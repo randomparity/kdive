@@ -45,6 +45,9 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation i
     CompletionDeadlineExecutor,
     RemoteModulePreparationExecutor,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_result_reader import (
+    SparseRemoteModuleResultReader,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
     render_module_volume_name,
 )
@@ -97,6 +100,7 @@ from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_sup
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_support import _result
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_support import (
     Conn,
+    Stream,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_support import (
     request as volume_request,
@@ -769,11 +773,17 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
     executor.shutdown()
 
 
-def test_real_runtime_and_database_reopen_installed_phase_in_fresh_process(
+@pytest.mark.parametrize(
+    "cleanup_fault",
+    ["reaping-marker", "source-delete", "scratch-delete", "reaped-marker", "discharge"],
+    ids=str,
+)
+def test_real_runtime_and_database_resume_at_cleanup_boundaries(
     migrated_url: str,
     authority_role_dsns: _RoleDsns,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cleanup_fault: str,
 ) -> None:
     class Writer:
         operation = b""
@@ -925,6 +935,16 @@ def test_real_runtime_and_database_reopen_installed_phase_in_fresh_process(
             "kdive.services.remote_module_volume_preparation.build_remote_device_identity_port",
             lambda authority, _deadline: authority,
         )
+        monkeypatch.setattr(
+            Stream,
+            "sparseRecvAll",
+            lambda stream, data, _hole, opaque: data(stream, stream.download_payload, opaque),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_result_reader._read_debugfs",
+            lambda _image, _deadline, _monotonic: scratch_result[0],
+        )
         async with (
             AsyncConnectionPool(
                 authority_role_dsns("kdive_server"), min_size=1, max_size=1
@@ -935,7 +955,7 @@ def test_real_runtime_and_database_reopen_installed_phase_in_fresh_process(
         ):
             receipt = await open_module_attempt_preparation(server, repository, attempt)
 
-            def runtime() -> RemoteModuleOperationRuntime:
+            def preparation_runtime() -> RemoteModuleOperationRuntime:
                 async def read(_recovery: RemoteModuleRecoveryRefV2, _deadline: float) -> bytes:
                     return scratch_result[0]
 
@@ -948,6 +968,29 @@ def test_real_runtime_and_database_reopen_installed_phase_in_fresh_process(
                     worker_write_context=context,
                 )
 
+            reader = SparseRemoteModuleResultReader(
+                storage,
+                tmp_path,
+                appliance_config.deadline_executor,
+                appliance_config.monotonic,
+                executor,
+            )
+
+            def recovery_runtime() -> RemoteModuleOperationRuntime:
+                async def read(
+                    recovery: RemoteModuleRecoveryRefV2, deadline: float
+                ) -> bytes | None:
+                    return await reader.read_recovery_async(recovery, deadline=deadline)
+
+                return RemoteModuleOperationRuntime(
+                    worker,
+                    repository,
+                    read,
+                    appliance_execution=appliance_config,
+                    volume_recovery=RemoteModuleVolumeRecovery(storage, "systems"),
+                    worker_write_context=context,
+                )
+
             request = CaptureInstallRequest(
                 receipt,
                 operation,
@@ -956,10 +999,10 @@ def test_real_runtime_and_database_reopen_installed_phase_in_fresh_process(
             )
             with pytest.raises(RuntimeError, match="worker loss during teardown"):
                 await capture_install_modules(
-                    request, runtime=runtime(), executor=executor, deadline=10**12
+                    request, runtime=preparation_runtime(), executor=executor, deadline=10**12
                 )
             assert appliance.creates == 1
-            restarted = runtime()
+            restarted = preparation_runtime()
             recovery = await capture_install_modules(
                 request, runtime=restarted, executor=executor, deadline=10**12
             )
@@ -975,29 +1018,53 @@ def test_real_runtime_and_database_reopen_installed_phase_in_fresh_process(
             foreign = object()
             storage.pool.volumes["foreign-volume"] = cast(Any, foreign)
             source = storage.pool.volumes[source_name]
-            original_delete = source.delete
-            fail_delete = True
+            scratch = storage.pool.volumes[scratch_name]
+            selected = source if cleanup_fault == "source-delete" else scratch
+            original_delete = selected.delete
+            fail_once = cleanup_fault in {"source-delete", "scratch-delete"}
 
             def delete_once(flags: int = 0) -> int:
-                nonlocal fail_delete
-                if fail_delete:
-                    fail_delete = False
-                    raise RuntimeError("injected worker loss during source deletion")
+                nonlocal fail_once
+                if fail_once:
+                    fail_once = False
+                    raise RuntimeError("injected worker loss")
                 return original_delete(flags)
 
-            cast(Any, source).delete = delete_once
-            with pytest.raises(RuntimeError, match="worker loss during source deletion"):
+            cast(Any, selected).delete = delete_once
+            create_xml = storage.pool.createXML
+            marker_fail_once = cleanup_fault in {"reaping-marker", "reaped-marker"}
+
+            def create_marker_once(xml: str, flags: int = 0):
+                nonlocal marker_fail_once
+                if marker_fail_once and f"{cleanup_fault.removesuffix('-marker')}.journal" in xml:
+                    marker_fail_once = False
+                    raise RuntimeError("injected worker loss")
+                return create_xml(xml, flags)
+
+            cast(Any, storage.pool).createXML = create_marker_once
+            discharge = repository.worker_discharge_reap_obligation
+            discharge_fail_once = cleanup_fault == "discharge"
+
+            async def discharge_once(*args: Any, **kwargs: Any) -> bool:
+                nonlocal discharge_fail_once
+                if discharge_fail_once:
+                    discharge_fail_once = False
+                    raise RuntimeError("injected worker loss")
+                return await discharge(*args, **kwargs)
+
+            monkeypatch.setattr(repository, "worker_discharge_reap_obligation", discharge_once)
+            with pytest.raises(RuntimeError, match="worker loss"):
                 await restore_modules(
                     recovery,
                     authority_reference,
-                    runtime=runtime(),
+                    runtime=recovery_runtime(),
                     executor=executor,
                     deadline=10**12,
                 )
             completed = await restore_modules(
                 recovery,
                 authority_reference,
-                runtime=runtime(),
+                runtime=recovery_runtime(),
                 executor=executor,
                 deadline=10**12,
             )

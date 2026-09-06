@@ -229,6 +229,7 @@ async def restore_modules(
     if reap_state != "absent":
         result = await runtime.reopen_result(recovery, deadline)
         if reap_state == "reaped":
+            await runtime.record_reaped(recovery, executor, deadline)
             return result
         observation = await runtime.resume_reap(recovery, executor, deadline)
         if not observation.complete:
