@@ -266,7 +266,7 @@ class SparseRemoteModuleResultReader:
                     if not isinstance(chunk, bytes) or logical + len(chunk) > capacity:
                         raise ValueError("sparse download exceeds scratch capacity")
                     logical += len(chunk)
-                    if any(chunk):
+                    if zero_filled and any(chunk):
                         zero_filled = False
                     return handle.write(chunk)
 
@@ -286,17 +286,12 @@ class SparseRemoteModuleResultReader:
                     limit,
                 )
                 self._call(lambda: cast(Any, stream).sparseRecvAll(data, hole, None), limit)
-                if logical != capacity:
-                    raise ValueError("sparse download did not cover scratch capacity")
                 self._call(cast(Any, stream).finish, limit)
                 finished = True
                 handle.truncate(capacity)
-            try:
-                return _read_debugfs(image, limit, self.monotonic)
-            except CategorizedError:
-                if zero_filled:
-                    return None
-                raise
+            if zero_filled and logical == capacity:
+                return None
+            return _read_debugfs(image, limit, self.monotonic)
         except CategorizedError:
             raise
         except TimeoutError as exc:
