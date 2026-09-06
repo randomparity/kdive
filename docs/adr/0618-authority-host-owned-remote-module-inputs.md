@@ -35,6 +35,17 @@ group bound to that PREP baseline; ordinary CLEANUP requires it, while authentic
 discard an installed-only baseline. Reap retention stays open from PREP until authenticated volume
 absence is committed.
 
+## Considered & rejected
+
+- Worker-selected root volumes, appliance assets, or provider paths would cross the fixed
+  provider-ownership boundary. The authority derives them from its configured binding instead.
+- A worker monotonic timestamp cannot be compared with the authority host clock. The authority
+  converts the bounded duration once and retains its own deadline for replay.
+- Overwriting PREP evidence after RESTORE would erase the baseline needed for recovery and reap
+  validation. RESTORE therefore has a separate immutable evidence group.
+- Enabling ordinary remote Resources from a private proof fixture would advertise an ownership
+  path that provisioning has not established. General advertisement remains disabled.
+
 ## Consequences
 
 Provider authority provisioning must supply only fixed appliance assets and the fixed libvirt
