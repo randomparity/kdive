@@ -331,22 +331,31 @@ class ExternalBootActivation(_ClosedRow):
             and self.teardown_evidence.system_id != self.system_id
         ):
             raise ValueError("teardown evidence ownership does not match activation")
-        if self.state is ExternalBootActivationState.TORN_DOWN and self.teardown_evidence is None:
-            raise ValueError("torn_down activation requires teardown evidence")
+        if self.state is ExternalBootActivationState.TORN_DOWN and (
+            self.teardown_evidence is None or not self.cleanup_complete
+        ):
+            raise ValueError("torn_down activation requires teardown evidence and cleanup")
         if self.cleanup_complete != (self.cleanup_evidence is not None):
             raise ValueError("cleanup evidence presence must match cleanup_complete")
         if self.cleanup_complete:
             cleanup_evidence = self.cleanup_evidence
             if cleanup_evidence is None:
                 raise AssertionError("cleanup evidence presence checked above")
-            ordinary = self.state in {
+            ordinary_history_states = {
                 ExternalBootActivationState.RECOVERED,
                 ExternalBootActivationState.ABANDONED,
             }
+            ordinary_history = self.state in ordinary_history_states
+            ordinary = cleanup_evidence.mode == "ordinary"
             pending_teardown = cleanup_evidence.mode == "pending_system_teardown"
             if (
-                (cleanup_evidence.mode == "ordinary") != ordinary
-                or ordinary != (self.teardown_evidence is None)
+                (
+                    ordinary
+                    and self.state
+                    not in {*ordinary_history_states, ExternalBootActivationState.TORN_DOWN}
+                )
+                or (ordinary_history and not ordinary)
+                or (ordinary_history != (self.teardown_evidence is None))
                 or (
                     not ordinary
                     and (

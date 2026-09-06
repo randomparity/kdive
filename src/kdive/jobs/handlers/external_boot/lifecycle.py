@@ -43,13 +43,16 @@ from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedReleaseCompletion,
+    ExternalBootDerivedTeardownCompletion,
 )
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityTeardownMutationRequestV1,
     RecoveryObjectBindingV1,
+    canonical_teardown_proof_bytes,
 )
 from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
 
@@ -77,7 +80,6 @@ _RECOVERY_STATES: Final = frozenset(
 _CLEANUP_STATES: Final = frozenset(
     {State.RECOVERED, State.ABANDONED, State.RECOVERY_CONFLICT, State.RECOVERY_FAILED}
 )
-_TEARDOWN_STATES: Final = frozenset({State.RECOVERY_CONFLICT, State.RECOVERY_FAILED})
 _ORDINARY_CLEANUP_STATES: Final = frozenset({State.RECOVERED, State.ABANDONED})
 
 
@@ -514,13 +516,12 @@ async def _require_cleanable(
     return {"release_identity": release["release_identity"]}
 
 
-async def _require_torn_down_system(
+async def _teardown_prerequisites(
     conn: AsyncConnection,
     activation: ExternalBootActivation,
     marker: ExternalBootAuthorityMarkerV1,
 ) -> Mapping[str, Any]:
-    """Footnote § : ``teardown`` additionally requires ``systems.state = 'failed'``."""
-    cleanable = await _require_cleanable(conn, activation, marker)
+    """Admit every restricting activation, including one with only a pending reservation."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT state FROM systems WHERE id = %s", (activation.system_id,))
         row = await cur.fetchone()
@@ -529,7 +530,7 @@ async def _require_torn_down_system(
             f"teardown requires system {activation.system_id} in 'failed', "
             f"not {row and row['state']!r}"
         )
-    return cleanable
+    return {"connection": conn}
 
 
 def _handler(
@@ -829,21 +830,12 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
 
 
 def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
-    """Release the recovery-store reservation, copying its three fields from the row verbatim.
+    """Recover, clean, then credit only after the authority proves owned storage absence.
 
-    ``objects`` is **always empty, and that is the truthful value.** Release performs no deletion:
-    ADR-0584's merged adapter lists ``RELEASE`` in neither its mutating nor its deleting operation
-    set, because deletion belongs to ``cleanup`` under a later generation. So at release time no
-    owned object is absent, and ``_ReleaseObject`` can represent only an absent object. Nor could
-    the handler check: ``ExternalBootPorts`` has no method reporting per-object absence, and
-    ``observe`` returns a ``RunningKernelObservation`` carrying no object identity.
-    ``enumeration_complete`` is truthful because the domain it can check is empty, not because it
-    checked and found nothing.
-    The handler never asserts ``absent`` for an object it did not check, and this design gives it no
-    way to; a store-side enumeration needs a port that does not exist (#2199/#2200).
-
-    Crediting the reservation back while the objects still exist departs from ADR-0583's ordering;
-    that is deferral record 0010, which this handler neither introduces nor resolves.
+    The root release job drives its derived ``recover`` and ``cleanup`` phases in the authority
+    journal.  The worker records an exact cleanup receipt from the terminal ``absent`` head before
+    the SQL finalizer deletes the ready reservation and writes its one release credit.  It does not
+    infer absence from a release request or credit while owned artifacts remain.
     """
 
     async def complete(context: OperationContext) -> ExternalBootDerivedReleaseCompletion:
@@ -969,37 +961,88 @@ def _teardown_evidence(context: OperationContext) -> dict[str, Any]:
 
 
 def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
-    """The only operation on the ``teardown`` kind; carries both evidences in one result."""
+    """Route full System teardown through the authority's terminal proof receipt."""
 
-    def build(
-        context: OperationContext, _observation: AuthorityObservationV1
-    ) -> ExternalBootAuthoritySuccessV1:
-        # Built once and digested, so `teardown_identity` names the exact document this result
-        # carries. The commit persists that document verbatim
-        # (`0122…sql:1454-1458`), so an auditor holding the stored row can recompute the digest
-        # and check it. Digesting a *different* document — an earlier version of this handler
-        # digested `{schema, system_id, system_state, generation}`, which is not what it emits —
-        # produces an identity that names nothing recoverable, and nothing in the schema would
-        # ever catch it: the commit only checks the digest's shape.
-        teardown_evidence = _teardown_evidence(context)
-        return authority_result(
-            context,
-            {
+    async def complete(context: OperationContext) -> ExternalBootDerivedTeardownCompletion:
+        executor = ports.teardown_executor
+        if executor is None:
+            raise _refuse("no external-boot authority teardown executor is configured")
+        request = AuthorityTeardownMutationRequestV1(
+            authority_id=context.authority.authority_id,
+            generation=context.authority.generation,
+            system_id=context.marker.system_id,
+            activation_id=context.marker.activation_id,
+            run_id=context.marker.run_id,
+            plan_identity=context.marker.plan_identity,
+            purpose="teardown",
+            operation="teardown",
+            provider_kind=context.marker.provider_kind,
+            authority_instance=context.marker.authority_instance,
+            operation_identity=context.marker.operation_identity,
+            operation_digest=context.authority.operation_digest,
+            attempt_id=uuid5(NAMESPACE_URL, context.marker.operation_identity),
+        )
+        response = await executor.execute_teardown(request)
+        async with context.prerequisites["connection"].cursor() as cursor:
+            await cursor.execute(
+                "SELECT public.finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    hashlib.sha256(
+                        ports.incarnation_credential.get_secret_value().encode()
+                    ).digest(),
+                    context.job.id,
+                    context.job.attempt,
+                    context.authority.authority_id,
+                    context.authority.generation,
+                    response.journal_sequence,
+                    response.journal_digest,
+                    canonical_teardown_proof_bytes(response.proof),
+                ),
+            )
+            row = await cursor.fetchone()
+        if row is None or row[0] not in {"applied", "retained"}:
+            raise CategorizedError(
+                "teardown receipt was superseded", category=ErrorCategory.STALE_HANDLE
+            )
+        carrier = {
+            "schema": "external-boot-authority-result-v1",
+            "authority_id": context.authority.authority_id,
+            "generation": context.authority.generation,
+            "activation_id": context.marker.activation_id,
+            "run_id": context.marker.run_id,
+            "system_id": context.marker.system_id,
+            "plan_identity": context.marker.plan_identity,
+            "purpose": context.marker.purpose,
+            "provider_kind": context.marker.provider_kind,
+            "authority_instance": context.marker.authority_instance,
+            "admitted_operation": context.marker.operation,
+            "operation_identity": context.marker.operation_identity,
+            "operation_digest": context.authority.operation_digest,
+            "journal_sequence": response.journal_sequence,
+            "journal_digest": response.journal_digest,
+            "result": {
                 "schema": "external-boot-authority-result-v1",
                 "operation": "teardown",
                 "result_ref": None,
-                "teardown_evidence": teardown_evidence,
-                "cleanup_evidence": _cleanup_evidence(
-                    context, teardown_identity=evidence_digest(teardown_evidence)
-                ),
+                "response": response.model_dump(mode="json", by_alias=True),
             },
-        )
+        }
+        return ExternalBootDerivedTeardownCompletion.model_validate(carrier)
 
     return _handler(
         ports,
-        require_activation_state=_TEARDOWN_STATES,
-        require_activation_evidence=frozenset({"recovery_point"}),
-        require_preconditions=_require_torn_down_system,
+        require_activation_state=frozenset(set(State) - {State.TORN_DOWN}),
+        require_activation_evidence=frozenset(),
+        require_preconditions=lambda conn, activation, marker: _teardown_prerequisites(
+            conn, activation, marker
+        ),
         expected_observation="absent",
-        build_result=build,
+        build_result=_unreachable_teardown_result,
+        before_port=complete,
     )
+
+
+def _unreachable_teardown_result(
+    _context: OperationContext, _observation: object
+) -> ExternalBootDerivedTeardownCompletion:
+    raise AssertionError("authority teardown completion must run before result construction")

@@ -61,11 +61,18 @@ def _canonical_bytes(value: BaseModel) -> bytes:
     return encoded
 
 
+def canonical_teardown_proof_bytes(proof: AuthorityTeardownProofV1) -> bytes:
+    """Encode the exact bounded UTF-8 proof document authenticated by the journal head."""
+    return _canonical_bytes(proof)
+
+
 def teardown_proof_digest(proof: AuthorityTeardownProofV1) -> str:
     """Name one closed teardown disposition with the authority observation digest."""
     return (
         "sha256:"
-        + hashlib.sha256(_TEARDOWN_PROOF_IDENTITY_PREFIX + _canonical_bytes(proof)).hexdigest()
+        + hashlib.sha256(
+            _TEARDOWN_PROOF_IDENTITY_PREFIX + canonical_teardown_proof_bytes(proof)
+        ).hexdigest()
     )
 
 
@@ -447,8 +454,7 @@ class AuthorityTeardownCompleteReadyV1(_ClosedValue):
     @model_validator(mode="after")
     def _ready_evidence_is_closed(self) -> Self:
         if (
-            self.release_identity
-            != "sha256:" + hashlib.sha256(_canonical_bytes(self.release_evidence)).hexdigest()
+            self.release_identity != self.release_evidence.identity
             or self.cleanup_evidence.mode != "system_teardown"
             or self.cleanup_evidence.release_identity != self.release_identity
             or self.cleanup_evidence.teardown_identity != self.teardown_evidence.identity

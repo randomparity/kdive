@@ -285,6 +285,32 @@ def test_torn_down_is_not_abandoned_and_requires_teardown_evidence() -> None:
         ExternalBootActivation.model_validate(common)
 
 
+def test_torn_down_can_retain_a_completed_ordinary_release() -> None:
+    teardown = ExternalBootTeardownEvidenceV1(system_id=_SYSTEM_ID, observed_at=_AT)
+    cleanup = ExternalBootCleanupEvidenceV1(
+        activation_id=_ACTIVATION_ID,
+        system_id=_SYSTEM_ID,
+        release_identity=_RELEASE,
+        mode="ordinary",
+        completed_at=_AT,
+    )
+    activation = ExternalBootActivation(
+        id=_ACTIVATION_ID,
+        system_id=_SYSTEM_ID,
+        run_id=_RUN_ID,
+        plan_identity=_PLAN,
+        operation_owner_id=_OBSERVATION_ID,
+        authority_generation=1,
+        state="torn_down",
+        cleanup_complete=True,
+        teardown_evidence=teardown,
+        cleanup_evidence=cleanup,
+        created_at=_AT,
+        updated_at=_AT,
+    )
+    assert activation.cleanup_evidence == cleanup
+
+
 def test_activation_row_rejects_recovery_point_for_another_activation() -> None:
     materialization = ExternalBootMaterialization.model_validate(
         {

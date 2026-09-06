@@ -18,6 +18,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownResponseV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.external_boot.routing import AuthorityReservationGeometry
@@ -30,6 +32,7 @@ __all__ = [
     "ExternalBootAuthorityAcknowledger",
     "ExternalBootAuthorityExecutor",
     "ExternalBootAuthorityPreparationExecutor",
+    "ExternalBootAuthorityTeardownExecutor",
     "ExternalBootHandlerPorts",
 ]
 
@@ -69,6 +72,14 @@ class ExternalBootAuthorityPreparationExecutor(Protocol):
     ) -> AuthorityPreparationResponseV1: ...
 
 
+class ExternalBootAuthorityTeardownExecutor(Protocol):
+    """Run the closed authority-owned System teardown commit."""
+
+    async def execute_teardown(
+        self, request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ExternalBootHandlerPorts:
     """Ports one ``build_operations`` call binds into all six operation handlers.
@@ -86,6 +97,7 @@ class ExternalBootHandlerPorts:
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
     authority_executor: ExternalBootAuthorityExecutor | None = None
     preparation_executor: ExternalBootAuthorityPreparationExecutor | None = None
+    teardown_executor: ExternalBootAuthorityTeardownExecutor | None = None
     authority_client_factory: ExternalBootClientFactory | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     activation_readiness_timeout: timedelta = timedelta(minutes=5)

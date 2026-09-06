@@ -554,7 +554,11 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             binding, marker, asyncio.get_running_loop().time() + timeout.total_seconds()
         )
         ports = replace(
-            ports, acknowledger=client, authority_executor=client, preparation_executor=client
+            ports,
+            acknowledger=client,
+            authority_executor=client,
+            preparation_executor=client,
+            teardown_executor=client,
         )
     activation = await _read_activation(
         conn,
