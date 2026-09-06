@@ -534,6 +534,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
     del storage.pool.volumes[scratch_name]
     for inspection in (
         AttachmentInspection(True, True, True, frozenset()),
+        AttachmentInspection(True, True, False, frozenset()),
         TimeoutError("attachment inspection unresolved"),
     ):
 
