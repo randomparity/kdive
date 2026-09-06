@@ -258,6 +258,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind teardown recovery observations
 - Reclaim interrupted preparation
 - Gate external boot recovery capacity
+- Discharge open mutations by system
+- Discharge module obligations on teardown
+- Discharge terminal module obligations
+- Discharge terminal module mutations
 
 ### Changed
 
