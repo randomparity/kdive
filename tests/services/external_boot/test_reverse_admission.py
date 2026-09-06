@@ -28,6 +28,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Run, Snapshot
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.lifecycle.control import registrar as control_registrar
 from kdive.mcp.tools.lifecycle.control.registrar import (
     capture_traffic_system,
     diagnostic_sysrq_system,
@@ -951,11 +952,10 @@ def test_a_boot_does_not_cross_a_restriction_committed_mid_flight(
 
 
 @pytest.mark.parametrize("operation", ("force_crash", "watch_for_crash"))
-def test_missing_crash_run_does_not_cross_active_activation_committed_mid_flight(
-    migrated_url: str, seeded_activation: SeedActivation, operation: str
+def test_crash_admission_holds_the_system_lock_while_activation_state_can_change(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
-    """The System lock makes a just-committed active owner visible before fresh enqueue."""
-    race_key = 0x2206_0583
+    """The fresh-admission read cannot race an activation writer on this System."""
 
     async def invoke(pool: AsyncConnectionPool, system_id: str) -> ToolResponse:
         if operation == "force_crash":
@@ -968,35 +968,35 @@ def test_missing_crash_run_does_not_cross_active_activation_committed_mid_flight
             resolver=_resolver(),
         )
 
-    async def _run() -> tuple[ToolResponse, int]:
+    async def _run() -> tuple[ToolResponse, bool]:
         async with runs_support.pool(migrated_url) as conn_pool:
-            system_id, owning_run_id = await _ready_system_with_run(conn_pool)
-            barrier_taken = asyncio.Event()
+            system_id, _ = await _ready_system_with_run(conn_pool)
+            entered = asyncio.Event()
+            release = asyncio.Event()
 
-            async def commit_active() -> None:
-                writer = await psycopg.AsyncConnection.connect(migrated_url)
-                async with writer, writer.transaction():
-                    await writer.execute("SELECT pg_advisory_xact_lock(%s)", (race_key,))
-                    barrier_taken.set()
-                    await seeded_activation(
-                        writer,
-                        state=_STATE.ACTIVE,
-                        system_id=UUID(system_id),
-                        run_id=UUID(owning_run_id),
-                    )
+            async def blocked_admission(*_args: object, **_kwargs: object) -> None:
+                entered.set()
+                await release.wait()
 
-            async def invoke_after_commit() -> ToolResponse:
-                await barrier_taken.wait()
-                async with conn_pool.connection() as conn:
-                    await conn.execute("SELECT pg_advisory_xact_lock(%s)", (race_key,))
-                return await invoke(conn_pool, system_id)
+            monkeypatch.setattr(
+                control_registrar, "check_external_boot_admission", blocked_admission
+            )
+            task = asyncio.create_task(invoke(conn_pool, system_id))
+            await entered.wait()
+            writer = await psycopg.AsyncConnection.connect(migrated_url)
+            async with writer:
+                cur = await writer.execute(
+                    "SELECT pg_try_advisory_xact_lock(%s)",
+                    (_lock_key(LockScope.SYSTEM, UUID(system_id)),),
+                )
+                row = await cur.fetchone()
+            assert row is not None
+            release.set()
+            return await task, bool(row[0])
 
-            _, response = await asyncio.gather(commit_active(), invoke_after_commit())
-            return response, await _job_count(conn_pool)
-
-    response, jobs = asyncio.run(_run())
-    _assert_denied(response, _ACTIVE_ACTIONS)
-    assert jobs == 0
+    response, writer_acquired = asyncio.run(_run())
+    assert response.status == "queued", response.model_dump()
+    assert not writer_acquired
 
 
 _REPLAY_SNAP = "replay-snap"

@@ -236,10 +236,10 @@ async def _optional_run_for_system(
     ctx: RequestContext,
     run_id: str | None,
     system_id: UUID,
-) -> UUID | ToolResponse:
+) -> UUID | None | ToolResponse:
     """Validate an optional readable Run is bound to the target System."""
     if run_id is None:
-        return system_id
+        return None
     uid = _as_uuid(run_id)
     if uid is None:
         return _invalid_uuid_error("run_id", run_id)
@@ -311,7 +311,7 @@ async def force_crash_system(
                         uid,
                         ExternalBootOperation.FORCE_CRASH,
                         project=system.project,
-                        run_id=run if run_id is not None else None,
+                        run_id=run,
                     )
                 except ExternalBootDenied as exc:
                     return _external_boot_denial(system_id, exc, ctx)
@@ -488,7 +488,7 @@ async def watch_for_crash_system(
                         uid,
                         ExternalBootOperation.SYSTEM_WATCH_CRASH,
                         project=system.project,
-                        run_id=run if run_id is not None else None,
+                        run_id=run,
                     )
                 except ExternalBootDenied as exc:
                     return _external_boot_denial(system_id, exc, ctx)
