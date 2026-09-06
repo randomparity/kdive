@@ -13,7 +13,15 @@ from datetime import datetime
 from typing import Any, Final, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
@@ -88,10 +96,18 @@ class SystemPayload(_PayloadBase):
         return value
 
 
+class RecoveryRequestV1(_PayloadBase):
+    """Exact public request identity and original server-clock recovery deadline."""
+
+    request_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    readiness_deadline: AwareDatetime
+
+
 class ResolveRecoveryOrphanPayload(SystemPayload):
     """Closed reference to one atomically admitted quarantine disposition request."""
 
     schema_: Literal["resolve-recovery-orphan-v1"] = Field(alias="schema")
+    recovery_request_v1: RecoveryRequestV1 | None = None
     request_id: str
     binding_digest: str
 
@@ -439,6 +455,7 @@ class BootPayload(RunPayload):
 
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
     external_boot_plan_v1: ExternalBootPlan | None = None
+    recovery_request_v1: RecoveryRequestV1 | None = None
     remote_module_attempt_v1: ModuleAttemptPreparationRequestV1 | None = None
 
     @field_validator("remote_module_attempt_v1", mode="before")

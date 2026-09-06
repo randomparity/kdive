@@ -46,6 +46,7 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_request, recovery_response
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
@@ -302,6 +303,7 @@ async def request_release(
     *,
     run_id: str,
     resolver: ProviderResolver | None = None,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit and durably enqueue release of the Run's external-boot activation.
 
@@ -330,7 +332,7 @@ async def request_release(
                     detail="this Run is bound to no System, so it holds no external boot",
                     next_action="runs.get",
                 )
-            return await _release_locked(conn, ctx, run, run.system_id, resolver)
+            return await _release_locked(conn, ctx, run, run.system_id, resolver, idempotency_key)
 
 
 async def _release_locked(
@@ -339,6 +341,7 @@ async def _release_locked(
     run: Run,
     system_id: UUID,
     resolver: ProviderResolver | None,
+    idempotency_key: str | None,
 ) -> ToolResponse:
     """Decide the release under the System lock, so every read sees one consistent activation.
 
@@ -353,6 +356,19 @@ async def _release_locked(
     """
     object_id = str(run.id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        dedup_key = ""
+        metadata = None
+        if idempotency_key is not None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RELEASE_TOOL,
+                object_key="run_id",
+                object_id=object_id,
+                arguments=(),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
         activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
         if activation is None:
             return _conflict(
@@ -361,6 +377,18 @@ async def _release_locked(
                 detail="no external-boot activation restricts this Run's System",
                 next_actions=["runs.get"],
             )
+        if idempotency_key is None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RELEASE_TOOL,
+                object_key="run_id",
+                object_id=object_id,
+                arguments=(),
+                idempotency_key=None,
+                scope_identity=str(activation.id),
+            )
+            if replay is not None:
+                return replay
         try:
             await check_external_boot_admission(
                 conn,
@@ -374,14 +402,9 @@ async def _release_locked(
         operation_identity = (
             "sha256:"
             + hashlib.sha256(
-                f"{activation.id}\0release\0{activation.plan_identity}".encode()
+                f"{activation.id}\0release\0{activation.plan_identity}\0{dedup_key}".encode()
             ).hexdigest()
         )
-        dedup_key = f"external-boot-release:{operation_identity}"
-        existing = await queue.get_by_dedup_key(conn, dedup_key)
-        if existing is not None:
-            response = ToolResponse.from_job(existing)
-            return response.model_copy(update={"data": {**response.data, "run_id": object_id}})
         job_ids = await _active_job_ids_for_system(conn, system_id)
         if job_ids:
             return _conflict(
@@ -440,12 +463,11 @@ async def _release_locked(
         job = await queue.enqueue(
             conn,
             kind,
-            payload,
+            payload.model_copy(update={"recovery_request_v1": metadata}),
             job_authorizing(ctx, run.project),
             dedup_key,
         )
-    response = ToolResponse.from_job(job)
-    return response.model_copy(update={"data": {**response.data, "run_id": object_id}})
+    return recovery_response(job, "run_id", object_id)
 
 
 def _resolution_input_error(
@@ -494,6 +516,7 @@ async def resolve_conflict(
     system_id: str,
     operation: str,
     observed_identity: str,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit a recovery-conflict resolution, then report the missing executor.
 
@@ -521,6 +544,7 @@ async def resolve_conflict(
                 uid,
                 system.project,
                 observed_identity,
+                idempotency_key,
             )
 
 
@@ -531,6 +555,7 @@ async def _resolve_conflict_locked(
     system_id: UUID,
     project: str,
     observed_identity: str,
+    idempotency_key: str | None,
 ) -> ToolResponse:
     """Decide and enqueue the resolution atomically under the System lock.
 
@@ -539,6 +564,19 @@ async def _resolve_conflict_locked(
     """
     object_id = str(system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        dedup_key = ""
+        metadata = None
+        if idempotency_key is not None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RESOLVE_CONFLICT_TOOL,
+                object_key="system_id",
+                object_id=object_id,
+                arguments=(SUPPORTED_RESOLUTION_OPERATION, observed_identity),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
         activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
         if activation is None:
             return _conflict(
@@ -547,6 +585,18 @@ async def _resolve_conflict_locked(
                 detail="no external-boot activation restricts this System, so none is conflicted",
                 next_actions=["runs.get"],
             )
+        if idempotency_key is None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RESOLVE_CONFLICT_TOOL,
+                object_key="system_id",
+                object_id=object_id,
+                arguments=(SUPPORTED_RESOLUTION_OPERATION, observed_identity),
+                idempotency_key=None,
+                scope_identity=str(activation.id),
+            )
+            if replay is not None:
+                return replay
         try:
             await check_external_boot_admission(
                 conn,
@@ -583,10 +633,12 @@ async def _resolve_conflict_locked(
         operation_identity = (
             "sha256:"
             + hashlib.sha256(
-                (f"{activation.id}\0{SUPPORTED_RESOLUTION_OPERATION}\0{observed_identity}").encode()
+                (
+                    f"{activation.id}\0{SUPPORTED_RESOLUTION_OPERATION}\0{observed_identity}"
+                    f"\0{dedup_key}"
+                ).encode()
             ).hexdigest()
         )
-        dedup_key = f"external-boot-conflict:{operation_identity}"
         try:
             kind, payload = await build_external_boot_payload(
                 conn,
@@ -611,12 +663,11 @@ async def _resolve_conflict_locked(
         job = await queue.enqueue(
             conn,
             kind,
-            payload,
+            payload.model_copy(update={"recovery_request_v1": metadata}),
             job_authorizing(ctx, project),
             dedup_key,
         )
-    response = ToolResponse.from_job(job)
-    return response.model_copy(update={"data": {**response.data, "system_id": object_id}})
+    return recovery_response(job, "system_id", object_id)
 
 
 def _orphan_input_error(
@@ -653,6 +704,7 @@ async def resolve_recovery_orphan(
     object_identities: list[str],
     disposition: str,
     resolver: ProviderResolver | None = None,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Atomically admit a bounded, durable quarantined recovery-object repair.
 
@@ -693,6 +745,26 @@ async def resolve_recovery_orphan(
             system = await SYSTEMS.get(conn, uid)
             if system is None:
                 return _unresolved_system(system_id)
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=ORPHAN_TOOL,
+                object_key="system_id",
+                object_id=str(uid),
+                arguments=(disposition, *sorted(object_identities)),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
+            if resolver is None:
+                return _config_error(
+                    system_id,
+                    reason="recovery_executor_unavailable",
+                    detail=(
+                        "ops.resolve_recovery_orphan cannot run because the external-boot "
+                        "recovery executor is not installed"
+                    ),
+                    next_action="systems.get",
+                )
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(_QUARANTINE_SQL, (uid, object_identities))
                 rows = await cur.fetchall()
@@ -709,13 +781,6 @@ async def resolve_recovery_orphan(
                     reason="quarantine_binding_mismatch",
                     detail="the quarantined recovery-object provider binding no longer matches",
                     next_actions=["systems.get"],
-                )
-            if resolver is None:
-                return _config_error(
-                    system_id,
-                    reason="recovery_executor_unavailable",
-                    detail="the recovery-object provider resolver is not configured",
-                    next_action="systems.get",
                 )
             binding = await resolver.binding_for_system(conn, uid)
             if (
@@ -737,13 +802,14 @@ async def resolve_recovery_orphan(
                 system_id=str(uid),
                 request_id=str(request_id),
                 binding_digest=binding_digest,
+                recovery_request_v1=metadata,
             )
             job = await queue.enqueue(
                 conn,
                 JobKind.RESOLVE_RECOVERY_ORPHAN,
                 payload,
                 job_authorizing(ctx, system.project),
-                f"external-boot-orphan:{operation_identity}",
+                dedup_key,
             )
             object_ids = [row["id"] for row in rows]
             await conn.execute(
@@ -752,8 +818,7 @@ async def resolve_recovery_orphan(
                 "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
                 (request_id, uid, disposition, binding_digest, object_ids, job.id),
             )
-    response = ToolResponse.from_job(job)
-    return response.model_copy(update={"data": {**response.data, "system_id": system_id}})
+    return recovery_response(job, "system_id", str(uid))
 
 
 __all__ = [

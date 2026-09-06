@@ -35,6 +35,17 @@ async def resolve_recovery_orphan_handler(
 ) -> dict[str, object]:
     """Revalidate, observe, and disposition every object in one closed request."""
     payload = load_payload(job, ResolveRecoveryOrphanPayload)
+    request_metadata = payload.recovery_request_v1
+    if request_metadata is not None:
+        row = await (await conn.execute("SELECT clock_timestamp() ")).fetchone()
+        if row is None:
+            raise RuntimeError("recovery-object handler could not read server clock")
+        if row[0] >= request_metadata.readiness_deadline:
+            raise CategorizedError(
+                "recovery readiness deadline expired before provider mutation",
+                category=ErrorCategory.READINESS_FAILURE,
+                terminal=True,
+            )
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, system_id, disposition, binding_digest, object_ids, completed_at "

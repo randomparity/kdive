@@ -661,6 +661,10 @@ def _register_systems_resolve_external_boot_conflict(
                 ),
             ),
         ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(max_length=255, description="Optional replay key, bounded to 255 UTF-8 bytes."),
+        ] = None,
     ) -> ToolResponse:
         """Enqueue an idempotent recovery-conflict resolution job.
 
@@ -682,4 +686,5 @@ def _register_systems_resolve_external_boot_conflict(
             system_id=system_id,
             operation=operation,
             observed_identity=observed_identity,
+            idempotency_key=idempotency_key,
         )
