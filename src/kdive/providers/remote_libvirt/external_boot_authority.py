@@ -11,8 +11,9 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, Self
+from typing import Annotated, Literal, Protocol, Self, cast
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -26,6 +27,11 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityTeardownMutationRequestV1,
+)
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
 )
 from kdive.providers.ports.external_boot import (
     Digest,
@@ -60,6 +66,15 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
 _OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
+type RemoteSystemTeardownPhase = Literal[
+    "intent-recorded",
+    "domain-validated",
+    "domain-destroyed",
+    "recovery-removed",
+    "domain-undefined",
+    "artifacts-removed",
+    "complete",
+]
 
 
 def _canonical_model_bytes(value: BaseModel) -> bytes:
@@ -69,6 +84,116 @@ def _canonical_model_bytes(value: BaseModel) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode()
+
+
+class RemoteSystemTeardownAnchorV1(BaseModel):
+    """Path-free authority request and mutation-started anchor for remote teardown."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True, strict=True)
+
+    schema_: Literal["remote-libvirt-system-teardown-anchor-v1"] = Field(
+        "remote-libvirt-system-teardown-anchor-v1", alias="schema"
+    )
+    authority_id: UUID
+    generation: Annotated[int, Field(ge=1)]
+    binding: ExternalBootActivationBinding
+    plan_identity: Digest
+    provider_kind: Annotated[str, Field(min_length=1, max_length=255)]
+    authority_instance: Annotated[str, Field(min_length=1, max_length=255)]
+    operation_identity: Annotated[str, Field(min_length=1, max_length=255)]
+    operation_digest: Digest
+    attempt_id: UUID
+    journal_sequence: Annotated[int, Field(ge=1)]
+    journal_digest: Digest
+
+    @property
+    def identity(self) -> str:
+        return "sha256:" + hashlib.sha256(_canonical_model_bytes(self)).hexdigest()
+
+
+class RemoteSystemTeardownIntentV1(RemoteSystemTeardownAnchorV1):
+    """Exact request and accounting owner persisted before the first host mutation."""
+
+    schema_: Literal["remote-libvirt-system-teardown-intent-v1"] = Field(
+        "remote-libvirt-system-teardown-intent-v1", alias="schema"
+    )
+    reservation: AuthorityTeardownReservationV1
+
+    def matches_anchor(self, anchor: RemoteSystemTeardownAnchorV1) -> bool:
+        left = self.model_dump(exclude={"schema_", "reservation"})
+        right = anchor.model_dump(exclude={"schema_"})
+        return left == right
+
+    def same_subject(self, other: RemoteSystemTeardownIntentV1) -> bool:
+        return (
+            self.binding,
+            self.plan_identity,
+            self.provider_kind,
+            self.authority_instance,
+            self.reservation,
+        ) == (
+            other.binding,
+            other.plan_identity,
+            other.provider_kind,
+            other.authority_instance,
+            other.reservation,
+        )
+
+
+class RemoteSystemTeardownRecordV1(BaseModel):
+    """Durable remote teardown checkpoint retained across process loss."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True, strict=True)
+
+    schema_: Literal["remote-libvirt-system-teardown-record-v1"] = Field(
+        "remote-libvirt-system-teardown-record-v1", alias="schema"
+    )
+    intent: RemoteSystemTeardownIntentV1
+    phase: RemoteSystemTeardownPhase
+    domain_validated: bool
+    completed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _completion_matches_phase(self) -> Self:
+        if (self.phase == "complete") != (self.completed_at is not None):
+            raise ValueError("remote System teardown completion timestamp differs from phase")
+        if self.completed_at is not None and self.completed_at.utcoffset() != UTC.utcoffset(
+            self.completed_at
+        ):
+            raise ValueError("remote System teardown completion timestamp must be UTC")
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        if len(data) > _MAX_PREPARATION_BYTES:
+            raise ValueError("remote System teardown record exceeds 1048576 bytes")
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote System teardown record is not canonical JSON")
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteSystemTeardownState:
+    """Exact provider-private records available for one teardown subject."""
+
+    binding: ExternalBootActivationBinding
+    plan_identity: str
+    preparation: RemoteModuleVolumePreparationRequestV1 | None
+    terminal: RemoteModuleTerminalRecord | None
+    materialization: RemoteExternalBootMaterializationRecord | None
+    recovery: RemoteExternalBootRecoveryRecord | None
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteSystemTeardownInspection:
+    domain_absent: bool
+    overlay_absent: bool
+    baseline_absent: bool
+    recovery_absent: bool
 
 
 class RemotePreparedVolumeV1(BaseModel):
@@ -404,6 +529,17 @@ class RemoteModuleLifecycleResponseV1(BaseModel):
         return value
 
 
+class RemoteModuleSystemTeardownRequestV1(BaseModel):
+    """Internal module reap request carrying the distinct System teardown authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
+    schema_: Literal["remote-module-system-teardown-request-v1"] = Field(
+        "remote-module-system-teardown-request-v1", alias="schema"
+    )
+    authority: AuthorityTeardownMutationRequestV1
+    budget_seconds: Annotated[int, Field(ge=1, le=300)]
+
+
 class _PersistedRemoteModuleLifecycleV1(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
     request: RemoteModuleLifecycleRequestV1
@@ -627,6 +763,107 @@ class RemoteModuleVolumePreparationStore:
             with suppress(FileNotFoundError):
                 os.unlink(temporary, dir_fd=self._root_fd)
 
+    def _replace(self, name: str, expected: bytes, data: bytes) -> None:
+        if self._read(name) != expected:
+            raise ValueError("remote teardown evidence changed before checkpoint")
+        temporary = f".{name}.{uuid4().hex}.tmp"
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=self._root_fd,
+            )
+            try:
+                view = memoryview(data)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("remote teardown evidence write made no progress")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, name, src_dir_fd=self._root_fd, dst_dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=self._root_fd)
+
+    @staticmethod
+    def _system_teardown_key(binding: ExternalBootActivationBinding) -> str:
+        bound = binding.system_id.encode()
+        return hashlib.sha256(b"kdive-remote-system-teardown-v1\0" + bound).hexdigest()
+
+    def begin_system_teardown(
+        self, intent: RemoteSystemTeardownIntentV1
+    ) -> RemoteSystemTeardownRecordV1:
+        name = f"{self._system_teardown_key(intent.binding)}.teardown"
+        data = self._read(name)
+        if data is None:
+            record = RemoteSystemTeardownRecordV1(
+                intent=intent, phase="intent-recorded", domain_validated=False
+            )
+            self._publish(name, record.to_canonical_json())
+            return record
+        record = RemoteSystemTeardownRecordV1.from_canonical_json(data)
+        if record.intent == intent:
+            return record
+        if not record.intent.same_subject(intent) or intent.generation <= record.intent.generation:
+            raise ValueError("remote System teardown conflicts with retained intent")
+        adopted = record.model_copy(update={"intent": intent})
+        self._replace(name, data, adopted.to_canonical_json())
+        return adopted
+
+    def reopen_system_teardown(
+        self, anchor: RemoteSystemTeardownAnchorV1
+    ) -> RemoteSystemTeardownRecordV1 | None:
+        name = f"{self._system_teardown_key(anchor.binding)}.teardown"
+        data = self._read(name)
+        if data is None:
+            return None
+        record = RemoteSystemTeardownRecordV1.from_canonical_json(data)
+        if not record.intent.matches_anchor(anchor):
+            raise ValueError("remote System teardown observation conflicts with retained intent")
+        return record
+
+    def checkpoint_system_teardown(
+        self,
+        record: RemoteSystemTeardownRecordV1,
+        phase: RemoteSystemTeardownPhase,
+        *,
+        completed_at: datetime | None = None,
+    ) -> RemoteSystemTeardownRecordV1:
+        phases: tuple[RemoteSystemTeardownPhase, ...] = (
+            "intent-recorded",
+            "domain-validated",
+            "domain-destroyed",
+            "recovery-removed",
+            "domain-undefined",
+            "artifacts-removed",
+            "complete",
+        )
+        current = phases.index(record.phase)
+        requested = phases.index(phase)
+        if requested < current:
+            return record
+        if requested > current + 1:
+            raise ValueError("remote System teardown phase skipped a checkpoint")
+        if requested == current:
+            return record
+        updated = record.model_copy(
+            update={
+                "phase": phase,
+                "domain_validated": record.domain_validated or phase == "domain-validated",
+                "completed_at": completed_at,
+            }
+        )
+        updated = RemoteSystemTeardownRecordV1.from_canonical_json(updated.to_canonical_json())
+        key = self._system_teardown_key(record.intent.binding)
+        name = f"{key}.teardown"
+        self._replace(name, record.to_canonical_json(), updated.to_canonical_json())
+        return updated
+
     def stage(self, request: RemoteModuleVolumePreparationRequestV1, local_deadline: float) -> None:
         name = f"{self._key(request)}.request"
         candidate = _PersistedRemoteModulePreparationV1(
@@ -833,6 +1070,40 @@ class RemoteModuleVolumePreparationStore:
             raise ValueError("remote module terminal preparation binding differs")
         return record
 
+    def teardown_preparation(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteModuleVolumePreparationRequestV1 | None:
+        """Find one exact durable PREPARE request without trusting a caller-selected path."""
+        names = os.listdir(self._root_fd)
+        if len(names) > 4096:
+            raise ValueError("remote preparation store exceeds teardown scan bound")
+        matches: list[RemoteModuleVolumePreparationRequestV1] = []
+        for name in names:
+            if len(name) != 64 + len(".request") or not name.endswith(".request"):
+                continue
+            digest = name.removesuffix(".request")
+            if any(character not in "0123456789abcdef" for character in digest):
+                raise ValueError("remote preparation request name is malformed")
+            data = self._read(name)
+            if data is None:
+                continue
+            persisted = _PersistedRemoteModulePreparationV1.from_canonical_json(data)
+            request = persisted.request
+            authority = request.authority
+            if (
+                str(authority.system_id) == binding.system_id
+                and str(authority.activation_id) == binding.activation_id
+                and str(authority.run_id) == binding.run_id
+                and authority.plan_identity == plan_identity
+            ):
+                matches.append(request)
+        if not matches:
+            return None
+        first = matches[0]
+        if any(candidate.operation != first.operation for candidate in matches[1:]):
+            raise ValueError("remote teardown found conflicting preparation attempts")
+        return first
+
     @staticmethod
     def _preparation_key(request: ExternalBootPreparationRequest) -> str:
         return hashlib.sha256(
@@ -927,6 +1198,48 @@ class RemoteModuleVolumePreparationStore:
         ):
             raise ValueError("remote materialization plan index differs")
         return record
+
+    def teardown_materialization(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteExternalBootMaterializationRecord | None:
+        identity = plan_identity.removeprefix("sha256:")
+        if len(identity) != 64 or any(
+            character not in "0123456789abcdef" for character in identity
+        ):
+            raise ValueError("remote teardown plan identity is malformed")
+        index = self._read(f"{identity}.materialization-index")
+        if index is None:
+            return None
+        try:
+            materialization_identity = index.decode("ascii")
+        except UnicodeDecodeError:
+            raise ValueError("remote materialization plan index is malformed") from None
+        if len(materialization_identity) != 64 or any(
+            character not in "0123456789abcdef" for character in materialization_identity
+        ):
+            raise ValueError("remote materialization plan index is malformed")
+        data = self._read(f"{materialization_identity}.materialization")
+        if data is None:
+            raise ValueError("remote materialization plan index is incomplete")
+        record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
+        materialization = record.materialization
+        if (
+            record.plan.identity != plan_identity
+            or materialization.identity.removeprefix("sha256:") != materialization_identity
+            or materialization.ownership.system_id != binding.system_id
+            or materialization.ownership.run_id != binding.run_id
+        ):
+            raise ValueError("remote teardown materialization differs from activation")
+        return record
+
+    def teardown_recovery(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteExternalBootRecoveryRecord | None:
+        try:
+            point = self.recovery_point(binding, plan_identity)
+        except FileNotFoundError:
+            return None
+        return self.reopen_recovery(point)
 
     def reopen_materialization(
         self, materialization: ExternalBootMaterialization
@@ -1051,6 +1364,13 @@ class RemoteModulePreparationOperation(Protocol):
         request: RemoteModuleLifecycleRequestV1,
         terminal: RemoteModuleTerminalRecord,
         restored: RemoteModuleLifecycleResponseV1 | None,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1: ...
+
+    async def execute_system_teardown(
+        self,
+        request: RemoteModuleSystemTeardownRequestV1,
+        terminal: RemoteModuleTerminalRecord,
         deadline: float,
     ) -> RemoteModuleLifecycleResponseV1: ...
 
@@ -1230,6 +1550,28 @@ class DurableRemoteModuleVolumePreparationHost:
         self._store.publish_lifecycle_completion(request, response)
         return response
 
+    async def execute_system_teardown(
+        self, request: RemoteModuleSystemTeardownRequestV1
+    ) -> RemoteModuleLifecycleResponseV1:
+        binding = ExternalBootActivationBinding(
+            system_id=str(request.authority.system_id),
+            run_id=str(request.authority.run_id),
+            activation_id=str(request.authority.activation_id),
+        )
+        terminal = self._store.reopen_terminal(binding, request.authority.plan_identity)
+        task = asyncio.create_task(
+            self._host.execute_system_teardown(
+                request, terminal, self._monotonic() + request.budget_seconds
+            )
+        )
+        cancelled, consumed = await _wait_for_owned_child(task)
+        if cancelled is not None:
+            caller = asyncio.current_task()
+            assert caller is not None
+            _restore_cancellation(caller, cancelled, consumed)
+            raise cancelled from None
+        return task.result()
+
 
 class RemoteExternalBootRecoveryRecord(BaseModel):
     """Durable facts sufficient to reconstruct one remote activation after process loss."""
@@ -1406,6 +1748,24 @@ class RemoteExternalBootOperations(Protocol):
     ) -> None: ...
 
 
+class RemoteSystemTeardownOperations(Protocol):
+    """Authority-owned System destruction outside the six external-boot operations."""
+
+    def inspect_system_teardown(
+        self, state: RemoteSystemTeardownState, *, domain_validated: bool
+    ) -> RemoteSystemTeardownInspection: ...
+
+    def validate_system_teardown(self, state: RemoteSystemTeardownState) -> None: ...
+
+    def destroy_system_domain(self, state: RemoteSystemTeardownState) -> None: ...
+
+    def undefine_system_domain(self, state: RemoteSystemTeardownState) -> None: ...
+
+    def remove_system_artifacts(self, state: RemoteSystemTeardownState) -> None: ...
+
+    def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool: ...
+
+
 class RemoteExternalBootCoordinator:
     """Six-operation public adapter over exact durable provider-host recovery."""
 
@@ -1542,6 +1902,65 @@ class RemoteExternalBootCoordinator:
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         self._operations.cleanup(self._store.reopen_recovery(recovery), authority, self._deadline())
 
+    def system_teardown_state(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteSystemTeardownState:
+        preparation = self._store.teardown_preparation(binding, plan_identity)
+        try:
+            terminal = self._store.reopen_terminal(binding, plan_identity)
+        except FileNotFoundError:
+            terminal = None
+        return RemoteSystemTeardownState(
+            binding=binding,
+            plan_identity=plan_identity,
+            preparation=preparation,
+            terminal=terminal,
+            materialization=self._store.teardown_materialization(binding, plan_identity),
+            recovery=self._store.teardown_recovery(binding, plan_identity),
+        )
+
+    def begin_system_teardown(
+        self, intent: RemoteSystemTeardownIntentV1
+    ) -> RemoteSystemTeardownRecordV1:
+        return self._store.begin_system_teardown(intent)
+
+    def reopen_system_teardown(
+        self, anchor: RemoteSystemTeardownAnchorV1
+    ) -> RemoteSystemTeardownRecordV1 | None:
+        return self._store.reopen_system_teardown(anchor)
+
+    def checkpoint_system_teardown(
+        self,
+        record: RemoteSystemTeardownRecordV1,
+        phase: RemoteSystemTeardownPhase,
+        *,
+        completed_at: datetime | None = None,
+    ) -> RemoteSystemTeardownRecordV1:
+        return self._store.checkpoint_system_teardown(record, phase, completed_at=completed_at)
+
+    def inspect_system_teardown(
+        self, state: RemoteSystemTeardownState, *, domain_validated: bool
+    ) -> RemoteSystemTeardownInspection:
+        operations = cast(RemoteSystemTeardownOperations, self._operations)
+        return operations.inspect_system_teardown(state, domain_validated=domain_validated)
+
+    def validate_system_teardown(self, state: RemoteSystemTeardownState) -> None:
+        cast(RemoteSystemTeardownOperations, self._operations).validate_system_teardown(state)
+
+    def destroy_system_domain(self, state: RemoteSystemTeardownState) -> None:
+        cast(RemoteSystemTeardownOperations, self._operations).destroy_system_domain(state)
+
+    def undefine_system_domain(self, state: RemoteSystemTeardownState) -> None:
+        cast(RemoteSystemTeardownOperations, self._operations).undefine_system_domain(state)
+
+    def remove_system_artifacts(self, state: RemoteSystemTeardownState) -> None:
+        cast(RemoteSystemTeardownOperations, self._operations).remove_system_artifacts(state)
+
+    def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool:
+        return cast(RemoteSystemTeardownOperations, self._operations).unfinished_preparation_absent(
+            state
+        )
+
 
 class RemoteExternalBootAuthorityAdapter:
     """Decorate remote mutations with completion-owned durable kernel observation."""
@@ -1551,12 +1970,16 @@ class RemoteExternalBootAuthorityAdapter:
         delegate: RemoteAuthorityMutationDelegate,
         coordinator: RemoteExternalBootCoordinator,
         executor: RemoteModulePreparationExecutor,
+        remote_module_host: DurableRemoteModuleVolumePreparationHost | None = None,
         close: Callable[[], None] | None = None,
+        teardown_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._delegate = delegate
         self._coordinator = coordinator
         self._executor = executor
+        self._remote_module_host = remote_module_host
         self._close = close
+        self._teardown_clock = teardown_clock
 
     def close(self) -> None:
         self._executor.shutdown()
@@ -1622,6 +2045,179 @@ class RemoteExternalBootAuthorityAdapter:
             )
             return self._preparation_observation(receipt)
         return await self._delegate.commit(request, context)
+
+    @staticmethod
+    def _teardown_anchor(
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+    ) -> RemoteSystemTeardownAnchorV1:
+        if (
+            request.operation is not AuthorityOperation.TEARDOWN
+            or request.purpose != "teardown"
+            or context.commit_point is not AuthorityOperation.TEARDOWN
+            or context.operation_identity != request.operation_identity
+            or context.attempt_id != request.attempt_id
+        ):
+            raise ValueError("remote System teardown context differs from request")
+        return RemoteSystemTeardownAnchorV1(
+            authority_id=request.authority_id,
+            generation=request.generation,
+            binding=ExternalBootActivationBinding(
+                system_id=str(request.system_id),
+                run_id=str(request.run_id),
+                activation_id=str(request.activation_id),
+            ),
+            plan_identity=request.plan_identity,
+            provider_kind=request.provider_kind,
+            authority_instance=request.authority_instance,
+            operation_identity=request.operation_identity,
+            operation_digest=request.operation_digest,
+            attempt_id=request.attempt_id,
+            journal_sequence=context.journal_sequence,
+            journal_digest=context.journal_digest,
+        )
+
+    @staticmethod
+    def _teardown_facts(
+        owner: RemoteSystemTeardownAnchorV1 | RemoteSystemTeardownIntentV1,
+        record: RemoteSystemTeardownRecordV1 | None,
+        inspection: RemoteSystemTeardownInspection,
+    ) -> AuthoritySystemTeardownFacts:
+        reservation = record.intent.reservation if record is not None else None
+        completed_at = record.completed_at if record is not None else None
+        complete = (
+            inspection.domain_absent
+            and inspection.overlay_absent
+            and inspection.baseline_absent
+            and inspection.recovery_absent
+            and completed_at is not None
+            and reservation is not None
+        )
+        return AuthoritySystemTeardownFacts(
+            intent_identity=owner.identity,
+            domain_absent=inspection.domain_absent,
+            overlay_absent=inspection.overlay_absent,
+            baseline_absent=inspection.baseline_absent,
+            recovery_absent=inspection.recovery_absent,
+            quarantine_retained=not complete,
+            completed_at=completed_at,
+            reservation=reservation,
+        )
+
+    async def execute_system_teardown(
+        self,
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+        reservation: AuthorityTeardownReservationV1,
+    ) -> AuthoritySystemTeardownFacts:
+        """Persist intent, then resume exact remote domain and storage destruction."""
+        anchor = self._teardown_anchor(request, context)
+        retained = AuthorityTeardownReservationV1.model_validate(
+            reservation.model_dump(mode="json")
+        )
+        intent = RemoteSystemTeardownIntentV1.model_validate(
+            anchor.model_dump(exclude={"schema_"}) | {"reservation": retained}
+        )
+        record = await self._executor.run(lambda: self._coordinator.begin_system_teardown(intent))
+        state = await self._executor.run(
+            lambda: self._coordinator.system_teardown_state(intent.binding, intent.plan_identity)
+        )
+
+        async def phase(
+            expected: RemoteSystemTeardownPhase,
+            achieved: RemoteSystemTeardownPhase,
+            action: Callable[[], None],
+        ) -> None:
+            nonlocal record
+            if record.phase != expected:
+                return
+
+            def complete_phase() -> RemoteSystemTeardownRecordV1:
+                action()
+                return self._coordinator.checkpoint_system_teardown(record, achieved)
+
+            record = await self._executor.run(complete_phase)
+
+        await phase(
+            "intent-recorded",
+            "domain-validated",
+            lambda: self._coordinator.validate_system_teardown(state),
+        )
+        await phase(
+            "domain-validated",
+            "domain-destroyed",
+            lambda: self._coordinator.destroy_system_domain(state),
+        )
+        if record.phase == "domain-destroyed":
+            if state.terminal is not None:
+                host = self._remote_module_host
+                if host is None:
+                    raise ValueError("remote module teardown host is unavailable")
+                await host.execute_system_teardown(
+                    RemoteModuleSystemTeardownRequestV1(authority=request, budget_seconds=300)
+                )
+            elif state.preparation is not None:
+                absent = await self._executor.run(
+                    lambda: self._coordinator.unfinished_preparation_absent(state)
+                )
+                if not absent:
+                    inspection = await self._executor.run(
+                        lambda: self._coordinator.inspect_system_teardown(
+                            state, domain_validated=record.domain_validated
+                        )
+                    )
+                    return self._teardown_facts(record.intent, record, inspection)
+            record = await self._executor.run(
+                lambda: self._coordinator.checkpoint_system_teardown(record, "recovery-removed")
+            )
+        await phase(
+            "recovery-removed",
+            "domain-undefined",
+            lambda: self._coordinator.undefine_system_domain(state),
+        )
+        await phase(
+            "domain-undefined",
+            "artifacts-removed",
+            lambda: self._coordinator.remove_system_artifacts(state),
+        )
+        inspection = await self._executor.run(
+            lambda: self._coordinator.inspect_system_teardown(
+                state, domain_validated=record.domain_validated
+            )
+        )
+        if (
+            record.phase == "artifacts-removed"
+            and inspection.domain_absent
+            and inspection.overlay_absent
+            and inspection.baseline_absent
+            and inspection.recovery_absent
+        ):
+            record = await self._executor.run(
+                lambda: self._coordinator.checkpoint_system_teardown(
+                    record, "complete", completed_at=self._teardown_clock()
+                )
+            )
+        return self._teardown_facts(record.intent, record, inspection)
+
+    async def observe_system_teardown(
+        self,
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+    ) -> AuthoritySystemTeardownFacts:
+        """Observe retained remote teardown facts without resuming any mutation."""
+        anchor = self._teardown_anchor(request, context)
+
+        def observe() -> AuthoritySystemTeardownFacts:
+            record = self._coordinator.reopen_system_teardown(anchor)
+            state = self._coordinator.system_teardown_state(anchor.binding, anchor.plan_identity)
+            inspection = self._coordinator.inspect_system_teardown(
+                state, domain_validated=record.domain_validated if record is not None else False
+            )
+            return self._teardown_facts(
+                record.intent if record is not None else anchor, record, inspection
+            )
+
+        return await self._executor.run(observe)
 
     async def preparation_receipt(
         self, request: AuthorityPreparationMutationRequestV1

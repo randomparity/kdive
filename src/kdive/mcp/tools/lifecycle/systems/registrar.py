@@ -141,7 +141,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_get(app, pool, resolver)
     _register_systems_list(app, pool)
     _register_systems_profile_examples(app, resolver)
-    _register_systems_teardown(app, pool)
+    _register_systems_teardown(app, pool, resolver)
     _register_systems_reprovision(app, pool, resolver)
     _register_systems_ssh_info(app, pool, resolver)
     _register_systems_check_ssh_reachable(app, pool, resolver)
@@ -405,7 +405,9 @@ def _register_systems_profile_examples(app: FastMCP, resolver: ProviderResolver)
         return _build_profile_examples(_load_inventory_for_examples(), resolver.registered_kinds())
 
 
-def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _register_systems_teardown(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="systems.teardown",
         annotations=_docmeta.destructive(),
@@ -418,7 +420,7 @@ def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(
                 description=(
                     "Replay-safe key; a repeated key returns the prior envelope unless a new "
-                    "external-boot activation now fences that ordinary teardown."
+                    "external-boot history routes teardown through its recorded authority."
                 )
             ),
         ] = None,
@@ -428,13 +430,13 @@ def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
         Teardown drives the System to `torn_down` but leaves its Allocation `active`; once the
         teardown job succeeds, release the freed Allocation with `allocations.release` (the
         completed job and the already-`torn_down` replay both name it in
-        `suggested_next_actions`). While an external boot is active, first call
-        `runs.release_external_boot`, wait for its cleanup job, then retry this tool. Teardown from
-        an external-boot recovery failure is not yet available; the tool returns `conflict` and
-        enqueues no teardown job rather than bypassing provider authority.
+        `suggested_next_actions`). If this System has external-boot history, the returned teardown
+        job is authority-marked and the authority destroys its private artifacts before the
+        durable terminal record commits. The authority route must remain configured; otherwise the
+        tool returns `configuration_error` and enqueues no ordinary teardown job.
         """
         return await _teardown_system(
-            pool, current_context(), system_id, idempotency_key=idempotency_key
+            pool, current_context(), system_id, idempotency_key=idempotency_key, resolver=resolver
         )
 
 

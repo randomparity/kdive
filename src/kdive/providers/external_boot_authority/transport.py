@@ -38,6 +38,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownResponseV1,
     authority_server_name,
     decode_authority_request,
     read_frame,
@@ -72,6 +74,7 @@ type Operation = Literal[
     "execute-conflict-resolution",
     "execute-mutation",
     "execute-preparation",
+    "execute-teardown",
     "begin-remote-module-preparation",
     "execute-remote-module-preparation",
     "execute-remote-module-lifecycle",
@@ -112,6 +115,13 @@ class AuthorityPreparationService(Protocol):
     async def execute_preparation(
         self, peer: AuthenticatedPeer, request: AuthorityPreparationMutationRequestV1
     ) -> AuthorityPreparationResponseV1: ...
+
+
+@runtime_checkable
+class AuthorityTeardownService(Protocol):
+    async def execute_teardown(
+        self, peer: AuthenticatedPeer, request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1: ...
 
 
 @runtime_checkable
@@ -204,6 +214,10 @@ def encode_request_envelope(
         decoded, AuthorityPreparationMutationRequestV1
     ):
         raise ValueError("invalid-request")
+    if operation == "execute-teardown" and not isinstance(
+        decoded, AuthorityTeardownMutationRequestV1
+    ):
+        raise ValueError("invalid-request")
     if operation == "begin-remote-module-preparation" and not isinstance(
         decoded, RemoteModulePreparationBeginRequestV1
     ):
@@ -275,6 +289,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "execute-conflict-resolution",
             "execute-mutation",
             "execute-preparation",
+            "execute-teardown",
             "begin-remote-module-preparation",
             "execute-remote-module-preparation",
             "execute-remote-module-lifecycle",
@@ -324,6 +339,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, AuthorityPreparationMutationRequestV1
         ):
             raise ValueError
+        if operation == "execute-teardown" and not isinstance(
+            request, AuthorityTeardownMutationRequestV1
+        ):
+            raise ValueError
         if operation == "begin-remote-module-preparation" and not isinstance(
             request, RemoteModulePreparationBeginRequestV1
         ):
@@ -355,14 +374,14 @@ def _success(
     value: AuthorityAcknowledgementV1
     | AuthorityObservationV1
     | AuthorityPreparationResponseV1
+    | AuthorityTeardownResponseV1
     | AuthorityRunningObservationV1
     | AuthorityHealthAcknowledgementV1
     | DeviceIdentityResponseV1
     | RemoteModulePreparationBeginResponseV1
     | RemoteModuleLifecycleResponseV1
     | RemoteModuleTerminalPreparationResponseV1
-    | AuthorityRecoveryOrphanDispositionResponseV1
-    | DeviceIdentityResponseV1,
+    | AuthorityRecoveryOrphanDispositionResponseV1,
 ) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
 
@@ -458,6 +477,12 @@ async def _dispatch(
             if not isinstance(service, AuthorityPreparationService):
                 return _error("provider-not-configured")
             return _success(await service.execute_preparation(peer, request))
+        if operation == "execute-teardown":
+            if not isinstance(request, AuthorityTeardownMutationRequestV1):
+                raise _TransportError("invalid-request")
+            if not isinstance(service, AuthorityTeardownService):
+                return _error("provider-not-configured")
+            return _success(await service.execute_teardown(peer, request))
         if operation == "resolve-recovery-orphan":
             if not isinstance(request, AuthorityRecoveryOrphanDispositionRequestV1):
                 raise _TransportError("invalid-request")

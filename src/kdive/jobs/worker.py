@@ -46,6 +46,7 @@ from kdive.jobs.models import (
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedReleaseCompletion,
+    ExternalBootDerivedTeardownCompletion,
     HandlerRegistry,
     JobHandler,
     JobHandlerResult,
@@ -542,11 +543,14 @@ class Worker:
             return
         marker = _external_marker(job)
         if marker is not None:
-            if isinstance(result_ref, ExternalBootDerivedReleaseCompletion):
+            if isinstance(
+                result_ref,
+                (ExternalBootDerivedReleaseCompletion, ExternalBootDerivedTeardownCompletion),
+            ):
                 if _authority_binding_matches(marker, result_ref):
                     return
                 _log.warning(
-                    "marked external boot job %s returned a mismatched derived release completion",
+                    "marked external boot job %s returned a mismatched derived completion",
                     job.id,
                 )
                 return

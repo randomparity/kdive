@@ -22,6 +22,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownResponseV1,
 )
 from kdive.providers.ports.external_boot import RunningKernelObservation
 from kdive.providers.remote_libvirt.config import remote_config_for_resource
@@ -54,6 +56,7 @@ class ExternalBootAuthorityClient:
             AuthorityTakeoverRequestV1
             | AuthorityMutationRequestV1
             | AuthorityPreparationMutationRequestV1
+            | AuthorityTeardownMutationRequestV1
         ),
     ) -> None:
         for name in (
@@ -81,6 +84,12 @@ class ExternalBootAuthorityClient:
     ) -> AuthorityPreparationResponseV1:
         self._validate(request)
         return await self.sender.execute_preparation(request, deadline=self.deadline)
+
+    async def execute_teardown(
+        self, request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1:
+        self._validate(request)
+        return await self.sender.execute_teardown(request, deadline=self.deadline)
 
     async def open_remote_module_attempt(
         self, request: RemoteModulePreparationBeginRequestV1, *, deadline: float

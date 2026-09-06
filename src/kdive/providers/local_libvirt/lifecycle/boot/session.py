@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import selectors
+import shutil
 import stat
 import tempfile
 import threading
@@ -15,7 +16,7 @@ import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defus
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 import libvirt
@@ -27,7 +28,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
 )
-from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
+from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -125,6 +126,10 @@ class _Domain(RunningDomain, Protocol):
     def free(self) -> object: ...
 
 
+class _TeardownDomain(_Domain, Protocol):
+    def undefineFlags(self, flags: int) -> int: ...  # noqa: N802
+
+
 class _Connection(Protocol):
     def lookupByName(self, name: str) -> _Domain: ...  # noqa: N802
     def defineXML(self, xml: str) -> _Domain: ...  # noqa: N802
@@ -167,6 +172,7 @@ type ReadinessProbe = Callable[[UUID, ConsoleReadinessWindow], ReadinessResult]
 type PrepareConsole = Callable[[UUID], ConsoleReadinessWindow]
 type RunningObserver = Callable[[UUID, RunningDomain], RunningKernelObservation]
 type CleanupPayloads = Callable[[int, "LocalRecoveryMetadataV1"], None]
+type SystemPath = Callable[[UUID], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +209,27 @@ class LocalExternalBootSession(Protocol):
     def observe_running(self) -> RunningKernelObservation: ...
     def restore_power(self, prior: Literal["running", "inactive"]) -> None: ...
     def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def close(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LocalSystemTeardownInspection:
+    """Path-free host facts observed through an exact System lease."""
+
+    domain_absent: bool
+    domain_validated: bool
+    overlay_absent: bool
+    baseline_absent: bool
+
+
+class LocalSystemTeardownSession(Protocol):
+    """No-create local System teardown capability."""
+
+    def inspect(self) -> LocalSystemTeardownInspection: ...
+    def destroy(self) -> None: ...
+    def undefine(self) -> None: ...
+    def remove_overlay(self) -> None: ...
+    def remove_baseline(self) -> None: ...
     def close(self) -> None: ...
 
 
@@ -1215,6 +1242,8 @@ class LocalExternalBootSessionFactory:
         readiness: ReadinessProbe | None = None,
         observe_running: RunningObserver | None = None,
         cleanup_payloads: CleanupPayloads | None = None,
+        teardown_overlay_path: SystemPath = lambda system_id: overlay_path(system_id),
+        teardown_baseline_path: SystemPath = lambda system_id: baseline_dir(system_id),
     ) -> None:
         self._pin_lease = pin_lease
         self._connect = connect
@@ -1235,6 +1264,8 @@ class LocalExternalBootSessionFactory:
         self._readiness = readiness or _unconfigured_readiness
         self._observe_running = observe_running or _unconfigured_observation
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
+        self._teardown_overlay_path = teardown_overlay_path
+        self._teardown_baseline_path = teardown_baseline_path
 
     def open(
         self,
@@ -1336,6 +1367,171 @@ class LocalExternalBootSessionFactory:
             for error in errors:
                 exc.add_note(f"cleanup failed: {error!r}")
             raise
+
+    def open_teardown(
+        self,
+        lease: LocalExternalBootOperationLease,
+        expected: ExpectedOperationOwnership,
+    ) -> LocalSystemTeardownSession:
+        """Open an exact System lane without creating activation state or requiring a domain."""
+        ownership = self._pin_lease(lease)
+        pin = ownership._pin
+        facts = ownership.ownership
+        try:
+            _require_expected_ownership(facts, expected)
+            connection = self._connect()
+        except BaseException as exc:
+            try:
+                pin.close()
+            except BaseException as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        return _ConcreteSystemTeardownSession(
+            system_id=facts.system_id,
+            pin=pin,
+            connection=connection,
+            overlay=self._teardown_overlay_path(facts.system_id),
+            baseline=self._teardown_baseline_path(facts.system_id),
+        )
+
+
+class _ConcreteSystemTeardownSession:
+    """Exact no-create host teardown capability held under one pinned operation lane."""
+
+    def __init__(
+        self,
+        *,
+        system_id: UUID,
+        pin: LocalExternalBootOperationPin,
+        connection: _Connection,
+        overlay: str,
+        baseline: str,
+    ) -> None:
+        self._system_id = system_id
+        self._pin: LocalExternalBootOperationPin | None = pin
+        self._connection: _Connection | None = connection
+        self._overlay = overlay
+        self._baseline = baseline
+
+    def inspect(self) -> LocalSystemTeardownInspection:
+        domain = self._lookup_owned()
+        try:
+            return LocalSystemTeardownInspection(
+                domain_absent=domain is None,
+                domain_validated=domain is not None,
+                overlay_absent=_path_kind(self._overlay, "regular") == "absent",
+                baseline_absent=_path_kind(self._baseline, "directory") == "absent",
+            )
+        finally:
+            if domain is not None:
+                domain.free()
+
+    def destroy(self) -> None:
+        domain = self._lookup_owned()
+        if domain is None:
+            return
+        try:
+            if _active(domain):
+                domain.destroy()
+            if _active(domain):
+                raise RuntimeError("domain remained active after destroy")
+        finally:
+            domain.free()
+
+    def undefine(self) -> None:
+        domain = self._lookup_owned()
+        if domain is None:
+            return
+        try:
+            if _active(domain):
+                raise RuntimeError("domain must be inactive before undefine")
+            domain.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
+                raise
+        finally:
+            domain.free()
+
+    def remove_overlay(self) -> None:
+        if _path_kind(self._overlay, "regular") == "absent":
+            return
+        os.unlink(self._overlay)
+
+    def remove_baseline(self) -> None:
+        if _path_kind(self._baseline, "directory") == "absent":
+            return
+        shutil.rmtree(self._baseline)
+
+    def close(self) -> None:
+        connection, self._connection = self._connection, None
+        pin, self._pin = self._pin, None
+        errors: list[Exception] = []
+        for closer in (
+            connection.close if connection is not None else None,
+            pin.close if pin is not None else None,
+        ):
+            if closer is not None:
+                try:
+                    closer()
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise ExceptionGroup("failed to close local System teardown session", errors)
+
+    def _lookup_owned(self) -> _TeardownDomain | None:
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("local System teardown session is closed")
+        try:
+            domain = cast(
+                _TeardownDomain,
+                connection.lookupByName(domain_name_for(self._system_id)),
+            )
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return None
+            raise
+        expected_overlay = self._overlay
+        try:
+            _parse_owned_xml(
+                domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
+            )
+            _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
+        except BaseException:
+            domain.free()
+            raise
+        return domain
+
+
+def _require_expected_ownership(
+    facts: OperationOwnership, expected: ExpectedOperationOwnership
+) -> None:
+    binding = facts.binding
+    if (
+        binding.system_id != str(facts.system_id)
+        or facts.system_id != expected.system_id
+        or UUID(binding.run_id) != expected.run_id
+        or (
+            expected.activation_id is not None
+            and UUID(binding.activation_id) != expected.activation_id
+        )
+    ):
+        raise ValueError("operation lease does not match expected ownership")
+
+
+def _path_kind(
+    path: str, expected: Literal["regular", "directory"]
+) -> Literal["present", "absent"]:
+    try:
+        opened = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return "absent"
+    matches = (
+        stat.S_ISREG(opened.st_mode) if expected == "regular" else stat.S_ISDIR(opened.st_mode)
+    )
+    if not matches:
+        raise ValueError(f"System {expected} storage path has unsafe type")
+    return "present"
 
 
 def _active(domain: _Domain) -> bool:
