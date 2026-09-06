@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
@@ -18,18 +18,23 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.ports.external_boot import ExternalBootPreparationObservation
+from kdive.providers.ports.external_boot import (
+    ExternalBootPreparationObservation,
+    RunningKernelObservation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +69,13 @@ class AuthorityRecoveryObserver(Protocol):
 
 
 @runtime_checkable
+class AuthorityRunningObserver(Protocol):
+    async def observe_running(
+        self, request: AuthorityMutationRequestV1
+    ) -> RunningKernelObservation: ...
+
+
+@runtime_checkable
 class AuthorityPreparationAdapter(Protocol):
     async def preparation_receipt(
         self, request: AuthorityPreparationMutationRequestV1
@@ -76,8 +88,14 @@ class AuthorityPreparationAdopter(Protocol):
         self,
         request: AuthorityPreparationMutationRequestV1,
         predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
         context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityAdapterCloser(Protocol):
+    def close(self) -> None: ...
 
 
 class AuthorityRepository(Protocol):
@@ -267,6 +285,10 @@ class ExternalBootAuthorityService:
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._lanes: dict[UUID, _Lane] = {}
         self._logger = logging.getLogger(__name__)
+
+    def close(self) -> None:
+        if isinstance(self._adapter, AuthorityAdapterCloser):
+            self._adapter.close()
 
     def _lane(self, system_id: UUID) -> _Lane:
         lane = self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
@@ -474,6 +496,31 @@ class ExternalBootAuthorityService:
         ):
             raise AuthorityServiceError("journal_conflict")
         return records
+
+    async def _observation_head_is_current(
+        self, binding: AuthorityBinding, records: list[JournalRecordV1]
+    ) -> None:
+        """Refuse an observation unless its local journal ends at the trusted exact head.
+
+        Unlike mutation recovery, this only compares durable facts.  An observation must not
+        repair, append, or truncate local history merely to make a provider read admissible.
+        """
+        if not records:
+            raise AuthorityServiceError("journal_conflict")
+        head = await self._repository.read_head(binding)
+        last = records[-1]
+        if (
+            head is None
+            or head.authority_instance != binding.authority_instance
+            or head.system_id != binding.system_id
+            or head.sequence != last.sequence
+            or head.digest != record_digest(last)
+            or head.phase is not last.phase
+            or head.authority_id != last.authority_id
+            or head.generation != last.generation
+            or head.operation_identity != last.operation_identity
+        ):
+            raise AuthorityServiceError("journal_conflict")
 
     async def _anchor(
         self,
@@ -1029,6 +1076,7 @@ class ExternalBootAuthorityService:
                         await self._finalize_adapter(request, records)
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
+                    predecessor_receipt_identity: str | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1041,6 +1089,15 @@ class ExternalBootAuthorityService:
                             None,
                         )
                         if predecessor_record is not None:
+                            if (
+                                predecessor_record.outcome != "target"
+                                or predecessor_record.observation is None
+                                or predecessor_record.observation.category != "target"
+                            ):
+                                raise AuthorityServiceError("journal_conflict")
+                            predecessor_receipt_identity = (
+                                predecessor_record.observation.composite_state
+                            )
                             predecessor = request.model_copy(
                                 update={
                                     "authority_id": predecessor_record.authority_id,
@@ -1151,6 +1208,13 @@ class ExternalBootAuthorityService:
                 # cannot reconcile, not a state it should paper over.
                 if not await self._head_still_anchors(binding, context):
                     raise AuthorityServiceError("journal_conflict")
+                if isinstance(request, AuthorityConflictResolutionRequestV1):
+                    observed = await self._adapter.observe(request)
+                    if (
+                        observed.category == "unreadable"
+                        or observed.composite_state != request.expected_observed_composite
+                    ):
+                        raise AuthorityServiceError("superseded")
                 try:
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
@@ -1158,6 +1222,7 @@ class ExternalBootAuthorityService:
                         await self._adapter.adopt_preparation(
                             cast(AuthorityPreparationMutationRequestV1, request),
                             predecessor,
+                            cast(str, predecessor_receipt_identity),
                             context,
                         )
                     else:
@@ -1217,6 +1282,94 @@ class ExternalBootAuthorityService:
                 active.done.set()
                 if lane.active is active:
                     lane.active = None
+                self._release_lane(trusted.system_id, lane)
+
+        task = asyncio.create_task(run())
+        try:
+            return await asyncio.shield(task)
+        except AuthorityServiceError as error:
+            self._ensure_rejection(request, error)
+            raise
+
+    async def execute_conflict_resolution(
+        self, peer: AuthenticatedPeer | None, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        """Mutate only after the authority re-observes the caller-bound conflict identity."""
+        return await self.execute_mutation(peer, request)
+
+    async def observe_authority(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        """Read one current authority-bound provider state without changing its journal or provider.
+
+        The acknowledgement and current authority are checked both before and after the provider
+        read.  A concurrent takeover therefore cannot turn an observation made under a stale
+        generation into an admission fact for a later mutation.
+        """
+        return await self._observe_current(peer, request, self._adapter.observe)
+
+    async def observe_running(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityRunningObservationV1:
+        """Read bounded kernel evidence through the same authenticated read-only lane."""
+
+        async def read(request: AuthorityMutationRequestV1) -> AuthorityRunningObservationV1:
+            if not isinstance(self._adapter, AuthorityRunningObserver):
+                raise AuthorityServiceError("provider_conflict")
+            observed = await self._adapter.observe_running(request)
+            return AuthorityRunningObservationV1.from_observation(observed)
+
+        return await self._observe_current(peer, request, read)
+
+    async def _observe_current[T](
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityMutationRequestV1,
+        read: Callable[[AuthorityMutationRequestV1], Awaitable[T]],
+    ) -> T:
+        authenticated = self._require_peer(peer, request)
+        trusted = await self._repository.resolve_current_candidate(authenticated, request)
+        if trusted is None or not self._binding_matches(trusted, request):
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
+
+        async def run() -> T:
+            try:
+                async with lane.lock:
+                    if lane.failed:
+                        raise AuthorityServiceError("journal_conflict")
+                    if lane.active is not None:
+                        raise AuthorityServiceError("superseded")
+                    _journal, records = self._lane_journal(request.system_id, lane)
+                    await self._observation_head_is_current(trusted, records)
+                    acknowledgements = [
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.generation == request.generation
+                    ]
+                    if not acknowledgements:
+                        raise AuthorityServiceError("superseded")
+                    acknowledgement = acknowledgements[-1]
+                    confirmed = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if confirmed is None or not self._binding_matches(confirmed, request):
+                        raise AuthorityServiceError("superseded")
+                    try:
+                        observation = await read(request)
+                    except AuthorityServiceError:
+                        raise
+                    except Exception:
+                        raise self._provider_error(request) from None
+                    rechecked = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if rechecked is None or not self._binding_matches(rechecked, request):
+                        raise AuthorityServiceError("superseded")
+                    await self._observation_head_is_current(rechecked, records)
+                    return observation
+            finally:
                 self._release_lane(trusted.system_id, lane)
 
         task = asyncio.create_task(run())

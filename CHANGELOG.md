@@ -250,9 +250,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare attempt volumes
 - Retain preparation completion
 - Supervise remote module appliance
+- Add durable module reopen runtime
+- Verify module preparation receipts
+- Prepare verified module volumes
+- Run module appliance
+- Clean up module attempt volumes
 - Reap orphaned remote module volumes
 - Compose remote module volume reaper
 - Enqueue remote module volume reaping
+- Complete module reap runtime
+- Persist recovery volume geometry
 - Isolate activation cleanup artifacts
 - Pass external boot storage bounds
 - Bind teardown recovery observations
@@ -262,13 +269,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discharge module obligations on teardown
 - Discharge terminal module obligations
 - Discharge terminal module mutations
-- Add durable module reopen runtime
-- Verify module preparation receipts
-- Prepare verified module volumes
-- Run module appliance
-- Clean up module attempt volumes
-- Complete module reap runtime
 - Materialize local external boot artifacts
+- Fence crashes to active owning runs
 
 ### Changed
 
@@ -1331,6 +1333,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Define recovery observation context
 - Ratify local storage reclamation
 - Align storage records with gate format
+- Record remote recovery geometry
 
 ### Fixed
 
@@ -2130,14 +2133,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Avoid racing unresolved console reads
 - Preserve unresolved stream release
 - Validate console volume keys
-- Preserve module reap payload wire shape
-- Retry unreachable module volume fleets
-- Snapshot remote fleet configuration
-- Preserve partial abort authority
-- Run capacity probe in check mode
 - Reopen restore phase evidence
 - Own terminal evidence connections
 - Validate module runtime boundaries
+- Preserve module reap payload wire shape
+- Retry unreachable module volume fleets
+- Snapshot remote fleet configuration
+- Bind v2 recovery baseline identity
+- Preserve partial abort authority
+- Run capacity probe in check mode
 - Harden external boot materialization retry
 - Narrow projection reopen authority
 - Validate payloads before projection commit
@@ -2145,6 +2149,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify canonical materialized modules
 - Confine module conversion scratch files
 - Bound materializer validation storage
+- Fence provision during system teardown
+- Cite teardown race ordering
+- Regenerate owning-run crash options
 
 ### Security
 

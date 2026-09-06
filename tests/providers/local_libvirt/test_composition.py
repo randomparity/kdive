@@ -21,6 +21,7 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
+    RealLocalExternalBootIO,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     LocalExternalBootReadiness,
@@ -396,6 +397,35 @@ def test_build_external_boot_session_mechanisms_opens_nothing(
     assert sorted(seam.iterdir()) == []
 
 
+def test_local_authority_builder_shares_scope_with_real_io(
+    seam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_require = composition.config.require
+
+    def require(setting: object) -> object:
+        if setting is composition.LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES:
+            return 4096
+        return original_require(setting)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(composition.config, "require", require)
+    opened: list[str] = []
+    monkeypatch.setattr(composition.libvirt, "open", lambda uri: opened.append(uri))
+    provider_socket = seam / "libvirt?socket=foreign"
+    binding = composition.build_local_external_boot_authority(
+        cast(ObjectStore, object()), provider_socket
+    )
+    io = cast(RealLocalExternalBootIO, binding.provider._io)  # noqa: SLF001
+
+    assert opened == []
+    io._session_factory._connect()  # noqa: SLF001
+    assert opened == [f"qemu+unix:///system?socket={seam}/libvirt%3Fsocket%3Dforeign"]
+    pin = cast(Any, io._session_factory._pin_lease)  # noqa: SLF001
+    assert pin.__self__ is not None
+    resolver = cast(Any, io._resolve_operation_lease)  # noqa: SLF001
+    assert binding.adapter._lease_scope is resolver.__self__  # noqa: SLF001
+    assert io._recovery_root == seam  # noqa: SLF001
+
+
 def test_mechanisms_share_one_recovery_root(seam: Path) -> None:
     # Checked on the built object rather than described in a comment: this is the only
     # in-change control on the #2212 divergence, where cleanup's archive removal and
@@ -465,8 +495,11 @@ def test_configuration_comes_only_from_the_composition_seam(
         "LocalArtifactRoot": ["providers/local_libvirt/composition.py"],
         "LocalPayloadCleanup": ["providers/local_libvirt/composition.py"],
     }
-    # The builder takes no parameters, so no caller can inject configuration into it.
-    assert inspect.signature(composition.build_external_boot_session_mechanisms).parameters == {}
+    # The only optional input is the host-validated provider socket; all filesystem roots
+    # still come from the registry rather than a request.
+    assert tuple(
+        inspect.signature(composition.build_external_boot_session_mechanisms).parameters
+    ) == ("provider_socket",)
     # And the value it constructs them with is the one config.require returned.
     # Equality, not identity: the seam hands out a fresh Path per resolution (see the
     # fixture), and what this asserts is provenance -- the value came from require.

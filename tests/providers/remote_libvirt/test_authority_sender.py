@@ -24,7 +24,17 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
 )
 from kdive.providers.external_boot_authority.network_client import _AuthorityNetworkTransport
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
+)
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+)
 from kdive.providers.remote_libvirt import composition
 from kdive.providers.remote_libvirt.config import (
     RemoteAuthorityBinding,
@@ -34,6 +44,7 @@ from kdive.providers.remote_libvirt.config import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
 from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain, FakeStoragePool
+from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
 
 pytestmark = pytest.mark.anyio
 
@@ -43,6 +54,56 @@ def _sender(backend: object, borrow: object):
 
     return AuthorityRequestSender(
         lambda: cast(_AuthorityNetworkTransport, backend), cast(Callable[[], SecretStr], borrow)
+    )
+
+
+def _preparation_request() -> AuthorityPreparationMutationRequestV1:
+    system_id, activation_id, run_id = uuid4(), uuid4(), uuid4()
+    plan = external_boot_plan(system_id, run_id)
+    return AuthorityPreparationMutationRequestV1(
+        authority_id=uuid4(),
+        generation=1,
+        system_id=system_id,
+        activation_id=activation_id,
+        run_id=run_id,
+        plan_identity=plan.identity,
+        purpose="activate",
+        operation="materialize",
+        provider_kind="local-libvirt",
+        authority_instance="authority-a",
+        operation_identity="materialize-a",
+        operation_digest="sha256:" + "a" * 64,
+        attempt_id=uuid4(),
+        expected_source_identity="sha256:" + "b" * 64,
+        intended_target_identity="sha256:" + "c" * 64,
+        recovery_objects=(),
+        plan=plan,
+    )
+
+
+def _preparation_response(
+    request: AuthorityPreparationMutationRequestV1,
+) -> AuthorityPreparationResponseV1:
+    materialization = external_boot_materialization(request.plan)
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=ExternalBootActivationBinding(
+            system_id=str(request.system_id),
+            activation_id=str(request.activation_id),
+            run_id=str(request.run_id),
+        ),
+        plan_identity=request.plan_identity,
+        authority=OpaqueProviderRef(ref="authority/preparation"),
+        operation_identity=request.operation_identity,
+        materialization=materialization,
+    )
+    return AuthorityPreparationResponseV1(
+        observation=AuthorityObservationV1(
+            observation_id=uuid4(), category="target", composite_state=receipt.identity
+        ),
+        receipt=receipt,
+        journal_sequence=1,
+        journal_digest="sha256:" + "d" * 64,
     )
 
 
@@ -76,6 +137,35 @@ async def test_sender_uses_typed_identity_operation_and_rejects_malformed_succes
     assert caught.value.category is ErrorCategory.CONFLICT
 
 
+async def test_sender_encodes_preparation_request_and_requires_closed_response() -> None:
+    request = _preparation_request()
+    response = _preparation_response(request)
+
+    class Backend:
+        malformed = False
+
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            assert deadline == 123.0
+            decoded = json.loads(envelope)
+            assert decoded["operation"] == "execute-preparation"
+            assert decoded["request"]["attempt_id"] == str(request.attempt_id)
+            if self.malformed:
+                return b'{"status":"ok","value":{"schema":"wrong"}}'
+            return json.dumps(
+                {"status": "ok", "value": response.model_dump(mode="json", by_alias=True)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+
+    backend = Backend()
+    sender = _sender(backend, lambda: SecretStr("preparation-incarnation"))
+    assert await sender.execute_preparation(request, deadline=123.0) == response
+    backend.malformed = True
+    with pytest.raises(CategorizedError, match="^authority: invalid-response$") as caught:
+        await sender.execute_preparation(request, deadline=123.0)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 async def test_sender_borrows_only_while_encoding_and_authenticates_active_incarnation() -> None:
     owner = SimpleNamespace(incarnation_credential=SecretStr("active-test-incarnation"))
     borrowed: list[SecretStr] = []
@@ -107,6 +197,10 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "health",
         "acknowledge_takeover",
         "execute_mutation",
+        "execute_preparation",
+        "execute_conflict_resolution",
+        "observe_authority",
+        "observe_running",
         "resolve_device_identity",
     }
     assert all(not isinstance(getattr(sender, slot), SecretStr) for slot in sender.__slots__)
@@ -379,6 +473,52 @@ async def test_existing_operations_preserve_envelopes_and_typed_responses(mutati
     method = sender.execute_mutation if mutation else sender.acknowledge_takeover
     assert set(inspect.signature(method).parameters) == {"request", "deadline"}
     assert await method(request, deadline=321.0) == expected
+
+
+async def test_sender_encodes_read_only_observation_as_its_own_operation() -> None:
+    request = protocol.AuthorityMutationRequestV1.model_validate(
+        {
+            "authority_id": uuid4(),
+            "generation": 1,
+            "system_id": uuid4(),
+            "activation_id": uuid4(),
+            "run_id": uuid4(),
+            "plan_identity": "sha256:" + "a" * 64,
+            "purpose": "recover",
+            "operation": "recover",
+            "provider_kind": "remote-libvirt",
+            "authority_instance": "authority-a",
+            "operation_identity": "operation-a",
+            "operation_digest": "sha256:" + "b" * 64,
+            "attempt_id": uuid4(),
+            "expected_source_identity": "source",
+            "intended_target_identity": "target",
+            "recovery_objects": [],
+        }
+    )
+    expected = protocol.AuthorityObservationV1(
+        observation_id=uuid4(),
+        category="target",
+        composite_state="sha256:" + "c" * 64,
+    )
+
+    class Backend:
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            assert envelope == transport.encode_request_envelope(
+                "observe-authority",
+                request.model_dump(mode="json", by_alias=True),
+                "operation-test-incarnation",
+            )
+            assert deadline == 321.0
+            return json.dumps(
+                {"status": "ok", "value": expected.model_dump(mode="json", by_alias=True)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+
+    sender = _sender(Backend(), lambda: SecretStr("operation-test-incarnation"))
+    assert set(inspect.signature(sender.observe_authority).parameters) == {"request", "deadline"}
+    assert await sender.observe_authority(request, deadline=321.0) == expected
 
 
 @pytest.mark.parametrize("credential", ["", "a" * 4097])

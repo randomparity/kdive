@@ -52,6 +52,7 @@ async def build_external_boot_payload(
     operation_identity: str,
     resolver: ProviderResolver,
     preparation_plan: ExternalBootPlan | None = None,
+    expected_observed_composite: str | None = None,
 ) -> tuple[JobKind, BootPayload | TeardownPayload]:
     """Return the ``JobKind`` and payload one authority-marked operation must be enqueued as.
 
@@ -104,6 +105,8 @@ async def build_external_boot_payload(
         "operation": operation,
         "operation_identity": operation_identity,
     }
+    if expected_observed_composite is not None:
+        marker["expected_observed_composite"] = expected_observed_composite
     if purpose == "teardown":
         return JobKind.TEARDOWN, TeardownPayload.model_validate(
             {"system_id": str(activation.system_id), "external_boot_authority_v1": marker}

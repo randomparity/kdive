@@ -60,7 +60,7 @@ class SeededCase:
 
     @property
     def marker(self) -> dict[str, Any]:
-        return {
+        marker = {
             "activation_id": str(self.vehicle.activation_id),
             "run_id": str(self.vehicle.run_id),
             "system_id": str(self.vehicle.system_id),
@@ -71,6 +71,9 @@ class SeededCase:
             "operation": self.operation,
             "operation_identity": self.operation_identity,
         }
+        if self.operation == "resolve-conflict":
+            marker["expected_observed_composite"] = "sha256:" + "8" * 64
+        return marker
 
 
 async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argument is one column

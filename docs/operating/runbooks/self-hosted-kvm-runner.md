@@ -156,12 +156,15 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    both resources for every slot. See
    [ADR-0575](../../adr/0575-host-workers-use-kvm-provider-authority.md).
 
-### Dormant external-boot authority diagnosis
+### External-boot authority diagnosis
 
-The authority host is a deployed boundary, not a provider path. The fixed workers retain their
-existing `kdive-live-libvirt` and `kvm` access, and external-boot capability advertisement remains
-disabled until #2140 binds and proves the replacement adapter. Do not route a live test or worker
-through the authority request socket while that hold applies.
+The installed role currently provisions the authority identity, database and TLS credentials,
+journal, request socket, and private libvirt endpoint. It does not yet provision the
+authority-owned recovery root, object-store endpoint and credentials, or the fixed workers' five
+`KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_*` values and referenced client TLS files. Without that
+complete set the host remains identity-only and workers must not route mutations to it. The worker
+gate preserves those five values when they are supplied by the slot environment; provisioning the
+values and files remains required before a connected native proof.
 
 The normal runner play leaves this dormant boundary disabled. To install it, prepare a protected
 mode-`0600` vars file on the control host, set `live_vm_host_authority_enabled: true`, and provide

@@ -41,6 +41,7 @@ from kdive.jobs.models import (
     ExternalBootAuthoritySuccessV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     RecoveryObjectBindingV1,
@@ -143,26 +144,28 @@ def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
                 reference=recovery.recovery_ref.ref,
             ),
         )
-    return AuthorityMutationRequestV1.model_validate(
-        {
-            "authority_id": context.authority.authority_id,
-            "generation": context.authority.generation,
-            "system_id": context.marker.system_id,
-            "activation_id": context.marker.activation_id,
-            "run_id": context.marker.run_id,
-            "plan_identity": context.marker.plan_identity,
-            "purpose": context.marker.purpose,
-            "operation": context.marker.operation,
-            "provider_kind": context.marker.provider_kind,
-            "authority_instance": context.marker.authority_instance,
-            "operation_identity": context.marker.operation_identity,
-            "operation_digest": context.authority.operation_digest,
-            "attempt_id": attempt_id,
-            "expected_source_identity": recovery.source_state.definition,
-            "intended_target_identity": recovery.target_state.definition,
-            "recovery_objects": objects,
-        }
-    )
+    values = {
+        "authority_id": context.authority.authority_id,
+        "generation": context.authority.generation,
+        "system_id": context.marker.system_id,
+        "activation_id": context.marker.activation_id,
+        "run_id": context.marker.run_id,
+        "plan_identity": context.marker.plan_identity,
+        "purpose": context.marker.purpose,
+        "operation": context.marker.operation,
+        "provider_kind": context.marker.provider_kind,
+        "authority_instance": context.marker.authority_instance,
+        "operation_identity": context.marker.operation_identity,
+        "operation_digest": context.authority.operation_digest,
+        "attempt_id": attempt_id,
+        "expected_source_identity": recovery.source_state.definition,
+        "intended_target_identity": recovery.target_state.definition,
+        "recovery_objects": objects,
+    }
+    if context.marker.expected_observed_composite is not None:
+        values["expected_observed_composite"] = context.marker.expected_observed_composite
+        return AuthorityConflictResolutionRequestV1.model_validate(values)
+    return AuthorityMutationRequestV1.model_validate(values)
 
 
 async def _execute(
@@ -171,9 +174,11 @@ async def _execute(
     executor = context.prerequisites.get("authority_executor")
     if executor is None:
         raise _refuse("no external-boot authority executor is configured")
-    authority_observation = await cast(ExternalBootAuthorityExecutor, executor).execute(
-        _mutation_request(context)
-    )
+    request = _mutation_request(context)
+    if isinstance(request, AuthorityConflictResolutionRequestV1):
+        authority_observation = await cast(Any, executor).execute_conflict_resolution(request)
+    else:
+        authority_observation = await cast(ExternalBootAuthorityExecutor, executor).execute(request)
     kernel_observation = None
     if authority_observation.category == "target":
         kernel_observation = context.port.observe(_recovery(context), authority_ref(context))
@@ -313,7 +318,11 @@ def _handler(
     build_result: Callable[
         [OperationContext, AuthorityObservationV1], ExternalBootAuthoritySuccessV1
     ],
-    before_port: Callable[[OperationContext], ExternalBootAuthoritySuccessV1 | None] | None = None,
+    before_port: Callable[
+        [OperationContext],
+        ExternalBootAuthoritySuccessV1 | None | Awaitable[ExternalBootAuthoritySuccessV1 | None],
+    ]
+    | None = None,
 ) -> ExternalBootOperationHandler:
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
@@ -525,7 +534,7 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
             },
         )
 
-    def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
+    async def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
         if context.activation.state is State.RECOVERING:
             deadline = context.prerequisites.get("attempt_deadline")
             if deadline is not None and ports.clock() >= deadline:
@@ -535,6 +544,17 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
                     terminal=True,
                 )
             return None
+        executor = context.prerequisites["authority_executor"]
+        expected = context.marker.expected_observed_composite
+        if expected is None:
+            raise _refuse("resolve-conflict has no observed composite binding")
+        observation = await executor.observe(_mutation_request(context))
+        if observation.category == "unreadable" or observation.composite_state != expected:
+            raise CategorizedError(
+                "authority observation no longer matches the conflict binding",
+                category=ErrorCategory.STALE_HANDLE,
+                terminal=True,
+            )
         deadline = ports.clock() + ports.recovery_readiness_timeout
         attempt_id = uuid5(
             NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
@@ -547,6 +567,7 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
                 "attempt_id": str(attempt_id),
                 "recovery_basis": "pre_recovery",
                 "deadline": deadline.isoformat().replace("+00:00", "Z"),
+                "observed_composite_state": expected,
             },
         )
 
