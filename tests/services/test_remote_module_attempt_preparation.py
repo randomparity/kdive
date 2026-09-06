@@ -31,6 +31,7 @@ from tests.db.external_boot_authority_support import (
 from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
+from tests.db.remote_module_attempt_obligations_support import _evidence
 
 
 async def _seed(conn: psycopg.AsyncConnection) -> ModuleAttempt:
@@ -199,6 +200,85 @@ def test_verification_holds_lock_through_consumer_and_returns_only_result(
                     worker, repo, _request(attempt), retained[0], post_return_consumer
                 )
         assert post_return_called is False
+
+    asyncio.run(_run())
+
+
+def test_terminal_commit_failure_rolls_back_evidence_and_reap_retention(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            attempt = await _seed(admin)
+            await repo.open_mutation_obligation(admin, attempt)
+            await admin.commit()
+
+        async def consumer(_: ModuleAttempt) -> str:
+            return "remote-terminal"
+
+        async def fail_after_write(
+            conn: psycopg.AsyncConnection, value: ModuleAttempt, result: str
+        ) -> None:
+            assert result == "remote-terminal"
+            await repo.record_terminal_evidence(conn, value, _evidence(value))
+            await repo.open_reap_obligation(conn, value)
+            raise RuntimeError("terminal evidence commit failed")
+
+        async with await _open_pool(migrated_url) as worker:
+            with pytest.raises(RuntimeError, match="terminal evidence commit failed"):
+                await run_verified_module_attempt_preparation(
+                    worker,
+                    repo,
+                    _request(attempt),
+                    attempt,
+                    consumer,
+                    commit_result=fail_after_write,
+                )
+
+        async with await psycopg.AsyncConnection.connect(migrated_url) as observer:
+            assert await repo.read_terminal_evidence(observer, attempt) is None
+            assert await repo.reap_obligation_is_open(observer, attempt) is False
+            assert await repo.mutation_obligation_is_open(observer, attempt) is True
+
+    asyncio.run(_run())
+
+
+def test_retained_terminal_evidence_allows_only_explicit_replay(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            attempt = await _seed(admin)
+            await repo.open_mutation_obligation(admin, attempt)
+            await repo.record_terminal_evidence(admin, attempt, _evidence(attempt))
+            await repo.open_reap_obligation(admin, attempt)
+            await admin.commit()
+
+        calls = 0
+
+        async def consumer(_: ModuleAttempt) -> str:
+            nonlocal calls
+            calls += 1
+            return "replayed-terminal"
+
+        async with await _open_pool(migrated_url) as worker:
+            with pytest.raises(ModuleAttemptObligationVerificationError):
+                await run_verified_module_attempt_preparation(
+                    worker, repo, _request(attempt), attempt, consumer
+                )
+            assert (
+                await run_verified_module_attempt_preparation(
+                    worker,
+                    repo,
+                    _request(attempt),
+                    attempt,
+                    consumer,
+                    commit_result=lambda *_args: asyncio.sleep(0),
+                    allow_terminal_replay=True,
+                )
+                == "replayed-terminal"
+            )
+        assert calls == 1
 
     asyncio.run(_run())
 

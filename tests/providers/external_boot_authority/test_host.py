@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import socket
 import tempfile
@@ -11,7 +13,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -49,6 +51,33 @@ def _file(path: Path, *, mode: int, content: str = "value") -> Path:
     return path
 
 
+def _install_remote_module_appliance(root: Path, architecture: str) -> None:
+    directory = root / architecture
+    (directory / "image").mkdir(parents=True)
+    files = {
+        "image/vmlinuz": b"kernel",
+        "image/initramfs.cpio": b"initramfs",
+    }
+    for relative, content in files.items():
+        (directory / relative).write_bytes(content)
+    manifest = {
+        "architecture": architecture,
+        "files": [
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+            for relative, content in files.items()
+        ],
+        "format": "kdive-remote-module-appliance-v1",
+        "initramfs_files": [],
+    }
+    (directory / "manifest.json").write_bytes(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+
+
 def _config(tmp_path: Path) -> AuthorityHostConfig:
     journal = tmp_path / "journal"
     journal.mkdir(mode=0o700)
@@ -76,6 +105,10 @@ def _access_boundary_config(tmp_path: Path) -> AuthorityHostConfig:
     credentials = tmp_path / "credential-source"
     state = tmp_path / "state"
     journal = state / "journal"
+    remote_modules = state / "remote-module-preparations"
+    remote_evidence = remote_modules / "evidence"
+    remote_work = remote_modules / "work"
+    remote_pool = state / "remote-libvirt-pool"
     runtime = tmp_path / "run" / "provider-authority"
     request = runtime / "request"
     provider = runtime / "libvirt"
@@ -84,6 +117,10 @@ def _access_boundary_config(tmp_path: Path) -> AuthorityHostConfig:
         (credentials, 0o700),
         (state, 0o700),
         (journal, 0o700),
+        (remote_modules, 0o700),
+        (remote_evidence, 0o700),
+        (remote_work, 0o700),
+        (remote_pool, 0o700),
         (runtime, 0o710),
         (request, 0o2750),
         (provider, 0o700),
@@ -833,9 +870,46 @@ def test_host_keeps_identity_only_mode_without_local_recovery_root(
     assert host._build_mutation_service(_config(tmp_path)) is None  # noqa: SLF001
 
 
+def test_host_keeps_local_mutation_without_remote_module_dependencies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import libvirt
+
+    from kdive import config as kdive_config
+    from kdive.providers.assembly import composition as provider_assembly
+    from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
+    from kdive.providers.local_libvirt import composition
+
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir(mode=0o700)
+    kdive_config.load({"KDIVE_LIBVIRT_RECOVERY_ROOT": str(recovery_root)})
+    binding = SimpleNamespace(adapter=object(), provider=object())
+    monkeypatch.setattr(provider_assembly, "object_store_from_env", object)
+    monkeypatch.setattr(
+        composition,
+        "build_local_external_boot_authority",
+        lambda _store, _socket: binding,
+    )
+    monkeypatch.setattr(
+        libvirt,
+        "open",
+        lambda _uri: pytest.fail("disabled remote modules must not open libvirt"),
+    )
+
+    service = host._build_mutation_service(_access_boundary_config(tmp_path))  # noqa: SLF001
+
+    assert service is not None
+    assert service._adapter is binding.adapter  # noqa: SLF001
+    assert service._remote_module_host is None  # noqa: SLF001
+    assert isinstance(service._recovery_orphans, RecoveryOrphanAuthorityService)  # noqa: SLF001
+    assert service._recovery_orphans._executor is binding.adapter  # noqa: SLF001
+
+
 def test_host_constructs_mutation_chain_for_checked_provider_socket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    import libvirt
+
     from kdive import config as kdive_config
     from kdive.providers.assembly import composition as provider_assembly
     from kdive.providers.local_libvirt import composition
@@ -854,10 +928,128 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
             or SimpleNamespace(adapter=object(), provider=object())
         ),
     )
-    config = _config(tmp_path)
+    closed: list[bool] = []
 
-    assert host._build_mutation_service(config) is not None  # noqa: SLF001
+    class Pool:
+        def isActive(self) -> int:
+            return 1
+
+        def XMLDesc(self, _flags: int) -> str:
+            return (
+                "<pool type='dir'><name>authority-systems</name><target><path>"
+                f"{config.remote_libvirt_pool_dir}</path></target></pool>"
+            )
+
+    class Connection:
+        def storagePoolLookupByName(self, name: str) -> Pool:
+            assert name == "authority-systems"
+            return Pool()
+
+        def close(self) -> None:
+            closed.append(True)
+
+    config = replace(
+        _access_boundary_config(tmp_path),
+        remote_module_enabled=True,
+        remote_module_architectures=("x86_64",),
+        remote_libvirt_storage_pool="authority-systems",
+        remote_module_appliance_root=tmp_path / "appliance",
+    )
+    _install_remote_module_appliance(config.remote_module_appliance_root, "x86_64")
+    opened: list[str] = []
+
+    def open_connection(uri: str) -> Connection:
+        opened.append(uri)
+        return Connection()
+
+    monkeypatch.setattr(libvirt, "open", open_connection)
+
+    service = host._build_mutation_service(config)  # noqa: SLF001
+    assert service is not None
+    assert opened == ["qemu+unix:///session?socket=" + str(config.provider_socket)]
     assert captured == [(store, config.provider_socket)]
+    remote_module_host = cast(Any, service._remote_module_host)  # noqa: SLF001
+    assert remote_module_host._host._factory._pool_name == "authority-systems"  # noqa: SLF001
+    operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
+    assert operations._pool_name == "authority-systems"  # noqa: SLF001
+    assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001
+    asyncio.run(service.close())
+    assert closed == [True]
+
+
+def test_remote_module_readiness_rejects_missing_selected_appliance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import libvirt
+
+    closed: list[bool] = []
+    config = replace(
+        _access_boundary_config(tmp_path),
+        remote_module_enabled=True,
+        remote_module_architectures=("x86_64",),
+        remote_libvirt_storage_pool="authority-systems",
+        remote_module_appliance_root=tmp_path / "appliance",
+    )
+
+    class Pool:
+        def isActive(self) -> int:
+            return 1
+
+        def XMLDesc(self, _flags: int) -> str:
+            return (
+                "<pool type='dir'><name>authority-systems</name><target><path>"
+                f"{config.remote_libvirt_pool_dir}</path></target></pool>"
+            )
+
+    class Connection:
+        def storagePoolLookupByName(self, _name: str) -> Pool:
+            return Pool()
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(libvirt, "open", lambda _uri: Connection())
+
+    with pytest.raises(HostReadinessError, match="remote-module-appliance: invalid"):
+        host._open_remote_module_connection(config)  # noqa: SLF001
+    assert closed == [True]
+
+
+def test_remote_module_readiness_rejects_wrong_pool_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import libvirt
+
+    config = replace(
+        _access_boundary_config(tmp_path),
+        remote_module_enabled=True,
+        remote_module_architectures=("x86_64",),
+        remote_libvirt_storage_pool="authority-systems",
+        remote_module_appliance_root=tmp_path / "appliance",
+    )
+    _install_remote_module_appliance(config.remote_module_appliance_root, "x86_64")
+
+    class Pool:
+        def isActive(self) -> int:
+            return 1
+
+        def XMLDesc(self, _flags: int) -> str:
+            return (
+                "<pool type='dir'><name>authority-systems</name>"
+                "<target><path>/wrong</path></target></pool>"
+            )
+
+    class Connection:
+        def storagePoolLookupByName(self, _name: str) -> Pool:
+            return Pool()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(libvirt, "open", lambda _uri: Connection())
+
+    with pytest.raises(HostReadinessError, match="remote-module-pool: invalid"):
+        host._open_remote_module_connection(config)  # noqa: SLF001
 
 
 def test_host_validates_listener_before_ready(
@@ -1086,6 +1278,57 @@ def test_one_shot_probe_reports_lock_contention(
         asyncio.run(host.check_authority_host_once(config))
 
 
+def test_one_shot_probe_validates_remote_prerequisites_when_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(
+        _config(tmp_path),
+        remote_module_enabled=True,
+        remote_module_architectures=("x86_64",),
+    )
+    events: list[str] = []
+
+    class Connection:
+        def close(self) -> None:
+            events.append("remote-close")
+
+    class Listener:
+        def validate(self) -> None:
+            events.append("listener-validate")
+
+        async def start_serving(self) -> None:
+            events.append("listener-start")
+
+        async def close(self) -> None:
+            events.append("listener-close")
+
+    async def static_check(*_args: object) -> None:
+        events.append("static")
+
+    async def serve(*_args: object, **_kwargs: object) -> Listener:
+        return Listener()
+
+    async def health(*_args: object) -> None:
+        events.append("health")
+
+    monkeypatch.setattr(host, "_check_static_authority_host", static_check)
+    monkeypatch.setattr(host, "_open_remote_module_connection", lambda _config: Connection())
+    monkeypatch.setattr(host, "validate_socket_parent", lambda *_args: None)
+    monkeypatch.setattr(host, "serve_authority_transport", serve)
+    monkeypatch.setattr(host, "check_tls_health", health)
+
+    asyncio.run(host.check_authority_host_once(config))
+
+    assert events == [
+        "static",
+        "remote-close",
+        "listener-validate",
+        "listener-start",
+        "health",
+        "listener-close",
+    ]
+
+
 def test_provider_socket_rejects_mode_and_group_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1141,6 +1384,9 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_UID", str(os.geteuid()))
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_GID", str(os.getegid()))
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID", str(os.getegid()))
+    monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_STORAGE_POOL", "authority-systems")
+    monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED", "true")
+    monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ARCHITECTURES", "x86_64")
     monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
     kdive_config.load()
     config = AuthorityHostConfig.from_environment()
@@ -1148,6 +1394,9 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     assert config.authority_uid == os.geteuid()
     assert config.authority_gid == os.getegid()
     assert config.authority_client_gid == os.getegid()
+    assert config.remote_libvirt_storage_pool == "authority-systems"
+    assert config.remote_module_enabled is True
+    assert config.remote_module_architectures == ("x86_64",)
     assert config.journal_dir == Path("/var/lib/kdive/provider-authority/journal")
     assert config.request_socket == Path("/run/kdive/provider-authority/request/authority.sock")
     assert config.provider_socket == Path("/run/kdive/provider-authority/libvirt/libvirt-sock")
@@ -1173,6 +1422,8 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ARCHITECTURES",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF",

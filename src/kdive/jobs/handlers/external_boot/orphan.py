@@ -11,12 +11,12 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
-from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ResolveRecoveryOrphanPayload, load_payload
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
 )
+from kdive.providers.ports.authority import AuthorityRequestSender
 
 
 def _refuse(reason: str) -> CategorizedError:

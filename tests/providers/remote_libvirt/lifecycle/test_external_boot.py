@@ -37,15 +37,17 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     require_disk_grub_source,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
-from kdive.providers.shared.guest_agent import AgentExecResult
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from kdive.providers.shared.runtime_paths import domain_name_for
 from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
+    _NOTES,
     _RUN_ID,
     _SYSTEM_ID,
+    _FakeAgentExec,
     _kernel_identity,
     _materialization,
     _plan,
+    _replies,
     _source_xml,
 )
 
@@ -575,53 +577,12 @@ def test_activation_reports_an_xmldesc_failure_as_infrastructure_failure() -> No
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-_NOTES = bytes.fromhex("040000000800000003000000474e5500") + bytes.fromhex("ab" * 8)
-_CMDLINE = b"root=/dev/vda1 console=ttyS0\n"
-
-
 class _FakeGuestDomain:
     def __init__(self, name: str) -> None:
         self._name = name
 
     def name(self) -> str:
         return self._name
-
-
-class _FakeAgentExec:
-    """Answers an exact argv with a canned result; an unconfigured argv is a hard failure."""
-
-    def __init__(self, replies: dict[tuple[str, ...], AgentExecResult]) -> None:
-        self._replies = replies
-        self.argvs: list[list[str]] = []
-        self.error: BaseException | None = None
-
-    def run(
-        self, domain: Any, argv: list[str], *, input_data: str | None = None
-    ) -> AgentExecResult:
-        self.argvs.append(list(argv))
-        if self.error is not None:
-            raise self.error
-        key = tuple(argv)
-        if key not in self._replies:
-            raise AssertionError(f"unconfigured argv: {argv}")
-        return self._replies[key]
-
-
-def _replies(
-    *,
-    release: bytes = b"6.9.0-kdive\n",
-    machine: bytes = b"x86_64\n",
-    cmdline: bytes = _CMDLINE,
-    notes: bytes = _NOTES,
-    exits: dict[str, int] | None = None,
-) -> dict[tuple[str, ...], AgentExecResult]:
-    codes = exits or {}
-    return {
-        ("/usr/bin/uname", "-r"): AgentExecResult(codes.get("release", 0), release, b""),
-        ("/usr/bin/uname", "-m"): AgentExecResult(codes.get("machine", 0), machine, b""),
-        ("/usr/bin/cat", "/proc/cmdline"): AgentExecResult(codes.get("cmdline", 0), cmdline, b""),
-        ("/usr/bin/cat", "/sys/kernel/notes"): AgentExecResult(codes.get("notes", 0), notes, b""),
-    }
 
 
 def _guest(system_id: UUID = _SYSTEM_ID) -> _FakeGuestDomain:

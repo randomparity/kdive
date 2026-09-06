@@ -97,6 +97,27 @@ def test_xml_is_exactly_confined_and_native(architecture: str) -> None:
     ]
 
 
+def test_direct_kernel_appliance_uses_the_installed_three_disk_mapping() -> None:
+    req = replace(
+        request(Clock()),
+        appliance_volume=None,
+        appliance_kernel="/var/lib/libvirt/kdive/module-appliance/v1/x86_64/image/vmlinuz",
+        appliance_initrd="/var/lib/libvirt/kdive/module-appliance/v1/x86_64/image/initramfs.cpio",
+    )
+
+    root = ET.fromstring(render_remote_module_appliance(req))
+
+    assert root.findtext("./os/kernel") == req.appliance_kernel
+    assert root.findtext("./os/initrd") == req.appliance_initrd
+    targets = [disk.find("target") for disk in root.findall("./devices/disk")]
+    assert all(target is not None for target in targets)
+    assert [target.get("dev") for target in targets if target is not None] == [
+        "vda",
+        "vdb",
+        "vdc",
+    ]
+
+
 def test_launch_uses_auto_destroy_and_only_scratch_proves_completion() -> None:
     clock = Clock()
     forged = json.dumps({"status": "success", "phase": "installed"}).encode() + b"\n"

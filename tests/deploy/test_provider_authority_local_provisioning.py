@@ -36,6 +36,9 @@ def test_local_mutation_is_disabled_by_default() -> None:
     assert defaults["provider_authority_host_s3_bucket"] == ""
     assert defaults["provider_authority_host_s3_region"] == "us-east-1"
     assert defaults["provider_authority_host_s3_credentials_source"] == ""
+    assert defaults["provider_authority_host_remote_module_enabled"] is False
+    assert defaults["provider_authority_host_remote_module_architectures"] == []
+    assert defaults["provider_authority_host_remote_libvirt_storage_pool"] == "default"
 
 
 def test_enabled_environment_contains_complete_mutation_configuration() -> None:
@@ -58,6 +61,9 @@ def test_enabled_environment_contains_complete_mutation_configuration() -> None:
         provider_authority_host_s3_endpoint_url="https://objects.example.invalid",
         provider_authority_host_s3_bucket="artifacts",
         provider_authority_host_s3_region="us-east-1",
+        provider_authority_host_remote_module_enabled=True,
+        provider_authority_host_remote_module_architectures=["x86_64"],
+        provider_authority_host_remote_libvirt_storage_pool="authority-systems",
     )
     assert (
         "KDIVE_LIBVIRT_RECOVERY_ROOT=" + "/var/lib/kdive/provider-authority/recovery\n" in rendered
@@ -66,6 +72,10 @@ def test_enabled_environment_contains_complete_mutation_configuration() -> None:
     assert "KDIVE_S3_ENDPOINT_URL=https://objects.example.invalid\n" in rendered
     assert "KDIVE_S3_BUCKET=artifacts\n" in rendered
     assert "KDIVE_S3_REGION=us-east-1\n" in rendered
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED=true\n" in rendered
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ARCHITECTURES=x86_64\n" in rendered
+    # pragma: allowlist nextline secret -- fixed storage-pool name, not a credential
+    assert "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL=authority-systems\n" in rendered
 
 
 def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() -> None:
@@ -121,6 +131,32 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
         ({"endpoint": "https://user:" + "not-a-real-secret@objects.example.invalid"}, False),
         ({"bucket": ""}, False),
         ({"s3_credentials": "relative/credentials"}, False),
+        ({"remote_module": True}, False),
+        ({"remote_module": True, "architectures": []}, False),
+        ({"remote_module": True, "architectures": ["aarch64"]}, False),
+        ({"remote_module": True, "pool": "bad/name"}, False),
+        (
+            {
+                "local_mutation": False,
+                "capacity": None,
+                "endpoint": "",
+                "bucket": "",
+                "s3_credentials": "",
+                "remote_module": True,
+                "architectures": ["x86_64"],
+                "pool": "authority-systems",
+            },
+            False,
+        ),
+        (
+            {
+                "remote_module": True,
+                "local_mutation": True,
+                "architectures": ["x86_64"],
+                "pool": "authority-systems",
+            },
+            True,
+        ),
     ],
 )
 def test_local_mutation_preflight_is_executable_and_fails_closed(
@@ -148,6 +184,9 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
         "bucket": "artifacts",
         "region": "us-east-1",
         "s3_credentials": "/protected/s3-credentials",
+        "remote_module": False,
+        "architectures": [],
+        "pool": "default",
     }
     values.update(override)
     result = subprocess.run(
@@ -196,7 +235,10 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
     assert "ProtectSystem=strict" in unit
     assert "NoNewPrivileges=yes" in unit
     template = Environment(undefined=StrictUndefined).from_string(unit)
-    identity_only = template.render(provider_authority_host_local_mutation_enabled=False)
+    identity_only = template.render(
+        provider_authority_host_local_mutation_enabled=False,
+        provider_authority_host_remote_module_enabled=False,
+    )
     assert "PrivateDevices=yes" in identity_only
     assert "DeviceAllow=" not in identity_only
     assert "s3-credentials" not in identity_only
@@ -206,11 +248,29 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
         provider_authority_host_recovery_root="/var/lib/kdive/provider-authority/recovery",
         provider_authority_host_rootfs_root="/var/lib/kdive/provider-authority/rootfs",
         provider_authority_host_console_root="/var/lib/kdive/provider-authority/console",
+        provider_authority_host_remote_module_enabled=True,
     )
     assert "PrivateDevices=no" in mutation
     assert "DevicePolicy=closed" in mutation
     assert "DeviceAllow=/dev/kvm rw" in mutation
     assert "ReadWritePaths=/var/lib/kdive/provider-authority/recovery" in mutation
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations/evidence"
+        in mutation
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations/work"
+        in mutation
+    )
+    assert "remote-module-preparations" not in identity_only
+
+
+def test_remote_module_private_pool_uses_the_authority_session_daemon() -> None:
+    tasks = (ROLE / "tasks" / "libvirt.yml").read_text(encoding="utf-8")
+    assert "/var/lib/kdive/provider-authority/remote-libvirt-pool" in tasks
+    assert "provider_authority_host_remote_libvirt_storage_pool" in tasks
+    assert "qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock" in tasks
+    assert "provider_authority_host_remote_module_enabled | default(false) | bool" in tasks
 
 
 def test_runbook_describes_a_complete_local_mutation_vars_file() -> None:

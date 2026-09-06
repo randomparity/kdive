@@ -187,6 +187,22 @@ def test_source_only_partial_state_traverses_actual_domain_graph() -> None:
     assert result.proves_detached(state.pool, state.source_volume)
 
 
+def test_scratch_only_partial_state_is_admitted_only_for_cleanup_resume() -> None:
+    state = expected()
+    pool = storage_pool()
+    pool._volumes.pop(state.source_volume)
+    conn = Conn([Domain(system_xml(state.system_id))], {state.pool: pool})
+    present = frozenset({state.scratch_volume})
+
+    with pytest.raises(CategorizedError, match="partial volume state"):
+        _inspect_module_attachments(conn, IdentityPort(), state, present)
+
+    result = _inspect_module_attachments(
+        conn, IdentityPort(), state, present, allow_cleanup_partial=True
+    )
+    assert result.proves_detached(state.pool, state.scratch_volume)
+
+
 @pytest.mark.parametrize(
     "domains",
     [

@@ -140,12 +140,12 @@ def _seed_case(
     worker_protocol: int = 4,
     worker_suffix: str = "a",
     legacy_recovery_point: bool = False,
+    provider_kind: str = "local-libvirt",
 ) -> _AuthorityCase:
     resource_id, allocation_id, system_id = uuid4(), uuid4(), uuid4()
     investigation_id, run_id, activation_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
     worker_id = f"docker:external-authority-{worker_suffix}-{uuid4()}"
     credential = worker_suffix.encode() * 32
-    provider_kind = "local-libvirt"
     authority_instance = f"authority-{worker_suffix}"
     operation = operation or purpose
     operation_identity = f"operation-{worker_suffix}-{uuid4()}"
@@ -153,8 +153,12 @@ def _seed_case(
 
     conn.execute(
         "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
-        "VALUES (%s, 'local-libvirt', 'default', 'standard', 'available', 'qemu:///system')",
-        (resource_id,),
+        "VALUES (%s, %s, 'default', 'standard', 'available', %s)",
+        (
+            resource_id,
+            provider_kind,
+            "qemu+tls://host/system" if provider_kind == "remote-libvirt" else "qemu:///system",
+        ),
     )
     conn.execute(
         "INSERT INTO allocations (id, resource_id, state, principal, project) "
@@ -173,8 +177,14 @@ def _seed_case(
     )
     conn.execute(
         "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, build_profile, "
-        "principal, project) VALUES (%s, %s, %s, 'local-libvirt', %s, '{}'::jsonb, 'p', 'proj')",
-        (run_id, investigation_id, system_id, "failed" if purpose == "teardown" else "succeeded"),
+        "principal, project) VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, 'p', 'proj')",
+        (
+            run_id,
+            investigation_id,
+            system_id,
+            provider_kind,
+            "failed" if purpose == "teardown" else "succeeded",
+        ),
     )
     materialization, recovery_point = _activation_evidence(system_id, run_id, activation_id)
     if legacy_recovery_point:

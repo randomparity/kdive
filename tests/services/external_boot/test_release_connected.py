@@ -62,6 +62,7 @@ class _ReleaseFaultAuthorityAdapter:
     def __init__(self, vehicle: Vehicle) -> None:
         self._vehicle = vehicle
         self.mutations: list[str] = []
+        self.events: list[str] = []
         self.block_operation: str | None = None
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -86,6 +87,7 @@ class _ReleaseFaultAuthorityAdapter:
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthorityObservationV1:
         del context
+        self.events.append(f"authority-{request.operation.value}")
         authority = OpaqueProviderRef(ref=f"authority/{request.authority_id}/{request.generation}")
         if request.operation.value == "recover":
             self._vehicle.port.recover(self._vehicle.recovery_point, authority)
@@ -253,6 +255,17 @@ def test_public_active_release_claims_and_completes_through_worker(
                 return status
 
             monkeypatch.setattr(lifecycle, "_derived_release_status", interrupting_status)
+            original_module_lifecycle = lifecycle._execute_remote_module_lifecycle
+
+            async def record_module_lifecycle(*args: Any, **kwargs: Any) -> None:
+                request = args[1]
+                action = "restore" if request.operation.value == "recover" else "reap"
+                adapter.events.append(f"module-{action}")
+                await original_module_lifecycle(*args, **kwargs)
+
+            monkeypatch.setattr(
+                lifecycle, "_execute_remote_module_lifecycle", record_module_lifecycle
+            )
             async with AsyncConnectionPool(
                 authority_role_dsns("kdive_worker"), min_size=5, max_size=5
             ) as worker_pool:
@@ -419,5 +432,12 @@ def test_public_active_release_claims_and_completes_through_worker(
                 assert await cur.fetchone() == (1,)
         assert adapter.mutations == ["recover", "cleanup"]
         assert vehicle.port.calls == ["recover", "cleanup"]
+        if interrupt_after is None:
+            assert adapter.events == [
+                "module-restore",
+                "authority-recover",
+                "module-reap",
+                "authority-cleanup",
+            ]
 
     asyncio.run(run())
