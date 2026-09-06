@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -612,7 +612,7 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
     worker = "local-systemd:kdive-live-worker@2.service:" + "a" * 32
     loaded: list[dict[str, str]] = []
     resolved: list[str] = []
-    sent: list[tuple[object, float]] = []
+    sent: list[tuple[protocol_module.AuthorityMutationRequestV1, float]] = []
     document = "\n".join(
         (
             "KDIVE_DATABASE_URL=postgresql://worker",
@@ -625,12 +625,14 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
             "KDIVE_FORBIDDEN_CALLER_VALUE=ignored",
         )
     ).encode()
-    record = SimpleNamespace(
+    record = protocol_module.JournalRecordV1(
+        sequence=1,
+        previous_digest=protocol_module.GENESIS_DIGEST,
         phase=protocol_module.JournalPhase.MUTATION_STARTED,
-        authority_id=authority_id,
+        authority_id=UUID(authority_id),
         generation=1,
-        system_id=system_id,
-        run_id=run_id,
+        system_id=UUID(system_id),
+        run_id=UUID(run_id),
         activation_id=uuid4(),
         plan_identity="sha256:" + "1" * 64,
         purpose="activate",
@@ -638,7 +640,7 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
         authority_instance="authority-1",
         operation_identity="operation-1",
         operation_digest="sha256:" + "2" * 64,
-        operation="activate",
+        operation=protocol_module.AuthorityOperation.ACTIVATE,
         attempt_id=uuid4(),
         expected_source_identity="source",
         intended_target_identity="target",
@@ -655,11 +657,6 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
         def close(self) -> None:
             return None
 
-    class FakeRequest:
-        @staticmethod
-        def model_validate(value: dict[str, object]) -> dict[str, object]:
-            return value
-
     class Backend:
         def resolve(self, ref: str) -> str:
             resolved.append(ref)
@@ -672,7 +669,9 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
     )
 
     class Sender:
-        async def execute_mutation(self, request: object, *, deadline: float) -> None:
+        async def execute_mutation(
+            self, request: protocol_module.AuthorityMutationRequestV1, *, deadline: float
+        ) -> None:
             sent.append((request, deadline))
             raise CategorizedError(
                 "authority: superseded", category=ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -690,6 +689,8 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
     monkeypatch.setattr(
         sys, "argv", ["client", system_id, run_id, worker, invocation_id, authority_id, "1", job_id]
     )
+    isolated_environment: dict[str, str] = {}
+    monkeypatch.setattr(carrier.os, "environ", isolated_environment)
     monkeypatch.setattr(carrier.os, "open", lambda *_args, **_kwargs: 10)
     monkeypatch.setattr(
         carrier.os,
@@ -713,7 +714,6 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
     )
     monkeypatch.setattr(config_registry, "load", lambda env=None: loaded.append(dict(env or {})))
     monkeypatch.setattr(journal_module, "FileAuthorityJournal", FakeJournal)
-    monkeypatch.setattr(protocol_module, "AuthorityMutationRequestV1", FakeRequest)
     monkeypatch.setattr(local_module, "local_authority_binding", lambda: binding)
     monkeypatch.setattr(secrets_module, "secret_backend_from_env", lambda **_kwargs: Backend())
     monkeypatch.setattr(
@@ -732,6 +732,25 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
     assert loaded and "KDIVE_FORBIDDEN_CALLER_VALUE" not in loaded[0]
     assert resolved == ["cert.pem", "key.pem", "ca.pem"]
     assert len(sent) == 1
+    assert sent[0][0] == protocol_module.AuthorityMutationRequestV1(
+        authority_id=record.authority_id,
+        generation=record.generation,
+        system_id=record.system_id,
+        activation_id=record.activation_id,
+        run_id=record.run_id,
+        plan_identity=record.plan_identity,
+        purpose=record.purpose,
+        provider_kind=record.provider_kind,
+        authority_instance=record.authority_instance,
+        operation_identity=record.operation_identity,
+        operation_digest=record.operation_digest,
+        operation=record.operation,
+        attempt_id=record.attempt_id,
+        expected_source_identity=record.expected_source_identity or "",
+        intended_target_identity=record.intended_target_identity or "",
+        recovery_objects=record.recovery_objects,
+    )
+    assert isolated_environment == loaded[0]
     assert capsys.readouterr().out == "superseded\n"
 
 
