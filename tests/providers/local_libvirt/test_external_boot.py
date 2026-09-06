@@ -969,7 +969,7 @@ def test_receipt_only_partial_is_authenticated_and_removed(tmp_path: Path) -> No
             store.inspect_abortable_partial(_BINDING, request.plan.identity, request.authority)
             is None
         )
-        store.remove_abortable_partial(_BINDING)
+        store.remove_abortable_partial(_BINDING, request.plan.identity, request.authority)
         assert (
             store.inspect_abortable_partial(_BINDING, request.plan.identity, request.authority)
             == "absent"
@@ -1793,6 +1793,10 @@ class _RealSession:
     def restore_power(self, prior: str) -> None:
         self.preparation.actions.append(f"power:{prior}")
 
+    def readiness(self) -> ReadinessResult:
+        self.preparation.actions.append("readiness")
+        return ReadinessResult(True, True)
+
     def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
         assert metadata.binding == self.preparation.metadata.binding
         self.preparation.actions.append("cleanup")
@@ -1805,6 +1809,123 @@ class _RealSession:
 
 class _ProcessLost(BaseException):
     pass
+
+
+def test_pre_stop_abort_restores_running_source_before_removing_partial(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata().model_copy(update={"prior_power": "running"})
+    intent = _pre_stop(metadata)
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    preparation = _RealPreparation(metadata, root)
+    session = _RealSession(preparation)
+    session.inspection = replace(session.inspection, active=False)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+
+    result = operation.abort_preparation(
+        _BINDING,
+        metadata.plan_identity,
+        metadata.source_boot,
+        metadata.target_boot,
+        OpaqueProviderRef(ref="authority/current"),
+    )
+
+    assert result == "removed"
+    assert preparation.actions == ["power:running", "readiness"]
+    with RecoveryMetadataStore(root) as store:
+        assert (
+            store.inspect_abortable_partial(
+                _BINDING,
+                metadata.plan_identity,
+                OpaqueProviderRef(ref="authority/current"),
+            )
+            == "absent"
+        )
+
+
+@pytest.mark.parametrize(
+    "interrupted_name",
+    [
+        ".modules.tar.partial",
+        "modules.tar",
+        ".intent.initial",
+        "intent.json",
+        "preparation-result.json",
+    ],
+)
+def test_partial_abort_retries_each_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted_name: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata().model_copy(update={"prior_power": "inactive"})
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": request.plan.identity}
+        ),
+    )
+    intent = _pre_stop(metadata).model_copy(update={"plan_identity": request.plan.identity})
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        store.publish_pre_stop(intent)
+    partial = root / f".{_BINDING.system_id}.{_BINDING.activation_id}.partial"
+    for name in ("modules.tar", ".modules.tar.partial", ".intent.initial"):
+        (partial / name).write_bytes(b"residue")
+        (partial / name).chmod(0o600)
+    preparation = _RealPreparation(metadata, root)
+    session = _RealSession(preparation)
+    session.inspection = replace(session.inspection, active=False)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+    original_unlink = external_boot_module.os.unlink
+    interrupted = False
+
+    def fail_once(name: str, *, dir_fd: int) -> None:
+        nonlocal interrupted
+        if name == interrupted_name and not interrupted:
+            interrupted = True
+            raise OSError("interrupted unlink")
+        original_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(external_boot_module.os, "unlink", fail_once)
+    with pytest.raises(OSError, match="interrupted unlink"):
+        operation.abort_preparation(
+            _BINDING,
+            request.plan.identity,
+            metadata.source_boot,
+            metadata.target_boot,
+            request.authority,
+        )
+    assert interrupted
+    assert (
+        operation.abort_preparation(
+            _BINDING,
+            request.plan.identity,
+            metadata.source_boot,
+            metadata.target_boot,
+            request.authority,
+        )
+        == "removed"
+    )
+    assert not partial.exists()
 
 
 class _RestartFaults:

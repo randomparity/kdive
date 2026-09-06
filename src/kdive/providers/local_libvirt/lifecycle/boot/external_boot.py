@@ -1244,7 +1244,7 @@ class _RealLocalExternalBootOperation:
                     readiness = self._session.readiness()
                     if not readiness.ok:
                         raise ValueError("source readiness failed while aborting preparation")
-            store.remove_abortable_partial(binding)
+            store.remove_abortable_partial(binding, plan_identity, authority)
             return "removed"
 
     def recovery_is_absent(self, binding: ExternalBootActivationBinding) -> bool:
@@ -2397,7 +2397,15 @@ class RecoveryMetadataStore:
         finally:
             os.close(directory_fd)
 
-    def remove_abortable_partial(self, binding: ExternalBootActivationBinding) -> None:
+    def remove_abortable_partial(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        checked = self.inspect_abortable_partial(binding, plan_identity, authority)
+        if isinstance(checked, str):
+            return
         name = recovery_directory_name(_recovery_ref(binding), binding)
         partial_name = f".{name}.partial"
         try:

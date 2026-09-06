@@ -569,6 +569,92 @@ class TestArtifactRoot:
 
 
 class TestPayloadCleanup:
+    def test_cleanup_prunes_one_activation_and_preserves_same_run_sibling(
+        self, recovery_root: Path
+    ) -> None:
+        first = LocalArtifactRoot(recovery_root).open(OWNERSHIP)
+        sibling_binding = BINDING.model_copy(
+            update={"activation_id": "22222222-2222-2222-2222-222222222222"}
+        )
+        sibling = LocalArtifactRoot(recovery_root).open(
+            OperationOwnership(SYSTEM_ID, sibling_binding)
+        )
+        first_path = recovery_root / BINDING.system_id / BINDING.run_id / BINDING.activation_id
+        metadata = _add_projection(first_path, _metadata().model_copy(update={"binding": BINDING}))
+        for name in PAYLOAD_NAMES:
+            (first_path / name).write_bytes(b"payload")
+        LocalPayloadCleanup(recovery_root).cleanup(first, metadata)
+        os.close(first)
+        os.close(sibling)
+
+        assert not first_path.exists()
+        sibling_path = (
+            recovery_root / BINDING.system_id / BINDING.run_id / sibling_binding.activation_id
+        )
+        assert sibling_path.is_dir()
+
+    def test_cleanup_retry_after_projection_removal_converges(self, recovery_root: Path) -> None:
+        first = LocalArtifactRoot(recovery_root).open(OWNERSHIP)
+        activation = recovery_root / BINDING.system_id / BINDING.run_id / BINDING.activation_id
+        metadata = _add_projection(activation, _metadata().model_copy(update={"binding": BINDING}))
+        LocalPayloadCleanup(recovery_root).cleanup(first, metadata)
+        os.close(first)
+
+        retry = LocalArtifactRoot(recovery_root).open(OWNERSHIP)
+        LocalPayloadCleanup(recovery_root).cleanup(retry, metadata)
+        os.close(retry)
+        assert not activation.exists()
+
+    @pytest.mark.parametrize(
+        ("operation", "name"),
+        [
+            *(("unlink", name) for name in (*PAYLOAD_NAMES, "target-projection.json")),
+            ("rmdir", "digest"),
+            ("rmdir", "activation"),
+            ("rmdir", "run"),
+            ("rmdir", "system"),
+        ],
+    )
+    def test_cleanup_retries_each_payload_and_parent_removal(
+        self,
+        recovery_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        operation: str,
+        name: str,
+    ) -> None:
+        descriptor = LocalArtifactRoot(recovery_root).open(OWNERSHIP)
+        activation = recovery_root / BINDING.system_id / BINDING.run_id / BINDING.activation_id
+        metadata = _add_projection(activation, _metadata().model_copy(update={"binding": BINDING}))
+        for payload in PAYLOAD_NAMES:
+            (activation / payload).write_bytes(b"payload")
+        digest = metadata.materialized_modules.ref.split("/")[-2]
+        actual_name = {
+            "digest": digest,
+            "activation": BINDING.activation_id,
+            "run": BINDING.run_id,
+            "system": BINDING.system_id,
+        }.get(name, name)
+        original = getattr(os, operation)
+        interrupted = False
+
+        def fail_once(candidate: str, *, dir_fd: int) -> None:
+            nonlocal interrupted
+            if candidate == actual_name and not interrupted:
+                interrupted = True
+                raise OSError(errno.EIO, "interrupted removal")
+            original(candidate, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, operation, fail_once)
+        with pytest.raises((OSError, ValueError), match="interrupted|EIO"):
+            LocalPayloadCleanup(recovery_root).cleanup(descriptor, metadata)
+        os.close(descriptor)
+        assert interrupted
+
+        retry = LocalArtifactRoot(recovery_root).open(OWNERSHIP)
+        LocalPayloadCleanup(recovery_root).cleanup(retry, metadata)
+        os.close(retry)
+        assert not activation.exists()
+
     def test_cleanup_removes_only_the_payload_names_under_the_descriptor(
         self, recovery_root: Path, tmp_path: Path
     ) -> None:

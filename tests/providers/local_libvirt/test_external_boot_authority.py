@@ -942,6 +942,23 @@ async def test_restarted_recovery_refuses_present_activation_residue() -> None:
     assert caught.value.category == "provider_conflict"
 
 
+async def test_restarted_recovery_classifies_tombstone_before_absence_probe() -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    io.recovery_absent = False
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    observed = await _adapter(io).observe_recovery(request, _recovery_context())
+
+    assert observed.category == "absent"
+    assert "recovery-absence" not in io.actions
+
+
 async def test_release_without_cleanup_mutates_nothing() -> None:
     io = _FakeIO(_metadata("recovered"))
     request = _request(purpose="release", operation=AuthorityOperation.RELEASE)

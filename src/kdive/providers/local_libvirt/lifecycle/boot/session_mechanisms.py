@@ -421,13 +421,17 @@ class LocalPayloadCleanup:
             for name in PAYLOAD_NAMES:
                 with suppress(FileNotFoundError):
                     os.unlink(name, dir_fd=root_fd)
-            projection_fd = _open_private_directory(root_fd, parts[4])
             try:
-                with suppress(FileNotFoundError):
-                    os.unlink("target-projection.json", dir_fd=projection_fd)
-                os.fsync(projection_fd)
-            finally:
-                os.close(projection_fd)
+                projection_fd = _open_private_directory(root_fd, parts[4])
+            except FileNotFoundError:
+                projection_fd = None
+            if projection_fd is not None:
+                try:
+                    with suppress(FileNotFoundError):
+                        os.unlink("target-projection.json", dir_fd=projection_fd)
+                    os.fsync(projection_fd)
+                finally:
+                    os.close(projection_fd)
             with suppress(FileNotFoundError):
                 os.rmdir(parts[4], dir_fd=root_fd)
             if recovery_fd is not None:
