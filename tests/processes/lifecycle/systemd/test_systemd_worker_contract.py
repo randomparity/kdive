@@ -110,6 +110,22 @@ def test_start_requires_the_complete_allowlisted_settings() -> None:
         LifecycleRequest.model_validate(payload)
 
 
+@pytest.mark.parametrize("field", ["libvirt_recovery_root", "external_boot_capacity_bytes"])
+def test_start_requires_explicit_recovery_storage_settings(field: str) -> None:
+    payload = start_payload()
+    settings = cast(dict[str, object], payload["settings"])
+    del settings[field]
+
+    with pytest.raises(ValidationError, match=field):
+        LifecycleRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("capacity", [0, -1])
+def test_start_rejects_nonpositive_recovery_capacity(capacity: int) -> None:
+    with pytest.raises(ValidationError, match="external_boot_capacity_bytes"):
+        LifecycleRequest.model_validate(start_payload(external_boot_capacity_bytes=capacity))
+
+
 def test_start_rejects_relative_worker_paths() -> None:
     payload = start_payload()
     settings = cast(dict[str, object], payload["settings"])

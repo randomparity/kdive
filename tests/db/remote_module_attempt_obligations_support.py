@@ -1,5 +1,3 @@
-"""Durable remote-module attempt obligation proofs (ADR-0588, migration 0126)."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -13,17 +11,11 @@ from kdive.db.remote_module_attempt_obligations import (
 )
 
 _PLAN = "sha256:" + "a" * 64
-
 _DIGEST = "sha256:" + "b" * 64
-
 _MANIFEST = "sha256:" + "c" * 64
-
 _TERMINAL_OPERATION_IDENTITY = "sha256:" + "1" * 64
-
 _TERMINAL_RESULT_IDENTITY = "sha256:" + "2" * 64
-
 _BASELINE_OPERATION_IDENTITY = "sha256:" + "3" * 64
-
 _BASELINE_RESULT_IDENTITY = "sha256:" + "4" * 64
 
 

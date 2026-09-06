@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defus
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
-from typing import BinaryIO, Literal, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol
 from uuid import UUID, uuid4
 
 import libvirt
@@ -34,6 +34,9 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from kdive.providers.shared.runtime_paths import domain_name_for
+
+if TYPE_CHECKING:
+    from kdive.providers.local_libvirt.lifecycle.boot.external_boot import LocalRecoveryMetadataV1
 
 
 @dataclass(frozen=True)
@@ -159,7 +162,7 @@ type OpenGuest = Callable[[], _Guest]
 type ReadinessProbe = Callable[[UUID, ConsoleReadinessWindow], ReadinessResult]
 type PrepareConsole = Callable[[UUID], ConsoleReadinessWindow]
 type RunningObserver = Callable[[UUID, RunningDomain], RunningKernelObservation]
-type CleanupPayloads = Callable[[int, ExternalBootActivationBinding], None]
+type CleanupPayloads = Callable[[int, "LocalRecoveryMetadataV1"], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +190,7 @@ class LocalExternalBootSession(Protocol):
     def readiness(self) -> ReadinessResult: ...
     def observe_running(self) -> RunningKernelObservation: ...
     def restore_power(self, prior: Literal["running", "inactive"]) -> None: ...
-    def cleanup_payloads(self) -> None: ...
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def close(self) -> None: ...
 
 
@@ -875,10 +878,12 @@ class _ConcreteSession:
         elif prior == "inactive" and active:
             domain.destroy()
 
-    def cleanup_payloads(self) -> None:
-        self.require_inactive()
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self._require_open_domain()
         assert self._artifact_fd is not None
-        self._cleanup_payloads(self._artifact_fd, self._binding)
+        if metadata.binding != self._binding:
+            raise ValueError("cleanup metadata does not match session ownership")
+        self._cleanup_payloads(self._artifact_fd, metadata)
 
     def _start_domain(self) -> None:
         prior, self._readiness_window = self._readiness_window, None
@@ -1273,7 +1278,7 @@ def _unconfigured_observation(_system_id: UUID, _domain: RunningDomain) -> Runni
     raise RuntimeError("local external-boot running observation is not configured")
 
 
-def _unconfigured_cleanup(_root_fd: int, _binding: ExternalBootActivationBinding) -> None:
+def _unconfigured_cleanup(_root_fd: int, _metadata: LocalRecoveryMetadataV1) -> None:
     raise RuntimeError("local external-boot payload cleanup is not configured")
 
 
