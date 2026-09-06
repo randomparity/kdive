@@ -393,6 +393,12 @@ class ExternalBootPreparationPorts(Protocol):
         self, request: ExternalBootPreparationRequest
     ) -> ExternalBootPreparationObservation: ...
 
+    def adopt_preparation(
+        self,
+        request: ExternalBootPreparationRequest,
+        predecessor: ExternalBootPreparationRequest,
+    ) -> ExternalBootPreparationObservation: ...
+
 
 class ExternalBootPorts(Protocol):
     """Six narrow operations shared by external-boot providers."""

@@ -70,6 +70,16 @@ class AuthorityPreparationAdapter(Protocol):
     ) -> ExternalBootPreparationObservation: ...
 
 
+@runtime_checkable
+class AuthorityPreparationAdopter(Protocol):
+    async def adopt_preparation(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        predecessor: AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
+    ) -> AuthorityObservationV1: ...
+
+
 class AuthorityRepository(Protocol):
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
@@ -781,6 +791,43 @@ class ExternalBootAuthorityService:
         finally:
             self._release_lane(binding.system_id, lane)
 
+    @staticmethod
+    def _acknowledgement_response(
+        request: AuthorityTakeoverRequestV1,
+        records: list[JournalRecordV1],
+        watermark: JournalRecordV1,
+        acknowledgement: JournalRecordV1,
+    ) -> AuthorityAcknowledgementV1:
+        quiescence = json.dumps(
+            {
+                "authority_instance": request.authority_instance,
+                "generation": request.generation,
+                "lower_operations": [
+                    {
+                        "digest": record_digest(record),
+                        "outcome": record.outcome,
+                        "sequence": record.sequence,
+                    }
+                    for record in records
+                    if record.phase is JournalPhase.TERMINAL
+                    and record.generation < request.generation
+                ],
+                "system_id": str(request.system_id),
+                "watermark_digest": record_digest(watermark),
+                "watermark_sequence": watermark.sequence,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return AuthorityAcknowledgementV1(
+            authority_id=request.authority_id,
+            generation=request.generation,
+            system_id=request.system_id,
+            journal_sequence=acknowledgement.sequence,
+            journal_digest=record_digest(acknowledgement),
+            positive_quiescence_digest="sha256:" + hashlib.sha256(quiescence).hexdigest(),
+        )
+
     async def _acknowledge_takeover_bound(
         self,
         authenticated: AuthenticatedPeer,
@@ -797,6 +844,36 @@ class ExternalBootAuthorityService:
             try:
                 journal, records = self._lane_journal(request.system_id, lane)
                 records = await self._recover(binding, journal, records)
+                acknowledgement = next(
+                    (
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.authority_id == request.authority_id
+                        and record.generation == request.generation
+                        and record.operation_identity == request.operation_identity
+                        and record.operation_digest == request.operation_digest
+                    ),
+                    None,
+                )
+                if acknowledgement is not None:
+                    trusted = await self._repository.read_head(binding)
+                    if trusted is None:
+                        raise AuthorityServiceError("journal_conflict")
+                    watermark = next(
+                        (
+                            record
+                            for record in records
+                            if record.sequence == acknowledgement.watermark_sequence
+                            and record_digest(record) == acknowledgement.watermark_digest
+                        ),
+                        None,
+                    )
+                    if watermark is None:
+                        raise AuthorityServiceError("journal_conflict")
+                    return self._acknowledgement_response(
+                        request, records[: acknowledgement.sequence], watermark, acknowledgement
+                    )
                 trusted = await self._repository.read_head(binding)
                 watermark: JournalRecordV1 | None = None
                 pending = trusted.pending_takeover if trusted is not None else None
@@ -926,35 +1003,7 @@ class ExternalBootAuthorityService:
                 lane.failed = True
                 raise
             self.metrics.set_unresolved((request.provider_kind, request.authority_instance), False)
-            quiescence = json.dumps(
-                {
-                    "authority_instance": request.authority_instance,
-                    "generation": request.generation,
-                    "lower_operations": [
-                        {
-                            "digest": record_digest(record),
-                            "outcome": record.outcome,
-                            "sequence": record.sequence,
-                        }
-                        for record in records
-                        if record.phase is JournalPhase.TERMINAL
-                        and record.generation < request.generation
-                    ],
-                    "system_id": str(request.system_id),
-                    "watermark_digest": record_digest(watermark),
-                    "watermark_sequence": watermark.sequence,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-            return AuthorityAcknowledgementV1(
-                authority_id=request.authority_id,
-                generation=request.generation,
-                system_id=request.system_id,
-                journal_sequence=acknowledgement.sequence,
-                journal_digest=record_digest(acknowledgement),
-                positive_quiescence_digest="sha256:" + hashlib.sha256(quiescence).hexdigest(),
-            )
+            return self._acknowledgement_response(request, records, watermark, acknowledgement)
 
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
@@ -1004,6 +1053,37 @@ class ExternalBootAuthorityService:
                             raise AuthorityServiceError("journal_conflict")
                         await self._finalize_adapter(request, records)
                         return prior.observation
+                    predecessor: AuthorityPreparationMutationRequestV1 | None = None
+                    if isinstance(request, AuthorityPreparationMutationRequestV1):
+                        predecessor_record = next(
+                            (
+                                record
+                                for record in reversed(records)
+                                if record.phase is JournalPhase.TERMINAL
+                                and record.operation == request.operation
+                                and record.generation < request.generation
+                            ),
+                            None,
+                        )
+                        if predecessor_record is not None:
+                            predecessor = request.model_copy(
+                                update={
+                                    "authority_id": predecessor_record.authority_id,
+                                    "generation": predecessor_record.generation,
+                                    "attempt_id": predecessor_record.attempt_id,
+                                    "operation_identity": predecessor_record.operation_identity,
+                                    "operation_digest": predecessor_record.operation_digest,
+                                    "expected_source_identity": (
+                                        predecessor_record.expected_source_identity
+                                    ),
+                                    "intended_target_identity": (
+                                        predecessor_record.intended_target_identity
+                                    ),
+                                    "recovery_objects": predecessor_record.recovery_objects,
+                                }
+                            )
+                            if not self._operation_matches(predecessor_record, predecessor):
+                                raise AuthorityServiceError("journal_conflict")
                     unresolved = next(
                         (
                             record
@@ -1097,7 +1177,16 @@ class ExternalBootAuthorityService:
                 if not await self._head_still_anchors(binding, context):
                     raise AuthorityServiceError("journal_conflict")
                 try:
-                    await self._adapter.commit(request, context)
+                    if predecessor is not None:
+                        if not isinstance(self._adapter, AuthorityPreparationAdopter):
+                            raise AuthorityServiceError("provider_conflict")
+                        await self._adapter.adopt_preparation(
+                            cast(AuthorityPreparationMutationRequestV1, request),
+                            predecessor,
+                            context,
+                        )
+                    else:
+                        await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.

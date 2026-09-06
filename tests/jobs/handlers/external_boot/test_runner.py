@@ -20,6 +20,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -53,11 +54,20 @@ from kdive.jobs.models import (
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
 )
+from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    AuthorityServiceError,
+    ExternalBootAuthorityService,
+)
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
+from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
@@ -333,6 +343,170 @@ def test_preparing_executes_and_commits_exact_materialization(
         assert [request.operation.value for request in executed] == ["materialize", "prepare"]
         assert executed[0].operation_identity != executed[1].operation_identity
         assert executed[0].attempt_id != executed[1].attempt_id
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+@pytest.mark.parametrize("restart_mode", ["same", "successor", "unresolved-successor"])
+def test_real_authority_service_and_worker_sql_prepare_both_phases(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    restart_mode: str,
+) -> None:
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        await seed.execute(
+            "UPDATE jobs SET payload = payload || %s WHERE id=%s",
+            (
+                Jsonb(
+                    {"external_boot_plan_v1": vehicle.plan.model_dump(mode="json", by_alias=True)}
+                ),
+                case.job_id,
+            ),
+        )
+
+        @asynccontextmanager
+        async def authority_connection() -> Any:
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_provider_authority"), autocommit=True
+            ) as connection:
+                yield connection
+
+        provider = FaultInjectExternalBoot()
+        if restart_mode == "unresolved-successor":
+            provider.interrupt_after_receipt("materialize")
+        service = ExternalBootAuthorityService(
+            repository=DatabaseAuthorityRepository(authority_connection),
+            journal_factory=lambda system_id: FileAuthorityJournal(
+                tmp_path, f"{system_id}.journal"
+            ),
+            adapter=LocalExternalBootAuthorityAdapter(cast(Any, provider)),
+        )
+        peer = AuthenticatedPeer(case.worker_incarnation)
+        interrupt_after_terminal = restart_mode != "unresolved-successor"
+
+        class Authority:
+            current_peer = peer
+
+            async def acknowledge(self, request: Any) -> Any:
+                answer = await service.acknowledge_takeover(self.current_peer, request)
+                row = await seed.execute(
+                    "SELECT allocation_id, job_id, job_attempt, worker_incarnation "
+                    "FROM external_boot_authorities WHERE id=%s",
+                    (request.authority_id,),
+                )
+                authority = await row.fetchone()
+                assert authority is not None
+                async with authority_connection() as connection:
+                    committed = await connection.execute(
+                        "SELECT status FROM acknowledge_external_boot_authority("
+                        "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            request.authority_id,
+                            request.generation,
+                            authority[0],
+                            request.activation_id,
+                            request.run_id,
+                            request.system_id,
+                            request.plan_identity,
+                            authority[1],
+                            authority[2],
+                            request.purpose,
+                            request.provider_kind,
+                            request.authority_instance,
+                            authority[3],
+                            request.operation.value,
+                            request.operation_identity,
+                            request.operation_digest,
+                            answer.journal_sequence,
+                            answer.journal_digest,
+                            answer.positive_quiescence_digest,
+                        ),
+                    )
+                    assert await committed.fetchone() == ("applied",)
+                return answer
+
+            async def execute_preparation(
+                self, request: AuthorityPreparationMutationRequestV1
+            ) -> AuthorityPreparationResponseV1:
+                nonlocal interrupt_after_terminal
+                response = await service.execute_preparation(self.current_peer, request)
+                if interrupt_after_terminal:
+                    interrupt_after_terminal = False
+                    raise RuntimeError("worker stopped before preparation commit")
+                return response
+
+        authority = Authority()
+        ports = replace(
+            _ports(case, resolver=resolver_for(vehicle), acknowledger=authority),
+            preparation_executor=authority,
+        )
+        expected_error: type[Exception] = (
+            AuthorityServiceError if restart_mode == "unresolved-successor" else RuntimeError
+        )
+        expected_message = (
+            "provider_conflict"
+            if restart_mode == "unresolved-successor"
+            else "worker stopped before preparation commit"
+        )
+        with pytest.raises(expected_error, match=expected_message):
+            await _run(
+                worker,
+                case,
+                ports=ports,
+                require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+                call_port=lambda _context: None,
+            )
+        assert provider.preparation_mutations == {"materialize": 1, "prepare": 0}
+        if restart_mode != "same":
+            new_incarnation = f"docker:external-boot-{uuid4()}"
+            new_credential = f"worker-credential-{uuid4()}"
+            await seed.execute(
+                "UPDATE worker_incarnations SET state='terminated', terminated_at=now(), "
+                "outcome='killed' WHERE incarnation=%s",
+                (case.worker_incarnation,),
+            )
+            await seed.execute(
+                "INSERT INTO worker_incarnations "
+                "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
+                "VALUES (%s, 'docker', '{}'::jsonb, sha256(convert_to(%s, 'UTF8')), 4)",
+                (new_incarnation, new_credential),
+            )
+            await seed.execute(
+                "UPDATE jobs SET attempt=2, worker_id=%s WHERE id=%s",
+                (new_incarnation, case.job_id),
+            )
+            case = replace(
+                case,
+                attempt=2,
+                worker_incarnation=new_incarnation,
+                credential=new_credential,
+            )
+            authority.current_peer = AuthenticatedPeer(new_incarnation)
+            ports = replace(ports, incarnation_credential=SecretStr(new_credential))
+        await _run(
+            worker,
+            case,
+            ports=ports,
+            require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+            call_port=lambda _context: None,
+        )
+        row = await seed.execute(
+            "SELECT state, materialization IS NOT NULL, recovery_point IS NOT NULL "
+            "FROM external_boot_activations WHERE id=%s",
+            (vehicle.activation_id,),
+        )
+        assert await row.fetchone() == ("prepared", True, True)
+        assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 

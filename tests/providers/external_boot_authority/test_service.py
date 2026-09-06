@@ -992,6 +992,41 @@ async def test_provider_boundary_failure_remains_unresolved_across_restart(
 
 
 @pytest.mark.anyio
+async def test_exact_same_generation_takeover_ack_replays_without_new_journal_records(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    original = await service.acknowledge_takeover(peer, request)
+    before = tuple(repository.records)
+
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    replay = await restarted.acknowledge_takeover(peer, request)
+
+    assert replay == original
+    assert tuple(repository.records) == before
+
+
+@pytest.mark.anyio
+async def test_same_generation_takeover_ack_replay_requires_anchored_head(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    assert repository.head is not None
+    repository.head = replace(repository.head, digest=_DIGEST_B)
+
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await restarted.acknowledge_takeover(peer, request)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("restart", [False, True])
 async def test_failed_commit_must_recover_before_later_same_generation_admission(
     tmp_path: Path, restart: bool

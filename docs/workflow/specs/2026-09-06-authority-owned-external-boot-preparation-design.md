@@ -46,8 +46,10 @@ phase.
 
 A reclaimed job allocates a newer root generation and reconstructs the plan from its durable
 payload. Existing activation receipts guide exact provider observation and prevent duplicate capture
-or ownership replacement. The fresh generation receives freshly derived digests; old-generation
-resolver and commit calls are rejected. A failure after acknowledgement is bound to the current
+or ownership replacement. After the journal authenticates a predecessor terminal receipt, the
+provider atomically rebinds that receipt to the successor authority and phase identity without
+repeating its provider operation. The fresh generation receives freshly derived digests;
+old-generation resolver and commit calls are rejected. A failure after acknowledgement is bound to the current
 phase and uses the guarded failure path. Neither failure nor cancellation can report an intermediate
 phase as job success.
 
