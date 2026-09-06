@@ -2,31 +2,50 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import posixpath
+import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Protocol
 
 import libvirt
 from defusedxml.common import DefusedXmlException
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.device_identity import (
+    build_remote_device_identity_port,
+)
+from kdive.providers.infra.reaping import ModuleVolumeKey
+from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding, RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     RemoteDeviceIdentity,
     RemoteDeviceIdentityPort,
     path_references,
     volume_references,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
     ModuleVolumeOwner,
     parse_module_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import XmlEnumerationBudget
+from kdive.providers.remote_libvirt.reaping.connections import (
+    FleetConnections,
+    map_over_fleet,
+    open_libvirt_reaper,
+    remote_libvirt_reaper_connections,
+)
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _MAX_STORAGE_PATH_BYTES = 4096
 _MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 _MAX_PATH_IDENTITIES = 4096
+_HOST_SWEEP_SECONDS = 300.0
 _LOG = logging.getLogger(__name__)
 
 
@@ -244,8 +263,83 @@ def reap_orphaned_module_volumes(
     return removed
 
 
+class RemoteLibvirtModuleVolumeReaper:
+    """Completion-owned fleet adapter for synchronous host module-volume sweeps."""
+
+    def __init__(
+        self,
+        connections: FleetConnections[ModuleVolumeReaperConn],
+        executor: RemoteModulePreparationExecutor,
+        authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._connections = connections
+        self._executor = executor
+        self._authority_sender_factory = authority_sender_factory
+        self._clock = clock
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        secret_registry: SecretRegistry,
+        authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
+    ) -> RemoteLibvirtModuleVolumeReaper:
+        """Construct without opening a host connection or resolving authority credentials."""
+        return cls(
+            remote_libvirt_reaper_connections(
+                secret_registry=secret_registry,
+                open_connection=open_libvirt_reaper,
+            ),
+            RemoteModulePreparationExecutor(),
+            authority_sender_factory,
+        )
+
+    async def reap_module_volumes(
+        self,
+        retained_owners: Callable[[], Awaitable[Collection[ModuleVolumeKey]]],
+    ) -> int:
+        loop = asyncio.get_running_loop()
+
+        def retained_sync() -> Collection[ModuleVolumeOwner]:
+            async def read_retained() -> Collection[ModuleVolumeKey]:
+                return await retained_owners()
+
+            keys = asyncio.run_coroutine_threadsafe(read_retained(), loop).result()
+            return [ModuleVolumeOwner(*key) for key in keys]
+
+        def sweep() -> int:
+            def reap_host(conn: ModuleVolumeReaperConn, config: RemoteLibvirtConfig) -> int:
+                if config.authority is None or self._authority_sender_factory is None:
+                    raise _conflict("remote module provider authority is unavailable")
+                sender = self._authority_sender_factory(config.authority)
+                identity = build_remote_device_identity_port(
+                    sender, self._clock() + _HOST_SWEEP_SECONDS
+                )
+                if identity is None:
+                    raise _conflict("remote module provider authority is unavailable")
+                return reap_orphaned_module_volumes(
+                    conn,
+                    config.storage_pool,
+                    identity,
+                    retained_owners=retained_sync,
+                )
+
+            return sum(
+                map_over_fleet(
+                    self._connections,
+                    reap_host,
+                    operation="module-volume reaping",
+                )
+            )
+
+        return await self._executor.run(sweep)
+
+
 __all__ = [
     "ModuleVolumeReaperConn",
+    "RemoteLibvirtModuleVolumeReaper",
     "list_owned_module_volumes",
     "reap_orphaned_module_volumes",
     "referenced_volume_paths",
