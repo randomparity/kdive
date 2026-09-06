@@ -640,7 +640,11 @@ class RemoteExternalBootOperations(Protocol):
     """The six closed operations available to the remote coordinator."""
 
     def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef, deadline: float
+        self,
+        plan: ExternalBootPlan,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+        deadline: float,
     ) -> ExternalBootMaterialization: ...
 
     def prepare(
@@ -701,7 +705,7 @@ class RemoteExternalBootCoordinator:
     ) -> ExternalBootMaterialization:
         if binding.system_id != plan.ownership.system_id or binding.run_id != plan.ownership.run_id:
             raise ValueError("remote materialization binding differs from the requested plan")
-        materialization = self._operations.materialize(plan, authority, self._deadline())
+        materialization = self._operations.materialize(plan, binding, authority, self._deadline())
         if (
             materialization.plan_identity != plan.identity
             or materialization.ownership.system_id != plan.ownership.system_id

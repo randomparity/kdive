@@ -565,8 +565,11 @@ def test_preparation_receipt_survives_core_commit_loss_without_repeating_provide
     calls: list[str] = []
 
     class Operations:
-        def materialize(self, plan: object, owner: object, deadline: float) -> object:
+        def materialize(
+            self, plan: object, binding: object, owner: object, deadline: float
+        ) -> object:
             assert plan == _plan_for_record(record)
+            assert binding == record.binding
             assert owner == OpaqueProviderRef(ref="authority/remote-a")
             assert deadline in {123.0, 456.0}
             calls.append("materialize")
@@ -769,7 +772,10 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     calls: list[tuple[str, float]] = []
 
     class Operations:
-        def materialize(self, plan: object, owner: object, deadline: float) -> object:
+        def materialize(
+            self, plan: object, binding: object, owner: object, deadline: float
+        ) -> object:
+            assert binding == record.binding
             assert owner == authority
             calls.append(("materialize", deadline))
             return record.materialization
