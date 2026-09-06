@@ -291,3 +291,251 @@ def test_baseline_removal_rejects_symlink(tmp_path: Path) -> None:
         script._remove_directory(link)
     assert link.is_symlink()
     assert target.is_dir()
+
+
+def _existing_fixture(
+    script: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Path, Path, Path, Path, Path]:
+    worker_root = tmp_path / "worker"
+    rootfs_root = tmp_path / "authority-rootfs"
+    console_root = tmp_path / "authority-console"
+    worker_root.mkdir()
+    rootfs_root.mkdir(mode=0o700)
+    console_root.mkdir(mode=0o700)
+    source = worker_root / _SOURCE_NAME
+    source.write_bytes(_qcow2())
+    base = rootfs_root / f"{_SYSTEM_ID}-fixture-base.qcow2"
+    base.write_bytes(_qcow2())
+    base.chmod(0o600)
+    overlay = rootfs_root / f"{_SYSTEM_ID}-overlay.qcow2"
+    overlay.write_bytes(_qcow2(backing=os.fsencode(base)))
+    overlay.chmod(0o664)
+    console = console_root / f"{_SYSTEM_ID}.log"
+    console.write_bytes(b"")
+    console.chmod(0o664)
+    baseline = rootfs_root / f"{_SYSTEM_ID}-baseline"
+    baseline.mkdir(mode=0o700)
+    kernel = baseline / "kernel"
+    kernel.write_bytes(b"kernel")
+    kernel.chmod(0o600)
+    monkeypatch.setattr(script, "_WORKER_ROOTFS_ROOT", worker_root)
+    monkeypatch.setattr(script, "_AUTHORITY_ROOTFS_ROOT", rootfs_root)
+    monkeypatch.setattr(script, "overlay_path", lambda _system_id: str(overlay))
+    monkeypatch.setattr(script, "console_log_path", lambda _system_id: console)
+    monkeypatch.setattr(script, "baseline_dir", lambda _system_id: str(baseline))
+    return _profile(script, source), rootfs_root, console_root, base, overlay, console
+
+
+def _domain_xml(
+    script: ModuleType,
+    *,
+    disk: Path,
+    console: Path,
+    baseline: Path,
+    system_id: UUID = _SYSTEM_ID,
+    metadata_id: UUID = _SYSTEM_ID,
+) -> str:
+    return f"""
+<domain>
+  <name>kdive-{system_id}</name>
+  <uuid>{system_id}</uuid>
+  <os><kernel>{baseline / "kernel"}</kernel></os>
+  <devices>
+    <disk device="disk"><source file="{disk}" /></disk>
+    <serial><log file="{console}" append="on" /></serial>
+  </devices>
+  <metadata>
+    <kdive:system xmlns:kdive="{script.KDIVE_METADATA_NS}">{metadata_id}</kdive:system>
+  </metadata>
+</domain>
+"""
+
+
+def test_verify_existing_fixture_accepts_inactive_exact_private_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    profile, rootfs_root, _console_root, _base, overlay, console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+    xml = _domain_xml(
+        script,
+        disk=overlay,
+        console=console,
+        baseline=rootfs_root / f"{_SYSTEM_ID}-baseline",
+    )
+    opened: list[str] = []
+
+    class Domain:
+        def isActive(self) -> int:  # The verifier deliberately does not require a running guest.
+            return 0
+
+        def XMLDesc(self, flags: int) -> str:
+            assert flags == 0
+            return xml
+
+    class Connection:
+        def lookupByName(self, name: str) -> Domain:
+            assert name == f"kdive-{_SYSTEM_ID}"
+            return Domain()
+
+        def close(self) -> None:
+            opened.append("closed")
+
+    monkeypatch.setattr(script.libvirt, "open", lambda uri: opened.append(uri) or Connection())
+
+    script._verify_existing_authority_fixture(
+        _SYSTEM_ID, profile, authority_uid=os.geteuid(), authority_gid=os.getegid()
+    )
+
+    assert opened == [script._AUTHORITY_URI, "closed"]
+
+
+@pytest.mark.parametrize("mismatch", ["uuid", "metadata", "disk", "console", "baseline"])
+def test_verify_existing_fixture_rejects_domain_readback_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    script = _script()
+    profile, rootfs_root, _console_root, _base, overlay, console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+    other = tmp_path / "other"
+    other.write_bytes(b"other")
+    xml = _domain_xml(
+        script,
+        disk=other if mismatch == "disk" else overlay,
+        console=other if mismatch == "console" else console,
+        baseline=other if mismatch == "baseline" else rootfs_root / f"{_SYSTEM_ID}-baseline",
+        system_id=(
+            UUID("22222222-2222-2222-2222-222222222222") if mismatch == "uuid" else _SYSTEM_ID
+        ),
+        metadata_id=(
+            UUID("22222222-2222-2222-2222-222222222222") if mismatch == "metadata" else _SYSTEM_ID
+        ),
+    )
+
+    class Domain:
+        def XMLDesc(self, _flags: int) -> str:
+            return xml
+
+    class Connection:
+        def lookupByName(self, _name: str) -> Domain:
+            return Domain()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(script.libvirt, "open", lambda _uri: Connection())
+
+    with pytest.raises(ValueError):
+        script._verify_existing_authority_fixture(
+            _SYSTEM_ID, profile, authority_uid=os.geteuid(), authority_gid=os.getegid()
+        )
+
+
+def test_verify_existing_fixture_rejects_unselected_profile_and_nonprivate_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    profile, rootfs_root, _console_root, _base, _overlay, _console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+    wrong_source = tmp_path / "other-source.qcow2"
+    wrong_source.write_bytes(_qcow2())
+    with pytest.raises(ValueError, match="fixed worker rootfs input"):
+        script._verify_existing_authority_fixture(
+            _SYSTEM_ID,
+            _profile(script, wrong_source),
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+    rootfs_root.chmod(0o750)
+    with pytest.raises(ValueError, match="owner-only private directory"):
+        script._verify_existing_authority_fixture(
+            _SYSTEM_ID, profile, authority_uid=os.geteuid(), authority_gid=os.getegid()
+        )
+
+
+def test_verify_existing_fixture_rejects_overlay_with_a_different_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    profile, rootfs_root, _console_root, _base, overlay, console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+    other_base = rootfs_root / f"{_SYSTEM_ID}-wrongxx-base.qcow2"
+    other_base.write_bytes(_qcow2())
+    other_base.chmod(0o600)
+    overlay.write_bytes(_qcow2(backing=os.fsencode(other_base)))
+    xml = _domain_xml(
+        script,
+        disk=overlay,
+        console=console,
+        baseline=rootfs_root / f"{_SYSTEM_ID}-baseline",
+    )
+
+    class Domain:
+        def XMLDesc(self, _flags: int) -> str:
+            return xml
+
+    class Connection:
+        def lookupByName(self, _name: str) -> Domain:
+            return Domain()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(script.libvirt, "open", lambda _uri: Connection())
+
+    with pytest.raises(ValueError, match="exact private base"):
+        script._verify_existing_authority_fixture(
+            _SYSTEM_ID, profile, authority_uid=os.geteuid(), authority_gid=os.getegid()
+        )
+
+
+def test_main_verify_existing_dispatches_no_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _script()
+
+    class Provider:
+        local_libvirt_section = object()
+
+    class Profile:
+        provider = Provider()
+
+    identity = type("Identity", (), {"pw_uid": 1, "pw_gid": 2})()
+    seen: list[tuple[tuple[object, ...], dict[str, int]]] = []
+
+    def forbidden(*_args: object) -> None:
+        raise AssertionError("verify-existing must not mutate a fixture")
+
+    def verify(*args: object, **kwargs: int) -> None:
+        seen.append((args, kwargs))
+
+    monkeypatch.setattr(script.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        sys, "argv", ["provision-authority-fixture.py", "--verify-existing", str(_SYSTEM_ID)]
+    )
+    monkeypatch.setattr(script.json, "load", lambda _stream: {})
+    monkeypatch.setattr(script.ProvisioningProfile, "model_validate", lambda _value: Profile())
+    monkeypatch.setattr(script.pwd, "getpwnam", lambda _name: identity)
+    monkeypatch.setattr(
+        script,
+        "_verify_existing_authority_fixture",
+        verify,
+    )
+    monkeypatch.setattr(script, "_refuse_existing_authority_domain", forbidden)
+    monkeypatch.setattr(script, "_stage_fixture_base", forbidden)
+    monkeypatch.setattr(script, "_undefine_worker_domain", forbidden)
+    monkeypatch.setattr(script, "_remove_regular", forbidden)
+    monkeypatch.setattr(script, "_remove_directory", forbidden)
+    monkeypatch.setattr(script.LocalLibvirtProvisioning, "from_env", forbidden)
+
+    script.main()
+
+    assert len(seen) == 1
+    args, kwargs = seen[0]
+    assert args[0] == _SYSTEM_ID
+    assert isinstance(args[1], Profile)
+    assert kwargs == {"authority_uid": 1, "authority_gid": 2}

@@ -73,8 +73,10 @@ the appliance identity stored in operation and result documents; the outer bundl
 the acquisition identity used by Ansible.
 
 The `remote_libvirt_module_appliance` Ansible role is wired into `deploy/ansible/site.yml` behind
-`remote_libvirt_module_appliance_enabled`. Enabling it requires an immutable URL and a lowercase
-64-character SHA-256 for both architecture bundles. Production inventories normally use HTTPS;
+`remote_libvirt_module_appliance_enabled`. Set `provider_authority_host_remote_module_architectures`
+to the non-empty subset of `x86_64` and `ppc64le` this host serves. Enabling installation requires
+an immutable URL and a lowercase 64-character SHA-256 for each selected bundle. Unselected
+architectures need no installed bundle. Production inventories normally use HTTPS;
 an operator may instead stage immutable bundles on each host and use `file://` URLs. This split is
 intentional: the repository owns the deterministic build and pinned installation contract, while
 artifact publication remains an operator/release action. Ansible verifies every digest during

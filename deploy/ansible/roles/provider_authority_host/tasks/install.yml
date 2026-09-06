@@ -86,9 +86,6 @@
     - /var/lib/kdive/provider-authority/.ansible
     - /var/lib/kdive/provider-authority/.ansible/tmp
     - /var/lib/kdive/provider-authority/journal
-    - /var/lib/kdive/provider-authority/remote-module-preparations
-    - /var/lib/kdive/provider-authority/remote-module-preparations/evidence
-    - /var/lib/kdive/provider-authority/remote-module-preparations/work
     - /run/kdive/provider-authority
     - /run/kdive/provider-authority/request
     - /run/kdive/provider-authority/libvirt
@@ -115,12 +112,43 @@
     - {path: /var/lib/kdive/provider-authority/.ansible}
     - {path: /var/lib/kdive/provider-authority/.ansible/tmp}
     - {path: /var/lib/kdive/provider-authority/journal}
-    - {path: /var/lib/kdive/provider-authority/remote-module-preparations}
-    - {path: /var/lib/kdive/provider-authority/remote-module-preparations/evidence}
-    - {path: /var/lib/kdive/provider-authority/remote-module-preparations/work}
     - {path: /run/kdive/provider-authority, mode: "0710", group: kdive-provider-authority-client}
     - {path: /run/kdive/provider-authority/request, mode: "2750", group: kdive-provider-authority-client}
     - {path: /run/kdive/provider-authority/libvirt}
+
+- name: Inspect remote module authority directories without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /var/lib/kdive/provider-authority/remote-module-preparations
+    - /var/lib/kdive/provider-authority/remote-module-preparations/evidence
+    - /var/lib/kdive/provider-authority/remote-module-preparations/work
+    - /var/lib/kdive/provider-authority/remote-libvirt-pool
+  register: provider_authority_host_remote_module_paths
+  when: provider_authority_host_remote_module_enabled | bool
+
+- name: Refuse substituted remote module authority directories
+  ansible.builtin.assert:
+    that: not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    quiet: true
+  loop: "{{ provider_authority_host_remote_module_paths.results | default([]) }}"
+  when: provider_authority_host_remote_module_enabled | bool
+
+- name: Create private remote module authority directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0700"
+    follow: false
+  loop:
+    - /var/lib/kdive/provider-authority/remote-module-preparations
+    - /var/lib/kdive/provider-authority/remote-module-preparations/evidence
+    - /var/lib/kdive/provider-authority/remote-module-preparations/work
+    - /var/lib/kdive/provider-authority/remote-libvirt-pool
+  when: provider_authority_host_remote_module_enabled | bool
 
 - name: Install the boot-persistent authority runtime directory policy
   ansible.builtin.copy:

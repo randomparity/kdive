@@ -14,7 +14,7 @@
       }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
     content: |
       [Unit]
-      Description=kdive dormant external-boot authority session libvirt daemon
+      Description=kdive external-boot authority session libvirt daemon
       ConditionPathIsDirectory=/run/kdive/provider-authority/libvirt
 
       [Service]
@@ -56,3 +56,27 @@
   become: true
   become_user: "{{ provider_authority_host_account }}"
   when: provider_authority_host_enabled | bool
+
+- name: Define the private remote module storage pool
+  community.libvirt.virt_pool:
+    uri: qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock
+    name: "{{ provider_authority_host_remote_libvirt_storage_pool }}"
+    state: present
+    xml: |
+      <pool type='dir'>
+        <name>{{ provider_authority_host_remote_libvirt_storage_pool }}</name>
+        <target><path>/var/lib/kdive/provider-authority/remote-libvirt-pool</path></target>
+      </pool>
+  become: true
+  become_user: "{{ provider_authority_host_account }}"
+  when: provider_authority_host_remote_module_enabled | default(false) | bool
+
+- name: Activate the private remote module storage pool
+  community.libvirt.virt_pool:
+    uri: qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock
+    name: "{{ provider_authority_host_remote_libvirt_storage_pool }}"
+    state: active
+    autostart: true
+  become: true
+  become_user: "{{ provider_authority_host_account }}"
+  when: provider_authority_host_remote_module_enabled | default(false) | bool

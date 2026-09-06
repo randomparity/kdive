@@ -1,5 +1,5 @@
 [Unit]
-Description=KDIVE dormant external-boot provider authority
+Description=KDIVE external-boot provider authority
 Documentation=https://github.com/randomparity/kdive
 After=network-online.target systemd-tmpfiles-setup.service
 Wants=network-online.target systemd-tmpfiles-setup.service
@@ -52,6 +52,10 @@ ReadWritePaths=/run/kdive/provider-authority/request
 ReadWritePaths={{ provider_authority_host_recovery_root }}
 ReadWritePaths={{ provider_authority_host_rootfs_root }}
 ReadWritePaths={{ provider_authority_host_console_root }}
+{% endif %}
+{% if provider_authority_host_remote_module_enabled %}
+ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations/evidence
+ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations/work
 {% endif %}
 
 [Install]

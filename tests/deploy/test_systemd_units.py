@@ -112,9 +112,9 @@ def test_external_boot_authority_unit_is_isolated_and_supervised() -> None:
         "PrivateDevices=yes",
         "RestrictAddressFamilies=AF_UNIX",
         "ReadWritePaths=/var/lib/kdive/provider-authority/journal",
-        "ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations",
         "ReadWritePaths=/run/kdive/provider-authority/request",
     ):
         assert directive in text
     assert "service-credential:" in text
+    assert "remote-module-preparations" not in text
     assert "sentinel" not in text

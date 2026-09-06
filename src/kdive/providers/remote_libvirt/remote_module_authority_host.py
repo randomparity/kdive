@@ -732,6 +732,7 @@ class RemoteModuleAuthorityHostFactory:
         *,
         connection: Any,
         pool_name: str,
+        architectures: tuple[str, ...],
         work_dir: Path,
         appliance_root: Path,
         artifact_stager: ExternalBootArtifactStager,
@@ -741,6 +742,7 @@ class RemoteModuleAuthorityHostFactory:
     ) -> None:
         self._connection = connection
         self._pool_name = pool_name
+        self._architectures = frozenset(architectures)
         self._work_dir = work_dir
         self._appliance_root = appliance_root
         self._artifact_stager = artifact_stager
@@ -791,6 +793,8 @@ class RemoteModuleAuthorityHostFactory:
         )
 
     def configuration(self, architecture: str) -> RemoteModuleAuthorityHostConfiguration:
+        if architecture not in self._architectures:
+            raise ValueError("remote module appliance architecture is not enabled")
         appliance = load_installed_remote_module_appliance(self._appliance_root, architecture)
         emulator = {
             "x86_64": "/usr/bin/qemu-system-x86_64",

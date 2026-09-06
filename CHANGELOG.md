@@ -326,6 +326,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind authority volume preparation
 - Persist authority recovery evidence
 - Persist preparation receipts
+- Verify existing authority fixture
 
 ### Changed
 
@@ -2304,6 +2305,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep authority host settings out of worker lifecycle
 - Provision fixed-worker readiness artifacts
 - Connect authority clients to private session daemon
+- Parse bzImage release token
+- Accept bzImage gzip trailers
+- Allow active authority fixtures
+- Use local worker authority binding
 
 ### Security
 

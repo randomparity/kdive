@@ -41,7 +41,6 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 UMask=0077
 ReadWritePaths=/var/lib/kdive/provider-authority/journal
-ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations
 ReadWritePaths=/run/kdive/provider-authority/request
 
 [Install]

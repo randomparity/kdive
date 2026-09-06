@@ -7,6 +7,15 @@ This slice defines the closed durable recovery record, preparation receipts, and
 boundary consumed by the remote coordinator. Construction, host service wiring, job handling,
 and provider advertisement remain owned by #2216.
 
+#2216 makes the remote module host chain an explicit default-off deployment mode. The mode uses
+the authority's private `qemu:///session` daemon, one fixed configured directory pool beneath the
+authority state root, and an explicit nonempty subset of the supported x86_64 and ppc64le appliance
+architectures. Startup and the one-shot readiness command validate the active pool's exact target
+and reopen each selected canonical installed appliance manifest. Disabled local-only authority
+deployments do not import or open the remote libvirt chain and require no appliance assets.
+Ordinary remote-provider capability advertisement remains disabled until System provisioning can
+establish the same private authority ownership; a proof-only authority fixture is not that route.
+
 The record binds one exact System, Run, and activation to the plan and materialization identities,
 the validated source/target domain definition pair, the V2 module recovery geometry, both provider
 state identities, prior power, and the complete sorted set of provider-owned recovery objects. It

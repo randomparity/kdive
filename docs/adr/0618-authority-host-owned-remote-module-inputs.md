@@ -28,6 +28,14 @@ The authority converts the caller's bounded budget to its own monotonic deadline
 reuses that deadline for exact replay. A worker monotonic timestamp is never compared directly to
 the authority host clock.
 
+Remote module mutation is a separate explicit authority-host opt-in and remains disabled by
+default. When enabled, the host opens its protected session libvirt socket, not the worker-visible
+system daemon, and uses one configured storage-pool name whose directory remains fixed beneath the
+authority state root. The same connection and pool feed materialization, module preparation, and
+lifecycle operations. The configured appliance architecture set is a nonempty subset of x86_64
+and ppc64le; readiness reopens every selected installed manifest and its direct-kernel files before
+the host accepts requests. Unselected architecture assets are neither required nor accepted.
+
 The worker commits the authenticated PREP terminal operation, result, recovery reference, and
 reap retention while the attempt verifier still holds the System lock. Those PREP fields remain
 immutable provenance. A later successful RESTORE is recorded in a separate immutable evidence
@@ -52,3 +60,8 @@ Provider authority provisioning must supply only fixed appliance assets and the 
 binding. The remote appliance renderer uses direct kernel/initrd boot and its three owned disks;
 it does not require a phantom appliance pool volume. Worker jobs retain no provider path, host
 credential, root-volume selector, or appliance selector.
+
+An installed proof fixture may create a disposable System inside this private namespace, but that
+does not authorize capability advertisement for ordinary remote Resources. General advertisement
+remains fail-closed until System provisioning itself establishes authority ownership without
+granting a worker access to the private provider endpoint.

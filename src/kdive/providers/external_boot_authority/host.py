@@ -9,12 +9,14 @@ import re
 import socket
 import stat
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Awaitable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
+from uuid import UUID
 
 from psycopg import AsyncConnection
 from pydantic import SecretStr
@@ -38,9 +40,12 @@ from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_NETWORK_ADDRESS,
     AUTHORITY_NETWORK_PORT,
     AUTHORITY_PROVIDER_SOCKET,
+    AUTHORITY_REMOTE_MODULE_ARCHITECTURES,
+    AUTHORITY_REMOTE_MODULE_ENABLED,
     AUTHORITY_REQUEST_SOCKET,
     AUTHORITY_UID,
     DEFAULT_DENIED_IDENTITIES,
+    REMOTE_MODULE_ARCHITECTURES,
 )
 from kdive.providers.external_boot_authority.transport import (
     AuthorityListener,
@@ -80,6 +85,7 @@ _DATABASE_CONNECTION_OPTIONS = (
 _AUTHORITY_INSTALL_DIR = Path("/opt/kdive-provider-authority")
 _AUTHORITY_CREDENTIALS_SOURCE_DIR = Path("/etc/kdive/credentials/provider-authority")
 _AUTHORITY_STATE_DIR = Path("/var/lib/kdive/provider-authority")
+_REMOTE_MODULE_APPLIANCE_ROOT = Path("/var/lib/libvirt/kdive/module-appliance/v1")
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
 
@@ -117,7 +123,10 @@ class AuthorityHostConfig:
     worker_client_ca: Path
     health_client_certificate: Path
     health_client_key: Path
+    remote_module_enabled: bool = False
+    remote_module_architectures: tuple[str, ...] = ()
     remote_libvirt_storage_pool: str = "default"
+    remote_module_appliance_root: Path = _REMOTE_MODULE_APPLIANCE_ROOT
     install_dir: Path = _AUTHORITY_INSTALL_DIR
     credentials_source_dir: Path = _AUTHORITY_CREDENTIALS_SOURCE_DIR
     state_dir: Path = _AUTHORITY_STATE_DIR
@@ -136,6 +145,14 @@ class AuthorityHostConfig:
                 AUTHORITY_NETWORK_PORT.parse(str(self.network_port))
             except ValueError, TypeError:
                 raise HostReadinessError("configuration", "invalid") from None
+        if self.remote_module_enabled and (
+            not self.remote_module_architectures
+            or len(set(self.remote_module_architectures)) != len(self.remote_module_architectures)
+            or not set(self.remote_module_architectures) <= REMOTE_MODULE_ARCHITECTURES
+        ):
+            raise HostReadinessError("configuration", "invalid")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", self.remote_libvirt_storage_pool):
+            raise HostReadinessError("configuration", "invalid")
 
     @property
     def remote_module_store_dir(self) -> Path:
@@ -144,6 +161,10 @@ class AuthorityHostConfig:
     @property
     def remote_module_work_dir(self) -> Path:
         return self.state_dir / "remote-module-preparations/work"
+
+    @property
+    def remote_libvirt_pool_dir(self) -> Path:
+        return self.state_dir / "remote-libvirt-pool"
 
     @classmethod
     def from_environment(cls) -> AuthorityHostConfig:
@@ -165,6 +186,10 @@ class AuthorityHostConfig:
             denied_identities = config_registry.require(AUTHORITY_DENIED_IDENTITIES)
             network_address = config_registry.get(AUTHORITY_NETWORK_ADDRESS)
             network_port = config_registry.get(AUTHORITY_NETWORK_PORT)
+            remote_module_enabled = config_registry.require(AUTHORITY_REMOTE_MODULE_ENABLED)
+            remote_module_architectures = config_registry.require(
+                AUTHORITY_REMOTE_MODULE_ARCHITECTURES
+            )
             remote_libvirt_storage_pool = (
                 config_registry.get(REMOTE_LIBVIRT_STORAGE_POOL) or "default"
             )
@@ -185,6 +210,8 @@ class AuthorityHostConfig:
             worker_client_ca=credentials / "worker-client-ca",
             health_client_certificate=credentials / "health-client-certificate",
             health_client_key=credentials / "health-client-key",
+            remote_module_enabled=remote_module_enabled,
+            remote_module_architectures=remote_module_architectures,
             remote_libvirt_storage_pool=remote_libvirt_storage_pool,
             network_address=network_address,
             network_port=network_port,
@@ -246,23 +273,44 @@ def validate_credential_paths(config: AuthorityHostConfig) -> None:
 
 def _validate_access_boundary(config: AuthorityHostConfig) -> None:
     runtime_dir = config.request_socket.parent.parent
-    protected_directories = (
+    protected_directories = [
         (config.install_dir, config.authority_uid, config.authority_gid, 0o700),
         (config.credentials_source_dir, config.authority_uid, config.authority_gid, 0o700),
         (config.state_dir, config.authority_uid, config.authority_gid, 0o700),
         (config.journal_dir, config.authority_uid, config.authority_gid, 0o700),
-        (
-            config.remote_module_store_dir.parent,
-            config.authority_uid,
-            config.authority_gid,
-            0o700,
-        ),
-        (config.remote_module_store_dir, config.authority_uid, config.authority_gid, 0o700),
-        (config.remote_module_work_dir, config.authority_uid, config.authority_gid, 0o700),
         (runtime_dir, config.authority_uid, config.authority_client_gid, 0o710),
         (config.request_socket.parent, config.authority_uid, config.authority_client_gid, 0o2750),
         (config.provider_socket.parent, config.authority_uid, config.authority_gid, 0o700),
-    )
+    ]
+    if config.remote_module_enabled:
+        protected_directories.extend(
+            (
+                (
+                    config.remote_module_store_dir.parent,
+                    config.authority_uid,
+                    config.authority_gid,
+                    0o700,
+                ),
+                (
+                    config.remote_module_store_dir,
+                    config.authority_uid,
+                    config.authority_gid,
+                    0o700,
+                ),
+                (
+                    config.remote_module_work_dir,
+                    config.authority_uid,
+                    config.authority_gid,
+                    0o700,
+                ),
+                (
+                    config.remote_libvirt_pool_dir,
+                    config.authority_uid,
+                    config.authority_gid,
+                    0o700,
+                ),
+            )
+        )
     for path, owner_uid, group_gid, mode in protected_directories:
         try:
             status = os.stat(path, follow_symlinks=False)
@@ -1111,10 +1159,57 @@ async def _authenticate(config: AuthorityHostConfig, credential: SecretStr) -> A
             raise ValueError("unauthenticated") from None
 
 
-def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
-    """Build mutation support only on a host with an explicitly provisioned local root."""
+def _remote_module_uri(config: AuthorityHostConfig) -> str:
+    return f"qemu+unix:///session?socket={quote(str(config.provider_socket), safe='/')}"
+
+
+def _open_remote_module_connection(config: AuthorityHostConfig) -> Any:
+    """Open and verify the one private pool and every selected installed appliance."""
     import libvirt
 
+    from kdive.providers.remote_libvirt.remote_module_authority_host import (
+        load_installed_remote_module_appliance,
+    )
+
+    try:
+        connection = libvirt.open(_remote_module_uri(config))
+    except Exception:
+        raise HostReadinessError("provider-socket", "unreachable") from None
+    if connection is None:
+        raise HostReadinessError("provider-socket", "unreachable")
+    try:
+        try:
+            pool = connection.storagePoolLookupByName(config.remote_libvirt_storage_pool)
+        except Exception:
+            raise HostReadinessError("remote-module-pool", "unavailable") from None
+        try:
+            root = ET.fromstring(pool.XMLDesc(0))
+            name = root.findtext("name")
+            target = root.findtext("target/path")
+            if (
+                pool.isActive() != 1
+                or name != config.remote_libvirt_storage_pool
+                or target is None
+                or Path(target) != config.remote_libvirt_pool_dir
+            ):
+                raise ValueError
+        except Exception:
+            raise HostReadinessError("remote-module-pool", "invalid") from None
+        for architecture in config.remote_module_architectures:
+            try:
+                load_installed_remote_module_appliance(
+                    config.remote_module_appliance_root, architecture
+                )
+            except OSError, ValueError:
+                raise HostReadinessError("remote-module-appliance", "invalid") from None
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
+    """Build mutation support only on a host with an explicitly provisioned local root."""
     from kdive import config as runtime_config
     from kdive.providers.assembly.composition import (
         build_authority_artifact_stager,
@@ -1128,6 +1223,40 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
         ExternalBootAuthorityService,
     )
     from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
+
+    if runtime_config.get(LIBVIRT_RECOVERY_ROOT) is None:
+        if config.remote_module_enabled:
+            raise HostReadinessError("remote-module", "local-binding-missing")
+        return None
+    object_store = object_store_from_env()
+    binding = build_authority_mutation_binding(config.provider_socket, object_store)
+    if binding is None:
+        if config.remote_module_enabled:
+            raise HostReadinessError("remote-module", "local-binding-missing")
+        return None
+
+    @asynccontextmanager
+    async def connections() -> AsyncIterator[AsyncConnection]:
+        async with _database_connection(config) as connection:
+            await check_database_role(connection)
+            yield connection
+
+    repository = DatabaseAuthorityRepository(connections)
+
+    def journal_factory(system_id: UUID) -> FileAuthorityJournal:
+        return FileAuthorityJournal(
+            config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
+        )
+
+    recovery_orphans = RecoveryOrphanAuthorityService(connections, binding.provider)
+    if not config.remote_module_enabled:
+        return ExternalBootAuthorityService(
+            repository=repository,
+            journal_factory=journal_factory,
+            adapter=binding.adapter,
+            recovery_orphans=recovery_orphans,
+        )
+
     from kdive.providers.remote_libvirt.external_boot_authority import (
         DurableRemoteModuleVolumePreparationHost,
         RemoteExternalBootAuthorityAdapter,
@@ -1151,17 +1280,12 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
     from kdive.security.secrets.secret_registry import SecretRegistry
 
-    if runtime_config.get(LIBVIRT_RECOVERY_ROOT) is None:
-        return None
-    object_store = object_store_from_env()
-    binding = build_authority_mutation_binding(config.provider_socket, object_store)
-    if binding is None:
-        return None
-
-    uri = f"qemu+unix:///system?socket={quote(str(config.provider_socket), safe='/')}"
-    connection = libvirt.open(uri)
-    if connection is None:
-        raise HostReadinessError("provider-socket", "unreachable")
+    try:
+        connection = _open_remote_module_connection(config)
+    except BaseException:
+        if isinstance(binding.adapter, AuthorityAdapterCloser):
+            binding.adapter.close()
+        raise
     module_store = RemoteModuleVolumePreparationStore(config.remote_module_store_dir)
     module_executor = RemoteModulePreparationExecutor()
     registry = SecretRegistry()
@@ -1175,8 +1299,9 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     module_factory = RemoteModuleAuthorityHostFactory(
         connection=connection,
         pool_name=config.remote_libvirt_storage_pool,
+        architectures=config.remote_module_architectures,
         work_dir=config.remote_module_work_dir,
-        appliance_root=Path("/var/lib/libvirt/kdive/module-appliance/v1"),
+        appliance_root=config.remote_module_appliance_root,
         artifact_stager=artifact_stager,
         secret_registry=registry,
         executor=module_executor,
@@ -1224,20 +1349,12 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
         close=close_remote,
     )
 
-    @asynccontextmanager
-    async def connections() -> AsyncIterator[AsyncConnection]:
-        async with _database_connection(config) as connection:
-            await check_database_role(connection)
-            yield connection
-
     return ExternalBootAuthorityService(
-        repository=DatabaseAuthorityRepository(connections),
-        journal_factory=lambda system_id: FileAuthorityJournal(
-            config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
-        ),
+        repository=repository,
+        journal_factory=journal_factory,
         adapter=adapter,
         remote_module_host=remote_module_host,
-        recovery_orphans=RecoveryOrphanAuthorityService(connections, binding.provider),
+        recovery_orphans=recovery_orphans,
     )
 
 
@@ -1335,6 +1452,12 @@ async def check_authority_host_once(config: AuthorityHostConfig) -> None:
     probe_config = replace(config, request_socket=probe)
     journal_validator = JournalInventoryValidator()
     await _bounded_readiness_check(_check_static_authority_host(probe_config, journal_validator))
+    if config.remote_module_enabled:
+        connection = _open_remote_module_connection(config)
+        try:
+            connection.close()
+        except Exception:
+            raise HostReadinessError("remote-module-pool", "cleanup-failed") from None
 
     async def never_authenticate(_credential: SecretStr) -> AuthenticatedPeer:
         raise ValueError("health client has no incarnation credential")

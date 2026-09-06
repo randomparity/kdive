@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
+import pytest
 import yaml
 from jinja2 import Environment, StrictUndefined
 
@@ -135,6 +136,9 @@ def test_provider_authority_environment_retracts_only_network_configuration() ->
     assert "REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock" in disabled
     # pragma: allowlist nextline secret -- fixed socket path, not a credential
     assert "PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock" in disabled
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED=false" in disabled
+    assert "REMOTE_MODULE_ARCHITECTURES" not in disabled
+    assert "REMOTE_LIBVIRT_STORAGE_POOL" not in disabled
     drift = template.render(**(values | {"provider_authority_host_network_port": 18444}))
     assert "NETWORK_PORT=18444" in drift
     assert "NETWORK_PORT=18443" not in drift
@@ -155,7 +159,7 @@ def test_provider_authority_reuses_service_confinement_and_rechecks_drift() -> N
     assert "User=kdive-provider-authority" in service
     assert "ReadWritePaths=/run/kdive/provider-authority/request" in service
     assert "ReadWritePaths=/var/lib/kdive/provider-authority/journal" in service
-    assert "ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations" in service
+    assert "remote-module-preparations" not in service
     defaults = yaml.safe_load(_text(PROVIDER_AUTHORITY / "defaults/main.yml"))
     assert all(
         "e2fsprogs" in packages
@@ -502,6 +506,37 @@ def test_authority_group_verification_tracks_local_mutation_kvm_requirement() ->
             )
             is expected_failure
         )
+
+
+@pytest.mark.parametrize(
+    ("local_mutation", "result", "expected_failure"),
+    [
+        (False, {"rc": 0, "stdout": ""}, False),
+        (False, {"rc": 0, "stdout": "fixture-domain\n"}, True),
+        (True, {"rc": 0, "stdout": "fixture-domain\n"}, False),
+        (True, {"rc": 1, "stdout": ""}, True),
+    ],
+)
+def test_authority_domain_verification_tracks_local_mutation_and_command_failure(
+    local_mutation: bool, result: dict[str, object], expected_failure: bool
+) -> None:
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(
+        item
+        for item in tasks
+        if item.get("name") == "Verify the authority can use its private provider endpoint"
+    )
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["bool"] = bool
+    failed = environment.compile_expression(task["failed_when"])
+
+    assert (
+        failed(
+            live_vm_host_authority_domains=result,
+            live_vm_host_authority_local_mutation_enabled=local_mutation,
+        )
+        is expected_failure
+    )
 
 
 def test_ansible_installs_authority_in_clean_host_order() -> None:
