@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 import libvirt
@@ -14,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     ModuleAttemptTerminalEvidence,
+    ModuleAttemptWorkerWriteContext,
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -32,13 +34,17 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV1,
     RemoteModuleResultV1,
     identity_for,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleRecoveryRefV2 as RemoteModuleRecoveryRefV1,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
+    ModuleAttemptInspection,
     RemoteModuleApplianceExecution,
     RemoteModuleVolumePreparation,
+    RemoteModuleVolumeRecovery,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -50,8 +56,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedModuleVolumes,
     VolumeRequest,
     delete_owned_attempt_volume,
-    expected_attempt_volumes,
     prepare_attempt_volumes,
+    recovery_attempt_volumes,
     validate_attempt_volumes,
 )
 from kdive.providers.remote_libvirt.reaping.module_volumes import (
@@ -69,10 +75,12 @@ class RemoteModuleOperationRuntime:
 
     pool: AsyncConnectionPool
     repository: RemoteModuleAttemptObligationRepository
-    read_scratch_result: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]]
+    read_scratch_result: Callable[..., Awaitable[bytes | None]]
     volume_preparation: RemoteModuleVolumePreparation | None = None
     appliance_execution: RemoteModuleApplianceExecution | None = None
     module_volume_reaper: ModuleVolumeReaper | None = None
+    volume_recovery: RemoteModuleVolumeRecovery | None = None
+    worker_write_context: ModuleAttemptWorkerWriteContext | None = None
 
     @staticmethod
     def _attempt(recovery: RemoteModuleRecoveryRefV1) -> ModuleAttempt:
@@ -119,10 +127,19 @@ class RemoteModuleOperationRuntime:
     ) -> PreparedModuleVolumes:
         """Consume the caller's committed receipt while the verifier owns its System lock."""
         configured = self.volume_preparation
+        appliance = self.appliance_execution
         if configured is None:
             raise CategorizedError(
                 "remote module volume preparation is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        if (
+            appliance is not None
+            and operation.appliance_image_digest != appliance.appliance_image_digest
+        ):
+            raise CategorizedError(
+                "remote module appliance image differs from operation",
+                category=ErrorCategory.CONFLICT,
             )
         attempt = ModuleAttempt(
             UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
@@ -153,6 +170,102 @@ class RemoteModuleOperationRuntime:
             authority,
             deadline,
             prepare_volumes,
+        )
+
+    async def inspect_attempt(
+        self,
+        request: ModuleAttemptPreparationRequestV1,
+        operation: RemoteModuleOperationV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> ModuleAttemptInspection | None:
+        """Read exact current-attempt state only when its durable obligation remains open."""
+        self._check_deadline(deadline)
+        attempt = self._attempt_for_operation(operation)
+        receipt = request.module_attempt_obligation
+        if (
+            receipt.system_id != attempt.system_id
+            or receipt.run_id != attempt.run_id
+            or receipt.operation_nonce != attempt.operation_nonce
+        ):
+            raise CategorizedError(
+                "remote module inspection obligation differs from operation",
+                category=ErrorCategory.CONFLICT,
+            )
+        async with self.pool.connection() as conn:
+            if not await self.repository.mutation_obligation_is_open(conn, attempt):
+                raise CategorizedError(
+                    "remote module inspection obligation is absent",
+                    category=ErrorCategory.CONFLICT,
+                )
+        configured = self.volume_preparation
+        appliance = self.appliance_execution
+        if configured is None or appliance is None:
+            raise CategorizedError(
+                "remote module attempt inspection is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+        def inspect() -> ModuleAttemptInspection | None:
+            self._check_deadline(deadline)
+            volume_request = self._volume_request(operation)
+            pool = configured.storage.storagePoolLookupByName(configured.pool_name)
+            names = (
+                render_module_volume_name(
+                    operation.system_id, operation.run_id, operation.operation_nonce, "source.ext4"
+                ),
+                render_module_volume_name(
+                    operation.system_id,
+                    operation.run_id,
+                    operation.operation_nonce,
+                    "scratch.ext4",
+                ),
+            )
+            present: list[bool] = []
+            for name in names:
+                try:
+                    pool.storageVolLookupByName(name)
+                    present.append(True)
+                except libvirt.libvirtError as exc:
+                    if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                        raise
+                    present.append(False)
+            if not any(present):
+                return None
+            if not all(present):
+                raise CategorizedError(
+                    "remote module attempt volumes are incomplete",
+                    category=ErrorCategory.CONFLICT,
+                )
+            volumes = validate_attempt_volumes(configured.storage, volume_request)
+            raw = appliance.read_scratch_result(volumes.scratch, deadline)
+            self._check_deadline(deadline)
+            if raw is None:
+                raise CategorizedError(
+                    "remote module attempt result is absent",
+                    category=ErrorCategory.CONFLICT,
+                )
+            try:
+                result = RemoteModuleResultV1.from_wire_bytes(raw)
+                result.validate_for(operation)
+            except ValueError:
+                raise CategorizedError(
+                    "remote module attempt result is invalid",
+                    category=ErrorCategory.CONFLICT,
+                ) from None
+            if not result.is_identity_complete:
+                raise CategorizedError(
+                    "remote module attempt result lacks identity",
+                    category=ErrorCategory.CONFLICT,
+                )
+            return ModuleAttemptInspection(volumes, result)
+
+        return await executor.run(inspect)
+
+    @staticmethod
+    def _attempt_for_operation(operation: RemoteModuleOperationV1) -> ModuleAttempt:
+        return ModuleAttempt(
+            UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
         )
 
     async def _evidence(
@@ -219,7 +332,7 @@ class RemoteModuleOperationRuntime:
                     category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                     details={"timed_out": outcome.timed_out},
                 )
-            raw = configured.read_scratch_result(volumes.scratch)
+            raw = configured.read_scratch_result(volumes.scratch, deadline)
             if raw is None:
                 raise CategorizedError(
                     "remote module result artifact is absent",
@@ -250,6 +363,41 @@ class RemoteModuleOperationRuntime:
             )
         return configured.inspect_attachments()
 
+    def _volume_binding(self) -> RemoteModuleVolumeRecovery:
+        if self.volume_recovery is not None:
+            return self.volume_recovery
+        if self.volume_preparation is not None:
+            return RemoteModuleVolumeRecovery(
+                self.volume_preparation.storage, self.volume_preparation.pool_name
+            )
+        raise CategorizedError(
+            "remote module volume recovery is not configured",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+    def recovery_volumes(
+        self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
+    ) -> PreparedModuleVolumes:
+        configured = self._volume_binding()
+        volumes = recovery_attempt_volumes(
+            operation, configured.pool_name, recovery.source_capacity_bytes
+        )
+        if (
+            recovery.pool.ref != configured.pool_name
+            or recovery.source_volume.ref != volumes.source.name
+            or recovery.scratch_volume.ref != volumes.scratch.name
+        ):
+            raise CategorizedError(
+                "remote module recovery volume geometry differs from fixed provider binding",
+                category=ErrorCategory.CONFLICT,
+            )
+        return volumes
+
+    def _recovery_volumes(
+        self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
+    ) -> PreparedModuleVolumes:
+        return self.recovery_volumes(operation, recovery)
+
     def _appliance_request(
         self,
         operation: RemoteModuleOperationV1,
@@ -257,8 +405,7 @@ class RemoteModuleOperationRuntime:
         deadline: float,
     ) -> ApplianceRequest:
         configured = self.appliance_execution
-        prepared = self.volume_preparation
-        if configured is None or prepared is None:
+        if configured is None:
             raise CategorizedError(
                 "remote module appliance execution is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
@@ -269,7 +416,7 @@ class RemoteModuleOperationRuntime:
             emulator_path=configured.emulator_path,
             memory_kib=configured.memory_kib,
             vcpus=configured.vcpus,
-            pool=prepared.pool_name,
+            pool=self._volume_binding().pool_name,
             appliance_volume=configured.appliance_volume,
             appliance_image_digest=configured.appliance_image_digest,
             root=configured.root(operation),
@@ -277,7 +424,7 @@ class RemoteModuleOperationRuntime:
             scratch=volumes.scratch,
             operation=operation,
             secret_registry=configured.secret_registry,
-            read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch),
+            read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch, deadline),
             inspect_attachments=configured.inspect_attachments,
             executor=configured.deadline_executor,
             monotonic=configured.monotonic,
@@ -290,8 +437,8 @@ class RemoteModuleOperationRuntime:
         executor: RemoteModulePreparationExecutor,
         deadline: float,
     ) -> TeardownObservation:
-        operation = await self.reopen_operation(recovery)
-        volumes = expected_attempt_volumes(self._volume_request(operation))
+        operation = await self.reopen_operation(recovery, deadline)
+        volumes = self.recovery_volumes(operation, recovery)
         request = self._appliance_request(operation, volumes, deadline)
         configured = self.appliance_execution
         assert configured is not None
@@ -299,9 +446,11 @@ class RemoteModuleOperationRuntime:
             lambda: teardown_remote_module_appliance(configured.appliance, request)
         )
 
-    async def _open_reap_evidence(self, recovery: RemoteModuleRecoveryRefV1) -> None:
-        operation = await self.reopen_operation(recovery)
-        result = await self.reopen_result(recovery)
+    async def _open_reap_evidence(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
+    ) -> None:
+        operation = await self.reopen_operation(recovery, deadline)
+        result = await self.reopen_result(recovery, deadline)
         if recovery.installed_entry_count is None or recovery.installed_content_bytes is None:
             raise CategorizedError(
                 "remote module installed baseline counts are absent",
@@ -318,40 +467,58 @@ class RemoteModuleOperationRuntime:
             installed_content_bytes=recovery.installed_content_bytes,
             recovery_reference=recovery.model_dump(mode="json"),
         )
+        context = self.worker_write_context
+        if context is None:
+            raise CategorizedError(
+                "remote module worker evidence context is absent",
+                category=ErrorCategory.CONFLICT,
+            )
         async with self.pool.connection() as conn, conn.transaction():
-            await self.repository.record_terminal_evidence(conn, self._attempt(recovery), evidence)
-            await self.repository.open_reap_obligation(conn, self._attempt(recovery))
+            if not await self.repository.worker_record_terminal_evidence(
+                conn, context, self._attempt(recovery), evidence
+            ):
+                raise CategorizedError(
+                    "remote module worker evidence authority is stale",
+                    category=ErrorCategory.CONFLICT,
+                )
 
     async def _delete(
         self,
         recovery: RemoteModuleRecoveryRefV1,
         executor: RemoteModulePreparationExecutor,
         purpose: str,
+        deadline: float | None,
     ) -> None:
         if purpose == "scratch":
-            await self._open_reap_evidence(recovery)
-        operation = await self.reopen_operation(recovery)
-        request = self._volume_request(operation)
-        volumes = expected_attempt_volumes(request)
+            await self._open_reap_evidence(recovery, deadline)
+        operation = await self.reopen_operation(recovery, deadline)
+        volumes = self.recovery_volumes(operation, recovery)
         selected = volumes.source if purpose == "source" else volumes.scratch
-        configured = self.volume_preparation
-        assert configured is not None
+        configured = self._volume_binding()
 
         def delete() -> None:
+            self._check_deadline(deadline)
             inspection = self._require_cleanup_inspection()
             delete_owned_attempt_volume(configured.storage, selected, inspection=inspection)
+            self._check_deadline(deadline)
 
         await executor.run(delete)
 
     async def delete_source(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
-        await self._delete(recovery, executor, "source")
+        await self._delete(recovery, executor, "source", deadline)
 
     async def delete_scratch(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
-        await self._delete(recovery, executor, "scratch")
+        await self._delete(recovery, executor, "scratch", deadline)
 
     def _marker_name(self, recovery: RemoteModuleRecoveryRefV1, state: str) -> str:
         return render_module_volume_name(
@@ -367,12 +534,7 @@ class RemoteModuleOperationRuntime:
         # Durable database evidence is the marker's content; the closed whole name is its
         # storage ownership proof.  Storage-volume metadata is intentionally not used.
         await self._evidence(recovery)
-        configured = self.volume_preparation
-        if configured is None:
-            raise CategorizedError(
-                "remote module volume preparation is not configured",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-            )
+        configured = self._volume_binding()
         name = self._marker_name(recovery, state)
 
         def create() -> None:
@@ -392,18 +554,79 @@ class RemoteModuleOperationRuntime:
 
         await executor.run(create)
 
+    async def reap_state(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> Literal["absent", "reaping", "reaped"]:
+        """Read only exact whole-name journal markers backed by matching durable evidence."""
+        self._check_deadline(deadline)
+        configured = self._volume_binding()
+
+        def present(state: str) -> bool:
+            self._check_deadline(deadline)
+            pool = configured.storage.storagePoolLookupByName(configured.pool_name)
+            try:
+                pool.storageVolLookupByName(self._marker_name(recovery, state))
+                return True
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    return False
+                raise
+
+        reaping, reaped = await executor.run(lambda: (present("reaping"), present("reaped")))
+        self._check_deadline(deadline)
+        if not reaping and not reaped:
+            return "absent"
+        await self._evidence(recovery)
+        return "reaped" if reaped else "reaping"
+
     async def record_reaping(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
-        await self._open_reap_evidence(recovery)
+        self._check_deadline(deadline)
+        await self._open_reap_evidence(recovery, deadline)
         await self._record_marker(recovery, executor, "reaping")
+        self._check_deadline(deadline)
 
     async def record_reaped(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
+        self._check_deadline(deadline)
         await self._record_marker(recovery, executor, "reaped")
+        context = self.worker_write_context
+        if context is None:
+            raise CategorizedError(
+                "remote module worker evidence context is absent",
+                category=ErrorCategory.CONFLICT,
+            )
         async with self.pool.connection() as conn, conn.transaction():
-            await self.repository.discharge_reap_obligation(conn, self._attempt(recovery))
+            if not await self.repository.worker_discharge_reap_obligation(
+                conn, context, self._attempt(recovery)
+            ):
+                raise CategorizedError(
+                    "remote module worker evidence authority is stale",
+                    category=ErrorCategory.CONFLICT,
+                )
+        self._check_deadline(deadline)
+
+    def _check_deadline(self, deadline: float | None) -> None:
+        if deadline is None:
+            return
+        clock = (
+            self.appliance_execution.monotonic
+            if self.appliance_execution is not None
+            else time.monotonic
+        )
+        if clock() >= deadline:
+            raise TimeoutError("remote module invocation deadline expired")
 
     async def resume_reap(
         self,
@@ -412,7 +635,7 @@ class RemoteModuleOperationRuntime:
         deadline: float,
     ) -> TeardownObservation:
         operation, _result = await self._evidence(recovery)
-        volumes = expected_attempt_volumes(self._volume_request(operation))
+        volumes = self.recovery_volumes(operation, recovery)
         configured = self.appliance_execution
         assert configured is not None
         request = self._appliance_request(operation, volumes, deadline)
@@ -423,12 +646,7 @@ class RemoteModuleOperationRuntime:
     async def inventory(
         self, executor: RemoteModulePreparationExecutor
     ) -> tuple[ModuleVolumeKey, ...]:
-        configured = self.volume_preparation
-        if configured is None:
-            raise CategorizedError(
-                "remote module volume preparation is not configured",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-            )
+        configured = self._volume_binding()
 
         def observe() -> tuple[ModuleVolumeKey, ...]:
             return tuple(
@@ -561,9 +779,9 @@ class RemoteModuleOperationRuntime:
         )
 
     async def reopen_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1:
-        raw = await self.read_scratch_result(recovery)
+        raw = await self._read_scratch(recovery, deadline)
         if raw is None:
             return (await self._evidence(recovery))[0]
         result = self._decode_scratch(raw)
@@ -581,14 +799,14 @@ class RemoteModuleOperationRuntime:
         return operation
 
     async def reopen_capture_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1:
-        return self._operation_from_result(await self.reopen_installed_result(recovery))
+        return self._operation_from_result(await self.reopen_installed_result(recovery, deadline))
 
     async def reopen_installed_result(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleResultV1:
-        result = await self.reopen_result(recovery)
+        result = await self.reopen_result(recovery, deadline)
         return self._installed_result(result, recovery)
 
     @staticmethod
@@ -600,8 +818,10 @@ class RemoteModuleOperationRuntime:
                 "remote module scratch result is invalid", category=ErrorCategory.CONFLICT
             ) from None
 
-    async def reopen_result(self, recovery: RemoteModuleRecoveryRefV1) -> RemoteModuleResultV1:
-        raw = await self.read_scratch_result(recovery)
+    async def reopen_result(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
+    ) -> RemoteModuleResultV1:
+        raw = await self._read_scratch(recovery, deadline)
         if raw is None:
             return (await self._evidence(recovery))[1]
         result = self._decode_scratch(raw)
@@ -617,3 +837,10 @@ class RemoteModuleOperationRuntime:
                 category=ErrorCategory.CONFLICT,
             )
         return result
+
+    async def _read_scratch(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None
+    ) -> bytes | None:
+        if deadline is None:
+            return await self.read_scratch_result(recovery)
+        return await self.read_scratch_result(recovery, deadline)

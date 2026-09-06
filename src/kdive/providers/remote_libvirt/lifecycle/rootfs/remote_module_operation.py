@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.infra.reaping import ModuleVolumeKey
@@ -21,8 +21,10 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV1,
     RemoteModuleResultV1,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleRecoveryRefV2 as RemoteModuleRecoveryRefV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -38,15 +40,33 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 class ModuleOperationRuntime(Protocol):
+    async def inspect_attempt(
+        self,
+        request: ModuleAttemptPreparationRequestV1,
+        operation: RemoteModuleOperationV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> ModuleAttemptInspection | None: ...
+    async def reap_state(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> Literal["absent", "reaping", "reaped"]: ...
+    def recovery_volumes(
+        self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
+    ) -> PreparedModuleVolumes: ...
     async def reopen_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1: ...
-    async def reopen_result(self, recovery: RemoteModuleRecoveryRefV1) -> RemoteModuleResultV1: ...
+    async def reopen_result(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
+    ) -> RemoteModuleResultV1: ...
     async def reopen_capture_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1: ...
     async def reopen_installed_result(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleResultV1: ...
     async def prepare(
         self,
@@ -70,16 +90,28 @@ class ModuleOperationRuntime(Protocol):
         deadline: float,
     ) -> TeardownObservation: ...
     async def delete_source(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def delete_scratch(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def record_reaping(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def record_reaped(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def resume_reap(
         self,
@@ -94,6 +126,14 @@ class ModuleOperationRuntime(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ModuleAttemptInspection:
+    """Validated current-attempt volumes and their exact durable scratch result."""
+
+    volumes: PreparedModuleVolumes
+    result: RemoteModuleResultV1
+
+
+@dataclass(frozen=True, slots=True)
 class RemoteModuleVolumePreparation:
     storage: StorageConn
     pool_name: str
@@ -101,6 +141,12 @@ class RemoteModuleVolumePreparation:
     writer: FilesystemImageWriter
     inspect_attachments: Callable[[RemoteDeviceIdentityPort], AttachmentInspection]
     work_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteModuleVolumeRecovery:
+    storage: StorageConn
+    pool_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +159,7 @@ class RemoteModuleApplianceExecution:
     appliance_volume: str
     appliance_image_digest: str
     root: Callable[[RemoteModuleOperationV1], PreparedVolume]
-    read_scratch_result: Callable[[PreparedVolume], bytes | None]
+    read_scratch_result: Callable[[PreparedVolume, float], bytes | None]
     inspect_attachments: Callable[[], AttachmentInspection]
     secret_registry: SecretRegistry
     deadline_executor: DeadlineExecutor
