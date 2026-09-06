@@ -2373,6 +2373,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validate native proof socket with operator privileges
 - Bind fault proof to exact run
 - Inspect installed authority route
+- Commit authority role validation transaction
 
 ### Security
 
