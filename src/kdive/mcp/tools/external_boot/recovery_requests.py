@@ -303,13 +303,12 @@ async def request_release(
     run_id: str,
     resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
-    """Admit a release of the Run's external-boot activation, then report the missing executor.
+    """Admit and durably enqueue release of the Run's external-boot activation.
 
     Resolves and authorizes the Run, then decides ``external_boot_release`` against the
     activation restricting its System and refuses the two conditions ADR-0583 names as
-    blocking a release. The caller gets the same refusal it will get once the executor lands;
-    an admissible request gets ``configuration_error`` with
-    ``reason=recovery_executor_unavailable`` and no activation row is touched.
+    blocking a release. An admissible request resolves its exact server-owned durable
+    authority and atomically enqueues the recovery job without provider I/O.
     """
     uid = _as_uuid(run_id)
     if uid is None:
@@ -344,7 +343,7 @@ async def _release_locked(
     """Decide the release under the System lock, so every read sees one consistent activation.
 
     ``conn`` has already read the Run, so this transaction is a SAVEPOINT and the lock releases
-    at end-of-request; only the envelope render follows the block, and nothing is written.
+    at end-of-request. Authority resolution and durable enqueue remain inside that lock.
 
     The restricting activation is read directly before the guard because the guard cannot
     express "nothing to release": it returns ``None`` both for an admitted operation and for a
