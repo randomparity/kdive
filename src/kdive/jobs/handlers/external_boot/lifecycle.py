@@ -676,13 +676,11 @@ async def _with_executor(
 
 
 def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
-    """Activate the prepared external boot, then confirm the running kernel is the expected one.
+    """Prepare and activate the external boot, then confirm the expected running kernel.
 
-    The admitted state is ``activating`` alone, taken from the **commit** preconditions
-    (``0122…sql:1302-1306``) rather than ``allocate``'s looser ``prepared``-or-``activating``
-    (``:482-485``). Failing early on a ``prepared`` activation the server has not advanced is
-    cheaper and safer than allocating, acknowledging, mutating a live System, and only then being
-    refused at commit.
+    ADR-0608 admits ``preparing`` so the same claimed job and authority generation own
+    materialize, prepare, deadline, and activate.  ``prepared`` and ``activating`` remain the
+    restart states after those durable intermediate commits.
     """
 
     def build(
@@ -724,7 +722,7 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
 
     return _handler(
         ports,
-        require_activation_state=frozenset({State.PREPARED, State.ACTIVATING}),
+        require_activation_state=frozenset({State.PREPARING, State.PREPARED, State.ACTIVATING}),
         require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_no_preconditions,
         expected_observation="target",
