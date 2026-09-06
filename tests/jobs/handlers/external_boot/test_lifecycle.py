@@ -47,6 +47,7 @@ from kdive.jobs.models import (
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
 )
@@ -144,6 +145,18 @@ class _VehicleExecutor:
         return AuthorityObservationV1(
             observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
         )
+
+    async def observe(self, _request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid4(),
+            category="source",
+            composite_state=getattr(self.vehicle.port, "observed_composite", "sha256:" + "8" * 64),
+        )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        return await self.execute(request)
 
 
 class _ReceiptExecutor(_VehicleExecutor):
@@ -363,6 +376,25 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
         assert await _job_state(seed, case.job_id) == "succeeded"
 
     _drive(migrated_url, authority_role_dsns, operation, body)
+
+
+def test_resolve_conflict_refuses_changed_observation_before_provider_mutation(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        case.vehicle.port.__dict__["observed_composite"] = "sha256:" + "9" * 64
+
+        with pytest.raises(ExternalBootAuthorityFailure) as raised:
+            await _run_operation(authority_role_dsns, seed, case, "resolve-conflict")
+
+        failure = raised.value.result.result
+        assert isinstance(failure, _FailureResult)
+        assert failure.error_category == "stale_handle"
+        assert case.vehicle.port.calls == []
+        row = await _activation_row(seed, case.vehicle.activation_id)
+        assert row["state"] == "recovery_conflict"
+
+    _drive(migrated_url, authority_role_dsns, "resolve-conflict", body)
 
 
 def test_activate_reuses_the_persisted_readiness_deadline(

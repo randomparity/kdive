@@ -8,7 +8,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
@@ -464,7 +464,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     ],
     call_port: Callable[[OperationContext], Any],
     build_result: Callable[[OperationContext, Any], R],
-    before_port: Callable[[OperationContext], R | None] | None = None,
+    before_port: Callable[[OperationContext], R | None | Awaitable[R | None]] | None = None,
 ) -> R:
     """Run one authority-bound operation and return its result for the worker to commit.
 
@@ -531,8 +531,11 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     )
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))
     try:
-        if before_port is not None and (intermediate := before_port(context)) is not None:
-            return intermediate
+        intermediate = before_port(context) if before_port is not None else None
+        if inspect.isawaitable(intermediate):
+            intermediate = await intermediate
+        if intermediate is not None:
+            return cast(R, intermediate)
     except Exception as exc:
         raise _bound_failure(
             context,
