@@ -17,6 +17,7 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
+    RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootRecoveryRecord,
@@ -25,7 +26,15 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
 )
-from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
+from kdive.providers.remote_libvirt.lifecycle.external_boot import (
+    _AgentRunner,
+    activate_definition,
+    observe_guest_identity,
+    prepare_target_definition,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
+    parse_boot_artifact_name,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 
@@ -42,11 +51,19 @@ class _Domain(Protocol):
 
     def isActive(self) -> int: ...  # noqa: N802
 
+    def name(self) -> str: ...
+
+    def create(self) -> int: ...
+
+    def destroy(self) -> int: ...
+
 
 class RemoteExternalBootPreparationConn(Protocol):
     def lookupByName(self, name: str) -> _Domain: ...  # noqa: N802
 
     def storagePoolLookupByName(self, name: str) -> _Pool: ...  # noqa: N802
+
+    def defineXML(self, xml: str) -> _Domain: ...  # noqa: N802
 
 
 class ConcreteRemoteExternalBootOperations:
@@ -58,11 +75,13 @@ class ConcreteRemoteExternalBootOperations:
         connection: Callable[[], AbstractContextManager[RemoteExternalBootPreparationConn]],
         pool_name: str,
         monotonic: Callable[[], float],
+        agent_exec: _AgentRunner,
     ) -> None:
         self._materializer = materializer
         self._connection = connection
         self._pool_name = pool_name
         self._monotonic = monotonic
+        self._agent_exec = agent_exec
 
     def materialize(
         self,
@@ -146,3 +165,68 @@ class ConcreteRemoteExternalBootOperations:
             prior_power=prior_power,
             recovery_objects=tuple(sorted(objects, key=lambda value: value.to_canonical_json())),
         )
+
+    def _validate_owned_artifacts(
+        self,
+        connection: RemoteExternalBootPreparationConn,
+        recovery: RemoteExternalBootRecoveryRecord,
+    ) -> None:
+        pool = connection.storagePoolLookupByName(self._pool_name)
+        expected = {
+            recovery.materialization.artifacts.kernel,
+            recovery.module_recovery.source_volume,
+            recovery.module_recovery.scratch_volume,
+        }
+        if recovery.materialization.artifacts.initrd is not None:
+            expected.add(recovery.materialization.artifacts.initrd)
+        if not expected.issubset(recovery.recovery_objects):
+            raise ValueError("remote recovery omitted an owned private artifact")
+        boot_references = [(recovery.materialization.artifacts.kernel, "kernel")]
+        if recovery.materialization.artifacts.initrd is not None:
+            boot_references.append((recovery.materialization.artifacts.initrd, "initrd"))
+        for reference, kind in boot_references:
+            parsed = parse_boot_artifact_name(reference.ref)
+            digest = (
+                recovery.materialization.extracted_vmlinuz_sha256
+                if kind == "kernel"
+                else recovery.materialization.verified_initrd_sha256
+            )
+            if (
+                parsed is None
+                or parsed.partial
+                or parsed.kind != kind
+                or str(parsed.system_id) != recovery.binding.system_id
+                or str(parsed.run_id) != recovery.binding.run_id
+                or parsed.digest != digest
+            ):
+                raise ValueError("remote recovery boot artifact identity differs")
+        for reference in expected:
+            if not pool.storageVolLookupByName(reference.ref).path().startswith("/"):
+                raise ValueError("remote recovery artifact path is not absolute")
+
+    def activate(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        deadline: float,
+    ) -> None:
+        del authority
+        if self._monotonic() >= deadline:
+            raise TimeoutError("remote external-boot activation deadline expired")
+        with self._connection() as connection:
+            self._validate_owned_artifacts(connection, recovery)
+            activate_definition(connection, recovery.definition)
+
+    def observe(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        deadline: float,
+    ) -> RunningKernelObservation:
+        del authority
+        if self._monotonic() >= deadline:
+            raise TimeoutError("remote external-boot observation deadline expired")
+        with self._connection() as connection:
+            self._validate_owned_artifacts(connection, recovery)
+            domain = connection.lookupByName(domain_name_for(UUID(recovery.binding.system_id)))
+            return observe_guest_identity(self._agent_exec, domain, recovery.definition)

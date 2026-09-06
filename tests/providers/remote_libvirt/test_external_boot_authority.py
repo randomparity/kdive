@@ -58,6 +58,7 @@ from kdive.providers.remote_libvirt.external_boot_operations import (
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     MaterializedBootArtifacts,
+    artifact_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
@@ -77,6 +78,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     render_module_volume_name,
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.services.remote_module_authority_preparation import (
     RemoteModulePreparationInputs,
     _operation,
@@ -85,8 +87,10 @@ from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_sup
     operation as module_operation,
 )
 from tests.providers.remote_libvirt.lifecycle.test_external_boot import (
+    _FakeAgentExec,
     _materialization,
     _plan,
+    _replies,
     _source_xml,
 )
 from tests.support.external_boot_plan import external_boot_plan
@@ -244,7 +248,7 @@ def test_concrete_remote_prepare_captures_source_before_deriving_durable_recover
             return Pool()
 
     operations = ConcreteRemoteExternalBootOperations(
-        cast(Any, object()), cast(Any, Connection), "modules", lambda: 1.0
+        cast(Any, object()), cast(Any, Connection), "modules", lambda: 1.0, cast(Any, object())
     )
     recovery = operations.prepare(
         plan,
@@ -261,6 +265,136 @@ def test_concrete_remote_prepare_captures_source_before_deriving_durable_recover
     assert recovery.materialization.artifacts.kernel in recovery.recovery_objects
     assert recovery.module_recovery.source_volume in recovery.recovery_objects
     store.close()
+
+
+def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -> None:
+    recovery = _record()
+    kernel = OpaqueProviderRef(
+        ref=artifact_volume_name(
+            "kernel",
+            UUID(recovery.binding.system_id),
+            UUID(recovery.binding.run_id),
+            recovery.materialization.extracted_vmlinuz_sha256,
+        )
+    )
+    initrd = (
+        None
+        if recovery.materialization.verified_initrd_sha256 is None
+        else OpaqueProviderRef(
+            ref=artifact_volume_name(
+                "initrd",
+                UUID(recovery.binding.system_id),
+                UUID(recovery.binding.run_id),
+                recovery.materialization.verified_initrd_sha256,
+            )
+        )
+    )
+    recovery = recovery.model_copy(
+        update={
+            "materialization": recovery.materialization.model_copy(
+                update={
+                    "artifacts": recovery.materialization.artifacts.model_copy(
+                        update={"kernel": kernel, "initrd": initrd}
+                    )
+                }
+            )
+        }
+    )
+    owned = set(recovery.recovery_objects)
+    owned.add(recovery.materialization.artifacts.kernel)
+    if recovery.materialization.artifacts.initrd is not None:
+        owned.add(recovery.materialization.artifacts.initrd)
+    recovery = recovery.model_copy(
+        update={
+            "recovery_objects": tuple(sorted(owned, key=lambda value: value.to_canonical_json()))
+        }
+    )
+
+    class Volume:
+        def path(self) -> str:
+            return "/pool/owned"
+
+    class Pool:
+        def storageVolLookupByName(self, name: str) -> Volume:
+            assert OpaqueProviderRef(ref=name) in recovery.recovery_objects
+            return Volume()
+
+    class Domain:
+        def __init__(self) -> None:
+            self.xml = recovery.definition.source_xml
+            self.active = False
+            self.creates = 0
+
+        def name(self) -> str:
+            return domain_name_for(UUID(recovery.binding.system_id))
+
+        def XMLDesc(self, flags: int = 0) -> str:
+            del flags
+            return self.xml
+
+        def isActive(self) -> int:
+            return int(self.active)
+
+        def create(self) -> int:
+            self.active = True
+            self.creates += 1
+            return 0
+
+        def destroy(self) -> int:
+            self.active = False
+            return 0
+
+    domain = Domain()
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def lookupByName(self, name: str) -> Domain:
+            assert name == domain.name()
+            return domain
+
+        def storagePoolLookupByName(self, name: str) -> Pool:
+            assert name == "modules"
+            return Pool()
+
+        def defineXML(self, xml: str) -> Domain:
+            domain.xml = xml
+            return domain
+
+    agent = _FakeAgentExec(
+        _replies(
+            release=(recovery.materialization.kernel_observation.release + "\n").encode(),
+            cmdline=(recovery.definition.expected_cmdline + "\n").encode(),
+        )
+    )
+    operations = ConcreteRemoteExternalBootOperations(
+        cast(Any, object()), cast(Any, Connection), "modules", lambda: 1.0, agent
+    )
+    authority = OpaqueProviderRef(ref="authority/current")
+    operations.activate(recovery, authority, 2.0)
+    operations.activate(recovery, authority, 2.0)
+    observation = operations.observe(recovery, authority, 2.0)
+
+    assert domain.creates == 1
+    assert observation.identity == recovery.materialization.kernel_observation
+    assert observation.cmdline == recovery.definition.expected_cmdline.encode()
+
+    incomplete = recovery.model_copy(
+        update={
+            "recovery_objects": tuple(
+                item
+                for item in recovery.recovery_objects
+                if item != recovery.materialization.artifacts.kernel
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="omitted an owned private artifact"):
+        operations.activate(incomplete, authority, 2.0)
+    assert domain.creates == 1
 
 
 @pytest.mark.anyio
