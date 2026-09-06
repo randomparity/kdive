@@ -13,7 +13,7 @@ from tests.db.external_boot_authority_support import (
 from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
-from tests.support.external_boot_plan import external_boot_plan
+from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
 
 
 def test_preparing_allocation_and_phase_resolution_are_exact(
@@ -114,3 +114,63 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
     assert materialize[3] == plan.model_dump(mode="json", by_alias=True)
     assert prepared is not None and prepared != materialize[1:3]
     assert plan.identity != _PLAN
+
+    journal_digest = "sha256:" + "d" * 64
+    receipt = external_boot_materialization(plan)
+    with psycopg.connect(migrated_url) as admin:
+        admin.execute(
+            "INSERT INTO external_boot_authority_journal_heads "
+            "(authority_instance, system_id, sequence, digest, phase, authority_id, generation, "
+            "operation_identity, head_record) VALUES (%s,%s,2,%s,'terminal',%s,%s,%s,%s)",
+            (
+                case.authority_instance,
+                case.system_id,
+                journal_digest,
+                authority_id,
+                generation,
+                materialize[1],
+                Jsonb(
+                    {
+                        "operation": "materialize",
+                        "operation_identity": materialize[1],
+                        "operation_digest": materialize[2],
+                    }
+                ),
+            ),
+        )
+    arguments = (
+        case.credential,
+        case.job_id,
+        case.attempt,
+        authority_id,
+        generation,
+        "materialize",
+        materialize[1],
+        materialize[2],
+        2,
+        journal_digest,
+        plan.identity,
+        Jsonb(receipt.model_dump(mode="json", by_alias=True)),
+    )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT commit_external_boot_preparation_result(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            arguments,
+        ).fetchone() == ("applied",)
+        assert worker.execute(
+            "SELECT commit_external_boot_preparation_result(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            arguments,
+        ).fetchone() == ("applied",)
+    with psycopg.connect(migrated_url) as admin:
+        state = admin.execute(
+            "SELECT e.state, e.materialization, j.state, a.state "
+            "FROM external_boot_activations e JOIN jobs j ON j.id=%s "
+            "JOIN external_boot_authorities a ON a.id=%s WHERE e.id=%s",
+            (case.job_id, authority_id, case.activation_id),
+        ).fetchone()
+    assert state == (
+        "preparing",
+        receipt.model_dump(mode="json", by_alias=True),
+        "running",
+        "current",
+    )

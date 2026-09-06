@@ -2,7 +2,12 @@
 
 from uuid import UUID
 
-from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.providers.ports.external_boot import (
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    MaterializedArtifacts,
+    OpaqueProviderRef,
+)
 
 
 def external_boot_plan(system_id: UUID, run_id: UUID) -> ExternalBootPlan:
@@ -45,4 +50,31 @@ def external_boot_plan(system_id: UUID, run_id: UUID) -> ExternalBootPlan:
                 "source": {"identity": zero, "kind": "staged-image"},
             },
         }
+    )
+
+
+def external_boot_materialization(plan: ExternalBootPlan) -> ExternalBootMaterialization:
+    return ExternalBootMaterialization(
+        architecture=plan.architecture,
+        provider_kind="local-libvirt",
+        ownership={
+            "system_id": plan.ownership.system_id,
+            "run_id": plan.ownership.run_id,
+        },
+        plan_identity=plan.identity,
+        extracted_vmlinuz_sha256=plan.bundle.vmlinuz_sha256,
+        source_module_manifest=plan.module_obligation.source_manifest,
+        installed_module_tree="sha256:" + "3" * 64,
+        verified_bundle_sha256=plan.bundle.sha256,
+        verified_initrd_sha256=None,
+        kernel_observation={
+            "architecture": plan.architecture,
+            "release": plan.module_obligation.release,
+            "gnu_build_id": "01020304",
+        },
+        artifacts=MaterializedArtifacts(
+            kernel=OpaqueProviderRef(ref="artifact/kernel"),
+            modules=OpaqueProviderRef(ref="artifact/modules"),
+            initrd=None,
+        ),
     )

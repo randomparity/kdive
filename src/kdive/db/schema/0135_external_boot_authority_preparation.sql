@@ -113,6 +113,149 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.commit_external_boot_preparation_result(
+    p_credential_hash bytea, p_job_id uuid, p_attempt integer,
+    p_authority_id uuid, p_generation bigint, p_operation text,
+    p_operation_identity text, p_operation_digest text,
+    p_journal_sequence bigint, p_journal_digest text,
+    p_plan_identity text, p_receipt jsonb
+) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_activation public.external_boot_activations%ROWTYPE;
+    v_authority public.external_boot_authorities%ROWTYPE;
+    v_bound record;
+    v_head public.external_boot_authority_journal_heads%ROWTYPE;
+    v_incarnation text;
+    v_job public.jobs%ROWTYPE;
+    v_materialization_identity text;
+BEGIN
+    IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
+        RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
+    END IF;
+    IF p_credential_hash IS NULL OR octet_length(p_credential_hash) <> 32
+       OR p_job_id IS NULL OR p_attempt IS NULL OR p_attempt <= 0
+       OR p_authority_id IS NULL OR p_generation IS NULL OR p_generation <= 0
+       OR p_operation NOT IN ('materialize', 'prepare')
+       OR p_operation_identity !~ '^sha256:[0-9a-f]{64}$'
+       OR p_operation_digest !~ '^sha256:[0-9a-f]{64}$'
+       OR p_journal_sequence IS NULL OR p_journal_sequence <= 0
+       OR p_journal_digest !~ '^sha256:[0-9a-f]{64}$'
+       OR p_plan_identity !~ '^sha256:[0-9a-f]{64}$'
+       OR jsonb_typeof(p_receipt) IS DISTINCT FROM 'object'
+       OR pg_column_size(p_receipt) > 65536 THEN
+        RAISE EXCEPTION 'external boot preparation commit facts are invalid'
+            USING ERRCODE = '22023';
+    END IF;
+    SELECT w.incarnation INTO v_incarnation FROM public.worker_incarnations AS w
+    WHERE w.credential_hash = p_credential_hash AND w.state = 'active' AND w.fence_protocol = 4;
+    IF v_incarnation IS NULL THEN RETURN 'superseded'; END IF;
+
+    SELECT a.* INTO v_authority FROM public.external_boot_authorities AS a
+    WHERE a.id = p_authority_id AND a.generation = p_generation;
+    IF NOT FOUND THEN RETURN 'superseded'; END IF;
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('kdive:system:' || v_authority.system_id::text, 2125)
+    );
+    SELECT a.* INTO v_authority FROM public.external_boot_authorities AS a
+    WHERE a.id = p_authority_id AND a.generation = p_generation FOR UPDATE;
+    SELECT j.* INTO v_job FROM public.jobs AS j WHERE j.id = p_job_id FOR UPDATE;
+    SELECT e.* INTO v_activation FROM public.external_boot_activations AS e
+    WHERE e.id = v_authority.activation_id FOR UPDATE;
+    SELECT h.* INTO v_head FROM public.external_boot_authority_journal_heads AS h
+    WHERE h.system_id = v_authority.system_id
+      AND h.authority_instance = v_authority.authority_instance FOR UPDATE;
+    SELECT * INTO v_bound FROM public.derive_external_boot_preparation_binding(
+        jsonb_build_object(
+            'authority_id', v_authority.id, 'generation', v_authority.generation,
+            'system_id', v_authority.system_id, 'activation_id', v_authority.activation_id,
+            'run_id', v_authority.run_id, 'plan_identity', v_authority.plan_identity,
+            'purpose', v_authority.purpose, 'provider_kind', v_authority.provider_kind,
+            'authority_instance', v_authority.authority_instance,
+            'worker_incarnation', v_authority.worker_incarnation,
+            'root_operation', v_authority.operation,
+            'root_operation_identity', v_authority.operation_identity,
+            'root_operation_digest', v_authority.operation_digest
+        ), p_operation
+    );
+    IF v_authority.state <> 'current' OR v_authority.worker_incarnation <> v_incarnation
+       OR v_authority.job_id <> p_job_id OR v_authority.job_attempt <> p_attempt
+       OR v_authority.plan_identity <> p_plan_identity
+       OR v_job.state <> 'running' OR v_job.worker_id <> v_incarnation
+       OR v_job.attempt <> p_attempt OR v_job.lease_expires_at <= clock_timestamp()
+       OR v_job.payload #>> '{external_boot_authority_v1,plan_identity}' <> p_plan_identity
+       OR v_job.payload #>> '{external_boot_plan_v1,ownership,system_id}'
+            <> v_authority.system_id::text
+       OR v_job.payload #>> '{external_boot_plan_v1,ownership,run_id}'
+            <> v_authority.run_id::text
+       OR v_bound.operation_identity <> p_operation_identity
+       OR v_bound.operation_digest <> p_operation_digest
+       OR v_head.authority_id <> p_authority_id OR v_head.generation <> p_generation
+       OR v_head.sequence <> p_journal_sequence OR v_head.digest <> p_journal_digest
+       OR v_head.phase <> 'terminal'
+       OR v_head.head_record->>'operation' <> p_operation
+       OR v_head.head_record->>'operation_identity' <> p_operation_identity
+       OR v_head.head_record->>'operation_digest' <> p_operation_digest
+       OR v_activation.system_id <> v_authority.system_id
+       OR v_activation.run_id <> v_authority.run_id
+       OR v_activation.plan_identity <> p_plan_identity
+       OR v_activation.cleanup_complete THEN
+        RETURN 'superseded';
+    END IF;
+
+    IF p_operation = 'materialize' THEN
+        IF p_receipt->>'schema' <> 'external-boot-materialization-v1'
+           OR p_receipt #>> '{ownership,system_id}' <> v_authority.system_id::text
+           OR p_receipt #>> '{ownership,run_id}' <> v_authority.run_id::text
+           OR p_receipt->>'plan_identity' <> p_plan_identity
+           OR v_activation.state <> 'preparing' THEN RETURN 'conflict'; END IF;
+        IF v_activation.materialization IS NOT NULL THEN
+            RETURN CASE WHEN v_activation.materialization = p_receipt
+                        THEN 'applied' ELSE 'conflict' END;
+        END IF;
+        UPDATE public.external_boot_activations SET materialization = p_receipt
+        WHERE id = v_activation.id;
+    ELSE
+        IF p_receipt->>'schema' <> 'external-boot-recovery-v1'
+           OR p_receipt #>> '{binding,system_id}' <> v_authority.system_id::text
+           OR p_receipt #>> '{binding,run_id}' <> v_authority.run_id::text
+           OR p_receipt #>> '{binding,activation_id}' <> v_authority.activation_id::text
+           OR p_receipt->>'plan_identity' <> p_plan_identity
+           OR v_activation.materialization IS NULL
+           OR v_activation.state NOT IN ('preparing', 'prepared') THEN RETURN 'conflict'; END IF;
+        v_materialization_identity := 'sha256:' || encode(sha256(
+            convert_to('kdive-external-boot-materialization-v1', 'UTF8') || decode('00', 'hex') ||
+            convert_to(public.canonical_external_boot_authority_json(
+                v_activation.materialization
+            ), 'UTF8')
+        ), 'hex');
+        IF p_receipt->>'materialization_identity' <> v_materialization_identity THEN
+            RETURN 'conflict';
+        END IF;
+        IF v_activation.state = 'prepared' THEN
+            RETURN CASE WHEN v_activation.recovery_point = p_receipt
+                        THEN 'applied' ELSE 'conflict' END;
+        END IF;
+        UPDATE public.external_boot_activations
+        SET recovery_point = p_receipt, state = 'prepared'
+        WHERE id = v_activation.id;
+    END IF;
+    INSERT INTO public.external_boot_authority_audit (
+        authority_id, system_id, allocation_id, activation_id, run_id, plan_identity,
+        job_id, job_attempt, worker_incarnation, generation, purpose, provider_kind,
+        authority_instance, operation, operation_identity, operation_digest,
+        journal_sequence, journal_digest, outcome
+    ) VALUES (
+        v_authority.id, v_authority.system_id, v_authority.allocation_id,
+        v_authority.activation_id, v_authority.run_id, v_authority.plan_identity,
+        v_authority.job_id, v_authority.job_attempt, v_authority.worker_incarnation,
+        v_authority.generation, v_authority.purpose, v_authority.provider_kind,
+        v_authority.authority_instance, p_operation, p_operation_identity,
+        p_operation_digest, p_journal_sequence, p_journal_digest, 'result_committed'
+    );
+    RETURN 'applied';
+END
+$$;
+
 -- Keep one journal head while allowing only the two preparation successor operations.
 DO $$
 DECLARE
@@ -207,6 +350,9 @@ REVOKE ALL ON FUNCTION
     public.derive_external_boot_preparation_binding(jsonb, text),
     public.resolve_current_external_boot_preparation_authority(
         text, uuid, bigint, bigint, text, text
+    ),
+    public.commit_external_boot_preparation_result(
+        bytea, uuid, integer, uuid, bigint, text, text, text, bigint, text, text, jsonb
     )
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
     kdive_provider_authority;
@@ -214,3 +360,6 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
 GRANT EXECUTE ON FUNCTION public.resolve_current_external_boot_preparation_authority(
     text, uuid, bigint, bigint, text, text
 ) TO kdive_provider_authority;
+GRANT EXECUTE ON FUNCTION public.commit_external_boot_preparation_result(
+    bytea, uuid, integer, uuid, bigint, text, text, text, bigint, text, text, jsonb
+) TO kdive_worker;
