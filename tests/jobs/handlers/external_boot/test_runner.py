@@ -359,6 +359,23 @@ def test_competing_activations_serialize_recovery_capacity_debit(
             ):
                 contenders = [asyncio.create_task(debit(index)) for index in range(2)]
                 await asyncio.gather(*(event.wait() for event in entered))
+                async with asyncio.timeout(10):
+                    while True:
+                        blocked = await (
+                            await seed.execute(
+                                "SELECT count(*) FROM pg_stat_activity "
+                                "WHERE pid = ANY(%s) "
+                                "AND %s = ANY(pg_blocking_pids(pid))",
+                                (
+                                    [connection.info.backend_pid for connection in connections],
+                                    seed.info.backend_pid,
+                                ),
+                            )
+                        ).fetchone()
+                        if blocked == (2,):
+                            break
+                        assert not any(task.done() for task in contenders)
+                        await asyncio.sleep(0.01)
             results = await asyncio.gather(*contenders)
             assert sorted(results) == ["applied", "capacity_exhausted"]
 

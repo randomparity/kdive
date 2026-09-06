@@ -1,8 +1,8 @@
-# ADR-0614: Derive external-boot release phases from one immutable request
+# 0614 — Derive external-boot release phases from one immutable request
 
 ## Status
 
-Accepted
+Accepted (2026-09-06)
 
 ## Context
 
@@ -56,3 +56,12 @@ Provider deletion and verified absence precede capacity credit. One public job r
 the full sequence, and each host mutation retains an independently replayable journal record without
 rewriting the root payload. The schema gains a narrow receipt table and phase-specific resolver and
 commit functions; it gains no generic workflow or payload-mutation mechanism.
+
+## Considered & rejected
+
+- judgment: Crediting capacity before verified provider absence would allow new work to consume
+  capacity still occupied by recovery objects.
+- judgment: Rewriting the public job payload for each phase would erase the immutable request
+  binding used to fence retries and would add a second source of workflow state.
+- judgment: Repeating deletion after a confirmed terminal cleanup would discard usable durable
+  evidence. Exact receipt adoption preserves that evidence without reviving an old authority.
