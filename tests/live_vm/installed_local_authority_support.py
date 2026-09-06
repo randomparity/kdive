@@ -49,6 +49,164 @@ _JOURNAL_ROOT = Path("/var/lib/kdive/provider-authority/journal")
 _JOURNAL_PROOF_MAX_BYTES = 512
 _TAKEOVER_WAIT_SECONDS = 8 * 60.0
 
+_STALE_PROVIDER_CLIENT = r"""
+import asyncio
+import os
+import pwd
+import re
+import shlex
+import sys
+from pathlib import Path
+
+import psycopg
+from pydantic import SecretStr
+
+from kdive.domain.errors import CategorizedError
+from kdive.jobs.authority_sender import local_authority_sender_factory
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.local_client import local_authority_binding
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1, JournalPhase,
+)
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.secrets import secret_backend_from_env
+from kdive.worker_lifecycle.worker_incarnation import worker_incarnation_credential
+
+if len(sys.argv) != 8:
+    raise SystemExit("invalid stale-provider proof subject")
+(
+    system_id,
+    run_id,
+    job_id,
+    original_worker,
+    original_attempt,
+    replacement_worker,
+    replacement_attempt,
+) = sys.argv[1:]
+if not original_attempt.isdigit() or not replacement_attempt.isdigit():
+    raise SystemExit("invalid stale-provider attempt binding")
+original_attempt, replacement_attempt = int(original_attempt), int(replacement_attempt)
+match = re.fullmatch(
+    r"local-systemd:kdive-live-worker@([1-8])\.service:([0-9a-f]{32})", original_worker
+)
+if match is None or replacement_worker == original_worker:
+    raise SystemExit("invalid stale-provider worker binding")
+slot = match.group(1)
+
+def env_file(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        name, separator, raw = line.partition("=")
+        if not separator or not name.startswith("KDIVE_"):
+            continue
+        parsed = shlex.split(raw, posix=True)
+        if len(parsed) != 1 or name in values:
+            raise SystemExit("invalid retained worker environment")
+        values[name] = parsed[0]
+    return values
+
+worker_env = env_file(f"/var/lib/kdive/live-workers/slots/{slot}/worker.env")
+os.environ.update(worker_env)
+dsn = os.environ.get("KDIVE_DATABASE_URL")
+if not dsn:
+    raise SystemExit("stale-provider proof has no database route")
+
+async def main():
+    async with await psycopg.AsyncConnection.connect(dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT id, generation, worker_incarnation, state, activation_id, run_id, "
+                "plan_identity, purpose, provider_kind, authority_instance, operation, "
+                "operation_identity, operation_digest, job_id, job_attempt "
+                "FROM external_boot_authorities WHERE system_id=%s AND job_id=%s "
+                "ORDER BY generation", (system_id, job_id),
+            )
+            authorities = await cur.fetchall()
+            await cur.execute(
+                "SELECT state, attempt, worker_id FROM jobs WHERE id=%s", (job_id,)
+            )
+            job_before = await cur.fetchone()
+            await cur.execute(
+                "SELECT authority_id, generation, sequence, digest, head_record "
+                "FROM external_boot_authority_journal_heads WHERE system_id=%s", (system_id,)
+            )
+            head_before = await cur.fetchone()
+    if len(authorities) != 2:
+        raise SystemExit("stale-provider proof requires exact g1/g2 authorities")
+    g1, g2 = authorities
+    if (str(g1[2]) != original_worker or g1[3] != "superseded"
+            or str(g2[2]) != replacement_worker or g2[3] != "current"
+            or str(g1[5]) != run_id or str(g2[5]) != run_id
+            or str(g1[13]) != job_id or str(g2[13]) != job_id
+            or g1[4] != g2[4] or g1[6:13] != g2[6:13]
+            or g1[14] != original_attempt or g2[14] != replacement_attempt
+            or g1[1] >= g2[1]
+            or job_before != ("succeeded", replacement_attempt, replacement_worker)
+            or head_before is None or head_before[0] != g2[0] or head_before[1] != g2[1]):
+        raise SystemExit("stale-provider proof DB binding is not exact")
+    owner = pwd.getpwnam("kdive-provider-authority").pw_uid
+    journal = FileAuthorityJournal(
+        Path("/var/lib/kdive/provider-authority/journal"), f"{system_id}.jsonl", owner_uid=owner
+    )
+    try:
+        records = journal.load()
+    finally:
+        journal.close()
+    matches = [record for record in records if (
+        record.phase is JournalPhase.MUTATION_STARTED
+        and record.authority_id == g1[0] and record.generation == g1[1]
+        and str(record.system_id) == system_id and str(record.run_id) == run_id
+        and record.operation_identity == g1[11] and record.operation_digest == g1[12]
+    )]
+    if len(matches) != 1:
+        raise SystemExit("stale-provider proof has no exact g1 mutation-started record")
+    record = matches[0]
+    request = AuthorityMutationRequestV1.model_validate({
+        "authority_id": record.authority_id, "generation": record.generation,
+        "system_id": record.system_id, "activation_id": record.activation_id,
+        "run_id": record.run_id, "plan_identity": record.plan_identity,
+        "purpose": record.purpose, "provider_kind": record.provider_kind,
+        "authority_instance": record.authority_instance,
+        "operation_identity": record.operation_identity,
+        "operation_digest": record.operation_digest, "operation": record.operation,
+        "attempt_id": record.attempt_id,
+        "expected_source_identity": record.expected_source_identity,
+        "intended_target_identity": record.intended_target_identity,
+        "recovery_objects": record.recovery_objects,
+    })
+    credential_path = Path(
+        f"/var/lib/kdive/live-workers/slots/{slot}/worker-incarnation.credential"
+    )
+    credential = worker_incarnation_credential(credential_path)
+    registry = SecretRegistry()
+    backend = secret_backend_from_env(registry=registry)
+    binding = local_authority_binding()
+    sender = local_authority_sender_factory(backend, lambda: credential, binding=binding)
+    if sender is None:
+        raise SystemExit("stale-provider proof has no installed local sender")
+    try:
+        await sender.execute_mutation(request, deadline=asyncio.get_running_loop().time() + 10.0)
+    except CategorizedError as exc:
+        if str(exc) != "authority: superseded":
+            raise
+    else:
+        raise SystemExit("stale provider request was accepted")
+    async with await psycopg.AsyncConnection.connect(dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT state, attempt, worker_id FROM jobs WHERE id=%s", (job_id,))
+            job_after = await cur.fetchone()
+            await cur.execute(
+                "SELECT authority_id, generation, sequence, digest, head_record "
+                "FROM external_boot_authority_journal_heads WHERE system_id=%s", (system_id,)
+            )
+            head_after = await cur.fetchone()
+    if job_after != job_before or head_after != head_before:
+        raise SystemExit("stale provider denial changed g2 job or journal head")
+    print("superseded")
+
+asyncio.run(main())
+"""
+
 _WORKER_HOLD_CLIENT = """
 import json
 import os
@@ -73,6 +231,7 @@ for slot in range(1, 9):
         try:
             metadata = os.fstat(descriptor)
             if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
                     or metadata.st_size > 4096):
                 raise SystemExit("unsafe native worker state")
             data = os.read(descriptor, 4097)
@@ -109,6 +268,18 @@ if (status.returncode != 0 or set(fields) != {"MainPID", "InvocationID"}
     raise SystemExit("native worker is no longer the retained invocation")
 pidfd = os.pidfd_open(int(fields["MainPID"]), 0)
 try:
+    recheck = subprocess.run(
+        ["systemctl", "show", unit, "--property=MainPID", "--property=InvocationID"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=10,
+    )
+    rechecked = {}
+    for line in recheck.stdout.decode("ascii", "strict").splitlines():
+        name, separator, value = line.partition("=")
+        if not separator or name in rechecked:
+            raise SystemExit("native worker invocation recheck is malformed")
+        rechecked[name] = value
+    if recheck.returncode != 0 or rechecked != fields:
+        raise SystemExit("native worker invocation changed after pidfd acquisition")
     signal.pidfd_send_signal(pidfd, signal.SIGSTOP if action == "stop" else signal.SIGCONT)
 finally:
     os.close(pidfd)
@@ -781,11 +952,12 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
                 replacement = await wait_for_reclaimed_job(db_url, activation.activate_job_id, held)
                 release_fault_barrier(config)
                 await drain_job(client, "activate-takeover", activation.activate_job_id)
+                assert_stale_provider_request_denied(config, activation, held, replacement)
                 set_exact_worker_hold(held, "continue")
+                await wait_for_stale_worker_commit_observed(activation.activate_job_id, held)
                 held = None
                 if replacement.attempt < 2:
                     raise AssertionError("native takeover did not charge a reclaimed attempt")
-                await asyncio.sleep(2.0)
                 async with (
                     await psycopg.AsyncConnection.connect(db_url) as conn,
                     conn.cursor() as cur,
@@ -811,6 +983,13 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
                         release.object_id,
                     ),
                 )
+                closed = await client.call_tool(
+                    "investigations.close",
+                    investigation_id=activation.investigation_id,
+                    summary="Native stale-provider and reclaimed-commit proof completed",
+                )
+                assert not isinstance(closed, list)
+                assert closed.status not in {"error", "failed"}
             finally:
                 if held is not None:
                     set_exact_worker_hold(held, "continue")
@@ -1180,6 +1359,31 @@ def set_exact_worker_hold(claim: RunningJobClaim, action: Literal["stop", "conti
         raise AssertionError("native worker hold returned an invalid result")
 
 
+def assert_stale_provider_request_denied(
+    config: NativeAuthorityConfig,
+    activation: ActivationJob,
+    original: RunningJobClaim,
+    replacement: RunningJobClaim,
+) -> None:
+    """Submit one exact g1 mutation through the installed typed sender and require fencing."""
+    result = _output(
+        "sudo",
+        "-n",
+        "/opt/kdive/.venv/bin/python",
+        "-c",
+        _STALE_PROVIDER_CLIENT,
+        str(config.system_id),
+        activation.run_id,
+        activation.activate_job_id,
+        original.worker_id,
+        str(original.attempt),
+        replacement.worker_id,
+        str(replacement.attempt),
+    )
+    if result != "superseded":
+        raise AssertionError("installed authority returned an invalid stale-provider proof")
+
+
 async def running_job_claim(db_url: str, job_id: str) -> RunningJobClaim:
     """Read the actual leased job holder; no caller-crafted worker identity is accepted."""
     async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
@@ -1230,6 +1434,34 @@ async def wait_for_reclaimed_job(
     raise TimeoutError(
         "native takeover did not reclaim the paused worker lease before its deadline"
     )
+
+
+async def wait_for_stale_worker_commit_observed(
+    job_id: str, original: RunningJobClaim, *, timeout_seconds: float = 60.0
+) -> None:
+    """Observe the exact retained systemd invocation dropping its fenced commit."""
+    invocation_id = original.worker_id.rsplit(":", 1)[-1]
+    expected = f"external boot job {job_id} was reclaimed; result dropped"
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [
+                "journalctl",
+                "-b",
+                "--no-pager",
+                "-o",
+                "cat",
+                "_SYSTEMD_INVOCATION_ID=" + invocation_id,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and expected in result.stdout.splitlines():
+            return
+        await asyncio.sleep(0.2)
+    raise TimeoutError("stale paused worker did not attempt its fenced core commit")
 
 
 def restart_authority_after_fault(config: NativeAuthorityConfig) -> None:
