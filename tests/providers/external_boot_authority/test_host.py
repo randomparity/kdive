@@ -821,7 +821,8 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
         composition,
         "build_local_external_boot_authority",
         lambda actual_store, socket: (
-            captured.append((actual_store, socket)) or SimpleNamespace(adapter=object())
+            captured.append((actual_store, socket))
+            or SimpleNamespace(adapter=object(), provider=object())
         ),
     )
     config = _config(tmp_path)

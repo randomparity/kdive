@@ -146,7 +146,12 @@ class _Repository:
             or request.authority_instance != self.request.authority_instance
         ):
             return None
-        binding = _binding(peer, self.request, "current")
+        uses_root_binding = isinstance(request, AuthorityPreparationMutationRequestV1) or (
+            self.request.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+        )
+        binding = _binding(peer, self.request if uses_root_binding else request, "current")
         return (
             replace(binding, operation=self.operation_override)
             if self.operation_override
