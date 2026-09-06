@@ -1850,7 +1850,7 @@ def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> 
     assert "KDIVE_WORKER_DATABASE_URL" in text
 
 
-def test_lifecycle_launcher_covers_required_worker_settings_and_authority_route() -> None:
+def test_lifecycle_launcher_covers_required_worker_settings_and_authority_geometry() -> None:
     from kdive.processes.lifecycle.systemd.systemd_worker_contract import WorkerSettings
 
     program = LIFECYCLE.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
@@ -1862,11 +1862,61 @@ def test_lifecycle_launcher_covers_required_worker_settings_and_authority_route(
         in (keys := {key.value for key in node.keys if isinstance(key, ast.Constant)})
     )
     required = {name for name, field in WorkerSettings.model_fields.items() if field.is_required()}
-    route = {name for name in WorkerSettings.model_fields if name.startswith("authority_")}
-    assert required | route <= settings_keys
+    authority = {
+        name
+        for name in WorkerSettings.model_fields
+        if name.startswith("authority_") or name == "external_boot_capacity_bytes"
+    }
+    assert required | authority <= settings_keys
     assert settings_keys <= WorkerSettings.model_fields.keys()
     assert "libvirt_recovery_root" not in settings_keys
-    assert "external_boot_capacity_bytes" not in settings_keys
+
+
+def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"\n'
+            'uri="$2"\n'
+            "require_compatible_lifecycle() { :; }\n"
+            "require_start_prerequisites() { :; }\n"
+            'load_published_libvirt_uri() { printf %s "$uri"; }\n'
+            "request start 1",
+            "bash",
+            str(LIFECYCLE),
+            "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "KDIVE_ROOTFS_DIR": "/tmp/rootfs",
+            "KDIVE_BUILD_WORKSPACE": "/tmp/build",
+            "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
+            "KDIVE_INSTALL_STAGING": "/tmp/install",
+            "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
+            "KDIVE_KERNEL_SRC": "/tmp/kernel",
+            "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
+            "AWS_ACCESS_KEY_ID": "access-key",
+            "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": "/run/authority.sock",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": "authority/server-ca",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": "authority/client-cert",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": (
+                "authority/client-key"  # pragma: allowlist secret
+            ),
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": "authority-store",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "4096",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "8192",
+            "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "4097",
+        },
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == "lifecycle request construction failed safely\n"
 
 
 @pytest.mark.parametrize(

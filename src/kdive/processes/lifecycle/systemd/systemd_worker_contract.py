@@ -104,6 +104,10 @@ class WorkerSettings(BaseModel):
     authority_server_ca_ref: str | None = None
     authority_client_certificate_ref: str | None = None
     authority_client_key_ref: str | None = None
+    authority_store_identity: str | None = None
+    authority_recovery_reserve_bytes: int | None = Field(default=None, gt=0)
+    authority_recovery_max_bytes: int | None = Field(default=None, gt=0)
+    external_boot_capacity_bytes: int | None = Field(default=None, gt=0)
 
     @field_validator(
         "python",
@@ -124,6 +128,7 @@ class WorkerSettings(BaseModel):
         "authority_server_ca_ref",
         "authority_client_certificate_ref",
         "authority_client_key_ref",
+        "authority_store_identity",
     )
     @classmethod
     def validate_string_bytes(cls, value: str | None) -> str | None:
@@ -175,19 +180,32 @@ class WorkerSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_authority_route(self) -> Self:
-        """Accept the worker authority route only as one complete five-value contract."""
-        values = (
+        """Accept optional authority routing and reservation geometry as complete groups."""
+        route = (
             self.authority_instance,
             self.authority_request_socket,
             self.authority_server_ca_ref,
             self.authority_client_certificate_ref,
             self.authority_client_key_ref,
         )
-        if any(value is not None for value in values) and not all(values):
+        if any(value is not None for value in route) and not all(route):
             raise ValueError("worker authority route must be complete or absent")
         socket = self.authority_request_socket
         if socket is not None and not socket.startswith("/"):
             raise ValueError("worker authority request socket must be absolute")
+        geometry = (
+            self.authority_store_identity,
+            self.authority_recovery_reserve_bytes,
+            self.authority_recovery_max_bytes,
+            self.external_boot_capacity_bytes,
+        )
+        if any(value is not None for value in geometry) and not all(geometry):
+            raise ValueError("worker authority reservation geometry must be complete or absent")
+        if (
+            all(geometry)
+            and self.authority_recovery_reserve_bytes != self.external_boot_capacity_bytes
+        ):
+            raise ValueError("worker authority reservation geometry must match worker capacity")
         return self
 
 
