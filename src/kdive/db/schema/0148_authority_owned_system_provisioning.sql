@@ -465,9 +465,22 @@ $$;
 
 CREATE FUNCTION public.resolve_allocating_authority_system_attempt(
     p_peer_incarnation text, p_authority_id uuid, p_generation bigint
-) RETURNS SETOF public.authority_system_attempts
+) RETURNS TABLE (
+    authority_id uuid, generation bigint, system_id uuid, allocation_id uuid,
+    resource_id uuid, provider_kind text, resource_name text, authority_instance text,
+    profile_identity text, root_identity text, bootstrap_identity text,
+    operation text, operation_identity text, operation_digest text, state text,
+    journal_sequence bigint, journal_digest text, journal_phase text,
+    journal_record jsonb
+)
 LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
-    SELECT attempt.* FROM public.authority_system_attempts AS attempt
+    SELECT attempt.id,attempt.generation,owner.system_id,owner.allocation_id,owner.resource_id,
+           owner.provider_kind,owner.resource_name,owner.authority_instance,
+           owner.profile_identity,owner.root_identity,owner.bootstrap_identity,
+           attempt.operation,attempt.operation_identity,attempt.operation_digest,attempt.state,
+           owner.journal_sequence,owner.journal_digest,owner.journal_phase,owner.journal_record
+    FROM public.authority_system_attempts AS attempt
+    JOIN public.authority_system_ownership AS owner ON owner.system_id=attempt.system_id
     JOIN public.worker_incarnations AS worker
       ON worker.incarnation=attempt.worker_incarnation
     JOIN public.jobs AS job ON job.id=attempt.job_id
@@ -487,19 +500,27 @@ CREATE FUNCTION public.resolve_current_authority_system_attempt(
     resource_id uuid, provider_kind text, resource_name text, authority_instance text,
     profile_identity text, root_identity text, bootstrap_identity text,
     operation text, operation_identity text, operation_digest text,
-    journal_sequence bigint, journal_digest text, journal_phase text,
-    journal_record jsonb
+    state text, journal_sequence bigint, journal_digest text, journal_phase text,
+    journal_record jsonb, project text, provisioning_profile jsonb,
+    source_image_id uuid, root_architecture text, root_spec jsonb,
+    bootstrap_public_key text
 ) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
     SELECT attempt.id,attempt.generation,owner.system_id,owner.allocation_id,owner.resource_id,
            owner.provider_kind,owner.resource_name,owner.authority_instance,
            owner.profile_identity,owner.root_identity,owner.bootstrap_identity,
            attempt.operation,attempt.operation_identity,attempt.operation_digest,
-           owner.journal_sequence,owner.journal_digest,owner.journal_phase,owner.journal_record
+           attempt.state,owner.journal_sequence,owner.journal_digest,
+           owner.journal_phase,owner.journal_record,
+           system.project,system.provisioning_profile,root.source_image_id,root.architecture,
+           root.root_spec,bootstrap.public_key
     FROM public.authority_system_attempts AS attempt
     JOIN public.authority_system_ownership AS owner
       ON owner.current_attempt_id=attempt.id
     JOIN public.worker_incarnations AS worker
       ON worker.incarnation=attempt.worker_incarnation
+    JOIN public.systems AS system ON system.id=owner.system_id
+    JOIN public.system_root_provenance AS root ON root.system_id=owner.system_id
+    JOIN public.system_bootstrap_keys AS bootstrap ON bootstrap.system_id=owner.system_id
     WHERE pg_has_role(session_user,'kdive_provider_authority','member')
       AND attempt.id=p_authority_id AND attempt.generation=p_generation
       AND attempt.worker_incarnation=p_peer_incarnation
