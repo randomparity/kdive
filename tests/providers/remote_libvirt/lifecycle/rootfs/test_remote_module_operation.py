@@ -45,6 +45,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     BuiltSourceImage,
     ModuleTreeEntry,
     SourceFilesystemEvidence,
+    expected_attempt_volumes,
     prepare_attempt_volumes,
 )
 from kdive.services.remote_module_attempt_preparation import (
@@ -808,6 +809,80 @@ def test_runtime_reap_uses_landed_reaper_with_live_retention_callback() -> None:
 
     assert asyncio.run(runtime.reap(retained)) == 3
     assert events == ["enumerated", "retained"]
+
+
+def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
+    result = RemoteModuleResultV1.from_wire_bytes(success_result())
+    operation = appliance_operation()
+    recovery = _recovery(result)
+    clock = ApplianceClock()
+    reference = appliance_request(clock)
+
+    class FlakyAppliance(ApplianceConn):
+        fail = True
+
+        def lookupByName(self, name: str):  # noqa: N802
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("provider lookup failed")
+            return super().lookupByName(name)
+
+    appliance = FlakyAppliance([], clock)
+    wanted = volume_request(tmp_path)
+
+    async def read(_recovery: RemoteModuleRecoveryRefV1) -> bytes:
+        return result.to_wire_bytes()
+
+    runtime = _runtime(read)
+    object.__setattr__(
+        runtime,
+        "volume_preparation",
+        RemoteModuleVolumePreparation(
+            Conn(),
+            "pool",
+            wanted.entries,
+            wanted.writer,
+            lambda _identity: detached(),
+            tmp_path,
+        ),
+    )
+    expected = expected_attempt_volumes(runtime._volume_request(operation))
+
+    def detached() -> AttachmentInspection:
+        return AttachmentInspection(
+            True,
+            True,
+            False,
+            frozenset({("pool", expected.source.name), ("pool", expected.scratch.name)}),
+        )
+
+    object.__setattr__(
+        runtime,
+        "appliance_execution",
+        RemoteModuleApplianceExecution(
+            appliance,
+            reference.architecture,
+            reference.emulator_path,
+            reference.memory_kib,
+            reference.vcpus,
+            reference.appliance_volume,
+            reference.appliance_image_digest,
+            lambda _operation: volume("root", "root"),
+            lambda _scratch: result.to_wire_bytes(),
+            detached,
+            reference.secret_registry,
+            ApplianceExecutor(),
+            clock,
+        ),
+    )
+    executor = RemoteModulePreparationExecutor()
+    with pytest.raises(RuntimeError, match="provider lookup failed"):
+        asyncio.run(runtime.teardown(recovery, executor, 300.0))
+    observed = asyncio.run(runtime.teardown(recovery, executor, 300.0))
+    executor.shutdown()
+
+    assert observed.complete
+    assert operation.system_id == recovery.system_id
 
 
 def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: Path) -> None:
