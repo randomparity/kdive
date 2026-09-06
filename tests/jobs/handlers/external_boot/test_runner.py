@@ -334,6 +334,25 @@ def test_competing_activations_serialize_recovery_capacity_debit(
                     )
                 return result.value
 
+            owner = await (
+                await seed.execute(
+                    "SELECT owner_key FROM external_boot_reservations WHERE activation_id=%s",
+                    (targets[0].vehicle.activation_id,),
+                )
+            ).fetchone()
+            assert owner is not None
+            await seed.execute(
+                "DELETE FROM external_boot_reservations WHERE activation_id=%s",
+                (targets[0].vehicle.activation_id,),
+            )
+            assert await debit(0) == "superseded"
+            await seed.execute(
+                "INSERT INTO external_boot_reservations "
+                "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                "VALUES (%s, %s, %s, %s, 'pending')",
+                (targets[0].vehicle.activation_id, shared_store, owner[0], RESERVED_BYTES),
+            )
+
             async with (
                 seed.transaction(),
                 advisory_xact_lock(seed, LockScope.RECOVERY_STORE, shared_store),

@@ -10,6 +10,7 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE
     v_used bigint;
+    v_updated integer;
 BEGIN
     IF p_recovery_max_bytes <= 0 OR p_reserve_bytes <= 0
        OR p_reserve_bytes > p_recovery_max_bytes THEN
@@ -18,6 +19,8 @@ BEGIN
     PERFORM 1 FROM public.jobs WHERE id = p_job_id FOR UPDATE;
     PERFORM 1 FROM public.external_boot_authorities
       WHERE job_id = p_job_id AND job_attempt = p_job_attempt FOR UPDATE;
+    PERFORM 1 FROM public.external_boot_reservations
+      WHERE activation_id = p_activation_id FOR UPDATE;
     IF NOT EXISTS (
         SELECT 1 FROM public.jobs j
         JOIN public.worker_incarnations w ON w.incarnation = j.worker_id
@@ -40,6 +43,7 @@ BEGIN
           )
           AND x.state = 'preparing' AND NOT x.cleanup_complete
           AND r.store_identity = p_store_identity AND r.reserved_bytes = p_reserve_bytes
+          AND r.state IN ('pending', 'ready')
     ) THEN
         RETURN 'superseded';
     END IF;
@@ -58,6 +62,10 @@ BEGIN
     UPDATE public.external_boot_reservations
        SET state = 'ready', ready_at = clock_timestamp()
      WHERE activation_id = p_activation_id AND state = 'pending';
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    IF v_updated <> 1 THEN
+        RETURN 'superseded';
+    END IF;
     RETURN 'applied';
 END;
 $$;
