@@ -320,6 +320,55 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
     preparation.shutdown()
 
 
+def test_sparse_reader_treats_a_complete_zero_raw_scratch_as_absent(tmp_path: Path) -> None:
+    image = tmp_path / "raw-scratch.ext4"
+    with image.open("wb") as handle:
+        handle.truncate(SCRATCH_CAPACITY_BYTES)
+    stream = _ImageStream(image, SCRATCH_CAPACITY_BYTES)
+    storage = _ImageStorage(_ImageVolume(image, stream), stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    assert reader.read_volume(_scratch()) is None
+    assert stream.sparse_called and stream.finished
+
+
+def test_sparse_reader_rejects_a_nonzero_malformed_raw_scratch(tmp_path: Path) -> None:
+    image = tmp_path / "malformed-scratch.ext4"
+    with image.open("wb") as handle:
+        handle.truncate(SCRATCH_CAPACITY_BYTES)
+        handle.seek(0)
+        handle.write(b"x")
+    stream = _ImageStream(image, SCRATCH_CAPACITY_BYTES)
+    storage = _ImageStorage(_ImageVolume(image, stream), stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    with pytest.raises(CategorizedError, match="durable filesystem is unreadable") as caught:
+        reader.read_volume(_scratch())
+    assert caught.value.category is ErrorCategory.CONFLICT
+
+
+def test_sparse_reader_rejects_a_short_blank_stream_before_debugfs(tmp_path: Path) -> None:
+    stream = _Stream([SCRATCH_CAPACITY_BYTES - 1])
+    storage = _Storage(stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    with pytest.raises(CategorizedError, match="durable result read failed") as caught:
+        reader.read_volume(_scratch())
+    assert caught.value.category is ErrorCategory.CONFLICT
+
+
 def test_debugfs_returns_none_only_for_a_real_absent_result(tmp_path: Path) -> None:
     image = tmp_path / "empty-scratch.ext4"
     with image.open("wb") as handle:
