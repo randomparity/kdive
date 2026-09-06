@@ -181,7 +181,7 @@ class LocalExternalBootAuthorityAdapter:
     def close(self) -> None:
         with self._executor_lock:
             self._closed = True
-            self._executor.__exit__(None, None, None)
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
     async def observe(
         self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
