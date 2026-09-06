@@ -250,6 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare attempt volumes
 - Retain preparation completion
 - Supervise remote module appliance
+- Reap orphaned remote module volumes
+- Compose remote module volume reaper
+- Enqueue remote module volume reaping
 
 ### Changed
 
@@ -1290,6 +1293,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align module volumes with prerequisites
 - Bound module volume offload
 - Name verified preparation seam
+- Design module volume reaping
+- Close reaping design gaps
+- Define cancellation drain
+- Reuse attachment traversal
+- Reconcile volume reaping dependencies
+- Expose reaper identity authority
+- Bound reaper identity work
+- Queue module volume reaping
+- Assign reaping to workers
+- Use landed worker types
+- Isolate internal volume reap jobs
+- Preserve tenant job pagination
+- Format module reap design snippet
+- Refresh job reference for internal volume reaping
 
 ### Fixed
 
@@ -2089,6 +2106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Avoid racing unresolved console reads
 - Preserve unresolved stream release
 - Validate console volume keys
+- Preserve module reap payload wire shape
+- Retry unreachable module volume fleets
+- Snapshot remote fleet configuration
 
 ### Security
 
