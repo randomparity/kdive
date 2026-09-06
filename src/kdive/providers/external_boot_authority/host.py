@@ -1250,7 +1250,10 @@ def _build_mutation_service(
     @asynccontextmanager
     async def connections() -> AsyncIterator[AsyncConnection]:
         async with _database_connection(config) as connection:
-            await check_database_role(connection)
+            # Finish the readiness query's transaction before repository methods
+            # establish their own durable transaction.
+            async with connection.transaction():
+                await check_database_role(connection)
             yield connection
 
     repository = DatabaseAuthorityRepository(connections)

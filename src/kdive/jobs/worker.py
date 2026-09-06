@@ -496,12 +496,21 @@ class Worker:
                 await conn.set_autocommit(False)
 
     async def _run_handler(self, job: Job, handler: JobHandler, span: JobSpan) -> None:
-        handler_task = asyncio.create_task(self._invoke_handler(job, handler))
-        await self._finalize_handler(job, span, handler_task)
+        for continuation in range(2):
+            handler_task = asyncio.create_task(self._invoke_handler(job, handler))
+            continue_claim = await self._finalize_handler(job, span, handler_task)
+            if not continue_claim:
+                return
+            if continuation == 1:
+                _log.warning(
+                    "external boot job %s returned a repeated intermediate deadline; "
+                    "leaving its claimed lease for recovery",
+                    job.id,
+                )
 
     async def _finalize_handler(
         self, job: Job, span: JobSpan, handler_task: asyncio.Task[JobHandlerResult]
-    ) -> None:
+    ) -> bool:
         try:
             result_ref = await handler_task
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
@@ -523,7 +532,7 @@ class Worker:
                         exc,
                         exc_info=True,
                     )
-                return
+                return False
             span.set_outcome("error")
             category = _failure_category(exc)
             terminal = _is_terminal(exc, category)
@@ -540,7 +549,7 @@ class Worker:
             if failed_job.state is JobState.QUEUED:
                 self._telemetry.record_job_retry(job.kind.value)
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
-            return
+            return False
         marker = _external_marker(job)
         if marker is not None:
             if isinstance(
@@ -548,22 +557,22 @@ class Worker:
                 (ExternalBootDerivedReleaseCompletion, ExternalBootDerivedTeardownCompletion),
             ):
                 if _authority_binding_matches(marker, result_ref):
-                    return
+                    return False
                 _log.warning(
                     "marked external boot job %s returned a mismatched derived completion",
                     job.id,
                 )
-                return
+                return False
             if isinstance(result_ref, ExternalBootAuthorityResultV1) and _authority_binding_matches(
                 marker, result_ref
             ):
-                await self._commit_external_result(job, result_ref)
+                return await self._commit_external_result(job, result_ref)
             else:
                 _log.warning("marked external boot job %s returned no authority result", job.id)
-            return
+            return False
         if isinstance(result_ref, ExternalBootAuthorityResultV1):
             _log.warning("ordinary job %s returned an external authority result", job.id)
-            return
+            return False
         async with self._pool.connection() as conn:
             completed = await queue.complete(
                 conn,
@@ -574,10 +583,11 @@ class Worker:
             )
         if completed is None:
             _log.warning("job %s completed but was reclaimed; result dropped", job.id)
+        return False
 
     async def _commit_external_result(
         self, job: Job, result: ExternalBootAuthorityResultV1
-    ) -> None:
+    ) -> bool:
         async with self._pool.connection() as conn:
             if isinstance(result, ExternalBootAuthoritySuccessV1):
                 committed = await queue.complete_external_boot(
@@ -589,14 +599,20 @@ class Worker:
                 )
             else:
                 _log.warning("external boot job %s returned an untyped result variant", job.id)
-                return
+                return False
         if not isinstance(committed, queue.ExternalBootCommitStatus):
             if committed is None:
                 _log.warning("external boot job %s was reclaimed; result dropped", job.id)
-            return
+                return False
+            return (
+                isinstance(committed, Job)
+                and isinstance(result, ExternalBootAuthoritySuccessV1)
+                and result.result.operation == "deadline"
+                and committed.state is JobState.RUNNING
+            )
         if committed is queue.ExternalBootCommitStatus.SUPERSEDED:
             _log.warning("external boot job %s was reclaimed; result dropped", job.id)
-            return
+            return False
         failure = _classified_external_boot_failure(result, committed)
         async with self._pool.connection() as conn:
             finalized = await queue.fail_external_boot(
@@ -611,6 +627,7 @@ class Worker:
                 "result dropped",
                 job.id,
             )
+        return False
 
     async def _heartbeat_loop(self, job_id: UUID, attempt: int) -> None:
         """Renew the lease until cancelled, the fence misses, or a heartbeat errors.

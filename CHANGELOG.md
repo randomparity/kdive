@@ -322,12 +322,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Complete active external boot release
 - Route orphan disposition through authority
 - Publish authority cleanup quarantine evidence
+- Route external history teardown through authority
 - Define remote external boot recovery contract
 - Bind authority volume preparation
 - Persist authority recovery evidence
 - Persist preparation receipts
-- Verify existing authority fixture
-- Bind staged rootfs provenance digest
+- Add closed authority teardown proof
+- Resolve trusted teardown snapshot
+- Add authority teardown request
+- Transport closed authority teardown proofs
+- Add authority-owned local system teardown
+- Finalize authority teardown receipts
+- Consume authority teardown receipts
+- Resolve authority teardown snapshots
+- Admit full teardown journal records
+- Anchor authority-owned system teardown proofs
 - Retain plans for host preparation
 - Run module preparation on authority host
 - Reopen running recovery evidence
@@ -347,18 +356,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stream module archives into ext4
 - Wire authority-owned module preparation
 - Wire remote module recovery lifecycle
-- Route external history teardown through authority
-- Add closed authority teardown proof
-- Resolve trusted teardown snapshot
-- Add authority teardown request
-- Transport closed authority teardown proofs
-- Add authority-owned local system teardown
-- Finalize authority teardown receipts
-- Consume authority teardown receipts
-- Resolve authority teardown snapshots
-- Admit full teardown journal records
-- Anchor authority-owned system teardown proofs
 - Add remote authority-owned system teardown
+- Verify existing authority fixture
+- Bind staged rootfs provenance digest
+- Add native authority fault barrier
 
 ### Changed
 
@@ -1443,12 +1444,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Publish current external boot teardown boundary
 - Specify remote materialization receipt recovery
 - Classify request client decision alternatives
-- Assign remote module input ownership
-- Clarify selected appliance architecture inputs
-- Record rejected remote authority alternatives
 - Correct derived release ordering
+- Assign remote module input ownership
 - Refresh system teardown reference
 - Refresh teardown CLI argument help
+- Record rejected remote authority alternatives
+- Clarify selected appliance architecture inputs
 - Record rejected remote authority alternatives
 
 ### Fixed
@@ -2339,16 +2340,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden preparation evidence I/O
 - Validate preparation evidence
 - Pass activation binding to materializer
+- Retain release proof through teardown
+- Retain teardown reservation through recovery
 - Stage private authority fixture input
 - Verify authority kvm membership by mode
 - Keep authority host settings out of worker lifecycle
-- Provision fixed-worker readiness artifacts
-- Connect authority clients to private session daemon
-- Parse bzImage release token
-- Accept bzImage gzip trailers
-- Allow active authority fixtures
-- Use local worker authority binding
-- Close authority install root provenance payload
+- Complete authority-owned system teardown
+- Preserve teardown intent across capacity release
 - Bind remote cleanup to current authority
 - Retain preparation completion evidence
 - Assemble authority adapters at the provider boundary
@@ -2360,14 +2358,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restore drained cancellation state
 - Persist cancelled host failures
 - Close authority import boundaries
+- Provision fixed-worker readiness artifacts
+- Connect authority clients to private session daemon
+- Reconcile system teardown terminal contracts
 - Gate authority host deployment
+- Parse bzImage release token
+- Accept bzImage gzip trailers
+- Allow active authority fixtures
+- Use local worker authority binding
+- Close authority install root provenance payload
 - Retain authority orphan completion executor
 - Package bootable remote module appliance runtime
-- Retain release proof through teardown
-- Retain teardown reservation through recovery
-- Complete authority-owned system teardown
-- Preserve teardown intent across capacity release
-- Reconcile system teardown terminal contracts
+- Complete preparing boot in one claim
+- Validate native proof socket with operator privileges
+- Bind fault proof to exact run
+- Inspect installed authority route
+- Commit authority role validation transaction
 
 ### Security
 
@@ -2396,6 +2402,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adopt authority service shutdown support
 - Adopt derived release authority contracts
 - Integrate authority preparation contract
+- Apply local authority route fix
+- Reconcile native proof with remote authority host
 
 ### Security
 
