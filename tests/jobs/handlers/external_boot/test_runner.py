@@ -33,6 +33,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
@@ -439,7 +440,11 @@ def test_real_authority_service_and_worker_sql_prepare_both_phases(
                 self, request: AuthorityPreparationMutationRequestV1
             ) -> AuthorityPreparationResponseV1:
                 nonlocal interrupt_after_terminal
-                response = await service.execute_preparation(self.current_peer, request)
+                async with (
+                    worker.transaction(),
+                    advisory_xact_lock(worker, LockScope.SYSTEM, request.system_id),
+                ):
+                    response = await service.execute_preparation(self.current_peer, request)
                 if interrupt_after_terminal:
                     interrupt_after_terminal = False
                     raise RuntimeError("worker stopped before preparation commit")
