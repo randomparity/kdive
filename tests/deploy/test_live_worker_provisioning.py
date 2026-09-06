@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
+import pytest
 import yaml
 from jinja2 import Environment, StrictUndefined
 
@@ -499,6 +500,37 @@ def test_authority_group_verification_tracks_local_mutation_kvm_requirement() ->
         )
 
 
+@pytest.mark.parametrize(
+    ("local_mutation", "result", "expected_failure"),
+    [
+        (False, {"rc": 0, "stdout": ""}, False),
+        (False, {"rc": 0, "stdout": "fixture-domain\n"}, True),
+        (True, {"rc": 0, "stdout": "fixture-domain\n"}, False),
+        (True, {"rc": 1, "stdout": ""}, True),
+    ],
+)
+def test_authority_domain_verification_tracks_local_mutation_and_command_failure(
+    local_mutation: bool, result: dict[str, object], expected_failure: bool
+) -> None:
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(
+        item
+        for item in tasks
+        if item.get("name") == "Verify the authority can use its private provider endpoint"
+    )
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["bool"] = bool
+    failed = environment.compile_expression(task["failed_when"])
+
+    assert (
+        failed(
+            live_vm_host_authority_domains=result,
+            live_vm_host_authority_local_mutation_enabled=local_mutation,
+        )
+        is expected_failure
+    )
+
+
 def test_ansible_installs_authority_in_clean_host_order() -> None:
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)
@@ -734,6 +766,40 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     assert "dest: /opt/kdive-live-worker-lifecycle/revision" in tasks
     assert 'mode: "0444"' in tasks
     assert "Symlink the libguestfs binding into the lifecycle worker venv" in tasks
+
+
+def test_ansible_bakes_checkout_identity_before_installing_fixed_worker_runtime() -> None:
+    tasks = _text(MAIN_TASKS)
+    stamp = "Stamp the exact checkout build identity"
+    install = "Install KDIVE into the lifecycle witness venv"
+    stamp_block = tasks[tasks.index(stamp) : tasks.index(install)]
+
+    assert "scripts/stamp-buildinfo.sh" in stamp_block
+    assert '- "false"' in stamp_block
+    assert 'KDIVE_BUILDINFO_COMMIT: "{{ live_vm_host_checkout.after[0:12] }}"' in stamp_block
+    assert 'become_user: "{{ github_runner_user }}"' in stamp_block
+    assert "safe.directory" not in tasks
+    assert tasks.index(stamp) < tasks.index(install)
+
+
+def test_ansible_installs_manifest_from_final_fixed_worker_runtime() -> None:
+    tasks = _text(MAIN_TASKS)
+    runtime = "Keep the lifecycle witness environment root-owned"
+    locate = "Locate the lifecycle witness venv site-packages"
+    build = "Build the fixed-worker capture bootstrap manifest"
+    install = "Install the root-owned fixed-worker capture bootstrap manifest"
+    producer_verify = "Verify the installed fixed-worker capture bootstrap manifest"
+    consumer_verify = "Verify capture readiness as the fixed worker identity"
+
+    assert tasks.index(runtime) < tasks.index(locate) < tasks.index(build)
+    assert tasks.index(build) < tasks.index(install) < tasks.index(producer_verify)
+    assert tasks.index(producer_verify) < tasks.index(consumer_verify)
+    assert "scripts/generate/build-capture-bootstrap-manifest.py" in tasks
+    assert "ansible.builtin.tempfile:" in tasks
+    assert "live_vm_host_capture_manifest_staged.path" in tasks
+    assert "/opt/kdive-live-worker-lifecycle/.venv/bin/python" in tasks
+    assert "/usr/share/kdive/capture-bootstrap-manifest.json" in tasks
+    assert "become_user: kdive-worker-1" in tasks[tasks.index(consumer_verify) :]
 
 
 def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:

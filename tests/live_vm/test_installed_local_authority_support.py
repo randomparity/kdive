@@ -884,7 +884,7 @@ print(json.dumps({{
     )
 
     assert json.loads(result.stdout) == {
-        "uri": "qemu+unix:///system?socket=/run/kdive/provider-authority/libvirt/libvirt-sock",
+        "uri": "qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock",
         "rootfs": "/var/lib/kdive/provider-authority/rootfs/"
         "11111111-1111-1111-1111-111111111111-overlay.qcow2",
         "console": "/var/lib/kdive/provider-authority/console/"
