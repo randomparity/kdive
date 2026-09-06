@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 from typing import LiteralString
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -34,8 +34,10 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import Digest
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
+from kdive.jobs.payloads import ResolveRecoveryOrphanPayload
 from kdive.log import bind_context
 from kdive.mcp.platform_auth import audit_platform_denial
 from kdive.mcp.responses import ToolResponse
@@ -119,6 +121,18 @@ _IDENTITY = TypeAdapter(Digest)
 _CONFLICT_AUTHORITY_SQL: LiteralString = (
     "SELECT provider_kind, authority_instance "
     "FROM resolve_external_boot_conflict_dispatch_binding(%s, %s, %s, %s)"
+)
+
+_QUARANTINE_SQL: LiteralString = (
+    "SELECT q.id, q.object_identity, q.resource_id, q.activation_id, q.provider_kind, "
+    "q.authority_instance, q.object_kind, q.object_reference, q.ownership_digest, "
+    "q.observed_digest, q.reserved_bytes, r.kind AS resource_kind "
+    "FROM external_boot_recovery_quarantine AS q "
+    "JOIN systems AS s ON s.id = q.system_id "
+    "JOIN allocations AS a ON a.id = s.allocation_id "
+    "JOIN resources AS r ON r.id = a.resource_id AND r.id = q.resource_id "
+    "WHERE q.system_id = %s AND q.status = 'quarantined' "
+    "AND q.object_identity = ANY(%s) ORDER BY q.object_identity FOR UPDATE OF q"
 )
 
 _PROMOTION = (
@@ -570,15 +584,17 @@ async def resolve_recovery_orphan(
     system_id: str,
     object_identities: list[str],
     disposition: str,
+    resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
-    """Admit a quarantined recovery-object repair, then report the missing executor.
+    """Atomically admit a bounded, durable quarantined recovery-object repair.
 
     The platform role is enforced before the System is *resolved*, matching the break-glass
     ``ops`` tools this one registers beside: a caller without ``platform_admin`` learns nothing
     about which System ids exist. Only the id's syntax is checked first, so the denial audit
     below records a bounded identifier rather than arbitrary caller input. It runs no admission
     check — ADR-0583 scopes the repair to quarantined recovery objects, which are not the
-    activation the matrix keys on, and no quarantine record exists to read yet.
+    activation the matrix keys on. Object references and provider authority come only from
+    exact durable quarantine rows; caller identities are selectors, never provider paths.
     """
     uid = _as_uuid(system_id)
     if uid is None:
@@ -590,15 +606,86 @@ async def resolve_recovery_orphan(
             pool, ctx, tool=ORPHAN_TOOL, scope=f"denied:{uid}", args={"system_id": str(uid)}
         )
         return ToolResponse.denied(system_id, missing_roles=[PlatformRole.PLATFORM_ADMIN])
+    invalid = _orphan_input_error(system_id, object_identities, disposition)
+    if invalid is not None:
+        return invalid
+    if len(object_identities) != len(set(object_identities)):
+        return _config_error(
+            system_id,
+            reason="duplicate_object_identities",
+            detail="object_identities must not contain duplicates",
+            next_action="systems.get",
+        )
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
+        async with (
+            pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.SYSTEM, uid),
+        ):
             system = await SYSTEMS.get(conn, uid)
-        if system is None:
-            return _unresolved_system(system_id)
-        invalid = _orphan_input_error(system_id, object_identities, disposition)
-        if invalid is not None:
-            return invalid
-        return _executor_unavailable(system_id, ORPHAN_TOOL)
+            if system is None:
+                return _unresolved_system(system_id)
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(_QUARANTINE_SQL, (uid, object_identities))
+                rows = await cur.fetchall()
+            if len(rows) != len(object_identities):
+                return _conflict(
+                    system_id,
+                    reason="quarantine_binding_mismatch",
+                    detail="the exact quarantined recovery-object set is unavailable",
+                    next_actions=["systems.get"],
+                )
+            if any(row["provider_kind"] != row["resource_kind"] for row in rows):
+                return _conflict(
+                    system_id,
+                    reason="quarantine_binding_mismatch",
+                    detail="the quarantined recovery-object provider binding no longer matches",
+                    next_actions=["systems.get"],
+                )
+            if resolver is None:
+                return _config_error(
+                    system_id,
+                    reason="recovery_executor_unavailable",
+                    detail="the recovery-object provider resolver is not configured",
+                    next_action="systems.get",
+                )
+            binding = await resolver.binding_for_system(conn, uid)
+            if (
+                any(row["provider_kind"] != binding.kind.value for row in rows)
+                or binding.runtime.external_boot_recovery_objects is None
+            ):
+                return _executor_unavailable(system_id, ORPHAN_TOOL)
+            canonical = "\0".join(
+                f"{row['id']}:{row['ownership_digest']}:{row['observed_digest']}" for row in rows
+            )
+            binding_digest = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+            operation_identity = (
+                "sha256:"
+                + hashlib.sha256(f"{uid}\0{disposition}\0{binding_digest}".encode()).hexdigest()
+            )
+            request_id = uuid5(NAMESPACE_URL, f"kdive:{operation_identity}")
+            payload = ResolveRecoveryOrphanPayload(
+                schema="resolve-recovery-orphan-v1",
+                system_id=str(uid),
+                request_id=str(request_id),
+                binding_digest=binding_digest,
+            )
+            job = await queue.enqueue(
+                conn,
+                JobKind.RESOLVE_RECOVERY_ORPHAN,
+                payload,
+                job_authorizing(ctx, system.project),
+                f"external-boot-orphan:{operation_identity}",
+            )
+            object_ids = [row["id"] for row in rows]
+            await conn.execute(
+                "INSERT INTO external_boot_recovery_orphan_requests "
+                "(id, system_id, disposition, binding_digest, object_ids, job_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (request_id, uid, disposition, binding_digest, object_ids, job.id),
+            )
+    response = ToolResponse.from_job(job)
+    return response.model_copy(update={"data": {**response.data, "system_id": system_id}})
 
 
 __all__ = [

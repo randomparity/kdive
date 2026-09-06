@@ -346,6 +346,8 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         "reclaim_investigation_rootfs",
         # Platform-internal fleet maintenance, enqueued by the reconciler rather than a tenant.
         "remote_module_volume_reap",
+        # Platform-admin-only exact recovery-object quarantine disposition.
+        "resolve_recovery_orphan",
     }
 
 

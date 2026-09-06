@@ -400,6 +400,53 @@ class ExternalBootPreparationPorts(Protocol):
     ) -> ExternalBootPreparationObservation: ...
 
 
+class RecoveryObjectBinding(_ClosedValue):
+    """Exact server-owned identity of one quarantined recovery object."""
+
+    record_id: CanonicalUuid
+    binding: ExternalBootActivationBinding
+    kind: Literal["kernel", "initrd", "modules", "recovery-record"]
+    reference: OpaqueProviderRef
+    ownership_digest: Digest
+
+
+class RecoveryObjectObservation(_ClosedValue):
+    """Fresh provider evidence for one exact quarantined object binding."""
+
+    binding: RecoveryObjectBinding
+    present: bool
+    managed: bool
+    observed_digest: Digest
+
+    @model_validator(mode="after")
+    def _managed_object_is_present(self) -> RecoveryObjectObservation:
+        if self.managed and not self.present:
+            raise ValueError("an absent recovery object cannot be managed")
+        return self
+
+
+class ExternalBootRecoveryObjectPorts(Protocol):
+    """Bounded per-object quarantine observation and disposition."""
+
+    def observe_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
+    ) -> RecoveryObjectObservation: ...
+
+    def delete_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: Digest,
+    ) -> RecoveryObjectObservation: ...
+
+    def adopt_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: Digest,
+    ) -> RecoveryObjectObservation: ...
+
+
 class ExternalBootPorts(Protocol):
     """Six narrow operations shared by external-boot providers."""
 
