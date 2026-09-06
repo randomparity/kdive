@@ -32,6 +32,7 @@ from kdive.services.remote_module_phases import (
     capture_install_modules,
     classify_phase,
     inventory_module_attempts,
+    reap_module_attempt,
     restore_modules,
 )
 
@@ -313,3 +314,40 @@ async def test_inventory_uses_only_owned_keys_and_marks_unreadable_incomplete() 
     ]
     assert inventory.complete is False
     assert inventory.rollback_safe is False
+
+
+@pytest.mark.anyio
+async def test_reap_resumes_from_durable_marker_without_repeating_teardown() -> None:
+    operation = _operation()
+    runtime = Runtime(_result("installed"))
+    recovery = await capture_install_modules(
+        _request(operation),
+        runtime=cast(Any, runtime),
+        executor=cast(Any, SimpleNamespace()),
+        deadline=100.0,
+    )
+    await restore_modules(
+        recovery,
+        OpaqueProviderRef(ref="authority/fixed"),
+        runtime=cast(Any, runtime),
+        executor=cast(Any, SimpleNamespace()),
+        deadline=100.0,
+    )
+    runtime.reap = "reaping"
+    runtime.calls.clear()
+
+    await reap_module_attempt(
+        recovery,
+        OpaqueProviderRef(ref="authority/fixed"),
+        runtime=cast(Any, runtime),
+        executor=cast(Any, SimpleNamespace()),
+        deadline=100.0,
+    )
+
+    assert runtime.calls == [
+        "reap-state",
+        "resume-reap",
+        "delete-source",
+        "delete-scratch",
+        "record-reaped",
+    ]

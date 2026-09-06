@@ -283,3 +283,51 @@ async def restore_modules(
     await runtime.delete_scratch(recovery, executor)
     await runtime.record_reaped(recovery, executor)
     return result
+
+
+async def reap_module_attempt(
+    recovery: RemoteModuleRecoveryRefV2,
+    authority_reference: OpaqueProviderRef,
+    *,
+    runtime: ModuleOperationRuntime,
+    executor: RemoteModulePreparationExecutor,
+    deadline: float,
+) -> None:
+    """Finish cleanup of an already-restored attempt without authorizing unknown state."""
+    try:
+        recovery.validate_authority(authority_reference)
+    except ValueError as exc:
+        raise CategorizedError(
+            "remote module recovery authority differs",
+            category=ErrorCategory.CONFLICT,
+        ) from exc
+    state = await runtime.reap_state(recovery, executor)
+    if state == "reaped":
+        return
+    if state == "absent":
+        operation = await runtime.reopen_operation(recovery, deadline)
+        result = await runtime.reopen_result(recovery, deadline)
+        _validate_result(operation, result)
+        if result.phase != "restored":
+            raise CategorizedError(
+                "only a durably restored module attempt may be reaped",
+                category=ErrorCategory.CONFLICT,
+                details={"phase": result.phase},
+            )
+        observation = await runtime.teardown(recovery, executor, deadline)
+        if not observation.complete:
+            raise CategorizedError(
+                "remote module reap teardown incomplete",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        await runtime.record_reaping(recovery, executor)
+    else:
+        observation = await runtime.resume_reap(recovery, executor, deadline)
+        if not observation.complete:
+            raise CategorizedError(
+                "remote module reap cleanup incomplete",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+    await runtime.delete_source(recovery, executor)
+    await runtime.delete_scratch(recovery, executor)
+    await runtime.record_reaped(recovery, executor)
