@@ -62,6 +62,8 @@ def _gate_env(tmp_path: Path, python: Path) -> tuple[dict[str, str], Path]:
         "KDIVE_KERNEL_SRC": "/checkout/linux",
         "KDIVE_LIVE_WORKER_STATE_ROOT": str(root),
         "KDIVE_LIBVIRT_URI": "qemu+unix:///session?socket=/run/libvirt.sock",
+        "KDIVE_LIBVIRT_RECOVERY_ROOT": "/recovery/kdive-worker-1",
+        "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "10737418240",
         "KDIVE_LOG_LEVEL": "INFO",
         "KDIVE_ROOTFS_DIR": "/rootfs",
         "KDIVE_S3_BUCKET": "kdive",
@@ -207,6 +209,10 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         "KDIVE_INSTALL_STAGING": env["KDIVE_INSTALL_STAGING"],
         "KDIVE_KERNEL_SRC": env["KDIVE_KERNEL_SRC"],
         "KDIVE_LIBVIRT_URI": env["KDIVE_LIBVIRT_URI"],
+        "KDIVE_LIBVIRT_RECOVERY_ROOT": env["KDIVE_LIBVIRT_RECOVERY_ROOT"],
+        "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": env[
+            "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"
+        ],
         "KDIVE_LOG_LEVEL": "INFO",
         "KDIVE_ROOTFS_DIR": env["KDIVE_ROOTFS_DIR"],
         "KDIVE_S3_BUCKET": env["KDIVE_S3_BUCKET"],
