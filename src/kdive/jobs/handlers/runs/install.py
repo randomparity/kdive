@@ -26,6 +26,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
+from kdive.services.external_boot.routing import require_worker_authority_route
 from kdive.services.runs.build_use import acquire_build_use, release_build_use
 from kdive.services.runs.steps import (
     cmdline_for,
@@ -33,6 +34,7 @@ from kdive.services.runs.steps import (
     install_method_for,
     system_arch,
 )
+from kdive.services.systems.root_provenance import read_root_spec
 
 _log = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ class _InstallPayloadContext:
     run_id: UUID
     override: str | None
     crashkernel: str | None
+    authority_instance: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,7 @@ class _InstallPlan:
     request: InstallRequest
     applied_extra: str | None
     crashkernel: str | None
+    staging_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,15 +78,18 @@ async def install_handler(
     payload = _install_payload_context(job)
     plan = await _resolve_install_plan(conn, payload, resolver)
     job_ctx = job_context_from_job(job, plan.run.project)
-    claimed = await _run_install_step(
-        conn,
-        payload.run_id,
-        plan.installer,
-        plan.request,
-        job_id=job.id,
-        attempt=job.attempt,
-        incarnation_credential=incarnation_credential,
-    )
+    if plan.staging_only:
+        claimed = (await claim_run_step(conn, payload.run_id, "install")).claimed
+    else:
+        claimed = await _run_install_step(
+            conn,
+            payload.run_id,
+            plan.installer,
+            plan.request,
+            job_id=job.id,
+            attempt=job.attempt,
+            incarnation_credential=incarnation_credential,
+        )
     if not claimed:
         return str(payload.run_id)
     await _complete_install_step(conn, job_ctx, plan)
@@ -95,6 +102,7 @@ def _install_payload_context(job: Job) -> _InstallPayloadContext:
         run_id=UUID(install_payload.run_id),
         override=install_payload.cmdline,
         crashkernel=install_payload.crashkernel,
+        authority_instance=install_payload.authority_instance,
     )
 
 
@@ -129,6 +137,19 @@ async def _resolve_install_plan(
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
     runtime = binding.runtime
+    root_cmdline = runtime.platform_root_cmdline
+    staging_only = payload.authority_instance is not None
+    if staging_only:
+        require_worker_authority_route(binding, payload.authority_instance)
+        root_spec = await read_root_spec(conn, system_id)
+        if root_spec is None:
+            raise CategorizedError(
+                "external-boot install requires immutable root provenance; re-stage the System "
+                "root image",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"reason": "root_provenance_missing"},
+            )
+        root_cmdline = " ".join(root_spec.arguments)
     method = install_method_for(system, runtime.profile_policy)
     await _validate_crashkernel(conn, run_id, method, payload.crashkernel, arch=system_arch(system))
     return await _build_install_plan(
@@ -138,8 +159,9 @@ async def _resolve_install_plan(
         runtime.installer,
         method,
         kernel_ref=kernel_ref,
-        root_cmdline=runtime.platform_root_cmdline,
+        root_cmdline=root_cmdline,
         payload=payload,
+        staging_only=staging_only,
     )
 
 
@@ -187,6 +209,7 @@ async def _build_install_plan(
     kernel_ref: str,
     root_cmdline: str | None,
     payload: _InstallPayloadContext,
+    staging_only: bool = False,
 ) -> _InstallPlan:
     run_id = payload.run_id
     # One read of the build step result feeds the cmdline, initrd, and debuginfo below.
@@ -234,6 +257,7 @@ async def _build_install_plan(
         ),
         applied_extra=applied_extra,
         crashkernel=payload.crashkernel,
+        staging_only=staging_only,
     )
 
 
@@ -381,6 +405,8 @@ async def _complete_install_step(
                 "system_id": str(plan.request.system_id),
                 "cmdline": plan.applied_extra,
                 "crashkernel": plan.crashkernel,
+                "exact_cmdline": plan.request.cmdline,
+                "authority_instance": (None if not plan.staging_only else "configured"),
             },
         )
         await audit.record(

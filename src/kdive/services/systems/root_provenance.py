@@ -143,4 +143,28 @@ async def insert_root_provenance(
     )
 
 
-__all__ = ["RootProvenanceSnapshot", "insert_root_provenance", "resolve_root_provenance"]
+async def read_root_spec(conn: AsyncConnection, system_id: UUID) -> RootSpecV1 | None:
+    """Read the immutable mechanically inspected root specification for a System."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT root_spec FROM system_root_provenance WHERE system_id = %s", (system_id,)
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    try:
+        return RootSpecV1.model_validate(row["root_spec"])
+    except ValidationError as exc:
+        raise CategorizedError(
+            "stored root provenance is malformed; re-stage the System root image",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "malformed_system_root_provenance"},
+        ) from exc
+
+
+__all__ = [
+    "RootProvenanceSnapshot",
+    "insert_root_provenance",
+    "read_root_spec",
+    "resolve_root_provenance",
+]

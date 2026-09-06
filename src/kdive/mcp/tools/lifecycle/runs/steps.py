@@ -38,6 +38,7 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.external_boot.routing import server_authority_instance
 from kdive.services.runs.build_catalog import resolve_build, resolve_build_expiry
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
@@ -112,6 +113,11 @@ async def install_run(
                 return _config_error(run_id, data={"current_status": run.state.value})
             if run.system_id is None:
                 return _not_bound(run_id)
+            try:
+                binding = await resolver.binding_for_system(conn, run.system_id)
+                authority_instance = server_authority_instance(binding)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(run_id, exc)
             # The method gate is on the crashkernel path only: an install without a reservation is
             # byte-unchanged (no System fetch, no binding call, no new failure surface, ADR-0300).
             if crashkernel is not None:
@@ -124,7 +130,9 @@ async def install_run(
                 principal=ctx.principal,
                 project=run.project,
                 kind="runs.install",
-                do_work=lambda: _restage_and_enqueue_install(conn, ctx, run, cmdline, crashkernel),
+                do_work=lambda: _restage_and_enqueue_install(
+                    conn, ctx, run, cmdline, crashkernel, authority_instance
+                ),
             )
 
 
@@ -196,6 +204,7 @@ async def _restage_and_enqueue_install(
     run: Run,
     cmdline: str | None,
     crashkernel: str | None,
+    authority_instance: str | None,
 ) -> ToolResponse:
     """Enqueue install under Investigation→Run locks, re-staging changed variants.
 
@@ -290,7 +299,12 @@ async def _restage_and_enqueue_install(
             JobKind.INSTALL,
             "install",
             "runs.install",
-            InstallPayload(run_id=str(run.id), cmdline=cmdline, crashkernel=crashkernel),
+            InstallPayload(
+                run_id=str(run.id),
+                cmdline=cmdline,
+                crashkernel=crashkernel,
+                authority_instance=authority_instance,
+            ),
             audit_args,
         )
     return run_job_envelope(job, run.id)
