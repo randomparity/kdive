@@ -41,8 +41,8 @@ class _ValidationState:
     previous_digest: str = GENESIS_DIGEST
     lane: tuple[str, str] | None = None
     ownership: dict[str, tuple[str, str]] = field(default_factory=dict)
-    operation_phases: dict[str, JournalPhase] = field(default_factory=dict)
-    operation_bindings: dict[str, tuple[object, ...]] = field(default_factory=dict)
+    operation_phases: dict[tuple[int, str], JournalPhase] = field(default_factory=dict)
+    operation_bindings: dict[tuple[int, str], tuple[object, ...]] = field(default_factory=dict)
     watermarks: dict[int, JournalRecordV1] = field(default_factory=dict)
     consumed_watermarks: set[tuple[int, str]] = field(default_factory=set)
     count: int = 0
@@ -51,6 +51,7 @@ class _ValidationState:
 @dataclass(frozen=True, slots=True)
 class _ValidationDelta:
     lane: tuple[str, str] | None
+    generation: int
     operation_identity: str
     operation_binding: tuple[object, ...] | None
     phase: JournalPhase
@@ -298,7 +299,8 @@ class FileAuthorityJournal:
             watermark_identity = (linked_generation, watermark.operation_identity)
             if watermark_identity in state.consumed_watermarks:
                 raise ValueError("authority journal watermark is already superseded")
-        prior_phase = state.operation_phases.get(record.operation_identity)
+        operation_key = (record.generation, record.operation_identity)
+        prior_phase = state.operation_phases.get(operation_key)
         allowed = (
             _INITIAL_OPERATION_PHASES
             if prior_phase is None
@@ -306,7 +308,7 @@ class FileAuthorityJournal:
         )
         if record.phase not in allowed:
             raise ValueError("authority journal phase ordering is invalid")
-        prior_binding = state.operation_bindings.get(record.operation_identity)
+        prior_binding = state.operation_bindings.get(operation_key)
         if prior_binding != operation_binding:
             if prior_binding is not None and not (
                 prior_phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
@@ -332,6 +334,7 @@ class FileAuthorityJournal:
                 new_ownership.append((item.reference, current_owner))
         return _ValidationDelta(
             new_lane,
+            record.generation,
             record.operation_identity,
             new_binding,
             record.phase,
@@ -346,8 +349,10 @@ class FileAuthorityJournal:
         if delta.lane is not None:
             state.lane = delta.lane
         if delta.operation_binding is not None:
-            state.operation_bindings[delta.operation_identity] = delta.operation_binding
-        state.operation_phases[delta.operation_identity] = delta.phase
+            state.operation_bindings[(delta.generation, delta.operation_identity)] = (
+                delta.operation_binding
+            )
+        state.operation_phases[(delta.generation, delta.operation_identity)] = delta.phase
         if delta.watermark is not None:
             state.watermarks[delta.watermark[0]] = delta.watermark[1]
         if delta.consumed_watermark is not None:

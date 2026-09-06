@@ -70,6 +70,16 @@ class AuthorityPreparationAdapter(Protocol):
     ) -> ExternalBootPreparationObservation: ...
 
 
+@runtime_checkable
+class AuthorityPreparationAdopter(Protocol):
+    async def adopt_preparation(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        predecessor: AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
+    ) -> AuthorityObservationV1: ...
+
+
 class AuthorityRepository(Protocol):
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
@@ -1018,6 +1028,37 @@ class ExternalBootAuthorityService:
                             raise AuthorityServiceError("journal_conflict")
                         await self._finalize_adapter(request, records)
                         return prior.observation
+                    predecessor: AuthorityPreparationMutationRequestV1 | None = None
+                    if isinstance(request, AuthorityPreparationMutationRequestV1):
+                        predecessor_record = next(
+                            (
+                                record
+                                for record in reversed(records)
+                                if record.phase is JournalPhase.TERMINAL
+                                and record.operation == request.operation
+                                and record.generation < request.generation
+                            ),
+                            None,
+                        )
+                        if predecessor_record is not None:
+                            predecessor = request.model_copy(
+                                update={
+                                    "authority_id": predecessor_record.authority_id,
+                                    "generation": predecessor_record.generation,
+                                    "attempt_id": predecessor_record.attempt_id,
+                                    "operation_identity": predecessor_record.operation_identity,
+                                    "operation_digest": predecessor_record.operation_digest,
+                                    "expected_source_identity": (
+                                        predecessor_record.expected_source_identity
+                                    ),
+                                    "intended_target_identity": (
+                                        predecessor_record.intended_target_identity
+                                    ),
+                                    "recovery_objects": predecessor_record.recovery_objects,
+                                }
+                            )
+                            if not self._operation_matches(predecessor_record, predecessor):
+                                raise AuthorityServiceError("journal_conflict")
                     unresolved = next(
                         (
                             record
@@ -1111,7 +1152,16 @@ class ExternalBootAuthorityService:
                 if not await self._head_still_anchors(binding, context):
                     raise AuthorityServiceError("journal_conflict")
                 try:
-                    await self._adapter.commit(request, context)
+                    if predecessor is not None:
+                        if not isinstance(self._adapter, AuthorityPreparationAdopter):
+                            raise AuthorityServiceError("provider_conflict")
+                        await self._adapter.adopt_preparation(
+                            cast(AuthorityPreparationMutationRequestV1, request),
+                            predecessor,
+                            context,
+                        )
+                    else:
+                        await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.

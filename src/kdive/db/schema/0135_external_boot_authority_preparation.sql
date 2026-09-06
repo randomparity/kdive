@@ -93,6 +93,32 @@ CREATE FUNCTION public.resolve_current_external_boot_preparation_authority(
       ), 'hex') = a.plan_identity
 $$;
 
+CREATE FUNCTION public.resolve_allocating_external_boot_preparation_plan(
+    p_peer_incarnation text, p_authority_id uuid, p_generation bigint
+) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
+    SELECT j.payload->'external_boot_plan_v1'
+    FROM public.external_boot_authorities AS a
+    JOIN public.worker_incarnations AS w ON w.incarnation = a.worker_incarnation
+    JOIN public.jobs AS j ON j.id = a.job_id AND j.attempt = a.job_attempt
+    WHERE pg_has_role(session_user, 'kdive_provider_authority', 'member')
+      AND w.incarnation = p_peer_incarnation AND w.state = 'active' AND w.fence_protocol = 4
+      AND a.id = p_authority_id AND a.generation = p_generation
+      AND a.state IN ('allocating', 'current')
+      AND a.purpose = 'activate' AND a.operation = 'activate'
+      AND j.state = 'running' AND j.worker_id = p_peer_incarnation
+      AND j.lease_expires_at > clock_timestamp()
+      AND jsonb_typeof(j.payload->'external_boot_plan_v1') = 'object'
+      AND j.payload #>> '{external_boot_plan_v1,ownership,system_id}' = a.system_id::text
+      AND j.payload #>> '{external_boot_plan_v1,ownership,run_id}' = a.run_id::text
+      AND 'sha256:' || encode(sha256(
+          convert_to('kdive-external-boot-plan-v1', 'UTF8') || decode('00', 'hex') ||
+          convert_to(public.canonical_external_boot_authority_json(
+              j.payload->'external_boot_plan_v1'
+          ), 'UTF8')
+      ), 'hex') = a.plan_identity
+$$;
+
 -- A preparing activation is now admitted to the same activate authority that will finish it.
 DO $$
 DECLARE
@@ -108,6 +134,60 @@ BEGIN
     ) INTO v_definition;
     IF v_definition NOT LIKE '%' || v_old || '%' THEN
         RAISE EXCEPTION 'external boot allocation source shape changed';
+    END IF;
+    EXECUTE replace(v_definition, v_old, v_new);
+END
+$$;
+
+-- A repeat delivery of the same claimed job attempt resumes its already-current authority.
+DO $$
+DECLARE
+    v_definition text;
+    v_anchor text := E'    INSERT INTO public.external_boot_authority_counters ' ||
+        E'(system_id, last_generation)\n';
+    v_resume text :=
+        E'    SELECT a.id, a.generation, a.operation_digest\n' ||
+        E'    INTO v_authority_id, v_generation, v_operation_digest\n' ||
+        E'    FROM public.external_boot_authorities AS a\n' ||
+        E'    WHERE a.system_id = p_system_id AND a.state = ''current''\n' ||
+        E'      AND a.activation_id = p_activation_id AND a.run_id = p_run_id\n' ||
+        E'      AND a.plan_identity = p_plan_identity AND a.job_id = p_job_id\n' ||
+        E'      AND a.job_attempt = p_attempt AND a.purpose = p_purpose\n' ||
+        E'      AND a.provider_kind = p_provider_kind\n' ||
+        E'      AND a.authority_instance = p_authority_instance\n' ||
+        E'      AND a.worker_incarnation = v_incarnation AND a.operation = v_operation\n' ||
+        E'      AND a.operation_identity = p_operation_identity;\n' ||
+        E'    IF FOUND THEN\n' ||
+        E'        RETURN QUERY SELECT ''allocated''::text, v_authority_id, v_generation, ' ||
+        E'v_operation_digest;\n' ||
+        E'        RETURN;\n' ||
+        E'    END IF;\n' ||
+        E'    v_authority_id := gen_random_uuid();\n\n';
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.allocate_external_boot_authority(bytea,uuid,integer,uuid,uuid,uuid,text,text,text,text,text)'::regprocedure
+    ) INTO v_definition;
+    IF v_definition NOT LIKE '%' || v_anchor || '%' THEN
+        RAISE EXCEPTION 'external boot allocation counter shape changed';
+    END IF;
+    EXECUTE replace(v_definition, v_anchor, v_resume || v_anchor);
+END
+$$;
+
+-- The same exact current binding remains resolvable only so its anchored takeover ack can replay.
+DO $$
+DECLARE
+    v_definition text;
+    v_old text := E'AND a.id = p_authority_id AND a.generation = p_generation ' ||
+        E'AND a.state = ''allocating''';
+    v_new text := E'AND a.id = p_authority_id AND a.generation = p_generation ' ||
+        E'AND a.state IN (''allocating'', ''current'')';
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.resolve_allocating_external_boot_authority(text,uuid,bigint)'::regprocedure
+    ) INTO v_definition;
+    IF v_definition NOT LIKE '%' || v_old || '%' THEN
+        RAISE EXCEPTION 'external boot allocating resolver shape changed';
     END IF;
     EXECUTE replace(v_definition, v_old, v_new);
 END
@@ -398,6 +478,7 @@ REVOKE ALL ON FUNCTION
     public.resolve_current_external_boot_preparation_authority(
         text, uuid, bigint, bigint, text, text
     ),
+    public.resolve_allocating_external_boot_preparation_plan(text, uuid, bigint),
     public.commit_external_boot_preparation_result(
         bytea, uuid, integer, uuid, bigint, text, uuid, text, text, bigint, text, text, jsonb
     )
@@ -406,6 +487,9 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
 
 GRANT EXECUTE ON FUNCTION public.resolve_current_external_boot_preparation_authority(
     text, uuid, bigint, bigint, text, text
+) TO kdive_provider_authority;
+GRANT EXECUTE ON FUNCTION public.resolve_allocating_external_boot_preparation_plan(
+    text, uuid, bigint
 ) TO kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION public.commit_external_boot_preparation_result(
     bytea, uuid, integer, uuid, bigint, text, uuid, text, text, bigint, text, text, jsonb
