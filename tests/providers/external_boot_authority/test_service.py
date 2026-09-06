@@ -449,6 +449,7 @@ async def test_shutdown_drains_started_lane_before_closing_adapter(tmp_path: Pat
     await mutation
     with pytest.raises(asyncio.CancelledError):
         await shutdown
+    assert shutdown.cancelling() == 2
     assert repository.records[-1].phase is JournalPhase.TERMINAL
     assert adapter.closed
 

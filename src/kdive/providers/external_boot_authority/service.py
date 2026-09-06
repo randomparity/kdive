@@ -288,21 +288,18 @@ class ExternalBootAuthorityService:
     async def close(self) -> None:
         """Stop admission, drain completion-owned mutations, then close the adapter."""
         self._accepting = False
-        cancelled = False
+        cancellation: asyncio.CancelledError | None = None
         while self._completion_tasks:
             pending = asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
             try:
                 await asyncio.shield(pending)
-            except asyncio.CancelledError:
-                cancelled = True
-                current = asyncio.current_task()
-                assert current is not None
-                current.uncancel()
+            except asyncio.CancelledError as error:
+                cancellation = error
         if not self._closed and isinstance(self._adapter, AuthorityAdapterCloser):
             self._adapter.close()
         self._closed = True
-        if cancelled:
-            raise asyncio.CancelledError
+        if cancellation is not None:
+            raise cancellation
 
     def _track_completion(self, task: asyncio.Task[object]) -> None:
         self._completion_tasks.add(task)
@@ -1318,13 +1315,9 @@ class ExternalBootAuthorityService:
         """Execute through the authenticated lane, then reopen its durable receipt."""
         if not self._accepting:
             raise AuthorityServiceError("superseded")
-        current = asyncio.current_task()
-        assert current is not None
-        self._track_completion(current)
-        try:
-            return await self._execute_preparation(peer, request)
-        finally:
-            self._completion_tasks.discard(current)
+        task = asyncio.create_task(self._execute_preparation(peer, request))
+        self._track_completion(task)
+        return await asyncio.shield(task)
 
     async def _execute_preparation(
         self,
