@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -20,6 +21,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
@@ -317,7 +319,15 @@ async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt
     takeover = _takeover().model_copy(update={"provider_kind": "remote-libvirt"})
     plan = external_boot_plan(takeover.system_id, takeover.run_id)
     takeover = takeover.model_copy(update={"plan_identity": plan.identity})
-    repository = _Repository(peer, takeover)
+
+    class PreparationRepository(_Repository):
+        async def resolve_allocating(
+            self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
+        ) -> AuthorityBinding | None:
+            binding = await super().resolve_allocating(peer, request)
+            return replace(binding, preparation_plan=plan) if binding is not None else None
+
+    repository = PreparationRepository(peer, takeover)
     repository.remote_attempt = ModuleAttemptPreparationRequestV1(
         module_attempt_obligation=ModuleAttemptObligationReceiptV1(
             system_id=takeover.system_id,
@@ -330,14 +340,47 @@ async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt
         async def execute(self, request: object) -> object:
             raise AssertionError(f"begin must not execute the provider host: {request!r}")
 
+    materialize = AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="materialize",
+        operation_identity="materialize-op",
+        operation_digest="sha256:" + "b" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+    materialization = external_boot_materialization(plan)
+    adapter = _PreparationAdapter(
+        ExternalBootPreparationObservation(
+            state="materialized",
+            binding=ExternalBootActivationBinding(
+                system_id=str(takeover.system_id),
+                run_id=str(takeover.run_id),
+                activation_id=str(takeover.activation_id),
+            ),
+            plan_identity=plan.identity,
+            authority=OpaqueProviderRef(ref="authority/materialize"),
+            operation_identity=materialize.operation_identity,
+            materialization=materialization,
+        )
+    )
+
     service = ExternalBootAuthorityService(
         repository=repository,
         journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
-        adapter=_Adapter(),
+        adapter=cast(Any, adapter),
         remote_module_host=cast(Any, Host()),
     )
     await service.acknowledge_takeover(peer, takeover)
     repository.current = True
+    await service.execute_preparation(peer, materialize)
     request = AuthorityPreparationMutationRequestV1(
         **takeover.model_dump(
             mode="python",
@@ -369,6 +412,23 @@ async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt
     assert await service.open_remote_module_attempt(peer, request) == receipt
     assert len(repository.remote_attempt_calls) == 2
 
+    successor = takeover.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=cast(Any, adapter),
+        remote_module_host=cast(Any, Host()),
+    )
+
+    acknowledgement = await asyncio.wait_for(
+        restarted.acknowledge_takeover(peer, successor), timeout=0.1
+    )
+
+    assert acknowledgement.generation == successor.generation
+
 
 @pytest.mark.anyio
 async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_path: Path) -> None:
@@ -384,6 +444,8 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
         )
     )
     completed: list[RemoteModuleVolumePreparationRequestV1] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
     class Result:
         def validate_terminal_for(self, operation: object, authority: object) -> None:
@@ -395,6 +457,8 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
             self, request: RemoteModuleVolumePreparationRequestV1
         ) -> RemoteModuleTerminalPreparationResponseV1:
             completed.append(request)
+            entered.set()
+            await release.wait()
             return cast(RemoteModuleTerminalPreparationResponseV1, Result())
 
     adapter = _Adapter()
@@ -439,7 +503,13 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
         deadline=10_000.0,
     )
 
-    result = await service.execute_remote_module_preparation(peer, remote)
+    first = asyncio.create_task(service.execute_remote_module_preparation(peer, remote))
+    await entered.wait()
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_remote_module_preparation(peer, remote)
+    assert completed == [remote]
+    release.set()
+    result = await first
 
     assert isinstance(result, Result)
     assert completed == [remote]

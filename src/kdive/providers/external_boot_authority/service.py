@@ -315,10 +315,7 @@ class _ActiveOperation:
     stop_before_start: bool = False
     completion_binding: AuthorityBinding | None = None
     request: AuthorityPreparationMutationRequestV1 | None = None
-    binding: AuthorityBinding | None = None
-    acknowledgement: JournalRecordV1 | None = None
     receipt: ModuleAttemptPreparationRequestV1 | None = None
-    retained_lane: bool = False
 
 
 class ExternalBootAuthorityService:
@@ -1388,7 +1385,6 @@ class ExternalBootAuthorityService:
         if trusted is None or not self._root_candidate_matches_preparation(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
-        retain_lane = False
         try:
             async with lane.lock:
                 if lane.failed:
@@ -1415,34 +1411,22 @@ class ExternalBootAuthorityService:
                     ),
                     None,
                 )
-                active = lane.active
                 if latest is not None:
                     if (
                         latest.phase is not JournalPhase.MUTATION_STARTED
                         or not self._operation_matches(latest, mutation)
                     ):
                         raise AuthorityServiceError("journal_conflict")
-                    if active is None:
-                        active = _ActiveOperation(
-                            request.generation,
-                            JournalPhase.MUTATION_STARTED,
-                            asyncio.Event(),
-                            request=request,
-                            binding=binding,
-                            acknowledgement=acknowledgement,
-                            retained_lane=True,
-                        )
-                        lane.active = active
-                        retain_lane = True
-                    elif active.request != request:
-                        raise AuthorityServiceError("superseded")
                 else:
-                    if active is not None:
+                    if lane.active is not None:
                         raise AuthorityServiceError("superseded")
+                    latest_by_operation: dict[str, JournalRecordV1] = {}
+                    for record in reversed(records):
+                        latest_by_operation.setdefault(record.operation_identity, record)
                     unresolved = next(
                         (
                             record
-                            for record in reversed(records)
+                            for record in latest_by_operation.values()
                             if record.phase
                             in {
                                 JournalPhase.ADMITTED,
@@ -1467,17 +1451,6 @@ class ExternalBootAuthorityService:
                         records,
                         self._record(mutation, records, JournalPhase.MUTATION_STARTED),
                     )
-                    active = _ActiveOperation(
-                        request.generation,
-                        JournalPhase.MUTATION_STARTED,
-                        asyncio.Event(),
-                        request=request,
-                        binding=binding,
-                        acknowledgement=acknowledgement,
-                        retained_lane=True,
-                    )
-                    lane.active = active
-                    retain_lane = True
                 receipt = await self._repository.open_remote_module_attempt(
                     authenticated,
                     request,
@@ -1486,14 +1459,12 @@ class ExternalBootAuthorityService:
                 )
                 if receipt is None:
                     raise AuthorityServiceError("superseded")
-                active.receipt = receipt
                 return receipt
         except AuthorityServiceError as error:
             self._ensure_rejection(mutation, error)
             raise
         finally:
-            if not retain_lane:
-                self._release_lane(trusted.system_id, lane)
+            self._release_lane(trusted.system_id, lane)
 
     async def execute_remote_module_preparation(
         self,
@@ -1551,8 +1522,7 @@ class ExternalBootAuthorityService:
                         result = await host.execute(remote)
                         result.validate_terminal_for(remote.operation, request)
                         return result
-                    active = lane.active
-                    if active is None:
+                    if lane.active is None:
                         started = next(
                             (
                                 record
@@ -1582,11 +1552,11 @@ class ExternalBootAuthorityService:
                             JournalPhase.MUTATION_STARTED,
                             asyncio.Event(),
                             request=request,
-                            binding=binding,
-                            acknowledgement=acknowledgement,
                             receipt=receipt,
                         )
                         lane.active = active
+                    else:
+                        raise AuthorityServiceError("superseded")
                     if active.request != request or active.receipt is None:
                         raise AuthorityServiceError("superseded")
                     receipt = active.receipt.module_attempt_obligation
@@ -1669,8 +1639,6 @@ class ExternalBootAuthorityService:
                     active.done.set()
                     if lane.active is active:
                         lane.active = None
-                    if active.retained_lane:
-                        self._release_lane(trusted.system_id, lane)
                 self._release_lane(trusted.system_id, lane)
 
         task = asyncio.create_task(run())
