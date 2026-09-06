@@ -44,6 +44,15 @@ Allocation, project, and Investigation relationships; the snapshot deliberately 
 Investigation column. A System without a checksum pin, or whose image lacks mechanically verified
 root provenance, remains disk/GRUB-only. Callers never select an authority row.
 
+When a configured authority route makes `runs.install` a staging-only operation, the server reads
+and validates that System's `RootSpecV1` inside the existing System/Run-locked enqueue transaction
+and stores the closed value in the exact Run's durable `InstallPayload`. The worker composes the
+staging command line from that payload and never reads `system_root_provenance`; the table remains
+server-only. Ordinary installs omit the field and retain their existing behavior. A legacy
+authority-marked job that lacks the snapshot fails without claiming the install step and directs
+the caller to invoke `runs.install` again, whose terminal-job recycle writes a newly validated
+payload. Missing or malformed provenance fails before enqueue.
+
 ## Failure behavior and compatibility
 
 Malformed root facts are configuration errors that identify the invalid field and direct the

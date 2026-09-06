@@ -23,6 +23,7 @@ from kdive.jobs.payloads import InstallPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.kernel_config.gate import crash_capture_refusal
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -34,7 +35,6 @@ from kdive.services.runs.steps import (
     install_method_for,
     system_arch,
 )
-from kdive.services.systems.root_provenance import read_root_spec
 
 _log = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ class _InstallPayloadContext:
     override: str | None
     crashkernel: str | None
     authority_instance: str | None
+    root_spec: RootSpecV1 | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +120,7 @@ def _install_payload_context(job: Job) -> _InstallPayloadContext:
         override=install_payload.cmdline,
         crashkernel=install_payload.crashkernel,
         authority_instance=install_payload.authority_instance,
+        root_spec=install_payload.root_spec,
     )
 
 
@@ -157,15 +159,14 @@ async def _resolve_install_plan(
     staging_only = payload.authority_instance is not None
     if staging_only:
         require_worker_authority_route(binding, payload.authority_instance)
-        root_spec = await read_root_spec(conn, system_id)
-        if root_spec is None:
+        if payload.root_spec is None:
             raise CategorizedError(
-                "external-boot install requires immutable root provenance; re-stage the System "
-                "root image",
+                "authority-marked install lacks its server-validated root snapshot; call "
+                "runs.install again to re-enqueue the failed job",
                 category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"reason": "root_provenance_missing"},
+                details={"reason": "authority_install_root_snapshot_missing"},
             )
-        root_cmdline = " ".join(root_spec.arguments)
+        root_cmdline = " ".join(payload.root_spec.arguments)
     method = install_method_for(system, runtime.profile_policy)
     await _validate_crashkernel(conn, run_id, method, payload.crashkernel, arch=system_arch(system))
     return await _build_install_plan(
