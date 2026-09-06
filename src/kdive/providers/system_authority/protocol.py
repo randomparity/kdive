@@ -377,6 +377,26 @@ class AuthoritySystemResponseV1(_ClosedValue):
     journal_digest: Digest
 
 
+class AuthoritySystemExecutionV1(_ClosedValue):
+    """One acknowledged mutation carried as a single closed transport value."""
+
+    schema_: Literal["authority-system-execution-v1"] = Field(
+        "authority-system-execution-v1", alias="schema"
+    )
+    request: AuthoritySystemMutationRequestV1
+    acknowledgement: AuthoritySystemAcknowledgementV1
+
+    @model_validator(mode="after")
+    def _acknowledgement_matches_request(self) -> Self:
+        if (
+            self.acknowledgement.authority_id != self.request.authority_id
+            or self.acknowledgement.generation != self.request.generation
+            or self.acknowledgement.attempt_id != self.request.attempt_id
+        ):
+            raise ValueError("authority System acknowledgement does not match request")
+        return self
+
+
 _PROOF_ADAPTER = TypeAdapter(AuthoritySystemProofV1)
 
 

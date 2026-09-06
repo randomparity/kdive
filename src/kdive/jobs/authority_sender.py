@@ -53,6 +53,13 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
+from kdive.providers.system_authority.protocol import (
+    AuthoritySystemAcknowledgementV1,
+    AuthoritySystemExecutionV1,
+    AuthoritySystemMutationRequestV1,
+    AuthoritySystemResponseV1,
+    AuthoritySystemTakeoverRequestV1,
+)
 from kdive.security.secrets.secrets import SecretBackend
 
 _PEER_REASONS = frozenset(
@@ -100,7 +107,10 @@ def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Va
         ):
             raise ValueError
         if value.get("status") == "ok" and set(value) == {"status", "value"}:
-            return model.model_validate(value["value"])
+            encoded = json.dumps(
+                value["value"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()
+            return model.model_validate_json(encoded)
         if (
             value.get("status") == "error"
             and set(value) == {"status", "category"}
@@ -187,6 +197,33 @@ class AuthorityRequestSender:
             self._encode("acknowledge-takeover", request), deadline=deadline
         )
         return _decode_response(response, AuthorityAcknowledgementV1)
+
+    async def acknowledge_system_takeover(
+        self, request: AuthoritySystemTakeoverRequestV1, *, deadline: float
+    ) -> AuthoritySystemAcknowledgementV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("acknowledge-system-takeover", request), deadline=deadline
+        )
+        return _decode_response(response, AuthoritySystemAcknowledgementV1)
+
+    async def execute_system_operation(
+        self,
+        request: AuthoritySystemMutationRequestV1,
+        acknowledgement: AuthoritySystemAcknowledgementV1,
+        *,
+        deadline: float,
+    ) -> AuthoritySystemResponseV1:
+        try:
+            execution = AuthoritySystemExecutionV1(
+                request=request,
+                acknowledgement=acknowledgement,
+            )
+        except ValueError, TypeError:
+            raise _failure("invalid-request") from None
+        response = await self._transport_factory()._request_frame(
+            self._encode("execute-system-operation", execution), deadline=deadline
+        )
+        return _decode_response(response, AuthoritySystemResponseV1)
 
     async def execute_mutation(
         self, request: AuthorityMutationRequestV1, *, deadline: float
