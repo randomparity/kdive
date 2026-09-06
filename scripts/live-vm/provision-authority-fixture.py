@@ -19,7 +19,7 @@ from uuid import UUID
 # precede every provider import.
 _AUTHORITY = "kdive-provider-authority"
 _WORKER_URI = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
-_AUTHORITY_URI = "qemu+unix:///system?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
+_AUTHORITY_URI = "qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
 _WORKER_ROOTFS_ROOT = Path("/var/lib/kdive/rootfs")
 _AUTHORITY_ROOTFS_ROOT = Path("/var/lib/kdive/provider-authority/rootfs")
 _FIXTURE_BASE_NAME = "live-vm-provisioned-rootfs.qcow2"
