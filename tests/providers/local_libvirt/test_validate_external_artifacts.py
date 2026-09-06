@@ -351,6 +351,34 @@ def test_external_boot_scan_rejects_unverified_kernel_metadata(boot: bytes, mess
         _validate_kernel_blob(_combined_kernel_tar(boot=boot))
 
 
+def test_x86_boot_header_extracts_release_from_linux_version_string() -> None:
+    header_release = "7.0.0-dirty (build-user@build-host) #1 sanitized timestamp"
+
+    assert (
+        validation._boot_release(
+            io.BytesIO(_bzimage(header_release=header_release, decoded_release="7.0.0-dirty")),
+            "x86_64",
+        )
+        == "7.0.0-dirty"
+    )
+
+
+@pytest.mark.parametrize("header_release", ["", "7.0.0/not-canonical (build-user@build-host)"])
+def test_x86_boot_header_rejects_empty_or_invalid_release_token(header_release: str) -> None:
+    with pytest.raises(CategorizedError, match="release is not canonical"):
+        validation._boot_release(io.BytesIO(_bzimage(header_release=header_release)), "x86_64")
+
+
+def test_x86_boot_header_rejects_truncated_version_field() -> None:
+    header = bytearray(b"x" * 0x306)
+    header[0x202:0x206] = b"HdrS"
+    struct.pack_into("<H", header, 0x20E, 0x100)
+    header[0x300:0x306] = b"7.0.0-"
+
+    with pytest.raises(CategorizedError, match="no bounded x86 kernel version string"):
+        validation._boot_release(io.BytesIO(header), "x86_64")
+
+
 def test_external_boot_scan_rejects_decoded_kernel_over_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

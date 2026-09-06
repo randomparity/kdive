@@ -771,7 +771,11 @@ def _boot_release(boot: IO[bytes], arch: str) -> str:
             raise _build_failure("boot/vmlinuz has no usable x86 boot header")
         version_offset = 0x200 + int.from_bytes(header[0x20E:0x210], "little")
         boot.seek(version_offset)
-        release = boot.read(256).partition(b"\0")[0]
+        version = boot.read(256)
+        release, terminator, _ = version.partition(b"\0")
+        if not terminator:
+            raise _build_failure("boot/vmlinuz has no bounded x86 kernel version string")
+        release = release.partition(b" ")[0]
         return _validated_release(release)
     boot.seek(0)
     return _release_from_linux_banner(boot.read(_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES))
