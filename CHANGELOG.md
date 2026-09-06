@@ -360,6 +360,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify existing authority fixture
 - Bind staged rootfs provenance digest
 - Add native authority fault barrier
+- Add remote authority proof host controls
 
 ### Changed
 
@@ -2375,6 +2376,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind fault proof to exact run
 - Inspect installed authority route
 - Project authority reservation geometry to workers
+- Bound remote authority proof controls
 
 ### Security
 
