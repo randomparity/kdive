@@ -56,7 +56,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalRunningObserver,
     open_libguestfs_guest,
 )
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding
+from kdive.providers.ports.external_boot import ExternalBootActivationBinding, OpaqueProviderRef
 from kdive.providers.shared.runtime_paths import overlay_path
 from tests.providers.local_libvirt.external_boot_support import (
     _BINDING,
@@ -244,11 +244,43 @@ def _cleanup(
     binding: ExternalBootActivationBinding | None = None,
 ) -> None:
     """Run cleanup against a descriptor the caller owns, as the session does."""
+    selected = binding or BINDING
+    metadata = _add_projection(artifacts, _metadata().model_copy(update={"binding": selected}))
     descriptor = os.open(artifacts, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        LocalPayloadCleanup(recovery_root).cleanup(descriptor, binding or BINDING)
+        LocalPayloadCleanup(recovery_root).cleanup(descriptor, metadata)
     finally:
         os.close(descriptor)
+
+
+def _add_projection(artifacts: Path, metadata):
+    selected = metadata.binding
+    artifact_activation = (
+        selected.activation_id if selected.activation_id != "../escape" else BINDING.activation_id
+    )
+    projection = TargetProjectionV1(
+        ownership={"system_id": selected.system_id, "run_id": selected.run_id},
+        activation_id=artifact_activation,
+        plan_identity="sha256:" + "6" * 64,
+        architecture="x86_64",
+        cmdline="root=/dev/vda1",
+        initrd_filename=None,
+    )
+    digest = projection.digest.removeprefix("sha256:")
+    projection_dir = _private_dir(artifacts / digest)
+    (projection_dir / "target-projection.json").write_bytes(projection.canonical_bytes())
+    (projection_dir / "target-projection.json").chmod(0o600)
+    return metadata.model_copy(
+        update={
+            "binding": selected,
+            "materialized_modules": OpaqueProviderRef(
+                ref=(
+                    f"local-artifact-v2/{selected.system_id}/{selected.run_id}/"
+                    f"{artifact_activation}/{digest}/modules"
+                ),
+            ),
+        }
+    )
 
 
 ARTIFACT_ROOT_WRAPPED = "artifact root is not an owner-only service-owned directory"
@@ -377,9 +409,11 @@ class TestArtifactRoot:
         try:
             system = recovery_root / str(SYSTEM_ID)
             run = system / BINDING.run_id
-            opened, on_disk = os.fstat(descriptor), run.stat()
+            activation = run / BINDING.activation_id
+            opened, on_disk = os.fstat(descriptor), activation.stat()
             assert (opened.st_dev, opened.st_ino) == (on_disk.st_dev, on_disk.st_ino)
             assert stat.S_IMODE(system.stat().st_mode) == 0o700
+            assert stat.S_IMODE(run.stat().st_mode) == 0o700
             assert stat.S_IMODE(on_disk.st_mode) == 0o700
         finally:
             os.close(descriptor)
@@ -595,7 +629,7 @@ class TestPayloadCleanup:
         # Nothing was deleted. Refusing *after* unlinking the payloads would strand the
         # activation: publish_tombstone is never reached, so every retry re-raises with the
         # payloads it would have needed already gone.
-        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert all((artifacts / name).exists() for name in PAYLOAD_NAMES)
         assert (recovery / "modules.tar").exists()
 
     def test_cleanup_refuses_a_wide_mode_recovery_root(
@@ -614,7 +648,7 @@ class TestPayloadCleanup:
             _cleanup(recovery_root, artifacts)
 
         _assert_refusal(caught.value, recovery_root, RECOVERY_ROOT_MODE)
-        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert all((artifacts / name).exists() for name in PAYLOAD_NAMES)
         assert (recovery / "modules.tar").exists()
 
     def test_cleanup_refuses_a_symlinked_recovery_directory(
@@ -634,7 +668,7 @@ class TestPayloadCleanup:
         assert str(caught.value).endswith("(ENOTDIR)")
         # Nothing deleted: had the payloads gone first, an attacker-planted symlink would
         # destroy them while leaving untouched the archive `finalize_tombstone` blocks on.
-        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert all((artifacts / name).exists() for name in PAYLOAD_NAMES)
         assert (elsewhere / "modules.tar").exists()
 
     def test_cleanup_refuses_a_non_canonical_binding(
@@ -653,7 +687,7 @@ class TestPayloadCleanup:
             _cleanup(recovery_root, artifacts, impostor)
 
         # Refused before anything was deleted, unlike every other refusal here.
-        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert all((artifacts / name).exists() for name in PAYLOAD_NAMES)
 
     def test_payload_names_match_the_target_projection_filenames(self) -> None:
         # Discover the fields rather than listing them. A hard-coded list of the three known
@@ -720,7 +754,9 @@ def _recovery_directory(recovery_root: Path) -> Path:
     return recovery_root / f"{_BINDING.system_id}.{_BINDING.activation_id}"
 
 
-def _archived_activation(store: RecoveryMetadataStore, archive: bytes = b"module archive"):
+def _archived_activation(
+    store: RecoveryMetadataStore, artifacts: Path, archive: bytes = b"module archive"
+):
     """Drive a real store to a `recovered` activation whose `modules.tar` is really published.
 
     A stubbed store is the vacuous form this proof exists to avoid, so every step here is the
@@ -728,7 +764,9 @@ def _archived_activation(store: RecoveryMetadataStore, archive: bytes = b"module
     `prior_power="running"`; both are overridden, which is why no existing test reaches this
     path.
     """
-    template = _metadata().model_copy(update={"prior_power": "inactive"})
+    template = _add_projection(
+        artifacts, _metadata().model_copy(update={"prior_power": "inactive"})
+    )
     intent = _pre_stop(template)
     reference = store.publish_pre_stop(intent)
     sink = store.recovery_archive_sink(reference, intent)
@@ -778,7 +816,7 @@ class TestCleanupReachability:
             (artifacts / name).write_bytes(b"payload")
 
         with RecoveryMetadataStore(recovery_root) as store:
-            reference, recovered = _archived_activation(store)
+            reference, recovered = _archived_activation(store, artifacts)
             assert (_recovery_directory(recovery_root) / "modules.tar").exists()
 
             # Drive the session, not the mechanism. Calling `LocalPayloadCleanup.cleanup`
@@ -787,7 +825,7 @@ class TestCleanupReachability:
             session = _session(
                 artifacts, cleanup_payloads=LocalPayloadCleanup(recovery_root).cleanup
             )
-            session.cleanup_payloads()
+            session.cleanup_payloads(recovered)
             session.close()
 
             _finalize(store, reference, recovered)
@@ -795,25 +833,24 @@ class TestCleanupReachability:
         assert not _recovery_directory(recovery_root).exists()
         assert os.listdir(artifacts) == []
 
-    def test_cleanup_is_blocked_while_the_domain_is_active(self, tmp_path: Path) -> None:
+    def test_cleanup_is_allowed_while_the_domain_is_active(self, tmp_path: Path) -> None:
         recovery_root = _private_dir(tmp_path / "recovery")
         artifacts = _private_dir(tmp_path / "artifacts")
         for name in PAYLOAD_NAMES:
             (artifacts / name).write_bytes(b"payload")
 
         with RecoveryMetadataStore(recovery_root) as store:
-            _archived_activation(store)
+            _, recovered = _archived_activation(store, artifacts)
             session = _session(
                 artifacts,
                 active=True,
                 cleanup_payloads=LocalPayloadCleanup(recovery_root).cleanup,
             )
-            with pytest.raises(RuntimeError, match="domain must be inactive"):
-                session.cleanup_payloads()
+            session.cleanup_payloads(recovered)
             session.close()
 
-        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
-        assert (_recovery_directory(recovery_root) / "modules.tar").exists()
+        assert os.listdir(artifacts) == []
+        assert not (_recovery_directory(recovery_root) / "modules.tar").exists()
         assert not (_recovery_directory(recovery_root) / "tombstone.json").exists()
 
     # What the test above proves and does not prove. It proves the gate fires on an active
@@ -1091,7 +1128,7 @@ class TestFailClosedDefaults:
             with pytest.raises(
                 RuntimeError, match="local external-boot payload cleanup is not configured"
             ):
-                session.cleanup_payloads()
+                session.cleanup_payloads(_metadata())
         finally:
             session.close()
 
@@ -1148,7 +1185,7 @@ class TestConfiguredRootItself:
         _assert_refusal(caught.value, root, RECOVERY_DIR_WRAPPED)
         _assert_context_suppressed(caught.value)
         assert str(caught.value).endswith("(ENOTDIR)")
-        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert all((artifacts / name).exists() for name in PAYLOAD_NAMES)
         assert (recovery / "modules.tar").exists()
 
     def test_cleanup_refuses_an_absent_configured_root(self, tmp_path: Path) -> None:
@@ -1163,4 +1200,4 @@ class TestConfiguredRootItself:
             _cleanup(tmp_path / "does-not-exist", artifacts)
 
         assert str(caught.value).endswith("(ENOENT)")
-        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert all((artifacts / name).exists() for name in PAYLOAD_NAMES)

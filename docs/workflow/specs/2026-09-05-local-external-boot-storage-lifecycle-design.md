@@ -86,11 +86,13 @@ through read-only `observe(request)`. The service rejects a context/request or r
 before adapter dispatch, and adapters reject unsupported recovery contexts.
 
 The local recovery call never deletes. If the equal handoff is absent after eviction or adapter
-restart, it derives the canonical partial name from the request and performs the same
-descriptor-relative owner/mode/no-follow validation through a new absence-only store probe. Exact
-absence returns the stable `absent` observation. Presence, malformed state, I/O failure, or any
-context/request mismatch returns `provider_conflict`; only the ordinary authenticated commit arm
-may remove a present partial. This separates non-mutating restart proof from context-authorized
+restart, it first classifies matching complete metadata and cleanup tombstones through their
+existing authenticated paths. Only when both are absent does a descriptor-relative
+owner/mode/no-follow probe verify that the canonical partial and activation-owned cleanup artifacts
+are also absent. Missing partial evidence alone is not terminal. Present owned residue is
+nonterminal; malformed state, I/O failure, or any context/request mismatch returns
+`provider_conflict`; only the ordinary authenticated commit arm may remove present residue. This
+separates non-mutating restart proof from context-authorized
 deletion. A present malformed/foreign partial raises `provider_conflict`; an I/O failure is
 bounded to `provider_conflict` and is never converted to absence. `not-partial` falls through to
 normal complete-recovery teardown. Lost response and already-absent retries return the same

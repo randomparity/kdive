@@ -229,6 +229,7 @@ class TargetProjectionV1(_ClosedValue):
         "local-libvirt-target-projection-v1", alias="schema"
     )
     ownership: ActivationOwnership
+    activation_id: Annotated[str, Field(pattern=r"^[0-9a-f-]{36}$")]
     plan_identity: Digest
     architecture: Literal["x86_64", "ppc64le"]
     cmdline: Annotated[str, Field(min_length=1, max_length=4096)]
@@ -290,8 +291,12 @@ class TargetProjectionStore:
         finally:
             os.close(owner_fd)
         try:
+            activation_fd = _open_or_create_private_child(run_fd, projection.activation_id)
+        finally:
+            os.close(run_fd)
+        try:
             digest_name = projection.digest.removeprefix("sha256:")
-            projection_fd = _open_or_create_private_child(run_fd, digest_name)
+            projection_fd = _open_or_create_private_child(activation_fd, digest_name)
             try:
                 data = projection.canonical_bytes()
                 if len(data) > _MAX_PROJECTION_BYTES:
@@ -311,33 +316,41 @@ class TargetProjectionStore:
                 os.fsync(projection_fd)
             finally:
                 os.close(projection_fd)
-            os.fsync(run_fd)
+            os.fsync(activation_fd)
         finally:
-            os.close(run_fd)
-        reopened = self.reopen(_projection_ref(projection, "kernel"), projection.ownership)
+            os.close(activation_fd)
+        reopened = self.reopen(
+            _projection_ref(projection, "kernel"),
+            projection.ownership,
+            projection.activation_id,
+        )
         if reopened != projection:
             raise ValueError("target projection failed exact reopen")
         return _projection_ref(projection, "kernel")
 
     def reopen(
-        self, artifact: OpaqueProviderRef, ownership: ActivationOwnership
+        self, artifact: OpaqueProviderRef, ownership: ActivationOwnership, activation_id: str
     ) -> TargetProjectionV1:
-        parts = _artifact_ref_parts(artifact, ownership)
+        parts = _artifact_ref_parts(artifact, ownership, activation_id)
         system_fd = _open_private_directory(self._root_fd, parts[1])
         try:
             run_fd = _open_private_directory(system_fd, parts[2])
         finally:
             os.close(system_fd)
         try:
-            projection_fd = _open_private_directory(run_fd, parts[3])
+            activation_fd = _open_private_directory(run_fd, parts[3])
         finally:
             os.close(run_fd)
+        try:
+            projection_fd = _open_private_directory(activation_fd, parts[4])
+        finally:
+            os.close(activation_fd)
         try:
             data = _read_private_file(projection_fd, _PROJECTION_NAME)
         finally:
             os.close(projection_fd)
         projection = TargetProjectionV1.model_validate_json(data)
-        digest_matches = projection.digest.removeprefix("sha256:") == parts[3]
+        digest_matches = projection.digest.removeprefix("sha256:") == parts[4]
         if projection.canonical_bytes() != data or not digest_matches:
             raise ValueError("target projection is not canonical or digest-bound")
         if projection.ownership != ownership:
@@ -348,22 +361,26 @@ class TargetProjectionStore:
 def _projection_ref(projection: TargetProjectionV1, filename: str) -> OpaqueProviderRef:
     return OpaqueProviderRef(
         ref=(
-            f"local-artifact-v1/{projection.ownership.system_id}/"
-            f"{projection.ownership.run_id}/{projection.digest.removeprefix('sha256:')}/{filename}"
+            f"local-artifact-v2/{projection.ownership.system_id}/"
+            f"{projection.ownership.run_id}/{projection.activation_id}/"
+            f"{projection.digest.removeprefix('sha256:')}/{filename}"
         )
     )
 
 
-def _artifact_ref_parts(artifact: OpaqueProviderRef, ownership: ActivationOwnership) -> list[str]:
+def _artifact_ref_parts(
+    artifact: OpaqueProviderRef, ownership: ActivationOwnership, activation_id: str
+) -> list[str]:
     parts = artifact.ref.split("/")
     if (
-        len(parts) != 5
-        or parts[0] != "local-artifact-v1"
+        len(parts) != 6
+        or parts[0] != "local-artifact-v2"
         or parts[1] != ownership.system_id
         or parts[2] != ownership.run_id
-        or len(parts[3]) != 64
-        or any(character not in "0123456789abcdef" for character in parts[3])
-        or parts[4] not in {"kernel", "modules", "initrd"}
+        or parts[3] != activation_id
+        or len(parts[4]) != 64
+        or any(character not in "0123456789abcdef" for character in parts[4])
+        or parts[5] not in {"kernel", "modules", "initrd"}
     ):
         raise ValueError("local artifact reference is malformed or cross-owner")
     return parts
@@ -1169,7 +1186,7 @@ class _RealLocalExternalBootOperation:
             reference = _recovery_ref(metadata.binding)
             if store.reopen(reference, metadata.binding) != metadata:
                 raise ValueError("recovery metadata changed before cleanup")
-            self._session.cleanup_payloads()
+            self._session.cleanup_payloads(metadata)
             store.publish_tombstone(reference, metadata.binding, metadata, point_digest)
 
     def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
@@ -1177,8 +1194,10 @@ class _RealLocalExternalBootOperation:
             system_id=metadata.binding.system_id,
             run_id=metadata.binding.run_id,
         )
-        parts = _artifact_ref_parts(metadata.materialized_modules, ownership)
-        descriptor = self._session.open_artifact(parts[4], os.O_RDONLY)
+        parts = _artifact_ref_parts(
+            metadata.materialized_modules, ownership, metadata.binding.activation_id
+        )
+        descriptor = self._session.open_artifact(parts[5], os.O_RDONLY)
         try:
             return KernelBundleSource(
                 descriptor,

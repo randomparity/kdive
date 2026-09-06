@@ -44,6 +44,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     RunningKernelObservation,
 )
+from tests.providers.local_libvirt.external_boot_support import _metadata
 from tests.providers.local_libvirt.lifecycle.boot.session_support import (
     ACTIVATION_ID,
     BINDING,
@@ -2457,8 +2458,8 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         prepare_console=lambda _sid: cast(ConsoleReadinessWindow, _Window(events, "authority")),
         readiness=lambda _system_id, _window: ReadinessResult(True, True),
         observe_running=lambda _system_id, _domain: observation,
-        cleanup_payloads=lambda root, binding: events.append(
-            f"cleanup:{root}:{binding.activation_id}"
+        cleanup_payloads=lambda root, metadata: events.append(
+            f"cleanup:{root}:{metadata.binding.activation_id}"
         ),
     )
     session = factory.open(_lease(), _expected())
@@ -2468,7 +2469,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     assert session.readiness() == ReadinessResult(True, True)
     assert session.observe_running() == observation
     session.restore_power("inactive")
-    session.cleanup_payloads()
+    session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING}))
     session.restore_power("running")
     assert domain.active
     session.restore_power("inactive")
@@ -2482,7 +2483,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         session.readiness,
         session.observe_running,
         lambda: session.restore_power("running"),
-        session.cleanup_payloads,
+        lambda: session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING})),
     ):
         with pytest.raises(RuntimeError, match="closed"):
             call()
@@ -2519,7 +2520,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
                 expected_cmdline=b"root=UUID=x",
             )
         ),
-        cleanup_payloads=lambda _root, binding: cleaned.append(binding),
+        cleanup_payloads=lambda _root, metadata: cleaned.append(metadata.binding),
     )
     session = factory.open(lease, _expected())
     lease.system_id = UUID(int=9)
@@ -2533,7 +2534,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
     session.readiness()
     session.observe_running()
     session.restore_power("inactive")
-    session.cleanup_payloads()
+    session.cleanup_payloads(_metadata().model_copy(update={"binding": original_binding}))
     assert observed_ids == [SYSTEM_ID, SYSTEM_ID]
     assert cleaned == [original_binding]
     session.close()

@@ -48,9 +48,11 @@ invokes it only while recovering an exact authenticated `mutation-started` or `p
 TEARDOWN journal record, passing a closed context containing that phase and the record's identity.
 Ordinary `observe` remains read-only. When adapter restart or oldest-entry eviction loses the
 in-memory handoff, local recovery observation performs only a non-mutating, exact-request check
-that the canonical partial is absent; it never repeats deletion. A present partial falls back to
-the authenticated record-specific cleanup path, while malformed, foreign, or unreadable state
-fails closed. Absence without either the equal in-memory handoff or service-supplied recovery
+that complete recovery metadata, a cleanup tombstone, the canonical partial, and activation-owned
+cleanup artifacts are all absent; it never repeats deletion. Complete metadata and tombstones take
+precedence over partial absence. Present owned residue falls back to the authenticated
+record-specific cleanup path, while malformed, foreign, or unreadable state fails closed. Absence
+without either the equal in-memory handoff or service-supplied recovery
 context does not authorize a terminal result. A normal prepare retry instead resumes the same matching partial. Any malformed,
 foreign, symlinked, wide-mode, non-directory, or ambiguous partial is retained and reported.
 

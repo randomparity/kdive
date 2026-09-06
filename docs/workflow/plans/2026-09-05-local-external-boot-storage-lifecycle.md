@@ -115,8 +115,9 @@ Steps:
    request; consume it only for the equal request to return stable terminal `absent`. Keep
    `not-partial` on normal RecoveryPoint handling and failures nonterminal.
 6. Add the service-created recovery context and recovery-only adapter call. On handoff eviction or
-   adapter restart, prove canonical partial absence without deletion; reject every request/context
-   mismatch and every present or unreadable state.
+   adapter restart, classify matching complete metadata and tombstones before considering absence,
+   then prove complete, tombstone, partial, and activation-owned artifact absence without deletion;
+   reject every request/context mismatch and every present or unreadable residue.
 7. Add first-call, lost-response, already-absent, mismatched-request, bounded-eviction,
    real-service adapter-restart, malformed, and I/O-failure observation tests, plus shared contract
    tests proving ordinary observation remains read-only and only verified recovery dispatches the

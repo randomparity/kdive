@@ -564,7 +564,11 @@ def test_recovery_metadata_binds_expected_observation_release() -> None:
 
 def _projection() -> TargetProjectionV1:
     return TargetProjectionV1(
-        ownership={"system_id": _BINDING.system_id, "run_id": _BINDING.run_id},
+        ownership={
+            "system_id": _BINDING.system_id,
+            "run_id": _BINDING.run_id,
+        },
+        activation_id=_BINDING.activation_id,
         plan_identity="sha256:" + "6" * 64,
         architecture="x86_64",
         cmdline="root=/dev/vda1 console=ttyS0",
@@ -578,11 +582,14 @@ def test_target_projection_sidecar_publishes_and_reopens_exactly(tmp_path: Path)
     projection = _projection()
     with TargetProjectionStore(root) as store:
         kernel_ref = store.publish(projection)
-        assert store.reopen(kernel_ref, projection.ownership) == projection
+        assert (
+            store.reopen(kernel_ref, projection.ownership, projection.activation_id) == projection
+        )
     sidecar = (
         root
         / projection.ownership.system_id
         / projection.ownership.run_id
+        / projection.activation_id
         / projection.digest.removeprefix("sha256:")
         / "target-projection.json"
     )
@@ -600,6 +607,7 @@ def test_target_projection_sidecar_retries_interrupted_temporary_publication(
     for name in (
         projection.ownership.system_id,
         projection.ownership.run_id,
+        projection.activation_id,
         projection.digest.removeprefix("sha256:"),
     ):
         directory /= name
@@ -610,7 +618,9 @@ def test_target_projection_sidecar_retries_interrupted_temporary_publication(
 
     with TargetProjectionStore(root) as store:
         kernel_ref = store.publish(projection)
-        assert store.reopen(kernel_ref, projection.ownership) == projection
+        assert (
+            store.reopen(kernel_ref, projection.ownership, projection.activation_id) == projection
+        )
 
     assert not temporary.exists()
 
@@ -625,18 +635,19 @@ def test_target_projection_sidecar_rejects_substitution_and_cross_owner(tmp_path
         root
         / projection.ownership.system_id
         / projection.ownership.run_id
+        / projection.activation_id
         / projection.digest.removeprefix("sha256:")
         / "target-projection.json"
     )
     replacement = projection.model_copy(update={"cmdline": "root=/dev/vda2"})
     sidecar.write_bytes(replacement.canonical_bytes())
     with TargetProjectionStore(root) as store, pytest.raises(ValueError, match="digest-bound"):
-        store.reopen(kernel_ref, projection.ownership)
+        store.reopen(kernel_ref, projection.ownership, projection.activation_id)
     crossed = projection.ownership.model_copy(
         update={"run_id": "00000000-0000-0000-0000-000000000009"}
     )
     with TargetProjectionStore(root) as store, pytest.raises(ValueError, match="cross-owner"):
-        store.reopen(kernel_ref, crossed)
+        store.reopen(kernel_ref, crossed, projection.activation_id)
 
 
 def test_recovery_metadata_store_publishes_reopens_and_advances_phase(tmp_path: Path) -> None:
@@ -1684,7 +1695,8 @@ class _RealSession:
     def restore_power(self, prior: str) -> None:
         self.preparation.actions.append(f"power:{prior}")
 
-    def cleanup_payloads(self) -> None:
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        assert metadata.binding == self.preparation.metadata.binding
         self.preparation.actions.append("cleanup")
 
     def close(self) -> None:
@@ -1878,8 +1890,8 @@ class _RestartSession(_RealSession):
     def observe_running(self) -> RunningKernelObservation:
         return self.running_observation
 
-    def cleanup_payloads(self) -> None:
-        self.faults.run("cleanup-payloads", lambda: _RealSession.cleanup_payloads(self))
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.faults.run("cleanup-payloads", lambda: _RealSession.cleanup_payloads(self, metadata))
 
 
 def _restart_fixture(
@@ -1923,7 +1935,10 @@ def _restart_fixture(
         update={
             "capture": capture,
             "materialized_modules": OpaqueProviderRef(
-                ref=(f"local-artifact-v1/{_BINDING.system_id}/{_BINDING.run_id}/{'a' * 64}/modules")
+                ref=(
+                    f"local-artifact-v2/{_BINDING.system_id}/{_BINDING.run_id}/"
+                    f"{_BINDING.activation_id}/{'a' * 64}/modules"
+                )
             ),
             "materialized_modules_sha256": (
                 "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -2806,7 +2821,10 @@ def test_activation_rejects_substituted_artifact_reference_before_guest_mutation
     substituted = metadata.model_copy(
         update={
             "materialized_modules": OpaqueProviderRef(
-                ref=f"local-artifact-v1/{_BINDING.system_id}/foreign/{'a' * 64}/modules"
+                ref=(
+                    f"local-artifact-v2/{_BINDING.system_id}/foreign/"
+                    f"{_BINDING.activation_id}/{'a' * 64}/modules"
+                )
             )
         }
     )
