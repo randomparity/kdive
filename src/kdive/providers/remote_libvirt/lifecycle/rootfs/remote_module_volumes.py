@@ -6,10 +6,13 @@ import contextlib
 import hashlib
 import json
 import os
+import posixpath
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
+import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,9 +35,16 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names 
     render_module_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import parse_libvirt_xml
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MODULE_ARCHIVE_BYTES as MAX_ARCHIVE_BYTES,
+)
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MODULE_ENTRIES as MAX_ENTRIES,
+)
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MODULE_REGULAR_BYTES as MAX_CONTENT_BYTES,
+)
 
-MAX_ENTRIES = 200_000
-MAX_CONTENT_BYTES = 8 * 1024**3
 SCRATCH_CAPACITY_BYTES = 10 * 1024**3
 _MIN_SOURCE_CAPACITY_BYTES = 64 * 1024**2
 _SOURCE_BLOCK_BYTES = 4096
@@ -90,6 +100,23 @@ class Ext4SourceFilesystemWriter:
 
     def build(self, operation: bytes, entries: tuple[ModuleTreeEntry, ...]) -> BuiltSourceImage:
         _validate_entries(entries)
+        return self._build_source(
+            operation,
+            lambda modules: _populate_module_entries(modules, entries),
+        )
+
+    def build_from_archive(self, operation: bytes, archive: Path) -> BuiltSourceImage:
+        """Build from the canonical file-backed module tar without materializing its contents."""
+        return self._build_source(
+            operation,
+            lambda modules: _extract_canonical_module_archive(archive, modules),
+        )
+
+    def _build_source(
+        self,
+        operation: bytes,
+        populate: Callable[[Path], tuple[int, int]],
+    ) -> BuiltSourceImage:
         staging = Path(tempfile.mkdtemp(prefix="kdive-module-source-", dir=self._work_dir))
         descriptor, raw_image = tempfile.mkstemp(
             prefix="kdive-module-source-", suffix=".ext4", dir=self._work_dir
@@ -101,26 +128,8 @@ class Ext4SourceFilesystemWriter:
             (staging / "operation-v1.json").write_bytes(operation)
             modules = staging / "modules"
             modules.mkdir(mode=0o755)
-            ordered = sorted(
-                entries,
-                key=lambda value: (len(PurePosixPath(value.path).parts), value.path),
-            )
-            for entry in ordered:
-                destination = modules.joinpath(*PurePosixPath(entry.path).parts)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                kind = stat.S_IFMT(entry.mode)
-                if kind == stat.S_IFDIR:
-                    destination.mkdir(exist_ok=True)
-                    destination.chmod(0o755)
-                elif kind == stat.S_IFREG:
-                    assert entry.content is not None
-                    destination.write_bytes(entry.content)
-                    destination.chmod(0o755 if entry.mode & 0o111 else 0o644)
-                else:
-                    assert entry.link_target is not None
-                    destination.symlink_to(entry.link_target)
-            content_bytes = sum(len(entry.content or b"") for entry in entries)
-            capacity = source_image_capacity_bytes(content_bytes, len(entries))
+            entry_count, content_bytes = populate(modules)
+            capacity = source_image_capacity_bytes(content_bytes, entry_count)
             subprocess.run(  # noqa: S603 - fixed executable and closed argument vector
                 [
                     "mkfs.ext4",  # noqa: S607
@@ -129,7 +138,7 @@ class Ext4SourceFilesystemWriter:
                     "-b",
                     str(_SOURCE_BLOCK_BYTES),
                     "-N",
-                    str(source_image_inode_count(len(entries))),
+                    str(source_image_inode_count(entry_count)),
                     "-d",
                     str(staging),
                     str(image),
@@ -142,7 +151,13 @@ class Ext4SourceFilesystemWriter:
             evidence = self.inspect(image)
             size = image.stat().st_size
             succeeded = True
-        except (OSError, subprocess.SubprocessError, CategorizedError, ValueError) as exc:
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            tarfile.TarError,
+            CategorizedError,
+            ValueError,
+        ) as exc:
             raise CategorizedError(
                 "failed to build remote module ext4 source image",
                 category=ErrorCategory.BUILD_FAILURE,
@@ -290,6 +305,160 @@ def _validate_entries(entries: tuple[ModuleTreeEntry, ...]) -> None:
         validate_module_tree_bounds(entry_count=len(entries), content_bytes=content_bytes)
 
 
+def _populate_module_entries(
+    modules: Path, entries: tuple[ModuleTreeEntry, ...]
+) -> tuple[int, int]:
+    ordered = sorted(
+        entries,
+        key=lambda value: (len(PurePosixPath(value.path).parts), value.path),
+    )
+    for entry in ordered:
+        destination = modules.joinpath(*PurePosixPath(entry.path).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        kind = stat.S_IFMT(entry.mode)
+        if kind == stat.S_IFDIR:
+            destination.mkdir(exist_ok=True)
+            destination.chmod(0o755)
+        elif kind == stat.S_IFREG:
+            assert entry.content is not None
+            destination.write_bytes(entry.content)
+            destination.chmod(0o755 if entry.mode & 0o111 else 0o644)
+        else:
+            assert entry.link_target is not None
+            destination.symlink_to(entry.link_target)
+    content_bytes = sum(len(entry.content or b"") for entry in entries)
+    return len(entries), content_bytes
+
+
+def _extract_canonical_module_archive(archive_path: Path, modules: Path) -> tuple[int, int]:
+    count = 0
+    content_bytes = 0
+    prior_name: bytes | None = None
+    kinds: dict[str, str] = {}
+    descriptor = os.open(archive_path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as source:
+        archive_status = os.fstat(descriptor)
+        if not stat.S_ISREG(archive_status.st_mode):
+            raise ValueError("canonical module archive is not a regular file")
+        if archive_status.st_size > MAX_ARCHIVE_BYTES:
+            raise ValueError(f"canonical module archive exceeds {MAX_ARCHIVE_BYTES} archive bytes")
+        with tarfile.open(fileobj=source, mode="r|") as archive:
+            for member in archive:
+                path = _canonical_archive_path(member.name)
+                encoded_path = path.encode()
+                if prior_name is not None and encoded_path <= prior_name:
+                    raise ValueError("canonical module archive entries are duplicate or unordered")
+                prior_name = encoded_path
+                kind = _canonical_archive_member_kind(member)
+                _validate_archive_ancestors(path, kinds)
+                kinds[path] = kind
+                count += 1
+                if kind == "regular":
+                    content_bytes += member.size
+                validate_module_tree_bounds(entry_count=count, content_bytes=content_bytes)
+                destination = modules.joinpath(*PurePosixPath(path).parts)
+                _extract_archive_member(archive, member, destination, kind)
+    return count, content_bytes
+
+
+def _canonical_archive_path(value: str) -> str:
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeError as exc:
+        raise ValueError("canonical module archive path is not UTF-8") from exc
+    if (
+        not value
+        or value.startswith("/")
+        or unicodedata.normalize("NFC", value) != value
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        raise ValueError("canonical module archive path is not canonical relative text")
+    return value
+
+
+def _canonical_archive_member_kind(member: tarfile.TarInfo) -> str:
+    if member.isdir():
+        kind = "directory"
+    elif member.isfile() and not member.islnk():
+        kind = "regular"
+    elif member.issym():
+        kind = "symlink"
+    else:
+        raise ValueError("canonical module archive contains forbidden topology")
+    allowed_pax = {
+        "KDIVE.xattrs-supported",
+        "gid",
+        "linkpath",
+        "path",
+        "size",
+        "uid",
+    }
+    if (
+        member.pax_headers.get("KDIVE.xattrs-supported") != "0"
+        or set(member.pax_headers) - allowed_pax
+    ):
+        raise ValueError("canonical module archive metadata is invalid")
+    if member.mtime != 0 or member.uname or member.gname:
+        raise ValueError("canonical module archive metadata is invalid")
+    if kind == "regular" and (member.size < 0 or member.linkname or member.sparse is not None):
+        raise ValueError("canonical module archive regular metadata is invalid")
+    if kind == "directory" and (member.size != 0 or member.linkname):
+        raise ValueError("canonical module archive directory metadata is invalid")
+    if kind == "symlink":
+        _canonical_archive_link_target(member.name, member.linkname)
+        if member.size != 0:
+            raise ValueError("canonical module archive symlink metadata is invalid")
+    return kind
+
+
+def _canonical_archive_link_target(name: str, target: str) -> None:
+    try:
+        target.encode("utf-8", "strict")
+    except UnicodeError as exc:
+        raise ValueError("canonical module archive symlink target is not UTF-8") from exc
+    if unicodedata.normalize("NFC", target) != target or target.startswith("/"):
+        raise ValueError("canonical module archive symlink escapes the module tree")
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+    if resolved == ".." or resolved.startswith("../"):
+        raise ValueError("canonical module archive symlink escapes the module tree")
+
+
+def _validate_archive_ancestors(path: str, kinds: dict[str, str]) -> None:
+    parts = path.split("/")
+    for end in range(1, len(parts)):
+        ancestor = "/".join(parts[:end])
+        if (kind := kinds.get(ancestor)) is not None and kind != "directory":
+            raise ValueError("canonical module archive member has a non-directory ancestor")
+
+
+def _extract_archive_member(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    destination: Path,
+    kind: str,
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "directory":
+        destination.mkdir(exist_ok=True)
+        destination.chmod(0o755)
+        return
+    if kind == "symlink":
+        destination.symlink_to(member.linkname)
+        return
+    extracted = archive.extractfile(member)
+    if extracted is None:
+        raise ValueError("canonical module archive regular entry is unreadable")
+    remaining = member.size
+    with destination.open("xb") as output:
+        while remaining:
+            chunk = extracted.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise ValueError("canonical module archive regular entry ended early")
+            output.write(chunk)
+            remaining -= len(chunk)
+    destination.chmod(0o755 if member.mode & 0o111 else 0o644)
+
+
 def validate_module_tree_bounds(*, entry_count: int, content_bytes: int) -> None:
     """Validate source limits without requiring materialized boundary-sized payloads."""
     if entry_count > MAX_ENTRIES:
@@ -331,13 +500,16 @@ def _source_tree_manifest(root: Path) -> tuple[str, int, int]:
             if stat.S_ISDIR(metadata.st_mode):
                 document: dict[str, object] = dict(mode="0755", path=relative, type="dir")
             elif stat.S_ISREG(metadata.st_mode):
-                payload = path.read_bytes()
-                content_bytes += len(payload)
+                content_bytes += metadata.st_size
+                validate_module_tree_bounds(entry_count=count, content_bytes=content_bytes)
+                digest, size = _regular_file_digest(path)
+                if size != metadata.st_size:
+                    raise ValueError("module tree regular entry changed during readback")
                 document = dict(
                     mode="0755" if metadata.st_mode & 0o111 else "0644",
                     path=relative,
-                    sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
-                    size=len(payload),
+                    sha256=digest,
+                    size=size,
                     type="file",
                 )
             elif stat.S_ISLNK(metadata.st_mode):
@@ -357,6 +529,16 @@ def _source_tree_manifest(root: Path) -> tuple[str, int, int]:
     ).encode()
     digest = hashlib.sha256(b"kdive-module-source-manifest-v1\0" + encoded).hexdigest()
     return f"sha256:{digest}", count, content_bytes
+
+
+def _regular_file_digest(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return "sha256:" + digest.hexdigest(), size
 
 
 def _render_volume(name: str, capacity: int) -> str:
