@@ -37,6 +37,7 @@ from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import (
     CONTRIBUTOR_CANCELABLE_JOB_KINDS,
+    PLATFORM_INTERNAL_JOB_KINDS,
     RETIRED_JOB_KINDS,
     Job,
     JobKind,
@@ -218,7 +219,7 @@ async def wait_job(
         while True:
             async with pool.connection() as conn:
                 job = await JOBS.get(conn, uid)
-            if job is None or not _in_scope(job, ctx):
+            if job is None or job.kind in PLATFORM_INTERNAL_JOB_KINDS or not _in_scope(job, ctx):
                 return _not_found(job_id)
             denied = _require_job_role(job, ctx, Role.VIEWER, job_id)
             if denied is not None:
@@ -264,7 +265,11 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
         # update_state's IllegalTransition handles below).
         async with pool.connection() as conn:
             existing = await JOBS.get(conn, uid)
-        if existing is None or not _in_scope(existing, ctx):
+        if (
+            existing is None
+            or existing.kind in PLATFORM_INTERNAL_JOB_KINDS
+            or not _in_scope(existing, ctx)
+        ):
             return _not_found(job_id)
         denied = _require_job_role(existing, ctx, _cancel_role(existing.kind), job_id)
         if denied is not None:

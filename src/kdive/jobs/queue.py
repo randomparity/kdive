@@ -26,6 +26,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import (
     DEFAULT_JOB_DISPATCH_LANE,
+    PLATFORM_INTERNAL_JOB_KINDS,
     RETIRED_JOB_KINDS,
     SYSTEM_FAILING_JOB_KINDS,
     Job,
@@ -584,8 +585,12 @@ async def recent_jobs(
     # columns into the row and break `Job.model_validate`). Composed via psycopg.sql so the
     # statically-built fragments stay type-safe and the values bind as parameters.
     join = sql.SQL("")
-    clauses = [sql.SQL("j.authorizing->>'project' = ANY(%s::text[])")]
-    params: list[object] = [list(projects)]
+    clauses = [
+        sql.SQL("j.authorizing->>'project' = ANY(%s::text[])"),
+        sql.SQL("j.kind <> ALL(%s::text[])"),
+    ]
+    internal_kinds = sorted(kind.value for kind in PLATFORM_INTERNAL_JOB_KINDS)
+    params: list[object] = [list(projects), internal_kinds]
     if investigation_id is not None:
         join = sql.SQL(" JOIN runs r ON r.id::text = j.payload->>'run_id'")
         clauses.append(sql.SQL("r.investigation_id = %s"))

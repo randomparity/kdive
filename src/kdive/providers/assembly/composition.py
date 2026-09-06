@@ -37,7 +37,9 @@ from kdive.providers.infra.reaping import (
     CaptureReaper,
     DumpVolumeReaper,
     InfraReaper,
+    ModuleVolumeReaper,
     NullDumpVolumeReaper,
+    NullModuleVolumeReaper,
     NullReaper,
     OwnedDomain,
 )
@@ -112,6 +114,7 @@ class _RuntimeDescriptor:
     infra_reaper_factory: Callable[[], InfraReaper] | None = None
     transport_resetter_factory: Callable[[], TransportResetter] | None = None
     dump_volume_reaper_factory: Callable[[], DumpVolumeReaper] | None = None
+    module_volume_reaper_factory: Callable[[], ModuleVolumeReaper] | None = None
     capture_reaper_factory: Callable[[], CaptureReaper] | None = None
     console_hosting_factory: _ConsoleHostingBuilder | None = None
 
@@ -352,6 +355,10 @@ class ProviderComposition:
                 dump_volume_reaper_factory=lambda: remote_composition.build_dump_volume_reaper(
                     secret_registry=self._secret_registry
                 ),
+                module_volume_reaper_factory=lambda: remote_composition.build_module_volume_reaper(
+                    secret_registry=self._secret_registry,
+                    authority_sender_factory=authority_sender_factory,
+                ),
                 capture_reaper_factory=lambda: remote_composition.build_capture_reaper(
                     secret_registry=self._secret_registry
                 ),
@@ -471,6 +478,22 @@ class ProviderComposition:
             if descriptor.dump_volume_reaper_factory is not None:
                 return descriptor.dump_volume_reaper_factory()
         return NullDumpVolumeReaper()
+
+    def build_worker_module_volume_reaper(
+        self,
+        *,
+        enable_remote_libvirt: bool | None = None,
+        authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+        | None = None,
+    ) -> ModuleVolumeReaper:
+        """Assemble the worker-owned remote module-volume fleet reaper when enabled."""
+        for descriptor in self._enabled_runtime_descriptors(
+            enable_remote_libvirt=enable_remote_libvirt,
+            authority_sender_factory=authority_sender_factory,
+        ):
+            if descriptor.module_volume_reaper_factory is not None:
+                return descriptor.module_volume_reaper_factory()
+        return NullModuleVolumeReaper()
 
     def build_reconciler_capture_reapers(
         self,

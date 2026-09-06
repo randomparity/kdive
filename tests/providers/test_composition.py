@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -706,6 +706,26 @@ def test_dump_volume_reaper_is_remote_when_enabled() -> None:
     assert isinstance(reaper, RemoteLibvirtDumpVolumeReaper)
 
 
+def test_module_volume_reaper_is_null_without_remote() -> None:
+    from kdive.providers.infra.reaping import NullModuleVolumeReaper
+
+    reaper = composition.ProviderComposition().build_worker_module_volume_reaper(
+        enable_remote_libvirt=False
+    )
+    assert isinstance(reaper, NullModuleVolumeReaper)
+
+
+def test_module_volume_reaper_is_remote_when_enabled() -> None:
+    from kdive.providers.remote_libvirt.reaping.module_volumes import (
+        RemoteLibvirtModuleVolumeReaper,
+    )
+
+    reaper = composition.ProviderComposition().build_worker_module_volume_reaper(
+        enable_remote_libvirt=True
+    )
+    assert isinstance(reaper, RemoteLibvirtModuleVolumeReaper)
+
+
 def test_console_hosting_is_none_without_remote() -> None:
     import asyncio
 
@@ -975,6 +995,7 @@ def test_remote_factory_builders_thread_the_shared_registry(
 
     resetter_obj = object()
     dump_obj = object()
+    module_obj = object()
     monkeypatch.setattr(
         composition.remote_composition,
         "build_transport_resetter",
@@ -986,14 +1007,37 @@ def test_remote_factory_builders_thread_the_shared_registry(
         _capture("dump", dump_obj),
     )
 
+    def module_builder(
+        *, secret_registry: SecretRegistry, authority_sender_factory: object
+    ) -> object:
+        seen["module"] = secret_registry
+        seen["authority_factory"] = authority_sender_factory
+        return module_obj
+
+    monkeypatch.setattr(
+        composition.remote_composition,
+        "build_module_volume_reaper",
+        module_builder,
+    )
+
     expected_registry = SecretRegistry()
     comp = composition.ProviderComposition(secret_registry=expected_registry)
+    authority_factory = object()
 
     assert comp.build_reconciler_transport_resetter(enable_remote_libvirt=True) is resetter_obj
     assert comp.build_reconciler_dump_volume_reaper(enable_remote_libvirt=True) is dump_obj
+    assert (
+        comp.build_worker_module_volume_reaper(
+            enable_remote_libvirt=True,
+            authority_sender_factory=cast(Any, authority_factory),
+        )
+        is module_obj
+    )
 
     assert seen["resetter"] is expected_registry
     assert seen["dump"] is expected_registry
+    assert seen["module"] is expected_registry
+    assert seen["authority_factory"] is authority_factory
 
 
 def test_remote_runtime_advertises_all_four_capture_methods() -> None:

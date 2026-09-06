@@ -851,6 +851,7 @@ def test_reconcile_once_counts_a_mixed_pass(migrated_url: str) -> None:
             leaked_domains=1,
             idempotency_keys_gc_count=0,
             failures=(),
+            module_volume_reap_jobs_enqueued=1,
         )
         assert tuple(report.repair_counts) == loop.ALL_REPAIR_KINDS
         assert report.repair_counts["orphaned_systems"] == 1

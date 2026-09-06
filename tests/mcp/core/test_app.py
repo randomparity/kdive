@@ -480,6 +480,10 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
             assert callable(authority_sender_factory)
             return resolver
 
+        def build_worker_module_volume_reaper(self, *, authority_sender_factory: object) -> object:
+            assert callable(authority_sender_factory)
+            return object()
+
     def _register(
         registry: HandlerRegistry,
         assembly: handler_module.WorkerHandlerAssembly,
