@@ -34,7 +34,10 @@ composition/report wiring, and provider, fleet, lane, and loop tests.
   multi-host provider adapter consuming that traversal.
 - `src/kdive/providers/infra/reaping.py`: provider-neutral module-volume reaper port and null port.
 - `src/kdive/reconciler/cleanup/provider_resources/module_volume_reaping.py`: durable-obligation
-  expansion and lane call.
+  expansion and worker handler; the reconciler-facing lane only enqueues the durable job.
+- `src/kdive/domain/operations/jobs.py`, `src/kdive/jobs/payloads.py`, `src/kdive/jobs/assembly.py`,
+  and `src/kdive/db/schema/0131_remote_module_volume_reap_job_kind.sql`: closed job contract,
+  persisted enum, and worker registration.
 - `src/kdive/providers/remote_libvirt/composition.py` and
   `src/kdive/providers/assembly/composition.py`: concrete port construction and enablement.
 - `src/kdive/reconciler/loop.py` and `src/kdive/processes/reconciler.py`: repair registration,
@@ -190,51 +193,64 @@ callback is invoked when no host is reached; cancellation does not outlive or ab
 thread or retained-owner future; caller-selected destinations and local identity fallback remain
 impossible.
 
-## Task 3 — Durable-obligation lane and reconciler registration
+## Task 3 — Durable worker job and reconciler registration
 
 ### Interfaces
 
 Consumes `RemoteModuleAttemptObligationRepository.retained_owners`, whose entries contain a
-`ModuleAttempt` and independent `mutation_retained`/`reap_retained` flags. Produces:
+`ModuleAttempt` and independent `mutation_retained`/`reap_retained` flags. Migration `0131` adds
+`remote_module_volume_reap` to the persisted job enum. The closed payload is:
 
 ```python
-async def reap_orphaned_module_volumes(
-    conn: AsyncConnection,
-    reaper: ModuleVolumeReaper,
-) -> int: ...
+class RemoteModuleVolumeReapPayload(ClosedPayload):
+    schema: Literal["remote-module-volume-reap-v1"]
 ```
 
-The callback expands a retained mutation owner to `source.ext4` and `scratch.ext4`, and a retained
-reap owner to `reaping.journal` and `reaped.journal`, rendering UUIDs canonically.
+The reconciler enqueues it under stable key `remote-module-volume-reap:v1`, with synthetic
+principal/project `remote-libvirt`, terminal recycling, and the ordinary bounded worker-attempt
+contract. No Resource, endpoint, credential, path, or owner enters the payload. The worker handler
+constructs the concrete reaper from `WorkerHandlerAssembly`, whose active incarnation credential
+is borrowed only by the typed sender, and calls it with a retained-owner callback over the claimed
+job's database connection. The callback expands mutation retention to `source.ext4` and
+`scratch.ext4`, and reap retention to `reaping.journal` and `reaped.journal`, rendering UUIDs
+canonically.
 
 ### Verification
 
 - Mode: focused-test. Contract: kind-specific expansion happens only when the provider invokes the
-  callback and the returned provider count is preserved. Tests:
+  callback; the handler preserves fixed Resource authority construction and exposes no destination
+  input. Tests:
   `tests/reconciler/test_module_volume_reaping.py`. Red: lane import fails. Green:
   `uv run python -m pytest tests/reconciler/test_module_volume_reaping.py -q`.
 - Mode: focused-test. Contract: repair ordering, failure isolation, report count, production
-  binding, and disabled composition. Tests in `tests/reconciler/test_loop.py`,
-  `tests/reconciler/test_catalog.py`, and `tests/processes/test_reconciler.py`. Red: expected repair
-  kind/count/config field is absent. Green:
-  `uv run python -m pytest tests/reconciler/test_loop.py tests/reconciler/test_catalog.py tests/processes/test_reconciler.py -q`.
+  binding, bounded payload, in-flight deduplication, terminal recycling, retry/restart behavior, and
+  disabled composition. Tests span `tests/jobs/`, `tests/reconciler/`, and worker assembly. Green:
+  run those changed test paths with `just test-verbose`.
 
 ### Steps
 
-1. Add lane tests for mutation-only, reap-only, both, discharged rows, deferred callback timing,
-   count propagation, and repository failure; observe the missing module.
-2. Implement the lane with a repository injection seam used only by tests and the concrete
-   repository default in production.
-3. Add the port to `ReconcileConfig`, register `reaped_module_volumes` beside provider-volume
-   lanes, extend `ReconcileReport` and repair counters, and bind the composition factory in the
-   reconciler process.
-4. Add catalog, report, failure-isolation, and process-construction assertions; run both focused
-   commands and expect all selected tests to pass.
-5. Run `just lint`, `just type`, and `just test-changed`; expect clean. Commit the task.
+1. Add migration `0131`, `JobKind.REMOTE_MODULE_VOLUME_REAP`, and the exact closed payload model;
+   prove missing/extra/wrong-schema fields fail before handler dispatch.
+2. Add queue admission tests for one stable key: queued/running rows deduplicate, terminal rows
+   recycle, concurrent admissions yield one active row, failed work retries within the bounded
+   worker attempt contract, and an expired lease is reclaimed after worker restart.
+3. Convert the reconciler lane to enqueue the constant payload. Register
+   `module_volume_reap_jobs_enqueued` in the catalog/report and return one only for insertion or
+   terminal recycling; queue failure is isolated like other repairs.
+4. Implement the worker handler. Validate the payload, build the reaper from worker assembly, and
+   give it the deferred repository callback. Prove mutation/reap expansion, post-enumeration read,
+   aggregate fleet isolation, null composition, and that no payload field can select Resource,
+   endpoint, or credential.
+5. Register the handler and construct the remote adapter only in worker assembly, borrowing the
+   active incarnation credential through the landed typed sender factory. Do not construct an
+   authority sender in the reconciler process.
+6. Run focused job, handler, reconciler, payload, migration, and assembly tests, then `just lint`,
+   `just type`, and `just test-changed`; expect clean. Commit the task.
 
-Acceptance: the retention query occurs only when the provider calls it after host enumeration;
-disabled remote composition is a no-op; an error records the repair name and does not starve later
-repairs.
+Acceptance: the retention query occurs only when the worker's provider calls it after host
+enumeration; the queue carries no authority selector; one stable row bounds in-flight work;
+terminal, retry, and restart paths converge; disabled remote composition is a no-op; and an enqueue
+error records the repair name without starving later repairs.
 
 ## Task 4 — Final verification and rollback check
 

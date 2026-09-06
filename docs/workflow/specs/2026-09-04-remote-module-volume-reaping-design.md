@@ -73,14 +73,34 @@ The provider-neutral `ModuleVolumeReaper` port accepts an async callback returni
 `ModuleVolumeOwner` model. A null implementation makes the lane inert when remote-libvirt is not
 configured.
 
-`reconciler/cleanup/provider_resources/module_volume_reaping.py` supplies that async callback from
-`RemoteModuleAttemptObligationRepository.retained_owners`. It expands each retained attempt by the
-two kinds governed by each true retention flag, excluding `kind` from the durable ownership key
-while preserving the two independent obligations. The lane returns the provider's removed count.
+The reconciler does not execute this authority-bearing provider operation. Its cleanup lane
+idempotently enqueues one platform-internal `remote_module_volume_reap` job with the closed payload
+`{"schema":"remote-module-volume-reap-v1"}` and the stable deduplication key
+`remote-module-volume-reap:v1`. The payload carries no host, endpoint, credential, path, owner, or
+caller-selected destination. Migration `0131` adds the persisted job-kind enum value. The
+synthetic authorizing principal and project are both `remote-libvirt`, matching the existing
+platform-internal worker-check convention and keeping the row outside tenant project views.
 
-Provider composition registers the concrete port only for an enabled remote-libvirt deployment.
-`ReconcileConfig` carries the port, the repair catalog runs it beside the other provider-volume
-lanes, and `ReconcileReport` exposes its count and failure name.
+Queue uniqueness admits at most one row for the stable key. Each reconciler pass uses terminal
+recycling: an existing queued or running job remains unchanged, while a succeeded, failed, or
+canceled row returns to queued with its attempt and lease state cleared. Concurrent passes
+serialize on the unique row. The ordinary worker lease and retry contract handles worker-process
+failure; a reclaimed or retried job safely repeats the full inventory because ownership and
+retention are re-read and deletion treats absence as achieved.
+
+The worker handler owns the provider call. It receives the claimed job's database connection,
+validates the closed payload, and supplies the retained-owner callback from
+`RemoteModuleAttemptObligationRepository.retained_owners`. The callback expands each retained
+attempt by the two kinds governed by each true retention flag, excluding `kind` from the durable
+ownership key while preserving the independent obligations. Worker assembly constructs the
+concrete fleet adapter with the active worker incarnation's credential and each Resource's fixed
+authority binding; the handler cannot accept an endpoint or credential from the payload. Disabled
+remote-libvirt composition uses the null port and succeeds without provider work. The handler logs
+only the aggregate removed count and returns no tenant-visible result.
+
+`ReconcileReport` exposes `module_volume_reap_jobs_enqueued`, not a deletion count: successful
+enqueue/recycle returns one and an already in-flight job returns zero. Queue or validation failure
+uses the repair catalog's existing failure isolation and later lanes continue.
 
 ## Failure handling and observability
 
@@ -93,7 +113,9 @@ pass re-derives state.
 The reference set is built completely before any candidate is deleted. A referenced candidate is
 then skipped with one warning carrying only pool and volume; an independent orphan remains
 reclaimable in the same pass. An incomplete reference set still aborts before every delete.
-Unreachable remote hosts use the established per-host warning and are retried next pass.
+Unreachable remote hosts use the established per-host warning and do not starve later hosts. A
+handler failure follows the queue's bounded attempt/lease behavior; after terminal failure, a later
+reconciler pass recycles the stable row and re-derives all state.
 
 ## Threat model
 
@@ -107,6 +129,9 @@ Unreachable remote hosts use the established per-host warning and are retried ne
 - Existing boundary widened: the reconciler can cause irreversible deletion on the configured
   remote host. Provider configuration and its referenced credentials are operator-controlled and
   trusted to select the intended fleet.
+- New boundary: a platform-internal durable queue row crosses from reconciler to worker. Its closed,
+  constant-size payload selects neither a Resource nor an authority destination. Only worker
+  assembly may borrow the active incarnation credential and bind it to configured Resources.
 
 ### Controls
 
@@ -126,6 +151,9 @@ Unreachable remote hosts use the established per-host warning and are retried ne
   distinct-path ceiling fails closed before deletion and reports no path.
 - Public errors expose only configured pool and volume identifiers. Connection credentials,
   domain XML, paths, and host identities do not enter error details.
+- The stable queue key admits one in-flight sweep; terminal recycling, worker leases, and
+  idempotent missing-volume deletion make retries and process restart convergent. Queue payload
+  validation rejects extra or alternate fields before provider work.
 
 ### Out of scope
 
@@ -152,5 +180,9 @@ are admitted, a 4,097th produces redacted `INFRASTRUCTURE_FAILURE` before deleti
 aliases consume one lookup without weakening identity-based alias protection. A composition test
 proves the per-host port is passed through unchanged.
 Lane tests prove obligation expansion, catalog registration, reporting, failure isolation, and
-disabled composition. Focused lint and whole-tree typing cover the protocol boundary; `just ci` is
-the pre-push gate.
+disabled composition. Queue tests prove the closed bounded payload, stable-key in-flight
+deduplication, terminal recycling, concurrent admission, retry after failure, and restart reclaim.
+Handler tests prove retention reads occur only after provider enumeration, the active
+worker-incarnation sender is used with fixed Resource bindings, and payload values cannot select a
+destination. Focused lint and whole-tree typing cover the protocol boundary; `just ci` is the
+pre-push gate.
