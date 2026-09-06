@@ -15,6 +15,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -23,6 +25,7 @@ __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
     "ExternalBootAuthorityAcknowledger",
     "ExternalBootAuthorityExecutor",
+    "ExternalBootAuthorityPreparationExecutor",
     "ExternalBootHandlerPorts",
 ]
 
@@ -54,6 +57,14 @@ class ExternalBootAuthorityExecutor(Protocol):
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
 
 
+class ExternalBootAuthorityPreparationExecutor(Protocol):
+    """Preparation method implemented by the same configured authority sender."""
+
+    async def execute_preparation(
+        self, request: AuthorityPreparationMutationRequestV1
+    ) -> AuthorityPreparationResponseV1: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ExternalBootHandlerPorts:
     """Ports one ``build_operations`` call binds into all six operation handlers.
@@ -70,6 +81,7 @@ class ExternalBootHandlerPorts:
     secret_registry: SecretRegistry
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
     authority_executor: ExternalBootAuthorityExecutor | None = None
+    preparation_executor: ExternalBootAuthorityPreparationExecutor | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     activation_readiness_timeout: timedelta = timedelta(minutes=5)
     recovery_readiness_timeout: timedelta = timedelta(minutes=5)

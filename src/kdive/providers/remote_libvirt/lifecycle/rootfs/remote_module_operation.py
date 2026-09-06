@@ -39,6 +39,14 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
+class PartialAttachmentInspector(Protocol):
+    def __call__(
+        self,
+        identity_port: RemoteDeviceIdentityPort,
+        present_attempt_volumes: frozenset[str] | None = None,
+    ) -> AttachmentInspection: ...
+
+
 class ModuleOperationRuntime(Protocol):
     async def inspect_attempt(
         self,
@@ -46,6 +54,7 @@ class ModuleOperationRuntime(Protocol):
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
         deadline: float,
+        authority: AuthorityRequestSender | None = None,
     ) -> ModuleAttemptInspection | None: ...
     async def reap_state(
         self,
@@ -139,7 +148,7 @@ class RemoteModuleVolumePreparation:
     pool_name: str
     entries: tuple[ModuleTreeEntry, ...]
     writer: FilesystemImageWriter
-    inspect_attachments: Callable[[RemoteDeviceIdentityPort], AttachmentInspection]
+    inspect_attachments: PartialAttachmentInspector
     work_dir: Path
 
 

@@ -22,6 +22,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
@@ -53,6 +54,7 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
     ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
     KernelIdentity,
     OpaqueProviderRef,
     PresentComponentState,
@@ -65,6 +67,7 @@ from kdive.providers.ports.external_boot import (
 # a second implementation of `AuthorityRepository` in this package could drift from the
 # contract the service is actually tested against, which is the thing these tests rely on.
 from tests.providers.external_boot_authority.service_support import _Repository
+from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
 
 pytestmark = pytest.mark.anyio
 
@@ -418,6 +421,8 @@ def _recovery_context(
 
 
 _PURPOSE_FOR: dict[AuthorityOperation, str] = {
+    AuthorityOperation.MATERIALIZE: "activate",
+    AuthorityOperation.PREPARE: "activate",
     AuthorityOperation.ACTIVATE: "activate",
     AuthorityOperation.DEADLINE: "activate",
     AuthorityOperation.FAIL: "activate",
@@ -428,6 +433,12 @@ _PURPOSE_FOR: dict[AuthorityOperation, str] = {
     AuthorityOperation.CLEANUP: "release",
     AuthorityOperation.TEARDOWN: "teardown",
 }
+
+_ORDINARY_OPERATIONS = tuple(
+    operation
+    for operation in AuthorityOperation
+    if operation not in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}
+)
 
 
 def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:
@@ -481,7 +492,7 @@ def test_adapter_satisfies_the_authority_mutation_adapter_protocol() -> None:
 @pytest.mark.parametrize(
     "purpose", ["activate", "recover", "resolve-conflict", "release", "teardown"]
 )
-@pytest.mark.parametrize("operation", list(AuthorityOperation))
+@pytest.mark.parametrize("operation", _ORDINARY_OPERATIONS)
 async def test_commit_refuses_every_illegal_purpose_operation_pair(
     purpose: str, operation: AuthorityOperation
 ) -> None:
@@ -489,7 +500,9 @@ async def test_commit_refuses_every_illegal_purpose_operation_pair(
         pytest.skip("legal pair is covered by the accepted-commit-point tests")
     io = _FakeIO()
     legal = next(
-        candidate for candidate in AuthorityOperation if operation_is_permitted(purpose, candidate)
+        candidate
+        for candidate in _ORDINARY_OPERATIONS
+        if operation_is_permitted(purpose, candidate)
     )
     request = _request(purpose=purpose, operation=legal)
 
@@ -512,6 +525,68 @@ async def test_a_commit_point_that_is_not_an_operation_cannot_reach_the_adapter(
 
     with pytest.raises(ValidationError):
         AuthorityCommitContextV1.model_validate(values | {"commit_point": "rm -rf /"})
+
+
+class _PreparationPorts:
+    def __init__(self, receipt: ExternalBootPreparationObservation) -> None:
+        self.receipt = receipt
+        self.executions = 0
+
+    def execute_preparation(self, request: object) -> ExternalBootPreparationObservation:
+        self.executions += 1
+        return self.receipt
+
+    def observe_preparation(self, request: object) -> ExternalBootPreparationObservation:
+        return self.receipt
+
+
+def _preparation_request() -> AuthorityPreparationMutationRequestV1:
+    plan = external_boot_plan(SYSTEM_ID, RUN_ID)
+    return AuthorityPreparationMutationRequestV1(
+        authority_id=AUTHORITY_ID,
+        generation=7,
+        system_id=SYSTEM_ID,
+        activation_id=ACTIVATION_ID,
+        run_id=RUN_ID,
+        plan_identity=plan.identity,
+        purpose="activate",
+        operation="materialize",
+        provider_kind="local-libvirt",
+        authority_instance="local-authority",
+        operation_identity="prep-op",
+        operation_digest="sha256:" + "9" * 64,
+        attempt_id=ATTEMPT_ID,
+        expected_source_identity=SOURCE_IDENTITY,
+        intended_target_identity=TARGET_IDENTITY,
+        recovery_objects=(),
+        plan=plan,
+    )
+
+
+async def test_preparation_commit_returns_journal_bound_durable_receipt() -> None:
+    request = _preparation_request()
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=request.plan_identity,
+        authority=OpaqueProviderRef(ref=f"authority/{AUTHORITY_ID}/7/{ATTEMPT_ID}"),
+        operation_identity=request.operation_identity,
+        materialization=external_boot_materialization(request.plan),
+    )
+    ports = _PreparationPorts(receipt)
+    adapter = LocalExternalBootAuthorityAdapter(cast(LocalLibvirtExternalBoot, ports))
+    record = JournalRecordV1(
+        **request.model_dump(mode="python", by_alias=True, exclude={"plan"}),
+        sequence=4,
+        previous_digest="sha256:" + "0" * 64,
+        phase=JournalPhase.MUTATION_STARTED,
+    )
+
+    observed = await adapter.commit(request, AuthorityCommitContextV1.for_record(record))
+
+    assert ports.executions == 1
+    assert observed.composite_state == receipt.identity
+    assert await adapter.preparation_receipt(request) == receipt
 
 
 # --------------------------------------------------------------------------------------

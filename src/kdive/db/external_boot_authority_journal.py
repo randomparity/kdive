@@ -14,15 +14,19 @@ from pydantic import SecretStr
 
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
 )
+from kdive.providers.ports.external_boot import ExternalBootPlan
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 
 type AdvanceStatus = Literal["advanced", "superseded", "conflict"]
+type PreparationCommitStatus = Literal["applied", "superseded", "conflict"]
 
 
 def _uuid(value: object) -> UUID:
@@ -61,6 +65,7 @@ class AuthorityBinding:
     operation_identity: str
     operation_digest: str
     state: Literal["allocating", "current"]
+    preparation_plan: ExternalBootPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +136,11 @@ def _binding(row: dict[str, Any] | None) -> AuthorityBinding | None:
         operation_identity=_bounded(row["operation_identity"]),
         operation_digest=_bounded(row["operation_digest"]),
         state=row["state"],
+        preparation_plan=(
+            ExternalBootPlan.model_validate(row["preparation_plan"])
+            if row.get("preparation_plan") is not None
+            else None
+        ),
     )
 
 
@@ -186,6 +196,33 @@ async def resolve_current_authority_candidate(
         await cursor.execute(
             "SELECT * FROM resolve_current_external_boot_authority_candidate(%s, %s, %s)",
             (peer_incarnation_id, authority_id, generation),
+        )
+        return _binding(await cursor.fetchone())
+
+
+async def resolve_current_preparation_authority_binding(
+    conn: AsyncConnection,
+    *,
+    peer_incarnation_id: str,
+    authority_id: UUID,
+    generation: int,
+    acknowledgement_sequence: int,
+    acknowledgement_digest: str,
+    operation: Literal["materialize", "prepare"],
+) -> AuthorityBinding | None:
+    """Resolve one SQL-derived preparation binding and its exact durable plan."""
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(
+            "SELECT * FROM resolve_current_external_boot_preparation_authority"
+            "(%s, %s, %s, %s, %s, %s)",
+            (
+                peer_incarnation_id,
+                authority_id,
+                generation,
+                acknowledgement_sequence,
+                acknowledgement_digest,
+                operation,
+            ),
         )
         return _binding(await cursor.fetchone())
 
@@ -332,4 +369,41 @@ async def advance_journal_head(
         row = await cursor.fetchone()
     if row is None or row[0] not in {"advanced", "superseded", "conflict"}:
         raise RuntimeError("journal-head advance returned an invalid status")
+    return row[0]
+
+
+async def commit_external_boot_preparation_result(
+    conn: AsyncConnection,
+    *,
+    credential: SecretStr,
+    job_id: UUID,
+    job_attempt: int,
+    request: AuthorityPreparationMutationRequestV1,
+    response: AuthorityPreparationResponseV1,
+) -> PreparationCommitStatus:
+    """Commit one journal-anchored preparation receipt without completing its job."""
+    credential_hash = hashlib.sha256(credential.get_secret_value().encode("utf-8")).digest()
+    async with conn.cursor() as cursor:
+        await cursor.execute(
+            "SELECT commit_external_boot_preparation_result("
+            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                credential_hash,
+                job_id,
+                job_attempt,
+                request.authority_id,
+                request.generation,
+                request.operation.value,
+                request.attempt_id,
+                request.operation_identity,
+                request.operation_digest,
+                response.journal_sequence,
+                response.journal_digest,
+                request.plan_identity,
+                Jsonb(response.receipt.model_dump(mode="json", by_alias=True)),
+            ),
+        )
+        row = await cursor.fetchone()
+    if row is None or row[0] not in {"applied", "superseded", "conflict"}:
+        raise RuntimeError("preparation receipt commit returned an invalid status")
     return row[0]

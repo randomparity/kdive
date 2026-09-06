@@ -134,7 +134,9 @@ async def capture_install_modules(
             "remote module capture requires capture_install operation",
             category=ErrorCategory.CONFLICT,
         )
-    inspected = await runtime.inspect_attempt(request.preparation, operation, executor, deadline)
+    inspected = await runtime.inspect_attempt(
+        request.preparation, operation, executor, deadline, request.authority
+    )
     if inspected is None:
         volumes = await runtime.prepare(
             request.preparation, operation, executor, request.authority, deadline

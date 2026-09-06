@@ -427,10 +427,12 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         }
     )
 
+    preparable = True
+
     class InspectionRepo:
-        async def mutation_obligation_is_open(self, conn: object, attempt: ModuleAttempt) -> bool:
+        async def attempt_is_preparable(self, conn: object, attempt: ModuleAttempt) -> bool:
             del conn
-            return attempt.operation_nonce == operation.operation_nonce
+            return preparable and attempt.operation_nonce == operation.operation_nonce
 
     class InlineExecutor:
         async def run(self, action: Callable[[], object]) -> object:
@@ -450,7 +452,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
             "systems",
             (),
             cast(Any, SimpleNamespace()),
-            lambda _identity: cast(Any, SimpleNamespace()),
+            lambda identity_port, present_attempt_volumes=None: cast(Any, SimpleNamespace()),
             tmp_path,
         ),
     )
@@ -482,6 +484,10 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         "kdive.services.remote_module_operation.validate_attempt_volumes",
         lambda _storage, _request: volumes,
     )
+    monkeypatch.setattr(
+        "kdive.services.remote_module_operation.validate_scratch_volume",
+        lambda _storage, _request: volumes.scratch,
+    )
 
     inspected = await runtime.inspect_attempt(receipt, operation, executor, 10**12)
     assert inspected is not None
@@ -508,6 +514,53 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         with pytest.raises(CategorizedError, match=message) as caught:
             await runtime.inspect_attempt(receipt, operation, executor, 10**12)
         assert caught.value.category is ErrorCategory.CONFLICT
+
+    monkeypatch.setattr(
+        "kdive.services.remote_module_operation.build_remote_device_identity_port",
+        lambda _authority, _deadline: object(),
+    )
+    phase_request = CaptureInstallRequest(
+        receipt, operation, cast(Any, object()), OpaqueProviderRef(ref="authority")
+    )
+    original_names = set(storage.pool.volumes)
+    del storage.pool.volumes[source_name]
+    with pytest.raises(CategorizedError, match="volume order"):
+        await capture_install_modules(
+            phase_request, runtime=runtime, executor=executor, deadline=10**12
+        )
+    assert set(storage.pool.volumes) == {scratch_name}
+
+    storage.pool.volumes[source_name] = cast(Any, SimpleNamespace(deleted=False))
+    del storage.pool.volumes[scratch_name]
+    for inspection in (
+        AttachmentInspection(True, True, True, frozenset()),
+        AttachmentInspection(True, True, False, frozenset()),
+        TimeoutError("attachment inspection unresolved"),
+    ):
+
+        def inspect_partial(
+            identity_port: object,
+            present_attempt_volumes: frozenset[str] | None = None,
+            value=inspection,
+        ):
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        object.__setattr__(runtime.volume_preparation, "inspect_attachments", inspect_partial)
+        with pytest.raises((CategorizedError, TimeoutError)):
+            await capture_install_modules(
+                phase_request, runtime=runtime, executor=executor, deadline=10**12
+            )
+        assert set(storage.pool.volumes) == {source_name}
+    assert original_names == {source_name, scratch_name}
+
+    preparable = False
+    with pytest.raises(CategorizedError, match="obligation is absent"):
+        await capture_install_modules(
+            phase_request, runtime=runtime, executor=executor, deadline=10**12
+        )
+    assert set(storage.pool.volumes) == {source_name}
 
 
 def test_real_receipt_guards_two_real_volume_creates(
@@ -574,7 +627,9 @@ def test_real_receipt_guards_two_real_volume_creates(
                     "systems",
                     (ModuleTreeEntry("kernel.ko", 0o100644, content=b"abc"),),
                     Writer(),
-                    lambda _identity: cast(Any, SimpleNamespace()),
+                    lambda identity_port, present_attempt_volumes=None: cast(
+                        Any, SimpleNamespace()
+                    ),
                     tmp_path,
                 ),
             )
@@ -737,7 +792,7 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
         "pool",
         entries,
         Writer(),
-        lambda _identity: inspection(),
+        lambda identity_port, present_attempt_volumes=None: inspection(),
         tmp_path,
     )
     runtime = _runtime(lambda _recovery: asyncio.sleep(0, result=None))
@@ -791,9 +846,17 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    "cleanup_fault",
-    ["reaping-marker", "source-delete", "scratch-delete", "reaped-marker", "discharge"],
-    ids=str,
+    ("cleanup_fault", "preparation_fault"),
+    [
+        ("reaping-marker", "before-upload"),
+        ("reaping-marker", "before-scratch"),
+        ("reaping-marker", "before-appliance"),
+        ("source-delete", None),
+        ("scratch-delete", None),
+        ("reaped-marker", None),
+        ("discharge", None),
+    ],
+    ids=lambda value: str(value),
 )
 def test_real_runtime_and_database_resume_at_cleanup_boundaries(
     migrated_url: str,
@@ -801,6 +864,7 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cleanup_fault: str,
+    preparation_fault: str | None,
 ) -> None:
     class Writer:
         operation = b""
@@ -895,7 +959,9 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
         installed = RemoteModuleResultV1.from_wire_bytes(success_result()).model_copy(
             update={"system_id": operation.system_id, "run_id": operation.run_id}
         )
-        scratch_result = [installed.to_wire_bytes()]
+        scratch_result: list[bytes | None] = [
+            None if preparation_fault == "before-appliance" else installed.to_wire_bytes()
+        ]
         storage = Conn()
         clock = ApplianceClock()
         appliance = PersistentAppliance([], clock)
@@ -921,7 +987,15 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
             "systems",
             (),
             Writer(),
-            lambda _identity: AttachmentInspection(True, True, False, frozenset()),
+            lambda identity_port, present_attempt_volumes=None: AttachmentInspection(
+                True,
+                True,
+                False,
+                frozenset(
+                    ("systems", name)
+                    for name in (present_attempt_volumes or {source_name, scratch_name})
+                ),
+            ),
             tmp_path,
         )
         appliance_config = RemoteModuleApplianceExecution(
@@ -973,7 +1047,9 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
             receipt = await open_module_attempt_preparation(server, repository, attempt)
 
             def preparation_runtime() -> RemoteModuleOperationRuntime:
-                async def read(_recovery: RemoteModuleRecoveryRefV2, _deadline: float) -> bytes:
+                async def read(
+                    _recovery: RemoteModuleRecoveryRefV2, _deadline: float
+                ) -> bytes | None:
                     return scratch_result[0]
 
                 return RemoteModuleOperationRuntime(
@@ -1014,15 +1090,108 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
                 cast(Any, object()),
                 authority_reference,
             )
+            if preparation_fault == "before-upload":
+                create_xml = storage.pool.createXML
+                interrupted_source: list[Any] = []
+
+                def create_then_die_before_upload(xml: str, flags: int = 0):
+                    created = create_xml(xml, flags)
+                    if "source.ext4" in xml:
+                        original_upload = created.upload
+
+                        def die_before_upload(*_args: object, **_kwargs: object) -> int:
+                            raise SystemExit("worker died before source upload")
+
+                        cast(Any, created).upload = die_before_upload
+                        interrupted_source[:] = [created, original_upload]
+                    return created
+
+                cast(Any, storage.pool).createXML = create_then_die_before_upload
+                with pytest.raises(SystemExit, match="before source upload"):
+                    await capture_install_modules(
+                        request,
+                        runtime=preparation_runtime(),
+                        executor=executor,
+                        deadline=10**12,
+                    )
+                cast(Any, storage.pool).createXML = create_xml
+                source, original_upload = interrupted_source
+                source.upload = original_upload
+                assert set(storage.pool.volumes) == {source_name}
+                assert bytes(source.payload) == b""
+
+            elif preparation_fault == "before-scratch":
+                create_xml = storage.pool.createXML
+                upload_calls = 0
+
+                def create_then_die_before_scratch(xml: str, flags: int = 0):
+                    nonlocal upload_calls
+                    if "scratch.ext4" in xml:
+                        raise SystemExit("worker died before scratch create")
+                    created = create_xml(xml, flags)
+                    original_upload = created.upload
+
+                    def count_upload(
+                        stream: object, offset: int, length: int, flags: int = 0
+                    ) -> int:
+                        nonlocal upload_calls
+                        upload_calls += 1
+                        return original_upload(stream, offset, length, flags)
+
+                    cast(Any, created).upload = count_upload
+                    return created
+
+                cast(Any, storage.pool).createXML = create_then_die_before_scratch
+                with pytest.raises(SystemExit, match="before scratch create"):
+                    await capture_install_modules(
+                        request,
+                        runtime=preparation_runtime(),
+                        executor=executor,
+                        deadline=10**12,
+                    )
+                cast(Any, storage.pool).createXML = create_xml
+                assert set(storage.pool.volumes) == {source_name}
+                assert upload_calls == 1
+
+            elif preparation_fault == "before-appliance":
+                create_appliance = appliance.createXML
+
+                def die_before_appliance(*_args: object, **_kwargs: object):
+                    raise SystemExit("worker died before appliance result")
+
+                cast(Any, appliance).createXML = die_before_appliance
+                with pytest.raises(SystemExit, match="before appliance result"):
+                    await capture_install_modules(
+                        request,
+                        runtime=preparation_runtime(),
+                        executor=executor,
+                        deadline=10**12,
+                    )
+
+                def create_appliance_and_publish(xml: str, flags: int = 0):
+                    created = create_appliance(xml, flags)
+                    scratch_result[0] = installed.to_wire_bytes()
+                    return created
+
+                cast(Any, appliance).createXML = create_appliance_and_publish
+                existing_volumes = dict(storage.pool.volumes)
+                assert set(existing_volumes) == {source_name, scratch_name}
+
             with pytest.raises(RuntimeError, match="worker loss during teardown"):
                 await capture_install_modules(
                     request, runtime=preparation_runtime(), executor=executor, deadline=10**12
                 )
-            assert appliance.creates == 1
             restarted = preparation_runtime()
             recovery = await capture_install_modules(
                 request, runtime=restarted, executor=executor, deadline=10**12
             )
+            if preparation_fault == "before-appliance":
+                assert all(
+                    storage.pool.volumes[name] is volume
+                    for name, volume in existing_volumes.items()
+                )
+            if preparation_fault == "before-scratch":
+                assert upload_calls == 1
             assert appliance.creates == 1
             assert recovery.source_capacity_bytes == 4096
             async with server.connection() as conn:
@@ -1136,7 +1305,7 @@ def test_run_cancellation_waits_for_provider_cleanup(tmp_path: Path) -> None:
                 "pool",
                 entries,
                 Writer(),
-                lambda _identity: reference.inspect_attachments(),
+                lambda identity_port, present_attempt_volumes=None: reference.inspect_attachments(),
                 tmp_path,
             ),
         )
@@ -1266,7 +1435,7 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
             wanted.pool,
             wanted.entries,
             wanted.writer,
-            lambda _identity: wanted.inspect_attachments(),
+            lambda identity_port, present_attempt_volumes=None: wanted.inspect_attachments(),
             tmp_path,
         ),
         worker_write_context=_worker_context(recovery),
@@ -1399,7 +1568,7 @@ def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
             "pool",
             wanted.entries,
             wanted.writer,
-            lambda _identity: detached(),
+            lambda identity_port, present_attempt_volumes=None: detached(),
             tmp_path,
         ),
     )
@@ -1514,7 +1683,7 @@ def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: 
             wanted.pool,
             wanted.entries,
             wanted.writer,
-            lambda _identity: wanted.inspect_attachments(),
+            lambda identity_port, present_attempt_volumes=None: wanted.inspect_attachments(),
             tmp_path,
         ),
         worker_write_context=_worker_context(recovery),
@@ -1565,7 +1734,7 @@ def test_delete_source_cancellation_waits_for_blocked_provider_delete(tmp_path: 
             wanted.pool,
             wanted.entries,
             wanted.writer,
-            lambda _identity: wanted.inspect_attachments(),
+            lambda identity_port, present_attempt_volumes=None: wanted.inspect_attachments(),
             tmp_path,
         ),
     )

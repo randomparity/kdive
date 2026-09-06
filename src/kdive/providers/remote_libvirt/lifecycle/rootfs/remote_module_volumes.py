@@ -672,6 +672,11 @@ def prepare_attempt_volumes(
             SCRATCH_CAPACITY_BYTES,
         )
         reused_source = existing_source is not None
+        if existing_source is not None:
+            observed_name, actual_capacity = _readback_facts(existing_source, source.name)
+            _require_owner(observed_name, _expected_owner(request, "source"), source.name)
+            if actual_capacity != source.capacity_bytes:
+                raise _conflict("remote module volume capacity mismatched", volume=source.name)
         if existing_source is None:
             _admit(admit_mutation)
             existing_source = _create(

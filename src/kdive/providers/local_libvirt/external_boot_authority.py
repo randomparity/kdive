@@ -21,6 +21,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     ObservationCategory,
     operation_is_permitted,
@@ -33,6 +34,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     OpaqueProviderRef,
     ProviderStateIdentity,
     RecoveryPoint,
@@ -68,7 +71,9 @@ _MUTATING_OPERATIONS = frozenset(
 _DELETING_OPERATIONS = frozenset({AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN})
 
 
-def _authority_ref(request: AuthorityMutationRequestV1) -> OpaqueProviderRef:
+def _authority_ref(
+    request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+) -> OpaqueProviderRef:
     """Derive the opaque provider reference for a request's authority binding.
 
     Built only from closed identity fields the request already carries. Nothing a peer
@@ -81,7 +86,7 @@ def _authority_ref(request: AuthorityMutationRequestV1) -> OpaqueProviderRef:
 
 
 def _activation_binding(
-    request: AuthorityMutationRequestV1,
+    request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
 ) -> ExternalBootActivationBinding:
     return ExternalBootActivationBinding(
         system_id=str(request.system_id),
@@ -115,8 +120,15 @@ class LocalExternalBootAuthorityAdapter:
         self._pending_cleanup_finalization: dict[str, RecoveryPoint] = {}
         self._pending_absence: dict[str, AuthorityMutationRequestV1] = {}
 
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+    async def observe(
+        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+    ) -> AuthorityObservationV1:
         """Classify observed provider state against the request's exact identities."""
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            receipt = await asyncio.to_thread(
+                self._ports.observe_preparation, self._preparation_request(request)
+            )
+            return self._preparation_observation(receipt)
         return await asyncio.to_thread(self._observe, request)
 
     async def observe_recovery(
@@ -133,12 +145,65 @@ class LocalExternalBootAuthorityAdapter:
         return await asyncio.to_thread(self._observe_recovery, request)
 
     async def commit(
-        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+        self,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1:
         """Apply one named commit point, then report the resulting observation."""
         operation = self._require_permitted_commit_point(request, context)
         self._require_admissible_generation(request)
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            receipt = await asyncio.to_thread(
+                self._ports.execute_preparation, self._preparation_request(request)
+            )
+            return self._preparation_observation(receipt)
         return await asyncio.to_thread(self._commit, request, operation, context)
+
+    async def preparation_receipt(
+        self, request: AuthorityPreparationMutationRequestV1
+    ) -> ExternalBootPreparationObservation:
+        return await asyncio.to_thread(
+            self._ports.observe_preparation, self._preparation_request(request)
+        )
+
+    async def adopt_preparation(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        predecessor: AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
+    ) -> AuthorityObservationV1:
+        self._require_permitted_commit_point(request, context)
+        self._require_admissible_generation(request)
+        receipt = await asyncio.to_thread(
+            self._ports.adopt_preparation,
+            self._preparation_request(request),
+            self._preparation_request(predecessor),
+        )
+        return self._preparation_observation(receipt)
+
+    @staticmethod
+    def _preparation_request(
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> ExternalBootPreparationRequest:
+        if request.operation not in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
+            raise AuthorityServiceError("provider_conflict")
+        return ExternalBootPreparationRequest(
+            phase=request.operation.value,  # type: ignore[arg-type]
+            plan=request.plan,
+            binding=_activation_binding(request),
+            authority=_authority_ref(request),
+            operation_identity=request.operation_identity,
+        )
+
+    @staticmethod
+    def _preparation_observation(
+        receipt: ExternalBootPreparationObservation,
+    ) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid5(_OBSERVATION_NAMESPACE, receipt.identity),
+            category="target",
+            composite_state=receipt.identity,
+        )
 
     async def finalize(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
@@ -170,7 +235,8 @@ class LocalExternalBootAuthorityAdapter:
 
     @staticmethod
     def _require_permitted_commit_point(
-        request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
     ) -> AuthorityOperation:
         """Refuse an illegal commit point before any provider call.
 
@@ -188,7 +254,9 @@ class LocalExternalBootAuthorityAdapter:
             raise AuthorityServiceError("provider_conflict")
         return operation
 
-    def _require_admissible_generation(self, request: AuthorityMutationRequestV1) -> None:
+    def _require_admissible_generation(
+        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+    ) -> None:
         lane = (str(request.system_id), str(request.activation_id))
         admitted = self._admitted.get(lane)
         if admitted is not None and request.generation < admitted:
