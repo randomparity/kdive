@@ -12,6 +12,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -46,6 +47,57 @@ _FAULT_BARRIER_MAX_BYTES = 1024
 _FAULT_BARRIER_SOCKET = Path("/run/kdive/provider-authority/proof-control/control.sock")
 _JOURNAL_ROOT = Path("/var/lib/kdive/provider-authority/journal")
 _JOURNAL_PROOF_MAX_BYTES = 512
+_TAKEOVER_WAIT_SECONDS = 8 * 60.0
+
+_WORKER_HOLD_CLIENT = """
+import json
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+
+if len(sys.argv) != 3 or sys.argv[2] not in {"stop", "continue"}:
+    raise SystemExit("invalid native worker hold request")
+incarnation, action = sys.argv[1:]
+if re.fullmatch(
+    r"local-systemd:kdive-live-worker@[1-8]\\.service:[0-9a-f]{32}", incarnation
+) is None:
+    raise SystemExit("invalid native worker incarnation")
+matches = []
+for slot in range(1, 9):
+    path = f"/var/lib/kdive/live-workers/slots/{slot}/state.json"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            metadata = os.fstat(descriptor)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_size > 4096):
+                raise SystemExit("unsafe native worker state")
+            data = os.read(descriptor, 4097)
+        finally:
+            os.close(descriptor)
+        state = json.loads(data)
+    except FileNotFoundError:
+        continue
+    if not isinstance(state, dict) or state.get("incarnation") != incarnation:
+        continue
+    unit = f"kdive-live-worker@{slot}.service"
+    if state.get("unit") != unit:
+        raise SystemExit("native worker state does not bind its slot")
+    matches.append(unit)
+if len(matches) != 1:
+    raise SystemExit("native worker incarnation is not uniquely retained")
+unit = matches[0]
+pid = subprocess.run(["systemctl", "show", unit, "--value", "--property=MainPID"],
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=10)
+if pid.returncode != 0 or not pid.stdout.strip().isdigit() or int(pid.stdout) <= 1:
+    raise SystemExit("native worker has no main process")
+subprocess.run(["systemctl", "kill", "--kill-who=main", "--signal=" +
+                ("STOP" if action == "stop" else "CONT"), unit], check=True, timeout=10)
+print(action + "ped")
+"""
 
 _INSTALLED_ROUTE_PREFLIGHT = """
 import os
@@ -487,6 +539,15 @@ class JournalLaneProof:
     digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class RunningJobClaim:
+    """The durable live claim used to fence one paused worker and observe its replacement."""
+
+    worker_id: str
+    attempt: int
+    lease_expires_at: datetime
+
+
 def _output(*argv: str) -> str:
     result = subprocess.run(argv, check=True, capture_output=True, text=True)
     return result.stdout.strip()
@@ -653,6 +714,61 @@ def run_installed_local_authority_restart_recovery() -> None:
                 raise cleanup_failures[0]
             if cleanup_failures:
                 raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
+
+    asyncio.run(run())
+
+
+def run_installed_local_authority_unresolved_call_takeover() -> None:
+    """Prove a paused genuine holder is reclaimed and its late completion remains fenced."""
+    config = load_config()
+    if config is None:
+        pytest.skip("installed local-authority carrier is not configured")
+    require_fault_barrier(config)
+    installed = _output("sudo", "-n", "cat", "/opt/kdive-provider-authority/revision")
+    assert installed == config.installed_revision
+    running_workers = _output(
+        "systemctl", "list-units", "kdive-live-worker@*.service", "--state=running", "--no-legend"
+    )
+    require_deployed_revision(config, require_stack(), running_workers)
+    require_installed_authority_routes(config, running_workers)
+    db_url = os.environ.get("KDIVE_DATABASE_URL")
+    assert db_url, "native authority carrier requires KDIVE_DATABASE_URL"
+    token = mint_role_token(
+        require_issuer(),
+        project=config.project,
+        agent_session=config.ownership_prefix,
+        role="admin",
+    )
+    ledger = ResourceLedger(config.ownership_prefix)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config)
+        require_authority_artifact_confinement(config, running_workers)
+        client = LiveStackClient.over_http(require_stack(), token)
+        async with client:
+            held: RunningJobClaim | None = None
+            try:
+                activation = await start_external_boot_activation(
+                    client,
+                    config,
+                    ledger,
+                    before_activate=lambda run_id: arm_fault_barrier(
+                        config, run_id, "activate", "before-provider"
+                    ),
+                )
+                wait_for_fault_barrier(config)
+                held = await running_job_claim(db_url, activation.activate_job_id)
+                set_exact_worker_hold(held, "stop")
+                replacement = await wait_for_reclaimed_job(db_url, activation.activate_job_id, held)
+                release_fault_barrier(config)
+                await drain_job(client, "activate-takeover", activation.activate_job_id)
+                set_exact_worker_hold(held, "continue")
+                held = None
+                if replacement.attempt < 2:
+                    raise AssertionError("native takeover did not charge a reclaimed attempt")
+            finally:
+                if held is not None:
+                    set_exact_worker_hold(held, "continue")
 
     asyncio.run(run())
 
@@ -1008,6 +1124,62 @@ def wait_for_fault_barrier(config: NativeAuthorityConfig, *, timeout_seconds: fl
                 "installed authority provider effect did not reach its armed barrier"
             )
         time.sleep(min(0.1, remaining))
+
+
+def set_exact_worker_hold(claim: RunningJobClaim, action: Literal["stop", "continue"]) -> None:
+    """Signal only the retained unit whose immutable state names the active job holder."""
+    result = _output(
+        "sudo", "-n", _IDENTITY_PYTHON, "-c", _WORKER_HOLD_CLIENT, claim.worker_id, action
+    )
+    if result != f"{action}ped":
+        raise AssertionError("native worker hold returned an invalid result")
+
+
+async def running_job_claim(db_url: str, job_id: str) -> RunningJobClaim:
+    """Read the actual leased job holder; no caller-crafted worker identity is accepted."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT worker_id, attempt, lease_expires_at FROM jobs "
+            "WHERE id = %s AND state = 'running' AND worker_id IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL",
+            (job_id,),
+        )
+        row = await cur.fetchone()
+    if row is None or not isinstance(row[0], str) or not isinstance(row[1], int):
+        raise AssertionError("fault barrier has no durable running job claim")
+    if not isinstance(row[2], datetime):
+        raise AssertionError("fault barrier running job has no lease deadline")
+    return RunningJobClaim(row[0], row[1], row[2])
+
+
+async def wait_for_reclaimed_job(
+    db_url: str, job_id: str, original: RunningJobClaim
+) -> RunningJobClaim:
+    """Observe genuine lease expiry and a distinct worker claim within the bounded native arm."""
+    started = time.monotonic()
+    deadline = min(
+        started + _TAKEOVER_WAIT_SECONDS,
+        started + max(0.0, (original.lease_expires_at - datetime.now(UTC)).total_seconds()) + 120.0,
+    )
+    while time.monotonic() < deadline:
+        async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT worker_id, attempt, lease_expires_at FROM jobs WHERE id = %s", (job_id,)
+            )
+            row = await cur.fetchone()
+        if (
+            row is not None
+            and isinstance(row[0], str)
+            and isinstance(row[1], int)
+            and isinstance(row[2], datetime)
+            and row[1] > original.attempt
+            and row[0] != original.worker_id
+        ):
+            return RunningJobClaim(row[0], row[1], row[2])
+        await asyncio.sleep(1.0)
+    raise TimeoutError(
+        "native takeover did not reclaim the paused worker lease before its deadline"
+    )
 
 
 def restart_authority_after_fault(config: NativeAuthorityConfig) -> None:
