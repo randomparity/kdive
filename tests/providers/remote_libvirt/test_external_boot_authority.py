@@ -13,6 +13,10 @@ import libvirt
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.remote_module_attempt_preparation import (
+    ModuleAttemptObligationReceiptV1,
+    ModuleAttemptPreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
@@ -61,6 +65,10 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     render_module_volume_name,
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
+from kdive.services.remote_module_authority_preparation import (
+    RemoteModulePreparationInputs,
+    _operation,
+)
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as module_operation,
 )
@@ -862,3 +870,27 @@ def test_remote_recovery_object_reopens_geometry_and_deletes_exact_volume(tmp_pa
     deleted = port.delete_object(binding, authority, observed.observed_digest)
     assert not deleted.present
     store.close()
+
+
+def test_remote_worker_operation_uses_server_committed_attempt_receipt() -> None:
+    request = _remote_preparation_request()
+    nonce = "9" * 32
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=request.authority.system_id,
+            run_id=request.authority.run_id,
+            operation_nonce=nonce,
+        )
+    )
+    operation = _operation(
+        RemoteModulePreparationInputs(
+            authority=request.authority,
+            root_volume_key="root-volume",
+            root_volume_identity="sha256:" + "8" * 64,
+            appliance_image_digest="sha256:" + "7" * 64,
+        ),
+        preparation,
+    )
+    assert operation.operation_nonce == nonce
+    assert operation.plan_identity == request.authority.plan_identity
+    assert operation.source_manifest == request.authority.plan.module_obligation.source_manifest
