@@ -216,10 +216,6 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         "KDIVE_INSTALL_STAGING": env["KDIVE_INSTALL_STAGING"],
         "KDIVE_KERNEL_SRC": env["KDIVE_KERNEL_SRC"],
         "KDIVE_LIBVIRT_URI": env["KDIVE_LIBVIRT_URI"],
-        "KDIVE_LIBVIRT_RECOVERY_ROOT": env["KDIVE_LIBVIRT_RECOVERY_ROOT"],
-        "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": env[
-            "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"
-        ],
         "KDIVE_LOG_LEVEL": "INFO",
         "KDIVE_ROOTFS_DIR": env["KDIVE_ROOTFS_DIR"],
         "KDIVE_S3_BUCKET": env["KDIVE_S3_BUCKET"],
@@ -247,6 +243,8 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
     }
     monkeypatch.setattr(os, "environ", captured["environment"])
     environment = cast(dict[str, str], captured["environment"])
+    assert "KDIVE_LIBVIRT_RECOVERY_ROOT" not in environment
+    assert "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES" not in environment
     credential = Path(environment["CREDENTIALS_DIRECTORY"]) / "worker-incarnation"
     assert worker_incarnation_credential(credential).get_secret_value() == "systemd-secret"
     assert worker_incarnation_credential().get_secret_value() == "systemd-secret"
