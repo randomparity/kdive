@@ -198,6 +198,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "acknowledge_takeover",
         "execute_mutation",
         "execute_preparation",
+        "execute_teardown",
         "execute_conflict_resolution",
         "observe_authority",
         "observe_running",
