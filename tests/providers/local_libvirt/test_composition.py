@@ -418,7 +418,7 @@ def test_local_authority_builder_shares_scope_with_real_io(
 
     assert opened == []
     io._session_factory._connect()  # noqa: SLF001
-    assert opened == [f"qemu+unix:///system?socket={seam}/libvirt%3Fsocket%3Dforeign"]
+    assert opened == [f"qemu+unix:///session?socket={seam}/libvirt%3Fsocket%3Dforeign"]
     pin = cast(Any, io._session_factory._pin_lease)  # noqa: SLF001
     assert pin.__self__ is not None
     resolver = cast(Any, io._resolve_operation_lease)  # noqa: SLF001

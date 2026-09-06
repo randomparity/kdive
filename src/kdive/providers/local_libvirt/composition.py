@@ -267,7 +267,7 @@ def build_external_boot_session_mechanisms(
     uri = (
         None
         if provider_socket is None
-        else f"qemu+unix:///system?socket={quote(str(provider_socket), safe='/')}"
+        else f"qemu+unix:///session?socket={quote(str(provider_socket), safe='/')}"
     )
     factory = build_external_boot_session_factory(
         pin_lease=lane.pin,

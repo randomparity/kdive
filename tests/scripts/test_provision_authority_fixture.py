@@ -26,6 +26,12 @@ def _script() -> ModuleType:
     return module
 
 
+def test_authority_fixture_uses_the_provisioned_private_session_daemon() -> None:
+    assert _script()._AUTHORITY_URI == (
+        "qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
+    )
+
+
 def _profile(script: ModuleType, source: Path) -> Any:
     return script.ProvisioningProfile.model_validate(
         {
