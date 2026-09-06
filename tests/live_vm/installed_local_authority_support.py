@@ -88,7 +88,7 @@ if not generation.isdigit():
 match = re.fullmatch(
     r"local-systemd:kdive-live-worker@([1-8])\.service:([0-9a-f]{32})", original_worker
 )
-if match is None or replacement_worker == original_worker:
+if match is None:
     raise SystemExit("invalid stale-provider worker binding")
 slot = match.group(1)
 
@@ -1522,10 +1522,22 @@ async def wait_for_stale_worker_commit_observed(
         )
         if result.returncode == 0:
             try:
-                messages = [json.loads(line).get("MESSAGE") for line in result.stdout.splitlines()]
-            except json.JSONDecodeError, AttributeError:
+                entries = [json.loads(line) for line in result.stdout.splitlines()]
+                messages = [
+                    json.loads(entry["MESSAGE"])
+                    for entry in entries
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("MESSAGE"), str)
+                    and len(entry["MESSAGE"]) <= 4096
+                ]
+            except json.JSONDecodeError, KeyError, TypeError:
                 messages = []
-            if expected in messages:
+            if any(
+                isinstance(message, dict)
+                and message.get("logger") == "kdive.jobs.worker"
+                and message.get("msg") == expected
+                for message in messages
+            ):
                 return
         await asyncio.sleep(0.2)
     raise TimeoutError("stale paused worker did not attempt its fenced core commit")

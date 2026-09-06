@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.log import JsonFormatter
 from kdive.mcp.responses import ToolResponse
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
@@ -591,26 +596,166 @@ def test_stale_provider_proof_accepts_only_derived_subjects_and_installed_sender
         exec(compile(carrier._STALE_PROVIDER_CLIENT, "<stale-provider-client>", "exec"), {})
 
 
+def test_stale_provider_embedded_client_executes_complete_valid_setup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import kdive.config as config_registry
+    import kdive.jobs.authority_sender as sender_module
+    import kdive.providers.external_boot_authority.journal as journal_module
+    import kdive.providers.external_boot_authority.local_client as local_module
+    import kdive.providers.external_boot_authority.protocol as protocol_module
+    import kdive.security.secrets.secrets as secrets_module
+    import kdive.worker_lifecycle.worker_incarnation as incarnation_module
+
+    system_id, run_id, authority_id, job_id = (str(uuid4()) for _ in range(4))
+    invocation_id = "b" * 32
+    worker = "local-systemd:kdive-live-worker@2.service:" + "a" * 32
+    loaded: list[dict[str, str]] = []
+    resolved: list[str] = []
+    sent: list[tuple[object, float]] = []
+    document = "\n".join(
+        (
+            "KDIVE_DATABASE_URL=postgresql://worker",
+            "KDIVE_SECRETS_ROOT=/secrets",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE=authority-1",  # pragma: allowlist secret
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/authority.sock",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF=ca.pem",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF=cert.pem",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF=key.pem",
+            "KDIVE_FORBIDDEN_CALLER_VALUE=ignored",
+        )
+    ).encode()
+    record = SimpleNamespace(
+        phase=protocol_module.JournalPhase.MUTATION_STARTED,
+        authority_id=authority_id,
+        generation=1,
+        system_id=system_id,
+        run_id=run_id,
+        activation_id=uuid4(),
+        plan_identity="sha256:" + "1" * 64,
+        purpose="activate",
+        provider_kind="local-libvirt",
+        authority_instance="authority-1",
+        operation_identity="operation-1",
+        operation_digest="sha256:" + "2" * 64,
+        operation="activate",
+        attempt_id=uuid4(),
+        expected_source_identity="source",
+        intended_target_identity="target",
+        recovery_objects=(),
+    )
+
+    class FakeJournal:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def load(self) -> tuple[object, ...]:
+            return (record,)
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequest:
+        @staticmethod
+        def model_validate(value: dict[str, object]) -> dict[str, object]:
+            return value
+
+    class Backend:
+        def resolve(self, ref: str) -> str:
+            resolved.append(ref)
+            return "material"
+
+    binding = SimpleNamespace(
+        server_ca_ref="ca.pem",  # pragma: allowlist secret
+        client_cert_ref="cert.pem",
+        client_key_ref="key.pem",  # pragma: allowlist secret
+    )
+
+    class Sender:
+        async def execute_mutation(self, request: object, *, deadline: float) -> None:
+            sent.append((request, deadline))
+            raise CategorizedError(
+                "authority: superseded", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+
+    def sender_factory(
+        backend: Backend, borrow: Callable[[], SecretStr], *, binding: object
+    ) -> Sender:
+        assert borrow().get_secret_value() == "actual-projected-credential"
+        assert binding is not None
+        for ref in ("cert.pem", "key.pem", "ca.pem"):
+            backend.resolve(ref)
+        return Sender()
+
+    monkeypatch.setattr(
+        sys, "argv", ["client", system_id, run_id, worker, invocation_id, authority_id, "1", job_id]
+    )
+    monkeypatch.setattr(carrier.os, "open", lambda *_args, **_kwargs: 10)
+    monkeypatch.setattr(
+        carrier.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(st_mode=0o100600, st_uid=0, st_nlink=1, st_size=len(document)),
+    )
+    monkeypatch.setattr(carrier.os, "read", lambda _fd, _size: document)
+    monkeypatch.setattr(carrier.os, "close", lambda _fd: None)
+    projected_env = (
+        b"CREDENTIALS_DIRECTORY="  # pragma: allowlist secret
+        b"/run/credentials/live-worker\0"  # pragma: allowlist secret
+    )
+    monkeypatch.setattr(Path, "read_bytes", lambda self: projected_env)
+    monkeypatch.setattr(carrier.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=991))
+    monkeypatch.setattr(
+        carrier.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, f"MainPID=123\nInvocationID={invocation_id}\n", ""
+        ),
+    )
+    monkeypatch.setattr(config_registry, "load", lambda env=None: loaded.append(dict(env or {})))
+    monkeypatch.setattr(journal_module, "FileAuthorityJournal", FakeJournal)
+    monkeypatch.setattr(protocol_module, "AuthorityMutationRequestV1", FakeRequest)
+    monkeypatch.setattr(local_module, "local_authority_binding", lambda: binding)
+    monkeypatch.setattr(secrets_module, "secret_backend_from_env", lambda **_kwargs: Backend())
+    monkeypatch.setattr(
+        incarnation_module,
+        "worker_incarnation_credential",
+        lambda path: (
+            SecretStr("actual-projected-credential")
+            if path == Path("/run/credentials/live-worker/worker-incarnation")
+            else pytest.fail("wrong credential projection")
+        ),
+    )
+    monkeypatch.setattr(sender_module, "local_authority_sender_factory", sender_factory)
+
+    exec(compile(carrier._STALE_PROVIDER_CLIENT, "<stale-provider-client>", "exec"), {})
+
+    assert loaded and "KDIVE_FORBIDDEN_CALLER_VALUE" not in loaded[0]
+    assert resolved == ["cert.pem", "key.pem", "ca.pem"]
+    assert len(sent) == 1
+    assert capsys.readouterr().out == "superseded\n"
+
+
 def test_stale_commit_wait_requires_exact_invocation_and_job_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     job_id = str(uuid4())
+
+    def journal_entry(message: str, *, logger: str = "kdive.jobs.worker") -> str:
+        record = logging.LogRecord(logger, logging.WARNING, "", 0, message, (), None)
+        return json.dumps({"MESSAGE": JsonFormatter().format(record)}) + "\n"
+
     responses = iter(
         (
             subprocess.CompletedProcess(
                 [],
                 0,
-                json.dumps(
-                    {"MESSAGE": f"external boot job {uuid4()} was reclaimed; result dropped"}
-                )
-                + "\n",
+                journal_entry(f"external boot job {uuid4()} was reclaimed; result dropped"),
                 "",
             ),
             subprocess.CompletedProcess(
                 [],
                 0,
-                json.dumps({"MESSAGE": f"external boot job {job_id} was reclaimed; result dropped"})
-                + "\n",
+                journal_entry(f"external boot job {job_id} was reclaimed; result dropped"),
                 "",
             ),
         )
