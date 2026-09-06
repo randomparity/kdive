@@ -10,15 +10,18 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     ModuleAttemptTerminalEvidence,
+    ModuleAttemptWorkerWriteContext,
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -39,6 +42,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation imp
     RemoteModuleVolumeRecovery,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    CompletionDeadlineExecutor,
     RemoteModulePreparationExecutor,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
@@ -47,6 +51,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names 
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
     BuiltSourceImage,
     ModuleTreeEntry,
+    PreparedVolume,
     SourceFilesystemEvidence,
     expected_attempt_volumes,
     prepare_attempt_volumes,
@@ -56,6 +61,11 @@ from kdive.services.remote_module_attempt_preparation import (
     open_module_attempt_preparation,
 )
 from kdive.services.remote_module_operation import RemoteModuleOperationRuntime
+from kdive.services.remote_module_phases import (
+    CaptureInstallRequest,
+    capture_install_modules,
+    restore_modules,
+)
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
@@ -71,6 +81,9 @@ from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_sup
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Conn as ApplianceConn,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
+    Domain as ApplianceDomain,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Executor as ApplianceExecutor,
@@ -135,6 +148,19 @@ def _recovery(result: RemoteModuleResultV1) -> RemoteModuleRecoveryRefV2:
     )
 
 
+def _worker_context(recovery: RemoteModuleRecoveryRefV2) -> ModuleAttemptWorkerWriteContext:
+    preparation = ModuleAttemptPreparationRequestV1.model_validate(
+        {
+            "module_attempt_obligation": {
+                "system_id": UUID(recovery.system_id),
+                "run_id": UUID(recovery.run_id),
+                "operation_nonce": recovery.operation_nonce,
+            }
+        }
+    )
+    return ModuleAttemptWorkerWriteContext(uuid4(), 1, SecretStr("test-worker"), preparation)
+
+
 class Repo:
     async def read_terminal_evidence(self, conn: object, attempt: object):
         del conn, attempt
@@ -142,7 +168,7 @@ class Repo:
 
 
 def _runtime(
-    read: Callable[[RemoteModuleRecoveryRefV2], Awaitable[bytes | None]], repo: object | None = None
+    read: Callable[..., Awaitable[bytes | None]], repo: object | None = None
 ) -> RemoteModuleOperationRuntime:
     @asynccontextmanager
     async def connection() -> AsyncIterator[object]:
@@ -743,6 +769,252 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
     executor.shutdown()
 
 
+def test_real_runtime_and_database_reopen_installed_phase_in_fresh_process(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Writer:
+        operation = b""
+
+        def build(self, operation: bytes, entries: tuple[ModuleTreeEntry, ...]) -> BuiltSourceImage:
+            del entries
+            self.operation = operation
+            path = tmp_path / "phase-source.ext4"
+            path.write_bytes(b"image" + bytes(4091))
+            return BuiltSourceImage(
+                path,
+                4096,
+                SourceFilesystemEvidence(operation, "sha256:" + "b" * 64, 0, 0),
+            )
+
+        def inspect(self, path: Path) -> SourceFilesystemEvidence:
+            assert path.read_bytes().startswith(b"image")
+            return SourceFilesystemEvidence(self.operation, "sha256:" + "b" * 64, 0, 0)
+
+    class FailOnceDomain(ApplianceDomain):
+        def __init__(self, xml: str) -> None:
+            super().__init__(xml)
+            self.destroy_calls = 0
+
+        def destroy(self) -> int:
+            self.destroy_calls += 1
+            if self.destroy_calls == 1:
+                raise RuntimeError("injected worker loss during teardown")
+            return super().destroy()
+
+    class PersistentAppliance(ApplianceConn):
+        creates = 0
+
+        def createXML(self, xml: str, flags: int = 0):  # noqa: N802
+            self.creates += 1
+            self.created_flags = flags
+            self.domain = FailOnceDomain(xml)
+            return self.domain
+
+        def lookupByName(self, name: str):  # noqa: N802
+            if self.domain is not None and self.domain.destroyed:
+                self.domain = None
+            return super().lookupByName(name)
+
+    async def run() -> None:
+        repository = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            system_id, run_id = await _seed(admin)
+        base = appliance_operation()
+        operation = base.model_copy(update={"system_id": str(system_id), "run_id": str(run_id)})
+        attempt = ModuleAttempt(system_id, run_id, operation.operation_nonce)
+        credential = SecretStr("phase-worker-credential")
+        job_id = uuid4()
+        preparation = ModuleAttemptPreparationRequestV1.model_validate(
+            {
+                "module_attempt_obligation": {
+                    "system_id": system_id,
+                    "run_id": run_id,
+                    "operation_nonce": operation.operation_nonce,
+                }
+            }
+        )
+        context = ModuleAttemptWorkerWriteContext(job_id, 1, credential, preparation)
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            await admin.execute(
+                "INSERT INTO worker_incarnations "
+                "(incarnation, authority_kind, authority_binding, fence_protocol, credential_hash) "
+                "VALUES (%s, 'docker', %s, 4, %s)",
+                ("phase-worker", Jsonb({"container_id": "a" * 64}), context.credential_hash),
+            )
+            await admin.execute(
+                "INSERT INTO jobs "
+                "(id, kind, payload, state, attempt, max_attempts, worker_id, "
+                "lease_expires_at, authorizing, dedup_key) "
+                "VALUES (%s, 'boot', %s, 'running', 1, 3, 'phase-worker', "
+                "now() + interval '5 minutes', %s, %s)",
+                (
+                    job_id,
+                    Jsonb(
+                        {
+                            "run_id": str(run_id),
+                            "remote_module_attempt_v1": preparation.model_dump(
+                                mode="json", by_alias=True
+                            ),
+                        }
+                    ),
+                    Jsonb({"principal": "phase-test", "project": "phase-test"}),
+                    f"phase-{job_id}",
+                ),
+            )
+            await admin.commit()
+        installed = RemoteModuleResultV1.from_wire_bytes(success_result()).model_copy(
+            update={"system_id": operation.system_id, "run_id": operation.run_id}
+        )
+        scratch_result = [installed.to_wire_bytes()]
+        storage = Conn()
+        clock = ApplianceClock()
+        appliance = PersistentAppliance([], clock)
+        executor = RemoteModulePreparationExecutor()
+        authority_reference = OpaqueProviderRef(ref="authority/resource-bound")
+        source_name = render_module_volume_name(
+            operation.system_id, operation.run_id, operation.operation_nonce, "source.ext4"
+        )
+        scratch_name = render_module_volume_name(
+            operation.system_id, operation.run_id, operation.operation_nonce, "scratch.ext4"
+        )
+
+        def attachments() -> AttachmentInspection:
+            return AttachmentInspection(
+                True,
+                True,
+                False,
+                frozenset({("systems", source_name), ("systems", scratch_name)}),
+            )
+
+        volume_config = RemoteModuleVolumePreparation(
+            storage,
+            "systems",
+            (),
+            Writer(),
+            lambda _identity: AttachmentInspection(True, True, False, frozenset()),
+            tmp_path,
+        )
+        appliance_config = RemoteModuleApplianceExecution(
+            appliance,
+            "x86_64",
+            "/usr/bin/qemu-system-x86_64",
+            262_144,
+            1,
+            "appliance-x86_64.qcow2",
+            operation.appliance_image_digest,
+            lambda value: PreparedVolume(
+                "systems",
+                value.root_volume.key,
+                value.system_id,
+                value.run_id,
+                value.operation_nonce,
+                "root",
+                value.root_volume.identity,
+                4096,
+            ),
+            lambda _scratch: scratch_result[0],
+            attachments,
+            appliance_request(clock).secret_registry,
+            CompletionDeadlineExecutor(clock),
+            clock,
+        )
+        monkeypatch.setattr(
+            "kdive.services.remote_module_volume_preparation.build_remote_device_identity_port",
+            lambda authority, _deadline: authority,
+        )
+        async with (
+            AsyncConnectionPool(
+                authority_role_dsns("kdive_server"), min_size=1, max_size=1
+            ) as server,
+            AsyncConnectionPool(
+                authority_role_dsns("kdive_worker"), min_size=1, max_size=1
+            ) as worker,
+        ):
+            receipt = await open_module_attempt_preparation(server, repository, attempt)
+
+            def runtime() -> RemoteModuleOperationRuntime:
+                async def read(_recovery: RemoteModuleRecoveryRefV2, _deadline: float) -> bytes:
+                    return scratch_result[0]
+
+                return RemoteModuleOperationRuntime(
+                    worker,
+                    repository,
+                    read,
+                    volume_config,
+                    appliance_config,
+                    worker_write_context=context,
+                )
+
+            request = CaptureInstallRequest(
+                receipt,
+                operation,
+                cast(Any, object()),
+                authority_reference,
+            )
+            with pytest.raises(RuntimeError, match="worker loss during teardown"):
+                await capture_install_modules(
+                    request, runtime=runtime(), executor=executor, deadline=10**12
+                )
+            assert appliance.creates == 1
+            restarted = runtime()
+            recovery = await capture_install_modules(
+                request, runtime=restarted, executor=executor, deadline=10**12
+            )
+            assert appliance.creates == 1
+            assert recovery.source_capacity_bytes == 4096
+            async with server.connection() as conn:
+                assert await repository.mutation_obligation_is_open(conn, attempt) is True
+
+            restored = installed.model_copy(
+                update={"phase": "restored", "entry_count": None, "content_bytes": None}
+            )
+            scratch_result[0] = restored.to_wire_bytes()
+            foreign = object()
+            storage.pool.volumes["foreign-volume"] = cast(Any, foreign)
+            source = storage.pool.volumes[source_name]
+            original_delete = source.delete
+            fail_delete = True
+
+            def delete_once(flags: int = 0) -> int:
+                nonlocal fail_delete
+                if fail_delete:
+                    fail_delete = False
+                    raise RuntimeError("injected worker loss during source deletion")
+                return original_delete(flags)
+
+            cast(Any, source).delete = delete_once
+            with pytest.raises(RuntimeError, match="worker loss during source deletion"):
+                await restore_modules(
+                    recovery,
+                    authority_reference,
+                    runtime=runtime(),
+                    executor=executor,
+                    deadline=10**12,
+                )
+            completed = await restore_modules(
+                recovery,
+                authority_reference,
+                runtime=runtime(),
+                executor=executor,
+                deadline=10**12,
+            )
+            assert completed == restored
+            assert storage.pool.volumes["foreign-volume"] is foreign
+            assert storage.pool.volumes[source_name].deleted is True
+            assert storage.pool.volumes[scratch_name].deleted is True
+            async with server.connection() as conn:
+                retained = await repository.retained_owners(conn)
+            owner = next(item for item in retained if item.attempt == attempt)
+            assert owner.mutation_retained is True
+            assert owner.reap_retained is False
+        executor.shutdown()
+
+    asyncio.run(run())
+
+
 def test_run_cancellation_waits_for_provider_cleanup(tmp_path: Path) -> None:
     async def run() -> None:
         operation = appliance_operation()
@@ -846,17 +1118,19 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
         async def read_terminal_evidence(self, _conn: object, _attempt: object):
             return self.evidence
 
-        async def record_terminal_evidence(
-            self, _conn: object, _attempt: object, evidence: ModuleAttemptTerminalEvidence
-        ) -> None:
+        async def worker_record_terminal_evidence(
+            self,
+            _conn: object,
+            _context: object,
+            _attempt: object,
+            evidence: ModuleAttemptTerminalEvidence,
+        ) -> bool:
             events.append("evidence")
             self.evidence = evidence
-
-        async def open_reap_obligation(self, _conn: object, _attempt: object) -> bool:
             events.append("reap-open")
             return True
 
-        async def discharge_reap_obligation(self, _conn: object, _attempt: object) -> bool:
+        async def worker_discharge_reap_obligation(self, *_args: object) -> bool:
             events.append("reap-discharge")
             return True
 
@@ -911,6 +1185,7 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
             lambda _identity: wanted.inspect_attachments(),
             tmp_path,
         ),
+        worker_write_context=_worker_context(recovery),
     )
     object.__setattr__(
         runtime,
@@ -1028,7 +1303,7 @@ def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
     appliance = FlakyAppliance([], clock)
     wanted = volume_request(tmp_path)
 
-    async def read(_recovery: RemoteModuleRecoveryRefV2) -> bytes:
+    async def read(_recovery: RemoteModuleRecoveryRefV2, _deadline: float) -> bytes:
         return result.to_wire_bytes()
 
     runtime = _runtime(read)
@@ -1113,7 +1388,7 @@ def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: 
         async def read_terminal_evidence(self, _conn: object, _attempt: object):
             return None
 
-        async def record_terminal_evidence(self, *_args: object) -> None:
+        async def worker_record_terminal_evidence(self, *_args: object) -> bool:
             raise RuntimeError("transaction rolled back")
 
     storage = Conn()
@@ -1158,6 +1433,7 @@ def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: 
             lambda _identity: wanted.inspect_attachments(),
             tmp_path,
         ),
+        worker_write_context=_worker_context(recovery),
     )
     executor = RemoteModulePreparationExecutor()
     with pytest.raises(RuntimeError, match="rolled back"):

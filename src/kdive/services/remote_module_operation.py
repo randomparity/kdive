@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     ModuleAttemptTerminalEvidence,
+    ModuleAttemptWorkerWriteContext,
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -79,6 +80,7 @@ class RemoteModuleOperationRuntime:
     appliance_execution: RemoteModuleApplianceExecution | None = None
     module_volume_reaper: ModuleVolumeReaper | None = None
     volume_recovery: RemoteModuleVolumeRecovery | None = None
+    worker_write_context: ModuleAttemptWorkerWriteContext | None = None
 
     @staticmethod
     def _attempt(recovery: RemoteModuleRecoveryRefV1) -> ModuleAttempt:
@@ -431,7 +433,7 @@ class RemoteModuleOperationRuntime:
         executor: RemoteModulePreparationExecutor,
         deadline: float,
     ) -> TeardownObservation:
-        operation = await self.reopen_operation(recovery)
+        operation = await self.reopen_operation(recovery, deadline)
         volumes = self.recovery_volumes(operation, recovery)
         request = self._appliance_request(operation, volumes, deadline)
         configured = self.appliance_execution
@@ -440,9 +442,11 @@ class RemoteModuleOperationRuntime:
             lambda: teardown_remote_module_appliance(configured.appliance, request)
         )
 
-    async def _open_reap_evidence(self, recovery: RemoteModuleRecoveryRefV1) -> None:
-        operation = await self.reopen_operation(recovery)
-        result = await self.reopen_result(recovery)
+    async def _open_reap_evidence(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
+    ) -> None:
+        operation = await self.reopen_operation(recovery, deadline)
+        result = await self.reopen_result(recovery, deadline)
         if recovery.installed_entry_count is None or recovery.installed_content_bytes is None:
             raise CategorizedError(
                 "remote module installed baseline counts are absent",
@@ -459,9 +463,20 @@ class RemoteModuleOperationRuntime:
             installed_content_bytes=recovery.installed_content_bytes,
             recovery_reference=recovery.model_dump(mode="json"),
         )
+        context = self.worker_write_context
+        if context is None:
+            raise CategorizedError(
+                "remote module worker evidence context is absent",
+                category=ErrorCategory.CONFLICT,
+            )
         async with self.pool.connection() as conn, conn.transaction():
-            await self.repository.record_terminal_evidence(conn, self._attempt(recovery), evidence)
-            await self.repository.open_reap_obligation(conn, self._attempt(recovery))
+            if not await self.repository.worker_record_terminal_evidence(
+                conn, context, self._attempt(recovery), evidence
+            ):
+                raise CategorizedError(
+                    "remote module worker evidence authority is stale",
+                    category=ErrorCategory.CONFLICT,
+                )
 
     async def _delete(
         self,
@@ -471,8 +486,8 @@ class RemoteModuleOperationRuntime:
         deadline: float | None,
     ) -> None:
         if purpose == "scratch":
-            await self._open_reap_evidence(recovery)
-        operation = await self.reopen_operation(recovery)
+            await self._open_reap_evidence(recovery, deadline)
+        operation = await self.reopen_operation(recovery, deadline)
         volumes = self.recovery_volumes(operation, recovery)
         selected = volumes.source if purpose == "source" else volumes.scratch
         configured = self._volume_binding()
@@ -564,7 +579,7 @@ class RemoteModuleOperationRuntime:
         deadline: float | None = None,
     ) -> None:
         self._check_deadline(deadline)
-        await self._open_reap_evidence(recovery)
+        await self._open_reap_evidence(recovery, deadline)
         await self._record_marker(recovery, executor, "reaping")
         self._check_deadline(deadline)
 
@@ -576,8 +591,20 @@ class RemoteModuleOperationRuntime:
     ) -> None:
         self._check_deadline(deadline)
         await self._record_marker(recovery, executor, "reaped")
+        context = self.worker_write_context
+        if context is None:
+            raise CategorizedError(
+                "remote module worker evidence context is absent",
+                category=ErrorCategory.CONFLICT,
+            )
         async with self.pool.connection() as conn, conn.transaction():
-            await self.repository.discharge_reap_obligation(conn, self._attempt(recovery))
+            if not await self.repository.worker_discharge_reap_obligation(
+                conn, context, self._attempt(recovery)
+            ):
+                raise CategorizedError(
+                    "remote module worker evidence authority is stale",
+                    category=ErrorCategory.CONFLICT,
+                )
         self._check_deadline(deadline)
 
     def _check_deadline(self, deadline: float | None) -> None:
