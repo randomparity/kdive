@@ -232,10 +232,12 @@ def test_preparing_without_executor_refuses_before_authority_or_provider(
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
+@pytest.mark.parametrize("commit_status", ["applied", "superseded"])
 def test_preparing_executes_and_commits_exact_materialization(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     monkeypatch: pytest.MonkeyPatch,
+    commit_status: str,
 ) -> None:
     executed: list[AuthorityPreparationMutationRequestV1] = []
     committed: list[AuthorityPreparationMutationRequestV1] = []
@@ -271,7 +273,7 @@ def test_preparing_executes_and_commits_exact_materialization(
 
     async def commit(_conn: AsyncConnection, **values: Any) -> str:
         committed.append(values["request"])
-        return "applied"
+        return commit_status
 
     monkeypatch.setattr(
         "kdive.jobs.handlers.external_boot.runner.commit_external_boot_preparation_result",
@@ -296,17 +298,26 @@ def test_preparing_executes_and_commits_exact_materialization(
             ),
             preparation_executor=Executor(),
         )
-        await _run(
+        call = _run(
             worker,
             case,
             ports=ports,
             require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
             call_port=lambda _context: None,
         )
+        if commit_status == "superseded":
+            with pytest.raises(CategorizedError, match="materialize commit was superseded"):
+                await call
+            assert [request.operation.value for request in executed] == ["materialize"]
+            return
+        await call
         assert executed == committed
         assert executed[0].plan == vehicle.plan
         assert executed[0].operation.value == "materialize"
         assert executed[0].operation_identity.startswith("sha256:")
+        assert [request.operation.value for request in executed] == ["materialize", "prepare"]
+        assert executed[0].operation_identity != executed[1].operation_identity
+        assert executed[0].attempt_id != executed[1].attempt_id
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 

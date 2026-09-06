@@ -8,7 +8,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
@@ -193,41 +193,46 @@ async def _materialize_preparing(
         raise _refuse("no external-boot authority preparation executor is configured")
     raw_plan = context.job.payload.get("external_boot_plan_v1")
     plan = ExternalBootPlan.model_validate(raw_plan)
-    operation_identity, operation_digest = _phase_binding(context, "materialize")
-    request = AuthorityPreparationMutationRequestV1(
-        authority_id=context.authority.authority_id,
-        generation=context.authority.generation,
-        system_id=context.marker.system_id,
-        activation_id=context.marker.activation_id,
-        run_id=context.marker.run_id,
-        plan_identity=context.marker.plan_identity,
-        purpose="activate",
-        operation="materialize",
-        provider_kind=context.marker.provider_kind,
-        authority_instance=context.marker.authority_instance,
-        operation_identity=operation_identity,
-        operation_digest=operation_digest,
-        attempt_id=uuid5(NAMESPACE_URL, f"{context.marker.operation_identity}/materialize"),
-        expected_source_identity=context.marker.plan_identity,
-        intended_target_identity=context.marker.plan_identity,
-        recovery_objects=(),
-        plan=plan,
-    )
-    response = await executor.execute_preparation(request)
-    status = await commit_external_boot_preparation_result(
-        conn,
-        credential=ports.incarnation_credential,
-        job_id=context.job.id,
-        job_attempt=context.job.attempt,
-        request=request,
-        response=response,
-    )
-    if status != "applied":
-        raise CategorizedError(
-            f"external boot materialization commit was {status}",
-            category=ErrorCategory.STALE_HANDLE,
-            terminal=False,
+
+    async def execute_phase(operation: Literal["materialize", "prepare"]) -> None:
+        operation_identity, operation_digest = _phase_binding(context, operation)
+        request = AuthorityPreparationMutationRequestV1(
+            authority_id=context.authority.authority_id,
+            generation=context.authority.generation,
+            system_id=context.marker.system_id,
+            activation_id=context.marker.activation_id,
+            run_id=context.marker.run_id,
+            plan_identity=context.marker.plan_identity,
+            purpose="activate",
+            operation=operation,
+            provider_kind=context.marker.provider_kind,
+            authority_instance=context.marker.authority_instance,
+            operation_identity=operation_identity,
+            operation_digest=operation_digest,
+            attempt_id=uuid5(NAMESPACE_URL, f"{context.marker.operation_identity}/{operation}"),
+            expected_source_identity=context.marker.plan_identity,
+            intended_target_identity=context.marker.plan_identity,
+            recovery_objects=(),
+            plan=plan,
         )
+        response = await executor.execute_preparation(request)
+        status = await commit_external_boot_preparation_result(
+            conn,
+            credential=ports.incarnation_credential,
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            request=request,
+            response=response,
+        )
+        if status != "applied":
+            raise CategorizedError(
+                f"external boot {operation} commit was {status}",
+                category=ErrorCategory.STALE_HANDLE,
+                terminal=False,
+            )
+
+    await execute_phase("materialize")
+    await execute_phase("prepare")
 
 
 async def _resolve_port(
