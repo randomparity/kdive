@@ -1396,13 +1396,13 @@ class LocalExternalBootSessionFactory:
 
 
 class _ConcreteSystemTeardownSession:
-    """Exact no-create host teardown capability held under one pinned operation lane."""
+    """Exact no-create host teardown capability, optionally held under one pinned lane."""
 
     def __init__(
         self,
         *,
         system_id: UUID,
-        pin: LocalExternalBootOperationPin,
+        pin: LocalExternalBootOperationPin | None,
         connection: _Connection,
         overlay: str,
         baseline: str,
@@ -1501,6 +1501,24 @@ class _ConcreteSystemTeardownSession:
             domain.free()
             raise
         return domain
+
+
+def open_authority_system_teardown(
+    connect: Connect, system_id: UUID, overlay: str, baseline: str
+) -> _ConcreteSystemTeardownSession:
+    """Open an activation-free exact teardown session for a private authority System.
+
+    This uses the same live/inactive XML validation as external boot but deliberately issues no
+    activation lease and accepts no Run identity.  The caller already holds the System authority
+    fence and supplies only its private, fixed connection and pre-derived artifact identities.
+    """
+    return _ConcreteSystemTeardownSession(
+        system_id=system_id,
+        pin=None,
+        connection=connect(),
+        overlay=overlay,
+        baseline=baseline,
+    )
 
 
 def _require_expected_ownership(
@@ -1611,11 +1629,17 @@ def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Ele
         raise ValueError("domain ownership does not match the operation lease")
     if root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system") != str(system_id):
         raise ValueError("domain ownership metadata does not match the operation lease")
+    all_disks = root.findall("devices/disk")
+    if len(all_disks) > 4096:
+        raise ValueError("domain XML exceeds the owned-storage device bound")
     disks = []
-    for disk in root.findall("devices/disk"):
+    overlay_references = 0
+    for disk in all_disks:
         source = disk.find("source")
         driver = disk.find("driver")
         target = disk.find("target")
+        if source is not None and source.get("file") == expected_overlay:
+            overlay_references += 1
         if (
             disk.get("type") == "file"
             and disk.get("device") == "disk"
@@ -1629,7 +1653,7 @@ def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Ele
             and disk.find("readonly") is None
         ):
             disks.append(disk)
-    if len(disks) != 1:
+    if len(disks) != 1 or overlay_references != 1:
         raise ValueError("domain overlay ownership is absent or ambiguous")
     return root
 

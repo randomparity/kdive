@@ -40,6 +40,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     PinOperationLease,
     _ConcreteSession,
     _Find0TreeCursor,
+    open_authority_system_teardown,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -214,6 +215,36 @@ def test_teardown_session_absent_replay_is_read_only_and_creates_nothing(tmp_pat
     assert observed.overlay_absent
     assert observed.baseline_absent
     assert sorted(tmp_path.iterdir()) == before == []
+
+
+def test_authority_teardown_session_requires_no_activation_or_run(tmp_path: Path) -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    _, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+
+    session = open_authority_system_teardown(
+        lambda: _TeardownConn(events, domain), SYSTEM_ID, str(overlay), str(baseline)
+    )
+
+    assert session.inspect().domain_validated
+    session.close()
+
+
+def test_teardown_rejects_a_second_alias_to_the_owned_overlay(tmp_path: Path) -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    factory, overlay, _baseline = _teardown_factory(tmp_path, events, domain)
+    duplicate = (
+        '<disk type="file" device="disk"><driver name="qemu" type="qcow2" />'
+        f'<source file="{overlay}" /><target dev="vdb" bus="virtio" /></disk>'
+    )
+    domain.xml = domain.xml.replace("</devices>", f"{duplicate}</devices>")
+    domain.inactive_xml = domain.xml
+
+    session = factory.open_teardown(_lease(), _expected())
+    with pytest.raises(ValueError, match="ambiguous"):
+        session.inspect()
+    session.close()
 
 
 LANE = FakeLane()

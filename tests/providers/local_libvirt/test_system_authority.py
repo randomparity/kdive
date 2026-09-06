@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -97,3 +99,27 @@ def test_private_intent_symlink_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(LocalAuthoritySystemError, match="unsafe"):
         provider._load_intent(intent.system_id)
+
+
+def test_cancellation_drains_the_completion_owned_host_operation(tmp_path: Path) -> None:
+    asyncio.run(_cancel_and_drain(tmp_path))
+
+
+async def _cancel_and_drain(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def operation() -> str:
+        started.set()
+        assert release.wait(timeout=1)
+        return "completed"
+
+    task = asyncio.create_task(provider._offload(operation))
+    await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
