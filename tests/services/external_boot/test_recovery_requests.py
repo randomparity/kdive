@@ -967,3 +967,30 @@ def test_conflict_enqueue_leaves_activation_unchanged(migrated_url: str) -> None
         ) == (jobs_before[0], jobs_before[1] + 1)
 
     _drive(migrated_url, _body)
+
+
+def test_release_enqueues_once_from_retired_exact_authority(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        seeded = await _seed(fixture.conn, state=_STATE.ACTIVE)
+        await _seed_retired_conflict_authority(fixture.conn, seeded)
+        await fixture.conn.execute("UPDATE jobs SET state = 'succeeded'")
+
+        first = await request_release(
+            fixture.pool, _ctx(), run_id=str(seeded.run_id), resolver=_RESOLVER
+        )
+        second = await request_release(
+            fixture.pool, _ctx(), run_id=str(seeded.run_id), resolver=_RESOLVER
+        )
+
+        assert first.status == second.status == "queued"
+        assert first.object_id == second.object_id
+        async with fixture.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT kind, payload FROM jobs WHERE id = %s", (first.object_id,))
+            job = await cur.fetchone()
+        assert job is not None
+        assert job["kind"] == "boot"
+        marker = job["payload"]["external_boot_authority_v1"]
+        assert marker["purpose"] == marker["operation"] == "release"
+        assert marker["activation_id"] == str(seeded.activation_id)
+
+    _drive(migrated_url, _body)
