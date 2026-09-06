@@ -756,6 +756,43 @@ class ExternalBootAuthorityService:
         finally:
             self._release_lane(binding.system_id, lane)
 
+    @staticmethod
+    def _acknowledgement_response(
+        request: AuthorityTakeoverRequestV1,
+        records: list[JournalRecordV1],
+        watermark: JournalRecordV1,
+        acknowledgement: JournalRecordV1,
+    ) -> AuthorityAcknowledgementV1:
+        quiescence = json.dumps(
+            {
+                "authority_instance": request.authority_instance,
+                "generation": request.generation,
+                "lower_operations": [
+                    {
+                        "digest": record_digest(record),
+                        "outcome": record.outcome,
+                        "sequence": record.sequence,
+                    }
+                    for record in records
+                    if record.phase is JournalPhase.TERMINAL
+                    and record.generation < request.generation
+                ],
+                "system_id": str(request.system_id),
+                "watermark_digest": record_digest(watermark),
+                "watermark_sequence": watermark.sequence,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return AuthorityAcknowledgementV1(
+            authority_id=request.authority_id,
+            generation=request.generation,
+            system_id=request.system_id,
+            journal_sequence=acknowledgement.sequence,
+            journal_digest=record_digest(acknowledgement),
+            positive_quiescence_digest="sha256:" + hashlib.sha256(quiescence).hexdigest(),
+        )
+
     async def _acknowledge_takeover_bound(
         self,
         authenticated: AuthenticatedPeer,
@@ -772,6 +809,36 @@ class ExternalBootAuthorityService:
             try:
                 journal, records = self._lane_journal(request.system_id, lane)
                 records = await self._recover(binding, journal, records)
+                acknowledgement = next(
+                    (
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.authority_id == request.authority_id
+                        and record.generation == request.generation
+                        and record.operation_identity == request.operation_identity
+                        and record.operation_digest == request.operation_digest
+                    ),
+                    None,
+                )
+                if acknowledgement is not None:
+                    trusted = await self._repository.read_head(binding)
+                    if trusted is None:
+                        raise AuthorityServiceError("journal_conflict")
+                    watermark = next(
+                        (
+                            record
+                            for record in records
+                            if record.sequence == acknowledgement.watermark_sequence
+                            and record_digest(record) == acknowledgement.watermark_digest
+                        ),
+                        None,
+                    )
+                    if watermark is None:
+                        raise AuthorityServiceError("journal_conflict")
+                    return self._acknowledgement_response(
+                        request, records[: acknowledgement.sequence], watermark, acknowledgement
+                    )
                 trusted = await self._repository.read_head(binding)
                 watermark: JournalRecordV1 | None = None
                 pending = trusted.pending_takeover if trusted is not None else None
@@ -901,35 +968,7 @@ class ExternalBootAuthorityService:
                 lane.failed = True
                 raise
             self.metrics.set_unresolved((request.provider_kind, request.authority_instance), False)
-            quiescence = json.dumps(
-                {
-                    "authority_instance": request.authority_instance,
-                    "generation": request.generation,
-                    "lower_operations": [
-                        {
-                            "digest": record_digest(record),
-                            "outcome": record.outcome,
-                            "sequence": record.sequence,
-                        }
-                        for record in records
-                        if record.phase is JournalPhase.TERMINAL
-                        and record.generation < request.generation
-                    ],
-                    "system_id": str(request.system_id),
-                    "watermark_digest": record_digest(watermark),
-                    "watermark_sequence": watermark.sequence,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-            return AuthorityAcknowledgementV1(
-                authority_id=request.authority_id,
-                generation=request.generation,
-                system_id=request.system_id,
-                journal_sequence=acknowledgement.sequence,
-                journal_digest=record_digest(acknowledgement),
-                positive_quiescence_digest="sha256:" + hashlib.sha256(quiescence).hexdigest(),
-            )
+            return self._acknowledgement_response(request, records, watermark, acknowledgement)
 
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
