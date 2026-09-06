@@ -69,7 +69,17 @@ Steps:
 
 ## Task 3 — prove durable intent, completion ownership, and wire framing
 
-Files: update the two Task 2 files and their focused tests only.
+Files:
+
+- Modify `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_volumes.py`.
+- Create `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_preparation.py` for
+  the provider-owned offload and ADR-0605 consumer composition.
+- Modify `tests/providers/remote_libvirt/lifecycle/rootfs/test_remote_module_volumes.py`.
+- Create `tests/providers/remote_libvirt/lifecycle/rootfs/test_remote_module_preparation.py`.
+
+The new provider seam receives ADR-0605's pool, repository, request, and expected attempt plus the
+already Resource-bound authority sender and captured operation deadline. It exposes no new job
+kind or handler; #2173 invokes it when that sibling lands orchestration.
 
 Steps:
 
