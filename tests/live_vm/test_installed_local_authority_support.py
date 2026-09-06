@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from kdive.mcp.responses import ToolResponse
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
+from tests.live_vm import installed_local_authority_support as carrier
 from tests.live_vm.installed_local_authority_support import (
     CONFIG_ENV,
     NativeAuthorityConfig,
@@ -318,8 +319,6 @@ def test_identity_probe_fails_when_a_subordinate_identity_can_bypass(
 def test_native_carrier_checks_deployed_builds_before_fixture_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.live_vm import test_installed_local_authority as carrier
-
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
         system_id=uuid4(),
@@ -351,15 +350,13 @@ def test_native_carrier_checks_deployed_builds_before_fixture_mutation(
     monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
 
     with pytest.raises(AssertionError, match="deployed worker slot 1 revision"):
-        carrier.test_installed_local_authority_normal_operations()
+        carrier.run_installed_local_authority_normal_operations()
     assert not fixture_called
 
 
 def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.live_vm import test_installed_local_authority as carrier
-
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
         system_id=uuid4(),
@@ -401,7 +398,7 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
 
     with pytest.raises(RuntimeError, match="stop before public MCP mutation"):
-        carrier.test_installed_local_authority_normal_operations()
+        carrier.run_installed_local_authority_normal_operations()
 
 
 async def _completed_root_release(migrated_url: str) -> NormalOperationJobs:

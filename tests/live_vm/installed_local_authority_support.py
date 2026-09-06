@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pwd
@@ -16,11 +17,19 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
+import pytest
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kdive.mcp.dev_harness import LiveStackClient
+from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.skew import _fetch_version, _resolve, readyz_urls
-from tests.integration.live_stack.spine import build_and_upload_kernel, drain_job, ok, scalar
+from tests.integration.live_stack.spine import (
+    build_and_upload_kernel,
+    drain_job,
+    mint_role_token,
+    ok,
+    scalar,
+)
 
 CONFIG_ENV = "KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG"
 OPERATIONS = ("activate", "recover", "resolve-conflict", "release", "cleanup", "teardown")
@@ -129,6 +138,80 @@ class NormalOperationJobs:
     run_id: str
     activate_job_id: str
     release_job_id: str
+
+
+def _output(*argv: str) -> str:
+    result = subprocess.run(argv, check=True, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def run_installed_local_authority_normal_operations() -> None:
+    """Run the configured carrier's public activate and root-release proof.
+
+    The collected native-test entrypoint remains deliberately thin; this support function also
+    keeps pre-mutation, confinement, and cleanup behavior directly unit-testable without importing
+    a collected test module.
+    """
+    config = load_config()
+    if config is None:
+        pytest.skip("installed local-authority carrier is not configured")
+
+    installed = _output("sudo", "-n", "cat", "/opt/kdive-provider-authority/revision")
+    assert installed == config.installed_revision, (
+        f"installed authority revision {installed!r} does not match configured coherent revision"
+    )
+    assert _output("systemctl", "is-active", config.authority_service) == "active"
+    running_workers = _output(
+        "systemctl",
+        "list-units",
+        "kdive-live-worker@*.service",
+        "--state=running",
+        "--no-legend",
+    )
+
+    issuer = require_issuer()
+    base_url = require_stack()
+    require_deployed_revision(config, base_url, running_workers)
+    db_url = os.environ.get("KDIVE_DATABASE_URL")
+    assert db_url, "native authority carrier requires KDIVE_DATABASE_URL"
+    token = mint_role_token(
+        issuer,
+        project=config.project,
+        agent_session=config.ownership_prefix,
+        role="admin",
+    )
+    ledger = ResourceLedger(config.ownership_prefix)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config)
+        require_authority_artifact_confinement(config, running_workers)
+        client = LiveStackClient.over_http(base_url, token)
+        async with client:
+            primary: Exception | None = None
+            try:
+                operations = await drive_normal_operations(client, config, ledger)
+                await assert_root_release_completion(db_url, operations)
+            except Exception as exc:  # preserve the native failure while still attempting cleanup
+                primary = exc
+            cleanup_failures: list[Exception] = []
+            investigations = [r for r in ledger.resources if r.kind == "investigation"]
+            for resource in reversed(investigations):
+                try:
+                    closed = await client.call_tool(
+                        "investigations.close", investigation_id=resource.identity
+                    )
+                    assert not isinstance(closed, list)
+                    assert closed.status not in {"error", "failed"}
+                except Exception as exc:
+                    cleanup_failures.append(exc)
+            if primary is not None:
+                cleanup_failures.insert(0, primary)
+            if len(cleanup_failures) == 1:
+                raise cleanup_failures[0]
+            if cleanup_failures:
+                raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
+
+    asyncio.run(run())
 
 
 def require_deployed_revision(
