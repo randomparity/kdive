@@ -20,6 +20,7 @@ from tests.live_vm.installed_local_authority_support import (
     drive_normal_operations,
     load_config,
     provision_authority_fixture,
+    require_authority_artifact_confinement,
     require_deployed_revision,
 )
 
@@ -64,6 +65,7 @@ def test_installed_local_authority_normal_operations() -> None:
 
     async def run() -> None:
         await provision_authority_fixture(db_url, config)
+        require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
             primary: Exception | None = None

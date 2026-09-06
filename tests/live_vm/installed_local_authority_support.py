@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -18,13 +19,77 @@ import psycopg
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kdive.mcp.dev_harness import LiveStackClient
-from tests.integration.live_stack.skew import _fetch_version, readyz_urls
+from tests.integration.live_stack.skew import _fetch_version, _resolve, readyz_urls
 from tests.integration.live_stack.spine import build_and_upload_kernel, drain_job, ok, scalar
 
 CONFIG_ENV = "KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG"
 OPERATIONS = ("activate", "recover", "resolve-conflict", "release", "cleanup", "teardown")
 _PREFIX = re.compile(r"kdive-2151-[0-9a-f]{12}-[0-9a-f]{8}")
 _FIXED_WORKER_UNIT = re.compile(r"kdive-live-worker@([1-8])\.service")
+_AUTHORITY_ACCOUNT = "kdive-provider-authority"
+_AUTHORITY_ARTIFACT_ROOTS = (
+    Path("/var/lib/kdive/provider-authority/rootfs"),
+    Path("/var/lib/kdive/provider-authority/console"),
+)
+_IDENTITY_PYTHON = "/usr/bin/python3"
+
+_CREATE_SENTINELS = """
+import json
+import os
+import stat
+import sys
+
+for entry in json.load(sys.stdin):
+    metadata = os.stat(entry["artifact"], follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(f"authority fixture artifact is not a regular file: {entry['artifact']}")
+    for name in (entry["sentinel"], entry["replacement"]):
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+        os.close(descriptor)
+"""
+
+_REMOVE_SENTINELS = """
+import json
+import os
+import sys
+
+for entry in json.load(sys.stdin):
+    for name in (entry["sentinel"], entry["replacement"]):
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+"""
+
+_IDENTITY_BYPASS_PROBE = """
+import json
+import os
+import sys
+
+failures = []
+for entry in json.load(sys.stdin):
+    try:
+        descriptor = os.open(entry["artifact"], os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        pass
+    else:
+        os.close(descriptor)
+        failures.append(f"opened private artifact {entry['artifact']}")
+    try:
+        os.unlink(entry["sentinel"])
+    except OSError:
+        pass
+    else:
+        failures.append(f"unlinked authority sentinel {entry['sentinel']}")
+    try:
+        os.replace(entry["replacement"], entry["sentinel"])
+    except OSError:
+        pass
+    else:
+        failures.append(f"replaced authority sentinel {entry['sentinel']}")
+if failures:
+    raise SystemExit("; ".join(failures))
+"""
 
 
 class NativeAuthorityConfig(BaseModel):
@@ -72,15 +137,17 @@ def require_deployed_revision(
     running_workers: str,
     *,
     fetch: Callable[[str], dict[str, object] | None] = _fetch_version,
+    resolve: Callable[[str], str | None] = _resolve,
 ) -> None:
-    """Refuse carrier mutation unless server and every active fixed worker report one build."""
+    """Refuse carrier mutation unless reports resolve exactly to the configured full build."""
     default_urls = readyz_urls(base_url, {})
     server_url = default_urls["server"]
     worker_urls = _active_worker_readyz_urls(base_url, running_workers)
     for process, url in (("server", server_url), *worker_urls):
         version = fetch(url)
         commit = version.get("commit") if version is not None else None
-        if commit != config.installed_revision:
+        resolved = resolve(commit) if isinstance(commit, str) else None
+        if resolved != config.installed_revision:
             reported = commit if isinstance(commit, str) else "unknown"
             raise AssertionError(
                 f"deployed {process} revision {reported!r} does not match configured "
@@ -106,6 +173,78 @@ def _active_worker_readyz_urls(base_url: str, running_workers: str) -> tuple[tup
         )
         for slot in slots
     )
+
+
+def _active_worker_slots(running_workers: str) -> tuple[int, ...]:
+    """Return the exact fixed-worker slots systemd reports as active for this invocation."""
+    slots = tuple(sorted({int(slot) for slot in _FIXED_WORKER_UNIT.findall(running_workers)}))
+    if not slots:
+        raise AssertionError("native authority carrier requires an active fixed worker incarnation")
+    return slots
+
+
+def _authority_artifacts(config: NativeAuthorityConfig) -> tuple[tuple[str, Path], ...]:
+    """Construct only the selected fixture's two authority-private artifacts."""
+    return (
+        ("overlay", _AUTHORITY_ARTIFACT_ROOTS[0] / f"{config.system_id}-overlay.qcow2"),
+        ("console", _AUTHORITY_ARTIFACT_ROOTS[1] / f"{config.system_id}.log"),
+    )
+
+
+def _sentinel_entries(config: NativeAuthorityConfig) -> tuple[dict[str, str], ...]:
+    """Name the only new files this invocation may create beneath private artifact parents."""
+    return tuple(
+        {
+            "artifact": str(artifact),
+            "sentinel": str(artifact.parent / f".{config.ownership_prefix}-{kind}-sentinel"),
+            "replacement": str(artifact.parent / f".{config.ownership_prefix}-{kind}-replacement"),
+        }
+        for kind, artifact in _authority_artifacts(config)
+    )
+
+
+def _run_identity_program(
+    identity: str,
+    program: str,
+    entries: tuple[dict[str, str], ...],
+    *,
+    sudo: bool,
+) -> None:
+    argv = [_IDENTITY_PYTHON, "-c", program]
+    if sudo:
+        argv = ["sudo", "-n", "-u", identity, *argv]
+    result = subprocess.run(
+        argv,
+        input=json.dumps(entries),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-1000:]
+        raise AssertionError(f"identity {identity} bypass probe failed: {detail}")
+
+
+def require_authority_artifact_confinement(
+    config: NativeAuthorityConfig,
+    running_workers: str,
+) -> None:
+    """Require every active worker and this control uid to be unable to alter private artifacts.
+
+    This is native-only evidence: the subprocesses run under installed identities. Unit tests mock
+    only that subprocess boundary and do not establish host permission enforcement.
+    """
+    entries = _sentinel_entries(config)
+    _run_identity_program(_AUTHORITY_ACCOUNT, _CREATE_SENTINELS, entries, sudo=True)
+    try:
+        for slot in _active_worker_slots(running_workers):
+            _run_identity_program(
+                f"kdive-worker-{slot}", _IDENTITY_BYPASS_PROBE, entries, sudo=True
+            )
+        control_identity = pwd.getpwuid(os.geteuid()).pw_name
+        _run_identity_program(control_identity, _IDENTITY_BYPASS_PROBE, entries, sudo=False)
+    finally:
+        _run_identity_program(_AUTHORITY_ACCOUNT, _REMOVE_SENTINELS, entries, sudo=True)
 
 
 def load_config(environment: dict[str, str] | None = None) -> NativeAuthorityConfig | None:

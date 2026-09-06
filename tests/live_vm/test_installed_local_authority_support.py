@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -26,6 +28,7 @@ from tests.live_vm.installed_local_authority_support import (
     drive_normal_operations,
     load_config,
     provision_authority_fixture,
+    require_authority_artifact_confinement,
     require_deployed_revision,
     require_fault_barrier,
 )
@@ -180,6 +183,7 @@ def test_deployed_revision_uses_the_actual_active_fixed_worker_slot() -> None:
         "http://127.0.0.1:8000/mcp",
         "kdive-live-worker@2.service loaded active running KDIVE retained live worker slot 2",
         fetch=fetch,
+        resolve=lambda commit: commit,
     )
 
     assert seen == ["http://127.0.0.1:9464/readyz", "http://127.0.0.1:9470/readyz"]
@@ -216,7 +220,99 @@ def test_deployed_revision_rejects_unknown_or_mismatched_build(
             "http://127.0.0.1:8000/mcp",
             "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1",
             fetch=fetch,
+            resolve=lambda commit: commit,
         )
+
+
+def test_deployed_revision_resolves_the_actual_checkout_abbreviation() -> None:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    config = NativeAuthorityConfig(
+        installed_revision=head,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    require_deployed_revision(
+        config,
+        "http://127.0.0.1:8000/mcp",
+        "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1",
+        fetch=lambda _url: {"commit": head[:12]},
+    )
+
+
+def test_identity_probe_limits_mutation_to_exact_authority_sentinels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unit coverage mocks subprocesses; only the marked native carrier enforces uid ACLs."""
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    calls: list[tuple[list[str], list[dict[str, str]]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        entries = json.loads(cast(str, kwargs["input"]))
+        calls.append((argv, entries))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    require_authority_artifact_confinement(
+        config,
+        "kdive-live-worker@2.service loaded active running KDIVE retained live worker slot 2",
+    )
+
+    assert [call[0][:4] for call in calls[:2]] == [
+        ["sudo", "-n", "-u", "kdive-provider-authority"],
+        ["sudo", "-n", "-u", "kdive-worker-2"],
+    ]
+    assert calls[2][0][:2] == ["/usr/bin/python3", "-c"]
+    assert calls[3][0][:4] == ["sudo", "-n", "-u", "kdive-provider-authority"]
+    for _argv, entries in calls:
+        assert {entry["artifact"] for entry in entries} == {
+            f"/var/lib/kdive/provider-authority/rootfs/{config.system_id}-overlay.qcow2",
+            f"/var/lib/kdive/provider-authority/console/{config.system_id}.log",
+        }
+        for entry in entries:
+            assert config.ownership_prefix in entry["sentinel"]
+            assert config.ownership_prefix in entry["replacement"]
+
+
+def test_identity_probe_fails_when_a_subordinate_identity_can_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    calls = 0
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            argv, 1 if calls == 2 else 0, "", "opened private artifact"
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(AssertionError, match="kdive-worker-1 bypass probe failed"):
+        require_authority_artifact_confinement(
+            config,
+            "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1",
+        )
+    assert calls == 3  # authority creates and removes only its two exact sentinel names.
 
 
 def test_native_carrier_checks_deployed_builds_before_fixture_mutation(
@@ -257,6 +353,55 @@ def test_native_carrier_checks_deployed_builds_before_fixture_mutation(
     with pytest.raises(AssertionError, match="deployed worker slot 1 revision"):
         carrier.test_installed_local_authority_normal_operations()
     assert not fixture_called
+
+
+def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.live_vm import test_installed_local_authority as carrier
+
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    events: list[str] = []
+
+    def output(*argv: str) -> str:
+        if argv[:3] == ("sudo", "-n", "cat"):
+            return config.installed_revision
+        if argv[:2] == ("systemctl", "is-active"):
+            return "active"
+        return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
+
+    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+        events.append("fixture")
+
+    def probe(_config: NativeAuthorityConfig, workers: str) -> None:
+        assert "kdive-live-worker@1.service" in workers
+        events.append("identity-probe")
+
+    class StopBeforeMcpClient:
+        @staticmethod
+        def over_http(_base_url: str, _token: str) -> object:
+            assert events == ["fixture", "identity-probe"]
+            raise RuntimeError("stop before public MCP mutation")
+
+    monkeypatch.setattr(carrier, "load_config", lambda: config)
+    monkeypatch.setattr(carrier, "_output", output)
+    monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
+    monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
+    monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
+    monkeypatch.setattr(carrier, "require_authority_artifact_confinement", probe)
+    monkeypatch.setattr(carrier, "LiveStackClient", StopBeforeMcpClient)
+    monkeypatch.setattr(carrier, "mint_role_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
+
+    with pytest.raises(RuntimeError, match="stop before public MCP mutation"):
+        carrier.test_installed_local_authority_normal_operations()
 
 
 async def _completed_root_release(migrated_url: str) -> NormalOperationJobs:
@@ -468,3 +613,55 @@ def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
     assert argv[-1] == str(config.system_id)
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert json.loads(cast(str, kwargs["input"])) == {"schema_version": 1}
+
+
+def test_fixture_subprocess_snapshots_authority_uri_and_roots_before_provider_import() -> None:
+    """Exercise the script import boundary; this does not provision a native fixture."""
+    repository = Path(__file__).resolve().parents[2]
+    script = repository / "scripts/live-vm/provision-authority-fixture.py"
+    probe = f"""
+import importlib.util
+import json
+import sys
+import types
+from uuid import UUID
+
+seen = []
+libvirt = types.ModuleType('libvirt')
+libvirt.open = seen.append
+libvirt.libvirtError = RuntimeError
+libvirt.VIR_ERR_NO_DOMAIN = 42
+sys.modules['libvirt'] = libvirt
+spec = importlib.util.spec_from_file_location('fixture_probe', {str(script)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+provisioner = module.LocalLibvirtProvisioning.from_env()
+provisioner._connect()
+print(json.dumps({{
+    'uri': seen[0],
+    'rootfs': module.overlay_path(UUID('11111111-1111-1111-1111-111111111111')),
+    'console': str(module.console_log_path(UUID('11111111-1111-1111-1111-111111111111'))),
+}}))
+"""
+    env = os.environ | {
+        "KDIVE_LIBVIRT_URI": "qemu:///wrong-before-fixture-import",
+        "KDIVE_LIBVIRT_ROOTFS_ROOT": "/tmp/wrong-root-before-fixture-import",
+        "KDIVE_LIBVIRT_CONSOLE_ROOT": "/tmp/wrong-console-before-fixture-import",
+        "PYTHONPATH": str(repository),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=repository,
+        env=env,
+    )
+
+    assert json.loads(result.stdout) == {
+        "uri": "qemu+unix:///system?socket=/run/kdive/provider-authority/libvirt/libvirt-sock",
+        "rootfs": "/var/lib/kdive/provider-authority/rootfs/"
+        "11111111-1111-1111-1111-111111111111-overlay.qcow2",
+        "console": "/var/lib/kdive/provider-authority/console/"
+        "11111111-1111-1111-1111-111111111111.log",
+    }

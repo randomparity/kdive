@@ -152,7 +152,13 @@ KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG=/protected/local-authority-carrier.json \
 
 An unset trigger skips. Any configured mismatch fails before mutation: the carrier requires the
 authority disk revision and the `/readyz` build revision from the server and every active fixed
-worker slot to equal `installed_revision`. The normal carrier opens a uniquely titled
+worker slot to resolve as commits exactly equal to `installed_revision` (abbreviated reports are
+resolved against the checkout; unknown, ambiguous, and ref-name reports fail). After its disposable
+fixture is re-provisioned, the carrier runs non-writing `O_RDWR` open attempts as every active fixed
+worker and the invoking control identity against that fixture's exact private overlay and console.
+It also requires both identities to fail unlink and replacement attempts against invocation-owned
+sentinels in those same private parents; only the authority identity creates and removes those exact
+sentinels. The normal carrier then opens a uniquely titled
 Investigation, creates a labeled Run on the operator-provided disposable System, uploads the
 kernel through the public artifact contract, and drains the real install, activate, and root
 release jobs with `jobs.wait`. The root release owns its derived recover and cleanup phases; the
