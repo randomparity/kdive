@@ -17,6 +17,7 @@ from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV1,
+    RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
     identity_for,
 )
@@ -564,6 +565,54 @@ def test_recovery_reference_rejects_unknown_version_and_free_form_fields() -> No
     document["protocol"] = "remote-module-recovery-ref-v2"
     with pytest.raises(ValidationError):
         RemoteModuleRecoveryRefV1.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "capacity",
+    [0, -4096, True, 4097, 10_499_653_632 + 4096],
+)
+def test_recovery_reference_v2_rejects_invalid_source_geometry(capacity: object) -> None:
+    authority = OpaqueProviderRef(ref="mutation/authority-1")
+    document = {
+        "protocol": "remote-module-recovery-ref-v2",
+        "system_id": SYSTEM_ID,
+        "run_id": RUN_ID,
+        "plan_identity": DIGESTS["a"],
+        "operation_nonce": NONCE,
+        "pool": {"ref": "pool/system"},
+        "root_volume": {"ref": "volumes/root"},
+        "source_volume": {"ref": "volumes/source"},
+        "scratch_volume": {"ref": "volumes/scratch"},
+        "source_capacity_bytes": capacity,
+        "operation_identity": DIGESTS["b"],
+        "result_identity": DIGESTS["c"],
+        "appliance_image_digest": DIGESTS["e"],
+        "authority_identity": RemoteModuleRecoveryRefV2.identity_for_authority(authority),
+    }
+    with pytest.raises(ValidationError):
+        RemoteModuleRecoveryRefV2.model_validate(document)
+
+
+def test_recovery_reference_v2_requires_geometry_without_changing_v1_parser() -> None:
+    document = json.loads(
+        RemoteModuleRecoveryRefV1(
+            system_id=SYSTEM_ID,
+            run_id=RUN_ID,
+            plan_identity=DIGESTS["a"],
+            operation_nonce=NONCE,
+            pool=OpaqueProviderRef(ref="pool/system"),
+            root_volume=OpaqueProviderRef(ref="volumes/root"),
+            source_volume=OpaqueProviderRef(ref="volumes/source"),
+            scratch_volume=OpaqueProviderRef(ref="volumes/scratch"),
+            operation_identity=DIGESTS["b"],
+            result_identity=DIGESTS["c"],
+            appliance_image_digest=DIGESTS["e"],
+            authority_identity=DIGESTS["f"],
+        ).to_canonical_json()
+    )
+    with pytest.raises(ValidationError):
+        RemoteModuleRecoveryRefV2.model_validate(document)
+    assert RemoteModuleRecoveryRefV1.model_validate(document).protocol.endswith("v1")
     document["protocol"] = "remote-module-recovery-ref-v1"
     document["credentials"] = {"token": "secret"}
     with pytest.raises(ValidationError):
