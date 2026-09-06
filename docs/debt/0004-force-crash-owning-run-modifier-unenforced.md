@@ -2,8 +2,13 @@
 
 ## Status
 
-Open
-review-by: 2027-03-02
+> **Resolved by #2206** (2026-09-06)
+
+`control.force_crash` and `control.watch_for_crash` now accept an optional readable `run_id`,
+validate that it is bound to the target System, and pass it to the System-locked admission check.
+Both operations are owning-Run-scoped while an activation is active; no-activation System calls
+remain compatible, and the force-crash ADMIN/profile gate plus crash-watch CONTRIBUTOR gate are
+unchanged.
 
 ## Concern
 
