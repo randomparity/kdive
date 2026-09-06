@@ -622,7 +622,7 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
             "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF=ca.pem",
             "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF=cert.pem",
             "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF=key.pem",
-            "KDIVE_FORBIDDEN_CALLER_VALUE=ignored",
+            "UNRELATED_CALLER_VALUE=ignored",
         )
     ).encode()
     record = protocol_module.JournalRecordV1(
@@ -729,7 +729,7 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
 
     exec(compile(carrier._STALE_PROVIDER_CLIENT, "<stale-provider-client>", "exec"), {})
 
-    assert loaded and "KDIVE_FORBIDDEN_CALLER_VALUE" not in loaded[0]
+    assert loaded and "UNRELATED_CALLER_VALUE" not in loaded[0]
     assert resolved == ["cert.pem", "key.pem", "ca.pem"]
     assert len(sent) == 1
     assert sent[0][0] == protocol_module.AuthorityMutationRequestV1(
