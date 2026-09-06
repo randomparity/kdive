@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import ssl
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -151,6 +152,33 @@ def test_local_binding_is_disabled_only_when_all_worker_settings_are_absent() ->
     with pytest.raises(CategorizedError, match="authority: incomplete-local-binding") as caught:
         local_authority_binding()
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    ("variable", "raw"),
+    [
+        ("KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET", "/private/socket/" + "x" * 108),
+        ("KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF", "private-ref-" + "x" * 256),
+    ],
+)
+def test_malformed_local_binding_never_exposes_config_values(
+    variable: str, raw: str, tmp_path: Path
+) -> None:
+    from kdive.jobs.authority_sender import local_authority_sender_factory
+
+    config_registry.load({variable: raw})
+    with pytest.raises(CategorizedError, match="authority: invalid-binding") as caught:
+        local_authority_sender_factory(
+            FileRefBackend(tmp_path, SecretRegistry()), lambda: SecretStr("unused")
+        )
+
+    error = caught.value
+    assert error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert raw not in str(error)
+    assert raw not in str(error.details)
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert raw not in "".join(traceback.format_exception(error))
 
 
 def test_worker_validation_does_not_require_authority_host_settings() -> None:
