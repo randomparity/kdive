@@ -221,3 +221,27 @@ def test_runbook_describes_a_complete_local_mutation_vars_file() -> None:
         "provider_authority_host_s3_credentials_source",
     ):
         assert name in runbook
+
+
+def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
+    defaults = _yaml(ROLE.parent / "live_vm_host" / "defaults" / "main.yml")
+    assert defaults["live_vm_host_worker_authority_enabled"] is False
+    assert defaults["live_vm_host_worker_authority_request_socket"] == (
+        "/run/kdive/provider-authority/request/authority.sock"
+    )
+    assert defaults["live_vm_host_worker_authority_server_ca_ref"] == (
+        "external-boot-authority/server-ca"
+    )
+    tasks = (ROLE.parent / "live_vm_host" / "tasks" / "main.yml").read_text(encoding="utf-8")
+    assert "Create the fixed-worker authority client group before account membership" in tasks
+    assert "Install protected fixed-worker authority TLS files" in tasks
+    assert 'mode: "0440"' in tasks
+    assert "live_vm_host_worker_authority_client_certificate_source" in tasks
+    assert "live_vm_host_worker_authority_client_key_source" in tasks
+    preflight = (ROLE.parent / "live_vm_host" / "tasks" / "authority_preflight.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "Require the complete fixed-worker authority client contract" in preflight
+    assert "Require protected regular fixed-worker authority client sources" in preflight
+    assert "delegate_to: localhost" in preflight
+    assert "no_log: true" in preflight

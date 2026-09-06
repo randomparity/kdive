@@ -186,6 +186,28 @@ the distro `kvm` group, creates the fixed recovery root as authority-owned mode 
 the service access only to `/dev/kvm` plus that root. Fixed workers and the control identity retain
 no access to the provider socket or recovery root.
 
+On a `live_vm_host` that runs the eight fixed workers beside the authority, enable the worker
+client route in the same protected vars file. The instance must be the authority's configured
+instance; the default already references `live_vm_host_authority_instance` so the TLS server
+identity and worker expectation cannot drift independently.
+
+```yaml
+live_vm_host_worker_authority_enabled: true
+live_vm_host_worker_authority_instance: "{{ live_vm_host_authority_instance }}"
+live_vm_host_worker_authority_request_socket: /run/kdive/provider-authority/request/authority.sock
+live_vm_host_worker_authority_server_ca_source: /protected/provider-authority-server-ca.pem
+live_vm_host_worker_authority_client_certificate_source: /protected/worker-client.pem
+live_vm_host_worker_authority_client_key_source: /protected/worker-client-key.pem
+```
+
+The three sources must be nonempty mode-`0400` or mode-`0600` regular files on the controller.
+Provisioning copies them under `/var/lib/kdive/secrets/external-boot-authority` as root-owned,
+client-group-readable files and publishes only their root-relative references in worker
+environments. Enabling only part of this contract fails before host mutation. The client group may
+traverse the request directory but still cannot traverse the authority's provider socket, recovery
+root, journal, installation, or credential directories; the control and reconciler identities
+remain outside the client group.
+
 The normal runner play leaves this dormant boundary disabled. To install it, prepare a protected
 mode-`0600` vars file on the control host, set `live_vm_host_authority_enabled: true`, and provide
 all seven source paths: the authority database DSN, server key and certificate, server CA, worker

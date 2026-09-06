@@ -359,11 +359,23 @@ def _settings() -> WorkerSettings:
         build_user="builder",
         log_level="INFO",
         health_binds={1: "127.0.0.1:9101", 2: "127.0.0.1:9102"},
+        authority_instance="authority-a",
+        authority_request_socket="/run/kdive/provider-authority/request/authority.sock",
+        authority_server_ca_ref="external-boot-authority/server-ca",
+        authority_client_certificate_ref="external-boot-authority/client-certificate",
+        authority_client_key_ref="external-boot-authority/client-key",  # pragma: allowlist secret
     )
 
 
 def _request(worker_count: int = 1) -> LifecycleRequest:
     return LifecycleRequest(operation="start", worker_count=worker_count, settings=_settings())
+
+
+def test_worker_settings_reject_incomplete_authority_route() -> None:
+    values = _settings().model_dump()
+    values["authority_client_key_ref"] = None
+    with pytest.raises(ValueError, match="authority route must be complete or absent"):
+        WorkerSettings.model_validate(values)
 
 
 def _deadline(clock: FakeClock, seconds: float = 1_000.0) -> MonotonicDeadline:
@@ -1643,6 +1655,12 @@ def test_diagnostic_loader_reads_a_real_prepared_slot_store(
 
     assert _stat_mode(root / "slots") == 0o711
     assert {"access", "secret", "postgresql://worker@localhost/kdive"} <= set(values)
+    environment = (root / "slots/1/worker.env").read_text(encoding="utf-8")
+    assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE=" + "authority-a\n" in environment
+    assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=" in environment
+    assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF=" in environment
+    assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF=" in environment
+    assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF=" in environment
 
 
 def _stat_mode(path: Path) -> int:
