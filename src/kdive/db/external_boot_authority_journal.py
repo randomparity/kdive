@@ -18,6 +18,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
     canonical_record_bytes,
 )
+from kdive.providers.ports.external_boot import ExternalBootPlan
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.service import AuthenticatedPeer
@@ -61,6 +62,7 @@ class AuthorityBinding:
     operation_identity: str
     operation_digest: str
     state: Literal["allocating", "current"]
+    preparation_plan: ExternalBootPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +133,11 @@ def _binding(row: dict[str, Any] | None) -> AuthorityBinding | None:
         operation_identity=_bounded(row["operation_identity"]),
         operation_digest=_bounded(row["operation_digest"]),
         state=row["state"],
+        preparation_plan=(
+            ExternalBootPlan.model_validate(row["preparation_plan"])
+            if row.get("preparation_plan") is not None
+            else None
+        ),
     )
 
 
@@ -186,6 +193,33 @@ async def resolve_current_authority_candidate(
         await cursor.execute(
             "SELECT * FROM resolve_current_external_boot_authority_candidate(%s, %s, %s)",
             (peer_incarnation_id, authority_id, generation),
+        )
+        return _binding(await cursor.fetchone())
+
+
+async def resolve_current_preparation_authority_binding(
+    conn: AsyncConnection,
+    *,
+    peer_incarnation_id: str,
+    authority_id: UUID,
+    generation: int,
+    acknowledgement_sequence: int,
+    acknowledgement_digest: str,
+    operation: Literal["materialize", "prepare"],
+) -> AuthorityBinding | None:
+    """Resolve one SQL-derived preparation binding and its exact durable plan."""
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(
+            "SELECT * FROM resolve_current_external_boot_preparation_authority"
+            "(%s, %s, %s, %s, %s, %s)",
+            (
+                peer_incarnation_id,
+                authority_id,
+                generation,
+                acknowledgement_sequence,
+                acknowledgement_digest,
+                operation,
+            ),
         )
         return _binding(await cursor.fetchone())
 
