@@ -280,21 +280,21 @@ def test_public_active_release_claims_and_completes_through_worker(
                     with pytest.raises(asyncio.CancelledError):
                         await dispatch
                     adapter.release.set()
-                    for _ in range(100):
-                        journal = FileAuthorityJournal(tmp_path, f"{vehicle.system_id}.journal")
-                        try:
-                            records = list(journal.load())
-                        finally:
-                            journal.close()
-                        if any(
-                            record.phase.value == "terminal"
-                            and record.operation == adapter.block_operation
-                            for record in records
-                        ):
-                            break
-                        await asyncio.sleep(0)
-                    else:
-                        raise AssertionError("cancelled authority phase did not reach terminal")
+                    # Completion includes database IO and fsync; event-loop turns are not time.
+                    async with asyncio.timeout(10):
+                        while True:
+                            journal = FileAuthorityJournal(tmp_path, f"{vehicle.system_id}.journal")
+                            try:
+                                records = list(journal.load())
+                            finally:
+                                journal.close()
+                            if any(
+                                record.phase.value == "terminal"
+                                and record.operation == adapter.block_operation
+                                for record in records
+                            ):
+                                break
+                            await asyncio.sleep(0.01)
                     claimed = None
                 if interrupt_after is not None and interrupt_after != "cancel-finalize":
                     if not interrupt_after.startswith("cancel-"):
