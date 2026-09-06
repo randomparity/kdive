@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
-from typing import Protocol
+from typing import Any, Protocol
+from uuid import UUID
 
 from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.db.external_boot_authority_journal import (
@@ -22,16 +24,24 @@ from kdive.db.external_boot_authority_journal import (
     resolve_current_preparation_authority_binding,
     resolve_current_release_phase_authority_binding,
 )
+from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
+    AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
-from kdive.providers.ports.external_boot import ExternalBootPlan, RecoveryObjectObservation
+from kdive.providers.external_boot_authority.teardown import AuthorityTeardownSnapshot
+from kdive.providers.ports.external_boot import (
+    ExternalBootPlan,
+    OpaqueProviderRef,
+    RecoveryObjectObservation,
+)
 
 
 class AuthorityConnectionFactory(Protocol):
@@ -136,6 +146,35 @@ class DatabaseAuthorityRepository:
                 acknowledgement_digest=acknowledgement_digest,
                 operation=operation,
             )
+
+    async def resolve_current_teardown(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityTeardownMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityTeardownSnapshot | None:
+        """Resolve one ACK-fenced teardown binding and its immutable reservation snapshot."""
+        async with (
+            self._connections() as conn,
+            conn.transaction(),
+            conn.cursor(row_factory=dict_row) as cursor,
+        ):
+            await cursor.execute(
+                "SELECT * FROM resolve_current_external_boot_teardown_authority"
+                "(%s, %s, %s, %s, %s)",
+                (
+                    str(peer.incarnation_id),
+                    request.authority_id,
+                    request.generation,
+                    acknowledgement_sequence,
+                    acknowledgement_digest,
+                ),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _teardown_snapshot(row, peer, request)
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None:
         async with self._connections() as conn, conn.transaction():
@@ -293,3 +332,80 @@ class DatabaseAuthorityRepository:
             result = await row.fetchone()
         if result is None or result[0] != len(objects):
             raise RuntimeError("cleanup quarantine publication was not applied")
+
+
+def _teardown_snapshot(
+    row: dict[str, Any],
+    peer: AuthenticatedPeer,
+    request: AuthorityTeardownMutationRequestV1,
+) -> AuthorityTeardownSnapshot:
+    state = str(row["state"])
+    if state != "current":
+        raise ValueError("teardown snapshot authority binding does not match request")
+    binding = AuthorityBinding(
+        peer_incarnation_id=str(row["peer_incarnation_id"]),
+        authority_id=_uuid(row["authority_id"]),
+        generation=int(row["generation"]),
+        system_id=_uuid(row["system_id"]),
+        activation_id=_uuid(row["activation_id"]),
+        run_id=_uuid(row["run_id"]),
+        plan_identity=str(row["plan_identity"]),
+        purpose=str(row["purpose"]),
+        operation=AuthorityOperation(str(row["operation"])),
+        provider_kind=str(row["provider_kind"]),
+        authority_instance=str(row["authority_instance"]),
+        operation_identity=str(row["operation_identity"]),
+        operation_digest=str(row["operation_digest"]),
+        state="current",
+    )
+    if (
+        binding.peer_incarnation_id,
+        binding.authority_id,
+        binding.generation,
+        binding.system_id,
+        binding.activation_id,
+        binding.run_id,
+        binding.plan_identity,
+        binding.purpose,
+        binding.operation,
+        binding.provider_kind,
+        binding.authority_instance,
+        binding.operation_identity,
+        binding.operation_digest,
+    ) != (
+        str(peer.incarnation_id),
+        request.authority_id,
+        request.generation,
+        request.system_id,
+        request.activation_id,
+        request.run_id,
+        request.plan_identity,
+        request.purpose,
+        request.operation,
+        request.provider_kind,
+        request.authority_instance,
+        request.operation_identity,
+        request.operation_digest,
+    ):
+        raise ValueError("teardown snapshot authority binding does not match request")
+    disposition = str(row["reservation_disposition"])
+    if disposition not in {"pending", "ready", "released"}:
+        raise ValueError("teardown snapshot reservation disposition is invalid")
+    release = row["release_evidence"]
+    return AuthorityTeardownSnapshot(
+        binding=binding,
+        reservation_disposition=disposition,
+        store_identity=OpaqueProviderRef(ref=str(row["store_identity"])),
+        owner_key=OpaqueProviderRef(ref=str(row["owner_key"])),
+        reserved_bytes=int(row["reserved_bytes"]),
+        release_identity=(
+            str(row["release_identity"]) if row["release_identity"] is not None else None
+        ),
+        release_evidence=(
+            ExternalBootReleaseEvidenceV1.model_validate(release) if release is not None else None
+        ),
+    )
+
+
+def _uuid(value: object) -> UUID:
+    return value if isinstance(value, UUID) else UUID(str(value))
