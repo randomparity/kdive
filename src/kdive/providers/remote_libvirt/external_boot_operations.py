@@ -44,6 +44,10 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 class _Volume(Protocol):
     def path(self) -> str: ...
 
+    def name(self) -> str: ...
+
+    def delete(self, flags: int = 0) -> int: ...
+
 
 class _Pool(Protocol):
     def storageVolLookupByName(self, name: str) -> _Volume: ...  # noqa: N802
@@ -266,13 +270,52 @@ class ConcreteRemoteExternalBootOperations:
         if self._monotonic() >= deadline:
             raise TimeoutError("remote external-boot recovery deadline expired")
         with self._connection() as connection:
-            self._validate_owned_artifacts(connection, recovery)
             recover_disk_grub_baseline(
                 connection,
                 RemoteExternalBootRecovery(
                     definition=recovery.definition, prior_power=recovery.prior_power
                 ),
             )
+
+    @staticmethod
+    def _lookup_optional(pool: _Pool, name: str) -> _Volume | None:
+        try:
+            return pool.storageVolLookupByName(name)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return None
+            raise
+
+    def cleanup(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        deadline: float,
+    ) -> None:
+        recovery.module_recovery.validate_authority(authority)
+        self._require_deadline(deadline, "cleanup")
+        with self._connection() as connection:
+            boot_pool = connection.storagePoolLookupByName(self._pool_name)
+            module_pool = connection.storagePoolLookupByName(recovery.module_recovery.pool.ref)
+            for reference in (
+                recovery.module_recovery.source_volume,
+                recovery.module_recovery.scratch_volume,
+            ):
+                if self._lookup_optional(module_pool, reference.ref) is not None:
+                    raise ValueError("remote module volume remains before authorized cleanup")
+            boot = [recovery.materialization.artifacts.kernel]
+            if recovery.materialization.artifacts.initrd is not None:
+                boot.append(recovery.materialization.artifacts.initrd)
+            for reference in boot:
+                self._require_deadline(deadline, "cleanup")
+                volume = self._lookup_optional(boot_pool, reference.ref)
+                if volume is None:
+                    continue
+                if volume.name() != reference.ref:
+                    raise ValueError("remote cleanup volume name differs")
+                volume.delete(0)
+                if self._lookup_optional(boot_pool, reference.ref) is not None:
+                    raise ValueError("remote cleanup volume remained after deletion")
 
     def _require_deadline(self, deadline: float, operation: str) -> None:
         if self._monotonic() >= deadline:

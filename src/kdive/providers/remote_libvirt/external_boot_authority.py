@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
@@ -1054,6 +1055,9 @@ class RemoteExternalBootCoordinator:
         """Reopen the exact provider-private recovery point after process restart."""
         return self._store.recovery_point(binding, plan_identity)
 
+    def recovery_record(self, recovery: RecoveryPoint) -> RemoteExternalBootRecoveryRecord:
+        return self._store.reopen_recovery(recovery)
+
     def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         self._operations.recover(self._store.reopen_recovery(recovery), authority, self._deadline())
 
@@ -1140,6 +1144,53 @@ class RemoteExternalBootAuthorityAdapter:
         return await self._executor.run(
             lambda: self._coordinator.observe_preparation(self._preparation_request(request))
         )
+
+    async def cleanup_subject(self, request: AuthorityMutationRequestV1) -> str:
+        binding = ExternalBootActivationBinding(
+            system_id=str(request.system_id),
+            run_id=str(request.run_id),
+            activation_id=str(request.activation_id),
+        )
+        point = await self._executor.run(
+            lambda: self._coordinator.recovery_point(binding, request.plan_identity)
+        )
+        record = self._coordinator.recovery_record(point)
+        return record.module_recovery.operation_nonce
+
+    async def commit_cleanup(
+        self,
+        request: AuthorityMutationRequestV1,
+        context: AuthorityCommitContextV1,
+        evidence: AuthorityCleanupEvidenceContextV1,
+    ) -> AuthorityObservationV1:
+        if (
+            evidence.operation_identity != request.operation_identity
+            or evidence.attempt_id != request.attempt_id
+            or context.operation_identity != request.operation_identity
+            or context.attempt_id != request.attempt_id
+        ):
+            raise ValueError("remote cleanup evidence differs from exact request")
+        binding = ExternalBootActivationBinding(
+            system_id=str(request.system_id),
+            run_id=str(request.run_id),
+            activation_id=str(request.activation_id),
+        )
+        point = await self._executor.run(
+            lambda: self._coordinator.recovery_point(binding, request.plan_identity)
+        )
+        record = self._coordinator.recovery_record(point)
+        reference = RemoteModuleRecoveryRefV2.model_validate_json(evidence.recovery_reference_json)
+        if (
+            reference != record.module_recovery
+            or evidence.operation_nonce != reference.operation_nonce
+        ):
+            raise ValueError("remote cleanup evidence changed before provider deletion")
+        authority = OpaqueProviderRef(
+            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+        )
+        await self._executor.run(lambda: self._coordinator.recover(point, authority))
+        await self._executor.run(lambda: self._coordinator.cleanup(point, authority))
+        return await self.observe(request)
 
     async def observe_running(
         self, request: AuthorityMutationRequestV1

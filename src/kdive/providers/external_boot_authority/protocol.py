@@ -545,6 +545,24 @@ class AuthorityCommitContextV1(_ClosedValue):
         )
 
 
+class AuthorityCleanupEvidenceContextV1(_ClosedValue):
+    """Trusted short-transaction result authorizing one exact remote cleanup."""
+
+    schema_: Literal["external-boot-authority-cleanup-evidence-v1"] = Field(
+        "external-boot-authority-cleanup-evidence-v1", alias="schema"
+    )
+    operation_identity: str
+    attempt_id: UUID
+    operation_nonce: Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+    cleanup_state: Literal["open", "discharged"]
+    recovery_reference_json: Annotated[str, Field(min_length=2, max_length=65_536)]
+
+    @field_validator("operation_identity")
+    @classmethod
+    def _operation_is_bounded(cls, value: str) -> str:
+        return _bounded_text(value)
+
+
 class AuthorityRecoveryObservationContextV1(_ClosedValue):
     """Service proof that a teardown observation recovers an anchored mutation."""
 

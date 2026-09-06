@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 from typing import Protocol
@@ -20,6 +21,7 @@ from kdive.db.external_boot_authority_journal import (
     resolve_current_preparation_authority_binding,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCleanupEvidenceContextV1,
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityTakeoverRequestV1,
@@ -114,6 +116,49 @@ class DatabaseAuthorityRepository:
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None:
         async with self._connections() as conn, conn.transaction():
             return await read_journal_head(conn, binding=binding)
+
+    async def resolve_cleanup_evidence(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+        operation_nonce: str,
+    ) -> AuthorityCleanupEvidenceContextV1 | None:
+        async with self._connections() as conn, conn.transaction():
+            row = await conn.execute(
+                "SELECT cleanup_state,recovery_reference FROM "
+                "read_authorized_remote_module_cleanup_evidence(" + ",".join(["%s"] * 16) + ")",
+                (
+                    str(peer.incarnation_id),
+                    binding.authority_id,
+                    binding.generation,
+                    acknowledgement_sequence,
+                    acknowledgement_digest,
+                    binding.system_id,
+                    binding.activation_id,
+                    binding.run_id,
+                    binding.plan_identity,
+                    binding.purpose,
+                    binding.operation.value,
+                    binding.provider_kind,
+                    binding.authority_instance,
+                    binding.operation_identity,
+                    binding.operation_digest,
+                    operation_nonce,
+                ),
+            )
+            found = await row.fetchone()
+            if found is None:
+                return None
+            return AuthorityCleanupEvidenceContextV1(
+                operation_identity=request.operation_identity,
+                attempt_id=request.attempt_id,
+                operation_nonce=operation_nonce,
+                cleanup_state=found[0],
+                recovery_reference_json=json.dumps(found[1], sort_keys=True, separators=(",", ":")),
+            )
 
     async def advance(
         self,

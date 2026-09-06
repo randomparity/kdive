@@ -17,6 +17,7 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
+    AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
@@ -98,6 +99,18 @@ class AuthorityAdapterCloser(Protocol):
     def close(self) -> None: ...
 
 
+@runtime_checkable
+class AuthorityCleanupAdapter(Protocol):
+    async def cleanup_subject(self, request: AuthorityMutationRequestV1) -> str: ...
+
+    async def commit_cleanup(
+        self,
+        request: AuthorityMutationRequestV1,
+        context: AuthorityCommitContextV1,
+        evidence: AuthorityCleanupEvidenceContextV1,
+    ) -> AuthorityObservationV1: ...
+
+
 class AuthorityRepository(Protocol):
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
@@ -135,6 +148,19 @@ class AuthorityPreparationRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
+
+
+@runtime_checkable
+class AuthorityCleanupRepository(Protocol):
+    async def resolve_cleanup_evidence(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+        operation_nonce: str,
+    ) -> AuthorityCleanupEvidenceContextV1 | None: ...
 
 
 class AuthorityServiceError(RuntimeError):
@@ -1227,7 +1253,30 @@ class ExternalBootAuthorityService:
                             context,
                         )
                     else:
-                        await self._adapter.commit(request, context)
+                        cleanup_operations = {
+                            AuthorityOperation.RECOVER,
+                            AuthorityOperation.TEARDOWN,
+                            AuthorityOperation.RESOLVE_CONFLICT,
+                        }
+                        if request.operation in cleanup_operations and isinstance(
+                            self._adapter, AuthorityCleanupAdapter
+                        ):
+                            if not isinstance(self._repository, AuthorityCleanupRepository):
+                                raise AuthorityServiceError("provider_conflict")
+                            nonce = await self._adapter.cleanup_subject(request)
+                            evidence = await self._repository.resolve_cleanup_evidence(
+                                authenticated,
+                                rechecked,
+                                request,
+                                acknowledgement.sequence,
+                                record_digest(acknowledgement),
+                                nonce,
+                            )
+                            if evidence is None:
+                                raise AuthorityServiceError("provider_conflict")
+                            await self._adapter.commit_cleanup(request, context, evidence)
+                        else:
+                            await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
