@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
@@ -65,6 +66,7 @@ type Operation = Literal[
     "execute-conflict-resolution",
     "execute-mutation",
     "execute-preparation",
+    "begin-remote-module-preparation",
     "execute-remote-module-preparation",
     "health",
     "resolve-device-identity",
@@ -107,6 +109,12 @@ class AuthorityPreparationService(Protocol):
 @runtime_checkable
 class RemoteModulePreparationService(Protocol):
     """The authority-owned, fixed remote-module operation for one bound Resource."""
+
+    async def open_remote_module_attempt(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> ModuleAttemptPreparationRequestV1: ...
 
     async def execute_remote_module_preparation(
         self,
@@ -171,6 +179,10 @@ def encode_request_envelope(
     ):
         raise ValueError("invalid-request")
     if operation == "execute-preparation" and not isinstance(
+        decoded, AuthorityPreparationMutationRequestV1
+    ):
+        raise ValueError("invalid-request")
+    if operation == "begin-remote-module-preparation" and not isinstance(
         decoded, AuthorityPreparationMutationRequestV1
     ):
         raise ValueError("invalid-request")
@@ -241,6 +253,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "execute-conflict-resolution",
             "execute-mutation",
             "execute-preparation",
+            "begin-remote-module-preparation",
             "execute-remote-module-preparation",
             "health",
             "resolve-device-identity",
@@ -279,6 +292,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, AuthorityPreparationMutationRequestV1
         ):
             raise ValueError
+        if operation == "begin-remote-module-preparation" and not isinstance(
+            request, AuthorityPreparationMutationRequestV1
+        ):
+            raise ValueError
         if operation == "execute-remote-module-preparation" and not isinstance(
             request, RemoteModuleVolumePreparationRequestV1
         ):
@@ -301,6 +318,7 @@ def _success(
     | AuthorityRunningObservationV1
     | AuthorityHealthAcknowledgementV1
     | DeviceIdentityResponseV1
+    | ModuleAttemptPreparationRequestV1
     | RemoteModuleTerminalPreparationResponseV1,
 ) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
@@ -347,6 +365,17 @@ async def _dispatch(
         try:
             result = await remote_module_service.execute_remote_module_preparation(peer, request)
             return _success(result)
+        except AuthorityServiceError as exc:
+            return _error(_service_category(exc.category))
+        except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            return _error("provider-conflict")
+    if operation == "begin-remote-module-preparation":
+        if remote_module_service is None:
+            return _error("provider-not-configured")
+        if not isinstance(request, AuthorityPreparationMutationRequestV1):
+            raise _TransportError("invalid-request")
+        try:
+            return _success(await remote_module_service.open_remote_module_attempt(peer, request))
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
@@ -761,3 +790,9 @@ def _tls_fingerprints(config: AuthorityHostConfig) -> dict[Path, tuple[int, int,
             config.health_client_key,
         )
     }
+
+    async def open_remote_module_attempt(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> ModuleAttemptPreparationRequestV1: ...

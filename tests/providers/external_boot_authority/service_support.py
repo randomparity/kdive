@@ -16,6 +16,7 @@ from kdive.db.external_boot_authority_journal import (
     PendingTakeover,
     SuspendedOperation,
 )
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
@@ -126,6 +127,34 @@ class _Repository:
         self.head_operation_identity_override: str | None = None
         self.cleanup_evidence: AuthorityCleanupEvidenceContextV1 | None = None
         self.cleanup_nonces: list[str] = []
+        self.remote_attempt: ModuleAttemptPreparationRequestV1 | None = None
+        self.remote_attempt_calls: list[tuple[int, str, str]] = []
+
+    async def open_remote_module_attempt(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> ModuleAttemptPreparationRequestV1 | None:
+        if (
+            peer != self.peer
+            or not self.records
+            or self.records[-1].phase is not JournalPhase.MUTATION_STARTED
+        ):
+            return None
+        started = self.records[-1]
+        if (
+            started.operation is not AuthorityOperation.PREPARE
+            or started.attempt_id != request.attempt_id
+            or started.operation_identity != request.operation_identity
+            or started.operation_digest != request.operation_digest
+        ):
+            return None
+        self.remote_attempt_calls.append(
+            (acknowledgement_sequence, acknowledgement_digest, request.attempt_id.hex)
+        )
+        return self.remote_attempt
 
     async def resolve_cleanup_evidence(
         self,

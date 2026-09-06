@@ -20,6 +20,7 @@ from kdive.db.external_boot_authority_journal import (
     resolve_current_authority_candidate,
     resolve_current_preparation_authority_binding,
 )
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityMutationRequestV1,
@@ -112,6 +113,33 @@ class DatabaseAuthorityRepository:
                 acknowledgement_digest=acknowledgement_digest,
                 operation=operation,
             )
+
+    async def open_remote_module_attempt(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> ModuleAttemptPreparationRequestV1 | None:
+        """Open/replay the authority-only 0141 receipt after PREPARE is journal-started."""
+        async with self._connections() as conn, conn.transaction():
+            row = await conn.execute(
+                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    str(peer.incarnation_id),
+                    request.authority_id,
+                    request.generation,
+                    acknowledgement_sequence,
+                    acknowledgement_digest,
+                    request.attempt_id,
+                    request.operation_identity,
+                    request.operation_digest,
+                ),
+            )
+            result = await row.fetchone()
+            if result is None or result[0] is None:
+                return None
+            return ModuleAttemptPreparationRequestV1.model_validate(result[0])
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None:
         async with self._connections() as conn, conn.transaction():

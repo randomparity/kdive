@@ -18,6 +18,7 @@ import pytest
 from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority import protocol, transport
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
@@ -255,6 +256,13 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
     )
 
     class ModuleService:
+        async def open_remote_module_attempt(
+            self,
+            peer: AuthenticatedPeer,
+            request: AuthorityPreparationMutationRequestV1,
+        ) -> ModuleAttemptPreparationRequestV1:
+            raise AssertionError(f"unexpected begin request from {peer}: {request!r}")
+
         async def execute_remote_module_preparation(
             self, peer: AuthenticatedPeer, request: RemoteModuleVolumePreparationRequestV1
         ) -> RemoteModuleTerminalPreparationResponseV1:
@@ -312,6 +320,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "execute_mutation",
         "execute_preparation",
         "execute_remote_module_preparation",
+        "open_remote_module_attempt",
         "execute_conflict_resolution",
         "observe_authority",
         "observe_running",

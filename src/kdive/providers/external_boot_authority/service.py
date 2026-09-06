@@ -13,6 +13,7 @@ from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
@@ -35,6 +36,10 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
     RunningKernelObservation,
+)
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
 )
 
 
@@ -148,6 +153,23 @@ class AuthorityPreparationRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
+
+
+@runtime_checkable
+class AuthorityRemoteModuleAttemptRepository(Protocol):
+    async def open_remote_module_attempt(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> ModuleAttemptPreparationRequestV1 | None: ...
+
+
+class RemoteModulePreparationHost(Protocol):
+    async def execute(
+        self, request: RemoteModuleVolumePreparationRequestV1
+    ) -> RemoteModuleTerminalPreparationResponseV1: ...
 
 
 @runtime_checkable
@@ -292,6 +314,11 @@ class _ActiveOperation:
     done: asyncio.Event
     stop_before_start: bool = False
     completion_binding: AuthorityBinding | None = None
+    request: AuthorityPreparationMutationRequestV1 | None = None
+    binding: AuthorityBinding | None = None
+    acknowledgement: JournalRecordV1 | None = None
+    receipt: ModuleAttemptPreparationRequestV1 | None = None
+    retained_lane: bool = False
 
 
 class ExternalBootAuthorityService:
@@ -303,11 +330,13 @@ class ExternalBootAuthorityService:
         repository: AuthorityRepository,
         journal_factory: Callable[[UUID], FileAuthorityJournal],
         adapter: AuthorityMutationAdapter,
+        remote_module_host: RemoteModulePreparationHost | None = None,
         metrics: AuthorityServiceMetrics | None = None,
     ) -> None:
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
+        self._remote_module_host = remote_module_host
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._lanes: dict[UUID, _Lane] = {}
         self._logger = logging.getLogger(__name__)
@@ -1339,6 +1368,316 @@ class ExternalBootAuthorityService:
             return await asyncio.shield(task)
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
+            raise
+
+    async def open_remote_module_attempt(
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> ModuleAttemptPreparationRequestV1:
+        """Anchor exact PREPARE before opening its authority-only remote attempt receipt."""
+        if request.operation is not AuthorityOperation.PREPARE:
+            raise AuthorityServiceError("superseded")
+        mutation = cast(AuthorityMutationRequestV1, request)
+        if not isinstance(self._repository, AuthorityRemoteModuleAttemptRepository):
+            raise AuthorityServiceError("provider_conflict")
+        if self._remote_module_host is None:
+            raise AuthorityServiceError("provider_conflict")
+        authenticated = self._require_peer(peer, mutation)
+        trusted = await self._repository.resolve_current_candidate(authenticated, mutation)
+        if trusted is None or not self._root_candidate_matches_preparation(trusted, request):
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
+        retain_lane = False
+        try:
+            async with lane.lock:
+                if lane.failed:
+                    raise AuthorityServiceError("journal_conflict")
+                journal, records = self._lane_journal(request.system_id, lane)
+                acknowledgements = [
+                    record
+                    for record in records
+                    if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                    and record.generation == request.generation
+                ]
+                if not acknowledgements:
+                    raise AuthorityServiceError("superseded")
+                acknowledgement = acknowledgements[-1]
+                binding = await self._resolve_confirmed(authenticated, mutation, acknowledgement)
+                if binding is None or not self._binding_matches(binding, mutation):
+                    raise AuthorityServiceError("superseded")
+                records = await self._recover(binding, journal, records)
+                latest = next(
+                    (
+                        record
+                        for record in reversed(records)
+                        if record.operation_identity == request.operation_identity
+                    ),
+                    None,
+                )
+                active = lane.active
+                if latest is not None:
+                    if (
+                        latest.phase is not JournalPhase.MUTATION_STARTED
+                        or not self._operation_matches(latest, mutation)
+                    ):
+                        raise AuthorityServiceError("journal_conflict")
+                    if active is None:
+                        active = _ActiveOperation(
+                            request.generation,
+                            JournalPhase.MUTATION_STARTED,
+                            asyncio.Event(),
+                            request=request,
+                            binding=binding,
+                            acknowledgement=acknowledgement,
+                            retained_lane=True,
+                        )
+                        lane.active = active
+                        retain_lane = True
+                    elif active.request != request:
+                        raise AuthorityServiceError("superseded")
+                else:
+                    if active is not None:
+                        raise AuthorityServiceError("superseded")
+                    unresolved = next(
+                        (
+                            record
+                            for record in reversed(records)
+                            if record.phase
+                            in {
+                                JournalPhase.ADMITTED,
+                                JournalPhase.MUTATION_STARTED,
+                                JournalPhase.PROVIDER_RETURNED,
+                                JournalPhase.OBSERVED,
+                            }
+                        ),
+                        None,
+                    )
+                    if unresolved is not None:
+                        raise AuthorityServiceError("provider_conflict")
+                    records = await self._anchor(
+                        binding,
+                        journal,
+                        records,
+                        self._record(mutation, records, JournalPhase.ADMITTED),
+                    )
+                    records = await self._anchor(
+                        binding,
+                        journal,
+                        records,
+                        self._record(mutation, records, JournalPhase.MUTATION_STARTED),
+                    )
+                    active = _ActiveOperation(
+                        request.generation,
+                        JournalPhase.MUTATION_STARTED,
+                        asyncio.Event(),
+                        request=request,
+                        binding=binding,
+                        acknowledgement=acknowledgement,
+                        retained_lane=True,
+                    )
+                    lane.active = active
+                    retain_lane = True
+                receipt = await self._repository.open_remote_module_attempt(
+                    authenticated,
+                    request,
+                    acknowledgement.sequence,
+                    record_digest(acknowledgement),
+                )
+                if receipt is None:
+                    raise AuthorityServiceError("superseded")
+                active.receipt = receipt
+                return receipt
+        except AuthorityServiceError as error:
+            self._ensure_rejection(mutation, error)
+            raise
+        finally:
+            if not retain_lane:
+                self._release_lane(trusted.system_id, lane)
+
+    async def execute_remote_module_preparation(
+        self,
+        peer: AuthenticatedPeer | None,
+        remote: RemoteModuleVolumePreparationRequestV1,
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        """Run the fixed host operation and finish only its already-started PREPARE journal."""
+        request = remote.authority
+        host = self._remote_module_host
+        if host is None or request.operation is not AuthorityOperation.PREPARE:
+            raise AuthorityServiceError("provider_conflict")
+        if not isinstance(self._repository, AuthorityRemoteModuleAttemptRepository):
+            raise AuthorityServiceError("provider_conflict")
+        mutation = cast(AuthorityMutationRequestV1, request)
+        authenticated = self._require_peer(peer, mutation)
+        trusted = await self._repository.resolve_current_candidate(authenticated, mutation)
+        if trusted is None or not self._root_candidate_matches_preparation(trusted, request):
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
+
+        async def run() -> RemoteModuleTerminalPreparationResponseV1:
+            active: _ActiveOperation | None = None
+            try:
+                async with lane.lock:
+                    if lane.failed:
+                        raise AuthorityServiceError("journal_conflict")
+                    journal, records = self._lane_journal(request.system_id, lane)
+                    acknowledgements = [
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.generation == request.generation
+                    ]
+                    if not acknowledgements:
+                        raise AuthorityServiceError("superseded")
+                    acknowledgement = acknowledgements[-1]
+                    binding = await self._resolve_confirmed(
+                        authenticated, mutation, acknowledgement
+                    )
+                    if binding is None or not self._binding_matches(binding, mutation):
+                        raise AuthorityServiceError("superseded")
+                    records = await self._recover(binding, journal, records)
+                    terminal = next(
+                        (
+                            record
+                            for record in reversed(records)
+                            if record.operation_identity == request.operation_identity
+                            and record.phase is JournalPhase.TERMINAL
+                        ),
+                        None,
+                    )
+                    if terminal is not None:
+                        if not self._operation_matches(terminal, mutation):
+                            raise AuthorityServiceError("journal_conflict")
+                        result = await host.execute(remote)
+                        result.validate_terminal_for(remote.operation, request)
+                        return result
+                    active = lane.active
+                    if active is None:
+                        started = next(
+                            (
+                                record
+                                for record in reversed(records)
+                                if record.operation_identity == request.operation_identity
+                            ),
+                            None,
+                        )
+                        if (
+                            started is None
+                            or started.phase is not JournalPhase.MUTATION_STARTED
+                            or not self._operation_matches(started, mutation)
+                        ):
+                            raise AuthorityServiceError("superseded")
+                        receipt = await cast(
+                            AuthorityRemoteModuleAttemptRepository, self._repository
+                        ).open_remote_module_attempt(
+                            authenticated,
+                            request,
+                            acknowledgement.sequence,
+                            record_digest(acknowledgement),
+                        )
+                        if receipt is None:
+                            raise AuthorityServiceError("superseded")
+                        active = _ActiveOperation(
+                            request.generation,
+                            JournalPhase.MUTATION_STARTED,
+                            asyncio.Event(),
+                            request=request,
+                            binding=binding,
+                            acknowledgement=acknowledgement,
+                            receipt=receipt,
+                        )
+                        lane.active = active
+                    if active.request != request or active.receipt is None:
+                        raise AuthorityServiceError("superseded")
+                    receipt = active.receipt.module_attempt_obligation
+                    if (
+                        remote.operation.system_id != str(receipt.system_id)
+                        or remote.operation.run_id != str(receipt.run_id)
+                        or remote.operation.operation_nonce != receipt.operation_nonce
+                    ):
+                        raise AuthorityServiceError("superseded")
+                    started = next(
+                        (
+                            record
+                            for record in reversed(records)
+                            if record.operation_identity == request.operation_identity
+                            and record.phase is JournalPhase.MUTATION_STARTED
+                        ),
+                        None,
+                    )
+                    if started is None:
+                        raise AuthorityServiceError("journal_conflict")
+                    context = AuthorityCommitContextV1.for_record(started)
+                result = await host.execute(remote)
+                result.validate_terminal_for(remote.operation, request)
+                rechecked = await self._resolve_confirmed(authenticated, mutation, acknowledgement)
+                if rechecked is None or not self._binding_matches(rechecked, mutation):
+                    raise AuthorityServiceError("superseded")
+                if not await self._head_still_anchors(rechecked, context):
+                    raise AuthorityServiceError("journal_conflict")
+                try:
+                    await self._adapter.commit(mutation, context)
+                except AuthorityServiceError:
+                    raise
+                except Exception:
+                    raise self._provider_error(request) from None
+                async with lane.lock:
+                    completion_binding = active.completion_binding or binding
+                    records = await self._anchor(
+                        completion_binding,
+                        journal,
+                        records,
+                        self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                    )
+                try:
+                    observation = await self._adapter.observe(mutation)
+                except AuthorityServiceError:
+                    raise
+                except Exception:
+                    raise self._provider_error(request) from None
+                async with lane.lock:
+                    completion_binding = active.completion_binding or binding
+                    records = await self._anchor(
+                        completion_binding,
+                        journal,
+                        records,
+                        self._record(
+                            mutation, records, JournalPhase.OBSERVED, observation=observation
+                        ),
+                    )
+                    outcome = (
+                        observation.category
+                        if observation.category in {"absent", "source", "target", "conflict"}
+                        else "conflict"
+                    )
+                    records = await self._anchor(
+                        completion_binding,
+                        journal,
+                        records,
+                        self._record(
+                            mutation,
+                            records,
+                            JournalPhase.TERMINAL,
+                            observation=observation,
+                            outcome=outcome,
+                        ),
+                    )
+                    await self._finalize_adapter(mutation, records)
+                return result
+            finally:
+                if active is not None:
+                    active.done.set()
+                    if lane.active is active:
+                        lane.active = None
+                    if active.retained_lane:
+                        self._release_lane(trusted.system_id, lane)
+                self._release_lane(trusted.system_id, lane)
+
+        task = asyncio.create_task(run())
+        try:
+            return await asyncio.shield(task)
+        except AuthorityServiceError as error:
+            self._ensure_rejection(mutation, error)
             raise
 
     async def execute_conflict_resolution(

@@ -9,6 +9,7 @@ from typing import Protocol
 from pydantic import BaseModel, SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
@@ -192,6 +193,15 @@ class AuthorityRequestSender:
             self._encode("execute-remote-module-preparation", request), deadline=deadline
         )
         return _decode_response(response, RemoteModuleTerminalPreparationResponseV1)
+
+    async def open_remote_module_attempt(
+        self, request: AuthorityPreparationMutationRequestV1, *, deadline: float
+    ) -> ModuleAttemptPreparationRequestV1:
+        """Anchor one PREPARE phase and return its authority-opened module-attempt receipt."""
+        response = await self._transport_factory()._request_frame(
+            self._encode("begin-remote-module-preparation", request), deadline=deadline
+        )
+        return _decode_response(response, ModuleAttemptPreparationRequestV1)
 
     async def observe_authority(
         self, request: AuthorityMutationRequestV1, *, deadline: float

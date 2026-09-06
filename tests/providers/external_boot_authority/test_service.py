@@ -10,6 +10,10 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.remote_module_attempt_preparation import (
+    ModuleAttemptObligationReceiptV1,
+    ModuleAttemptPreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
@@ -30,6 +34,13 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
     OpaqueProviderRef,
+)
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleOperationV1,
 )
 from tests.providers.external_boot_authority.service_support import (
     _DIGEST_B,
@@ -296,6 +307,148 @@ async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: P
     assert response.journal_digest == record_digest(terminal)
     assert adapter.calls == ["commit:materialize", "observe"]
     assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt(
+    tmp_path: Path,
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(update={"provider_kind": "remote-libvirt"})
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository = _Repository(peer, takeover)
+    repository.remote_attempt = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=takeover.system_id,
+            run_id=takeover.run_id,
+            operation_nonce="a" * 32,
+        )
+    )
+
+    class Host:
+        async def execute(self, request: object) -> object:
+            raise AssertionError(f"begin must not execute the provider host: {request!r}")
+
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_Adapter(),
+        remote_module_host=cast(Any, Host()),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    request = AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="prepare",
+        operation_identity="prepare-op",
+        operation_digest="sha256:" + "c" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+
+    receipt = await service.open_remote_module_attempt(peer, request)
+
+    assert receipt == repository.remote_attempt
+    assert [record.phase for record in repository.records][-2:] == [
+        JournalPhase.ADMITTED,
+        JournalPhase.MUTATION_STARTED,
+    ]
+    acknowledgement = repository.records[1]
+    assert repository.remote_attempt_calls == [
+        (acknowledgement.sequence, record_digest(acknowledgement), request.attempt_id.hex)
+    ]
+    assert await service.open_remote_module_attempt(peer, request) == receipt
+    assert len(repository.remote_attempt_calls) == 2
+
+
+@pytest.mark.anyio
+async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_path: Path) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(update={"provider_kind": "remote-libvirt"})
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository = _Repository(peer, takeover)
+    nonce = "a" * 32
+    repository.remote_attempt = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=takeover.system_id, run_id=takeover.run_id, operation_nonce=nonce
+        )
+    )
+    completed: list[RemoteModuleVolumePreparationRequestV1] = []
+
+    class Result:
+        def validate_terminal_for(self, operation: object, authority: object) -> None:
+            assert operation is remote.operation
+            assert authority is remote.authority
+
+    class Host:
+        async def execute(
+            self, request: RemoteModuleVolumePreparationRequestV1
+        ) -> RemoteModuleTerminalPreparationResponseV1:
+            completed.append(request)
+            return cast(RemoteModuleTerminalPreparationResponseV1, Result())
+
+    adapter = _Adapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        remote_module_host=Host(),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    request = AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="prepare",
+        operation_identity="prepare-op",
+        operation_digest="sha256:" + "c" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+    await service.open_remote_module_attempt(peer, request)
+    remote = RemoteModuleVolumePreparationRequestV1(
+        authority=request,
+        operation=RemoteModuleOperationV1(
+            operation="capture_install",
+            system_id=str(request.system_id),
+            run_id=str(request.run_id),
+            plan_identity=request.plan_identity,
+            operation_nonce=nonce,
+            release=request.plan.module_obligation.release,
+            root_volume={"key": "root", "identity": "sha256:" + "d" * 64},
+            source_manifest=request.plan.module_obligation.source_manifest,
+            appliance_image_digest="sha256:" + "e" * 64,
+        ),
+        deadline=10_000.0,
+    )
+
+    result = await service.execute_remote_module_preparation(peer, remote)
+
+    assert isinstance(result, Result)
+    assert completed == [remote]
+    assert [record.phase for record in repository.records][-3:] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    assert adapter.calls == ["commit:prepare", "observe"]
 
 
 @pytest.mark.anyio
