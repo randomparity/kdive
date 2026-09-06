@@ -29,16 +29,20 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV1,
+    RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
     identity_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
     RemoteModuleApplianceExecution,
     RemoteModuleVolumePreparation,
+    RemoteModuleVolumeRecovery,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+    render_module_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
     BuiltSourceImage,
@@ -86,7 +90,7 @@ from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_suppo
 )
 
 
-def _recovery(result: RemoteModuleResultV1) -> RemoteModuleRecoveryRefV1:
+def _recovery(result: RemoteModuleResultV1) -> RemoteModuleRecoveryRefV2:
     capture = RemoteModuleOperationV1.model_validate(
         {
             "operation": "capture_install",
@@ -104,7 +108,7 @@ def _recovery(result: RemoteModuleResultV1) -> RemoteModuleRecoveryRefV1:
         }
     )
     digest = "sha256:" + "a" * 64
-    return RemoteModuleRecoveryRefV1.model_validate(
+    return RemoteModuleRecoveryRefV2.model_validate(
         {
             "system_id": result.system_id,
             "run_id": result.run_id,
@@ -112,8 +116,17 @@ def _recovery(result: RemoteModuleResultV1) -> RemoteModuleRecoveryRefV1:
             "operation_nonce": result.operation_nonce,
             "pool": OpaqueProviderRef(ref="pool"),
             "root_volume": OpaqueProviderRef(ref="root"),
-            "source_volume": OpaqueProviderRef(ref="source"),
-            "scratch_volume": OpaqueProviderRef(ref="scratch"),
+            "source_volume": OpaqueProviderRef(
+                ref=render_module_volume_name(
+                    capture.system_id, capture.run_id, capture.operation_nonce, "source.ext4"
+                )
+            ),
+            "scratch_volume": OpaqueProviderRef(
+                ref=render_module_volume_name(
+                    capture.system_id, capture.run_id, capture.operation_nonce, "scratch.ext4"
+                )
+            ),
+            "source_capacity_bytes": 64 * 1024**2,
             "operation_identity": identity_for(capture),
             "result_identity": identity_for(result),
             "appliance_image_digest": result.appliance_image_digest,
@@ -129,7 +142,7 @@ class Repo:
 
 
 def _runtime(
-    read: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]], repo: object | None = None
+    read: Callable[[RemoteModuleRecoveryRefV2], Awaitable[bytes | None]], repo: object | None = None
 ) -> RemoteModuleOperationRuntime:
     @asynccontextmanager
     async def connection() -> AsyncIterator[object]:
@@ -146,7 +159,7 @@ def _runtime(
 def test_scratch_result_reopens_before_terminal_evidence() -> None:
     result = RemoteModuleResultV1.model_validate(_result())
 
-    async def read(_: RemoteModuleRecoveryRefV1) -> bytes | None:
+    async def read(_: RemoteModuleRecoveryRefV2) -> bytes | None:
         return result.to_wire_bytes()
 
     runtime = _runtime(read)
@@ -157,7 +170,7 @@ def test_scratch_result_reopens_before_terminal_evidence() -> None:
 def test_missing_or_malformed_scratch_is_redacted_conflict(raw: bytes | None) -> None:
     result = RemoteModuleResultV1.model_validate(_result())
 
-    async def read(_: RemoteModuleRecoveryRefV1) -> bytes | None:
+    async def read(_: RemoteModuleRecoveryRefV2) -> bytes | None:
         return raw
 
     runtime = _runtime(read)
@@ -175,7 +188,7 @@ def test_restore_ready_reopens_restore_but_keeps_installed_baseline_identity() -
         update={"installed_entry_count": 12, "installed_content_bytes": 4096}
     )
 
-    async def read(_: RemoteModuleRecoveryRefV1) -> bytes:
+    async def read(_: RemoteModuleRecoveryRefV2) -> bytes:
         return current.to_wire_bytes()
 
     runtime = _runtime(read)
@@ -192,7 +205,7 @@ def test_scratch_result_with_foreign_identity_is_rejected() -> None:
     installed = RemoteModuleResultV1.model_validate(_result())
     foreign = installed.model_copy(update={"source_manifest": "sha256:" + "0" * 64})
 
-    async def read(_: RemoteModuleRecoveryRefV1) -> bytes:
+    async def read(_: RemoteModuleRecoveryRefV2) -> bytes:
         return foreign.to_wire_bytes()
 
     with pytest.raises(CategorizedError) as caught:
@@ -235,7 +248,7 @@ def test_absent_scratch_reopens_valid_terminal_evidence() -> None:
                 recovery_reference=recovery.model_dump(mode="json"),
             )
 
-    async def absent(_: RemoteModuleRecoveryRefV1) -> None:
+    async def absent(_: RemoteModuleRecoveryRefV2) -> None:
         return None
 
     runtime = _runtime(absent, EvidenceRepo())
@@ -275,7 +288,7 @@ def test_absent_scratch_reads_terminal_evidence_through_owned_pool_connection(
                 )
                 await repository.record_terminal_evidence(conn, attempt, evidence)
 
-            async def absent(_: RemoteModuleRecoveryRefV1) -> None:
+            async def absent(_: RemoteModuleRecoveryRefV2) -> None:
                 return None
 
             runtime = RemoteModuleOperationRuntime(pool, repository, absent)
@@ -367,12 +380,12 @@ def test_real_receipt_guards_two_real_volume_creates(
         def build(self, operation: bytes, entries: tuple[ModuleTreeEntry, ...]) -> BuiltSourceImage:
             self.operation = operation
             path = tmp_path / "source.ext4"
-            path.write_bytes(b"image")
+            path.write_bytes(b"image" + bytes(4096 - len(b"image")))
             evidence = SourceFilesystemEvidence(operation, "sha256:" + "d" * 64, 1, 3)
-            return BuiltSourceImage(path, 5, evidence)
+            return BuiltSourceImage(path, 4096, evidence)
 
         def inspect(self, path: Path) -> SourceFilesystemEvidence:
-            assert path.read_bytes() == b"image"
+            assert path.read_bytes().startswith(b"image") and path.stat().st_size == 4096
             return SourceFilesystemEvidence(self.operation, "sha256:" + "d" * 64, 1, 3)
 
     async def run() -> None:
@@ -462,8 +475,68 @@ def test_real_receipt_guards_two_real_volume_creates(
                             conn, attempt, reason="restored"
                         )
             release.set()
-            await task
+            prepared = await task
             assert len(storage.pool.volumes) == 2
+            installed = RemoteModuleResultV1.model_validate(_result()).model_copy(
+                update={
+                    "system_id": operation.system_id,
+                    "run_id": operation.run_id,
+                    "operation_nonce": operation.operation_nonce,
+                }
+            )
+            restored = installed.model_copy(
+                update={
+                    "phase": "restored",
+                    "capture_manifest": None,
+                    "capture_absent": True,
+                    "entry_count": None,
+                    "content_bytes": None,
+                }
+            )
+            installed_baseline = restored.model_copy(
+                update={
+                    "phase": "installed",
+                    "entry_count": installed.entry_count,
+                    "content_bytes": installed.content_bytes,
+                }
+            )
+            recovery = _recovery(restored).model_copy(
+                update={
+                    "pool": OpaqueProviderRef(ref="systems"),
+                    "source_volume": OpaqueProviderRef(ref=prepared.source.name),
+                    "scratch_volume": OpaqueProviderRef(ref=prepared.scratch.name),
+                    "source_capacity_bytes": prepared.source.capacity_bytes,
+                    "installed_entry_count": installed.entry_count,
+                    "installed_content_bytes": installed.content_bytes,
+                    "result_identity": identity_for(installed_baseline),
+                }
+            )
+            terminal = RemoteModuleOperationRuntime._restore_operation(operation, restored)
+            evidence = ModuleAttemptTerminalEvidence(
+                terminal_operation=terminal.model_dump(mode="json"),
+                terminal_operation_identity=identity_for(terminal),
+                terminal_result=restored.model_dump(mode="json"),
+                terminal_result_identity=identity_for(restored),
+                baseline_operation_identity=recovery.operation_identity,
+                baseline_result_identity=recovery.result_identity,
+                installed_entry_count=recovery.installed_entry_count or 0,
+                installed_content_bytes=recovery.installed_content_bytes or 0,
+                recovery_reference=recovery.model_dump(mode="json"),
+            )
+            async with server.connection() as conn, conn.transaction():
+                await repository.record_terminal_evidence(conn, attempt, evidence)
+
+            async def absent(_recovery: RemoteModuleRecoveryRefV2) -> None:
+                return None
+
+            restarted = RemoteModuleOperationRuntime(
+                worker,
+                repository,
+                absent,
+                volume_recovery=RemoteModuleVolumeRecovery(storage, "systems"),
+            )
+            assert await restarted.reopen_operation(recovery) == terminal
+            assert restarted._recovery_volumes(terminal, recovery) == prepared
             async with server.connection() as conn, conn.transaction():
                 await repository.discharge_mutation_obligation(conn, attempt, reason="restored")
             before = len(storage.pool.volumes)
@@ -690,6 +763,8 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
     storage = Conn()
     wanted = volume_request(tmp_path)
     volumes = prepare_attempt_volumes(storage, wanted)
+    storage.pool.volumes[volumes.source.name].capacity = 64 * 1024**2
+    volumes = replace(volumes, source=replace(volumes.source, capacity_bytes=64 * 1024**2))
     cast(Any, storage.pool).refresh = lambda _flags=0: 0
     cast(Any, storage.pool).listAllVolumes = lambda _flags=0: [
         item for item in storage.pool.volumes.values() if not item.deleted
@@ -720,7 +795,7 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
     )
     repository = EvidenceRepository()
 
-    async def read_scratch(_recovery: RemoteModuleRecoveryRefV1) -> bytes | None:
+    async def read_scratch(_recovery: RemoteModuleRecoveryRefV2) -> bytes | None:
         scratch = storage.pool.volumes[volumes.scratch.name]
         return None if scratch.deleted else result.to_wire_bytes()
 
@@ -765,6 +840,12 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
 
     cast(Any, storage.pool.volumes[volumes.scratch.name]).delete = delete
     executor = RemoteModulePreparationExecutor()
+    altered = recovery.model_copy(
+        update={"source_capacity_bytes": recovery.source_capacity_bytes + 4096}
+    )
+    with pytest.raises(CategorizedError):
+        asyncio.run(runtime.delete_source(altered, executor))
+    assert not storage.pool.volumes[volumes.source.name].deleted
     asyncio.run(runtime.delete_scratch(recovery, executor))
     asyncio.run(runtime.delete_scratch(recovery, executor))
     create_xml = storage.pool.createXML
@@ -783,7 +864,11 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
     assert "reap-open" in events
     assert not any("reaping.journal" in name for name in storage.pool.volumes)
     asyncio.run(runtime.record_reaping(recovery, executor))
-    restarted = replace(runtime)
+    restarted = replace(
+        runtime,
+        volume_preparation=None,
+        volume_recovery=RemoteModuleVolumeRecovery(storage, wanted.pool),
+    )
     asyncio.run(restarted.record_reaping(recovery, executor))
     asyncio.run(restarted.record_reaped(recovery, executor))
     for name, stored_volume in storage.pool.volumes.items():
@@ -843,7 +928,7 @@ def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
     appliance = FlakyAppliance([], clock)
     wanted = volume_request(tmp_path)
 
-    async def read(_recovery: RemoteModuleRecoveryRefV1) -> bytes:
+    async def read(_recovery: RemoteModuleRecoveryRefV2) -> bytes:
         return result.to_wire_bytes()
 
     runtime = _runtime(read)
@@ -859,7 +944,9 @@ def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
             tmp_path,
         ),
     )
-    expected = expected_attempt_volumes(runtime._volume_request(operation))
+    expected = expected_attempt_volumes(
+        runtime._volume_request(operation), recovery.source_capacity_bytes
+    )
 
     def detached() -> AttachmentInspection:
         return AttachmentInspection(
@@ -891,7 +978,15 @@ def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
     executor = RemoteModulePreparationExecutor()
     with pytest.raises(RuntimeError, match="provider lookup failed"):
         asyncio.run(runtime.teardown(recovery, executor, 300.0))
-    observed = asyncio.run(runtime.teardown(recovery, executor, 300.0))
+    restarted = replace(
+        runtime,
+        volume_preparation=None,
+        volume_recovery=RemoteModuleVolumeRecovery(
+            cast(RemoteModuleVolumePreparation, runtime.volume_preparation).storage,
+            "pool",
+        ),
+    )
+    observed = asyncio.run(restarted.teardown(recovery, executor, 300.0))
     executor.shutdown()
 
     assert observed.complete
@@ -924,6 +1019,8 @@ def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: 
     storage = Conn()
     wanted = volume_request(tmp_path)
     volumes = prepare_attempt_volumes(storage, wanted)
+    storage.pool.volumes[volumes.source.name].capacity = 64 * 1024**2
+    volumes = replace(volumes, source=replace(volumes.source, capacity_bytes=64 * 1024**2))
     result = RemoteModuleResultV1.model_validate(_result()).model_copy(
         update={
             "system_id": wanted.operation.system_id,
@@ -937,12 +1034,16 @@ def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: 
     )
     recovery = _recovery(result).model_copy(
         update={
+            "pool": OpaqueProviderRef(ref=wanted.pool),
+            "source_volume": OpaqueProviderRef(ref=volumes.source.name),
+            "scratch_volume": OpaqueProviderRef(ref=volumes.scratch.name),
+            "source_capacity_bytes": volumes.source.capacity_bytes,
             "installed_entry_count": result.entry_count,
             "installed_content_bytes": result.content_bytes,
         }
     )
 
-    async def read_scratch(_recovery: RemoteModuleRecoveryRefV1) -> bytes:
+    async def read_scratch(_recovery: RemoteModuleRecoveryRefV2) -> bytes:
         return result.to_wire_bytes()
 
     runtime = RemoteModuleOperationRuntime(
@@ -970,6 +1071,8 @@ def test_delete_source_cancellation_waits_for_blocked_provider_delete(tmp_path: 
     storage = Conn()
     wanted = volume_request(tmp_path)
     volumes = prepare_attempt_volumes(storage, wanted)
+    storage.pool.volumes[volumes.source.name].capacity = 64 * 1024**2
+    volumes = replace(volumes, source=replace(volumes.source, capacity_bytes=64 * 1024**2))
     result = RemoteModuleResultV1.model_validate(_result()).model_copy(
         update={
             "system_id": wanted.operation.system_id,
@@ -981,9 +1084,16 @@ def test_delete_source_cancellation_waits_for_blocked_provider_delete(tmp_path: 
             "appliance_image_digest": wanted.operation.appliance_image_digest,
         }
     )
-    recovery = _recovery(result)
+    recovery = _recovery(result).model_copy(
+        update={
+            "pool": OpaqueProviderRef(ref=wanted.pool),
+            "source_volume": OpaqueProviderRef(ref=volumes.source.name),
+            "scratch_volume": OpaqueProviderRef(ref=volumes.scratch.name),
+            "source_capacity_bytes": volumes.source.capacity_bytes,
+        }
+    )
 
-    async def read_scratch(_recovery: RemoteModuleRecoveryRefV1) -> bytes:
+    async def read_scratch(_recovery: RemoteModuleRecoveryRefV2) -> bytes:
         return result.to_wire_bytes()
 
     runtime = _runtime(read_scratch)
@@ -1033,8 +1143,10 @@ def test_delete_source_cancellation_waits_for_blocked_provider_delete(tmp_path: 
     async def cancel_during_delete() -> None:
         executor = RemoteModulePreparationExecutor()
         task = asyncio.create_task(runtime.delete_source(recovery, executor))
-        while not entered.is_set():
+        while not entered.is_set() and not task.done():
             await asyncio.sleep(0)
+        if task.done():
+            await task
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()

@@ -41,6 +41,16 @@ _SOURCE_BLOCK_BYTES = 4096
 _SOURCE_FIXED_OVERHEAD_BYTES = 16 * 1024**2
 _SOURCE_HEADROOM_DIVISOR = 8
 _SOURCE_ROOT_INODES = 16
+MAX_SOURCE_CAPACITY_BYTES = (
+    (
+        (MAX_CONTENT_BYTES + MAX_ENTRIES * _SOURCE_BLOCK_BYTES + _SOURCE_FIXED_OVERHEAD_BYTES)
+        + (MAX_CONTENT_BYTES + _SOURCE_HEADROOM_DIVISOR - 1) // _SOURCE_HEADROOM_DIVISOR
+        + _SOURCE_BLOCK_BYTES
+        - 1
+    )
+    // _SOURCE_BLOCK_BYTES
+    * _SOURCE_BLOCK_BYTES
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -811,29 +821,70 @@ def validate_scratch_volume(conn: StorageConn, request: VolumeRequest) -> Prepar
     return expected
 
 
-def expected_attempt_volumes(request: VolumeRequest) -> PreparedModuleVolumes:
-    """Derive immutable volume identities without requiring either volume to exist."""
-    image = request.writer.build(request.operation.to_wire_bytes(), request.entries)
-    try:
-        source_name, scratch_name = _names(request)
-        return PreparedModuleVolumes(
-            _prepared(
-                request,
-                source_name,
-                "source",
-                request.source_manifest,
-                image.capacity_bytes,
-            ),
-            _prepared(
-                request,
-                scratch_name,
-                "scratch",
-                "sha256:" + "0" * 64,
-                SCRATCH_CAPACITY_BYTES,
-            ),
-        )
-    finally:
-        image.path.unlink(missing_ok=True)
+def expected_attempt_volumes(
+    request: VolumeRequest, source_capacity_bytes: int
+) -> PreparedModuleVolumes:
+    """Derive immutable volume identities from authenticated, persisted geometry."""
+    source_name, scratch_name = _names(request)
+    return PreparedModuleVolumes(
+        _prepared(
+            request,
+            source_name,
+            "source",
+            request.source_manifest,
+            source_capacity_bytes,
+        ),
+        _prepared(
+            request,
+            scratch_name,
+            "scratch",
+            "sha256:" + "0" * 64,
+            SCRATCH_CAPACITY_BYTES,
+        ),
+    )
+
+
+def recovery_attempt_volumes(
+    operation: RemoteModuleOperationV1,
+    pool: str,
+    source_capacity_bytes: int,
+) -> PreparedModuleVolumes:
+    """Derive exact attempt volumes without materialized entries or a filesystem writer."""
+    if (
+        type(source_capacity_bytes) is not int
+        or source_capacity_bytes < _SOURCE_BLOCK_BYTES
+        or source_capacity_bytes > MAX_SOURCE_CAPACITY_BYTES
+        or source_capacity_bytes % _SOURCE_BLOCK_BYTES
+    ):
+        raise ValueError("source capacity is not positive, block-aligned, and bounded")
+    source_name = render_module_volume_name(
+        operation.system_id, operation.run_id, operation.operation_nonce, "source.ext4"
+    )
+    scratch_name = render_module_volume_name(
+        operation.system_id, operation.run_id, operation.operation_nonce, "scratch.ext4"
+    )
+    common = {
+        "pool": pool,
+        "system_id": operation.system_id,
+        "run_id": operation.run_id,
+        "operation_nonce": operation.operation_nonce,
+    }
+    return PreparedModuleVolumes(
+        PreparedVolume(
+            **common,
+            name=source_name,
+            purpose="source",
+            digest=operation.source_manifest,
+            capacity_bytes=source_capacity_bytes,
+        ),
+        PreparedVolume(
+            **common,
+            name=scratch_name,
+            purpose="scratch",
+            digest="sha256:" + "0" * 64,
+            capacity_bytes=SCRATCH_CAPACITY_BYTES,
+        ),
+    )
 
 
 def delete_owned_attempt_volume(
