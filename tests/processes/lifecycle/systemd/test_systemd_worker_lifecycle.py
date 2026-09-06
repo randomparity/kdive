@@ -348,6 +348,8 @@ def _settings() -> WorkerSettings:
         fixture_catalog_path="/etc/kdive/fixtures.toml",
         worker_database_url=SecretStr("postgresql://worker@localhost/kdive"),
         libvirt_uri="qemu:///session",
+        libvirt_recovery_root="/recovery/kdive-worker-1",
+        external_boot_capacity_bytes=10 * 1024**3,
         s3_endpoint_url="http://127.0.0.1:9000",
         s3_bucket="kdive",
         s3_region="us-west-2",
