@@ -1085,7 +1085,7 @@ class RealLocalExternalBootMaterializer:
             evidence = self._validate_bundle_evidence(plan, bundle_fd)
             os.lseek(bundle_fd, 0, os.SEEK_SET)
             with (
-                tempfile.TemporaryFile(dir=temporary_directory) as expected_modules,
+                open(os.devnull, "wb") as expected_modules,
                 os.fdopen(os.dup(bundle_fd), "rb") as source,
             ):
                 expected_modules_digest, expected_modules_size = convert_kernel_bundle_modules(
@@ -1426,6 +1426,7 @@ class _RealLocalExternalBootOperation:
             + plan.module_obligation.uncompressed_bytes
             + plan.module_obligation.member_count * 1024
             + MAX_ARCHIVE_BYTES * 2
+            + _source_byte_limit(plan.bundle)
             + _MAX_PROJECTION_BYTES
             + _MAX_RECOVERY_METADATA_BYTES
         )
