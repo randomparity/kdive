@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-from hashlib import sha256
 from uuid import UUID, uuid4
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from kdive.domain.external_boot_activation import ExternalBootTeardownEvidenceV1
+from kdive.domain.external_boot_activation import (
+    ExternalBootReleaseEvidenceV1,
+    ExternalBootTeardownEvidenceV1,
+)
 from kdive.providers.external_boot_authority import protocol
 from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
@@ -338,10 +340,7 @@ def test_teardown_response_binds_closed_proof_to_absent_observation() -> None:
         "objects": [],
         "verified_at": "2026-09-06T00:00:00Z",
     }
-    release_identity = (
-        "sha256:"
-        + sha256(json.dumps(release, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    )
+    release_identity = ExternalBootReleaseEvidenceV1.model_validate(release).identity
     teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
     proof = {
         "disposition": "complete_ready",

@@ -278,6 +278,12 @@ BEGIN
             'owner_key', jsonb_build_object('ref', v_reservation.owner_key),
             'reserved_bytes', v_reservation.reserved_bytes, 'enumeration_complete', true,
             'objects', jsonb_build_array(), 'verified_at', v_proof #> '{release_evidence,verified_at}'
+        ) AND v_proof->>'release_identity' = 'sha256:' || encode(sha256(
+            convert_to('kdive-external-boot-release-evidence-v1', 'UTF8') || decode('00', 'hex')
+            || convert_to(public.canonical_external_boot_authority_json(
+                v_proof->'release_evidence'
+            ), 'UTF8')
+        ), 'hex'
         ) AND v_proof #>> '{cleanup_evidence,schema}' = 'external-boot-cleanup-evidence-v1'
           AND v_proof #>> '{cleanup_evidence,activation_id}' = v_authority.activation_id::text
           AND v_proof #>> '{cleanup_evidence,system_id}' = v_authority.system_id::text

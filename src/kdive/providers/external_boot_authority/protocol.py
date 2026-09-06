@@ -454,8 +454,7 @@ class AuthorityTeardownCompleteReadyV1(_ClosedValue):
     @model_validator(mode="after")
     def _ready_evidence_is_closed(self) -> Self:
         if (
-            self.release_identity
-            != "sha256:" + hashlib.sha256(_canonical_bytes(self.release_evidence)).hexdigest()
+            self.release_identity != self.release_evidence.identity
             or self.cleanup_evidence.mode != "system_teardown"
             or self.cleanup_evidence.release_identity != self.release_identity
             or self.cleanup_evidence.teardown_identity != self.teardown_evidence.identity

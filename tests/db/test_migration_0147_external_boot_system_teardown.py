@@ -11,7 +11,10 @@ from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
 from kdive.db import migrate
-from kdive.domain.external_boot_activation import ExternalBootTeardownEvidenceV1
+from kdive.domain.external_boot_activation import (
+    ExternalBootReleaseEvidenceV1,
+    ExternalBootTeardownEvidenceV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownProofV1,
     canonical_teardown_proof_bytes,
@@ -63,12 +66,7 @@ def _proof(case, disposition: str):
             "objects": [],
             "verified_at": "2026-09-06T00:00:00Z",
         }
-        identity = (
-            "sha256:"
-            + hashlib.sha256(
-                json.dumps(release, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
-        )
+        identity = ExternalBootReleaseEvidenceV1.model_validate(release).identity
         value = {
             "disposition": "complete_ready",
             "teardown_evidence": teardown,
@@ -87,7 +85,9 @@ def _proof(case, disposition: str):
     return TypeAdapter(AuthorityTeardownProofV1).validate_python(value)
 
 
-def _current(conn, case, authority, proof, *, category: str = "absent") -> None:
+def _current(
+    conn, case, authority, proof, *, category: str = "absent", composite_state: str | None = None
+) -> None:
     conn.execute(
         "UPDATE external_boot_authorities SET state = 'current', acknowledged_at = now() "
         "WHERE id = %s",
@@ -124,7 +124,7 @@ def _current(conn, case, authority, proof, *, category: str = "absent") -> None:
                 {
                     "observation": {
                         "category": category,
-                        "composite_state": teardown_proof_digest(proof),
+                        "composite_state": composite_state or teardown_proof_digest(proof),
                     }
                 }
             ),
@@ -306,6 +306,47 @@ def test_0147_rejects_unanchored_or_oversize_teardown_proofs(
                 "SELECT finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,%s,%s,%s)",
                 args + (b"x" * 131073,),
             )
+
+
+def test_0147_rejects_a_ready_proof_with_a_noncanonical_release_identity(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns = request.getfixturevalue("authority_role_dsns")
+    assert isinstance(role_dsns, _RoleDsns)
+    with psycopg.connect(migrated_url) as seed:
+        case = _seed_case(seed, purpose="teardown")
+        seed.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id,store_identity,owner_key,reserved_bytes,state,ready_at) "
+            "VALUES (%s,'store/private','owner/private',4096,'ready',now())",
+            (case.activation_id,),
+        )
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    proof = _proof(case, "complete_ready")
+    forged = proof.model_dump(mode="json", by_alias=True)
+    forged["release_identity"] = "sha256:" + "f" * 64
+    forged["cleanup_evidence"]["release_identity"] = forged["release_identity"]
+    raw = json.dumps(forged, sort_keys=True, separators=(",", ":")).encode()
+    composite_state = (
+        "sha256:" + hashlib.sha256(b"kdive-external-boot-teardown-proof-v1\0" + raw).hexdigest()
+    )
+    with psycopg.connect(migrated_url) as seed:
+        _current(seed, case, authority, proof, composite_state=composite_state)
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(
+            "SELECT finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                authority.authority_id,
+                authority.generation,
+                2,
+                _ACK_DIGEST,
+                raw,
+            ),
+        ).fetchone() == ("superseded",)
 
 
 def test_0147_retains_quarantine_without_terminalizing_system(
