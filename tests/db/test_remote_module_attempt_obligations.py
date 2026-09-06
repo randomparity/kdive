@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -14,7 +13,6 @@ from psycopg.types.json import Jsonb
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     ModuleAttemptObligationError,
-    ModuleAttemptTerminalEvidence,
     MutationDischargeReason,
     RemoteModuleAttemptObligationRepository,
     RetainedModuleAttempt,
@@ -25,127 +23,21 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
     RemoteModuleResultV1,
     identity_for,
 )
-
-_PLAN = "sha256:" + "a" * 64
-_DIGEST = "sha256:" + "b" * 64
-_MANIFEST = "sha256:" + "c" * 64
-_TERMINAL_OPERATION_IDENTITY = "sha256:" + "1" * 64
-_TERMINAL_RESULT_IDENTITY = "sha256:" + "2" * 64
-_BASELINE_OPERATION_IDENTITY = "sha256:" + "3" * 64
-_BASELINE_RESULT_IDENTITY = "sha256:" + "4" * 64
-
-
-async def _seed(conn: psycopg.AsyncConnection) -> tuple[UUID, UUID]:
-    """Insert the resource/allocation/system/investigation/run spine one attempt hangs off."""
-    resource_id, allocation_id = uuid4(), uuid4()
-    system_id, investigation_id, run_id = uuid4(), uuid4(), uuid4()
-    await conn.execute(
-        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
-        "VALUES (%s, 'remote-libvirt', 'default', 'standard', 'available', 'qemu+tls://host/system')",
-        (resource_id,),
-    )
-    await conn.execute(
-        "INSERT INTO allocations (id, resource_id, state, principal, project) "
-        "VALUES (%s, %s, 'granted', 'p', 'proj')",
-        (allocation_id, resource_id),
-    )
-    await conn.execute(
-        "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, project) "
-        "VALUES (%s, %s, 'ready', '{}'::jsonb, 'p', 'proj')",
-        (system_id, allocation_id),
-    )
-    await conn.execute(
-        "INSERT INTO investigations (id, principal, project, title, state) "
-        "VALUES (%s, 'p', 'proj', 't', 'open')",
-        (investigation_id,),
-    )
-    await conn.execute(
-        "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, build_profile, "
-        "principal, project) VALUES "
-        "(%s, %s, %s, 'remote-libvirt', 'created', '{}'::jsonb, 'p', 'proj')",
-        (run_id, investigation_id, system_id),
-    )
-    return system_id, run_id
-
-
-def _attempt(system_id: UUID, run_id: UUID, nonce: str = "0" * 32) -> ModuleAttempt:
-    return ModuleAttempt(system_id=system_id, run_id=run_id, operation_nonce=nonce)
-
-
-def _operation(attempt: ModuleAttempt) -> dict[str, Any]:
-    return {
-        "protocol": "remote-module-operation-v1",
-        "operation": "restore",
-        "system_id": str(attempt.system_id),
-        "run_id": str(attempt.run_id),
-        "plan_identity": _PLAN,
-        "operation_nonce": attempt.operation_nonce,
-        "release": "6.12.0",
-        "root_volume": {"key": "kdive-module-root", "identity": _DIGEST},
-        "source_manifest": _MANIFEST,
-        "installed_manifest": _MANIFEST,
-        "capture_absent": True,
-        "appliance_image_digest": _DIGEST,
-    }
-
-
-def _result(attempt: ModuleAttempt) -> dict[str, Any]:
-    """A successful `restored` result, complete enough for RemoteModuleResultV1 to accept it.
-
-    Its shape is the one `_validate_terminal_evidence` demands of a reap marker: the full
-    nine-field identity, `installed_manifest` present, exactly one capture form, and the counts
-    absent — which is what `restored` requires.
-    """
-    return {
-        "protocol": "remote-module-result-v1",
-        "status": "success",
-        "phase": "restored",
-        "system_id": str(attempt.system_id),
-        "run_id": str(attempt.run_id),
-        "plan_identity": _PLAN,
-        "operation_nonce": attempt.operation_nonce,
-        "appliance_image_digest": _DIGEST,
-        "release": "6.12.0",
-        "root_volume_key": "kdive-module-root",
-        "root_volume_identity": _DIGEST,
-        "source_manifest": _MANIFEST,
-        "installed_manifest": _MANIFEST,
-        "capture_absent": True,
-    }
-
-
-def _recovery_reference(attempt: ModuleAttempt) -> dict[str, Any]:
-    return {
-        "protocol": "remote-module-recovery-ref-v1",
-        "system_id": str(attempt.system_id),
-        "run_id": str(attempt.run_id),
-        "plan_identity": _PLAN,
-        "operation_nonce": attempt.operation_nonce,
-        "pool": {"ref": "pools/modules"},
-        "root_volume": {"ref": "volumes/root"},
-        "source_volume": {"ref": "volumes/source"},
-        "scratch_volume": {"ref": "volumes/scratch"},
-        "operation_identity": _TERMINAL_OPERATION_IDENTITY,
-        "result_identity": _TERMINAL_RESULT_IDENTITY,
-        "installed_entry_count": 42,
-        "installed_content_bytes": 4096,
-        "appliance_image_digest": _DIGEST,
-        "authority_identity": _DIGEST,
-    }
-
-
-def _evidence(attempt: ModuleAttempt) -> ModuleAttemptTerminalEvidence:
-    return ModuleAttemptTerminalEvidence(
-        terminal_operation=_operation(attempt),
-        terminal_operation_identity=_TERMINAL_OPERATION_IDENTITY,
-        terminal_result=_result(attempt),
-        terminal_result_identity=_TERMINAL_RESULT_IDENTITY,
-        baseline_operation_identity=_BASELINE_OPERATION_IDENTITY,
-        baseline_result_identity=_BASELINE_RESULT_IDENTITY,
-        installed_entry_count=42,
-        installed_content_bytes=4096,
-        recovery_reference=_recovery_reference(attempt),
-    )
+from tests.db.remote_module_attempt_obligations_support import (  # noqa: F401
+    _BASELINE_OPERATION_IDENTITY,
+    _BASELINE_RESULT_IDENTITY,
+    _DIGEST,
+    _MANIFEST,
+    _PLAN,
+    _TERMINAL_OPERATION_IDENTITY,
+    _TERMINAL_RESULT_IDENTITY,
+    _attempt,
+    _evidence,
+    _operation,
+    _recovery_reference,
+    _result,
+    _seed,
+)
 
 
 def test_mutation_obligation_opens_once_and_discharges_once(migrated_url: str) -> None:
@@ -269,6 +161,9 @@ def test_terminal_escape_discharges_only_open_mutations_for_one_system(
             ]
             assert rows[2][2] is not None and rows[2][3] is None
             assert await repo.mutation_obligation_is_open(conn, other) is True
+            assert await repo.attempt_is_preparable(conn, open_attempt) is False
+            assert await repo.attempt_is_preparable(conn, journal_attempt) is False
+            assert await repo.attempt_is_preparable(conn, other) is True
 
     asyncio.run(_run())
 
@@ -603,6 +498,54 @@ def test_database_rejects_a_recovery_reference_disagreeing_on_the_terminal_diges
                 async with conn.transaction():
                     await repo.record_terminal_evidence(conn, attempt, mismatched)
             assert await repo.read_terminal_evidence(conn, attempt) is None
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("capacity", [None, True, 0, -4096, 4097, 10_499_657_728])
+def test_database_rejects_v2_recovery_reference_without_valid_geometry(
+    migrated_url: str, capacity: object
+) -> None:
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            reference = _recovery_reference(attempt) | {
+                "protocol": "remote-module-recovery-ref-v2",
+                "operation_identity": _BASELINE_OPERATION_IDENTITY,
+                "result_identity": _BASELINE_RESULT_IDENTITY,
+            }
+            if capacity is not None:
+                reference["source_capacity_bytes"] = capacity
+            evidence = replace(_evidence(attempt), recovery_reference=reference)
+            with pytest.raises(psycopg.errors.CheckViolation, match="recovery_geometry"):
+                async with conn.transaction():
+                    await repo.record_terminal_evidence(conn, attempt, evidence)
+
+    asyncio.run(_run())
+
+
+def test_database_round_trips_v2_recovery_geometry(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            reference = _recovery_reference(attempt) | {
+                "protocol": "remote-module-recovery-ref-v2",
+                "source_capacity_bytes": 64 * 1024**2,
+                "operation_identity": _BASELINE_OPERATION_IDENTITY,
+                "result_identity": _BASELINE_RESULT_IDENTITY,
+            }
+            await repo.record_terminal_evidence(
+                conn, attempt, replace(_evidence(attempt), recovery_reference=reference)
+            )
+            stored = await repo.read_terminal_evidence(conn, attempt)
+            assert stored is not None
+            assert stored.recovery_reference == reference
 
     asyncio.run(_run())
 

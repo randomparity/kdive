@@ -73,7 +73,7 @@ async def run_verified_module_attempt_preparation[ResultT](
         async with pool.connection() as conn, conn.transaction():
             await conn.execute("SET TRANSACTION READ ONLY")
             async with advisory_xact_lock(conn, LockScope.SYSTEM, expected_attempt.system_id):
-                if not await repository.mutation_obligation_is_open(conn, expected_attempt):
+                if not await repository.attempt_is_preparable(conn, expected_attempt):
                     raise _verification_failed()
                 return await consumer(expected_attempt)
     except ModuleAttemptObligationVerificationError:

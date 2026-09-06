@@ -262,6 +262,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discharge module obligations on teardown
 - Discharge terminal module obligations
 - Discharge terminal module mutations
+- Add durable module reopen runtime
+- Verify module preparation receipts
+- Prepare verified module volumes
+- Run module appliance
+- Clean up module attempt volumes
+- Complete module reap runtime
+- Materialize local external boot artifacts
 
 ### Changed
 
@@ -428,6 +435,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trim the docstring AGENTS.md already carries
 - Move shared boot doubles into support modules
 - Clarify discharge SQL inventory
+- Move runtime orchestration to services
 
 ### Documentation
 
@@ -2127,6 +2135,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Snapshot remote fleet configuration
 - Preserve partial abort authority
 - Run capacity probe in check mode
+- Reopen restore phase evidence
+- Own terminal evidence connections
+- Validate module runtime boundaries
+- Harden external boot materialization retry
+- Narrow projection reopen authority
+- Validate payloads before projection commit
+- Clean interrupted materializer conversion
+- Verify canonical materialized modules
+- Confine module conversion scratch files
+- Bound materializer validation storage
 
 ### Security
 

@@ -12,16 +12,19 @@ enforcement, and their messages name what was violated.
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Literal
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 
 type MutationDischargeReason = Literal["restored", "baseline_committed", "terminal_escape"]
 
@@ -102,6 +105,31 @@ class ModuleAttemptTerminalEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ModuleAttemptWorkerWriteContext:
+    """One running job's non-transferable worker evidence-write coordinates."""
+
+    job_id: UUID
+    job_attempt: int
+    incarnation_credential: SecretStr
+    preparation: ModuleAttemptPreparationRequestV1
+
+    def __post_init__(self) -> None:
+        if self.job_attempt < 1:
+            raise ValueError("module attempt worker job attempt must be positive")
+
+    def validate_attempt(self, attempt: ModuleAttempt) -> None:
+        receipt = self.preparation.module_attempt_obligation
+        if (receipt.system_id, receipt.run_id, receipt.operation_nonce) != attempt.key:
+            raise ValueError("module attempt worker context differs from requested attempt")
+
+    @property
+    def credential_hash(self) -> bytes:
+        return hashlib.sha256(
+            self.incarnation_credential.get_secret_value().encode("utf-8")
+        ).digest()
+
+
+@dataclass(frozen=True, slots=True)
 class RetainedModuleAttempt:
     """One attempt with at least one un-discharged obligation.
 
@@ -179,6 +207,17 @@ class RemoteModuleAttemptObligationRepository:
         """Return whether the exact attempt has an open mutation obligation."""
         state = await self._state(conn, attempt)
         return state is not None and state["mutation_discharged_at"] is None
+
+    async def attempt_is_preparable(self, conn: AsyncConnection, attempt: ModuleAttempt) -> bool:
+        """Return whether an exact attempt may still create or repair its volumes."""
+        state = await self._state(conn, attempt)
+        return (
+            state is not None
+            and state["mutation_discharged_at"] is None
+            and not state["has_evidence"]
+            and state["reap_opened_at"] is None
+            and state["reap_discharged_at"] is None
+        )
 
     async def discharge_mutation_obligation(
         self, conn: AsyncConnection, attempt: ModuleAttempt, *, reason: MutationDischargeReason
@@ -285,6 +324,48 @@ class RemoteModuleAttemptObligationRepository:
             )
             row = await cur.fetchone()
         return None if row is None else _evidence(row)
+
+    async def worker_record_terminal_evidence(
+        self,
+        conn: AsyncConnection,
+        context: ModuleAttemptWorkerWriteContext,
+        attempt: ModuleAttempt,
+        evidence: ModuleAttemptTerminalEvidence,
+    ) -> bool:
+        context.validate_attempt(attempt)
+        row = await conn.execute(
+            "SELECT public.commit_worker_remote_module_evidence("
+            "%s, %s, %s, %s, %s, %s, 'record-terminal', %s)",
+            (
+                context.job_id,
+                context.credential_hash,
+                context.job_attempt,
+                *attempt.key,
+                Jsonb(asdict(evidence)),
+            ),
+        )
+        value = await row.fetchone()
+        return value is not None and value[0] is True
+
+    async def worker_discharge_reap_obligation(
+        self,
+        conn: AsyncConnection,
+        context: ModuleAttemptWorkerWriteContext,
+        attempt: ModuleAttempt,
+    ) -> bool:
+        context.validate_attempt(attempt)
+        row = await conn.execute(
+            "SELECT public.commit_worker_remote_module_evidence("
+            "%s, %s, %s, %s, %s, %s, 'discharge-reap', NULL)",
+            (
+                context.job_id,
+                context.credential_hash,
+                context.job_attempt,
+                *attempt.key,
+            ),
+        )
+        value = await row.fetchone()
+        return value is not None and value[0] is True
 
     async def open_reap_obligation(self, conn: AsyncConnection, attempt: ModuleAttempt) -> bool:
         """Open the reap obligation before the first journal volume is created.
