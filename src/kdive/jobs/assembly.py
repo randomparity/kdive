@@ -18,7 +18,9 @@ from kdive.jobs.authority_sender import AuthorityRequestSender, authority_sender
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.external_boot_authority_client import (
+    AuthoritySystemSenderFactory,
     ExternalBootClientFactory,
+    authority_system_sender_factory,
     external_boot_client_factory,
     recovery_orphan_authority_sender_factory,
 )
@@ -35,6 +37,7 @@ from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.control import capture_traffic, control, diagnostic_sysrq, watch_for_crash
 from kdive.jobs.handlers.external_boot import orphan
 from kdive.jobs.handlers.runs import registrar as runs
+from kdive.jobs.handlers.system_authority import AuthoritySystemWorkerPorts
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
@@ -58,6 +61,7 @@ class WorkerHandlerAssembly:
     pool: AsyncConnectionPool | None = None
     external_boot_client_factory: ExternalBootClientFactory | None = None
     recovery_orphan_authority_sender_factory: Callable[[], AuthorityRequestSender] | None = None
+    authority_system_sender_factory: AuthoritySystemSenderFactory | None = None
 
 
 def build_worker_handler_assembly(
@@ -102,6 +106,10 @@ def build_worker_handler_assembly(
             lambda: assembly.incarnation_credential,
         ),
         recovery_orphan_authority_sender_factory=recovery_orphan_authority_sender_factory(
+            secret_backend_from_env(registry=composition.secret_registry),
+            lambda: assembly.incarnation_credential,
+        ),
+        authority_system_sender_factory=authority_system_sender_factory(
             secret_backend_from_env(registry=composition.secret_registry),
             lambda: assembly.incarnation_credential,
         ),
@@ -171,6 +179,12 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         secret_registry=assembly.secret_registry,
         artifact_store=assembly.object_stores.store,
         external_boot=operations,
+        authority_system=AuthoritySystemWorkerPorts(
+            resolver=assembly.resolver,
+            incarnation_credential=assembly.incarnation_credential,
+            secret_registry=assembly.secret_registry,
+            sender_factory=assembly.authority_system_sender_factory,
+        ),
     )
     runs.register_handlers(
         registry,

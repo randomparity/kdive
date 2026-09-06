@@ -37,9 +37,18 @@ from kdive.jobs.payloads import (
     SystemPayload,
     load_payload,
 )
-from kdive.jobs.worker import Worker, WorkerConfig, _classified_external_boot_failure
+from kdive.jobs.worker import (
+    Worker,
+    WorkerConfig,
+    _authority_system_marker,
+    _classified_external_boot_failure,
+)
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.providers.local_libvirt.lifecycle.install import _open
+from kdive.providers.system_authority.protocol import (
+    AuthoritySystemMarkerV1,
+    AuthoritySystemOperation,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.integration._seed import (
@@ -53,6 +62,41 @@ from tests.support.otel import tracer_provider
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 _INCARNATION_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
 _DIGEST = "sha256:" + "a" * 64
+
+
+def test_worker_decodes_persisted_authority_system_marker() -> None:
+    system_id = uuid4()
+    marker = AuthoritySystemMarkerV1(
+        system_id=system_id,
+        allocation_id=uuid4(),
+        resource_id=uuid4(),
+        provider_kind="local-libvirt",
+        resource_name="host-a",
+        authority_instance="authority-a",
+        profile_identity=_DIGEST,
+        root_identity="sha256:" + "b" * 64,
+        operation=AuthoritySystemOperation.PROVISION,
+        operation_identity="provision-a",
+    )
+    now = datetime.now(UTC)
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.PROVISION,
+        payload={
+            "system_id": str(system_id),
+            "authority_system_v1": marker.model_dump(mode="json", by_alias=True),
+        },
+        state=JobState.RUNNING,
+        attempt=1,
+        max_attempts=3,
+        worker_id="worker-a",
+        authorizing={"principal": "p", "agent_session": None, "project": "proj"},
+        dedup_key=f"{system_id}:provision",
+    )
+
+    assert _authority_system_marker(job) == marker
 
 
 @pytest.mark.parametrize(

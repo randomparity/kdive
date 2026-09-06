@@ -379,9 +379,25 @@ BEGIN
        AND v_owner.bootstrap_identity <> v_bootstrap_identity THEN
         RETURN QUERY SELECT 'conflict'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
     END IF;
-    IF EXISTS (SELECT 1 FROM public.authority_system_attempts
-               WHERE system_id=v_owner.system_id AND state='allocating') THEN
-        RETURN QUERY SELECT 'busy'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
+    SELECT * INTO v_existing FROM public.authority_system_attempts
+    WHERE system_id=v_owner.system_id AND state='allocating' FOR UPDATE;
+    IF v_existing.id IS NOT NULL THEN
+        IF EXISTS (
+            SELECT 1 FROM public.jobs AS incumbent_job
+            JOIN public.worker_incarnations AS incumbent_worker
+              ON incumbent_worker.incarnation=v_existing.worker_incarnation
+            WHERE incumbent_job.id=v_existing.job_id
+              AND incumbent_job.state='running'
+              AND incumbent_job.attempt=v_existing.job_attempt
+              AND incumbent_job.worker_id=v_existing.worker_incarnation
+              AND incumbent_job.lease_expires_at>clock_timestamp()
+              AND incumbent_worker.state='active'
+              AND incumbent_worker.fence_protocol=4
+        ) THEN
+            RETURN QUERY SELECT 'busy'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
+        END IF;
+        UPDATE public.authority_system_attempts SET state='superseded',
+            superseded_at=clock_timestamp() WHERE id=v_existing.id AND state='allocating';
     END IF;
     v_generation := v_owner.next_generation;
     IF v_generation = 9223372036854775807 THEN

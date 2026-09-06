@@ -22,6 +22,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootTerminalEvidenceV1
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.providers.external_boot_authority.protocol import AuthorityTeardownResponseV1
+from kdive.providers.system_authority.protocol import AuthoritySystemResponseV1
 
 type _Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type _ResultRef = Annotated[str, Field(min_length=1, max_length=2048)] | None
@@ -455,7 +456,7 @@ class ExternalBootDerivedTeardownCompletion(ExternalBootAuthoritySuccessV1):
     """The teardown handler already consumed its exact authority receipt transaction."""
 
 
-type JobHandlerResult = str | None | ExternalBootAuthorityResultV1
+type JobHandlerResult = str | None | ExternalBootAuthorityResultV1 | AuthoritySystemResponseV1
 type JobHandler = Callable[[AsyncConnection, Job], Awaitable[JobHandlerResult]]
 
 

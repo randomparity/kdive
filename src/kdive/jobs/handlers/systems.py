@@ -36,6 +36,10 @@ from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_han
 from kdive.jobs.handlers.connectivity.ssh_reachable import check_ssh_reachable_handler
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.external_boot.router import route_marked
+from kdive.jobs.handlers.system_authority import (
+    AuthoritySystemWorkerPorts,
+    execute_authority_system_job,
+)
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import (
     ReprovisionPayload,
@@ -52,6 +56,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
+from kdive.providers.system_authority.protocol import AuthoritySystemResponseV1
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import (
@@ -869,6 +874,7 @@ def register_handlers(
     secret_registry: SecretRegistry,
     artifact_store: RetiredKeyBatchDeleter,
     external_boot: ExternalBootOperations,
+    authority_system: AuthoritySystemWorkerPorts | None = None,
 ) -> None:
     """Bind the provision/teardown/reprovision/authorize_ssh_key/check_ssh_reachable handlers.
 
@@ -877,22 +883,37 @@ def register_handlers(
     means that mistake is a ``TypeError`` at registration instead of a wrong operation against a
     live System.
     """
-    registry.register(
-        JobKind.PROVISION,
-        lambda conn, job: provision_handler(
-            conn,
-            job,
-            resolver=resolver,
-            secret_registry=secret_registry,
-        ),
-    )
+
+    async def provision(conn: AsyncConnection, job: Job) -> str | None | AuthoritySystemResponseV1:
+        if "authority_system_v1" in job.payload:
+            if authority_system is None:
+                raise CategorizedError(
+                    "authority System route is not configured",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    terminal=True,
+                )
+            return await execute_authority_system_job(conn, job, ports=authority_system)
+        return await provision_handler(
+            conn, job, resolver=resolver, secret_registry=secret_registry
+        )
+
+    async def teardown(conn: AsyncConnection, job: Job) -> str | None | AuthoritySystemResponseV1:
+        if "authority_system_v1" in job.payload:
+            if authority_system is None:
+                raise CategorizedError(
+                    "authority System route is not configured",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    terminal=True,
+                )
+            return await execute_authority_system_job(conn, job, ports=authority_system)
+        return await teardown_handler(conn, job, resolver=resolver, artifact_store=artifact_store)
+
+    registry.register(JobKind.PROVISION, provision)
     registry.register(
         JobKind.TEARDOWN,
         route_marked(
             external_boot,
-            lambda conn, job: teardown_handler(
-                conn, job, resolver=resolver, artifact_store=artifact_store
-            ),
+            teardown,
         ),
     )
     registry.register(

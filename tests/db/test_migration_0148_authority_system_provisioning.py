@@ -544,3 +544,164 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
         ).fetchone()
     assert stored == (7, receipt, True)
     assert json.loads(receipt)["disposition"] == "provision-ready"
+
+
+def test_0148_allocation_supersedes_only_dead_unacknowledged_candidate(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    resource_id, allocation_id, system_id, image_id = (uuid4() for _ in range(4))
+    first_job, second_job, first_request, second_request = (uuid4() for _ in range(4))
+    first_worker, second_worker = (
+        f"docker:authority-candidate-{uuid4()}",
+        f"docker:authority-candidate-{uuid4()}",
+    )
+    first_credential, second_credential = b"1" * 32, b"2" * 32
+    profile_digest = "sha256:" + "a" * 64
+    root_digest = "sha256:" + "b" * 64
+
+    def marker(operation_identity: str) -> dict[str, str]:
+        return {
+            "schema": "authority-system-marker-v1",
+            "system_id": str(system_id),
+            "allocation_id": str(allocation_id),
+            "resource_id": str(resource_id),
+            "provider_kind": "local-libvirt",
+            "resource_name": "host-candidate",
+            "authority_instance": "auth-candidate",
+            "profile_identity": profile_digest,
+            "root_identity": root_digest,
+            "operation": "provision",
+            "operation_identity": operation_identity,
+        }
+
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO resources (id,kind,name,pool,cost_class,status,host_uri) "
+            "VALUES (%s,'local-libvirt','host-candidate','default','standard','available',"
+            "'qemu:///system')",
+            (resource_id,),
+        )
+        conn.execute(
+            "INSERT INTO allocations (id,resource_id,state,principal,project) "
+            "VALUES (%s,%s,'active','p','proj')",
+            (allocation_id, resource_id),
+        )
+        conn.execute(
+            "INSERT INTO systems (id,allocation_id,state,provisioning_profile,principal,project) "
+            "VALUES (%s,%s,'provisioning','{}','p','proj')",
+            (system_id, allocation_id),
+        )
+        conn.execute(
+            "INSERT INTO system_root_provenance "
+            "(system_id,source_image_id,project,architecture,image_digest,root_spec) "
+            "VALUES (%s,%s,'proj','x86_64',%s,'{}')",
+            (system_id, image_id, root_digest),
+        )
+        conn.execute(
+            "INSERT INTO system_bootstrap_keys (system_id,private_key,public_key) "
+            "VALUES (%s,'private','ssh-ed25519 YWFhYQ== kdive-system')",
+            (system_id,),
+        )
+        for worker, credential in (
+            (first_worker, first_credential),
+            (second_worker, second_credential),
+        ):
+            conn.execute(
+                "INSERT INTO worker_incarnations "
+                "(incarnation,authority_kind,authority_binding,fence_protocol,credential_hash) "
+                "VALUES (%s,'docker','{}',4,%s)",
+                (worker, credential),
+            )
+        for job_id, worker, payload in (
+            (first_job, first_worker, marker("candidate-one")),
+            (second_job, second_worker, marker("candidate-two")),
+        ):
+            conn.execute(
+                "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
+                "payload,authorizing,dedup_key) VALUES "
+                "(%s,'provision','running',1,3,%s,clock_timestamp()+interval '5 minutes',"
+                "%s,'{}',%s)",
+                (job_id, worker, Jsonb({"authority_system_v1": payload}), f"candidate-{job_id}"),
+            )
+        conn.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,authority_instance,"
+            "profile_identity,root_identity) VALUES "
+            "(%s,%s,%s,'local-libvirt','host-candidate','auth-candidate',%s,%s)",
+            (system_id, allocation_id, resource_id, profile_digest, root_digest),
+        )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        first = worker_conn.execute(
+            "SELECT * FROM allocate_authority_system_attempt(%s,%s,1,%s)",
+            (first_credential, first_job, first_request),
+        ).fetchone()
+        assert first is not None and first[0] == "allocated"
+        first_authority = first[1]
+        worker_conn.commit()
+
+        assert (
+            worker_conn.execute(
+                "SELECT state FROM complete_worker_job(%s,%s,1,'forbidden')",
+                (first_job, first_credential),
+            ).fetchone()
+            is None
+        )
+        assert (
+            worker_conn.execute(
+                "SELECT state FROM fail_worker_job(%s,%s,1,'provider_error',%s,true)",
+                (first_job, first_credential, Jsonb({})),
+            ).fetchone()
+            is None
+        )
+
+        assert worker_conn.execute(
+            "SELECT status FROM allocate_authority_system_attempt(%s,%s,1,%s)",
+            (second_credential, second_job, second_request),
+        ).fetchone() == ("busy",)
+        worker_conn.rollback()
+
+    with psycopg.connect(migrated_url) as admin:
+        admin.execute(
+            "UPDATE jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=%s",
+            (first_job,),
+        )
+        admin.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        rolled_back = worker_conn.execute(
+            "SELECT * FROM allocate_authority_system_attempt(%s,%s,1,%s)",
+            (second_credential, second_job, second_request),
+        ).fetchone()
+        assert rolled_back is not None and rolled_back[0] == "allocated"
+        worker_conn.rollback()
+
+    with psycopg.connect(migrated_url) as admin:
+        assert admin.execute(
+            "SELECT state FROM authority_system_attempts WHERE id=%s", (first_authority,)
+        ).fetchone() == ("allocating",)
+        assert admin.execute(
+            "SELECT count(*) FROM authority_system_attempts WHERE job_id=%s", (second_job,)
+        ).fetchone() == (0,)
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        successor = worker_conn.execute(
+            "SELECT * FROM allocate_authority_system_attempt(%s,%s,1,%s)",
+            (second_credential, second_job, second_request),
+        ).fetchone()
+        assert successor is not None and successor[0] == "allocated"
+        worker_conn.commit()
+        replay = worker_conn.execute(
+            "SELECT * FROM allocate_authority_system_attempt(%s,%s,1,%s)",
+            (second_credential, second_job, second_request),
+        ).fetchone()
+        assert replay == successor
+
+    with psycopg.connect(migrated_url) as admin:
+        states = admin.execute(
+            "SELECT id,state FROM authority_system_attempts WHERE system_id=%s ORDER BY generation",
+            (system_id,),
+        ).fetchall()
+    assert states == [(first_authority, "superseded"), (successor[1], "allocating")]

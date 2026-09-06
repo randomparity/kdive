@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -53,6 +54,10 @@ from kdive.jobs.models import (
 )
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
+from kdive.providers.system_authority.protocol import (
+    AuthoritySystemMarkerV1,
+    AuthoritySystemResponseV1,
+)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -505,6 +510,15 @@ class Worker:
         try:
             result_ref = await handler_task
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
+            system_marker = _authority_system_marker(job)
+            if system_marker is not None:
+                _log.warning(
+                    "marked authority System job %s failed without a terminal receipt: %s",
+                    job.id,
+                    exc,
+                    exc_info=True,
+                )
+                return
             marker = _external_marker(job)
             if marker is not None:
                 if isinstance(exc, ExternalBootAuthorityFailure) and _authority_binding_matches(
@@ -541,6 +555,14 @@ class Worker:
                 self._telemetry.record_job_retry(job.kind.value)
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
             return
+        system_marker = _authority_system_marker(job)
+        if system_marker is not None:
+            if isinstance(result_ref, AuthoritySystemResponseV1) and _system_binding_matches(
+                system_marker, result_ref
+            ):
+                return
+            _log.warning("marked authority System job %s returned no matching receipt", job.id)
+            return
         marker = _external_marker(job)
         if marker is not None:
             if isinstance(
@@ -563,6 +585,9 @@ class Worker:
             return
         if isinstance(result_ref, ExternalBootAuthorityResultV1):
             _log.warning("ordinary job %s returned an external authority result", job.id)
+            return
+        if isinstance(result_ref, AuthoritySystemResponseV1):
+            _log.warning("ordinary job %s returned an authority System result", job.id)
             return
         async with self._pool.connection() as conn:
             completed = await queue.complete(
@@ -692,13 +717,52 @@ def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
     raw = job.payload["external_boot_authority_v1"]
     try:
         return ExternalBootAuthorityMarkerV1.model_validate(raw)
-    except ValidationError:
+    except TypeError, ValidationError:
         _log.warning("job %s has a malformed external boot authority marker", job.id)
         # Presence, rather than validity, selects the fail-closed path.
         return _MALFORMED_EXTERNAL_MARKER
 
 
 _MALFORMED_EXTERNAL_MARKER = ExternalBootAuthorityMarkerV1.model_construct()
+
+
+def _authority_system_marker(job: Job) -> AuthoritySystemMarkerV1 | None:
+    """Decode a System marker while preserving presence as the generic-finalizer fence."""
+    if "authority_system_v1" not in job.payload:
+        return None
+    try:
+        return AuthoritySystemMarkerV1.model_validate_json(
+            json.dumps(job.payload["authority_system_v1"])
+        )
+    except TypeError, ValidationError:
+        _log.warning("job %s has a malformed authority System marker", job.id)
+        return _MALFORMED_SYSTEM_MARKER
+
+
+_MALFORMED_SYSTEM_MARKER = AuthoritySystemMarkerV1.model_construct()
+
+
+def _system_binding_matches(
+    marker: AuthoritySystemMarkerV1, response: AuthoritySystemResponseV1
+) -> bool:
+    if marker is _MALFORMED_SYSTEM_MARKER:
+        return False
+    proof = response.proof
+    return all(
+        getattr(marker, name) == getattr(proof, name)
+        for name in (
+            "system_id",
+            "allocation_id",
+            "resource_id",
+            "provider_kind",
+            "resource_name",
+            "authority_instance",
+            "profile_identity",
+            "root_identity",
+            "operation",
+            "operation_identity",
+        )
+    )
 
 
 def _authority_binding_matches(
