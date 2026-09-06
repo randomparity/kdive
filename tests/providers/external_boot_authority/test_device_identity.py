@@ -118,6 +118,38 @@ def test_identity_service_rejects_exact_capacity_and_recovers_on_completion() ->
     asyncio.run(exercise())
 
 
+def test_repeated_cancellation_does_not_consume_default_executor_or_release_slots() -> None:
+    started = threading.Barrier(3)
+    release = threading.Event()
+
+    def blocked(path: str) -> RemoteDeviceIdentity | None:
+        del path
+        started.wait()
+        release.wait()
+        return None
+
+    async def exercise() -> None:
+        service = RemoteDeviceIdentityService(identity=blocked, capacity=2)
+        tasks = [
+            asyncio.create_task(service.resolve(DeviceIdentityRequestV1(path=f"/{index}")))
+            for index in range(2)
+        ]
+        await asyncio.to_thread(started.wait)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "ready"), 0.5) == "ready"
+        with pytest.raises(RuntimeError, match="provider-failure"):
+            await service.resolve(DeviceIdentityRequestV1(path="/exhausted"))
+        release.set()
+        await asyncio.sleep(0.05)
+        service.close()
+
+    asyncio.run(exercise())
+
+
 def test_identity_service_close_is_nonwaiting_and_rejects_new_work() -> None:
     pending: Future[RemoteDeviceIdentity | None] = Future()
 
