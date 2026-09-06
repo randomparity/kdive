@@ -10,6 +10,8 @@ from pydantic import ValidationError
 
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAbsenceFacts,
+    AuthoritySystemJournalPhase,
+    AuthoritySystemJournalRecordV1,
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,
     AuthoritySystemProvisionFacts,
@@ -60,6 +62,30 @@ def test_attempt_requires_explicit_bootstrap_and_attempt_binding() -> None:
         AuthoritySystemTakeoverRequestV1.model_validate(
             {key: item for key, item in value.items() if key != "bootstrap_identity"}
         )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [AuthoritySystemOperation.PROVISION, AuthoritySystemOperation.PREACTIVATION_TEARDOWN],
+)
+def test_terminal_never_began_is_valid_for_both_operations(
+    operation: AuthoritySystemOperation,
+) -> None:
+    marker = _marker().model_copy(update={"operation": operation})
+    record = AuthoritySystemJournalRecordV1(
+        **marker.model_dump(exclude={"schema_"}),
+        authority_id=uuid4(),
+        generation=1,
+        attempt_id=uuid4(),
+        operation_digest=_DIGEST,
+        bootstrap_identity=_DIGEST,
+        sequence=1,
+        previous_digest=_DIGEST,
+        phase=AuthoritySystemJournalPhase.TERMINAL,
+        outcome="never-began",
+        canonical_record=_DIGEST,
+    )
+    assert record.observation is None
 
 
 @pytest.mark.parametrize("kind", ["provision", "absence"])

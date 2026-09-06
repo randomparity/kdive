@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from kdive.domain.external_boot_activation import UtcDateTime
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSpecV1
+from kdive.security.ssh_authorized_key import validate_authorized_public_key
 
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
@@ -182,6 +183,7 @@ class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptBinding):
             if (self.outcome == "never-began") != (self.observation is None):
                 raise ValueError("terminal observation must match outcome")
             if self.operation is AuthoritySystemOperation.PROVISION and self.outcome not in {
+                "never-began",
                 "provision-ready",
                 "provision-failed",
                 "retained-quarantine",
@@ -189,7 +191,8 @@ class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptBinding):
                 raise ValueError("provision terminal outcome is invalid")
             if (
                 self.operation is AuthoritySystemOperation.PREACTIVATION_TEARDOWN
-                and self.outcome not in {"preactivation-absent", "retained-quarantine"}
+                and self.outcome
+                not in {"never-began", "preactivation-absent", "retained-quarantine"}
             ):
                 raise ValueError("preactivation teardown terminal outcome is invalid")
         return self
@@ -297,6 +300,14 @@ class AuthoritySystemProvisionSnapshot:
         )
         if self.bootstrap_identity != expected_bootstrap:
             raise ValueError("stored bootstrap public-key identity does not match")
+        if validate_authorized_public_key(self.bootstrap_public_key) != self.bootstrap_public_key:
+            raise ValueError("stored bootstrap public key is not canonical")
+        if self.provider_kind != self.profile.provider.kind.value:
+            raise ValueError("stored provider kind does not match provisioning profile")
+        if self.root_spec.authority != "stage-inspection":
+            raise ValueError("authority System root requires stage inspection")
+        if self.root_spec.source.kind != "staged-image":
+            raise ValueError("authority System root requires a staged image")
         if self.root_identity != self.root_spec.source.identity:
             raise ValueError("stored root identity does not match RootSpec source")
         if self.profile.arch != self.root_spec.architecture:
