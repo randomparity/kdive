@@ -215,10 +215,11 @@ def test_preparing_capacity_exhaustion_precedes_materialize_and_retries_after_re
             "WHERE incarnation=%s",
             (target.worker_incarnation,),
         )
-        for _ in range(2):
-            async with worker.transaction():
+
+        async def debit(connection: AsyncConnection) -> str:
+            async with connection.transaction():
                 status = await repository.mark_reservation_ready_for_job(
-                    worker,
+                    connection,
                     credential_hash=hashlib.sha256(target.credential.encode()).digest(),
                     job_id=target.job_id,
                     job_attempt=target.attempt,
@@ -230,7 +231,10 @@ def test_preparing_capacity_exhaustion_precedes_materialize_and_retries_after_re
                     reserve_bytes=RESERVED_BYTES,
                     recovery_max_bytes=RESERVED_BYTES,
                 )
-            assert status.value == "applied"
+            return status.value
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as competitor:
+            assert await asyncio.gather(debit(worker), debit(competitor)) == ["applied", "applied"]
         used = await (
             await seed.execute(
                 "SELECT sum(reserved_bytes) FROM external_boot_reservations "
