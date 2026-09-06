@@ -70,6 +70,7 @@ def referenced_volume_paths(conn: ModuleVolumeReaperConn) -> frozenset[str]: ...
 def reap_orphaned_module_volumes(
     conn: ModuleVolumeReaperConn,
     pool_name: str,
+    identity_port: RemoteDeviceIdentityPort,
     *,
     retained_owners: Callable[[], Collection[ModuleVolumeOwner]],
 ) -> int: ...
@@ -96,9 +97,12 @@ def reap_orphaned_module_volumes(
    candidate paths, and named-volume canonical paths through the supplied ADR-0603 identity port.
    Missing or malformed identity fails closed; timeout and operational resolution errors raise
    infrastructure failure. Enforce one bounded identity-call budget across the complete preflight.
+   The destructive function receives the port as an explicit positional dependency; no connection
+   object, helper, or closure constructs or captures authority implicitly.
 4. Implement one complete enumeration, retention filtering, a complete reference/conflict
-   preflight, then deletion. Translate libvirt errors with bounded details and count
-   `VIR_ERR_NO_STORAGE_VOL` as removed.
+   preflight, then deletion. Add a fake-port regression that records candidate and domain-reference
+   lookups, plus absent and malformed identity cases proving no delete begins. Translate libvirt
+   errors with bounded details and count `VIR_ERR_NO_STORAGE_VOL` as removed.
 5. Run the focused command plus #2167's attachment tests and require every named and added
    regression to pass. Commit the task.
 
@@ -156,10 +160,13 @@ asyncio loop. One bounded deadline covers each host sweep.
    pending until both callback and worker finish, after which it raises cancellation with the
    cancellation count preserved. Reuse the executor's existing shutdown and capacity regressions;
    do not duplicate its cancellation loop.
-4. Add the remote factory to the provider descriptor and expose
+4. Pass the per-host identity port explicitly into `reap_orphaned_module_volumes`; add a composition
+   assertion that the port built from that host's fixed binding is the one observed by candidate and
+   reference lookups.
+5. Add the remote factory to the provider descriptor and expose
    `ProviderComposition.build_reconciler_module_volume_reaper`, returning the null port when remote
    libvirt is disabled.
-5. Run the focused command and expect all selected tests to pass. Commit the task.
+6. Run the focused command and expect all selected tests to pass. Commit the task.
 
 Acceptance: provider construction opens no connection or authority credential; one unreachable host
 does not block later hosts; a reachable-host operation or missing authority fails closed; no

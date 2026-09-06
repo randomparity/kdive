@@ -38,19 +38,21 @@ storage referenced by an active or inactive domain definition.
 ## Components and data flow
 
 `providers/remote_libvirt/reaping/module_volumes.py` owns the synchronous, single-host libvirt
-algorithm and the exact interfaces named by #2168. It refreshes and enumerates once, calls the
-retained-owner callback only after enumeration, resolves all domain references through the shared
-`volume_references` and `path_references` traversal from
+algorithm and the interfaces named by #2168, with one explicit
+`RemoteDeviceIdentityPort` parameter added to the destructive reaper. It refreshes and enumerates
+once, calls the retained-owner callback only after enumeration, resolves all domain references
+through the shared `volume_references` and `path_references` traversal from
 `remote_module_attachments.py`, rejects conflicts, and deletes the remaining candidates. #2168
 promotes those two landed private helpers to provider-package interfaces without changing their
 behavior, so the attempt-scoped inspector and whole-pool sweep cannot drift onto different disk
-graphs.
+graphs. Neither the connection nor a helper constructs or captures identity authority implicitly.
 
 `RemoteLibvirtModuleVolumeReaper` is the asynchronous fleet port. Its libvirt work runs through
 #2170's landed completion-owned `RemoteModulePreparationExecutor` and the existing remote-reaper
 connection bundle. Each fleet configuration supplies its immutable Resource-bound authority
 binding; the adapter materializes the existing typed authority sender and ADR-0603 identity port
-for that host with one bounded sweep deadline. A configured host without an authority route fails
+for that host with one bounded sweep deadline and passes that port explicitly to the single-host
+reaper. A configured host without an authority route fails
 closed rather than falling back to local or lexical identity. The low-level algorithm's
 synchronous retained-owner callback bridges back to the reconciler event loop with
 `asyncio.run_coroutine_threadsafe`; the event loop remains free while awaiting the worker thread,
@@ -137,6 +139,9 @@ non-conflicts, and idempotent disappearance. A shared-traversal test pins the re
 exported helpers. Fleet-adapter tests prove the callback crosses from the worker thread at the
 required point, two cancellation requests cannot finish the adapter before the worker and callback
 finish, the cancellation count is preserved, and unreachable-host handling remains inherited.
+Fake identity-port tests record both candidate and reference lookups and prove absent or malformed
+identity prevents the first delete. A composition test proves the per-host port is passed through
+unchanged.
 Lane tests prove obligation expansion, catalog registration, reporting, failure isolation, and
 disabled composition. Focused lint and whole-tree typing cover the protocol boundary; `just ci` is
 the pre-push gate.
