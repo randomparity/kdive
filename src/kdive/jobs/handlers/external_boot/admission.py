@@ -7,12 +7,11 @@ caller must supply them — and a ``provider_kind`` disagreeing with the resolve
 ``allocate_external_boot_authority``. A pydantic validator cannot do it: it has no database and no
 resolver.
 
-This is also the production prepared-before-admission boundary: a ``preparing`` activation is
-resumed through its provider's durable preparation receipt before a marker can be returned. #2204
-wires the MCP tools to this helper. The ordering matters: a caller that composes a marker by hand
-can build one disagreeing with the activation row, and while execution catches that mismatch, a
-pre-allocation refusal is safe but not recoverable. Going through this helper makes the
-disagreement unconstructible instead.
+For a ``preparing`` activation this boundary validates and persists the exact plan on the job but
+does not call the provider. The claimed worker runs preparation only after authority allocation and
+acknowledgement (ADR-0608). #2204 wires the MCP tools to this helper. A caller that composes a
+marker by hand can build one disagreeing with the activation row; going through this helper makes
+that disagreement unconstructible instead.
 """
 
 from __future__ import annotations
@@ -32,7 +31,6 @@ from kdive.jobs.payloads import (
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
 from kdive.providers.ports.external_boot import ExternalBootPlan
-from kdive.services.external_boot.preparation import prepare_external_boot_for_admission
 
 __all__ = ["build_external_boot_payload"]
 
@@ -83,15 +81,17 @@ async def build_external_boot_payload(
     if activation.state.value == "preparing":
         if preparation_plan is None:
             raise _refuse("a preparing activation requires its durable preparation plan")
-        activation = await prepare_external_boot_for_admission(
-            conn,
-            repository=_ACTIVATIONS,
-            resolver=resolver,
-            plan=preparation_plan,
-            activation_id=activation.id,
-            provider_kind=provider_kind,
-            authority_instance=authority_instance,
-        )
+        if binding.runtime.external_boot_preparation is None:
+            raise _refuse(
+                f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
+                "has no external_boot_preparation port"
+            )
+        if (
+            preparation_plan.identity != activation.plan_identity
+            or preparation_plan.ownership.system_id != str(activation.system_id)
+            or preparation_plan.ownership.run_id != str(activation.run_id)
+        ):
+            raise _refuse("durable preparation plan does not match the activation")
 
     marker = {
         "activation_id": str(activation.id),
@@ -109,5 +109,9 @@ async def build_external_boot_payload(
             {"system_id": str(activation.system_id), "external_boot_authority_v1": marker}
         )
     return JobKind.BOOT, BootPayload.model_validate(
-        {"run_id": str(activation.run_id), "external_boot_authority_v1": marker}
+        {
+            "run_id": str(activation.run_id),
+            "external_boot_authority_v1": marker,
+            "external_boot_plan_v1": preparation_plan,
+        }
     )

@@ -16,6 +16,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
@@ -25,6 +26,7 @@ from kdive.providers.external_boot_authority.protocol import (
     decode_authority_request,
     record_digest,
 )
+from tests.support.external_boot_plan import external_boot_plan
 
 _DIGEST = "sha256:" + "a" * 64
 _OTHER_DIGEST = "sha256:" + "b" * 64
@@ -96,6 +98,23 @@ def _mutation(**changes: object) -> AuthorityMutationRequestV1:
     return AuthorityMutationRequestV1.model_validate(values)
 
 
+def _preparation(**changes: object) -> AuthorityPreparationMutationRequestV1:
+    values = _binding()
+    plan = external_boot_plan(UUID(str(values["system_id"])), UUID(str(values["run_id"])))
+    values.update(
+        operation="materialize",
+        purpose="activate",
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity=_DIGEST,
+        intended_target_identity=_OTHER_DIGEST,
+        recovery_objects=(),
+        plan=plan,
+    )
+    values.update(changes)
+    return AuthorityPreparationMutationRequestV1.model_validate(values)
+
+
 @pytest.mark.parametrize(
     ("purpose", "operation"),
     [
@@ -123,6 +142,30 @@ def test_every_authorized_purpose_operation_pair_is_accepted(purpose: str, opera
 def test_unknown_or_cross_purpose_operation_is_rejected(operation: str) -> None:
     with pytest.raises(ValidationError):
         _takeover(purpose="activate", operation=operation)
+
+
+def test_preparation_operation_requires_the_closed_plan_request() -> None:
+    request = _preparation()
+    assert decode_authority_request(protocol._canonical_bytes(request)) == request  # noqa: SLF001
+    ordinary = request.model_dump(mode="json", by_alias=True)
+    ordinary.pop("plan")
+    with pytest.raises(ValidationError, match="exact plan"):
+        AuthorityMutationRequestV1.model_validate(ordinary)
+
+
+@pytest.mark.parametrize("operation", ["activate", "recover"])
+def test_preparation_request_rejects_an_ordinary_operation(operation: str) -> None:
+    with pytest.raises(ValidationError, match="operation"):
+        _preparation(operation=operation)
+
+
+def test_preparation_request_binds_exact_plan_identity_and_ownership() -> None:
+    request = _preparation()
+    with pytest.raises(ValidationError, match="bound identity"):
+        _preparation(plan_identity=_DIGEST)
+    foreign = external_boot_plan(uuid4(), request.run_id)
+    with pytest.raises(ValidationError, match="ownership"):
+        _preparation(plan=foreign, plan_identity=foreign.identity)
 
 
 @pytest.mark.parametrize(

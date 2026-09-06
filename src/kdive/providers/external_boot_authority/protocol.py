@@ -18,6 +18,11 @@ from pydantic import (
     model_validator,
 )
 
+from kdive.providers.ports.external_boot import (
+    ExternalBootPlan,
+    ExternalBootPreparationObservation,
+)
+
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_RECOVERY_OBJECTS = 1_024
@@ -57,6 +62,8 @@ class _ClosedValue(BaseModel):
 
 
 class AuthorityOperation(StrEnum):
+    MATERIALIZE = "materialize"
+    PREPARE = "prepare"
     ACTIVATE = "activate"
     RECOVER = "recover"
     RESOLVE_CONFLICT = "resolve-conflict"
@@ -70,7 +77,13 @@ class AuthorityOperation(StrEnum):
 
 _PURPOSE_OPERATIONS: dict[str, frozenset[AuthorityOperation]] = {
     "activate": frozenset(
-        {AuthorityOperation.ACTIVATE, AuthorityOperation.DEADLINE, AuthorityOperation.FAIL}
+        {
+            AuthorityOperation.MATERIALIZE,
+            AuthorityOperation.PREPARE,
+            AuthorityOperation.ACTIVATE,
+            AuthorityOperation.DEADLINE,
+            AuthorityOperation.FAIL,
+        }
     ),
     "recover": frozenset(
         {
@@ -132,6 +145,12 @@ class _AuthorityBinding(_ClosedValue):
 class AuthorityTakeoverRequestV1(_AuthorityBinding):
     """Immutable allocating-authority facts used to install a takeover watermark."""
 
+    @model_validator(mode="after")
+    def _takeover_is_not_a_preparation_commit(self) -> Self:
+        if self.operation in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
+            raise ValueError("takeover request requires the immutable root operation")
+        return self
+
 
 class RecoveryObjectBindingV1(_ClosedValue):
     """Stable provider recovery-object ownership across authority takeover."""
@@ -183,6 +202,48 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
             raise ValueError("recovery object does not belong to request binding")
         return self
 
+    @model_validator(mode="after")
+    def _ordinary_request_is_not_preparation(self) -> Self:
+        if self.operation in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
+            raise ValueError("preparation operation requires its exact plan")
+        return self
+
+
+class AuthorityPreparationMutationRequestV1(_AuthorityBinding):
+    """A materialize or prepare mutation carrying its trusted durable plan projection."""
+
+    attempt_id: UUID
+    expected_source_identity: str
+    intended_target_identity: str
+    recovery_objects: Annotated[
+        tuple[RecoveryObjectBindingV1, ...], Field(max_length=MAX_RECOVERY_OBJECTS)
+    ]
+    plan: ExternalBootPlan
+
+    @field_validator("expected_source_identity", "intended_target_identity")
+    @classmethod
+    def _provider_identity_is_bounded(cls, value: str) -> str:
+        return _bounded_text(value, maximum=1024)
+
+    _objects_are_canonical = field_validator("recovery_objects")(_canonical_recovery_objects)
+
+    @model_validator(mode="after")
+    def _preparation_shape_is_bound(self) -> Self:
+        if self.operation not in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
+            raise ValueError("preparation request requires a preparation operation")
+        if self.plan.identity != self.plan_identity:
+            raise ValueError("preparation plan does not match its bound identity")
+        if self.plan.ownership.system_id != str(
+            self.system_id
+        ) or self.plan.ownership.run_id != str(self.run_id):
+            raise ValueError("preparation plan ownership does not match request binding")
+        if any(
+            item.system_id != self.system_id or item.activation_id != self.activation_id
+            for item in self.recovery_objects
+        ):
+            raise ValueError("recovery object does not belong to request binding")
+        return self
+
 
 class AuthorityHealthRequestV1(_ClosedValue):
     """Authentication-only request with no provider operation (ADR-0606)."""
@@ -201,7 +262,10 @@ class AuthorityHealthAcknowledgementV1(_ClosedValue):
 
 
 type AuthorityRequestV1 = (
-    AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | AuthorityHealthRequestV1
+    AuthorityTakeoverRequestV1
+    | AuthorityMutationRequestV1
+    | AuthorityPreparationMutationRequestV1
+    | AuthorityHealthRequestV1
 )
 _AUTHORITY_REQUEST_ADAPTER = TypeAdapter(AuthorityRequestV1)
 
@@ -248,6 +312,24 @@ class AuthorityObservationV1(_ClosedValue):
     observation_id: UUID
     category: ObservationCategory
     composite_state: Digest
+
+
+class AuthorityPreparationResponseV1(_ClosedValue):
+    """Exact terminal checkpoint and provider receipt for one preparation phase."""
+
+    schema_: Literal["external-boot-authority-preparation-response-v1"] = Field(
+        "external-boot-authority-preparation-response-v1", alias="schema"
+    )
+    observation: AuthorityObservationV1
+    receipt: ExternalBootPreparationObservation
+    journal_sequence: PositiveBigInt
+    journal_digest: Digest
+
+    @model_validator(mode="after")
+    def _receipt_matches_observation(self) -> Self:
+        if self.receipt.identity != self.observation.composite_state:
+            raise ValueError("preparation receipt does not match its journal observation")
+        return self
 
 
 class JournalPhase(StrEnum):

@@ -28,6 +28,7 @@ from kdive.jobs.payloads import (
     load_payload,
     run_id_from_payload,
 )
+from tests.support.external_boot_plan import external_boot_plan
 
 MARKER_KEY = "external_boot_authority_v1"
 _DIGEST = "sha256:" + "a" * 64
@@ -104,6 +105,43 @@ def test_marked_boot_payload_round_trips_unchanged() -> None:
     assert decoded.external_boot_authority_v1 is not None
     assert decoded.external_boot_authority_v1.run_id == run_id
     assert dump_payload(JobKind.BOOT, decoded) == dumped
+
+
+def test_marked_activate_payload_round_trips_its_exact_durable_plan() -> None:
+    run_id, system_id = uuid4(), uuid4()
+    plan = external_boot_plan(system_id, run_id)
+    marker = _marker(
+        run_id=run_id,
+        system_id=system_id,
+        plan_identity=plan.identity,
+    )
+
+    dumped = dump_payload(
+        JobKind.BOOT,
+        {
+            "run_id": str(run_id),
+            MARKER_KEY: marker,
+            "external_boot_plan_v1": plan.model_dump(mode="json", by_alias=True),
+        },
+    )
+
+    decoded = load_payload(_job(JobKind.BOOT, dumped), BootPayload)
+    assert decoded.external_boot_plan_v1 == plan
+    assert dump_payload(JobKind.BOOT, decoded) == dumped
+
+
+def test_durable_plan_requires_its_exact_activate_marker() -> None:
+    run_id, system_id = uuid4(), uuid4()
+    plan = external_boot_plan(system_id, run_id)
+    with pytest.raises(PayloadValidationError, match="does not match"):
+        dump_payload(
+            JobKind.BOOT,
+            {
+                "run_id": str(run_id),
+                MARKER_KEY: _marker(run_id=run_id, system_id=system_id),
+                "external_boot_plan_v1": plan.model_dump(mode="json", by_alias=True),
+            },
+        )
 
 
 def test_marked_teardown_payload_round_trips_unchanged() -> None:
