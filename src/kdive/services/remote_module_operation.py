@@ -32,13 +32,16 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV1,
     RemoteModuleResultV1,
     identity_for,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleRecoveryRefV2 as RemoteModuleRecoveryRefV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
     RemoteModuleApplianceExecution,
     RemoteModuleVolumePreparation,
+    RemoteModuleVolumeRecovery,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -50,8 +53,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedModuleVolumes,
     VolumeRequest,
     delete_owned_attempt_volume,
-    expected_attempt_volumes,
     prepare_attempt_volumes,
+    recovery_attempt_volumes,
     validate_attempt_volumes,
 )
 from kdive.providers.remote_libvirt.reaping.module_volumes import (
@@ -73,6 +76,7 @@ class RemoteModuleOperationRuntime:
     volume_preparation: RemoteModuleVolumePreparation | None = None
     appliance_execution: RemoteModuleApplianceExecution | None = None
     module_volume_reaper: ModuleVolumeReaper | None = None
+    volume_recovery: RemoteModuleVolumeRecovery | None = None
 
     @staticmethod
     def _attempt(recovery: RemoteModuleRecoveryRefV1) -> ModuleAttempt:
@@ -250,6 +254,36 @@ class RemoteModuleOperationRuntime:
             )
         return configured.inspect_attachments()
 
+    def _volume_binding(self) -> RemoteModuleVolumeRecovery:
+        if self.volume_recovery is not None:
+            return self.volume_recovery
+        if self.volume_preparation is not None:
+            return RemoteModuleVolumeRecovery(
+                self.volume_preparation.storage, self.volume_preparation.pool_name
+            )
+        raise CategorizedError(
+            "remote module volume recovery is not configured",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+    def _recovery_volumes(
+        self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
+    ) -> PreparedModuleVolumes:
+        configured = self._volume_binding()
+        volumes = recovery_attempt_volumes(
+            operation, configured.pool_name, recovery.source_capacity_bytes
+        )
+        if (
+            recovery.pool.ref != configured.pool_name
+            or recovery.source_volume.ref != volumes.source.name
+            or recovery.scratch_volume.ref != volumes.scratch.name
+        ):
+            raise CategorizedError(
+                "remote module recovery volume geometry differs from fixed provider binding",
+                category=ErrorCategory.CONFLICT,
+            )
+        return volumes
+
     def _appliance_request(
         self,
         operation: RemoteModuleOperationV1,
@@ -257,8 +291,7 @@ class RemoteModuleOperationRuntime:
         deadline: float,
     ) -> ApplianceRequest:
         configured = self.appliance_execution
-        prepared = self.volume_preparation
-        if configured is None or prepared is None:
+        if configured is None:
             raise CategorizedError(
                 "remote module appliance execution is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
@@ -269,7 +302,7 @@ class RemoteModuleOperationRuntime:
             emulator_path=configured.emulator_path,
             memory_kib=configured.memory_kib,
             vcpus=configured.vcpus,
-            pool=prepared.pool_name,
+            pool=self._volume_binding().pool_name,
             appliance_volume=configured.appliance_volume,
             appliance_image_digest=configured.appliance_image_digest,
             root=configured.root(operation),
@@ -291,7 +324,7 @@ class RemoteModuleOperationRuntime:
         deadline: float,
     ) -> TeardownObservation:
         operation = await self.reopen_operation(recovery)
-        volumes = expected_attempt_volumes(self._volume_request(operation))
+        volumes = self._recovery_volumes(operation, recovery)
         request = self._appliance_request(operation, volumes, deadline)
         configured = self.appliance_execution
         assert configured is not None
@@ -331,11 +364,9 @@ class RemoteModuleOperationRuntime:
         if purpose == "scratch":
             await self._open_reap_evidence(recovery)
         operation = await self.reopen_operation(recovery)
-        request = self._volume_request(operation)
-        volumes = expected_attempt_volumes(request)
+        volumes = self._recovery_volumes(operation, recovery)
         selected = volumes.source if purpose == "source" else volumes.scratch
-        configured = self.volume_preparation
-        assert configured is not None
+        configured = self._volume_binding()
 
         def delete() -> None:
             inspection = self._require_cleanup_inspection()
@@ -367,12 +398,7 @@ class RemoteModuleOperationRuntime:
         # Durable database evidence is the marker's content; the closed whole name is its
         # storage ownership proof.  Storage-volume metadata is intentionally not used.
         await self._evidence(recovery)
-        configured = self.volume_preparation
-        if configured is None:
-            raise CategorizedError(
-                "remote module volume preparation is not configured",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-            )
+        configured = self._volume_binding()
         name = self._marker_name(recovery, state)
 
         def create() -> None:
@@ -412,7 +438,7 @@ class RemoteModuleOperationRuntime:
         deadline: float,
     ) -> TeardownObservation:
         operation, _result = await self._evidence(recovery)
-        volumes = expected_attempt_volumes(self._volume_request(operation))
+        volumes = self._recovery_volumes(operation, recovery)
         configured = self.appliance_execution
         assert configured is not None
         request = self._appliance_request(operation, volumes, deadline)
@@ -423,12 +449,7 @@ class RemoteModuleOperationRuntime:
     async def inventory(
         self, executor: RemoteModulePreparationExecutor
     ) -> tuple[ModuleVolumeKey, ...]:
-        configured = self.volume_preparation
-        if configured is None:
-            raise CategorizedError(
-                "remote module volume preparation is not configured",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-            )
+        configured = self._volume_binding()
 
         def observe() -> tuple[ModuleVolumeKey, ...]:
             return tuple(

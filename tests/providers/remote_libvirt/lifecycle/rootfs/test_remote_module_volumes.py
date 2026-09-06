@@ -16,12 +16,14 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
     MAX_ENTRIES,
+    MAX_SOURCE_CAPACITY_BYTES,
     SCRATCH_CAPACITY_BYTES,
     Ext4SourceFilesystemWriter,
     ModuleTreeEntry,
     SourceFilesystemEvidence,
     delete_owned_attempt_volume,
     prepare_attempt_volumes,
+    recovery_attempt_volumes,
     source_image_capacity_bytes,
     source_image_inode_count,
     validate_attempt_volumes,
@@ -869,3 +871,18 @@ def test_a_complete_source_is_not_reuploaded_on_reopen(tmp_path: Path) -> None:
     finally:
         cast(Any, Volume).upload = original_upload
     assert uploads == 0
+
+
+@pytest.mark.parametrize("capacity", [0, -4096, True, 4097, MAX_SOURCE_CAPACITY_BYTES + 4096])
+def test_recovery_geometry_rejects_invalid_capacity_before_storage(
+    capacity: object,
+) -> None:
+    with pytest.raises(ValueError, match="block-aligned"):
+        recovery_attempt_volumes(OPERATION, "systems", cast(Any, capacity))
+
+
+def test_recovery_geometry_derives_exact_volumes_without_writer() -> None:
+    volumes = recovery_attempt_volumes(OPERATION, "systems", 64 * 1024**2)
+    assert volumes.source.name == SOURCE_NAME
+    assert volumes.source.capacity_bytes == 64 * 1024**2
+    assert volumes.scratch.name == SOURCE_NAME.removesuffix("source.ext4") + "scratch.ext4"

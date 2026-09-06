@@ -2,8 +2,9 @@
 
 Issue: #2170
 
-Governing decisions: [ADR-0588](../../adr/0588-remote-module-volume-ownership-lives-in-the-volume-name.md)
-and [ADR-0603](../../adr/0603-remote-device-identity-port.md).
+Governing decisions: [ADR-0588](../../adr/0588-remote-module-volume-ownership-lives-in-the-volume-name.md),
+[ADR-0603](../../adr/0603-remote-device-identity-port.md), and
+[ADR-0607](../../adr/0607-persist-remote-module-recovery-geometry.md).
 
 ## Outcome
 
@@ -43,6 +44,12 @@ returned by libvirt with the expected `ModuleVolumeOwner`, then check only the p
 and `info()[1]` capacity. `PreparedVolume.identity`, `_METADATA_NS`, `_identity`, and `_metadata` do
 not land. Source content remains bound by the existing full-image readback and manifest comparison.
 Deletion continues to require `AttachmentInspection.proves_detached` before any lookup or delete.
+
+Preparation records the validated source capacity in recovery-reference version 2. Restart
+recovery derives both expected volume requests from that durable reference and the fixed provider
+binding; it does not rebuild module entries or an image writer. Version-1 evidence remains
+repository-readable for migration compatibility but cannot authorize recovery because it lacks
+authenticated geometry. Capacity or identity disagreement fails before provider mutation.
 
 The operation bytes supplied to the image writer are `RemoteModuleOperationV1.to_wire_bytes()`.
 The producer-facing constructor accepts the typed operation rather than arbitrary pre-encoded
@@ -119,6 +126,7 @@ forge or destroy the objects being inspected.
 ## Exclusions
 
 The reconciler sweep (#2168), appliance (#2169), operation runtime and reap journal (#2171),
-obligation discharge lifecycle (#2172), phase orchestration (#2173), and recorded source capacity
-(#2154) remain separately owned. This change does not add SSH, a generic remote command API, a new
+obligation discharge lifecycle (#2172) and phase orchestration (#2173) remain separately owned.
+ADR-0607 adds recorded source capacity and reference-only runtime recovery under #2154, but its
+real worker-death phase matrix remains owned by #2173. This change does not add SSH, a generic remote command API, a new
 network listener, credentials, persistence, migration, or an agent-facing contract.

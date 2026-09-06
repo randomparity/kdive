@@ -21,8 +21,10 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV1,
     RemoteModuleResultV1,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleRecoveryRefV2 as RemoteModuleRecoveryRefV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -101,6 +103,12 @@ class RemoteModuleVolumePreparation:
     writer: FilesystemImageWriter
     inspect_attachments: Callable[[RemoteDeviceIdentityPort], AttachmentInspection]
     work_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteModuleVolumeRecovery:
+    storage: StorageConn
+    pool_name: str
 
 
 @dataclass(frozen=True, slots=True)
