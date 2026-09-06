@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defus
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 import libvirt
@@ -33,6 +33,10 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
     RunningKernelObservation,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    HostStatDeviceIdentity,
+    prove_no_foreign_path_references,
 )
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
@@ -1539,38 +1543,46 @@ def open_authority_system_teardown(
     )
 
 
-def prove_no_foreign_overlay_attachment(
-    connect: Connect, system_id: UUID, expected_overlay: str
+def prove_no_foreign_system_storage_references(
+    connect: Connect, system_id: UUID, overlay: str, baseline: str
 ) -> None:
-    """Fail closed if another defined domain refers to this System's private overlay.
+    """Fail closed if another defined domain refers to private System storage.
 
-    Libvirt's domain list is the ownership boundary here: an overlay cannot be unlinked until
-    every defined domain has been read and its bounded disk list proves it does not refer to the
-    exact path.  The caller supplies the same fixed private connection used for teardown.
+    Libvirt's domain list is the ownership boundary here: an artifact cannot be unlinked until
+    every defined domain has been read and its bounded disk graph proves it does not refer to the
+    exact overlay or one of the baseline's regular files.  The caller supplies the same fixed
+    private connection used for teardown.
     """
     connection = connect()
     try:
-        list_domains = getattr(connection, "listAllDomains", None)
-        if not callable(list_domains):
-            raise ValueError("local System teardown connection cannot enumerate domains")
-        domains = list_domains(0)
-        if len(domains) > 4096:
-            raise ValueError("local System teardown domain list exceeds its bound")
-        for domain in domains:
-            try:
-                xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-                root = _safe_domain_xml(xml)
-                if _is_exact_owned_domain(root, system_id):
-                    continue
-                disks = root.findall("devices/disk")
-                if len(disks) > 4096:
-                    raise ValueError("foreign domain XML exceeds the owned-storage device bound")
-                if any(_disk_source_is(disk, expected_overlay) for disk in disks):
-                    raise ValueError("foreign domain refers to the local System overlay")
-            finally:
-                domain.free()
+        prove_no_foreign_path_references(
+            cast(Any, connection),
+            HostStatDeviceIdentity(),
+            str(system_id),
+            _system_storage_paths(overlay, baseline),
+        )
     finally:
         connection.close()
+
+
+def _system_storage_paths(overlay: str, baseline: str) -> frozenset[str]:
+    paths: set[str] = set()
+    try:
+        if stat.S_ISREG(os.stat(overlay, follow_symlinks=False).st_mode):
+            paths.add(overlay)
+    except FileNotFoundError:
+        pass
+    try:
+        for current, _directories, files in os.walk(baseline, followlinks=False):
+            for name in files:
+                path = os.path.join(current, name)
+                if stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
+                    paths.add(path)
+                if len(paths) > 4096:
+                    raise ValueError("local System teardown storage path set exceeds its bound")
+    except FileNotFoundError:
+        pass
+    return frozenset(paths)
 
 
 def _require_expected_ownership(
@@ -1714,14 +1726,6 @@ def _safe_domain_xml(xml: str) -> ET.Element:
         raise ValueError("domain XML is malformed or forbidden") from exc
 
 
-def _is_exact_owned_domain(root: ET.Element, system_id: UUID) -> bool:
-    return (
-        root.tag == "domain"
-        and root.findtext("name") == domain_name_for(system_id)
-        and root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system") == str(system_id)
-    )
-
-
 def _disk_source_is(disk: ET.Element, expected_overlay: str) -> bool:
     source = disk.find("source")
     return source is not None and source.get("file") == expected_overlay
@@ -1778,9 +1782,9 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         "domain_type": root.get("type"),
         "name": root.findtext("name"),
         "uuid": root.findtext("uuid"),
-        "memory": (root.findtext("memory"), {} if memory is None else memory.attrib),
+        "memory_bytes": _memory_bytes(memory),
         "vcpu": root.findtext("vcpu"),
-        "cpu": None if cpu is None else (cpu.attrib, cpu.findtext("model")),
+        "cpu": None if cpu is None else (cpu.get("mode"), cpu.findtext("model")),
         "os": None
         if os_element is None
         else {
@@ -1797,9 +1801,9 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
             if (feature := features.find(tag)) is not None
         ),
         "root_disk": {
-            "source": source.attrib,
-            "driver": driver.attrib,
-            "target": target.attrib,
+            "source_file": source.get("file"),
+            "driver": (driver.get("name"), driver.get("type")),
+            "target": (target.get("dev"), target.get("bus")),
             "readonly": disk.find("readonly") is not None,
         },
         "gdb_port": recorded_gdb_port_from_root(root),
@@ -1807,11 +1811,42 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         "qemu_args": qemu_args,
         "interfaces": interfaces,
         "guest_channels": channels,
-        "serial_log": None if serial_log is None else serial_log.attrib,
+        "emulator": root.findtext("devices/emulator") if root.get("type") == "qemu" else None,
+        "preserve_on_crash": root.findtext("on_crash") == "preserve",
+        "serial_log": None
+        if serial_log is None
+        else (serial_log.get("file"), serial_log.get("append")),
         "system_metadata": root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system"),
     }
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return _digest(b"kdive-local-authority-domain-semantics-v1", payload)
+
+
+def _memory_bytes(memory: ET.Element | None) -> int | None:
+    if memory is None:
+        return None
+    value = memory.text
+    units = {
+        "b": 1,
+        "byte": 1,
+        "bytes": 1,
+        "kb": 1000,
+        "kib": 1024,
+        "mb": 1_000_000,
+        "mib": 1_048_576,
+        "gb": 1_000_000_000,
+        "gib": 1_073_741_824,
+        "tb": 1_000_000_000_000,
+        "tib": 1_099_511_627_776,
+    }
+    try:
+        factor = units[memory.get("unit", "KiB").lower()]
+        amount = int(value) if value is not None else -1
+    except (KeyError, ValueError) as exc:
+        raise ValueError("domain memory is not a supported integer quantity") from exc
+    if amount < 0:
+        raise ValueError("domain memory is not a supported integer quantity")
+    return amount * factor
 
 
 def _digest(prefix: bytes, payload: bytes) -> str:

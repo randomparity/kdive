@@ -42,7 +42,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     _Find0TreeCursor,
     open_authority_system_teardown,
     owned_system_semantic_identity,
-    prove_no_foreign_overlay_attachment,
+    prove_no_foreign_system_storage_references,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -108,6 +108,9 @@ class _TeardownDomain(Domain):
         self.events.append(f"domain.undefine:{flags}")
         self.defined = False
         return 0
+
+    def isPersistent(self) -> int:  # noqa: N802
+        return int(self.defined)
 
 
 class _TeardownConn(Conn):
@@ -246,11 +249,21 @@ def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path)
     events: list[str] = []
     owner = _TeardownDomain(events)
     _, overlay, _baseline = _teardown_factory(tmp_path, events, owner)
-    sibling = _TeardownDomain(events, xml=_xml(overlay=str(overlay), system_id=UUID(int=9)))
+    kernel = tmp_path / "kernel"
+    kernel.write_bytes(b"kernel")
+    sibling_xml = _xml(overlay=str(overlay), system_id=UUID(int=9)).replace(
+        "<kernel>/old</kernel>", f"<kernel>{kernel}</kernel>"
+    )
+    owner.xml = owner.xml.replace("<kernel>/old</kernel>", f"<kernel>{kernel}</kernel>")
+    owner.inactive_xml = owner.xml
+    sibling = _TeardownDomain(events, xml=sibling_xml)
 
-    with pytest.raises(ValueError, match="foreign domain refers"):
-        prove_no_foreign_overlay_attachment(
-            lambda: _DomainListConn(events, [owner, sibling]), SYSTEM_ID, str(overlay)
+    with pytest.raises(CategorizedError, match="another domain references"):
+        prove_no_foreign_system_storage_references(
+            lambda: _DomainListConn(events, [owner, sibling]),
+            SYSTEM_ID,
+            str(overlay),
+            str(_baseline),
         )
 
     assert "domain.list:0" in events
@@ -259,11 +272,17 @@ def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path)
 
 
 def test_authority_semantic_identity_permits_libvirt_generated_device_fields() -> None:
-    rendered = _xml()
+    rendered = _xml().replace(
+        "<os>", '<memory unit="MiB">2</memory><cpu mode="host-passthrough"/><os>'
+    )
     libvirt_readback = rendered.replace(
         '<target dev="vda" bus="virtio"/>',
         '<target dev="vda" bus="virtio"/><alias name="virtio-disk0"/>'
         '<address type="pci" slot="0x04"/>',
+    ).replace(
+        '<memory unit="MiB">2</memory><cpu mode="host-passthrough"/>',
+        '<memory unit="KiB">2048</memory>'
+        '<cpu mode="host-passthrough" check="none" migratable="on"/>',
     )
     changed_kernel = rendered.replace("<kernel>/old</kernel>", "<kernel>/other</kernel>")
 
@@ -273,6 +292,26 @@ def test_authority_semantic_identity_permits_libvirt_generated_device_fields() -
     assert owned_system_semantic_identity(
         rendered, SYSTEM_ID, OVERLAY
     ) != owned_system_semantic_identity(changed_kernel, SYSTEM_ID, OVERLAY)
+
+
+def test_authority_semantic_identity_accepts_sanitized_native_inactive_readback() -> None:
+    fixture = (
+        Path(__file__).parents[2] / "fixtures" / "native_inactive_normalized.xml"
+    ).read_text()
+    rendered = fixture.replace(
+        '<memory unit="KiB">2097152</memory>', '<memory unit="MiB">2048</memory>'
+    ).replace(
+        '<cpu mode="host-passthrough" check="none" migratable="on"/>',
+        '<cpu mode="host-passthrough"/>',
+    )
+    overlay = (
+        "/var/lib/kdive/provider-authority/rootfs/"
+        "11111111-1111-1111-1111-111111111111-overlay.qcow2"
+    )
+
+    assert owned_system_semantic_identity(
+        rendered, SYSTEM_ID, overlay
+    ) == owned_system_semantic_identity(fixture, SYSTEM_ID, overlay)
 
 
 def test_teardown_rejects_a_second_alias_to_the_owned_overlay(tmp_path: Path) -> None:

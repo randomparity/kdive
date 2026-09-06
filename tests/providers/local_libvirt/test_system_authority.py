@@ -16,12 +16,14 @@ from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemError,
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
+    _Completion,
     _Intent,
 )
 from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,
     AuthoritySystemMutationRequestV1,
     AuthoritySystemOperation,
+    AuthoritySystemProvisionFacts,
 )
 from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml
 
@@ -76,7 +78,7 @@ def _provider(tmp_path: Path) -> LocalAuthoritySystemProvider:
         ),
         readiness_probe=lambda _system_id: False,
         open_teardown=lambda *_args: _AbsentTeardown(),
-        assert_no_sibling_attachment=lambda _system_id, _overlay: None,
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
         allocate_port=lambda: 2200,
         now=lambda: datetime(2026, 9, 6, tzinfo=UTC),
     )
@@ -215,7 +217,7 @@ def test_retry_rejects_divergent_live_xml_before_provisioner_mutation(tmp_path: 
         ),
         readiness_probe=lambda _system_id: False,
         open_teardown=lambda *_args: Teardown(),
-        assert_no_sibling_attachment=lambda _system_id, _overlay: None,
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
         allocate_port=lambda: 2200,
     )
 
@@ -264,7 +266,7 @@ def test_teardown_checks_retained_identity_and_siblings_before_destroy(tmp_path:
         def close(self) -> None:
             events.append("close")
 
-    def reject_sibling(_system_id: object, _overlay: object) -> None:
+    def reject_sibling(_system_id: object, _overlay: object, _baseline: object) -> None:
         events.append("siblings")
         raise LocalAuthoritySystemError("foreign overlay attachment")
 
@@ -310,7 +312,7 @@ def test_teardown_checks_retained_identity_and_siblings_before_destroy(tmp_path:
     with pytest.raises(LocalAuthoritySystemError, match="foreign overlay"):
         asyncio.run(provider.execute_preactivation_teardown(request, context))
 
-    assert events == ["xml", "close", "siblings"]
+    assert events == ["xml", "close", "siblings", "close"]
     assert (tmp_path / "intents" / f"{intent.system_id}.json").exists()
 
 
@@ -381,7 +383,7 @@ def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: 
         ),
         readiness_probe=lambda _system_id: False,
         open_teardown=lambda *_args: Teardown(),
-        assert_no_sibling_attachment=lambda _system_id, _overlay: None,
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
         allocate_port=lambda: 2200,
     )
     request = AuthoritySystemMutationRequestV1(
@@ -410,6 +412,64 @@ def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: 
 
     facts = asyncio.run(provider.execute_preactivation_teardown(request, context))
 
-    assert facts.complete
+    assert not facts.complete
+    assert facts.quarantine_retained
     assert calls == ["inspect", "close"]
     assert not (tmp_path / "intents").exists()
+
+    completion = provider._store_completion(
+        _Completion(
+            system_id=request.system_id,
+            operation=request.operation,
+            operation_digest=request.operation_digest,
+            completed_at=datetime(2026, 9, 6, tzinfo=UTC),
+        )
+    )
+    receipt = tmp_path / "intents" / f"{request.system_id}.preactivation-teardown.complete.json"
+    before = receipt.read_bytes()
+    replayed = asyncio.run(provider.observe_preactivation_teardown(request, context))
+
+    assert replayed.complete
+    assert replayed.completed_at == completion.completed_at
+    assert receipt.read_bytes() == before
+    assert calls == ["inspect", "close", "inspect", "close"]
+
+
+def test_completion_receipt_replays_a_stable_terminal_timestamp(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    intent = _intent(tmp_path)
+    request = AuthoritySystemMutationRequestV1(
+        system_id=intent.system_id,
+        allocation_id=intent.allocation_id,
+        resource_id=intent.resource_id,
+        provider_kind="local-libvirt",
+        resource_name="local-a",
+        authority_instance=intent.authority_instance,
+        profile_identity=_DIGEST,
+        root_identity=intent.root_identity,
+        operation=AuthoritySystemOperation.PROVISION,
+        operation_identity="provision-a",
+        authority_id=uuid4(),
+        generation=1,
+        attempt_id=uuid4(),
+        operation_digest=intent.operation_digest,
+        bootstrap_identity=intent.bootstrap_identity,
+    )
+    candidate = AuthoritySystemProvisionFacts(
+        intent_identity=intent.identity,
+        domain_owned=True,
+        root_storage_owned=True,
+        boot_ready=True,
+        bootstrap_ready=False,
+        quarantine_retained=True,
+        completed_at=None,
+    )
+
+    completed = provider._complete_provision_facts(intent, request, candidate, create=True)
+    receipt = tmp_path / "intents" / f"{intent.system_id}.provision.complete.json"
+    before = receipt.read_bytes()
+    replayed = provider._complete_provision_facts(intent, request, candidate, create=False)
+
+    assert completed.complete
+    assert replayed == completed
+    assert receipt.read_bytes() == before

@@ -18,6 +18,7 @@ from defusedxml.common import DefusedXmlException
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import (
+    MAX_LIBVIRT_XML_DOCUMENTS,
     XmlEnumerationBudget,
     parse_libvirt_xml,
 )
@@ -288,6 +289,45 @@ def prove_no_foreign_storage_references(
     protected: frozenset[tuple[str, str]],
 ) -> None:
     """Reject any foreign domain graph that aliases a volume about to be destroyed."""
+    _prove_no_foreign_references(
+        conn,
+        identity_port,
+        owner_system_id,
+        protected_volumes=protected,
+        protected_paths=frozenset(),
+    )
+
+
+def prove_no_foreign_path_references(
+    conn: AttachmentConn,
+    identity_port: RemoteDeviceIdentityPort,
+    owner_system_id: str,
+    protected_paths: frozenset[str],
+) -> None:
+    """Reject foreign disk-graph aliases of exact host paths about to be removed.
+
+    This is the filesystem-path counterpart of :func:`prove_no_foreign_storage_references`.
+    Both use the same bounded traversal of every live and inactive definition, recursive
+    ``source``/``mirror`` graph references, and following device identity comparison.
+    """
+    _prove_no_foreign_references(
+        conn,
+        identity_port,
+        owner_system_id,
+        protected_volumes=frozenset(),
+        protected_paths=protected_paths,
+    )
+
+
+def _prove_no_foreign_references(
+    conn: AttachmentConn,
+    identity_port: RemoteDeviceIdentityPort,
+    owner_system_id: str,
+    *,
+    protected_volumes: frozenset[tuple[str, str]],
+    protected_paths: frozenset[str],
+) -> None:
+    """Traverse all defined disk graphs once against protected volumes and host paths."""
     identities: dict[str, RemoteDeviceIdentity] = {}
 
     def resolve(path: str) -> RemoteDeviceIdentity:
@@ -298,8 +338,10 @@ def prove_no_foreign_storage_references(
             identities[normalized] = _device_identity(identity_port, normalized)
         return identities[normalized]
 
-    protected_identities: set[RemoteDeviceIdentity] = set()
-    for pool, volume in sorted(protected):
+    protected_identities = {
+        resolve(path) for path in sorted(_normalize_storage_path(path) for path in protected_paths)
+    }
+    for pool, volume in sorted(protected_volumes):
         try:
             path = _volume_path(conn, pool, volume)
         except CategorizedError as error:
@@ -314,6 +356,8 @@ def prove_no_foreign_storage_references(
         domains = conn.listAllDomains(0)
     except libvirt.libvirtError as exc:
         raise _infrastructure("could not enumerate remote teardown attachments") from exc
+    if len(domains) > MAX_LIBVIRT_XML_DOCUMENTS:
+        raise _infrastructure("remote teardown domain enumeration exceeds provider limit")
     budget = XmlEnumerationBudget()
     seen_names: set[str] = set()
     for domain in domains:
@@ -324,35 +368,42 @@ def prove_no_foreign_storage_references(
                 documents.append(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
         except libvirt.libvirtError as exc:
             raise _infrastructure("could not read a remote teardown attachment") from exc
-        for index, document in enumerate(documents):
-            try:
-                root = budget.parse(document)
-            except (ET.ParseError, DefusedXmlException, ValueError) as exc:
-                raise _conflict("could not inspect a remote teardown attachment") from exc
-            name = root.findtext("name")
-            if index == 0:
-                if not name or name in seen_names:
-                    raise _conflict("duplicate or unnamed remote teardown domain")
-                seen_names.add(name)
-            owner = _system_ownership(root, domain=name)
-            references = volume_references(root)
-            paths = path_references(root)
-            paths.update(
-                value
-                for value in (root.findtext("./os/kernel"), root.findtext("./os/initrd"))
-                if value is not None
-            )
-            document_identities = {resolve(path) for path in paths}
-            document_identities.update(
-                resolve(_volume_path(conn, pool, volume)) for pool, volume in references
-            )
-            direct = set(references) & set(protected)
-            aliases = document_identities & protected_identities
-            exact_owner = owner == owner_system_id and name == domain_name_for(
-                UUID(owner_system_id)
-            )
-            if (direct or aliases) and not exact_owner:
-                raise _conflict("another domain references remote teardown storage", domain=name)
+        try:
+            for index, document in enumerate(documents):
+                try:
+                    root = budget.parse(document)
+                except (ET.ParseError, DefusedXmlException, ValueError) as exc:
+                    raise _conflict("could not inspect a remote teardown attachment") from exc
+                name = root.findtext("name")
+                if index == 0:
+                    if not name or name in seen_names:
+                        raise _conflict("duplicate or unnamed remote teardown domain")
+                    seen_names.add(name)
+                owner = _system_ownership(root, domain=name)
+                references = volume_references(root)
+                paths = path_references(root)
+                paths.update(
+                    value
+                    for value in (root.findtext("./os/kernel"), root.findtext("./os/initrd"))
+                    if value is not None
+                )
+                document_identities = {resolve(path) for path in paths}
+                document_identities.update(
+                    resolve(_volume_path(conn, pool, volume)) for pool, volume in references
+                )
+                direct = set(references) & set(protected_volumes)
+                aliases = document_identities & protected_identities
+                exact_owner = owner == owner_system_id and name == domain_name_for(
+                    UUID(owner_system_id)
+                )
+                if (direct or aliases) and not exact_owner:
+                    raise _conflict(
+                        "another domain references remote teardown storage", domain=name
+                    )
+        finally:
+            closer = getattr(domain, "free", None)
+            if callable(closer):
+                closer()
 
 
 def _volume_path(conn: AttachmentConn, pool_name: str, volume_name: str) -> str:

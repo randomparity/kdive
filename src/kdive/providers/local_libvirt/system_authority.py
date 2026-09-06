@@ -39,6 +39,7 @@ from kdive.providers.system_authority import (
 
 _INTENT_SCHEMA = "local-authority-system-intent-v1"
 _INTENT_PREFIX = b"kdive-local-authority-system-intent-v1\0"
+_COMPLETION_SCHEMA = "local-authority-system-completion-v1"
 _MAX_INTENT_BYTES = 1_048_576
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
@@ -72,7 +73,7 @@ class _SystemTeardown(Protocol):
 type OpenTeardown = Callable[[UUID, str, str], _SystemTeardown]
 type ReadinessProbe = Callable[[UUID], bool]
 type PortAllocator = Callable[[], int]
-type AssertNoSiblingAttachment = Callable[[UUID, str], None]
+type AssertNoSiblingAttachment = Callable[[UUID, str, str], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +205,54 @@ class _Intent:
         return intent
 
 
+@dataclass(frozen=True, slots=True)
+class _Completion:
+    """Private path-free receipt that makes one terminal authority observation replayable."""
+
+    system_id: UUID
+    operation: AuthoritySystemOperation
+    operation_digest: str
+    completed_at: datetime
+
+    def as_json(self) -> dict[str, str]:
+        return {
+            "schema": _COMPLETION_SCHEMA,
+            "system_id": str(self.system_id),
+            "operation": self.operation.value,
+            "operation_digest": self.operation_digest,
+            "completed_at": self.completed_at.isoformat(),
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> _Completion:
+        if not isinstance(value, dict) or set(value) != {
+            "schema",
+            "system_id",
+            "operation",
+            "operation_digest",
+            "completed_at",
+        }:
+            raise LocalAuthoritySystemError("local authority completion has an invalid shape")
+        checked = cast("dict[str, object]", value)
+        try:
+            completion = cls(
+                system_id=UUID(_require_str(checked, "system_id")),
+                operation=AuthoritySystemOperation(_require_str(checked, "operation")),
+                operation_digest=_require_digest(checked, "operation_digest"),
+                completed_at=datetime.fromisoformat(_require_str(checked, "completed_at")),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise LocalAuthoritySystemError(
+                "local authority completion has invalid values"
+            ) from error
+        if (
+            completion.completed_at.tzinfo is None
+            or completion.completed_at.utcoffset() != timedelta(0)
+        ):
+            raise LocalAuthoritySystemError("local authority completion time is not UTC")
+        return completion
+
+
 class LocalAuthoritySystemProvider:
     """Concrete authority provider for initial local-libvirt System lifecycle operations.
 
@@ -330,7 +379,8 @@ class LocalAuthoritySystemProvider:
                 "local authority provision failed to persist its intent"
             )
         intent = persisted
-        return self._provision_facts(intent)
+        facts = self._provision_facts(intent)
+        return self._complete_provision_facts(intent, request, facts, create=True)
 
     def _observe_system_provision(
         self,
@@ -350,7 +400,8 @@ class LocalAuthoritySystemProvider:
                 completed_at=None,
             )
         self._require_matching_intent(intent, request, snapshot)
-        return self._provision_facts(intent)
+        facts = self._provision_facts(intent)
+        return self._complete_provision_facts(intent, request, facts, create=False)
 
     def _execute_teardown(
         self, request: AuthoritySystemMutationRequestV1, _context: AuthoritySystemCommitContextV1
@@ -363,15 +414,18 @@ class LocalAuthoritySystemProvider:
                 domain_absent=inspection.domain_absent,
                 storage_absent=inspection.overlay_absent and inspection.baseline_absent,
                 intent_absent=True,
+                completed_at=self._completion_time(request),
             )
         self._require_teardown_intent(intent, request)
-        self._verify_retained_provision_identity(intent)
-        self._assert_no_sibling_attachment(intent.system_id, intent.overlay)
         session = self._open_teardown(request.system_id, intent.overlay, intent.baseline)
         try:
+            self._fence_teardown_boundary(intent)
             session.destroy()
+            self._fence_teardown_boundary(intent)
             session.undefine()
+            self._fence_teardown_boundary(intent)
             session.remove_overlay()
+            self._fence_teardown_boundary(intent)
             session.remove_baseline()
             inspection = session.inspect()
             if not (
@@ -382,9 +436,27 @@ class LocalAuthoritySystemProvider:
                 raise LocalAuthoritySystemError("local authority teardown did not reach absence")
         finally:
             session.close()
+        completion = self._load_completion(
+            request.system_id, AuthoritySystemOperation.PREACTIVATION_TEARDOWN
+        )
+        if completion is None:
+            completion = self._store_completion(
+                _Completion(
+                    system_id=request.system_id,
+                    operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+                    operation_digest=request.operation_digest,
+                    completed_at=self._utc_now(),
+                )
+            )
+        if completion.operation_digest != request.operation_digest:
+            raise LocalAuthoritySystemError("local authority completion does not match the request")
         self._remove_intent(intent)
         return self._absence_facts(
-            request, domain_absent=True, storage_absent=True, intent_absent=True
+            request,
+            domain_absent=True,
+            storage_absent=True,
+            intent_absent=True,
+            completed_at=completion.completed_at,
         )
 
     def _observe_teardown(
@@ -398,6 +470,7 @@ class LocalAuthoritySystemProvider:
                 domain_absent=inspection.domain_absent,
                 storage_absent=inspection.overlay_absent and inspection.baseline_absent,
                 intent_absent=True,
+                completed_at=self._completion_time(request),
             )
         self._require_teardown_intent(intent, request)
         session = self._open_teardown(request.system_id, intent.overlay, intent.baseline)
@@ -405,16 +478,18 @@ class LocalAuthoritySystemProvider:
             inspection = session.inspect()
         finally:
             session.close()
-        absent = (
-            inspection.domain_absent and inspection.overlay_absent and inspection.baseline_absent
-        )
         return self._absence_facts(
             request,
             domain_absent=inspection.domain_absent,
             storage_absent=inspection.overlay_absent and inspection.baseline_absent,
             intent_absent=False,
-            retained=not absent,
+            retained=True,
         )
+
+    def _fence_teardown_boundary(self, intent: _Intent) -> None:
+        """Prove retained ownership and graph exclusivity immediately before one deletion step."""
+        self._verify_retained_provision_identity(intent)
+        self._assert_no_sibling_attachment(intent.system_id, intent.overlay, intent.baseline)
 
     def _inspect_without_intent(self, system_id: UUID) -> Any:
         session = self._open_teardown(
@@ -525,6 +600,40 @@ class LocalAuthoritySystemProvider:
         finally:
             session.close()
 
+    def _complete_provision_facts(
+        self,
+        intent: _Intent,
+        request: AuthoritySystemMutationRequestV1,
+        facts: AuthoritySystemProvisionFacts,
+        *,
+        create: bool,
+    ) -> AuthoritySystemProvisionFacts:
+        if not (facts.domain_owned and facts.root_storage_owned and facts.boot_ready):
+            return facts
+        completion = self._load_completion(request.system_id, AuthoritySystemOperation.PROVISION)
+        if completion is None and create:
+            completion = self._store_completion(
+                _Completion(
+                    system_id=request.system_id,
+                    operation=AuthoritySystemOperation.PROVISION,
+                    operation_digest=request.operation_digest,
+                    completed_at=self._utc_now(),
+                )
+            )
+        if completion is None:
+            return facts
+        if completion.operation_digest != request.operation_digest:
+            raise LocalAuthoritySystemError("local authority completion does not match the request")
+        return AuthoritySystemProvisionFacts(
+            intent_identity=intent.identity,
+            domain_owned=True,
+            root_storage_owned=True,
+            boot_ready=True,
+            bootstrap_ready=True,
+            quarantine_retained=False,
+            completed_at=completion.completed_at,
+        )
+
     def _provision_facts(self, intent: _Intent) -> AuthoritySystemProvisionFacts:
         domain_owned = False
         try:
@@ -546,15 +655,14 @@ class LocalAuthoritySystemProvider:
             domain_owned = False
         root_owned = self._storage_is_owned(intent)
         ready = self._readiness_probe(intent.system_id) if domain_owned and root_owned else False
-        complete = domain_owned and root_owned and ready
         return AuthoritySystemProvisionFacts(
             intent_identity=intent.identity,
             domain_owned=domain_owned,
             root_storage_owned=root_owned,
             boot_ready=ready if domain_owned else False,
-            bootstrap_ready=complete,
-            quarantine_retained=not complete,
-            completed_at=self._utc_now() if complete else None,
+            bootstrap_ready=False,
+            quarantine_retained=True,
+            completed_at=None,
         )
 
     @staticmethod
@@ -565,8 +673,9 @@ class LocalAuthoritySystemProvider:
         storage_absent: bool,
         intent_absent: bool,
         retained: bool = False,
+        completed_at: datetime | None = None,
     ) -> AuthoritySystemAbsenceFacts:
-        complete = domain_absent and storage_absent and intent_absent
+        complete = domain_absent and storage_absent and intent_absent and completed_at is not None
         return AuthoritySystemAbsenceFacts(
             intent_identity=request.operation_digest,
             domain_absent=domain_absent,
@@ -574,11 +683,88 @@ class LocalAuthoritySystemProvider:
             baseline_absent=storage_absent,
             private_intent_absent=intent_absent,
             quarantine_retained=retained or not complete,
-            completed_at=datetime.now(UTC) if complete else None,
+            completed_at=completed_at if complete else None,
         )
 
     def _intent_path(self, system_id: UUID) -> Path:
         return self._topology.intent_root / f"{system_id}.json"
+
+    def _completion_path(self, system_id: UUID, operation: AuthoritySystemOperation) -> Path:
+        return self._topology.intent_root / f"{system_id}.{operation.value}.complete.json"
+
+    def _completion_time(self, request: AuthoritySystemMutationRequestV1) -> datetime | None:
+        completion = self._load_completion(request.system_id, request.operation)
+        if completion is None:
+            return None
+        if completion.operation_digest != request.operation_digest:
+            raise LocalAuthoritySystemError("local authority completion does not match the request")
+        return completion.completed_at
+
+    def _load_completion(
+        self, system_id: UUID, operation: AuthoritySystemOperation
+    ) -> _Completion | None:
+        root = self._open_private_root(create=False)
+        if root is None:
+            return None
+        try:
+            try:
+                descriptor = os.open(
+                    self._completion_path(system_id, operation).name,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=root,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as error:
+                raise LocalAuthoritySystemError(
+                    "local authority completion file is unsafe"
+                ) from error
+            try:
+                _require_private_file(os.fstat(descriptor), self._owner_uid, self._owner_gid)
+                payload = _read_bounded(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(root)
+        try:
+            completion = _Completion.from_json(json.loads(payload))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LocalAuthoritySystemError("local authority completion is unreadable") from error
+        if completion.system_id != system_id or completion.operation is not operation:
+            raise LocalAuthoritySystemError("local authority completion does not match its path")
+        return completion
+
+    def _store_completion(self, completion: _Completion) -> _Completion:
+        root = self._open_private_root(create=True)
+        assert root is not None
+        name = self._completion_path(completion.system_id, completion.operation).name
+        payload = json.dumps(completion.as_json(), sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        try:
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    _PRIVATE_FILE_MODE,
+                    dir_fd=root,
+                )
+            except FileExistsError:
+                existing = self._load_completion(completion.system_id, completion.operation)
+                if existing is None or existing != completion:
+                    raise LocalAuthoritySystemError(
+                        "local authority completion was replaced"
+                    ) from None
+                return existing
+            try:
+                _write_all(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.fsync(root)
+        finally:
+            os.close(root)
+        return completion
 
     def _load_intent(self, system_id: UUID) -> _Intent | None:
         root = self._open_private_root(create=False)
