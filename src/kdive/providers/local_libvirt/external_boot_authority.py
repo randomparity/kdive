@@ -11,10 +11,13 @@ provider, never XML this module composed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
+import threading
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from uuid import UUID, uuid5
 
 from kdive.providers.external_boot_authority.protocol import (
@@ -55,6 +58,7 @@ _OBSERVATION_NAMESPACE = UUID("6f3f0f6e-7a1a-4e3b-9a2f-2b6b1d4c8e57")
 # authoritative watermark; dropping the oldest entry here can only make this check
 # under-reject, which the service's own ``resolve_current`` still catches.
 _MAX_ADMITTED_LANES = 256
+_OFFLOAD_CAPACITY = 4
 
 # Commit points that reach a provider mutation. Every other legal operation is a
 # bookkeeping edge whose provider effect is exactly one observation: ADR-0584 makes
@@ -126,6 +130,31 @@ class LocalExternalBootAuthorityAdapter:
         self._admitted: dict[tuple[str, str], int] = {}
         self._pending_cleanup_finalization: dict[str, RecoveryPoint] = {}
         self._pending_absence: dict[str, AuthorityMutationRequestV1] = {}
+        self._executor = ThreadPoolExecutor(
+            max_workers=_OFFLOAD_CAPACITY, thread_name_prefix="kdive-local-external-boot"
+        )
+        self._admission = threading.BoundedSemaphore(_OFFLOAD_CAPACITY)
+        self._executor_lock = threading.Lock()
+        self._closed = False
+
+    async def _await_completion[T](self, future: Future[T]) -> T:
+        loop = asyncio.get_running_loop()
+        completed = loop.create_future()
+
+        def signal_completion(_future: Future[T]) -> None:
+            loop.call_soon_threadsafe(completed.set_result, None)
+
+        future.add_done_callback(signal_completion)
+        try:
+            await asyncio.shield(completed)
+        except asyncio.CancelledError as cancelled:
+            while not completed.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(completed)
+            if not future.cancelled():
+                future.exception()
+            raise cancelled from None
+        return future.result()
 
     async def _offload[T](
         self,
@@ -138,14 +167,21 @@ class LocalExternalBootAuthorityAdapter:
             with self._lease_scope.issue(_authority_ref(request), _activation_binding(request)):
                 return operation()
 
-        task = asyncio.create_task(asyncio.to_thread(scoped))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
+        with self._executor_lock:
+            if self._closed or not self._admission.acquire(blocking=False):
+                raise RuntimeError("local external-boot provider capacity is unavailable")
             try:
-                await task
-            finally:
-                raise
+                future = self._executor.submit(scoped)
+            except RuntimeError:
+                self._admission.release()
+                raise RuntimeError("local external-boot provider capacity is unavailable") from None
+        future.add_done_callback(lambda _future: self._admission.release())
+        return await self._await_completion(future)
+
+    def close(self) -> None:
+        with self._executor_lock:
+            self._closed = True
+            self._executor.__exit__(None, None, None)
 
     async def observe(
         self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1

@@ -358,6 +358,55 @@ async def test_cancellation_waits_for_scoped_provider_completion() -> None:
         scope.resolve(authority)
 
 
+@pytest.mark.anyio
+async def test_repeated_cancellation_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    request = _request()
+
+    task = asyncio.create_task(adapter._offload(request, lambda: entered.set() or release.wait()))
+    await asyncio.to_thread(entered.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelling() == 2
+    adapter.close()
+
+
+def test_event_loop_shutdown_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    request = _request()
+
+    def blocked() -> None:
+        entered.set()
+        release.wait()
+        finished.set()
+
+    async def abandon_task() -> None:
+        asyncio.create_task(adapter._offload(request, blocked))
+        await asyncio.to_thread(entered.wait)
+        threading.Timer(0.05, release.set).start()
+
+    asyncio.run(abandon_task())
+    assert finished.is_set()
+    adapter.close()
+
+
 def _request(
     *,
     purpose: str = "activate",

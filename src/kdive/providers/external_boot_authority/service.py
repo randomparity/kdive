@@ -81,6 +81,11 @@ class AuthorityPreparationAdopter(Protocol):
     ) -> AuthorityObservationV1: ...
 
 
+@runtime_checkable
+class AuthorityAdapterCloser(Protocol):
+    def close(self) -> None: ...
+
+
 class AuthorityRepository(Protocol):
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
@@ -268,6 +273,10 @@ class ExternalBootAuthorityService:
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._lanes: dict[UUID, _Lane] = {}
         self._logger = logging.getLogger(__name__)
+
+    def close(self) -> None:
+        if isinstance(self._adapter, AuthorityAdapterCloser):
+            self._adapter.close()
 
     def _lane(self, system_id: UUID) -> _Lane:
         lane = self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
