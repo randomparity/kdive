@@ -1130,9 +1130,11 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                 if network_listener is not None:
                     await _close_listener(network_listener)
             finally:
-                if listener is not None:
-                    await _close_listener(listener)
-                identity_service.close()
+                try:
+                    if listener is not None:
+                        await _close_listener(listener)
+                finally:
+                    identity_service.close()
 
 
 async def check_authority_host_once(config: AuthorityHostConfig) -> None:

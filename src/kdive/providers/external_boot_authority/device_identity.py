@@ -161,7 +161,12 @@ class RemoteAuthorityDeviceIdentity:
                 "remote device identity lookup failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-        request = DeviceIdentityRequestV1(path=path)
+        try:
+            request = DeviceIdentityRequestV1(path=path)
+        except ValueError, TypeError, UnicodeError:
+            raise CategorizedError(
+                "remote device identity is invalid", category=ErrorCategory.CONFLICT
+            ) from None
 
         async def resolve() -> DeviceIdentityResponseV1:
             loop = asyncio.get_running_loop()
