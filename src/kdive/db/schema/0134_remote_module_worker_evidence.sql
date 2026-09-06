@@ -37,6 +37,9 @@ BEGIN
         RETURN false;
     END IF;
     PERFORM pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('kdive:system:' || p_system_id::text, 2125)
+    );
+    PERFORM pg_advisory_xact_lock(
         pg_catalog.hashtextextended('kdive:worker-incarnation:' || v_incarnation, 1803)
     );
     PERFORM 1 FROM public.worker_incarnations AS worker
@@ -75,9 +78,6 @@ BEGIN
         RETURN false;
     END IF;
 
-    PERFORM pg_advisory_xact_lock(
-        pg_catalog.hashtextextended('kdive:system:' || p_system_id::text, 2125)
-    );
     PERFORM 1 FROM public.jobs AS job
     WHERE job.id = p_job_id
       AND job.worker_id = v_incarnation

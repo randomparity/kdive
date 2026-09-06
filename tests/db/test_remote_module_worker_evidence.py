@@ -222,6 +222,15 @@ def test_worker_evidence_rechecks_lease_after_waiting_for_system_lock(
                     )
                 )
                 await asyncio.sleep(0.3)
+                async with await psycopg.AsyncConnection.connect(migrated_url) as observer:
+                    row = await (
+                        await observer.execute(
+                            "SELECT pg_try_advisory_xact_lock(hashtextextended("
+                            "'kdive:worker-incarnation:module-worker', 1803))"
+                        )
+                    ).fetchone()
+                    assert row == (True,)
+                    await observer.rollback()
                 await admin.commit()
                 assert await pending is False
 
