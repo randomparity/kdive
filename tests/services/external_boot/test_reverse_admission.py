@@ -925,7 +925,7 @@ def test_supplied_crash_run_is_nonleaking_and_never_enqueues(
     assert after == before
 
 
-def test_teardown_is_admitted_in_every_restricted_state(
+def test_teardown_fails_closed_in_recovery_failed_until_authority_chain_lands(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
     async def _run() -> None:
@@ -934,7 +934,10 @@ def test_teardown_is_admitted_in_every_restricted_state(
                 conn_pool, seeded_activation, state=_STATE.RECOVERY_FAILED
             )
             response = await teardown_system(conn_pool, _ctx(), restricted.system_id)
-        assert response.status == "queued", response.model_dump()
+        assert response.status == "error", response.model_dump()
+        assert response.error_category == "conflict"
+        assert response.data["reason"] == "external_boot_teardown_not_supported"
+        assert response.suggested_next_actions == ["runs.get"]
 
     asyncio.run(_run())
 
@@ -1489,6 +1492,11 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
     the activation — `keyed_mutation` short-circuits to `do_work()` when `idempotency_key is
     None`, so on that path the dedup key is the only replay there is and a guard ahead of it
     turns an agent's poll into a refusal while the job it is polling stays queued and runs.
+
+    ``systems.teardown`` is the deliberate exception while its authority-fenced execution chain
+    is incomplete: an ordinary job created before the activation is no longer safe to execute, so
+    the current activation must replace its replay with a refusal. The worker independently fences
+    that already-queued job before System or provider mutation.
     """
     case = _JOB_TOOLS[tool]
 
@@ -1510,6 +1518,13 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
         # there is no replay for the guard to preempt.
         return
     assert held_first.status == "queued", held_first.model_dump()
+    if tool == "systems.teardown":
+        # A queued ordinary teardown predates the activation and therefore lacks authority.
+        # Replaying its envelope would advertise executable destructive work even though the
+        # worker now refuses it; the current activation wins over the old dedup row.
+        assert held_second.error_category == "conflict", held_second.model_dump()
+        assert held_second.data["reason"] == "external_boot_release_required"
+        return
     assert held_second.error_category is None, held_second.model_dump()
     # The same job, not the same envelope: a replay may annotate itself (`data.replayed`).
     assert held_second.object_id == held_first.object_id
