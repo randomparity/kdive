@@ -222,6 +222,7 @@ class RemoteModuleVolumePreparationStore:
         if not stat.S_ISDIR(status.st_mode) or stat.S_IMODE(status.st_mode) & 0o022:
             os.close(self._root_fd)
             raise PermissionError("remote preparation store must not be group/world writable")
+        self._owner_uid = status.st_uid
 
     def close(self) -> None:
         descriptor, self._root_fd = self._root_fd, -1
@@ -250,9 +251,18 @@ class RemoteModuleVolumePreparationStore:
             return None
         try:
             status = os.fstat(descriptor)
-            if not stat.S_ISREG(status.st_mode) or stat.S_IMODE(status.st_mode) != 0o600:
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or stat.S_IMODE(status.st_mode) != 0o600
+                or status.st_uid != self._owner_uid
+            ):
                 raise PermissionError("remote preparation evidence mode is unsafe")
-            data = os.read(descriptor, _MAX_PREPARATION_BYTES + 1)
+            chunks: list[bytes] = []
+            remaining = _MAX_PREPARATION_BYTES + 1
+            while remaining and (chunk := os.read(descriptor, min(65_536, remaining))):
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
             if len(data) > _MAX_PREPARATION_BYTES:
                 raise ValueError("remote preparation evidence exceeds 1048576 bytes")
             return data
@@ -534,7 +544,14 @@ class RemoteExternalBootCoordinator:
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef
     ) -> ExternalBootMaterialization:
-        return self._operations.materialize(plan, authority, self._deadline())
+        materialization = self._operations.materialize(plan, authority, self._deadline())
+        if (
+            materialization.plan_identity != plan.identity
+            or materialization.ownership.system_id != plan.ownership.system_id
+            or materialization.ownership.run_id != plan.ownership.run_id
+        ):
+            raise ValueError("remote materialization differs from the requested plan")
+        return materialization
 
     def prepare(
         self,
@@ -543,6 +560,8 @@ class RemoteExternalBootCoordinator:
         authority: OpaqueProviderRef,
     ) -> RecoveryPoint:
         recovery = self._operations.prepare(materialization, binding, authority, self._deadline())
+        if recovery.binding != binding or recovery.materialization != materialization:
+            raise ValueError("remote preparation returned a different activation")
         reference = self._store.publish_recovery(recovery)
         return RecoveryPoint(
             binding=recovery.binding,

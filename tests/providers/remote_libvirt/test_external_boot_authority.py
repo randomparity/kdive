@@ -491,7 +491,18 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
     )
-    assert coordinator.materialize(_plan(), authority) == record.materialization
+    base_plan = _plan()
+    plan = base_plan.model_copy(
+        update={
+            "ownership": base_plan.ownership.model_copy(
+                update={
+                    "system_id": record.binding.system_id,
+                    "run_id": record.binding.run_id,
+                }
+            )
+        }
+    )
+    assert coordinator.materialize(plan, authority) == record.materialization
     point = coordinator.prepare(record.materialization, record.binding, authority)
     store.close()
 
