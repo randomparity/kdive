@@ -18,10 +18,12 @@ so an unauthorized caller learns nothing about whether the System carries an act
 
 from __future__ import annotations
 
+import hashlib
 from typing import LiteralString
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import TypeAdapter, ValidationError
 
@@ -29,16 +31,22 @@ from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import Digest
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
+from kdive.jobs.payloads import ResolveRecoveryOrphanPayload
 from kdive.log import bind_context
 from kdive.mcp.platform_auth import audit_platform_denial
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     AuthorizationError,
@@ -89,12 +97,9 @@ _ACTIVE_JOB_STATES = [JobState.QUEUED.value, JobState.RUNNING.value]
 # `system_id` arm plans as `Index Scan using jobs_payload_system_id_idx` (migration 0082, an
 # expression index on exactly `payload->>'system_id'`) and reads 3 buffers.
 #
-# The `run_id` arm still scans every row: no index covers `payload->>'run_id'`
-# (`jobs_live_install_run_id_idx`, migration 0101, is partial on `kind = 'install'`), so its
-# per-arm `LIMIT` can only stop early when rows actually match — and the ordinary case, where
-# nothing blocks the release, is the one that scans the whole table while this holds the
-# System-wide advisory lock. Closing that needs an index this issue's surface does not cover;
-# the deferral is docs/debt/0008-external-boot-release-job-scan-under-the-system-lock.md.
+# The `run_id` arm uses `jobs_payload_run_id_idx` (migration 0137). It remains a separate arm:
+# combining the two expressions under `OR` made PostgreSQL ignore the `system_id` index, while a
+# global `ORDER BY` prevented either arm's `LIMIT` from stopping after the bounded result page.
 #
 # `UNION` rather than `UNION ALL`: nothing enforces that a payload carries only one of the two
 # keys, and a row matching both arms would otherwise be counted twice against
@@ -112,6 +117,30 @@ _ACTIVE_JOBS_SQL: LiteralString = (
 
 _REPOSITORY = ExternalBootActivationRepository()
 _IDENTITY = TypeAdapter(Digest)
+
+_CONFLICT_AUTHORITY_SQL: LiteralString = (
+    "SELECT provider_kind, authority_instance "
+    "FROM resolve_external_boot_conflict_dispatch_binding(%s, %s, %s, %s)"
+)
+
+_QUARANTINE_SQL: LiteralString = (
+    "SELECT q.id, q.object_identity, q.resource_id, q.activation_id, q.provider_kind, "
+    "q.authority_instance, q.object_kind, q.object_reference, q.ownership_digest, "
+    "q.observed_digest, q.reserved_bytes, r.kind AS resource_kind, "
+    "q.operation_identity, q.attempt_id, q.mutation_journal_sequence, "
+    "q.mutation_journal_digest "
+    "FROM external_boot_recovery_quarantine AS q "
+    "JOIN systems AS s ON s.id = q.system_id "
+    "JOIN allocations AS a ON a.id = s.allocation_id "
+    "JOIN resources AS r ON r.id = a.resource_id AND r.id = q.resource_id "
+    "WHERE q.system_id = %s AND q.status = 'quarantined' "
+    "AND q.object_identity = ANY(%s) ORDER BY q.object_identity FOR UPDATE OF q"
+)
+
+_RELEASE_AUTHORITY_SQL: LiteralString = (
+    "SELECT provider_kind, authority_instance "
+    "FROM resolve_external_boot_release_dispatch_binding(%s, %s, %s, %s)"
+)
 
 _PROMOTION = (
     "Promoted when the external-boot recovery job handler and worker claim path land (#2118)."
@@ -268,7 +297,11 @@ async def _active_job_ids_for_system(conn: AsyncConnection, system_id: UUID) -> 
 
 
 async def request_release(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: str,
+    resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
     """Admit a release of the Run's external-boot activation, then report the missing executor.
 
@@ -298,11 +331,15 @@ async def request_release(
                     detail="this Run is bound to no System, so it holds no external boot",
                     next_action="runs.get",
                 )
-            return await _release_locked(conn, ctx, run, run.system_id)
+            return await _release_locked(conn, ctx, run, run.system_id, resolver)
 
 
 async def _release_locked(
-    conn: AsyncConnection, ctx: RequestContext, run: Run, system_id: UUID
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    system_id: UUID,
+    resolver: ProviderResolver | None,
 ) -> ToolResponse:
     """Decide the release under the System lock, so every read sees one consistent activation.
 
@@ -317,7 +354,8 @@ async def _release_locked(
     """
     object_id = str(run.id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        if await _REPOSITORY.get_restricting_for_system(conn, system_id) is None:
+        activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
+        if activation is None:
             return _conflict(
                 object_id,
                 reason="no_active_activation",
@@ -334,6 +372,17 @@ async def _release_locked(
             )
         except ExternalBootDenied as exc:
             return _external_boot_denial(object_id, exc, ctx)
+        operation_identity = (
+            "sha256:"
+            + hashlib.sha256(
+                f"{activation.id}\0release\0{activation.plan_identity}".encode()
+            ).hexdigest()
+        )
+        dedup_key = f"external-boot-release:{operation_identity}"
+        existing = await queue.get_by_dedup_key(conn, dedup_key)
+        if existing is not None:
+            response = ToolResponse.from_job(existing)
+            return response.model_copy(update={"data": {**response.data, "run_id": object_id}})
         job_ids = await _active_job_ids_for_system(conn, system_id)
         if job_ids:
             return _conflict(
@@ -355,7 +404,49 @@ async def _release_locked(
                 next_actions=["debug.detach", "runs.get"],
                 data=_bounded_ids("session_ids", session_ids),
             )
-    return _executor_unavailable(object_id, RELEASE_TOOL)
+        if resolver is None:
+            return _executor_unavailable(object_id, RELEASE_TOOL)
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _RELEASE_AUTHORITY_SQL,
+                (activation.id, activation.system_id, activation.run_id, activation.plan_identity),
+            )
+            authorities = await cur.fetchall()
+        if len(authorities) != 1:
+            return _config_error(
+                object_id,
+                reason="release_authority_unresolved",
+                detail="the exact durable external-boot release authority is unavailable",
+                next_action="runs.get",
+            )
+        authority = authorities[0]
+        try:
+            kind, payload = await build_external_boot_payload(
+                conn,
+                activation_id=activation.id,
+                purpose="release",
+                operation="release",
+                provider_kind=str(authority["provider_kind"]),
+                authority_instance=str(authority["authority_instance"]),
+                operation_identity=operation_identity,
+                resolver=resolver,
+            )
+        except CategorizedError as exc:
+            return _config_error(
+                object_id,
+                reason="release_authority_unresolved",
+                detail=f"the durable release authority cannot dispatch recovery: {exc}",
+                next_action="runs.get",
+            )
+        job = await queue.enqueue(
+            conn,
+            kind,
+            payload,
+            job_authorizing(ctx, run.project),
+            dedup_key,
+        )
+    response = ToolResponse.from_job(job)
+    return response.model_copy(update={"data": {**response.data, "run_id": object_id}})
 
 
 def _resolution_input_error(
@@ -400,6 +491,7 @@ async def resolve_conflict(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
+    resolver: ProviderResolver,
     system_id: str,
     operation: str,
     observed_identity: str,
@@ -423,20 +515,33 @@ async def resolve_conflict(
             invalid = _resolution_input_error(system_id, operation, observed_identity)
             if invalid is not None:
                 return invalid
-            return await _resolve_conflict_locked(conn, ctx, uid, system.project)
+            return await _resolve_conflict_locked(
+                conn,
+                ctx,
+                resolver,
+                uid,
+                system.project,
+                observed_identity,
+            )
 
 
 async def _resolve_conflict_locked(
-    conn: AsyncConnection, ctx: RequestContext, system_id: UUID, project: str
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    resolver: ProviderResolver,
+    system_id: UUID,
+    project: str,
+    observed_identity: str,
 ) -> ToolResponse:
-    """Decide the resolution under the System lock.
+    """Decide and enqueue the resolution atomically under the System lock.
 
     See :func:`_release_locked` for why the restricting activation is read directly rather
     than inferred from the guard.
     """
     object_id = str(system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        if await _REPOSITORY.get_restricting_for_system(conn, system_id) is None:
+        activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
+        if activation is None:
             return _conflict(
                 object_id,
                 reason="no_recovery_conflict",
@@ -452,7 +557,67 @@ async def _resolve_conflict_locked(
             )
         except ExternalBootDenied as exc:
             return _external_boot_denial(object_id, exc, ctx)
-    return _executor_unavailable(object_id, RESOLVE_CONFLICT_TOOL)
+
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _CONFLICT_AUTHORITY_SQL,
+                (
+                    activation.id,
+                    activation.system_id,
+                    activation.run_id,
+                    activation.plan_identity,
+                ),
+            )
+            authorities = await cur.fetchall()
+        if not authorities:
+            return _config_error(
+                object_id,
+                reason="conflict_authority_unresolved",
+                detail=(
+                    "the restricting activation has no unambiguous durable authority binding "
+                    "from which recovery can be dispatched"
+                ),
+                next_action="systems.get",
+            )
+
+        authority = authorities[0]
+        operation_identity = (
+            "sha256:"
+            + hashlib.sha256(
+                (f"{activation.id}\0{SUPPORTED_RESOLUTION_OPERATION}\0{observed_identity}").encode()
+            ).hexdigest()
+        )
+        dedup_key = f"external-boot-conflict:{operation_identity}"
+        try:
+            kind, payload = await build_external_boot_payload(
+                conn,
+                activation_id=activation.id,
+                purpose="resolve-conflict",
+                operation="resolve-conflict",
+                provider_kind=str(authority["provider_kind"]),
+                authority_instance=str(authority["authority_instance"]),
+                operation_identity=operation_identity,
+                expected_observed_composite=observed_identity,
+                resolver=resolver,
+            )
+        except CategorizedError as exc:
+            # Admission failures at this boundary are closed configuration refusals. They occur
+            # before enqueue, and the surrounding transaction protects future additions here.
+            return _config_error(
+                object_id,
+                reason="conflict_authority_unresolved",
+                detail=f"the durable conflict authority cannot dispatch recovery: {exc}",
+                next_action="systems.get",
+            )
+        job = await queue.enqueue(
+            conn,
+            kind,
+            payload,
+            job_authorizing(ctx, project),
+            dedup_key,
+        )
+    response = ToolResponse.from_job(job)
+    return response.model_copy(update={"data": {**response.data, "system_id": object_id}})
 
 
 def _orphan_input_error(
@@ -488,15 +653,17 @@ async def resolve_recovery_orphan(
     system_id: str,
     object_identities: list[str],
     disposition: str,
+    resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
-    """Admit a quarantined recovery-object repair, then report the missing executor.
+    """Atomically admit a bounded, durable quarantined recovery-object repair.
 
     The platform role is enforced before the System is *resolved*, matching the break-glass
     ``ops`` tools this one registers beside: a caller without ``platform_admin`` learns nothing
     about which System ids exist. Only the id's syntax is checked first, so the denial audit
     below records a bounded identifier rather than arbitrary caller input. It runs no admission
     check — ADR-0583 scopes the repair to quarantined recovery objects, which are not the
-    activation the matrix keys on, and no quarantine record exists to read yet.
+    activation the matrix keys on. Object references and provider authority come only from
+    exact durable quarantine rows; caller identities are selectors, never provider paths.
     """
     uid = _as_uuid(system_id)
     if uid is None:
@@ -508,15 +675,86 @@ async def resolve_recovery_orphan(
             pool, ctx, tool=ORPHAN_TOOL, scope=f"denied:{uid}", args={"system_id": str(uid)}
         )
         return ToolResponse.denied(system_id, missing_roles=[PlatformRole.PLATFORM_ADMIN])
+    invalid = _orphan_input_error(system_id, object_identities, disposition)
+    if invalid is not None:
+        return invalid
+    if len(object_identities) != len(set(object_identities)):
+        return _config_error(
+            system_id,
+            reason="duplicate_object_identities",
+            detail="object_identities must not contain duplicates",
+            next_action="systems.get",
+        )
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
+        async with (
+            pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.SYSTEM, uid),
+        ):
             system = await SYSTEMS.get(conn, uid)
-        if system is None:
-            return _unresolved_system(system_id)
-        invalid = _orphan_input_error(system_id, object_identities, disposition)
-        if invalid is not None:
-            return invalid
-        return _executor_unavailable(system_id, ORPHAN_TOOL)
+            if system is None:
+                return _unresolved_system(system_id)
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(_QUARANTINE_SQL, (uid, object_identities))
+                rows = await cur.fetchall()
+            if len(rows) != len(object_identities):
+                return _conflict(
+                    system_id,
+                    reason="quarantine_binding_mismatch",
+                    detail="the exact quarantined recovery-object set is unavailable",
+                    next_actions=["systems.get"],
+                )
+            if any(row["provider_kind"] != row["resource_kind"] for row in rows):
+                return _conflict(
+                    system_id,
+                    reason="quarantine_binding_mismatch",
+                    detail="the quarantined recovery-object provider binding no longer matches",
+                    next_actions=["systems.get"],
+                )
+            if resolver is None:
+                return _config_error(
+                    system_id,
+                    reason="recovery_executor_unavailable",
+                    detail="the recovery-object provider resolver is not configured",
+                    next_action="systems.get",
+                )
+            binding = await resolver.binding_for_system(conn, uid)
+            if (
+                any(row["provider_kind"] != binding.kind.value for row in rows)
+                or binding.runtime.external_boot_recovery_objects is None
+            ):
+                return _executor_unavailable(system_id, ORPHAN_TOOL)
+            canonical = "\0".join(
+                f"{row['id']}:{row['ownership_digest']}:{row['observed_digest']}" for row in rows
+            )
+            binding_digest = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+            operation_identity = (
+                "sha256:"
+                + hashlib.sha256(f"{uid}\0{disposition}\0{binding_digest}".encode()).hexdigest()
+            )
+            request_id = uuid5(NAMESPACE_URL, f"kdive:{operation_identity}")
+            payload = ResolveRecoveryOrphanPayload(
+                schema="resolve-recovery-orphan-v1",
+                system_id=str(uid),
+                request_id=str(request_id),
+                binding_digest=binding_digest,
+            )
+            job = await queue.enqueue(
+                conn,
+                JobKind.RESOLVE_RECOVERY_ORPHAN,
+                payload,
+                job_authorizing(ctx, system.project),
+                f"external-boot-orphan:{operation_identity}",
+            )
+            object_ids = [row["id"] for row in rows]
+            await conn.execute(
+                "INSERT INTO external_boot_recovery_orphan_requests "
+                "(id, system_id, disposition, binding_digest, object_ids, job_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (request_id, uid, disposition, binding_digest, object_ids, job.id),
+            )
+    response = ToolResponse.from_job(job)
+    return response.model_copy(update={"data": {**response.data, "system_id": system_id}})
 
 
 __all__ = [

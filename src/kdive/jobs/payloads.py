@@ -88,6 +88,28 @@ class SystemPayload(_PayloadBase):
         return value
 
 
+class ResolveRecoveryOrphanPayload(SystemPayload):
+    """Closed reference to one atomically admitted quarantine disposition request."""
+
+    schema_: Literal["resolve-recovery-orphan-v1"] = Field(alias="schema")
+    request_id: str
+    binding_digest: str
+
+    @field_validator("request_id")
+    @classmethod
+    def _valid_request_id(cls, value: str) -> str:
+        UUID(value)
+        return value
+
+    @field_validator("binding_digest")
+    @classmethod
+    def _valid_binding_digest(cls, value: str) -> str:
+        if len(value) != 71 or not value.startswith("sha256:"):
+            raise ValueError("binding_digest must be a sha256 digest")
+        int(value[7:], 16)
+        return value
+
+
 class ReprovisionPayload(SystemPayload):
     profile_digest: str
 
@@ -513,6 +535,7 @@ type _ActivePayloadModel = (
     | type[BootPayload]
     | type[TeardownPayload]
     | type[RemoteModuleVolumeReapPayload]
+    | type[ResolveRecoveryOrphanPayload]
 )
 type ActivePayloadModel = (
     SystemPayload
@@ -535,6 +558,7 @@ type ActivePayloadModel = (
     | BootPayload
     | TeardownPayload
     | RemoteModuleVolumeReapPayload
+    | ResolveRecoveryOrphanPayload
 )
 _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
@@ -558,6 +582,7 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.CONSOLE_ROTATE: ConsoleRotatePayload,
     JobKind.RECLAIM_INVESTIGATION_ROOTFS: ReclaimInvestigationRootfsPayload,
     JobKind.REMOTE_MODULE_VOLUME_REAP: RemoteModuleVolumeReapPayload,
+    JobKind.RESOLVE_RECOVERY_ORPHAN: ResolveRecoveryOrphanPayload,
 }
 _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,

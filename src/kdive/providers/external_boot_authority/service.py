@@ -640,6 +640,7 @@ class ExternalBootAuthorityService:
             "attempt_id": getattr(request, "attempt_id", request.authority_id),
         }
         values.pop("plan", None)
+        values.pop("expected_observed_composite", None)
         if not isinstance(request, AuthorityTakeoverRequestV1):
             values |= {
                 "expected_source_identity": request.expected_source_identity,
