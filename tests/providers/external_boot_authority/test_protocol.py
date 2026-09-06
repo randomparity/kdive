@@ -16,6 +16,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -462,6 +463,35 @@ def test_commit_context_refuses_observed_records_and_is_closed() -> None:
     for rejected in ({"extra": "forbidden"}, {"phase": "observed"}, {"commit_point": "not-an-op"}):
         with pytest.raises(ValidationError):
             AuthorityCommitContextV1.model_validate(values | rejected)
+
+
+@pytest.mark.parametrize("phase", [JournalPhase.MUTATION_STARTED, JournalPhase.PROVIDER_RETURNED])
+def test_recovery_observation_context_is_bound_to_teardown_record(phase: JournalPhase) -> None:
+    record = _anchored(phase, sequence=5, purpose="teardown", operation="teardown")
+    context = AuthorityRecoveryObservationContextV1.for_record(record)
+
+    assert context.commit_point.value == "teardown"
+    assert context.operation_identity == record.operation_identity
+    assert context.attempt_id == record.attempt_id
+    assert context.journal_sequence == record.sequence
+    assert context.journal_digest == record_digest(record)
+    assert context.phase is phase
+
+
+def test_recovery_observation_context_refuses_non_teardown_and_terminal_records() -> None:
+    with pytest.raises(ValueError, match="anchored teardown"):
+        AuthorityRecoveryObservationContextV1.for_record(
+            _anchored(JournalPhase.MUTATION_STARTED, sequence=5)
+        )
+    with pytest.raises(ValueError, match="anchored teardown"):
+        AuthorityRecoveryObservationContextV1.for_record(
+            _anchored(
+                JournalPhase.ADMITTED,
+                sequence=5,
+                purpose="teardown",
+                operation="teardown",
+            )
+        )
 
 
 def test_the_wire_mutation_request_carries_no_journal_field() -> None:

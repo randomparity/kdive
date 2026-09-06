@@ -21,6 +21,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityRecoveryObservationContextV1,
     ObservationCategory,
     operation_is_permitted,
 )
@@ -116,6 +117,19 @@ class LocalExternalBootAuthorityAdapter:
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         """Classify observed provider state against the request's exact identities."""
         return await asyncio.to_thread(self._observe, request)
+
+    async def observe_recovery(
+        self,
+        request: AuthorityMutationRequestV1,
+        context: AuthorityRecoveryObservationContextV1,
+    ) -> AuthorityObservationV1:
+        if (
+            request.operation is not AuthorityOperation.TEARDOWN
+            or context.operation_identity != request.operation_identity
+            or context.attempt_id != request.attempt_id
+        ):
+            raise AuthorityServiceError("provider_conflict")
+        return await self.observe(request)
 
     async def commit(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1

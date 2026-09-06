@@ -417,3 +417,33 @@ class AuthorityCommitContextV1(_ClosedValue):
             journal_sequence=record.sequence,
             journal_digest=record_digest(record),
         )
+
+
+class AuthorityRecoveryObservationContextV1(_ClosedValue):
+    """Service proof that a teardown observation recovers an anchored mutation."""
+
+    schema_: Literal["external-boot-authority-v1"] = Field(
+        "external-boot-authority-v1", alias="schema"
+    )
+    commit_point: Literal[AuthorityOperation.TEARDOWN]
+    operation_identity: str
+    attempt_id: UUID
+    journal_sequence: PositiveBigInt
+    journal_digest: Digest
+    phase: Literal[JournalPhase.MUTATION_STARTED, JournalPhase.PROVIDER_RETURNED]
+
+    @classmethod
+    def for_record(cls, record: JournalRecordV1) -> AuthorityRecoveryObservationContextV1:
+        if record.operation is not AuthorityOperation.TEARDOWN or record.phase not in {
+            JournalPhase.MUTATION_STARTED,
+            JournalPhase.PROVIDER_RETURNED,
+        }:
+            raise ValueError("recovery observation context requires an anchored teardown record")
+        return cls(
+            commit_point=AuthorityOperation.TEARDOWN,
+            operation_identity=record.operation_identity,
+            attempt_id=record.attempt_id,
+            journal_sequence=record.sequence,
+            journal_digest=record_digest(record),
+            phase=record.phase,
+        )
