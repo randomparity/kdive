@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import libvirt
 import pytest
@@ -20,6 +20,9 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_result_reader
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleRecoveryRefV1,
+    RemoteModuleRecoveryRefV2,
+    RemoteModuleResultV1,
+    identity_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     CompletionDeadlineExecutor,
@@ -36,6 +39,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedVolume,
     StorageConn,
 )
+from kdive.services.remote_module_operation import RemoteModuleOperationRuntime
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Clock,
     DeadlineAwareExecutor,
@@ -45,6 +49,9 @@ from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_sup
     NONCE,
     RUN_ID,
     SYSTEM_ID,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_support import (
+    _result as result_document,
 )
 
 SCRATCH_NAME = render_module_volume_name(SYSTEM_ID, RUN_ID, NONCE, "scratch.ext4")
@@ -244,7 +251,8 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
     subprocess.run(
         ["mkfs.ext4", "-q", "-F", str(image)], check=True, capture_output=True, timeout=120
     )
-    result = b'{"result":"sparse"}\n'
+    result_value = RemoteModuleResultV1.model_validate(result_document())
+    result = result_value.to_wire_bytes()
     payload = tmp_path / "result-v1.json"
     payload.write_bytes(result)
     subprocess.run(
@@ -263,7 +271,7 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
 
     def inspect_receiver(path: Path, deadline: float, monotonic) -> bytes | None:  # noqa: ANN001
         stat = path.stat()
-        observed.update(size=stat.st_size, allocation=stat.st_blocks * 512)
+        observed.update(size=stat.st_size, allocation=stat.st_blocks * 512, deadline=int(deadline))
         return original(path, deadline, monotonic)
 
     monkeypatch.setattr(remote_module_result_reader, "_read_debugfs", inspect_receiver)
@@ -281,6 +289,35 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
     assert observed["size"] == SCRATCH_CAPACITY_BYTES
     assert observed["allocation"] < SCRATCH_CAPACITY_BYTES // 8
     assert observed["allocation"] <= source_allocation + 4 * 1024 * 1024
+
+    preparation = RemoteModulePreparationExecutor()
+    async_reader = replace(reader, preparation_executor=preparation)
+
+    async def read(recovery: RemoteModuleRecoveryRefV1, deadline: float) -> bytes | None:
+        return await async_reader.read_recovery_async(recovery, deadline=deadline)
+
+    runtime = RemoteModuleOperationRuntime(cast(Any, None), cast(Any, None), read)
+    operation = runtime._operation_from_result(result_value)
+    recovery = RemoteModuleRecoveryRefV2.model_validate(
+        {
+            "system_id": result_value.system_id,
+            "run_id": result_value.run_id,
+            "plan_identity": result_value.plan_identity,
+            "operation_nonce": result_value.operation_nonce,
+            "pool": {"ref": "pool"},
+            "root_volume": {"ref": result_value.root_volume_key},
+            "source_volume": {"ref": "source"},
+            "scratch_volume": {"ref": SCRATCH_NAME},
+            "operation_identity": identity_for(operation),
+            "result_identity": identity_for(result_value),
+            "appliance_image_digest": result_value.appliance_image_digest,
+            "authority_identity": "sha256:" + "a" * 64,
+            "source_capacity_bytes": 4096,
+        }
+    )
+    assert asyncio.run(runtime.reopen_result(recovery, 10.0)) == result_value
+    assert observed["deadline"] == 10
+    preparation.shutdown()
 
 
 def test_debugfs_returns_none_only_for_a_real_absent_result(tmp_path: Path) -> None:

@@ -456,11 +456,15 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
     object.__setattr__(
         runtime,
         "appliance_execution",
-        SimpleNamespace(read_scratch_result=lambda _volume: result.to_wire_bytes()),
+        SimpleNamespace(
+            read_scratch_result=lambda _volume: result.to_wire_bytes(),
+            deadline_executor=CompletionDeadlineExecutor(lambda: 0.0),
+            monotonic=lambda: 0.0,
+        ),
     )
     executor = cast(RemoteModulePreparationExecutor, InlineExecutor())
 
-    assert await runtime.inspect_attempt(receipt, operation, executor) is None
+    assert await runtime.inspect_attempt(receipt, operation, executor, 10**12) is None
 
     source_name = render_module_volume_name(
         operation.system_id, operation.run_id, operation.operation_nonce, "source.ext4"
@@ -476,7 +480,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         lambda _storage, _request: volumes,
     )
 
-    inspected = await runtime.inspect_attempt(receipt, operation, executor)
+    inspected = await runtime.inspect_attempt(receipt, operation, executor, 10**12)
     assert inspected is not None
     assert inspected.volumes is volumes
     assert inspected.result == result
@@ -491,10 +495,14 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         object.__setattr__(
             runtime,
             "appliance_execution",
-            SimpleNamespace(read_scratch_result=lambda _volume, value=raw: value),
+            SimpleNamespace(
+                read_scratch_result=lambda _volume, value=raw: value,
+                deadline_executor=CompletionDeadlineExecutor(lambda: 0.0),
+                monotonic=lambda: 0.0,
+            ),
         )
         with pytest.raises(CategorizedError, match=message) as caught:
-            await runtime.inspect_attempt(receipt, operation, executor)
+            await runtime.inspect_attempt(receipt, operation, executor, 10**12)
         assert caught.value.category is ErrorCategory.CONFLICT
 
 

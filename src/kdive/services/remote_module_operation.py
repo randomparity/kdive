@@ -177,8 +177,10 @@ class RemoteModuleOperationRuntime:
         request: ModuleAttemptPreparationRequestV1,
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
+        deadline: float,
     ) -> ModuleAttemptInspection | None:
         """Read exact current-attempt state only when its durable obligation remains open."""
+        self._check_deadline(deadline)
         attempt = self._attempt_for_operation(operation)
         receipt = request.module_attempt_obligation
         if (
@@ -205,6 +207,7 @@ class RemoteModuleOperationRuntime:
             )
 
         def inspect() -> ModuleAttemptInspection | None:
+            self._check_deadline(deadline)
             volume_request = self._volume_request(operation)
             pool = configured.storage.storagePoolLookupByName(configured.pool_name)
             names = (
@@ -235,7 +238,10 @@ class RemoteModuleOperationRuntime:
                     category=ErrorCategory.CONFLICT,
                 )
             volumes = validate_attempt_volumes(configured.storage, volume_request)
-            raw = appliance.read_scratch_result(volumes.scratch)
+            raw = appliance.deadline_executor.call(
+                lambda: appliance.read_scratch_result(volumes.scratch), deadline
+            )
+            self._check_deadline(deadline)
             if raw is None:
                 raise CategorizedError(
                     "remote module attempt result is absent",
@@ -551,12 +557,17 @@ class RemoteModuleOperationRuntime:
         await executor.run(create)
 
     async def reap_state(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
     ) -> Literal["absent", "reaping", "reaped"]:
         """Read only exact whole-name journal markers backed by matching durable evidence."""
+        self._check_deadline(deadline)
         configured = self._volume_binding()
 
         def present(state: str) -> bool:
+            self._check_deadline(deadline)
             pool = configured.storage.storagePoolLookupByName(configured.pool_name)
             try:
                 pool.storageVolLookupByName(self._marker_name(recovery, state))
@@ -567,6 +578,7 @@ class RemoteModuleOperationRuntime:
                 raise
 
         reaping, reaped = await executor.run(lambda: (present("reaping"), present("reaped")))
+        self._check_deadline(deadline)
         if not reaping and not reaped:
             return "absent"
         await self._evidence(recovery)

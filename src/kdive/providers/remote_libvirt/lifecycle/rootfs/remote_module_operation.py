@@ -45,9 +45,13 @@ class ModuleOperationRuntime(Protocol):
         request: ModuleAttemptPreparationRequestV1,
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
+        deadline: float,
     ) -> ModuleAttemptInspection | None: ...
     async def reap_state(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
     ) -> Literal["absent", "reaping", "reaped"]: ...
     def recovery_volumes(
         self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1

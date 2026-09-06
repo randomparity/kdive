@@ -134,7 +134,7 @@ async def capture_install_modules(
             "remote module capture requires capture_install operation",
             category=ErrorCategory.CONFLICT,
         )
-    inspected = await runtime.inspect_attempt(request.preparation, operation, executor)
+    inspected = await runtime.inspect_attempt(request.preparation, operation, executor, deadline)
     if inspected is None:
         volumes = await runtime.prepare(
             request.preparation, operation, executor, request.authority, deadline
@@ -225,7 +225,7 @@ async def restore_modules(
             "remote module recovery authority differs",
             category=ErrorCategory.CONFLICT,
         ) from exc
-    reap_state = await runtime.reap_state(recovery, executor)
+    reap_state = await runtime.reap_state(recovery, executor, deadline)
     if reap_state != "absent":
         result = await runtime.reopen_result(recovery, deadline)
         if reap_state == "reaped":
@@ -301,8 +301,9 @@ async def reap_module_attempt(
             "remote module recovery authority differs",
             category=ErrorCategory.CONFLICT,
         ) from exc
-    state = await runtime.reap_state(recovery, executor)
+    state = await runtime.reap_state(recovery, executor, deadline)
     if state == "reaped":
+        await runtime.record_reaped(recovery, executor, deadline)
         return
     if state == "absent":
         operation = await runtime.reopen_operation(recovery, deadline)
