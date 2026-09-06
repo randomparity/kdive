@@ -148,6 +148,13 @@ async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argume
         await _seed_store_rows(
             conn, vehicle, with_reservation=with_reservation, with_release=with_release
         )
+    elif activation_state == "preparing":
+        await conn.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+            "VALUES (%s, %s, %s, %s, 'pending')",
+            (vehicle.activation_id, store_identity(vehicle), owner_key(vehicle), RESERVED_BYTES),
+        )
     await conn.execute(
         "INSERT INTO worker_incarnations "
         "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "

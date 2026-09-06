@@ -900,6 +900,37 @@ class ExternalBootActivationRepository:
                 )
         return CasResult(CasStatus.APPLIED, _activation(activation_row))
 
+    async def mark_reservation_ready_for_job(
+        self,
+        conn: AsyncConnection,
+        *,
+        credential_hash: bytes,
+        job_id: UUID,
+        job_attempt: int,
+        activation_id: UUID,
+        store_identity: str,
+        reserve_bytes: int,
+        recovery_max_bytes: int,
+    ) -> CasStatus:
+        """Debit through the worker's closed SECURITY DEFINER boundary (ADR-0613)."""
+        row = await (
+            await conn.execute(
+                "SELECT public.mark_external_boot_reservation_ready(%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    credential_hash,
+                    job_id,
+                    job_attempt,
+                    activation_id,
+                    store_identity,
+                    reserve_bytes,
+                    recovery_max_bytes,
+                ),
+            )
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("reservation debit returned no status")
+        return CasStatus(str(row[0]))
+
     async def release_reservation(
         self,
         conn: AsyncConnection,

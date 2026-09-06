@@ -76,8 +76,15 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.routing import AuthorityReservationGeometry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
-from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
+from tests.jobs.handlers.external_boot.seeding import (
+    RESERVED_BYTES,
+    RecordingAcknowledger,
+    SeededCase,
+    seed_case,
+    store_identity,
+)
 from tests.jobs.handlers.external_boot.support import build_job
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
 from tests.mcp.systems_support import provider_resolver
@@ -162,6 +169,9 @@ def _ports(
         incarnation_credential=SecretStr(case.credential),
         secret_registry=SecretRegistry(),
         acknowledger=cast(Any, acknowledger),
+        reservation_geometry=lambda _binding: AuthorityReservationGeometry(
+            store_identity(case.vehicle), RESERVED_BYTES, RESERVED_BYTES * 2
+        ),
     )
 
 
