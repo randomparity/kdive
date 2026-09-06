@@ -205,6 +205,15 @@ LIBVIRT_RECOVERY_ROOT = Setting(
     ),
 )
 
+LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES = Setting(
+    name="KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES",
+    parse=_parse_positive_int,
+    group="local-libvirt",
+    processes=frozenset({"worker"}),
+    help="Per-activation external-boot materialization ceiling in bytes (ADR-0602).",
+    suggest="set a positive integer byte ceiling provisioned for this worker slot",
+)
+
 SETTINGS = [
     LIBVIRT_URI,
     LIBVIRT_ALLOCATION_CAP,
@@ -212,4 +221,5 @@ SETTINGS = [
     LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
     LIBVIRT_BOOT_WINDOW_S,
     LIBVIRT_RECOVERY_ROOT,
+    LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
 ]

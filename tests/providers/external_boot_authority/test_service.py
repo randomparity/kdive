@@ -52,6 +52,23 @@ async def test_takeover_anchors_without_provider_access(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_teardown_recovery_keeps_ordinary_observe_adapter_compatible(
+    tmp_path: Path,
+) -> None:
+    service, _repository, adapter, _peer, takeover = _service(tmp_path)
+    values = _mutation(takeover).model_dump(mode="json", by_alias=True)
+    request = type(_mutation(takeover)).model_validate(
+        values | {"purpose": "teardown", "operation": "teardown"}
+    )
+    record = service._record(request, [], JournalPhase.MUTATION_STARTED)
+
+    observation = await service._recovery_observation(request, record)
+
+    assert observation.category == "target"
+    assert adapter.calls == ["observe"]
+
+
+@pytest.mark.anyio
 async def test_rejections_precede_journal_and_provider_access(tmp_path: Path) -> None:
     service, repository, adapter, peer, request = _service(tmp_path)
     with pytest.raises(AuthorityServiceError, match="unauthenticated"):

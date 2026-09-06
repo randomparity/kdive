@@ -197,4 +197,5 @@ def test_settings_list_is_the_declared_settings_in_order() -> None:
         settings.LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
         settings.LIBVIRT_BOOT_WINDOW_S,
         settings.LIBVIRT_RECOVERY_ROOT,
+        settings.LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
     ]

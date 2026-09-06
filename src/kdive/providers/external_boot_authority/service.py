@@ -20,6 +20,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityOperation,
+    AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -47,6 +49,15 @@ class AuthorityMutationFinalizer(Protocol):
     async def finalize(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> None: ...
+
+
+@runtime_checkable
+class AuthorityRecoveryObserver(Protocol):
+    async def observe_recovery(
+        self,
+        request: AuthorityMutationRequestV1,
+        context: AuthorityRecoveryObservationContextV1,
+    ) -> AuthorityObservationV1: ...
 
 
 class AuthorityRepository(Protocol):
@@ -594,7 +605,7 @@ class ExternalBootAuthorityService:
             return await self._anchor(binding, journal, records, terminal)
         if prior.phase is JournalPhase.MUTATION_STARTED:
             try:
-                observation = await self._adapter.observe(request)
+                observation = await self._recovery_observation(request, prior)
             except AuthorityServiceError:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
@@ -609,7 +620,7 @@ class ExternalBootAuthorityService:
             )
         elif prior.phase is JournalPhase.PROVIDER_RETURNED:
             try:
-                observation = await self._adapter.observe(request)
+                observation = await self._recovery_observation(request, prior)
             except AuthorityServiceError:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
@@ -646,6 +657,17 @@ class ExternalBootAuthorityService:
                 outcome=outcome,
             ),
         )
+
+    async def _recovery_observation(
+        self, request: AuthorityMutationRequestV1, record: JournalRecordV1
+    ) -> AuthorityObservationV1:
+        if request.operation is AuthorityOperation.TEARDOWN and isinstance(
+            self._adapter, AuthorityRecoveryObserver
+        ):
+            return await self._adapter.observe_recovery(
+                request, AuthorityRecoveryObservationContextV1.for_record(record)
+            )
+        return await self._adapter.observe(request)
 
     async def acknowledge_takeover(
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1

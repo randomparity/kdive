@@ -1653,6 +1653,44 @@ def test_external_boot_recovery_root_defaults_are_declared() -> None:
     assert "live_vm_host_worker_recovery_root_owner" not in defaults
 
 
+def test_external_boot_capacity_is_checked_before_worker_release() -> None:
+    defaults = _yaml(DEFAULTS)
+    capacity_bytes = defaults["live_vm_host_external_boot_capacity_bytes"]
+    concurrent = defaults["live_vm_host_external_boot_concurrent_activations"]
+    assert isinstance(capacity_bytes, int) and capacity_bytes > 0
+    # The shipped value admits one plan at every existing contract maximum: decoded
+    # kernel, initrd, installed module tree, member overhead, archive capture plus its
+    # atomic temporary, and the bounded projection/recovery records.
+    maximum_live_bytes = (
+        2_147_483_648
+        + 536_870_912
+        + 8_589_934_592
+        + 200_000 * 1024
+        + 9_409_134_592 * 2
+        + 16_384
+        + 65_536
+    )
+    assert capacity_bytes >= maximum_live_bytes
+    assert isinstance(concurrent, int) and concurrent > 0
+    tasks = _text(MAIN_TASKS)
+    probe = tasks.index("Measure per-slot external-boot recovery free bytes")
+    capacity = tasks.index("Require provisioned external-boot recovery capacity")
+    release = tasks.index("Install the fixed live-worker executables")
+    assert probe < capacity < release
+    assert "ansible.builtin.command:\n    argv:" in tasks
+    assert "live_vm_host_external_boot_capacity_bytes | int" in tasks
+    assert "live_vm_host_external_boot_concurrent_activations | int" in tasks
+    role_tasks = yaml.safe_load(_text(MAIN_TASKS))
+    assert isinstance(role_tasks, list)
+    capacity_probe = next(
+        task
+        for task in role_tasks
+        if task.get("name") == "Measure per-slot external-boot recovery free bytes"
+    )
+    assert capacity_probe["check_mode"] is False
+    assert capacity_probe["changed_when"] is False
+
+
 def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
     # One root per fixed slot, not one shared root: RecoveryMetadataStore requires
     # st_uid == geteuid(), which a single directory cannot satisfy for eight accounts.

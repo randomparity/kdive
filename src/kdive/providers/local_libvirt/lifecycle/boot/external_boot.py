@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
+    _ARCHIVE_NAME,
     MAX_ARCHIVE_BYTES,
     MAX_ENTRIES,
     MAX_REGULAR_BYTES,
@@ -95,6 +96,7 @@ type RecoveryPhase = Literal[
     "cleaned",
 ]
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+type PartialAbortResult = Literal["removed", "absent", "not-partial"]
 
 
 class _ClosedValue(BaseModel):
@@ -229,6 +231,7 @@ class TargetProjectionV1(_ClosedValue):
         "local-libvirt-target-projection-v1", alias="schema"
     )
     ownership: ActivationOwnership
+    activation_id: Annotated[str, Field(pattern=r"^[0-9a-f-]{36}$")]
     plan_identity: Digest
     architecture: Literal["x86_64", "ppc64le"]
     cmdline: Annotated[str, Field(min_length=1, max_length=4096)]
@@ -258,6 +261,7 @@ class TargetProjectionV1(_ClosedValue):
 _PROJECTION_NAME = "target-projection.json"
 _PROJECTION_TEMPORARY_NAME = ".target-projection.next"
 _MAX_PROJECTION_BYTES = 16_384
+_MAX_RECOVERY_METADATA_BYTES = 65_536
 
 
 class TargetProjectionStore:
@@ -290,8 +294,12 @@ class TargetProjectionStore:
         finally:
             os.close(owner_fd)
         try:
+            activation_fd = _open_or_create_private_child(run_fd, projection.activation_id)
+        finally:
+            os.close(run_fd)
+        try:
             digest_name = projection.digest.removeprefix("sha256:")
-            projection_fd = _open_or_create_private_child(run_fd, digest_name)
+            projection_fd = _open_or_create_private_child(activation_fd, digest_name)
             try:
                 data = projection.canonical_bytes()
                 if len(data) > _MAX_PROJECTION_BYTES:
@@ -311,33 +319,41 @@ class TargetProjectionStore:
                 os.fsync(projection_fd)
             finally:
                 os.close(projection_fd)
-            os.fsync(run_fd)
+            os.fsync(activation_fd)
         finally:
-            os.close(run_fd)
-        reopened = self.reopen(_projection_ref(projection, "kernel"), projection.ownership)
+            os.close(activation_fd)
+        reopened = self.reopen(
+            _projection_ref(projection, "kernel"),
+            projection.ownership,
+            projection.activation_id,
+        )
         if reopened != projection:
             raise ValueError("target projection failed exact reopen")
         return _projection_ref(projection, "kernel")
 
     def reopen(
-        self, artifact: OpaqueProviderRef, ownership: ActivationOwnership
+        self, artifact: OpaqueProviderRef, ownership: ActivationOwnership, activation_id: str
     ) -> TargetProjectionV1:
-        parts = _artifact_ref_parts(artifact, ownership)
+        parts = _artifact_ref_parts(artifact, ownership, activation_id)
         system_fd = _open_private_directory(self._root_fd, parts[1])
         try:
             run_fd = _open_private_directory(system_fd, parts[2])
         finally:
             os.close(system_fd)
         try:
-            projection_fd = _open_private_directory(run_fd, parts[3])
+            activation_fd = _open_private_directory(run_fd, parts[3])
         finally:
             os.close(run_fd)
+        try:
+            projection_fd = _open_private_directory(activation_fd, parts[4])
+        finally:
+            os.close(activation_fd)
         try:
             data = _read_private_file(projection_fd, _PROJECTION_NAME)
         finally:
             os.close(projection_fd)
         projection = TargetProjectionV1.model_validate_json(data)
-        digest_matches = projection.digest.removeprefix("sha256:") == parts[3]
+        digest_matches = projection.digest.removeprefix("sha256:") == parts[4]
         if projection.canonical_bytes() != data or not digest_matches:
             raise ValueError("target projection is not canonical or digest-bound")
         if projection.ownership != ownership:
@@ -348,22 +364,26 @@ class TargetProjectionStore:
 def _projection_ref(projection: TargetProjectionV1, filename: str) -> OpaqueProviderRef:
     return OpaqueProviderRef(
         ref=(
-            f"local-artifact-v1/{projection.ownership.system_id}/"
-            f"{projection.ownership.run_id}/{projection.digest.removeprefix('sha256:')}/{filename}"
+            f"local-artifact-v2/{projection.ownership.system_id}/"
+            f"{projection.ownership.run_id}/{projection.activation_id}/"
+            f"{projection.digest.removeprefix('sha256:')}/{filename}"
         )
     )
 
 
-def _artifact_ref_parts(artifact: OpaqueProviderRef, ownership: ActivationOwnership) -> list[str]:
+def _artifact_ref_parts(
+    artifact: OpaqueProviderRef, ownership: ActivationOwnership, activation_id: str
+) -> list[str]:
     parts = artifact.ref.split("/")
     if (
-        len(parts) != 5
-        or parts[0] != "local-artifact-v1"
+        len(parts) != 6
+        or parts[0] != "local-artifact-v2"
         or parts[1] != ownership.system_id
         or parts[2] != ownership.run_id
-        or len(parts[3]) != 64
-        or any(character not in "0123456789abcdef" for character in parts[3])
-        or parts[4] not in {"kernel", "modules", "initrd"}
+        or parts[3] != activation_id
+        or len(parts[4]) != 64
+        or any(character not in "0123456789abcdef" for character in parts[4])
+        or parts[5] not in {"kernel", "modules", "initrd"}
     ):
         raise ValueError("local artifact reference is malformed or cross-owner")
     return parts
@@ -763,6 +783,18 @@ class LocalExternalBootOperation(Protocol):
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None: ...
 
 
+class LocalPartialRecoveryOperation(Protocol):
+    def abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        source_identity: str,
+        target_identity: str,
+        authority: OpaqueProviderRef,
+    ) -> PartialAbortResult: ...
+    def recovery_is_absent(self, binding: ExternalBootActivationBinding) -> bool: ...
+
+
 class LocalExternalBootIO(Protocol):
     """Opens one authenticated capability for each public coordinator call."""
 
@@ -811,12 +843,16 @@ class RealLocalExternalBootIO:
         recovery_writer: GuestRecoveryWriter,
         resolve_operation_lease: ResolveOperationLease,
         session_factory: LocalExternalBootSessionFactory,
+        capacity_bytes: int,
     ) -> None:
+        if capacity_bytes <= 0:
+            raise ValueError("external-boot capacity must be positive")
         self._recovery_root = recovery_root
         self._materializer = materializer
         self._recovery_writer = recovery_writer
         self._resolve_operation_lease = resolve_operation_lease
         self._session_factory = session_factory
+        self._capacity_bytes = capacity_bytes
 
     @contextmanager
     def open(
@@ -831,6 +867,7 @@ class RealLocalExternalBootIO:
             self._materializer,
             self._recovery_writer,
             session,
+            self._capacity_bytes,
         )
         try:
             yield operation
@@ -873,13 +910,27 @@ class _RealLocalExternalBootOperation:
         materializer: LocalExternalBootMaterializer,
         recovery_writer: GuestRecoveryWriter,
         session: LocalExternalBootSession,
+        capacity_bytes: int,
     ) -> None:
         self._recovery_root = recovery_root
         self._materializer = materializer
         self._recovery_writer = recovery_writer
         self._session = session
+        self._capacity_bytes = capacity_bytes
 
     def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
+        initrd_bytes = 0 if plan.initrd is None else plan.initrd.size_bytes
+        reservation = (
+            plan.bundle.decoded_kernel_size_bytes
+            + initrd_bytes
+            + plan.module_obligation.uncompressed_bytes
+            + plan.module_obligation.member_count * 1024
+            + MAX_ARCHIVE_BYTES * 2
+            + _MAX_PROJECTION_BYTES
+            + _MAX_RECOVERY_METADATA_BYTES
+        )
+        if reservation > self._capacity_bytes:
+            raise ValueError("external-boot materialization exceeds configured capacity")
         return self._materializer.materialize(plan, self._session)
 
     def prepare(
@@ -1169,16 +1220,49 @@ class _RealLocalExternalBootOperation:
             reference = _recovery_ref(metadata.binding)
             if store.reopen(reference, metadata.binding) != metadata:
                 raise ValueError("recovery metadata changed before cleanup")
-            self._session.cleanup_payloads()
+            self._session.cleanup_payloads(metadata)
             store.publish_tombstone(reference, metadata.binding, metadata, point_digest)
+
+    def abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        source_identity: str,
+        target_identity: str,
+        authority: OpaqueProviderRef,
+    ) -> PartialAbortResult:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            partial = store.inspect_abortable_partial(binding, plan_identity, authority)
+            if isinstance(partial, str):
+                return cast(PartialAbortResult, partial)
+            intent = partial.intent
+            if intent is not None:
+                if intent.source_boot != source_identity or intent.target_boot != target_identity:
+                    raise ValueError("recovery partial identity conflicts with teardown request")
+                _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
+                if intent.prior_power == "running":
+                    self._session.restore_power("running")
+                    readiness = self._session.readiness()
+                    if not readiness.ok:
+                        raise ValueError("source readiness failed while aborting preparation")
+            if partial.materialization is not None:
+                store.remove_abortable_activation(binding, plan_identity, partial.materialization)
+            store.remove_abortable_partial(binding, plan_identity, authority)
+            return "removed"
+
+    def recovery_is_absent(self, binding: ExternalBootActivationBinding) -> bool:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.exact_recovery_absence(binding)
 
     def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
         ownership = ActivationOwnership(
             system_id=metadata.binding.system_id,
             run_id=metadata.binding.run_id,
         )
-        parts = _artifact_ref_parts(metadata.materialized_modules, ownership)
-        descriptor = self._session.open_artifact(parts[4], os.O_RDONLY)
+        parts = _artifact_ref_parts(
+            metadata.materialized_modules, ownership, metadata.binding.activation_id
+        )
+        descriptor = self._session.open_artifact(parts[5], os.O_RDONLY)
         try:
             return KernelBundleSource(
                 descriptor,
@@ -1649,6 +1733,26 @@ class LocalLibvirtExternalBoot:
                 raise ValueError("cleanup tombstone does not match requested binding")
             return tombstone.recovery_point
 
+    def abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+        *,
+        plan_identity: Digest,
+        source_identity: str,
+        target_identity: str,
+    ) -> PartialAbortResult:
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            return cast(LocalPartialRecoveryOperation, operation).abort_preparation(
+                binding, plan_identity, source_identity, target_identity, authority
+            )
+
+    def recovery_is_absent(
+        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+    ) -> bool:
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            return cast(LocalPartialRecoveryOperation, operation).recovery_is_absent(binding)
+
     def observe_state(
         self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
     ) -> LocalObservedState:
@@ -1722,6 +1826,22 @@ _INITIAL_INTENT_TEMPORARY_NAME = ".intent.initial"
 _TOMBSTONE_NAME = "tombstone.json"
 _PREPARATION_NAME = "preparation-result.json"
 _MAX_METADATA_BYTES = 262_144
+
+
+class LocalPartialAbortReceiptV1(BaseModel):
+    """Root-level authority retained while the owned partial directory is removed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_: Literal["local-partial-abort-v1"] = Field("local-partial-abort-v1", alias="schema")
+    binding: ExternalBootActivationBinding
+    plan_identity: Digest
+    authority: OpaqueProviderRef
+
+
+@dataclass(frozen=True, slots=True)
+class AbortablePartial:
+    intent: LocalPreStopIntentV1 | None
+    materialization: ExternalBootMaterialization | None
 
 
 class LocalPreparationReceiptsV1(BaseModel):
@@ -2245,6 +2365,244 @@ class RecoveryMetadataStore:
         except FileExistsError:
             pass
         return _open_private_directory(self._root_fd, name)
+
+    def inspect_abortable_partial(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        authority: OpaqueProviderRef,
+    ) -> AbortablePartial | Literal["absent", "not-partial"]:
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        abort_name = f".{name}.abort.json"
+        expected_abort = LocalPartialAbortReceiptV1(
+            binding=binding, plan_identity=plan_identity, authority=authority
+        )
+        try:
+            complete_fd = _open_private_directory(self._root_fd, name)
+        except FileNotFoundError:
+            pass
+        else:
+            os.close(complete_fd)
+            return "not-partial"
+        abort_receipt = self._read_optional_abort_receipt(abort_name)
+        if abort_receipt is not None and abort_receipt != expected_abort:
+            raise ValueError("partial abort receipt does not match teardown request")
+        partial_name = f".{name}.partial"
+        try:
+            directory_fd = _open_private_directory(self._root_fd, partial_name)
+        except FileNotFoundError:
+            if abort_receipt is None:
+                return "absent"
+            return AbortablePartial(intent=None, materialization=None)
+        try:
+            entries = set(os.listdir(directory_fd))
+            allowed = {
+                _INTENT_NAME,
+                _INITIAL_INTENT_TEMPORARY_NAME,
+                _PREPARATION_NAME,
+                _ARCHIVE_NAME,
+                f".{_ARCHIVE_NAME}.partial",
+            }
+            if entries - allowed:
+                raise ValueError("recovery partial contains unexpected residue")
+            intent: LocalPreStopIntentV1 | None = None
+            materialization: ExternalBootMaterialization | None = None
+            if _INTENT_NAME in entries:
+                intent = self._read_pre_stop(directory_fd)
+                if intent.binding != binding or intent.plan_identity != plan_identity:
+                    raise ValueError("recovery partial does not match teardown request")
+            if _PREPARATION_NAME in entries:
+                receipts = self._read_preparation(directory_fd)
+                for receipt in (receipts.materialize, receipts.prepare):
+                    if receipt is not None and (
+                        receipt.binding != binding
+                        or receipt.plan_identity != plan_identity
+                        or receipt.authority != authority
+                    ):
+                        raise ValueError("recovery partial does not match teardown request")
+                receipt = receipts.prepare or receipts.materialize
+                materialization = None if receipt is None else receipt.materialization
+            if intent is None and materialization is None and abort_receipt is None:
+                raise ValueError("recovery partial has no owned record")
+            return AbortablePartial(intent=intent, materialization=materialization)
+        finally:
+            os.close(directory_fd)
+
+    def remove_abortable_partial(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        checked = self.inspect_abortable_partial(binding, plan_identity, authority)
+        if isinstance(checked, str):
+            return
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        partial_name = f".{name}.partial"
+        abort_name = f".{name}.abort.json"
+        receipt = LocalPartialAbortReceiptV1(
+            binding=binding, plan_identity=plan_identity, authority=authority
+        )
+        data = receipt.model_dump_json(by_alias=True).encode()
+        if len(data) > _MAX_METADATA_BYTES:
+            raise ValueError("partial abort receipt exceeds its byte bound")
+        existing = self._read_optional_abort_receipt(abort_name)
+        if existing is None:
+            _replace_private_file(self._root_fd, f"{abort_name}.next", abort_name, data)
+            os.fsync(self._root_fd)
+        elif existing != receipt:
+            raise ValueError("partial abort receipt conflicts with teardown request")
+        try:
+            directory_fd = _open_private_directory(self._root_fd, partial_name)
+        except FileNotFoundError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                for entry in (
+                    f".{_ARCHIVE_NAME}.partial",
+                    _ARCHIVE_NAME,
+                    _INITIAL_INTENT_TEMPORARY_NAME,
+                    _INTENT_NAME,
+                    _PREPARATION_NAME,
+                ):
+                    with suppress(FileNotFoundError):
+                        os.unlink(entry, dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        with suppress(FileNotFoundError):
+            os.rmdir(partial_name, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+        with suppress(FileNotFoundError):
+            os.unlink(abort_name, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+
+    def remove_abortable_activation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        materialization: ExternalBootMaterialization,
+    ) -> None:
+        """Remove only artifacts authenticated by the durable preparation receipt."""
+        ownership = ActivationOwnership(system_id=binding.system_id, run_id=binding.run_id)
+        if materialization.ownership != ownership or materialization.plan_identity != plan_identity:
+            raise ValueError("materialization does not match partial abort ownership")
+        refs = [materialization.artifacts.kernel, materialization.artifacts.modules]
+        if materialization.artifacts.initrd is not None:
+            refs.append(materialization.artifacts.initrd)
+        parts = [_artifact_ref_parts(ref, ownership, binding.activation_id) for ref in refs]
+        if any(item[1:5] != parts[0][1:5] for item in parts[1:]):
+            raise ValueError("materialization artifacts do not share one projection")
+        try:
+            system_fd = _open_private_directory(self._root_fd, binding.system_id)
+        except FileNotFoundError:
+            return
+        try:
+            try:
+                run_fd = _open_private_directory(system_fd, binding.run_id)
+            except FileNotFoundError:
+                return
+            try:
+                try:
+                    activation_fd = _open_private_directory(run_fd, binding.activation_id)
+                except FileNotFoundError:
+                    return
+                try:
+                    try:
+                        digest_fd = _open_private_directory(activation_fd, parts[0][4])
+                    except FileNotFoundError:
+                        digest_fd = None
+                    if digest_fd is not None:
+                        try:
+                            try:
+                                projection_data = _read_private_file(digest_fd, _PROJECTION_NAME)
+                            except FileNotFoundError:
+                                pass
+                            else:
+                                projection = TargetProjectionV1.model_validate_json(projection_data)
+                                if (
+                                    projection.canonical_bytes() != projection_data
+                                    or projection.ownership != ownership
+                                    or projection.activation_id != binding.activation_id
+                                    or projection.plan_identity != plan_identity
+                                    or projection.digest.removeprefix("sha256:") != parts[0][4]
+                                ):
+                                    raise ValueError(
+                                        "target projection does not authenticate abort"
+                                    )
+                                os.unlink(_PROJECTION_NAME, dir_fd=digest_fd)
+                                os.fsync(digest_fd)
+                        finally:
+                            os.close(digest_fd)
+                    for item in parts:
+                        with suppress(FileNotFoundError):
+                            os.unlink(item[5], dir_fd=activation_fd)
+                            os.fsync(activation_fd)
+                    with suppress(FileNotFoundError):
+                        os.rmdir(parts[0][4], dir_fd=activation_fd)
+                        os.fsync(activation_fd)
+                finally:
+                    os.close(activation_fd)
+                with suppress(FileNotFoundError):
+                    os.rmdir(binding.activation_id, dir_fd=run_fd)
+                    os.fsync(run_fd)
+            finally:
+                os.close(run_fd)
+            with suppress(FileNotFoundError):
+                os.rmdir(binding.run_id, dir_fd=system_fd)
+                os.fsync(system_fd)
+        finally:
+            os.close(system_fd)
+        with suppress(FileNotFoundError):
+            os.rmdir(binding.system_id, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+
+    def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
+        try:
+            data = _read_private_file(self._root_fd, name)
+        except FileNotFoundError:
+            return None
+        if not data or len(data) > _MAX_METADATA_BYTES:
+            raise ValueError("partial abort receipt is empty or oversized")
+        receipt = LocalPartialAbortReceiptV1.model_validate_json(data)
+        if receipt.model_dump_json(by_alias=True).encode() != data:
+            raise ValueError("partial abort receipt is not canonical")
+        return receipt
+
+    def exact_recovery_absence(self, binding: ExternalBootActivationBinding) -> bool:
+        """Read-only proof that every exact activation-owned storage location is absent."""
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        for candidate in (name, f".{name}.partial"):
+            try:
+                descriptor = _open_private_directory(self._root_fd, candidate)
+            except FileNotFoundError:
+                continue
+            else:
+                os.close(descriptor)
+                return False
+        if self._read_optional_abort_receipt(f".{name}.abort.json") is not None:
+            return False
+        try:
+            system_fd = _open_private_directory(self._root_fd, binding.system_id)
+        except FileNotFoundError:
+            return True
+        try:
+            try:
+                run_fd = _open_private_directory(system_fd, binding.run_id)
+            except FileNotFoundError:
+                return True
+            try:
+                try:
+                    activation_fd = _open_private_directory(run_fd, binding.activation_id)
+                except FileNotFoundError:
+                    return True
+                else:
+                    os.close(activation_fd)
+                    return False
+            finally:
+                os.close(run_fd)
+        finally:
+            os.close(system_fd)
 
     def _open_preparation_directory(
         self, binding: ExternalBootActivationBinding, *, create: bool
