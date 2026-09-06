@@ -64,11 +64,14 @@ class ModuleVolumeReaperConn(Protocol):
     def storagePoolLookupByName(self, name: str) -> _Pool: ...
     def listAllDomains(self, flags: int = 0) -> list[_Domain]: ...
 
+
 def list_owned_module_volumes(
     conn: ModuleVolumeReaperConn, pool_name: str
 ) -> list[tuple[str, ModuleVolumeOwner]]: ...
 
+
 def referenced_volume_paths(conn: ModuleVolumeReaperConn) -> frozenset[str]: ...
+
 
 def reap_orphaned_module_volumes(
     conn: ModuleVolumeReaperConn,
@@ -135,6 +138,7 @@ class ModuleVolumeKey(NamedTuple):
     run_id: str
     operation_nonce: str
     kind: str
+
 
 class ModuleVolumeReaper(Protocol):
     async def reap_module_volumes(
