@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
@@ -59,6 +59,12 @@ class PayloadValidationError(ValueError):
 
 class _PayloadBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class RemoteModuleVolumeReapPayload(_PayloadBase):
+    """Closed worker-maintenance payload; selects no remote authority or target."""
+
+    schema: Literal["remote-module-volume-reap-v1"]
 
 
 class Authorizing(_PayloadBase):
@@ -464,6 +470,7 @@ type _ActivePayloadModel = (
     | type[ReclaimInvestigationRootfsPayload]
     | type[BootPayload]
     | type[TeardownPayload]
+    | type[RemoteModuleVolumeReapPayload]
 )
 type ActivePayloadModel = (
     SystemPayload
@@ -485,6 +492,7 @@ type ActivePayloadModel = (
     | ReclaimInvestigationRootfsPayload
     | BootPayload
     | TeardownPayload
+    | RemoteModuleVolumeReapPayload
 )
 _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
@@ -507,6 +515,7 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.CHECK_SSH_REACHABLE: CheckSshReachablePayload,
     JobKind.CONSOLE_ROTATE: ConsoleRotatePayload,
     JobKind.RECLAIM_INVESTIGATION_ROOTFS: ReclaimInvestigationRootfsPayload,
+    JobKind.REMOTE_MODULE_VOLUME_REAP: RemoteModuleVolumeReapPayload,
 }
 _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,

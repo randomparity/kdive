@@ -16,6 +16,7 @@ from kdive.jobs.assembly import WorkerHandlerAssembly, register_all_handlers
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.infra.reaping import NullModuleVolumeReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -109,6 +110,7 @@ def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> No
             SimpleNamespace(credential=credential),
         ),
         worker_check_builders={},
+        module_volume_reaper=NullModuleVolumeReaper(),
     )
 
     register_all_handlers(registry, assembly)

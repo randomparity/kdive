@@ -199,23 +199,56 @@ def test_retained_set_is_read_after_enumeration() -> None:
     assert events.index("retained") > events.index(f"enumerate:{POOL}")
 
 
-def test_unrestored_attempt_keeps_both_volumes() -> None:
+def test_retention_matches_the_complete_owner_key() -> None:
     events: list[str] = []
     volumes = [
         Volume(_name("source.ext4"), "/pool/source", events),
         Volume(_name("scratch.ext4"), "/pool/scratch", events),
     ]
     run, events, _ = _subject(volumes=volumes, retained={_owner("source.ext4")})
-    assert run() == 0
-    assert not any(event.startswith("delete:") for event in events)
+    assert run() == 1
+    assert f"delete:{_name('source.ext4')}" not in events
+    assert f"delete:{_name('scratch.ext4')}" in events
 
 
-def test_in_flight_reap_journal_is_kept() -> None:
+def test_one_reap_journal_does_not_retain_the_other() -> None:
     run, events, _ = _subject(
         volumes=[Volume(_name("reaping.journal"), "/pool/reaping", [])],
         retained={_owner("reaped.journal")},
     )
-    assert run() == 0
+    assert run() == 1
+    assert any(event.startswith("delete:") for event in events)
+
+
+def test_expired_deadline_after_identity_lookup_starts_no_delete() -> None:
+    events: list[str] = []
+    volume = Volume(_name(), "/pool/source", events)
+    pool = Pool(POOL, [volume], events)
+    conn = Conn([pool], events)
+
+    class ExpiringIdentity(IdentityPort):
+        def identity(self, path: str) -> RemoteDeviceIdentity | None:
+            result = super().identity(path)
+            clock.expired = True
+            return result
+
+    class Clock:
+        expired = False
+
+        def __call__(self) -> float:
+            return 2.0 if self.expired else 0.0
+
+    clock = Clock()
+    with pytest.raises(CategorizedError) as caught:
+        reap_orphaned_module_volumes(
+            cast("ModuleVolumeReaperConn", conn),
+            POOL,
+            ExpiringIdentity(),
+            retained_owners=set,
+            deadline=1.0,
+            clock=clock,
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not any(event.startswith("delete:") for event in events)
 
 

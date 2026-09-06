@@ -709,7 +709,7 @@ def test_dump_volume_reaper_is_remote_when_enabled() -> None:
 def test_module_volume_reaper_is_null_without_remote() -> None:
     from kdive.providers.infra.reaping import NullModuleVolumeReaper
 
-    reaper = composition.ProviderComposition().build_reconciler_module_volume_reaper(
+    reaper = composition.ProviderComposition().build_worker_module_volume_reaper(
         enable_remote_libvirt=False
     )
     assert isinstance(reaper, NullModuleVolumeReaper)
@@ -720,7 +720,7 @@ def test_module_volume_reaper_is_remote_when_enabled() -> None:
         RemoteLibvirtModuleVolumeReaper,
     )
 
-    reaper = composition.ProviderComposition().build_reconciler_module_volume_reaper(
+    reaper = composition.ProviderComposition().build_worker_module_volume_reaper(
         enable_remote_libvirt=True
     )
     assert isinstance(reaper, RemoteLibvirtModuleVolumeReaper)
@@ -1027,7 +1027,7 @@ def test_remote_factory_builders_thread_the_shared_registry(
     assert comp.build_reconciler_transport_resetter(enable_remote_libvirt=True) is resetter_obj
     assert comp.build_reconciler_dump_volume_reaper(enable_remote_libvirt=True) is dump_obj
     assert (
-        comp.build_reconciler_module_volume_reaper(
+        comp.build_worker_module_volume_reaper(
             enable_remote_libvirt=True,
             authority_sender_factory=cast(Any, authority_factory),
         )

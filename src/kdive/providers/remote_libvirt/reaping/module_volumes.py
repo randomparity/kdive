@@ -131,7 +131,15 @@ def _domain_documents(domain: _Domain) -> list[str]:
         raise _infra("could not read remote module attachment") from exc
 
 
-def _reference_paths(conn: ModuleVolumeReaperConn) -> set[str]:
+def _admit_path(paths: set[str], path: str, *, pool: str) -> None:
+    paths.add(path)
+    if len(paths) > _MAX_PATH_IDENTITIES:
+        raise _infra("remote device identity lookup budget exceeded", pool=pool)
+
+
+def _reference_paths(
+    conn: ModuleVolumeReaperConn, *, admitted_paths: set[str] | None = None
+) -> set[str]:
     try:
         domains = conn.listAllDomains(0)
     except libvirt.libvirtError as exc:
@@ -145,7 +153,10 @@ def _reference_paths(conn: ModuleVolumeReaperConn) -> set[str]:
             except (ET.ParseError, DefusedXmlException, ValueError) as exc:
                 raise _conflict("could not inspect remote module attachment") from exc
             for path in path_references(root):
-                result.add(_normalize(path))
+                normalized = _normalize(path)
+                result.add(normalized)
+                if admitted_paths is not None:
+                    _admit_path(admitted_paths, normalized, pool="remote-libvirt")
             for pool_name, volume_name in volume_references(root):
                 try:
                     pool = conn.storagePoolLookupByName(pool_name)
@@ -156,7 +167,10 @@ def _reference_paths(conn: ModuleVolumeReaperConn) -> set[str]:
                         pool=pool_name,
                         volume=volume_name,
                     ) from exc
-                result.add(_normalize(path, pool=pool_name, volume=volume_name))
+                normalized = _normalize(path, pool=pool_name, volume=volume_name)
+                result.add(normalized)
+                if admitted_paths is not None:
+                    _admit_path(admitted_paths, normalized, pool=pool_name)
     return result
 
 
@@ -190,8 +204,9 @@ def _identity(
     return identity
 
 
-def _attempt(owner: ModuleVolumeOwner) -> tuple[str, str, str]:
-    return owner.system_id, owner.run_id, owner.operation_nonce
+def _deadline_not_expired(deadline: float | None, clock: Callable[[], float], *, pool: str) -> None:
+    if deadline is not None and clock() >= deadline:
+        raise _infra("remote module volume reaping deadline expired", pool=pool)
 
 
 def reap_orphaned_module_volumes(
@@ -200,38 +215,37 @@ def reap_orphaned_module_volumes(
     identity_port: RemoteDeviceIdentityPort,
     *,
     retained_owners: Callable[[], Collection[ModuleVolumeOwner]],
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """Delete unretained owned volumes only after a complete host attachment preflight."""
     pool = _open_pool(conn, pool_name)
     owned = _enumerate_owned(pool, pool_name)
-    retained_attempts = {_attempt(owner) for owner in retained_owners()}
-    candidates = [item for item in owned if _attempt(item[1]) not in retained_attempts]
+    retained = set(retained_owners())
+    candidates = [item for item in owned if item[1] not in retained]
     if not candidates:
         return 0
 
     candidate_paths: list[tuple[str, _Volume, ModuleVolumeOwner]] = []
+    admitted_paths: set[str] = set()
     for volume, owner in candidates:
         name = volume.name()
         try:
-            candidate_paths.append(
-                (
-                    _normalize(volume.path(), pool=pool_name, volume=name),
-                    volume,
-                    owner,
-                )
-            )
+            path = _normalize(volume.path(), pool=pool_name, volume=name)
+            _admit_path(admitted_paths, path, pool=pool_name)
+            candidate_paths.append((path, volume, owner))
         except libvirt.libvirtError as exc:
             raise _infra(
                 "could not resolve remote module volume", pool=pool_name, volume=name
             ) from exc
-    reference_paths = _reference_paths(conn)
-    all_paths = {path for path, _, _ in candidate_paths} | reference_paths
-    if len(all_paths) > _MAX_PATH_IDENTITIES:
-        raise _infra("remote device identity lookup budget exceeded", pool=pool_name)
+    _deadline_not_expired(deadline, clock, pool=pool_name)
+    reference_paths = _reference_paths(conn, admitted_paths=admitted_paths)
+    all_paths = admitted_paths
 
     identities: dict[str, RemoteDeviceIdentity] = {}
     candidate_by_path = {path: volume for path, volume, _ in candidate_paths}
     for path in sorted(all_paths):
+        _deadline_not_expired(deadline, clock, pool=pool_name)
         candidate = candidate_by_path.get(path)
         identities[path] = _identity(
             identity_port,
@@ -243,6 +257,7 @@ def reap_orphaned_module_volumes(
 
     removed = 0
     for path, volume, _owner in candidate_paths:
+        _deadline_not_expired(deadline, clock, pool=pool_name)
         name = volume.name()
         if identities[path] in referenced_identities:
             _LOG.warning(
@@ -314,9 +329,8 @@ class RemoteLibvirtModuleVolumeReaper:
                 if config.authority is None or self._authority_sender_factory is None:
                     raise _conflict("remote module provider authority is unavailable")
                 sender = self._authority_sender_factory(config.authority)
-                identity = build_remote_device_identity_port(
-                    sender, self._clock() + _HOST_SWEEP_SECONDS
-                )
+                deadline = self._clock() + _HOST_SWEEP_SECONDS
+                identity = build_remote_device_identity_port(sender, deadline)
                 if identity is None:
                     raise _conflict("remote module provider authority is unavailable")
                 return reap_orphaned_module_volumes(
@@ -324,6 +338,8 @@ class RemoteLibvirtModuleVolumeReaper:
                     config.storage_pool,
                     identity,
                     retained_owners=retained_sync,
+                    deadline=deadline,
+                    clock=self._clock,
                 )
 
             return sum(

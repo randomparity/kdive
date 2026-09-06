@@ -109,6 +109,8 @@ def test_fleet_runs_in_worker_and_bridges_retention_to_event_loop(
         identity: object,
         *,
         retained_owners: object,
+        deadline: float,
+        clock: object,
     ) -> int:
         events.append(("worker", threading.get_ident()))
         events.append(("host", (conn, pool)))
@@ -201,6 +203,8 @@ def test_repeated_cancellation_waits_for_callback_and_worker(
         _identity: object,
         *,
         retained_owners: object,
+        deadline: float,
+        clock: object,
     ) -> int:
         cast(Any, retained_owners)()
         worker_release.wait()

@@ -479,14 +479,14 @@ class ProviderComposition:
                 return descriptor.dump_volume_reaper_factory()
         return NullDumpVolumeReaper()
 
-    def build_reconciler_module_volume_reaper(
+    def build_worker_module_volume_reaper(
         self,
         *,
         enable_remote_libvirt: bool | None = None,
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
         | None = None,
     ) -> ModuleVolumeReaper:
-        """Assemble the remote module-volume fleet reaper when its provider is enabled."""
+        """Assemble the worker-owned remote module-volume fleet reaper when enabled."""
         for descriptor in self._enabled_runtime_descriptors(
             enable_remote_libvirt=enable_remote_libvirt,
             authority_sender_factory=authority_sender_factory,
