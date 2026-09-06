@@ -75,8 +75,14 @@ async def build_external_boot_payload(
             f"provider_kind {provider_kind!r} does not match the {binding.kind.value!r} runtime "
             f"bound for system {activation.system_id}"
         )
-    if server_authority_instance(binding) != authority_instance:
-        raise _refuse("authority_instance does not match the fixed server route")
+    if binding.runtime.external_boot is None:
+        if activation.state.value != "preparing":
+            raise _refuse(
+                f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
+                "has no external_boot port"
+            )
+        if server_authority_instance(binding) != authority_instance:
+            raise _refuse("authority_instance does not match the fixed server route")
     if activation.state.value == "preparing":
         if preparation_plan is None:
             raise _refuse("a preparing activation requires its durable preparation plan")
