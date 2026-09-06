@@ -270,6 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discharge terminal module obligations
 - Discharge terminal module mutations
 - Materialize local external boot artifacts
+- Fence crashes to active owning runs
 
 ### Changed
 
@@ -2150,6 +2151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound materializer validation storage
 - Fence provision during system teardown
 - Cite teardown race ordering
+- Regenerate owning-run crash options
 
 ### Security
 
