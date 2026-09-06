@@ -564,7 +564,11 @@ def test_recovery_metadata_binds_expected_observation_release() -> None:
 
 def _projection() -> TargetProjectionV1:
     return TargetProjectionV1(
-        ownership={"system_id": _BINDING.system_id, "run_id": _BINDING.run_id},
+        ownership={
+            "system_id": _BINDING.system_id,
+            "run_id": _BINDING.run_id,
+        },
+        activation_id=_BINDING.activation_id,
         plan_identity="sha256:" + "6" * 64,
         architecture="x86_64",
         cmdline="root=/dev/vda1 console=ttyS0",
@@ -578,11 +582,14 @@ def test_target_projection_sidecar_publishes_and_reopens_exactly(tmp_path: Path)
     projection = _projection()
     with TargetProjectionStore(root) as store:
         kernel_ref = store.publish(projection)
-        assert store.reopen(kernel_ref, projection.ownership) == projection
+        assert (
+            store.reopen(kernel_ref, projection.ownership, projection.activation_id) == projection
+        )
     sidecar = (
         root
         / projection.ownership.system_id
         / projection.ownership.run_id
+        / projection.activation_id
         / projection.digest.removeprefix("sha256:")
         / "target-projection.json"
     )
@@ -600,6 +607,7 @@ def test_target_projection_sidecar_retries_interrupted_temporary_publication(
     for name in (
         projection.ownership.system_id,
         projection.ownership.run_id,
+        projection.activation_id,
         projection.digest.removeprefix("sha256:"),
     ):
         directory /= name
@@ -610,7 +618,9 @@ def test_target_projection_sidecar_retries_interrupted_temporary_publication(
 
     with TargetProjectionStore(root) as store:
         kernel_ref = store.publish(projection)
-        assert store.reopen(kernel_ref, projection.ownership) == projection
+        assert (
+            store.reopen(kernel_ref, projection.ownership, projection.activation_id) == projection
+        )
 
     assert not temporary.exists()
 
@@ -625,18 +635,19 @@ def test_target_projection_sidecar_rejects_substitution_and_cross_owner(tmp_path
         root
         / projection.ownership.system_id
         / projection.ownership.run_id
+        / projection.activation_id
         / projection.digest.removeprefix("sha256:")
         / "target-projection.json"
     )
     replacement = projection.model_copy(update={"cmdline": "root=/dev/vda2"})
     sidecar.write_bytes(replacement.canonical_bytes())
     with TargetProjectionStore(root) as store, pytest.raises(ValueError, match="digest-bound"):
-        store.reopen(kernel_ref, projection.ownership)
+        store.reopen(kernel_ref, projection.ownership, projection.activation_id)
     crossed = projection.ownership.model_copy(
         update={"run_id": "00000000-0000-0000-0000-000000000009"}
     )
     with TargetProjectionStore(root) as store, pytest.raises(ValueError, match="cross-owner"):
-        store.reopen(kernel_ref, crossed)
+        store.reopen(kernel_ref, crossed, projection.activation_id)
 
 
 def test_recovery_metadata_store_publishes_reopens_and_advances_phase(tmp_path: Path) -> None:
@@ -938,6 +949,66 @@ def test_pre_stop_substitution_conflicts_before_complete_publication(tmp_path: P
             )
 
 
+def test_receipt_only_partial_is_authenticated_and_removed(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": request.plan.identity}
+        ),
+    )
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        partial = store.inspect_abortable_partial(
+            _BINDING, request.plan.identity, request.authority
+        )
+        assert not isinstance(partial, str)
+        assert partial.intent is None
+        assert partial.materialization == receipt.materialization
+        store.remove_abortable_partial(_BINDING, request.plan.identity, request.authority)
+        assert (
+            store.inspect_abortable_partial(_BINDING, request.plan.identity, request.authority)
+            == "absent"
+        )
+
+
+def test_complete_record_takes_precedence_over_partial_absence(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+        assert (
+            store.inspect_abortable_partial(
+                _BINDING,
+                metadata.plan_identity,
+                OpaqueProviderRef(ref="authority/current"),
+            )
+            == "not-partial"
+        )
+        assert store.exact_recovery_absence(_BINDING) is False
+
+
+def test_exact_recovery_absence_includes_activation_artifacts(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    activation = root / _BINDING.system_id / _BINDING.run_id / _BINDING.activation_id
+    activation.mkdir(mode=0o700, parents=True)
+    for parent in (activation.parent, activation.parent.parent):
+        parent.chmod(0o700)
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING) is False
+    activation.rmdir()
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING) is True
+
+
 def _materialization() -> ExternalBootMaterialization:
     return ExternalBootMaterialization(
         architecture="x86_64",
@@ -955,11 +1026,57 @@ def _materialization() -> ExternalBootMaterialization:
             "gnu_build_id": "01020304",
         },
         artifacts=MaterializedArtifacts(
-            kernel=OpaqueProviderRef(ref="artifacts/system/run/kernel"),
-            modules=OpaqueProviderRef(ref="artifacts/system/run/modules"),
+            kernel=OpaqueProviderRef(
+                ref=f"local-artifact-v2/{_BINDING.system_id}/{_BINDING.run_id}/"
+                f"{_BINDING.activation_id}/{'a' * 64}/kernel"
+            ),
+            modules=OpaqueProviderRef(
+                ref=f"local-artifact-v2/{_BINDING.system_id}/{_BINDING.run_id}/"
+                f"{_BINDING.activation_id}/{'a' * 64}/modules"
+            ),
             initrd=None,
         ),
     )
+
+
+def test_real_materializer_capacity_accepts_equality_and_refuses_one_over() -> None:
+    plan = _plan()
+    reservation = (
+        plan.bundle.decoded_kernel_size_bytes
+        + (0 if plan.initrd is None else plan.initrd.size_bytes)
+        + plan.module_obligation.uncompressed_bytes
+        + plan.module_obligation.member_count * 1024
+        + external_boot_module.MAX_ARCHIVE_BYTES * 2
+        + external_boot_module._MAX_PROJECTION_BYTES
+        + external_boot_module._MAX_RECOVERY_METADATA_BYTES
+    )
+    calls: list[ExternalBootPlan] = []
+
+    class Materializer:
+        def materialize(self, value: ExternalBootPlan, _session: object):
+            calls.append(value)
+            return _materialization()
+
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        Path("/unused"),
+        cast(external_boot_module.LocalExternalBootMaterializer, Materializer()),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, object()),
+        reservation,
+    )
+    operation.materialize(plan)
+    assert calls == [plan]
+
+    over = external_boot_module._RealLocalExternalBootOperation(
+        Path("/unused"),
+        cast(external_boot_module.LocalExternalBootMaterializer, Materializer()),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, object()),
+        reservation - 1,
+    )
+    with pytest.raises(ValueError, match="configured capacity"):
+        over.materialize(plan)
+    assert calls == [plan]
 
 
 def _plan() -> ExternalBootPlan:
@@ -1684,7 +1801,12 @@ class _RealSession:
     def restore_power(self, prior: str) -> None:
         self.preparation.actions.append(f"power:{prior}")
 
-    def cleanup_payloads(self) -> None:
+    def readiness(self) -> ReadinessResult:
+        self.preparation.actions.append("readiness")
+        return ReadinessResult(True, True)
+
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        assert metadata.binding == self.preparation.metadata.binding
         self.preparation.actions.append("cleanup")
 
     def close(self) -> None:
@@ -1695,6 +1817,123 @@ class _RealSession:
 
 class _ProcessLost(BaseException):
     pass
+
+
+def test_pre_stop_abort_restores_running_source_before_removing_partial(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata().model_copy(update={"prior_power": "running"})
+    intent = _pre_stop(metadata)
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    preparation = _RealPreparation(metadata, root)
+    session = _RealSession(preparation)
+    session.inspection = replace(session.inspection, active=False)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+
+    result = operation.abort_preparation(
+        _BINDING,
+        metadata.plan_identity,
+        metadata.source_boot,
+        metadata.target_boot,
+        OpaqueProviderRef(ref="authority/current"),
+    )
+
+    assert result == "removed"
+    assert preparation.actions == ["power:running", "readiness"]
+    with RecoveryMetadataStore(root) as store:
+        assert (
+            store.inspect_abortable_partial(
+                _BINDING,
+                metadata.plan_identity,
+                OpaqueProviderRef(ref="authority/current"),
+            )
+            == "absent"
+        )
+
+
+@pytest.mark.parametrize(
+    "interrupted_name",
+    [
+        ".modules.tar.partial",
+        "modules.tar",
+        ".intent.initial",
+        "intent.json",
+        "preparation-result.json",
+    ],
+)
+def test_partial_abort_retries_each_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted_name: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata().model_copy(update={"prior_power": "inactive"})
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": request.plan.identity}
+        ),
+    )
+    intent = _pre_stop(metadata).model_copy(update={"plan_identity": request.plan.identity})
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        store.publish_pre_stop(intent)
+    partial = root / f".{_BINDING.system_id}.{_BINDING.activation_id}.partial"
+    for name in ("modules.tar", ".modules.tar.partial", ".intent.initial"):
+        (partial / name).write_bytes(b"residue")
+        (partial / name).chmod(0o600)
+    preparation = _RealPreparation(metadata, root)
+    session = _RealSession(preparation)
+    session.inspection = replace(session.inspection, active=False)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+    original_unlink = external_boot_module.os.unlink
+    interrupted = False
+
+    def fail_once(name: str, *, dir_fd: int) -> None:
+        nonlocal interrupted
+        if name == interrupted_name and not interrupted:
+            interrupted = True
+            raise OSError("interrupted unlink")
+        original_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(external_boot_module.os, "unlink", fail_once)
+    with pytest.raises(OSError, match="interrupted unlink"):
+        operation.abort_preparation(
+            _BINDING,
+            request.plan.identity,
+            metadata.source_boot,
+            metadata.target_boot,
+            request.authority,
+        )
+    assert interrupted
+    assert (
+        operation.abort_preparation(
+            _BINDING,
+            request.plan.identity,
+            metadata.source_boot,
+            metadata.target_boot,
+            request.authority,
+        )
+        == "removed"
+    )
+    assert not partial.exists()
 
 
 class _RestartFaults:
@@ -1878,8 +2117,8 @@ class _RestartSession(_RealSession):
     def observe_running(self) -> RunningKernelObservation:
         return self.running_observation
 
-    def cleanup_payloads(self) -> None:
-        self.faults.run("cleanup-payloads", lambda: _RealSession.cleanup_payloads(self))
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.faults.run("cleanup-payloads", lambda: _RealSession.cleanup_payloads(self, metadata))
 
 
 def _restart_fixture(
@@ -1923,7 +2162,10 @@ def _restart_fixture(
         update={
             "capture": capture,
             "materialized_modules": OpaqueProviderRef(
-                ref=(f"local-artifact-v1/{_BINDING.system_id}/{_BINDING.run_id}/{'a' * 64}/modules")
+                ref=(
+                    f"local-artifact-v2/{_BINDING.system_id}/{_BINDING.run_id}/"
+                    f"{_BINDING.activation_id}/{'a' * 64}/modules"
+                )
             ),
             "materialized_modules_sha256": (
                 "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -1963,6 +2205,7 @@ def _restart_fixture(
         writer,
         lambda _authority: cast(LocalExternalBootOperationLease, object()),
         factory,
+        32 * 1024**3,
     )
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
@@ -2072,6 +2315,7 @@ class _FreshRestartHarness:
             writer,
             lambda _authority: cast(LocalExternalBootOperationLease, object()),
             cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+            32 * 1024**3,
         )
         self.sessions.append(session)
         self._invocations += 1
@@ -2806,7 +3050,10 @@ def test_activation_rejects_substituted_artifact_reference_before_guest_mutation
     substituted = metadata.model_copy(
         update={
             "materialized_modules": OpaqueProviderRef(
-                ref=f"local-artifact-v1/{_BINDING.system_id}/foreign/{'a' * 64}/modules"
+                ref=(
+                    f"local-artifact-v2/{_BINDING.system_id}/foreign/"
+                    f"{_BINDING.activation_id}/{'a' * 64}/modules"
+                )
             )
         }
     )
@@ -3053,6 +3300,7 @@ def test_real_adapter_captures_recovery_through_session_owned_capabilities(
         writer,
         lambda _authority: cast(LocalExternalBootOperationLease, object()),
         cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
     )
 
     prepared = _real_prepare(io, materialization)
@@ -3128,6 +3376,7 @@ def _real_io(
         _RecordingRecoveryWriter(preparation),
         lambda _authority: cast(LocalExternalBootOperationLease, object()),
         factory,
+        32 * 1024**3,
     )
     return io, session
 
@@ -3586,6 +3835,7 @@ def test_real_adapter_cleanup_complete_still_validates_authority(
         _RecordingRecoveryWriter(host),
         resolve,
         cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
     )
     ports = LocalLibvirtExternalBoot(io)
     with RecoveryMetadataStore(root) as store:
@@ -3617,6 +3867,7 @@ def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path:
         _RecordingRecoveryWriter(host),
         reject_session,
         cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
     )
     ports = LocalLibvirtExternalBoot(io)
     proof = FinalizeCleanupProof(
@@ -4106,3 +4357,123 @@ def test_target_projection_digest_still_measures_projection_inputs() -> None:
     assert "<domain" not in canonical.decode()
     changed = projection.model_copy(update={"cmdline": projection.cmdline + " quiet"})
     assert changed.digest != projection.digest
+
+
+@pytest.mark.parametrize("boundary", ["partial-rmdir", "abort-unlink", "after-abort-unlink"])
+def test_partial_abort_receipt_survives_final_removal_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    intent = _pre_stop(_metadata().model_copy(update={"prior_power": "inactive"}))
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    partial_name = f".{_BINDING.system_id}.{_BINDING.activation_id}.partial"
+    abort_name = f".{_BINDING.system_id}.{_BINDING.activation_id}.abort.json"
+    real_unlink = os.unlink
+    real_rmdir = os.rmdir
+    interrupted = False
+
+    def interrupt_unlink(path: str, *, dir_fd: int) -> None:
+        nonlocal interrupted
+        if path == abort_name and boundary == "abort-unlink" and not interrupted:
+            interrupted = True
+            raise OSError("injected abort unlink interruption")
+        real_unlink(path, dir_fd=dir_fd)
+        if path == abort_name and boundary == "after-abort-unlink" and not interrupted:
+            interrupted = True
+            raise OSError("injected post-abort unlink interruption")
+
+    def interrupt_rmdir(path: str, *, dir_fd: int) -> None:
+        nonlocal interrupted
+        if path == partial_name and boundary == "partial-rmdir" and not interrupted:
+            interrupted = True
+            raise OSError("injected partial rmdir interruption")
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", interrupt_unlink)
+    monkeypatch.setattr(os, "rmdir", interrupt_rmdir)
+    with RecoveryMetadataStore(root) as store, pytest.raises(OSError, match="injected"):
+        store.remove_abortable_partial(_BINDING, intent.plan_identity, authority)
+
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    monkeypatch.setattr(os, "rmdir", real_rmdir)
+    with RecoveryMetadataStore(root) as restarted:
+        restarted.remove_abortable_partial(_BINDING, intent.plan_identity, authority)
+        assert restarted.exact_recovery_absence(_BINDING)
+
+
+def test_partial_abort_receipt_rejects_foreign_request_after_last_owned_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    intent = _pre_stop(_metadata().model_copy(update={"prior_power": "inactive"}))
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    partial_name = f".{_BINDING.system_id}.{_BINDING.activation_id}.partial"
+    real_rmdir = os.rmdir
+
+    def interrupt_rmdir(path: str, *, dir_fd: int) -> None:
+        if path == partial_name:
+            raise OSError("injected partial rmdir interruption")
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "rmdir", interrupt_rmdir)
+    with RecoveryMetadataStore(root) as store, pytest.raises(OSError, match="injected"):
+        store.remove_abortable_partial(_BINDING, intent.plan_identity, authority)
+    monkeypatch.setattr(os, "rmdir", real_rmdir)
+
+    with (
+        RecoveryMetadataStore(root) as restarted,
+        pytest.raises(ValueError, match="does not match"),
+    ):
+        restarted.remove_abortable_partial(
+            _BINDING, intent.plan_identity, OpaqueProviderRef(ref="authority/foreign")
+        )
+    assert (root / partial_name).is_dir()
+
+
+def test_authenticated_partial_abort_removes_activation_artifacts_before_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection = _projection()
+    with TargetProjectionStore(root) as projections:
+        kernel = projections.publish(projection)
+    activation = root / _BINDING.system_id / _BINDING.run_id / _BINDING.activation_id
+    for name in ("kernel", "modules"):
+        (activation / name).write_bytes(b"owned")
+        (activation / name).chmod(0o600)
+    materialization = _materialization().model_copy(
+        update={
+            "plan_identity": projection.plan_identity,
+            "artifacts": MaterializedArtifacts(
+                kernel=kernel,
+                modules=external_boot_module._projection_ref(projection, "modules"),
+                initrd=None,
+            ),
+        }
+    )
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=projection.plan_identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=materialization,
+    )
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        partial = store.inspect_abortable_partial(
+            _BINDING, projection.plan_identity, request.authority
+        )
+        assert not isinstance(partial, str) and partial.materialization is not None
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+        assert not store.exact_recovery_absence(_BINDING)
+        store.remove_abortable_partial(_BINDING, projection.plan_identity, request.authority)
+        assert store.exact_recovery_absence(_BINDING)
