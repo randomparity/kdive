@@ -9,11 +9,12 @@ import re
 import socket
 import stat
 import time
-from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import quote
 
 from psycopg import AsyncConnection
 from pydantic import SecretStr
@@ -134,6 +135,14 @@ class AuthorityHostConfig:
             except ValueError, TypeError:
                 raise HostReadinessError("configuration", "invalid") from None
 
+    @property
+    def remote_module_store_dir(self) -> Path:
+        return self.state_dir / "remote-module-preparations/evidence"
+
+    @property
+    def remote_module_work_dir(self) -> Path:
+        return self.state_dir / "remote-module-preparations/work"
+
     @classmethod
     def from_environment(cls) -> AuthorityHostConfig:
         """Load fixed registry settings and fixed systemd credential descriptors."""
@@ -236,6 +245,14 @@ def _validate_access_boundary(config: AuthorityHostConfig) -> None:
         (config.credentials_source_dir, config.authority_uid, config.authority_gid, 0o700),
         (config.state_dir, config.authority_uid, config.authority_gid, 0o700),
         (config.journal_dir, config.authority_uid, config.authority_gid, 0o700),
+        (
+            config.remote_module_store_dir.parent,
+            config.authority_uid,
+            config.authority_gid,
+            0o700,
+        ),
+        (config.remote_module_store_dir, config.authority_uid, config.authority_gid, 0o700),
+        (config.remote_module_work_dir, config.authority_uid, config.authority_gid, 0o700),
         (runtime_dir, config.authority_uid, config.authority_client_gid, 0o710),
         (config.request_socket.parent, config.authority_uid, config.authority_client_gid, 0o2750),
         (config.provider_socket.parent, config.authority_uid, config.authority_gid, 0o700),
@@ -1073,13 +1090,112 @@ async def _authenticate(config: AuthorityHostConfig, credential: SecretStr) -> A
 
 def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
     """Build mutation support only on a host with an explicitly provisioned local root."""
-    from kdive.providers.assembly.composition import build_authority_mutation_adapter
-    from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-    from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
+    import libvirt
 
-    adapter = build_authority_mutation_adapter(config.provider_socket)
-    if adapter is None:
+    from kdive.providers.assembly.composition import (
+        build_authority_mutation_adapter,
+        object_store_from_env,
+    )
+    from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+    from kdive.providers.external_boot_authority.service import (
+        AuthorityAdapterCloser,
+        ExternalBootAuthorityService,
+    )
+    from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+        RealLocalExternalBootMaterializer,
+    )
+    from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
+    from kdive.providers.remote_libvirt.external_boot_authority import (
+        DurableRemoteModuleVolumePreparationHost,
+        RemoteExternalBootAuthorityAdapter,
+        RemoteExternalBootCoordinator,
+        RemoteModuleVolumePreparationStore,
+    )
+    from kdive.providers.remote_libvirt.external_boot_materialization import (
+        ConcreteRemoteExternalBootMaterializer,
+    )
+    from kdive.providers.remote_libvirt.external_boot_operations import (
+        ConcreteRemoteExternalBootOperations,
+    )
+    from kdive.providers.remote_libvirt.lifecycle.external_boot import OBSERVATION_PROGRAMS
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+        RemoteModulePreparationExecutor,
+    )
+    from kdive.providers.remote_libvirt.remote_module_authority_host import (
+        FactoryRemoteModuleAuthorityHost,
+        RemoteModuleAuthorityHostFactory,
+    )
+    from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
+    from kdive.security.secrets.secret_registry import SecretRegistry
+
+    if config_registry.get(LIBVIRT_RECOVERY_ROOT) is None:
         return None
+    object_store = object_store_from_env()
+    delegate = build_authority_mutation_adapter(config.provider_socket, object_store)
+    if delegate is None:
+        return None
+
+    uri = f"qemu+unix:///system?socket={quote(str(config.provider_socket), safe='/')}"
+    connection = libvirt.open(uri)
+    if connection is None:
+        raise HostReadinessError("provider-socket", "unreachable")
+    module_store = RemoteModuleVolumePreparationStore(config.remote_module_store_dir)
+    module_executor = RemoteModulePreparationExecutor()
+    registry = SecretRegistry()
+    monotonic = time.monotonic
+
+    @contextmanager
+    def provider_connection() -> Iterator[Any]:
+        yield connection
+
+    artifact_stager = RealLocalExternalBootMaterializer(object_store)
+    module_factory = RemoteModuleAuthorityHostFactory(
+        connection=connection,
+        pool_name="default",
+        work_dir=config.remote_module_work_dir,
+        appliance_root=Path("/var/lib/libvirt/kdive/module-appliance/v1"),
+        artifact_stager=artifact_stager,
+        secret_registry=registry,
+        executor=module_executor,
+        monotonic=monotonic,
+    )
+    remote_module_host = DurableRemoteModuleVolumePreparationHost(
+        module_store,
+        FactoryRemoteModuleAuthorityHost(module_factory),
+        monotonic=monotonic,
+    )
+    materializer = ConcreteRemoteExternalBootMaterializer(
+        object_store=object_store,
+        connection=provider_connection,
+        pool_name="default",
+        capacity_bytes=10 * 1024**3,
+        monotonic=monotonic,
+        artifact_stager=artifact_stager,
+    )
+    operations = ConcreteRemoteExternalBootOperations(
+        materializer,
+        provider_connection,
+        "default",
+        monotonic,
+        GuestAgentExec(
+            agent_command=qemu_agent_command,
+            allowed_programs=OBSERVATION_PROGRAMS,
+            monotonic=monotonic,
+        ),
+    )
+    coordinator = RemoteExternalBootCoordinator(
+        operations, module_store, lambda: monotonic() + 300.0
+    )
+
+    def close_remote() -> None:
+        module_store.close()
+        if isinstance(delegate, AuthorityAdapterCloser):
+            delegate.close()
+        connection.close()
+
+    adapter = RemoteExternalBootAuthorityAdapter(
+        delegate, coordinator, module_executor, close=close_remote
+    )
 
     @asynccontextmanager
     async def connections() -> AsyncIterator[AsyncConnection]:
@@ -1093,6 +1209,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         ),
         adapter=adapter,
+        remote_module_host=remote_module_host,
     )
 
 
@@ -1120,7 +1237,11 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
         mutation_service = _build_mutation_service(config)
         try:
             listener = await serve_authority_transport(
-                config, authenticate, service=mutation_service, identity_service=identity_service
+                config,
+                authenticate,
+                service=mutation_service,
+                identity_service=identity_service,
+                remote_module_service=mutation_service,
             )
             if config.network_address is not None:
                 network_listener = await serve_authority_network_transport(
@@ -1128,6 +1249,7 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                     authenticate,
                     service=mutation_service,
                     identity_service=identity_service,
+                    remote_module_service=mutation_service,
                 )
         except Exception:
             raise HostReadinessError("listener", "bind-failed") from None

@@ -76,6 +76,9 @@ def _access_boundary_config(tmp_path: Path) -> AuthorityHostConfig:
     credentials = tmp_path / "credential-source"
     state = tmp_path / "state"
     journal = state / "journal"
+    remote_modules = state / "remote-module-preparations"
+    remote_evidence = remote_modules / "evidence"
+    remote_work = remote_modules / "work"
     runtime = tmp_path / "run" / "provider-authority"
     request = runtime / "request"
     provider = runtime / "libvirt"
@@ -84,6 +87,9 @@ def _access_boundary_config(tmp_path: Path) -> AuthorityHostConfig:
         (credentials, 0o700),
         (state, 0o700),
         (journal, 0o700),
+        (remote_modules, 0o700),
+        (remote_evidence, 0o700),
+        (remote_work, 0o700),
         (runtime, 0o710),
         (request, 0o2750),
         (provider, 0o700),
@@ -807,6 +813,8 @@ def test_host_keeps_identity_only_mode_without_local_recovery_root(
 def test_host_constructs_mutation_chain_for_checked_provider_socket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    import libvirt
+
     from kdive import config as kdive_config
     from kdive.providers.assembly import composition as provider_assembly
     from kdive.providers.local_libvirt import composition
@@ -824,10 +832,20 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
             captured.append((actual_store, socket)) or SimpleNamespace(adapter=object())
         ),
     )
-    config = _config(tmp_path)
+    closed: list[bool] = []
 
-    assert host._build_mutation_service(config) is not None  # noqa: SLF001
+    class Connection:
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(libvirt, "open", lambda _uri: Connection())
+    config = _access_boundary_config(tmp_path)
+
+    service = host._build_mutation_service(config)  # noqa: SLF001
+    assert service is not None
     assert captured == [(store, config.provider_socket)]
+    service.close()
+    assert closed == [True]
 
 
 def test_host_validates_listener_before_ready(

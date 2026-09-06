@@ -38,6 +38,8 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
@@ -167,6 +169,13 @@ class AuthorityRemoteModuleAttemptRepository(Protocol):
 
 
 class RemoteModulePreparationHost(Protocol):
+    async def begin(
+        self,
+        authority: AuthorityPreparationMutationRequestV1,
+        preparation: ModuleAttemptPreparationRequestV1,
+        budget_seconds: int,
+    ) -> RemoteModulePreparationBeginResponseV1: ...
+
     async def execute(
         self, request: RemoteModuleVolumePreparationRequestV1
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
@@ -1370,9 +1379,10 @@ class ExternalBootAuthorityService:
     async def open_remote_module_attempt(
         self,
         peer: AuthenticatedPeer | None,
-        request: AuthorityPreparationMutationRequestV1,
-    ) -> ModuleAttemptPreparationRequestV1:
+        begin: RemoteModulePreparationBeginRequestV1,
+    ) -> RemoteModulePreparationBeginResponseV1:
         """Anchor exact PREPARE before opening its authority-only remote attempt receipt."""
+        request = begin.authority
         if request.operation is not AuthorityOperation.PREPARE:
             raise AuthorityServiceError("superseded")
         mutation = cast(AuthorityMutationRequestV1, request)
@@ -1459,7 +1469,7 @@ class ExternalBootAuthorityService:
                 )
                 if receipt is None:
                     raise AuthorityServiceError("superseded")
-                return receipt
+                return await self._remote_module_host.begin(request, receipt, begin.budget_seconds)
         except AuthorityServiceError as error:
             self._ensure_rejection(mutation, error)
             raise

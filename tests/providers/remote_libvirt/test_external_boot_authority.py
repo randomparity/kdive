@@ -14,10 +14,6 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.remote_module_attempt_preparation import (
-    ModuleAttemptObligationReceiptV1,
-    ModuleAttemptPreparationRequestV1,
-)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
@@ -39,6 +35,7 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.providers.remote_libvirt import external_boot_materialization as materialization_module
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    AdmittedRemoteModulePreparation,
     DurableRemoteModuleVolumePreparationHost,
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
@@ -80,10 +77,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
 from kdive.providers.shared.runtime_paths import domain_name_for
-from kdive.services.remote_module_authority_preparation import (
-    RemoteModulePreparationInputs,
-    _operation,
-)
+from kdive.services.remote_module_authority_preparation import RemoteModulePreparationInputs
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as module_operation,
 )
@@ -614,7 +608,13 @@ def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
     system_id = UUID(operation.system_id)
     run_id = UUID(operation.run_id)
     plan = external_boot_plan(system_id, run_id)
-    operation = operation.model_copy(update={"plan_identity": plan.identity})
+    operation = operation.model_copy(
+        update={
+            "plan_identity": plan.identity,
+            "release": plan.module_obligation.release,
+            "source_manifest": plan.module_obligation.source_manifest,
+        }
+    )
     authority = AuthorityPreparationMutationRequestV1(
         authority_id=uuid4(),
         generation=1,
@@ -634,9 +634,7 @@ def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
         recovery_objects=(),
         plan=plan,
     )
-    return RemoteModuleVolumePreparationRequestV1(
-        authority=authority, operation=operation, deadline=999.0
-    )
+    return RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
 
 
 def _prepared_volumes(request: RemoteModuleVolumePreparationRequestV1) -> PreparedModuleVolumes:
@@ -670,6 +668,57 @@ def _prepared_volumes(request: RemoteModuleVolumePreparationRequestV1) -> Prepar
             purpose="scratch",
             digest="sha256:" + "0" * 64,
             capacity_bytes=8192,
+        ),
+    )
+
+
+def _terminal_response(
+    request: RemoteModuleVolumePreparationRequestV1,
+) -> RemoteModuleTerminalPreparationResponseV1:
+    operation = request.operation
+    volumes = _prepared_volumes(request)
+    result = RemoteModuleResultV1(
+        status="success",
+        phase="installed",
+        system_id=operation.system_id,
+        run_id=operation.run_id,
+        plan_identity=operation.plan_identity,
+        operation_nonce=operation.operation_nonce,
+        appliance_image_digest=operation.appliance_image_digest,
+        release=operation.release,
+        root_volume_key=operation.root_volume.key,
+        root_volume_identity=operation.root_volume.identity,
+        source_manifest=operation.source_manifest,
+        installed_manifest=operation.source_manifest,
+        capture_absent=True,
+        entry_count=1,
+        content_bytes=3,
+    )
+    authority = request.authority
+    authority_ref = OpaqueProviderRef(
+        ref=f"authority/{authority.authority_id}/{authority.generation}/{authority.attempt_id}"
+    )
+    base = RemoteModuleVolumePreparationResponseV1.from_prepared(volumes)
+    return RemoteModuleTerminalPreparationResponseV1(
+        source=base.source,
+        scratch=base.scratch,
+        result=result,
+        recovery=RemoteModuleRecoveryRefV2(
+            system_id=operation.system_id,
+            run_id=operation.run_id,
+            plan_identity=operation.plan_identity,
+            operation_nonce=operation.operation_nonce,
+            pool=OpaqueProviderRef(ref=volumes.source.pool),
+            root_volume=OpaqueProviderRef(ref=operation.root_volume.key),
+            source_volume=OpaqueProviderRef(ref=volumes.source.name),
+            scratch_volume=OpaqueProviderRef(ref=volumes.scratch.name),
+            source_capacity_bytes=volumes.source.capacity_bytes,
+            operation_identity=identity_for(operation),
+            result_identity=identity_for(result),
+            installed_entry_count=1,
+            installed_content_bytes=3,
+            appliance_image_digest=operation.appliance_image_digest,
+            authority_identity=RemoteModuleRecoveryRefV2.identity_for_authority(authority_ref),
         ),
     )
 
@@ -787,57 +836,13 @@ def _publish_terminal(
             "system_id": record.binding.system_id,
             "run_id": record.binding.run_id,
             "plan_identity": plan.identity,
+            "release": plan.module_obligation.release,
+            "source_manifest": plan.module_obligation.source_manifest,
         }
     )
-    request = RemoteModuleVolumePreparationRequestV1(
-        authority=authority, operation=operation, deadline=base.deadline
-    )
-    volumes = _prepared_volumes(request)
-    result = RemoteModuleResultV1(
-        status="success",
-        phase="installed",
-        system_id=operation.system_id,
-        run_id=operation.run_id,
-        plan_identity=operation.plan_identity,
-        operation_nonce=operation.operation_nonce,
-        appliance_image_digest=operation.appliance_image_digest,
-        release=operation.release,
-        root_volume_key=operation.root_volume.key,
-        root_volume_identity=operation.root_volume.identity,
-        source_manifest=operation.source_manifest,
-        installed_manifest=operation.source_manifest,
-        capture_absent=True,
-        entry_count=1,
-        content_bytes=3,
-    )
-    authority_ref = OpaqueProviderRef(
-        ref=f"authority/{authority.authority_id}/{authority.generation}/{authority.attempt_id}"
-    )
-    base_response = RemoteModuleVolumePreparationResponseV1.from_prepared(volumes)
-    response = RemoteModuleTerminalPreparationResponseV1(
-        source=base_response.source,
-        scratch=base_response.scratch,
-        result=result,
-        recovery=RemoteModuleRecoveryRefV2(
-            system_id=operation.system_id,
-            run_id=operation.run_id,
-            plan_identity=operation.plan_identity,
-            operation_nonce=operation.operation_nonce,
-            pool=OpaqueProviderRef(ref=volumes.source.pool),
-            root_volume=OpaqueProviderRef(ref=operation.root_volume.key),
-            source_volume=OpaqueProviderRef(ref=volumes.source.name),
-            scratch_volume=OpaqueProviderRef(ref=volumes.scratch.name),
-            source_capacity_bytes=volumes.source.capacity_bytes,
-            operation_identity=identity_for(operation),
-            result_identity=identity_for(result),
-            installed_entry_count=1,
-            installed_content_bytes=3,
-            appliance_image_digest=operation.appliance_image_digest,
-            authority_identity=RemoteModuleRecoveryRefV2.identity_for_authority(authority_ref),
-        ),
-    )
-    store.stage(request)
-    store.publish_result(request, response)
+    request = RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
+    store.stage(request, 999.0)
+    store.publish_result(request, _terminal_response(request))
 
 
 def test_recovery_record_round_trips_only_canonical_closed_bytes() -> None:
@@ -921,7 +926,6 @@ def test_remote_volume_request_binds_exact_prepare_phase_and_operation() -> None
                 }
             ),
             operation=request.operation,
-            deadline=request.deadline,
         )
     with pytest.raises(ValidationError, match="differs from authority"):
         RemoteModuleVolumePreparationRequestV1(
@@ -929,7 +933,6 @@ def test_remote_volume_request_binds_exact_prepare_phase_and_operation() -> None
             operation=request.operation.model_copy(
                 update={"run_id": "00000000-0000-4000-8000-000000000099"}
             ),
-            deadline=request.deadline,
         )
 
 
@@ -1013,45 +1016,47 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
     request = _remote_preparation_request()
     calls = 0
 
-    def prepare(_operation: RemoteModuleOperationV1) -> PreparedModuleVolumes:
-        nonlocal calls
-        calls += 1
-        return _prepared_volumes(request)
+    class Host:
+        async def execute(
+            self, admitted: AdmittedRemoteModulePreparation
+        ) -> RemoteModuleTerminalPreparationResponseV1:
+            nonlocal calls
+            assert admitted.request == request
+            assert admitted.local_deadline == 999.0
+            calls += 1
+            return _terminal_response(request)
 
     first = RemoteModuleVolumePreparationStore(tmp_path)
-    first.stage(request)
+    first.stage(request, 999.0)
     first.close()
 
-    executor = RemoteModulePreparationExecutor()
     second = RemoteModuleVolumePreparationStore(tmp_path)
-    durable = DurableRemoteModuleVolumePreparationHost(
-        second, RemoteModuleVolumePreparationHost(prepare, executor)
-    )
+    durable = DurableRemoteModuleVolumePreparationHost(second, cast(Any, Host()))
     expected = await durable.execute(request)
     second.close()
 
     third = RemoteModuleVolumePreparationStore(tmp_path)
-    replay = DurableRemoteModuleVolumePreparationHost(
-        third, RemoteModuleVolumePreparationHost(prepare, executor)
-    )
+    replay = DurableRemoteModuleVolumePreparationHost(third, cast(Any, Host()))
     assert await replay.execute(request) == expected
     assert calls == 1
     third.close()
-    executor.shutdown()
 
 
-def test_durable_remote_preparation_renews_only_invocation_deadline(tmp_path: Path) -> None:
+def test_durable_remote_preparation_preserves_first_authority_clock_deadline(
+    tmp_path: Path,
+) -> None:
     request = _remote_preparation_request()
     store = RemoteModuleVolumePreparationStore(tmp_path)
-    store.stage(request)
-    renewed = request.model_copy(update={"deadline": request.deadline + 30.0})
-    store.stage(renewed)
-    assert store.reopen_request(renewed) == renewed
-    changed = renewed.model_copy(
-        update={"operation": renewed.operation.model_copy(update={"operation_nonce": "f" * 32})}
+    store.stage(request, 999.0)
+    store.stage(request, 1029.0)
+    admitted = store.reopen_request(request)
+    assert admitted.request == request
+    assert admitted.local_deadline == 999.0
+    changed = request.model_copy(
+        update={"operation": request.operation.model_copy(update={"operation_nonce": "f" * 32})}
     )
     with pytest.raises(ValueError, match="durable"):
-        store.stage(changed)
+        store.stage(changed, 999.0)
     store.close()
 
 
@@ -1065,6 +1070,7 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
             raise RuntimeError("provider returned after mutation")
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
     with pytest.raises(RuntimeError, match="after mutation"):
         await durable.execute(request)
@@ -1084,7 +1090,7 @@ async def test_durable_remote_preparation_cancellation_waits_and_records_termina
     request = _remote_preparation_request()
     started = asyncio.Event()
     release = asyncio.Event()
-    expected = RemoteModuleVolumePreparationResponseV1.from_prepared(_prepared_volumes(request))
+    expected = _terminal_response(request)
 
     class BlockingHost:
         async def execute(self, request: object) -> object:
@@ -1094,6 +1100,7 @@ async def test_durable_remote_preparation_cancellation_waits_and_records_termina
             return expected
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
     task = asyncio.create_task(
         DurableRemoteModuleVolumePreparationHost(store, cast(Any, BlockingHost())).execute(request)
     )
@@ -1128,20 +1135,27 @@ async def test_durable_remote_preparation_retries_unrecorded_provider_return(
         calls += 1
         return _prepared_volumes(request)
 
-    executor = RemoteModulePreparationExecutor()
     store = RemoteModuleVolumePreparationStore(tmp_path)
-    store.stage(request)
+    store.stage(request, 999.0)
+    executor = RemoteModulePreparationExecutor()
     await RemoteModuleVolumePreparationHost(prepare, executor).execute(request)
+    executor.shutdown()
     store.close()
 
+    class Host:
+        async def execute(
+            self, admitted: AdmittedRemoteModulePreparation
+        ) -> RemoteModuleTerminalPreparationResponseV1:
+            nonlocal calls
+            assert admitted.request == request
+            calls += 1
+            return _terminal_response(request)
+
     restarted = RemoteModuleVolumePreparationStore(tmp_path)
-    durable = DurableRemoteModuleVolumePreparationHost(
-        restarted, RemoteModuleVolumePreparationHost(prepare, executor)
-    )
+    durable = DurableRemoteModuleVolumePreparationHost(restarted, cast(Any, Host()))
     assert (await durable.execute(request)).prepared() == _prepared_volumes(request)
     assert calls == 2
     restarted.close()
-    executor.shutdown()
 
 
 def test_durable_remote_preparation_rejects_same_authority_with_changed_operation(
@@ -1149,17 +1163,17 @@ def test_durable_remote_preparation_rejects_same_authority_with_changed_operatio
 ) -> None:
     request = _remote_preparation_request()
     store = RemoteModuleVolumePreparationStore(tmp_path)
-    store.stage(request)
+    store.stage(request, 999.0)
     changed = request.model_copy(
         update={
             "operation": request.operation.model_copy(
-                update={"source_manifest": "sha256:" + "f" * 64}
+                update={"appliance_image_digest": "sha256:" + "f" * 64}
             )
         }
     )
 
     with pytest.raises(ValueError, match="durable"):
-        store.stage(changed)
+        store.stage(changed, 999.0)
     store.close()
 
 
@@ -1480,25 +1494,9 @@ def test_remote_recovery_object_reopens_geometry_and_deletes_exact_volume(tmp_pa
     store.close()
 
 
-def test_remote_worker_operation_uses_server_committed_attempt_receipt() -> None:
+def test_remote_worker_inputs_exclude_provider_owned_volume_and_appliance_identities() -> None:
     request = _remote_preparation_request()
-    nonce = "9" * 32
-    preparation = ModuleAttemptPreparationRequestV1(
-        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
-            system_id=request.authority.system_id,
-            run_id=request.authority.run_id,
-            operation_nonce=nonce,
-        )
-    )
-    operation = _operation(
-        RemoteModulePreparationInputs(
-            authority=request.authority,
-            root_volume_key="root-volume",
-            root_volume_identity="sha256:" + "8" * 64,
-            appliance_image_digest="sha256:" + "7" * 64,
-        ),
-        preparation,
-    )
-    assert operation.operation_nonce == nonce
-    assert operation.plan_identity == request.authority.plan_identity
-    assert operation.source_manifest == request.authority.plan.module_obligation.source_manifest
+    inputs = RemoteModulePreparationInputs(authority=request.authority)
+
+    assert set(RemoteModulePreparationInputs.__dataclass_fields__) == {"authority"}
+    assert inputs.authority == request.authority

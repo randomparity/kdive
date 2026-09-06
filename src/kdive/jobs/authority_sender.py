@@ -9,7 +9,6 @@ from typing import Protocol
 from pydantic import BaseModel, SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
@@ -42,6 +41,8 @@ from kdive.providers.external_boot_authority.transport import (
 )
 from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
@@ -56,6 +57,7 @@ _PEER_REASONS = frozenset(
         "provider-conflict",
         "provider-not-configured",
         "provider-failure",
+        "remote-module-failed",
     }
 )
 
@@ -65,7 +67,12 @@ class _AuthorityTransport(Protocol):
 
 
 def _failure(reason: str) -> CategorizedError:
-    return CategorizedError(f"authority: {reason}", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+    category = (
+        ErrorCategory.CONFLICT
+        if reason == "remote-module-failed"
+        else ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    return CategorizedError(f"authority: {reason}", category=category)
 
 
 def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Value:
@@ -195,13 +202,13 @@ class AuthorityRequestSender:
         return _decode_response(response, RemoteModuleTerminalPreparationResponseV1)
 
     async def open_remote_module_attempt(
-        self, request: AuthorityPreparationMutationRequestV1, *, deadline: float
-    ) -> ModuleAttemptPreparationRequestV1:
+        self, request: RemoteModulePreparationBeginRequestV1, *, deadline: float
+    ) -> RemoteModulePreparationBeginResponseV1:
         """Anchor one PREPARE phase and return its authority-opened module-attempt receipt."""
         response = await self._transport_factory()._request_frame(
             self._encode("begin-remote-module-preparation", request), deadline=deadline
         )
-        return _decode_response(response, ModuleAttemptPreparationRequestV1)
+        return _decode_response(response, RemoteModulePreparationBeginResponseV1)
 
     async def observe_authority(
         self, request: AuthorityMutationRequestV1, *, deadline: float

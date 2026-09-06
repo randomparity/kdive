@@ -8,9 +8,10 @@ import hashlib
 import json
 import os
 import stat
+import time
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, Self
 from uuid import UUID, uuid4, uuid5
@@ -18,6 +19,7 @@ from uuid import UUID, uuid4, uuid5
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
@@ -100,7 +102,6 @@ class RemoteModuleVolumePreparationRequestV1(BaseModel):
     )
     authority: AuthorityPreparationMutationRequestV1
     operation: RemoteModuleOperationV1
-    deadline: Annotated[float, Field(gt=0)]
 
     @model_validator(mode="after")
     def _operation_matches_authority(self) -> Self:
@@ -112,6 +113,8 @@ class RemoteModuleVolumePreparationRequestV1(BaseModel):
             operation.system_id != str(authority.system_id)
             or operation.run_id != str(authority.run_id)
             or operation.plan_identity != authority.plan_identity
+            or operation.release != authority.plan.module_obligation.release
+            or operation.source_manifest != authority.plan.module_obligation.source_manifest
         ):
             raise ValueError("remote module operation differs from authority binding")
         return self
@@ -130,6 +133,47 @@ class RemoteModuleVolumePreparationRequestV1(BaseModel):
         if value.to_canonical_json() != data:
             raise ValueError("remote module preparation request is not canonical JSON")
         return value
+
+
+class RemoteModulePreparationBeginRequestV1(BaseModel):
+    """PREPARE authority plus a duration interpreted only on the authority clock."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True, strict=True)
+
+    schema_: Literal["remote-module-preparation-begin-v1"] = Field(
+        "remote-module-preparation-begin-v1", alias="schema"
+    )
+    authority: AuthorityPreparationMutationRequestV1
+    budget_seconds: Annotated[int, Field(ge=1, le=900)]
+
+    @model_validator(mode="after")
+    def _prepare_only(self) -> Self:
+        if self.authority.operation is not AuthorityOperation.PREPARE:
+            raise ValueError("remote module begin requires the PREPARE authority phase")
+        return self
+
+
+class RemoteModulePreparationBeginResponseV1(BaseModel):
+    """Authority-opened obligation and its authority-derived operation descriptor."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
+
+    schema_: Literal["remote-module-preparation-begin-response-v1"] = Field(
+        "remote-module-preparation-begin-response-v1", alias="schema"
+    )
+    preparation: ModuleAttemptPreparationRequestV1
+    operation: RemoteModuleOperationV1
+
+    @model_validator(mode="after")
+    def _receipt_matches_operation(self) -> Self:
+        receipt = self.preparation.module_attempt_obligation
+        if (
+            self.operation.system_id != str(receipt.system_id)
+            or self.operation.run_id != str(receipt.run_id)
+            or self.operation.operation_nonce != receipt.operation_nonce
+        ):
+            raise ValueError("remote module operation differs from its obligation receipt")
+        return self
 
 
 class RemoteModuleVolumePreparationResponseV1(BaseModel):
@@ -308,6 +352,33 @@ class RemoteModuleTerminalRecord(BaseModel):
         return value
 
 
+class _PersistedRemoteModulePreparationV1(BaseModel):
+    """Authority-private request and one non-renewable local monotonic deadline."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    request: RemoteModuleVolumePreparationRequestV1
+    local_deadline: Annotated[float, Field(gt=0)]
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("persisted remote module preparation is not canonical JSON")
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedRemoteModulePreparation:
+    """Process-local view of the persisted request and authority-clock deadline."""
+
+    request: RemoteModuleVolumePreparationRequestV1
+    local_deadline: float
+
+
 class RemoteModuleVolumePreparationHost:
     """Completion-own one fixed provider-host volume preparation operation."""
 
@@ -426,25 +497,28 @@ class RemoteModuleVolumePreparationStore:
                 os.unlink(temporary, dir_fd=self._root_fd)
             raise
 
-    def stage(self, request: RemoteModuleVolumePreparationRequestV1) -> None:
+    def stage(self, request: RemoteModuleVolumePreparationRequestV1, local_deadline: float) -> None:
         name = f"{self._key(request)}.request"
+        candidate = _PersistedRemoteModulePreparationV1(
+            request=request, local_deadline=local_deadline
+        )
         if data := self._read(name):
-            persisted = RemoteModuleVolumePreparationRequestV1.from_canonical_json(data)
-            if persisted.model_copy(update={"deadline": request.deadline}) != request:
+            persisted = _PersistedRemoteModulePreparationV1.from_canonical_json(data)
+            if persisted.request != request:
                 raise ValueError("remote preparation evidence conflicts with durable bytes")
             return
-        self._publish(name, request.to_canonical_json())
+        self._publish(name, candidate.to_canonical_json())
 
     def reopen_request(
         self, request: RemoteModuleVolumePreparationRequestV1
-    ) -> RemoteModuleVolumePreparationRequestV1:
+    ) -> AdmittedRemoteModulePreparation:
         data = self._read(f"{self._key(request)}.request")
         if data is None:
             raise FileNotFoundError("remote preparation request is absent")
-        reopened = RemoteModuleVolumePreparationRequestV1.from_canonical_json(data)
-        if reopened.model_copy(update={"deadline": request.deadline}) != request:
+        reopened = _PersistedRemoteModulePreparationV1.from_canonical_json(data)
+        if reopened.request != request:
             raise ValueError("remote preparation evidence conflicts with durable bytes")
-        return reopened.model_copy(update={"deadline": request.deadline})
+        return AdmittedRemoteModulePreparation(reopened.request, reopened.local_deadline)
 
     def publish_result(
         self,
@@ -453,13 +527,6 @@ class RemoteModuleVolumePreparationStore:
     ) -> None:
         self.reopen_request(request)
         self._publish(f"{self._key(request)}.result", response.to_canonical_json())
-        if isinstance(response, RemoteModuleTerminalPreparationResponseV1):
-            self._publish(
-                f"{self._key(request)}.completion",
-                RemoteModulePreparationCompletionV1(
-                    state="terminal", response=response
-                ).to_canonical_json(),
-            )
         if isinstance(response, RemoteModuleTerminalPreparationResponseV1):
             terminal = RemoteModuleTerminalRecord(request=request, response=response)
             authority = request.authority
@@ -472,6 +539,12 @@ class RemoteModuleVolumePreparationStore:
             self._publish(
                 f"{key}.terminal",
                 terminal.to_canonical_json(),
+            )
+            self._publish(
+                f"{self._key(request)}.completion",
+                RemoteModulePreparationCompletionV1(
+                    state="terminal", response=response
+                ).to_canonical_json(),
             )
 
     def publish_failed_completion(self, request: RemoteModuleVolumePreparationRequestV1) -> None:
@@ -711,9 +784,15 @@ class RemoteModuleVolumePreparationStore:
 
 
 class RemoteModulePreparationOperation(Protocol):
+    async def derive_operation(
+        self,
+        authority: AuthorityPreparationMutationRequestV1,
+        preparation: ModuleAttemptPreparationRequestV1,
+    ) -> RemoteModuleOperationV1: ...
+
     async def execute(
-        self, request: RemoteModuleVolumePreparationRequestV1
-    ) -> RemoteModulePreparationResponse: ...
+        self, admitted: AdmittedRemoteModulePreparation
+    ) -> RemoteModuleTerminalPreparationResponseV1: ...
 
 
 class RemoteAuthorityMutationDelegate(Protocol):
@@ -733,14 +812,32 @@ class DurableRemoteModuleVolumePreparationHost:
         self,
         store: RemoteModuleVolumePreparationStore,
         host: RemoteModulePreparationOperation,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
         self._host = host
+        self._monotonic = monotonic
+
+    async def begin(
+        self,
+        authority: AuthorityPreparationMutationRequestV1,
+        preparation: ModuleAttemptPreparationRequestV1,
+        budget_seconds: int,
+    ) -> RemoteModulePreparationBeginResponseV1:
+        """Derive and persist one descriptor before returning it to the worker."""
+        operation = await self._host.derive_operation(authority, preparation)
+        request = RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
+        self._store.stage(request, self._monotonic() + budget_seconds)
+        admitted = self._store.reopen_request(request)
+        return RemoteModulePreparationBeginResponseV1(
+            preparation=preparation, operation=admitted.request.operation
+        )
 
     async def execute(
         self, request: RemoteModuleVolumePreparationRequestV1
-    ) -> RemoteModulePreparationResponse:
-        self._store.stage(request)
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        admitted = self._store.reopen_request(request)
         completion = self._store.reopen_completion(request)
         if completion is not None:
             if completion.response is not None:
@@ -753,8 +850,7 @@ class DurableRemoteModuleVolumePreparationHost:
             )
         if result := self._store.reopen_result(request):
             result.validate_for(request.operation)
-            return result
-        task = asyncio.create_task(self._host.execute(self._store.reopen_request(request)))
+        task = asyncio.create_task(self._host.execute(admitted))
         try:
             result = await asyncio.shield(task)
         except asyncio.CancelledError as cancelled:
@@ -1073,10 +1169,17 @@ class RemoteExternalBootAuthorityAdapter:
         delegate: RemoteAuthorityMutationDelegate,
         coordinator: RemoteExternalBootCoordinator,
         executor: RemoteModulePreparationExecutor,
+        close: Callable[[], None] | None = None,
     ) -> None:
         self._delegate = delegate
         self._coordinator = coordinator
         self._executor = executor
+        self._close = close
+
+    def close(self) -> None:
+        self._executor.shutdown()
+        if self._close is not None:
+            self._close()
 
     @staticmethod
     def _preparation_request(

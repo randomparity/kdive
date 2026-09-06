@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
-from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.domain.errors import CategorizedError
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
@@ -44,6 +44,8 @@ from kdive.providers.external_boot_authority.service import (
     AuthorityServiceError,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
@@ -113,13 +115,13 @@ class RemoteModulePreparationService(Protocol):
     async def open_remote_module_attempt(
         self,
         peer: AuthenticatedPeer,
-        request: AuthorityPreparationMutationRequestV1,
-    ) -> ModuleAttemptPreparationRequestV1: ...
+        begin: RemoteModulePreparationBeginRequestV1,
+    ) -> RemoteModulePreparationBeginResponseV1: ...
 
     async def execute_remote_module_preparation(
         self,
         peer: AuthenticatedPeer,
-        request: RemoteModuleVolumePreparationRequestV1,
+        remote: RemoteModuleVolumePreparationRequestV1,
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
 
 
@@ -165,7 +167,11 @@ def encode_request_envelope(
         else (
             RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
             if operation == "execute-remote-module-preparation"
-            else decode_authority_request(request_bytes)
+            else (
+                RemoteModulePreparationBeginRequestV1.model_validate_json(request_bytes)
+                if operation == "begin-remote-module-preparation"
+                else decode_authority_request(request_bytes)
+            )
         )
     )
     if operation == "acknowledge-takeover" and not isinstance(decoded, AuthorityTakeoverRequestV1):
@@ -183,7 +189,7 @@ def encode_request_envelope(
     ):
         raise ValueError("invalid-request")
     if operation == "begin-remote-module-preparation" and not isinstance(
-        decoded, AuthorityPreparationMutationRequestV1
+        decoded, RemoteModulePreparationBeginRequestV1
     ):
         raise ValueError("invalid-request")
     if operation == "execute-remote-module-preparation" and not isinstance(
@@ -271,7 +277,11 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             else (
                 RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
                 if operation == "execute-remote-module-preparation"
-                else decode_authority_request(request_bytes)
+                else (
+                    RemoteModulePreparationBeginRequestV1.model_validate_json(request_bytes)
+                    if operation == "begin-remote-module-preparation"
+                    else decode_authority_request(request_bytes)
+                )
             )
         )
         if operation == "acknowledge-takeover" and not isinstance(
@@ -293,7 +303,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
         ):
             raise ValueError
         if operation == "begin-remote-module-preparation" and not isinstance(
-            request, AuthorityPreparationMutationRequestV1
+            request, RemoteModulePreparationBeginRequestV1
         ):
             raise ValueError
         if operation == "execute-remote-module-preparation" and not isinstance(
@@ -318,7 +328,7 @@ def _success(
     | AuthorityRunningObservationV1
     | AuthorityHealthAcknowledgementV1
     | DeviceIdentityResponseV1
-    | ModuleAttemptPreparationRequestV1
+    | RemoteModulePreparationBeginResponseV1
     | RemoteModuleTerminalPreparationResponseV1,
 ) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
@@ -367,12 +377,16 @@ async def _dispatch(
             return _success(result)
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
+        except CategorizedError as exc:
+            if exc.details.get("completion") == "failed-after-mutation":
+                return _error("remote-module-failed")
+            return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
             return _error("provider-conflict")
     if operation == "begin-remote-module-preparation":
         if remote_module_service is None:
             return _error("provider-not-configured")
-        if not isinstance(request, AuthorityPreparationMutationRequestV1):
+        if not isinstance(request, RemoteModulePreparationBeginRequestV1):
             raise _TransportError("invalid-request")
         try:
             return _success(await remote_module_service.open_remote_module_attempt(peer, request))
@@ -794,5 +808,5 @@ def _tls_fingerprints(config: AuthorityHostConfig) -> dict[Path, tuple[int, int,
     async def open_remote_module_attempt(
         self,
         peer: AuthenticatedPeer,
-        request: AuthorityPreparationMutationRequestV1,
-    ) -> ModuleAttemptPreparationRequestV1: ...
+        request: RemoteModulePreparationBeginRequestV1,
+    ) -> RemoteModulePreparationBeginResponseV1: ...

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -13,18 +15,19 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
-from kdive.providers.external_boot_authority.protocol import AuthorityPreparationMutationRequestV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
+)
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     RemoteDeviceIdentityPort,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
-    RemoteModuleOperationV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -35,9 +38,13 @@ from kdive.services.remote_module_volume_preparation import (
 
 
 class RemoteModulePreparationAuthority(AuthorityRequestSender, Protocol):
-    async def open_remote_module_attempt(
+    async def execute_preparation(
         self, request: AuthorityPreparationMutationRequestV1, *, deadline: float
-    ) -> ModuleAttemptPreparationRequestV1: ...
+    ) -> AuthorityPreparationResponseV1: ...
+
+    async def open_remote_module_attempt(
+        self, request: RemoteModulePreparationBeginRequestV1, *, deadline: float
+    ) -> RemoteModulePreparationBeginResponseV1: ...
 
     async def execute_remote_module_preparation(
         self, request: RemoteModuleVolumePreparationRequestV1, *, deadline: float
@@ -47,27 +54,6 @@ class RemoteModulePreparationAuthority(AuthorityRequestSender, Protocol):
 @dataclass(frozen=True, slots=True)
 class RemoteModulePreparationInputs:
     authority: AuthorityPreparationMutationRequestV1
-    root_volume_key: str
-    root_volume_identity: str
-    appliance_image_digest: str
-
-
-def _operation(
-    inputs: RemoteModulePreparationInputs, preparation: ModuleAttemptPreparationRequestV1
-) -> RemoteModuleOperationV1:
-    authority = inputs.authority
-    receipt = preparation.module_attempt_obligation
-    return RemoteModuleOperationV1(
-        operation="capture_install",
-        system_id=str(receipt.system_id),
-        run_id=str(receipt.run_id),
-        plan_identity=authority.plan_identity,
-        operation_nonce=receipt.operation_nonce,
-        release=authority.plan.module_obligation.release,
-        root_volume={"key": inputs.root_volume_key, "identity": inputs.root_volume_identity},
-        source_manifest=authority.plan.module_obligation.source_manifest,
-        appliance_image_digest=inputs.appliance_image_digest,
-    )
 
 
 async def prepare_remote_module_on_authority_host(
@@ -80,14 +66,33 @@ async def prepare_remote_module_on_authority_host(
     deadline: float,
 ) -> RemoteModuleTerminalPreparationResponseV1:
     """Open exact server evidence, then retain worker verification through remote completion."""
-    preparation = await sender.open_remote_module_attempt(inputs.authority, deadline=deadline)
+    remaining = deadline - asyncio.get_running_loop().time()
+    budget_seconds = min(900, math.floor(remaining))
+    if budget_seconds < 1:
+        raise TimeoutError("remote module preparation deadline expired")
+    begin = await sender.open_remote_module_attempt(
+        RemoteModulePreparationBeginRequestV1(
+            authority=inputs.authority,
+            budget_seconds=budget_seconds,
+        ),
+        deadline=deadline,
+    )
+    preparation = begin.preparation
     receipt = preparation.module_attempt_obligation
     expected = ModuleAttempt(receipt.system_id, receipt.run_id, receipt.operation_nonce)
-    operation = _operation(inputs, preparation)
+    operation = begin.operation
+    authority = inputs.authority
+    if (
+        operation.system_id != str(authority.system_id)
+        or operation.run_id != str(authority.run_id)
+        or operation.plan_identity != authority.plan_identity
+        or operation.source_manifest != authority.plan.module_obligation.source_manifest
+        or operation.release != authority.plan.module_obligation.release
+    ):
+        raise ValueError("authority-derived remote module operation differs from worker plan")
     remote_request = RemoteModuleVolumePreparationRequestV1(
-        authority=inputs.authority,
+        authority=authority,
         operation=operation,
-        deadline=deadline,
     )
 
     async def execute(
@@ -99,21 +104,18 @@ async def prepare_remote_module_on_authority_host(
         if attempt != expected:
             raise ValueError("remote module verified attempt changed")
         check_deadline()
-        failure: CategorizedError | None = None
-        for _ in range(2):
+        while True:
             try:
+                transport_deadline = max(deadline, asyncio.get_running_loop().time() + 5.0)
                 result = await sender.execute_remote_module_preparation(
-                    remote_request, deadline=deadline
+                    remote_request, deadline=transport_deadline
                 )
-                result.validate_terminal_for(operation, inputs.authority)
+                result.validate_terminal_for(operation, authority)
                 return result
             except CategorizedError as exc:
                 if exc.category is not ErrorCategory.INFRASTRUCTURE_FAILURE:
                     raise
-                failure = exc
-                check_deadline()
-        assert failure is not None
-        raise failure
+                await asyncio.sleep(0.1)
 
     return await prepare_verified_remote_module_attempt(
         pool,

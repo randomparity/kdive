@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -15,6 +16,7 @@ from psycopg import AsyncConnection
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.external_boot_authority_journal import commit_external_boot_preparation_result
+from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
@@ -31,6 +33,7 @@ from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
 )
 from kdive.providers.ports.external_boot import (
@@ -38,8 +41,16 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPorts,
     OpaqueProviderRef,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.remote_module_authority_preparation import (
+    RemoteModulePreparationAuthority,
+    RemoteModulePreparationInputs,
+    prepare_remote_module_on_authority_host,
+)
 
 __all__ = [
     "COMMITTABLE_ERROR_CATEGORIES",
@@ -60,6 +71,27 @@ class _CommandLineMismatch(Exception):
 
 
 _ACTIVATIONS = ExternalBootActivationRepository()
+_MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
+
+
+class _BoundAuthorityPreparation:
+    """Adapt one Resource-bound sender to the handler's deadline-free ports."""
+
+    def __init__(self, sender: RemoteModulePreparationAuthority) -> None:
+        self._sender = sender
+
+    @staticmethod
+    def _deadline() -> float:
+        return asyncio.get_running_loop().time() + 300.0
+
+    async def acknowledge(self, request: AuthorityTakeoverRequestV1) -> AuthorityAcknowledgementV1:
+        return await self._sender.acknowledge_takeover(request, deadline=self._deadline())
+
+    async def execute_preparation(
+        self, request: AuthorityPreparationMutationRequestV1
+    ) -> AuthorityPreparationResponseV1:
+        return await self._sender.execute_preparation(request, deadline=self._deadline())
+
 
 # The phase a raise is attributed to. `_FailureContext.phase` admits a closed Literal and the
 # commit re-checks it, so a name invented here is refused at SQL rather than stored.
@@ -194,9 +226,11 @@ async def _materialize_preparing(
     raw_plan = context.job.payload.get("external_boot_plan_v1")
     plan = ExternalBootPlan.model_validate(raw_plan)
 
-    async def execute_phase(operation: Literal["materialize", "prepare"]) -> None:
+    def phase_request(
+        operation: Literal["materialize", "prepare"],
+    ) -> AuthorityPreparationMutationRequestV1:
         operation_identity, operation_digest = _phase_binding(context, operation)
-        request = AuthorityPreparationMutationRequestV1(
+        return AuthorityPreparationMutationRequestV1(
             authority_id=context.authority.authority_id,
             generation=context.authority.generation,
             system_id=context.marker.system_id,
@@ -215,6 +249,8 @@ async def _materialize_preparing(
             recovery_objects=(),
             plan=plan,
         )
+
+    async def execute_phase(request: AuthorityPreparationMutationRequestV1) -> None:
         response = await executor.execute_preparation(request)
         status = await commit_external_boot_preparation_result(
             conn,
@@ -226,13 +262,30 @@ async def _materialize_preparing(
         )
         if status != "applied":
             raise CategorizedError(
-                f"external boot {operation} commit was {status}",
+                f"external boot {request.operation.value} commit was {status}",
                 category=ErrorCategory.STALE_HANDLE,
                 terminal=False,
             )
 
-    await execute_phase("materialize")
-    await execute_phase("prepare")
+    materialize = phase_request("materialize")
+    prepare = phase_request("prepare")
+    await execute_phase(materialize)
+    if context.marker.provider_kind == "remote-libvirt":
+        if context.binding.runtime.authority is None or ports.pool is None:
+            raise _refuse("remote module authority preparation is not configured")
+        module_executor = RemoteModulePreparationExecutor()
+        try:
+            await prepare_remote_module_on_authority_host(
+                pool=ports.pool,
+                repository=_MODULE_ATTEMPTS,
+                sender=cast(RemoteModulePreparationAuthority, context.binding.runtime.authority),
+                inputs=RemoteModulePreparationInputs(authority=prepare),
+                executor=module_executor,
+                deadline=asyncio.get_running_loop().time() + 300.0,
+            )
+        finally:
+            module_executor.shutdown()
+    await execute_phase(prepare)
     refreshed = await _ACTIVATIONS.get(conn, context.marker.activation_id)
     if refreshed is None or refreshed.state is not ExternalBootActivationState.PREPARED:
         raise CategorizedError(
@@ -491,6 +544,11 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     nothing type-check clean.
     """
     binding, port = await _resolve_port(conn, marker, ports)
+    if binding.runtime.authority is not None:
+        bound = _BoundAuthorityPreparation(
+            cast(RemoteModulePreparationAuthority, binding.runtime.authority)
+        )
+        ports = replace(ports, acknowledger=bound, preparation_executor=bound)
     activation = await _read_activation(
         conn,
         marker,

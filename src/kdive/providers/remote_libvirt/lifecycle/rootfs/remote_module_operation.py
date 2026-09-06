@@ -10,6 +10,7 @@ from typing import Literal, Protocol
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
     ApplianceConn,
     DeadlineExecutor,
@@ -150,6 +151,7 @@ class RemoteModuleVolumePreparation:
     writer: FilesystemImageWriter
     inspect_attachments: PartialAttachmentInspector
     work_dir: Path
+    artifact_stager: ExternalBootArtifactStager | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,3 +177,4 @@ class RemoteModuleApplianceExecution:
     monotonic: Callable[[], float]
     appliance_kernel: Path | None = None
     appliance_initrd: Path | None = None
+    root_for_attempt: Callable[[str, str, str], PreparedVolume] | None = None

@@ -18,7 +18,6 @@ import pytest
 from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority import protocol, transport
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
@@ -44,6 +43,8 @@ from kdive.providers.remote_libvirt.config import (
     TlsCertRefs,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
@@ -186,7 +187,7 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
         "appliance_image_digest": "sha256:" + "2" * 64,
     }
     remote_request = RemoteModuleVolumePreparationRequestV1(
-        authority=authority, operation=operation, deadline=123.0
+        authority=authority, operation=operation
     )
     response = RemoteModuleTerminalPreparationResponseV1.model_validate(
         {
@@ -256,18 +257,26 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
     )
 
     class ModuleService:
+        failed = False
+
         async def open_remote_module_attempt(
             self,
             peer: AuthenticatedPeer,
-            request: AuthorityPreparationMutationRequestV1,
-        ) -> ModuleAttemptPreparationRequestV1:
-            raise AssertionError(f"unexpected begin request from {peer}: {request!r}")
+            begin: RemoteModulePreparationBeginRequestV1,
+        ) -> RemoteModulePreparationBeginResponseV1:
+            raise AssertionError(f"unexpected begin request from {peer}: {begin!r}")
 
         async def execute_remote_module_preparation(
-            self, peer: AuthenticatedPeer, request: RemoteModuleVolumePreparationRequestV1
+            self, peer: AuthenticatedPeer, remote: RemoteModuleVolumePreparationRequestV1
         ) -> RemoteModuleTerminalPreparationResponseV1:
             assert peer == AuthenticatedPeer("worker")
-            assert request == remote_request
+            assert remote == remote_request
+            if self.failed:
+                raise CategorizedError(
+                    "private provider failure",
+                    category=ErrorCategory.CONFLICT,
+                    details={"completion": "failed-after-mutation"},
+                )
             return response
 
     class Backend:
@@ -285,6 +294,10 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
     assert (
         await sender.execute_remote_module_preparation(remote_request, deadline=123.0) == response
     )
+    ModuleService.failed = True
+    with pytest.raises(CategorizedError, match="remote-module-failed") as failed:
+        await sender.execute_remote_module_preparation(remote_request, deadline=123.0)
+    assert failed.value.category is ErrorCategory.CONFLICT
 
 
 async def test_sender_borrows_only_while_encoding_and_authenticates_active_incarnation() -> None:

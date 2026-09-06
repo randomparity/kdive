@@ -38,6 +38,8 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
@@ -337,6 +339,29 @@ async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt
     )
 
     class Host:
+        async def begin(
+            self,
+            authority: AuthorityPreparationMutationRequestV1,
+            preparation: ModuleAttemptPreparationRequestV1,
+            budget_seconds: int,
+        ) -> RemoteModulePreparationBeginResponseV1:
+            assert budget_seconds == 30
+            obligation = preparation.module_attempt_obligation
+            return RemoteModulePreparationBeginResponseV1(
+                preparation=preparation,
+                operation=RemoteModuleOperationV1(
+                    operation="capture_install",
+                    system_id=str(obligation.system_id),
+                    run_id=str(obligation.run_id),
+                    plan_identity=authority.plan_identity,
+                    operation_nonce=obligation.operation_nonce,
+                    release=authority.plan.module_obligation.release,
+                    root_volume={"key": "root", "identity": "sha256:" + "d" * 64},
+                    source_manifest=authority.plan.module_obligation.source_manifest,
+                    appliance_image_digest="sha256:" + "e" * 64,
+                ),
+            )
+
         async def execute(self, request: object) -> object:
             raise AssertionError(f"begin must not execute the provider host: {request!r}")
 
@@ -398,9 +423,10 @@ async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt
         plan=plan,
     )
 
-    receipt = await service.open_remote_module_attempt(peer, request)
+    begin = RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
+    response = await service.open_remote_module_attempt(peer, begin)
 
-    assert receipt == repository.remote_attempt
+    assert response.preparation == repository.remote_attempt
     assert [record.phase for record in repository.records][-2:] == [
         JournalPhase.ADMITTED,
         JournalPhase.MUTATION_STARTED,
@@ -409,7 +435,7 @@ async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt
     assert repository.remote_attempt_calls == [
         (acknowledgement.sequence, record_digest(acknowledgement), request.attempt_id.hex)
     ]
-    assert await service.open_remote_module_attempt(peer, request) == receipt
+    assert await service.open_remote_module_attempt(peer, begin) == response
     assert len(repository.remote_attempt_calls) == 2
 
     successor = takeover.model_copy(
@@ -453,6 +479,19 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
             assert authority is remote.authority
 
     class Host:
+        async def begin(
+            self,
+            authority: AuthorityPreparationMutationRequestV1,
+            preparation: ModuleAttemptPreparationRequestV1,
+            budget_seconds: int,
+        ) -> RemoteModulePreparationBeginResponseV1:
+            assert authority == request
+            assert budget_seconds == 30
+            return RemoteModulePreparationBeginResponseV1(
+                preparation=preparation,
+                operation=remote.operation,
+            )
+
         async def execute(
             self, request: RemoteModuleVolumePreparationRequestV1
         ) -> RemoteModuleTerminalPreparationResponseV1:
@@ -486,7 +525,6 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
         recovery_objects=(),
         plan=plan,
     )
-    await service.open_remote_module_attempt(peer, request)
     remote = RemoteModuleVolumePreparationRequestV1(
         authority=request,
         operation=RemoteModuleOperationV1(
@@ -500,7 +538,9 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
             source_manifest=request.plan.module_obligation.source_manifest,
             appliance_image_digest="sha256:" + "e" * 64,
         ),
-        deadline=10_000.0,
+    )
+    await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
     )
 
     first = asyncio.create_task(service.execute_remote_module_preparation(peer, remote))

@@ -301,18 +301,26 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
             "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,3,%s,%s)",
             (case.worker_id, authority_id, generation, admitted_digest, Jsonb(payload)),
         ).fetchone() == ("advanced",)
-        opened = provider.execute(
-            "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
-            (
-                case.worker_id,
-                authority_id,
-                generation,
-                ack_digest,
-                prepare_attempt_id,
-                prepared[0],
-                prepared[1],
-            ),
-        ).fetchone()
+        with psycopg.connect(migrated_url) as verifier:
+            verifier.execute(
+                "SELECT pg_advisory_xact_lock("
+                "pg_catalog.hashtextextended('kdive:system:' || %s::text, 2125))",
+                (case.system_id,),
+            )
+            provider.execute("SET statement_timeout='500ms'")
+            opened = provider.execute(
+                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
+                (
+                    case.worker_id,
+                    authority_id,
+                    generation,
+                    ack_digest,
+                    prepare_attempt_id,
+                    prepared[0],
+                    prepared[1],
+                ),
+            ).fetchone()
+            provider.execute("RESET statement_timeout")
         assert opened is not None
         assert opened[0]["module_attempt_obligation"] == {
             "schema": "module-attempt-obligation-receipt-v1",

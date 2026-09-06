@@ -40,9 +40,9 @@ BEGIN
     FROM public.external_boot_authorities AS authority
     WHERE authority.id = p_authority_id AND authority.generation = p_generation;
     IF NOT FOUND THEN RETURN NULL; END IF;
-    PERFORM pg_advisory_xact_lock(
-        pg_catalog.hashtextextended('kdive:system:' || v_authority.system_id::text, 2125)
-    );
+    -- The worker retains this System lock while the authority-host operation runs.  The
+    -- authority checkpoint serializes on the authority/job rows below instead of waiting on
+    -- its caller and forming a distributed lock cycle (ADR-0618).
     PERFORM pg_advisory_xact_lock(
         pg_catalog.hashtextextended('kdive:worker-incarnation:' || p_peer_incarnation, 1803)
     );

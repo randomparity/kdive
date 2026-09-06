@@ -153,6 +153,12 @@ def test_provider_authority_reuses_service_confinement_and_rechecks_drift() -> N
     assert "User=kdive-provider-authority" in service
     assert "ReadWritePaths=/run/kdive/provider-authority/request" in service
     assert "ReadWritePaths=/var/lib/kdive/provider-authority/journal" in service
+    assert "ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations" in service
+    defaults = yaml.safe_load(_text(PROVIDER_AUTHORITY / "defaults/main.yml"))
+    assert all(
+        "e2fsprogs" in packages
+        for packages in defaults["provider_authority_host_packages"].values()
+    )
 
 
 def test_provider_authority_disable_retains_journal_evidence() -> None:

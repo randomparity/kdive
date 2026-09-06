@@ -35,6 +35,7 @@ from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import ExternalBootActivationState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job, JobKind
@@ -74,6 +75,9 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
     OpaqueProviderRef,
     RunningKernelObservation,
+)
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleTerminalPreparationResponseV1,
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -344,6 +348,122 @@ def test_preparing_executes_and_commits_exact_materialization(
         assert [request.operation.value for request in executed] == ["materialize", "prepare"]
         assert executed[0].operation_identity != executed[1].operation_identity
         assert executed[0].attempt_id != executed[1].attempt_id
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_remote_preparing_calls_typed_module_authority_before_phase_commit(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_calls: list[AuthorityPreparationMutationRequestV1] = []
+    vehicle_holder: list[Vehicle] = []
+    seed_holder: list[AsyncConnection] = []
+    acknowledger = RecordingAcknowledger(authority_role_dsns("kdive_provider_authority"))
+
+    class Authority:
+        async def acknowledge_takeover(self, request: Any, *, deadline: float) -> Any:
+            assert deadline > asyncio.get_running_loop().time()
+            return await acknowledger.acknowledge(request)
+
+        async def execute_preparation(
+            self, request: AuthorityPreparationMutationRequestV1, *, deadline: float
+        ) -> AuthorityPreparationResponseV1:
+            assert deadline > asyncio.get_running_loop().time()
+            receipt = ExternalBootPreparationObservation(
+                state="materialized",
+                binding=ExternalBootActivationBinding(
+                    system_id=str(request.system_id),
+                    run_id=str(request.run_id),
+                    activation_id=str(request.activation_id),
+                ),
+                plan_identity=request.plan_identity,
+                authority=OpaqueProviderRef(ref="authority/remote"),
+                operation_identity=request.operation_identity,
+                materialization=external_boot_materialization(request.plan),
+            )
+            return AuthorityPreparationResponseV1(
+                observation=AuthorityObservationV1(
+                    observation_id=uuid4(), category="target", composite_state=receipt.identity
+                ),
+                receipt=receipt,
+                journal_sequence=4,
+                journal_digest="sha256:" + "d" * 64,
+            )
+
+    authority = Authority()
+
+    async def prepare_modules(**values: Any) -> RemoteModuleTerminalPreparationResponseV1:
+        inputs = values["inputs"]
+        module_calls.append(inputs.authority)
+        assert values["pool"] is not None
+        assert values["deadline"] > asyncio.get_running_loop().time()
+        return cast(RemoteModuleTerminalPreparationResponseV1, object())
+
+    async def commit(_conn: AsyncConnection, **values: Any) -> str:
+        request = values["request"]
+        if request.operation.value == "prepare":
+            await seed_holder[0].execute(
+                "UPDATE external_boot_activations SET state='prepared', materialization=%s, "
+                "recovery_point=%s WHERE id=%s",
+                (
+                    Jsonb(vehicle_holder[0].materialization_json),
+                    Jsonb(vehicle_holder[0].recovery_point_json),
+                    vehicle_holder[0].activation_id,
+                ),
+            )
+        return "applied"
+
+    monkeypatch.setattr(
+        "kdive.jobs.handlers.external_boot.runner.prepare_remote_module_on_authority_host",
+        prepare_modules,
+    )
+    monkeypatch.setattr(
+        "kdive.jobs.handlers.external_boot.runner.commit_external_boot_preparation_result",
+        commit,
+    )
+
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        vehicle_holder.append(vehicle)
+        seed_holder.append(seed)
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+            marker_overrides={"provider_kind": "remote-libvirt"},
+        )
+        await seed.execute(
+            "UPDATE resources SET kind='remote-libvirt' WHERE id=("
+            "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+            "WHERE s.id=%s)",
+            (vehicle.system_id,),
+        )
+        await seed.execute(
+            "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
+        )
+        base = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+        resolver = ProviderResolver(
+            {ResourceKind.REMOTE_LIBVIRT: replace(base, authority=cast(Any, authority))}
+        )
+        ports = replace(_ports(case, resolver=resolver), pool=cast(Any, object()))
+
+        await _run(
+            worker,
+            case,
+            ports=ports,
+            marker=_marker(case, provider_kind="remote-libvirt"),
+            require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+            call_port=lambda _context: None,
+        )
+
+        assert len(module_calls) == 1
+        assert module_calls[0].operation.value == "prepare"
+        assert module_calls[0].plan == vehicle.plan
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 

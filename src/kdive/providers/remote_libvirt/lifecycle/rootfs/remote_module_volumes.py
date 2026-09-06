@@ -92,6 +92,10 @@ class FilesystemImageWriter(Protocol):
     def inspect(self, path: Path) -> SourceFilesystemEvidence: ...
 
 
+class ArchiveFilesystemImageWriter(FilesystemImageWriter, Protocol):
+    def build_from_archive(self, operation: bytes, archive: Path) -> BuiltSourceImage: ...
+
+
 class Ext4SourceFilesystemWriter:
     """Build and reopen the appliance's closed ext4 source layout with e2fsprogs."""
 
@@ -215,6 +219,7 @@ class VolumeRequest:
     # configured work directory rather than the default temp dir, which on a
     # systemd host is a RAM-backed tmpfs sized at half of memory.
     work_dir: Path | None = None
+    archive: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -817,6 +822,19 @@ def _prepared(
     )
 
 
+def _build_request_image(request: VolumeRequest, operation: bytes) -> BuiltSourceImage:
+    if request.archive is None:
+        return request.writer.build(operation, request.entries)
+    if request.entries:
+        raise ValueError("archive-backed module preparation forbids in-memory entries")
+    build = getattr(request.writer, "build_from_archive", None)
+    if not callable(build):
+        raise ValueError("archive-backed module preparation requires an archive writer")
+    return cast(ArchiveFilesystemImageWriter, request.writer).build_from_archive(
+        operation, request.archive
+    )
+
+
 def prepare_attempt_volumes(
     conn: StorageConn,
     request: VolumeRequest,
@@ -831,17 +849,19 @@ def prepare_attempt_volumes(
     existing_source = _lookup(pool, source_name)
     existing_scratch = _lookup(pool, scratch_name)
     operation = request.operation.to_wire_bytes()
-    image = request.writer.build(operation, request.entries)
+    image = _build_request_image(request, operation)
     created: list[PreparedVolume] = []
     try:
         observed = request.writer.inspect(image.path)
         expected_content_bytes = sum(len(entry.content or b"") for entry in request.entries)
         if observed != image.evidence or observed.operation != operation:
             raise _conflict("source filesystem readback does not match its input")
-        if (
-            observed.manifest != request.source_manifest
-            or observed.entry_count != len(request.entries)
-            or observed.content_bytes != expected_content_bytes
+        if observed.manifest != request.source_manifest or (
+            request.archive is None
+            and (
+                observed.entry_count != len(request.entries)
+                or observed.content_bytes != expected_content_bytes
+            )
         ):
             raise _conflict("source filesystem manifest or bounds readback mismatched")
         source_capacity = image.capacity_bytes
@@ -923,7 +943,7 @@ def validate_attempt_volumes(
 ) -> PreparedModuleVolumes:
     """Reopen and identity-check both volumes before use or retry."""
     _validate_entries(request.entries)
-    expected_image = request.writer.build(request.operation.to_wire_bytes(), request.entries)
+    expected_image = _build_request_image(request, request.operation.to_wire_bytes())
     try:
         if source is None:
             source_name, _scratch_name = _names(request)

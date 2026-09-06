@@ -48,6 +48,7 @@ class WorkerHandlerAssembly:
     capture_supervisor: CaptureOperationSupervisor
     worker_check_builders: diagnostics.WorkerCheckBuilders
     module_volume_reaper: ModuleVolumeReaper
+    pool: AsyncConnectionPool | None = None
 
 
 def build_worker_handler_assembly(
@@ -86,6 +87,7 @@ def build_worker_handler_assembly(
         module_volume_reaper=composition.build_worker_module_volume_reaper(
             authority_sender_factory=sender_factory
         ),
+        pool=pool,
     )
     return assembly
 
@@ -137,6 +139,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
+            pool=assembly.pool,
         )
     )
     systems.register_handlers(
