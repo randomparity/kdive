@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -15,6 +17,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
@@ -245,6 +248,33 @@ type RemoteModulePreparationResponse = (
 )
 
 
+class RemoteModulePreparationCompletionV1(BaseModel):
+    """Durable completion published only after the provider call has stopped."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_: Literal["remote-module-preparation-completion-v1"] = Field(
+        "remote-module-preparation-completion-v1", alias="schema"
+    )
+    state: Literal["terminal", "failed-after-mutation"]
+    response: RemoteModuleTerminalPreparationResponseV1 | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> Self:
+        if (self.response is not None) != (self.state == "terminal"):
+            raise ValueError("remote preparation completion state differs from response")
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote preparation completion is not canonical JSON")
+        return value
+
+
 class RemoteModuleTerminalRecord(BaseModel):
     """Exact authenticated request and terminal provider-host response."""
 
@@ -393,7 +423,13 @@ class RemoteModuleVolumePreparationStore:
             raise
 
     def stage(self, request: RemoteModuleVolumePreparationRequestV1) -> None:
-        self._publish(f"{self._key(request)}.request", request.to_canonical_json())
+        name = f"{self._key(request)}.request"
+        if data := self._read(name):
+            persisted = RemoteModuleVolumePreparationRequestV1.from_canonical_json(data)
+            if persisted.model_copy(update={"deadline": request.deadline}) != request:
+                raise ValueError("remote preparation evidence conflicts with durable bytes")
+            return
+        self._publish(name, request.to_canonical_json())
 
     def reopen_request(
         self, request: RemoteModuleVolumePreparationRequestV1
@@ -402,9 +438,9 @@ class RemoteModuleVolumePreparationStore:
         if data is None:
             raise FileNotFoundError("remote preparation request is absent")
         reopened = RemoteModuleVolumePreparationRequestV1.from_canonical_json(data)
-        if reopened != request:
-            raise ValueError("remote preparation request differs from durable authority evidence")
-        return reopened
+        if reopened.model_copy(update={"deadline": request.deadline}) != request:
+            raise ValueError("remote preparation evidence conflicts with durable bytes")
+        return reopened.model_copy(update={"deadline": request.deadline})
 
     def publish_result(
         self,
@@ -413,6 +449,13 @@ class RemoteModuleVolumePreparationStore:
     ) -> None:
         self.reopen_request(request)
         self._publish(f"{self._key(request)}.result", response.to_canonical_json())
+        if isinstance(response, RemoteModuleTerminalPreparationResponseV1):
+            self._publish(
+                f"{self._key(request)}.completion",
+                RemoteModulePreparationCompletionV1(
+                    state="terminal", response=response
+                ).to_canonical_json(),
+            )
         if isinstance(response, RemoteModuleTerminalPreparationResponseV1):
             terminal = RemoteModuleTerminalRecord(request=request, response=response)
             authority = request.authority
@@ -426,6 +469,22 @@ class RemoteModuleVolumePreparationStore:
                 f"{key}.terminal",
                 terminal.to_canonical_json(),
             )
+
+    def publish_failed_completion(self, request: RemoteModuleVolumePreparationRequestV1) -> None:
+        self.reopen_request(request)
+        self._publish(
+            f"{self._key(request)}.completion",
+            RemoteModulePreparationCompletionV1(state="failed-after-mutation").to_canonical_json(),
+        )
+
+    def reopen_completion(
+        self, request: RemoteModuleVolumePreparationRequestV1
+    ) -> RemoteModulePreparationCompletionV1 | None:
+        self.reopen_request(request)
+        data = self._read(f"{self._key(request)}.completion")
+        return (
+            None if data is None else RemoteModulePreparationCompletionV1.from_canonical_json(data)
+        )
 
     def reopen_result(
         self, request: RemoteModuleVolumePreparationRequestV1
@@ -621,10 +680,35 @@ class DurableRemoteModuleVolumePreparationHost:
         self, request: RemoteModuleVolumePreparationRequestV1
     ) -> RemoteModulePreparationResponse:
         self._store.stage(request)
+        completion = self._store.reopen_completion(request)
+        if completion is not None:
+            if completion.response is not None:
+                completion.response.validate_for(request.operation)
+                return completion.response
+            raise CategorizedError(
+                "remote module preparation requires recovery",
+                category=ErrorCategory.CONFLICT,
+                details={"completion": completion.state},
+            )
         if result := self._store.reopen_result(request):
             result.validate_for(request.operation)
             return result
-        result = await self._host.execute(self._store.reopen_request(request))
+        task = asyncio.create_task(self._host.execute(self._store.reopen_request(request)))
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError as cancelled:
+            while not task.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(task)
+            if task.cancelled() or task.exception() is not None:
+                self._store.publish_failed_completion(request)
+            else:
+                result = task.result()
+                self._store.publish_result(request, result)
+            raise cancelled from None
+        except BaseException:
+            self._store.publish_failed_completion(request)
+            raise
         self._store.publish_result(request, result)
         return result
 

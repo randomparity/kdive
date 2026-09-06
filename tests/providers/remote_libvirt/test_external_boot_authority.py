@@ -6,13 +6,14 @@ import asyncio
 import inspect
 import threading
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import libvirt
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.errors import CategorizedError
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -511,6 +512,43 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
     executor.shutdown()
 
 
+def test_durable_remote_preparation_renews_only_invocation_deadline(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request)
+    renewed = request.model_copy(update={"deadline": request.deadline + 30.0})
+    store.stage(renewed)
+    assert store.reopen_request(renewed) == renewed
+    changed = renewed.model_copy(
+        update={"operation": renewed.operation.model_copy(update={"operation_nonce": "f" * 32})}
+    )
+    with pytest.raises(ValueError, match="durable"):
+        store.stage(changed)
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost:
+        async def execute(self, request: object) -> object:
+            del request
+            raise RuntimeError("provider returned after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(RuntimeError, match="after mutation"):
+        await durable.execute(request)
+    store.close()
+    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await DurableRemoteModuleVolumePreparationHost(restarted, cast(Any, FailingHost())).execute(
+            request
+        )
+    restarted.close()
+
+
 @pytest.mark.anyio
 async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     tmp_path: Path,
@@ -553,7 +591,7 @@ def test_durable_remote_preparation_rejects_same_authority_with_changed_operatio
         }
     )
 
-    with pytest.raises(ValueError, match="conflicts with durable bytes"):
+    with pytest.raises(ValueError, match="durable"):
         store.stage(changed)
     store.close()
 
