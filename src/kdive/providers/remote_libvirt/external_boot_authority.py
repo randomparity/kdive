@@ -362,14 +362,24 @@ class RemoteModuleVolumePreparationStore:
         request: ExternalBootPreparationRequest,
         receipt: ExternalBootPreparationObservation,
     ) -> None:
+        ExternalBootPreparationObservation.model_validate(
+            receipt.model_dump(mode="python", by_alias=True)
+        )
+        expected_state = "materialized" if request.phase == "materialize" else "prepared"
         if (
             receipt.state == "absent"
+            or receipt.state != expected_state
             or receipt.binding != request.binding
             or receipt.plan_identity != request.plan.identity
             or receipt.authority != request.authority
             or receipt.operation_identity != request.operation_identity
         ):
-            raise ValueError("remote preparation receipt differs from request")
+            detail = (
+                "phase and state differ"
+                if receipt.state != expected_state
+                else "receipt differs from request"
+            )
+            raise ValueError(f"remote preparation {detail}")
 
     def observe_preparation(
         self, request: ExternalBootPreparationRequest
@@ -423,6 +433,8 @@ class RemoteModuleVolumePreparationStore:
             identity = index.decode("ascii")
         except UnicodeDecodeError:
             raise ValueError("remote materialization plan index is malformed") from None
+        if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
+            raise ValueError("remote materialization plan index is malformed")
         data = self._read(f"{identity}.materialization")
         if data is None:
             raise ValueError("remote materialization plan index is incomplete")

@@ -663,6 +663,64 @@ def test_preparation_store_refuses_mismatched_or_conflicting_publication(tmp_pat
     store.close()
 
 
+def test_preparation_store_rejects_wrong_phase_and_invalid_closed_shape_before_write(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    request = _preparation_request(record, "materialize")
+    point = RecoveryPoint(
+        binding=record.binding,
+        plan_identity=record.plan_identity,
+        materialization_identity=record.materialization.identity,
+        recovery_ref=OpaqueProviderRef(ref="remote/recovery"),
+        source_state=record.source_state,
+        target_state=record.target_state,
+    )
+    wrong_phase = ExternalBootPreparationObservation(
+        state="prepared",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=record.materialization,
+        recovery_point=point,
+    )
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    with pytest.raises(ValueError, match="phase and state differ"):
+        store.publish_preparation(request, wrong_phase)
+
+    malformed = wrong_phase.model_copy(update={"recovery_point": None})
+    with pytest.raises(ValueError, match="invalid values"):
+        store.publish_preparation(request, malformed)
+    assert not list(tmp_path.glob("*.preparation"))
+    store.close()
+
+
+def test_materialization_index_rejects_path_before_descriptor_relative_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan_for_record(_record())
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    name = f"{plan.identity.removeprefix('sha256:')}.materialization-index"
+    store._publish(name, b"../outside")
+    real_open = os.open
+    escaped: list[str] = []
+
+    def guarded_open(path: str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if dir_fd is not None and "/" in path:
+            escaped.append(path)
+            raise AssertionError("corrupted index escaped the preparation root")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.external_boot_authority.os.open", guarded_open
+    )
+    with pytest.raises(ValueError, match="index is malformed"):
+        store.reopen_materialization_for_plan(plan)
+    assert escaped == []
+    store.close()
+
+
 def test_preparation_takeover_adopts_only_authenticated_same_phase_receipt(
     tmp_path: Path,
 ) -> None:
