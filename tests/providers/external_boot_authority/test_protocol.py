@@ -22,6 +22,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
     AuthorityTeardownResponseV1,
     JournalPhase,
     JournalRecordV1,
@@ -214,6 +215,30 @@ def test_takeover_rejects_invalid_bounded_fields(field: str, value: object) -> N
 def test_values_are_closed() -> None:
     with pytest.raises(ValidationError):
         AuthorityTakeoverRequestV1.model_validate(_binding() | {"provider_definition": "secret"})
+
+
+def test_teardown_request_is_closed_without_recovery_point_fields() -> None:
+    request = AuthorityTeardownMutationRequestV1.model_validate(
+        _binding()
+        | {
+            "schema": "external-boot-authority-teardown-request-v1",
+            "purpose": "teardown",
+            "operation": "teardown",
+            "attempt_id": uuid4(),
+        }
+    )
+    assert decode_authority_request(protocol._canonical_bytes(request)) == request  # noqa: SLF001
+    with pytest.raises(ValidationError, match="operation"):
+        request.model_validate(
+            {**request.model_dump(mode="json", by_alias=True), "purpose": "recover"}
+        )
+    with pytest.raises(ValidationError):
+        request.model_validate(
+            {
+                **request.model_dump(mode="json", by_alias=True),
+                "expected_source_identity": _DIGEST,
+            }
+        )
 
 
 def test_mutation_requires_sorted_unique_recovery_objects() -> None:

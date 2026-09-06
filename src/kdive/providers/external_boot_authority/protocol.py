@@ -231,6 +231,21 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
         return self
 
 
+class AuthorityTeardownMutationRequestV1(_AuthorityBinding):
+    """One authority-owned System teardown without recovery-point assumptions."""
+
+    schema_: Literal["external-boot-authority-teardown-request-v1"] = Field(
+        "external-boot-authority-teardown-request-v1", alias="schema"
+    )
+    attempt_id: UUID
+
+    @model_validator(mode="after")
+    def _is_only_the_teardown_commit(self) -> Self:
+        if self.purpose != "teardown" or self.operation is not AuthorityOperation.TEARDOWN:
+            raise ValueError("teardown request requires the teardown purpose and operation")
+        return self
+
+
 class AuthorityConflictResolutionRequestV1(AuthorityMutationRequestV1):
     """Closed conflict mutation carrying the caller observation the authority must recheck."""
 
@@ -324,6 +339,7 @@ type AuthorityRequestV1 = (
     AuthorityTakeoverRequestV1
     | AuthorityConflictResolutionRequestV1
     | AuthorityMutationRequestV1
+    | AuthorityTeardownMutationRequestV1
     | AuthorityPreparationMutationRequestV1
     | AuthorityHealthRequestV1
     | AuthorityRecoveryOrphanDispositionRequestV1
