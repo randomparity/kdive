@@ -675,6 +675,34 @@ def test_predecessor_watermark_can_be_superseded_only_once(tmp_path: Path) -> No
         journal.load()
 
 
+def test_new_generation_can_reuse_immutable_logical_operation_identity(tmp_path: Path) -> None:
+    journal = FileAuthorityJournal(tmp_path, "journal")
+    first = _record(generation=1, operation_identity="logical-operation")
+    journal.append(first)
+    superseded = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_SUPERSEDED,
+        authority_id=uuid4(),
+        generation=2,
+        operation_identity="logical-operation",
+        predecessor_generation=1,
+        watermark_sequence=first.sequence,
+        watermark_digest=record_digest(first),
+    )
+    journal.append(superseded)
+    successor = _record(
+        3,
+        record_digest(superseded),
+        authority_id=superseded.authority_id,
+        generation=2,
+        operation_identity="logical-operation",
+    )
+    journal.append(successor)
+
+    assert journal.load() == (first, superseded, successor)
+
+
 def test_superseded_watermark_cannot_later_be_acknowledged(tmp_path: Path) -> None:
     path = tmp_path / "journal"
     journal = FileAuthorityJournal(path.parent, path.name)

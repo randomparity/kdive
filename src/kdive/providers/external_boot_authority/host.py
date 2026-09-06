@@ -54,7 +54,10 @@ from kdive.providers.external_boot_authority.transport import (
 )
 
 if TYPE_CHECKING:
-    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+    from kdive.providers.external_boot_authority.service import (
+        AuthenticatedPeer,
+        ExternalBootAuthorityService,
+    )
 
 READINESS_INTERVAL_SECONDS = 30.0
 READINESS_CHECK_TIMEOUT_SECONDS = 20.0
@@ -490,10 +493,14 @@ async def check_database_role(connection: Any) -> None:
                     ::regprocedure,
                 'public.resolve_allocating_external_boot_authority(text,uuid,bigint)'
                     ::regprocedure,
+                'public.resolve_allocating_external_boot_preparation_plan(text,uuid,bigint)'
+                    ::regprocedure,
                 'public.resolve_current_external_boot_authority_candidate(text,uuid,bigint)'
                     ::regprocedure,
                 'public.resolve_current_external_boot_authority(text,uuid,bigint,bigint,text)'
                     ::regprocedure,
+                'public.resolve_current_external_boot_preparation_authority(text,uuid,bigint,'
+                    'bigint,text,text)'::regprocedure,
                 'public.read_external_boot_authority_journal_head(text,uuid,bigint,text)'
                     ::regprocedure,
                 'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,'
@@ -1064,6 +1071,31 @@ async def _authenticate(config: AuthorityHostConfig, credential: SecretStr) -> A
             raise ValueError("unauthenticated") from None
 
 
+def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
+    """Build mutation support only on a host with an explicitly provisioned local root."""
+    from kdive.providers.assembly.composition import build_authority_mutation_adapter
+    from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+    from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
+
+    adapter = build_authority_mutation_adapter(config.provider_socket)
+    if adapter is None:
+        return None
+
+    @asynccontextmanager
+    async def connections() -> AsyncIterator[AsyncConnection]:
+        async with _database_connection(config) as connection:
+            await check_database_role(connection)
+            yield connection
+
+    return ExternalBootAuthorityService(
+        repository=DatabaseAuthorityRepository(connections),
+        journal_factory=lambda system_id: FileAuthorityJournal(
+            config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
+        ),
+        adapter=adapter,
+    )
+
+
 async def _bounded_readiness_check(check: Awaitable[None]) -> None:
     try:
         async with asyncio.timeout(READINESS_CHECK_TIMEOUT_SECONDS):
@@ -1076,6 +1108,7 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
     """Validate, publish readiness, and retract it before exiting on any later drift."""
     listener: AuthorityListener | None = None
     network_listener: AuthorityNetworkListener | None = None
+    mutation_service: ExternalBootAuthorityService | None = None
     journal_validator = JournalInventoryValidator()
     identity_service = RemoteDeviceIdentityService()
 
@@ -1084,15 +1117,16 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
 
     try:
         await _bounded_readiness_check(_check_static_authority_host(config, journal_validator))
+        mutation_service = _build_mutation_service(config)
         try:
             listener = await serve_authority_transport(
-                config, authenticate, service=None, identity_service=identity_service
+                config, authenticate, service=mutation_service, identity_service=identity_service
             )
             if config.network_address is not None:
                 network_listener = await serve_authority_network_transport(
                     config,
                     authenticate,
-                    service=None,
+                    service=mutation_service,
                     identity_service=identity_service,
                 )
         except Exception:
@@ -1134,7 +1168,11 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                     if listener is not None:
                         await _close_listener(listener)
                 finally:
-                    identity_service.close()
+                    try:
+                        if mutation_service is not None:
+                            await mutation_service.close()
+                    finally:
+                        identity_service.close()
 
 
 async def check_authority_host_once(config: AuthorityHostConfig) -> None:

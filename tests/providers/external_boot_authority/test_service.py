@@ -12,7 +12,9 @@ import pytest
 
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
@@ -23,6 +25,11 @@ from kdive.providers.external_boot_authority.service import (
     AuthorityServiceMetrics,
     ExternalBootAuthorityService,
 )
+from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+)
 from tests.providers.external_boot_authority.service_support import (
     _DIGEST_B,
     _Adapter,
@@ -32,6 +39,31 @@ from tests.providers.external_boot_authority.service_support import (
     _service,
     _takeover,
 )
+from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
+
+
+class _PreparationAdapter:
+    def __init__(self, receipt: ExternalBootPreparationObservation) -> None:
+        self.calls: list[str] = []
+        self.receipt = receipt
+        self.reopened = receipt
+
+    async def commit(self, request: object, context: object) -> AuthorityObservationV1:
+        self.calls.append("commit:materialize")
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category="target", composite_state=self.receipt.identity
+        )
+
+    async def observe(self, request: object) -> AuthorityObservationV1:
+        self.calls.append("observe")
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category="target", composite_state=self.receipt.identity
+        )
+
+    async def preparation_receipt(
+        self, request: AuthorityPreparationMutationRequestV1
+    ) -> ExternalBootPreparationObservation:
+        return self.reopened
 
 
 @pytest.mark.anyio
@@ -49,6 +81,59 @@ async def test_takeover_anchors_without_provider_access(tmp_path: Path) -> None:
     assert service.metrics.checkpoints[labels] == 2
     assert service.metrics.checkpoint_latency[labels][0] == 2
     assert service.metrics.checkpoint_latency[labels][1] >= 0
+
+
+@pytest.mark.anyio
+async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: Path) -> None:
+    service, repository, _adapter, peer, takeover = _service(tmp_path)
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository.request = takeover
+    repository.allocating_request = takeover
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    request = AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="materialize",
+        operation_identity="materialize-op",
+        operation_digest="sha256:" + "c" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=ExternalBootActivationBinding(
+            system_id=str(request.system_id),
+            run_id=str(request.run_id),
+            activation_id=str(request.activation_id),
+        ),
+        plan_identity=plan.identity,
+        authority=OpaqueProviderRef(
+            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+        ),
+        operation_identity=request.operation_identity,
+        materialization=external_boot_materialization(plan),
+    )
+    adapter = _PreparationAdapter(receipt)
+    service._adapter = cast(Any, adapter)
+
+    response = await service.execute_preparation(peer, request)
+
+    assert response.receipt == receipt
+    assert response.observation.composite_state == receipt.identity
+    terminal = repository.records[-1]
+    assert response.journal_sequence == terminal.sequence
+    assert response.journal_digest == record_digest(terminal)
+    assert adapter.calls == ["commit:materialize", "observe"]
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
 
 
 @pytest.mark.anyio
@@ -336,6 +421,37 @@ async def test_caller_cancellation_does_not_cancel_started_lane(tmp_path: Path) 
             break
         await asyncio.sleep(0)
     assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_shutdown_drains_started_lane_before_closing_adapter(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.release.clear()
+    mutation = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+    await adapter.entered.wait()
+
+    shutdown = asyncio.create_task(service.close())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    assert not adapter.closed
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    assert not adapter.closed
+
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, _mutation(request))
+    adapter.release.set()
+    await mutation
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+    assert shutdown.cancelling() == 2
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert adapter.closed
 
 
 @pytest.mark.anyio
@@ -801,6 +917,41 @@ async def test_provider_boundary_failure_remains_unresolved_across_restart(
     acknowledgement = await restarted.acknowledge_takeover(peer, successor)
     assert acknowledgement.generation == 2
     assert repository.records[-1].phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+
+
+@pytest.mark.anyio
+async def test_exact_same_generation_takeover_ack_replays_without_new_journal_records(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    original = await service.acknowledge_takeover(peer, request)
+    before = tuple(repository.records)
+
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    replay = await restarted.acknowledge_takeover(peer, request)
+
+    assert replay == original
+    assert tuple(repository.records) == before
+
+
+@pytest.mark.anyio
+async def test_same_generation_takeover_ack_replay_requires_anchored_head(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    assert repository.head is not None
+    repository.head = replace(repository.head, digest=_DIGEST_B)
+
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await restarted.acknowledge_takeover(peer, request)
 
 
 @pytest.mark.anyio

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
+from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
+from kdive.db.external_boot_authority_journal import commit_external_boot_preparation_result
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
@@ -26,9 +30,11 @@ from kdive.jobs.models import (
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityPreparationMutationRequestV1,
     AuthorityTakeoverRequestV1,
 )
 from kdive.providers.ports.external_boot import (
+    ExternalBootPlan,
     ExternalBootPorts,
     OpaqueProviderRef,
 )
@@ -147,6 +153,94 @@ def authority_ref(context: OperationContext) -> OpaqueProviderRef:
     return OpaqueProviderRef(
         ref=f"authority/{context.authority.authority_id}/{context.authority.generation}"
     )
+
+
+def _phase_binding(context: OperationContext, operation: str) -> tuple[str, str]:
+    worker_id = context.job.worker_id
+    if worker_id is None:
+        raise _refuse("claimed external-boot job has no worker identity")
+    root = {
+        "authority_id": str(context.authority.authority_id),
+        "generation": context.authority.generation,
+        "system_id": str(context.marker.system_id),
+        "activation_id": str(context.marker.activation_id),
+        "run_id": str(context.marker.run_id),
+        "plan_identity": context.marker.plan_identity,
+        "purpose": context.marker.purpose,
+        "provider_kind": context.marker.provider_kind,
+        "authority_instance": context.marker.authority_instance,
+        "worker_incarnation": worker_id,
+        "root_operation": context.marker.operation,
+        "root_operation_identity": context.marker.operation_identity,
+        "root_operation_digest": context.authority.operation_digest,
+        "operation": operation,
+    }
+    canonical = json.dumps(root, sort_keys=True, separators=(",", ":")).encode()
+    identity = hashlib.sha256(
+        b"kdive-external-boot-preparation-identity-v1\0" + canonical
+    ).hexdigest()
+    digest = hashlib.sha256(b"kdive-external-boot-preparation-digest-v1\0" + canonical).hexdigest()
+    return "sha256:" + identity, "sha256:" + digest
+
+
+async def _materialize_preparing(
+    conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
+) -> ExternalBootActivation:
+    if context.activation.state is not ExternalBootActivationState.PREPARING:
+        return context.activation
+    executor = ports.preparation_executor
+    if executor is None:
+        raise _refuse("no external-boot authority preparation executor is configured")
+    raw_plan = context.job.payload.get("external_boot_plan_v1")
+    plan = ExternalBootPlan.model_validate(raw_plan)
+
+    async def execute_phase(operation: Literal["materialize", "prepare"]) -> None:
+        operation_identity, operation_digest = _phase_binding(context, operation)
+        request = AuthorityPreparationMutationRequestV1(
+            authority_id=context.authority.authority_id,
+            generation=context.authority.generation,
+            system_id=context.marker.system_id,
+            activation_id=context.marker.activation_id,
+            run_id=context.marker.run_id,
+            plan_identity=context.marker.plan_identity,
+            purpose="activate",
+            operation=operation,
+            provider_kind=context.marker.provider_kind,
+            authority_instance=context.marker.authority_instance,
+            operation_identity=operation_identity,
+            operation_digest=operation_digest,
+            attempt_id=uuid5(NAMESPACE_URL, f"{context.marker.operation_identity}/{operation}"),
+            expected_source_identity=context.marker.plan_identity,
+            intended_target_identity=context.marker.plan_identity,
+            recovery_objects=(),
+            plan=plan,
+        )
+        response = await executor.execute_preparation(request)
+        status = await commit_external_boot_preparation_result(
+            conn,
+            credential=ports.incarnation_credential,
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            request=request,
+            response=response,
+        )
+        if status != "applied":
+            raise CategorizedError(
+                f"external boot {operation} commit was {status}",
+                category=ErrorCategory.STALE_HANDLE,
+                terminal=False,
+            )
+
+    await execute_phase("materialize")
+    await execute_phase("prepare")
+    refreshed = await _ACTIVATIONS.get(conn, context.marker.activation_id)
+    if refreshed is None or refreshed.state is not ExternalBootActivationState.PREPARED:
+        raise CategorizedError(
+            "external boot preparation commit did not publish prepared state",
+            category=ErrorCategory.STALE_HANDLE,
+            terminal=False,
+        )
+    return refreshed
 
 
 async def _resolve_port(
@@ -404,6 +498,11 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         require_activation_evidence=require_activation_evidence,
     )
     prerequisites = await require_preconditions(conn, activation, marker)
+    if (
+        activation.state is ExternalBootActivationState.PREPARING
+        and ports.preparation_executor is None
+    ):
+        raise _refuse("no external-boot authority preparation executor is configured")
 
     authority = await allocate_authority(
         conn, job, marker, incarnation_credential=ports.incarnation_credential
@@ -430,6 +529,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         secret_registry=ports.secret_registry,
         prerequisites=prerequisites,
     )
+    context = replace(context, activation=await _materialize_preparing(conn, context, ports))
     try:
         if before_port is not None and (intermediate := before_port(context)) is not None:
             return intermediate

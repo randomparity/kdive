@@ -8,8 +8,10 @@ doubled.
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import inspect
+import threading
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID, uuid4
@@ -22,6 +24,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
@@ -49,10 +52,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalRecoveryMetadataV1,
     RecoveryPhase,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalOperationLeaseScope
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
     ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
     KernelIdentity,
     OpaqueProviderRef,
     PresentComponentState,
@@ -65,6 +70,7 @@ from kdive.providers.ports.external_boot import (
 # a second implementation of `AuthorityRepository` in this package could drift from the
 # contract the service is actually tested against, which is the thing these tests rely on.
 from tests.providers.external_boot_authority.service_support import _Repository
+from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
 
 pytestmark = pytest.mark.anyio
 
@@ -324,6 +330,111 @@ def _adapter(io: _FakeIO) -> LocalExternalBootAuthorityAdapter:
     return LocalExternalBootAuthorityAdapter(ports)
 
 
+@pytest.mark.anyio
+async def test_cancellation_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    request = _request()
+    authority = adapter_module._authority_ref(request)
+
+    def operation() -> None:
+        assert scope.resolve(authority).binding == _BINDING
+        entered.set()
+        release.wait()
+
+    task = asyncio.create_task(adapter._offload(request, operation))
+    await asyncio.to_thread(entered.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
+
+
+@pytest.mark.anyio
+async def test_repeated_cancellation_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    request = _request()
+
+    task = asyncio.create_task(adapter._offload(request, lambda: entered.set() or release.wait()))
+    await asyncio.to_thread(entered.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelling() == 2
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_close_does_not_wait_for_running_provider_call() -> None:
+    adapter = _adapter(_FakeIO())
+    entered = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    def close() -> None:
+        adapter.close()
+        closed.set()
+
+    task = asyncio.create_task(
+        adapter._offload(_request(), lambda: entered.set() or release.wait())
+    )
+    await asyncio.to_thread(entered.wait)
+    closer = threading.Thread(target=close)
+    closer.start()
+    try:
+        assert await asyncio.to_thread(closed.wait, 2), "shutdown waited for live provider IO"
+        assert not task.done()
+        with pytest.raises(RuntimeError, match="capacity is unavailable"):
+            await adapter._offload(_request(), lambda: None)
+    finally:
+        release.set()
+        await task
+        await asyncio.to_thread(closer.join)
+
+
+def test_event_loop_shutdown_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    request = _request()
+
+    def blocked() -> None:
+        entered.set()
+        release.wait()
+        finished.set()
+
+    async def abandon_task() -> None:
+        asyncio.create_task(adapter._offload(request, blocked))
+        await asyncio.to_thread(entered.wait)
+        threading.Timer(0.05, release.set).start()
+
+    asyncio.run(abandon_task())
+    assert finished.is_set()
+    adapter.close()
+
+
 def _request(
     *,
     purpose: str = "activate",
@@ -418,6 +529,8 @@ def _recovery_context(
 
 
 _PURPOSE_FOR: dict[AuthorityOperation, str] = {
+    AuthorityOperation.MATERIALIZE: "activate",
+    AuthorityOperation.PREPARE: "activate",
     AuthorityOperation.ACTIVATE: "activate",
     AuthorityOperation.DEADLINE: "activate",
     AuthorityOperation.FAIL: "activate",
@@ -428,6 +541,12 @@ _PURPOSE_FOR: dict[AuthorityOperation, str] = {
     AuthorityOperation.CLEANUP: "release",
     AuthorityOperation.TEARDOWN: "teardown",
 }
+
+_ORDINARY_OPERATIONS = tuple(
+    operation
+    for operation in AuthorityOperation
+    if operation not in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}
+)
 
 
 def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:
@@ -481,7 +600,7 @@ def test_adapter_satisfies_the_authority_mutation_adapter_protocol() -> None:
 @pytest.mark.parametrize(
     "purpose", ["activate", "recover", "resolve-conflict", "release", "teardown"]
 )
-@pytest.mark.parametrize("operation", list(AuthorityOperation))
+@pytest.mark.parametrize("operation", _ORDINARY_OPERATIONS)
 async def test_commit_refuses_every_illegal_purpose_operation_pair(
     purpose: str, operation: AuthorityOperation
 ) -> None:
@@ -489,7 +608,9 @@ async def test_commit_refuses_every_illegal_purpose_operation_pair(
         pytest.skip("legal pair is covered by the accepted-commit-point tests")
     io = _FakeIO()
     legal = next(
-        candidate for candidate in AuthorityOperation if operation_is_permitted(purpose, candidate)
+        candidate
+        for candidate in _ORDINARY_OPERATIONS
+        if operation_is_permitted(purpose, candidate)
     )
     request = _request(purpose=purpose, operation=legal)
 
@@ -514,6 +635,68 @@ async def test_a_commit_point_that_is_not_an_operation_cannot_reach_the_adapter(
         AuthorityCommitContextV1.model_validate(values | {"commit_point": "rm -rf /"})
 
 
+class _PreparationPorts:
+    def __init__(self, receipt: ExternalBootPreparationObservation) -> None:
+        self.receipt = receipt
+        self.executions = 0
+
+    def execute_preparation(self, request: object) -> ExternalBootPreparationObservation:
+        self.executions += 1
+        return self.receipt
+
+    def observe_preparation(self, request: object) -> ExternalBootPreparationObservation:
+        return self.receipt
+
+
+def _preparation_request() -> AuthorityPreparationMutationRequestV1:
+    plan = external_boot_plan(SYSTEM_ID, RUN_ID)
+    return AuthorityPreparationMutationRequestV1(
+        authority_id=AUTHORITY_ID,
+        generation=7,
+        system_id=SYSTEM_ID,
+        activation_id=ACTIVATION_ID,
+        run_id=RUN_ID,
+        plan_identity=plan.identity,
+        purpose="activate",
+        operation="materialize",
+        provider_kind="local-libvirt",
+        authority_instance="local-authority",
+        operation_identity="prep-op",
+        operation_digest="sha256:" + "9" * 64,
+        attempt_id=ATTEMPT_ID,
+        expected_source_identity=SOURCE_IDENTITY,
+        intended_target_identity=TARGET_IDENTITY,
+        recovery_objects=(),
+        plan=plan,
+    )
+
+
+async def test_preparation_commit_returns_journal_bound_durable_receipt() -> None:
+    request = _preparation_request()
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=request.plan_identity,
+        authority=OpaqueProviderRef(ref=f"authority/{AUTHORITY_ID}/7/{ATTEMPT_ID}"),
+        operation_identity=request.operation_identity,
+        materialization=external_boot_materialization(request.plan),
+    )
+    ports = _PreparationPorts(receipt)
+    adapter = LocalExternalBootAuthorityAdapter(cast(LocalLibvirtExternalBoot, ports))
+    record = JournalRecordV1(
+        **request.model_dump(mode="python", by_alias=True, exclude={"plan"}),
+        sequence=4,
+        previous_digest="sha256:" + "0" * 64,
+        phase=JournalPhase.MUTATION_STARTED,
+    )
+
+    observed = await adapter.commit(request, AuthorityCommitContextV1.for_record(record))
+
+    assert ports.executions == 1
+    assert observed.composite_state == receipt.identity
+    assert await adapter.preparation_receipt(request) == receipt
+
+
 # --------------------------------------------------------------------------------------
 # AC 3 - only named local commit points; no generic power call, no XML synthesis
 # --------------------------------------------------------------------------------------
@@ -523,7 +706,12 @@ def test_adapter_module_names_no_generic_power_operation_or_domain_xml() -> None
     source = Path(inspect.getfile(adapter_module)).read_text()
     tree = ast.parse(source)
 
-    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    # Closing the owned ThreadPoolExecutor is not a provider power operation.
+    attributes = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and ast.unparse(node) != "self._executor.shutdown"
+    }
     called = {
         node.func.id
         for node in ast.walk(tree)
@@ -713,10 +901,10 @@ async def test_unproven_recovery_object_is_quarantined_not_reused_or_deleted() -
 # --------------------------------------------------------------------------------------
 
 
-def test_construction_takes_only_the_coordinator() -> None:
+def test_construction_takes_only_the_coordinator_and_local_lease_scope() -> None:
     parameters = list(inspect.signature(LocalExternalBootAuthorityAdapter.__init__).parameters)
 
-    assert parameters == ["self", "ports"]
+    assert parameters == ["self", "ports", "lease_scope"]
 
 
 def test_no_request_field_can_select_a_host_resource() -> None:

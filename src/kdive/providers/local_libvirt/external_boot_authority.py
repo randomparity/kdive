@@ -11,9 +11,13 @@ provider, never XML this module composed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
+import threading
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from uuid import UUID, uuid5
 
 from kdive.providers.external_boot_authority.protocol import (
@@ -21,6 +25,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     ObservationCategory,
     operation_is_permitted,
@@ -31,8 +36,13 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalLibvirtExternalBoot,
     LocalObservedState,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalOperationLeaseScope,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     OpaqueProviderRef,
     ProviderStateIdentity,
     RecoveryPoint,
@@ -48,6 +58,7 @@ _OBSERVATION_NAMESPACE = UUID("6f3f0f6e-7a1a-4e3b-9a2f-2b6b1d4c8e57")
 # authoritative watermark; dropping the oldest entry here can only make this check
 # under-reject, which the service's own ``resolve_current`` still catches.
 _MAX_ADMITTED_LANES = 256
+_OFFLOAD_CAPACITY = 4
 
 # Commit points that reach a provider mutation. Every other legal operation is a
 # bookkeeping edge whose provider effect is exactly one observation: ADR-0584 makes
@@ -68,7 +79,9 @@ _MUTATING_OPERATIONS = frozenset(
 _DELETING_OPERATIONS = frozenset({AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN})
 
 
-def _authority_ref(request: AuthorityMutationRequestV1) -> OpaqueProviderRef:
+def _authority_ref(
+    request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+) -> OpaqueProviderRef:
     """Derive the opaque provider reference for a request's authority binding.
 
     Built only from closed identity fields the request already carries. Nothing a peer
@@ -81,7 +94,7 @@ def _authority_ref(request: AuthorityMutationRequestV1) -> OpaqueProviderRef:
 
 
 def _activation_binding(
-    request: AuthorityMutationRequestV1,
+    request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
 ) -> ExternalBootActivationBinding:
     return ExternalBootActivationBinding(
         system_id=str(request.system_id),
@@ -105,8 +118,11 @@ class LocalExternalBootAuthorityAdapter:
     already bound inside the injected coordinator.
     """
 
-    def __init__(self, ports: LocalLibvirtExternalBoot) -> None:
+    def __init__(
+        self, ports: LocalLibvirtExternalBoot, lease_scope: LocalOperationLeaseScope | None = None
+    ) -> None:
         self._ports = ports
+        self._lease_scope = lease_scope
         # Highest generation this adapter has admitted per activation lane. It complements
         # the journal watermark the service enforces through ``resolve_current``; it does
         # not replace it, and it is deliberately in-process because a restarted adapter
@@ -114,10 +130,69 @@ class LocalExternalBootAuthorityAdapter:
         self._admitted: dict[tuple[str, str], int] = {}
         self._pending_cleanup_finalization: dict[str, RecoveryPoint] = {}
         self._pending_absence: dict[str, AuthorityMutationRequestV1] = {}
+        self._executor = ThreadPoolExecutor(
+            max_workers=_OFFLOAD_CAPACITY, thread_name_prefix="kdive-local-external-boot"
+        )
+        self._admission = threading.BoundedSemaphore(_OFFLOAD_CAPACITY)
+        self._executor_lock = threading.Lock()
+        self._closed = False
 
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+    async def _await_completion[T](self, future: Future[T]) -> T:
+        loop = asyncio.get_running_loop()
+        completed = loop.create_future()
+
+        def signal_completion(_future: Future[T]) -> None:
+            loop.call_soon_threadsafe(completed.set_result, None)
+
+        future.add_done_callback(signal_completion)
+        try:
+            await asyncio.shield(completed)
+        except asyncio.CancelledError as cancelled:
+            while not completed.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(completed)
+            if not future.cancelled():
+                future.exception()
+            raise cancelled from None
+        return future.result()
+
+    async def _offload[T](
+        self,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        operation: Callable[[], T],
+    ) -> T:
+        def scoped() -> T:
+            if self._lease_scope is None:
+                return operation()
+            with self._lease_scope.issue(_authority_ref(request), _activation_binding(request)):
+                return operation()
+
+        with self._executor_lock:
+            if self._closed or not self._admission.acquire(blocking=False):
+                raise RuntimeError("local external-boot provider capacity is unavailable")
+            try:
+                future = self._executor.submit(scoped)
+            except RuntimeError:
+                self._admission.release()
+                raise RuntimeError("local external-boot provider capacity is unavailable") from None
+        future.add_done_callback(lambda _future: self._admission.release())
+        return await self._await_completion(future)
+
+    def close(self) -> None:
+        with self._executor_lock:
+            self._closed = True
+            self._executor.shutdown(wait=False, cancel_futures=True)
+
+    async def observe(
+        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+    ) -> AuthorityObservationV1:
         """Classify observed provider state against the request's exact identities."""
-        return await asyncio.to_thread(self._observe, request)
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            receipt = await self._offload(
+                request, lambda: self._ports.observe_preparation(self._preparation_request(request))
+            )
+            return self._preparation_observation(receipt)
+        return await self._offload(request, lambda: self._observe(request))
 
     async def observe_recovery(
         self,
@@ -130,15 +205,72 @@ class LocalExternalBootAuthorityAdapter:
             or context.attempt_id != request.attempt_id
         ):
             raise AuthorityServiceError("provider_conflict")
-        return await asyncio.to_thread(self._observe_recovery, request)
+        return await self._offload(request, lambda: self._observe_recovery(request))
 
     async def commit(
-        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+        self,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1:
         """Apply one named commit point, then report the resulting observation."""
         operation = self._require_permitted_commit_point(request, context)
         self._require_admissible_generation(request)
-        return await asyncio.to_thread(self._commit, request, operation, context)
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            receipt = await self._offload(
+                request, lambda: self._ports.execute_preparation(self._preparation_request(request))
+            )
+            return self._preparation_observation(receipt)
+        return await self._offload(request, lambda: self._commit(request, operation, context))
+
+    async def preparation_receipt(
+        self, request: AuthorityPreparationMutationRequestV1
+    ) -> ExternalBootPreparationObservation:
+        return await self._offload(
+            request, lambda: self._ports.observe_preparation(self._preparation_request(request))
+        )
+
+    async def adopt_preparation(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
+        context: AuthorityCommitContextV1,
+    ) -> AuthorityObservationV1:
+        self._require_permitted_commit_point(request, context)
+        self._require_admissible_generation(request)
+        receipt = await self._offload(
+            request,
+            lambda: self._ports.adopt_preparation(
+                self._preparation_request(request),
+                self._preparation_request(predecessor),
+                predecessor_receipt_identity,
+            ),
+        )
+        return self._preparation_observation(receipt)
+
+    @staticmethod
+    def _preparation_request(
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> ExternalBootPreparationRequest:
+        if request.operation not in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
+            raise AuthorityServiceError("provider_conflict")
+        return ExternalBootPreparationRequest(
+            phase=request.operation.value,  # type: ignore[arg-type]
+            plan=request.plan,
+            binding=_activation_binding(request),
+            authority=_authority_ref(request),
+            operation_identity=request.operation_identity,
+        )
+
+    @staticmethod
+    def _preparation_observation(
+        receipt: ExternalBootPreparationObservation,
+    ) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid5(_OBSERVATION_NAMESPACE, receipt.identity),
+            category="target",
+            composite_state=receipt.identity,
+        )
 
     async def finalize(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
@@ -149,10 +281,9 @@ class LocalExternalBootAuthorityAdapter:
         authority = _authority_ref(request)
         point = self._pending_cleanup_finalization.pop(request.operation_identity, None)
         if point is None:
-            point = await asyncio.to_thread(
-                self._ports.cleanup_receipt,
-                _activation_binding(request),
-                authority,
+            point = await self._offload(
+                request,
+                lambda: self._ports.cleanup_receipt(_activation_binding(request), authority),
             )
         if point is None:
             # A terminal replay after exact finalization has no durable point left to
@@ -161,16 +292,17 @@ class LocalExternalBootAuthorityAdapter:
         matched = self._require_matching_identities(request, point)
         if not _ownership_is_proven(request, matched, require_named=True):
             raise AuthorityServiceError("provider_conflict")
-        await asyncio.to_thread(
-            self._ports.finalize_cleanup_tombstone,
-            matched,
-            _cleanup_proof(context, matched),
-            authority,
+        await self._offload(
+            request,
+            lambda: self._ports.finalize_cleanup_tombstone(
+                matched, _cleanup_proof(context, matched), authority
+            ),
         )
 
     @staticmethod
     def _require_permitted_commit_point(
-        request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
     ) -> AuthorityOperation:
         """Refuse an illegal commit point before any provider call.
 
@@ -188,7 +320,9 @@ class LocalExternalBootAuthorityAdapter:
             raise AuthorityServiceError("provider_conflict")
         return operation
 
-    def _require_admissible_generation(self, request: AuthorityMutationRequestV1) -> None:
+    def _require_admissible_generation(
+        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+    ) -> None:
         lane = (str(request.system_id), str(request.activation_id))
         admitted = self._admitted.get(lane)
         if admitted is not None and request.generation < admitted:
