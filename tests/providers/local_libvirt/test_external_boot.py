@@ -12,6 +12,7 @@ import tarfile
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Literal, cast
 from uuid import UUID
@@ -19,21 +20,26 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     CleanupQuarantineReceiptV1,
     CleanupTombstoneV1,
     FinalizeCleanupProof,
     LibguestfsAuthenticatedGuestTree,
+    LocalExternalBootMaterializer,
     LocalLibvirtExternalBoot,
     LocalObservedState,
     LocalPreStopIntentV1,
     LocalRecoveryMetadataV1,
+    LocalSystemTeardownIntentV1,
+    LocalSystemTeardownRecordV1,
     ModuleLayout,
     PublicationPhase,
     RealLocalExternalBootIO,
     RecoveryMetadataStore,
     RecoveryPhase,
+    SystemTeardownPhase,
     TargetProjectionStore,
     TargetProjectionV1,
     advance_absence_publication,
@@ -46,6 +52,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure,
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     AbsentModuleCapture,
     AuthenticatedGuestTree,
+    GuestRecoveryWriter,
     KernelBundleSource,
     ModuleArchiveCapture,
     RealGuestRecoveryWriter,
@@ -58,6 +65,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     InactiveGuestDirectoryEntry,
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
+    LocalSystemTeardownInspection,
     OverlayIdentity,
 )
 from kdive.providers.ports.external_boot import (
@@ -82,6 +90,13 @@ from tests.providers.local_libvirt.external_boot_support import (
     _metadata,
     _point,
     _pre_stop,
+)
+
+_TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
+    disposition="ready",
+    store_identity=OpaqueProviderRef(ref="stores/private"),
+    owner_key=OpaqueProviderRef(ref="owners/private"),
+    reserved_bytes=4096,
 )
 
 
@@ -130,6 +145,294 @@ def _raw_bundle(names: list[tuple[str, bytes]]) -> bytes:
             member.size = len(content)
             archive.addfile(member, io.BytesIO(content))
     return result.getvalue()
+
+
+def _teardown_intent(
+    *,
+    generation: int = 7,
+    plan_identity: str = "sha256:" + "6" * 64,
+    reservation: AuthorityTeardownReservationV1 = _TEARDOWN_RESERVATION,
+) -> LocalSystemTeardownIntentV1:
+    return LocalSystemTeardownIntentV1(
+        authority_id=UUID(int=generation),
+        generation=generation,
+        binding=_BINDING,
+        plan_identity=plan_identity,
+        provider_kind="local-libvirt",
+        authority_instance="local-authority",
+        operation_identity=f"teardown-{generation}",
+        operation_digest="sha256:" + "9" * 64,
+        attempt_id=UUID(int=generation + 10),
+        journal_sequence=generation,
+        journal_digest="sha256:" + "8" * 64,
+        reservation=reservation,
+    )
+
+
+def test_system_teardown_store_persists_exact_intent_and_adopts_only_same_subject(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    first = _teardown_intent()
+    inspection = LocalSystemTeardownInspection(False, True, False, False)
+
+    with RecoveryMetadataStore(root) as store:
+        record = store.begin_system_teardown(first, inspection)
+        assert record.intent == first
+        assert store.read_system_teardown(_BINDING) == record
+        successor = _teardown_intent(generation=8)
+        adopted = store.begin_system_teardown(successor, inspection)
+        assert adopted.intent == successor
+        assert adopted.phase == "intent-recorded"
+        with pytest.raises(ValueError, match="conflicts"):
+            store.begin_system_teardown(
+                _teardown_intent(plan_identity="sha256:" + "d" * 64), inspection
+            )
+        with pytest.raises(ValueError, match="conflicts"):
+            store.begin_system_teardown(
+                successor.model_copy(update={"operation_identity": "other-request"}), inspection
+            )
+        with pytest.raises(ValueError, match="conflicts"):
+            store.begin_system_teardown(_teardown_intent(generation=7), inspection)
+        with pytest.raises(ValueError, match="conflicts"):
+            store.begin_system_teardown(
+                _teardown_intent(
+                    generation=9,
+                    reservation=_TEARDOWN_RESERVATION.model_copy(
+                        update={"owner_key": OpaqueProviderRef(ref="owners/other")}
+                    ),
+                ),
+                inspection,
+            )
+        assert store.read_system_teardown(_BINDING) == adopted
+
+
+def test_system_teardown_store_refuses_unvalidated_present_overlay_without_write(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    with RecoveryMetadataStore(root) as store, pytest.raises(ValueError, match="quarantine"):
+        store.begin_system_teardown(
+            _teardown_intent(),
+            LocalSystemTeardownInspection(True, False, False, True),
+        )
+    assert list(root.iterdir()) == []
+
+
+class _SystemTeardownSession:
+    def __init__(self) -> None:
+        self.domain_present = True
+        self.domain_active = True
+        self.overlay_present = True
+        self.baseline_present = True
+        self.domain_was_validated = True
+        self.actions: list[str] = []
+        self.destroy_mutations = 0
+        self.undefine_mutations = 0
+        self.overlay_mutations = 0
+
+    def inspect(self) -> LocalSystemTeardownInspection:
+        self.actions.append("inspect")
+        return LocalSystemTeardownInspection(
+            domain_absent=not self.domain_present,
+            domain_validated=self.domain_present and self.domain_was_validated,
+            overlay_absent=not self.overlay_present,
+            baseline_absent=not self.baseline_present,
+        )
+
+    def destroy(self) -> None:
+        self.actions.append("destroy")
+        if self.domain_present and self.domain_active:
+            self.destroy_mutations += 1
+            self.domain_active = False
+
+    def undefine(self) -> None:
+        self.actions.append("undefine")
+        if self.domain_present:
+            self.undefine_mutations += 1
+            self.domain_present = False
+
+    def remove_overlay(self) -> None:
+        self.actions.append("remove-overlay")
+        if self.overlay_present:
+            self.overlay_mutations += 1
+            self.overlay_present = False
+
+    def remove_baseline(self) -> None:
+        self.actions.append("remove-baseline")
+        self.baseline_present = False
+
+    def close(self) -> None:
+        self.actions.append("close")
+
+
+class _SystemTeardownFactory:
+    def __init__(self, session: _SystemTeardownSession) -> None:
+        self.session = session
+
+    def open_teardown(self, _lease: object, _expected: object) -> _SystemTeardownSession:
+        return self.session
+
+
+def _system_teardown_io(root: Path, session: _SystemTeardownSession) -> RealLocalExternalBootIO:
+    return RealLocalExternalBootIO(
+        root,
+        cast(LocalExternalBootMaterializer, object()),
+        cast(GuestRecoveryWriter, object()),
+        lambda _authority: cast(LocalExternalBootOperationLease, object()),
+        cast(LocalExternalBootSessionFactory, _SystemTeardownFactory(session)),
+        1024,
+        lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+
+
+@pytest.mark.parametrize(
+    ("boundary", "counter"),
+    [
+        ("domain-destroyed", "destroy_mutations"),
+        ("domain-undefined", "undefine_mutations"),
+        ("overlay-removed", "overlay_mutations"),
+    ],
+)
+def test_system_teardown_resumes_after_mutation_before_checkpoint_without_repeating_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: SystemTeardownPhase,
+    counter: str,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    sibling = root / "sibling"
+    sibling.write_bytes(b"keep")
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    original = RecoveryMetadataStore.record_system_teardown_phase
+    failed = False
+
+    def interrupt(
+        store: RecoveryMetadataStore,
+        expected: LocalSystemTeardownRecordV1,
+        phase: SystemTeardownPhase,
+        *,
+        completed_at: datetime | None = None,
+    ) -> LocalSystemTeardownRecordV1:
+        nonlocal failed
+        if phase == boundary and not failed:
+            failed = True
+            raise OSError("injected after destroy")
+        return original(
+            store,
+            expected,
+            phase,
+            completed_at=completed_at,
+        )
+
+    monkeypatch.setattr(RecoveryMetadataStore, "record_system_teardown_phase", interrupt)
+    with pytest.raises(OSError, match="injected"):
+        io.teardown_system(intent, authority)
+    assert getattr(session, counter) == 1
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_system_teardown(_BINDING) is not None
+
+    result = io.teardown_system(intent, authority)
+    replay = io.observe_system_teardown(intent, authority)
+
+    assert result.complete
+    assert replay.completed_at == result.completed_at == datetime(2026, 9, 6, tzinfo=UTC)
+    assert replay.reservation == result.reservation == _TEARDOWN_RESERVATION
+    assert getattr(session, counter) == 1
+    assert sibling.read_bytes() == b"keep"
+
+
+def test_system_teardown_observation_is_read_only_and_recovery_residue_retains_quarantine(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    recovery = root / f"{_BINDING.system_id}.{_BINDING.activation_id}"
+    recovery.mkdir(mode=0o700)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    before = sorted(path.name for path in root.iterdir())
+
+    observed = io.observe_system_teardown(intent, authority)
+    result = io.teardown_system(intent, authority)
+
+    assert sorted(path.name for path in root.iterdir()) == [
+        f".system-teardown-{_BINDING.system_id}.json",
+        *before,
+    ]
+    assert not observed.complete
+    assert result.quarantine_retained
+    assert "destroy" not in session.actions
+
+
+def test_system_teardown_observation_does_not_invent_completion_for_physical_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _SystemTeardownSession()
+    session.domain_present = False
+    session.domain_active = False
+    session.overlay_present = False
+    session.baseline_present = False
+    io = _system_teardown_io(root, session)
+    intent = _teardown_intent()
+
+    observed = io.observe_system_teardown(intent, OpaqueProviderRef(ref="authority/current"))
+
+    assert observed.domain_absent
+    assert observed.overlay_absent
+    assert observed.baseline_absent
+    assert observed.recovery_absent
+    assert observed.completed_at is None
+    assert observed.reservation is None
+    assert not observed.complete
+    assert list(root.iterdir()) == []
+
+
+def test_system_teardown_observation_does_not_adopt_a_successor_request(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    with RecoveryMetadataStore(root) as store:
+        store.begin_system_teardown(_teardown_intent(), session.inspect())
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+
+    with pytest.raises(ValueError, match="conflicts"):
+        io.observe_system_teardown(
+            _teardown_intent(generation=8), OpaqueProviderRef(ref="authority/successor")
+        )
+
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    assert "destroy" not in session.actions
+
+
+def test_system_teardown_reopens_private_point_without_requiring_domain(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+    session = _SystemTeardownSession()
+    session.domain_present = False
+    io = _system_teardown_io(root, session)
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+
+    point = io.system_teardown_recovery_point(intent, authority)
+
+    assert point == _point(metadata)
+    assert not io.system_teardown_recovery_is_absent(intent, authority)
+    assert session.actions == ["close", "close"]
 
 
 def test_bundle_converter_is_deterministic_and_declares_xattrs_unsupported() -> None:
@@ -1987,6 +2290,33 @@ def test_pre_stop_abort_restores_running_source_before_removing_partial(tmp_path
             )
             == "absent"
         )
+
+
+def test_system_teardown_partial_abort_derives_identities_from_private_intent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata().model_copy(update={"prior_power": "running"})
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(_pre_stop(metadata))
+    preparation = _RealPreparation(metadata, root)
+    session = _RealSession(preparation)
+    session.inspection = replace(session.inspection, active=False)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+
+    result = operation.abort_system_teardown_preparation(
+        _BINDING, metadata.plan_identity, OpaqueProviderRef(ref="authority/current")
+    )
+
+    assert result == "removed"
+    assert preparation.actions == ["power:running", "readiness"]
 
 
 @pytest.mark.parametrize(

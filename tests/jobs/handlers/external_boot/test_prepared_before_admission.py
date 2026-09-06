@@ -36,12 +36,13 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
-from tests.jobs.handlers.external_boot.support import CASES, build_job
+from tests.jobs.handlers.external_boot.support import CASES, RecordingTeardownExecutor, build_job
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
+from tests.support.object_store import INERT_OBJECT_STORE
 
-# operation -> a database-valid activation with a NULL recovery_point. Release now rejects its
-# `abandoned` state before it reaches the evidence check; that earlier refusal still pins that no
-# authority is allocated for a malformed activation.
+# operation -> a database-valid activation with a NULL recovery_point. Full System teardown is
+# deliberately absent: its closed request has no recovery identities and accepts pre-preparation
+# activations, which is proved separately below.
 NULL_RECOVERY_POINT_CASES: dict[str, dict[str, Any]] = {
     "release": {
         "purpose": "release",
@@ -50,11 +51,6 @@ NULL_RECOVERY_POINT_CASES: dict[str, dict[str, Any]] = {
         "error_match": "is 'abandoned', which 'release' does not admit",
     },
     "cleanup": {"purpose": "release", "activation_state": "abandoned", "seed": {}},
-    "teardown": {
-        "purpose": "teardown",
-        "activation_state": "recovery_failed",
-        "seed": {"attempt_state": "failed", "with_pre_recovery": True},
-    },
 }
 
 
@@ -76,7 +72,11 @@ async def _authority_count(conn: AsyncConnection) -> int:
 
 
 async def _dispatch(
-    dsns: Callable[[str], str], case: SeededCase, operation: str, vehicle: Vehicle
+    dsns: Callable[[str], str],
+    conn: AsyncConnection,
+    case: SeededCase,
+    operation: str,
+    vehicle: Vehicle,
 ) -> None:
     class Executor:
         async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
@@ -100,17 +100,23 @@ async def _dispatch(
                 composite_state="sha256:" + "8" * 64,
             )
 
+    teardown_executor = RecordingTeardownExecutor(conn) if operation == "teardown" else None
     ports = ExternalBootHandlerPorts(
         resolver=resolver_for(vehicle),
         incarnation_credential=SecretStr(case.credential),
         secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
         authority_executor=Executor(),
+        teardown_executor=teardown_executor,
+        artifact_store=INERT_OBJECT_STORE,
     )
     handler = build_operations(ports).get(operation)
     assert handler is not None
     async with await role_connection(dsns("kdive_worker")) as worker:
         await handler(worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker))
+    if teardown_executor is not None:
+        assert len(teardown_executor.calls) == 1
+        vehicle.port.calls.append("authority-teardown")
 
 
 def _drive(migrated_url: str, body: Callable[[AsyncConnection], Awaitable[None]]) -> None:
@@ -128,8 +134,8 @@ def test_a_null_recovery_point_is_refused_before_allocation(
     """A NULL evidence column is a categorized refusal, never read as a finished operation.
 
     The consequence is stated rather than left to be discovered: an activation whose required
-    evidence column is NULL cannot be released, cleaned up, or torn down by this change at all —
-    each refuses here, each refusal wedges its job, the reservation stays charged, and
+    evidence column is NULL cannot be released or cleaned up by this change at all — each refuses
+    here, each refusal wedges its job, the reservation stays charged, and
     ``external_boot_activations_one_live_per_system`` keeps matching so the System can take no new
     activation. The alternative is worse: reading a NULL as a finished operation would commit
     evidence for work nothing performed. No writer produces that state today, and guaranteeing it
@@ -152,12 +158,39 @@ def test_a_null_recovery_point_is_refused_before_allocation(
         with pytest.raises(
             CategorizedError, match=spec.get("error_match", "has no recovery_point")
         ) as excinfo:
-            await _dispatch(authority_role_dsns, case, operation, vehicle)
+            await _dispatch(authority_role_dsns, seed, case, operation, vehicle)
 
         assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
         assert excinfo.value.terminal is True
         assert vehicle.port.calls == []
         assert await _authority_count(seed) == 0
+
+    _drive(migrated_url, body)
+
+
+def test_teardown_uses_its_recovery_free_request_before_preparation(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """Full System teardown needs no fabricated recovery point or legacy provider cleanup."""
+
+    async def body(seed: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="teardown",
+            operation="teardown",
+            activation_state="recovery_failed",
+            attempt_state="failed",
+            with_pre_recovery=True,
+            with_recovery_point=False,
+            with_reservation=True,
+        )
+
+        await _dispatch(authority_role_dsns, seed, case, "teardown", vehicle)
+
+        assert vehicle.port.calls == ["authority-teardown"]
+        assert await _authority_count(seed) == 1
 
     _drive(migrated_url, body)
 
@@ -204,15 +237,26 @@ def test_no_direct_handler_calls_materialize_or_prepare_on_any_path(
         for operation in ("activate", "recover", "resolve-conflict", "cleanup", "teardown"):
             spec = CASES[operation]
             vehicle = build_vehicle()
-            case = await seed_case(
-                seed,
-                vehicle,
-                purpose=spec["purpose"],
-                operation=operation,
-                activation_state=spec["activation_state"],
-                **spec["seed"],
-            )
-            await _dispatch(authority_role_dsns, case, operation, vehicle)
+            if operation == "teardown":
+                case = await seed_case(
+                    seed,
+                    vehicle,
+                    purpose="teardown",
+                    operation="teardown",
+                    activation_state="recovery_failed",
+                    attempt_state="failed",
+                    with_reservation=True,
+                )
+            else:
+                case = await seed_case(
+                    seed,
+                    vehicle,
+                    purpose=spec["purpose"],
+                    operation=operation,
+                    activation_state=spec["activation_state"],
+                    **spec["seed"],
+                )
+            await _dispatch(authority_role_dsns, seed, case, operation, vehicle)
             observed.extend(vehicle.port.calls)
 
         assert observed, "no operation ran, so this asserts nothing"
@@ -255,7 +299,7 @@ def test_a_recovery_point_without_a_materialization_cannot_decode_at_all(
         )
 
         with pytest.raises(ValidationError, match="recovery point ownership"):
-            await _dispatch(authority_role_dsns, case, "release", vehicle)
+            await _dispatch(authority_role_dsns, seed, case, "release", vehicle)
 
         assert vehicle.port.calls == []
         assert await _authority_count(seed) == 0

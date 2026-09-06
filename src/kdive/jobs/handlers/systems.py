@@ -761,6 +761,40 @@ async def _reclaim_snapshots(
         await delete_snapshots_for_system(conn, system_id)
 
 
+async def reclaim_system_core_after_provider_teardown(
+    conn: AsyncConnection,
+    artifact_store: RetiredKeyBatchDeleter,
+    system_id: UUID,
+    *,
+    reclaim_snapshot_ledger: bool,
+    discharge_mutation_obligations: bool,
+) -> None:
+    """Reclaim core-owned System state after the provider proves physical absence.
+
+    Authority-owned external boot calls this only for a complete proof. Ordinary teardown has
+    already removed its snapshot ledger in ``_reclaim_snapshots`` and passes ``False``.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        if reclaim_snapshot_ledger:
+            await delete_snapshots_for_system(conn, system_id)
+        if discharge_mutation_obligations:
+            await RemoteModuleAttemptObligationRepository().discharge_system_mutation_obligations(
+                conn, system_id
+            )
+    async with conn.transaction():
+        await delete_system_bootstrap_key(conn, system_id)
+    await asyncio.to_thread(shutil.rmtree, str(pcap_dir(system_id)), ignore_errors=True)
+    try:
+        await _reclaim_console_artifacts(conn, artifact_store, system_id)
+        await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
+    except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
+        _log.warning(
+            "best-effort System-artifact reclaim for system %s failed",
+            system_id,
+            exc_info=True,
+        )
+
+
 async def teardown_handler(
     conn: AsyncConnection,
     job: Job,
@@ -806,17 +840,8 @@ async def teardown_handler(
     provisioner = binding.runtime.provisioner
     await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
     await asyncio.to_thread(provisioner.teardown, domain_name)
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        # Provider teardown completed, so a cancellation/failure before this transaction cannot
-        # erase mutation-retention evidence. The System lock serializes exact-System discharge.
-        await RemoteModuleAttemptObligationRepository().discharge_system_mutation_obligations(
-            conn, system_id
-        )
-    # The bootstrap key (ADR-0289, #963) is System-owned like the console/sysrq artifacts, but its
-    # deletion is not best-effort: a stale row after teardown wrongly reports a System as
-    # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.
-    async with conn.transaction():
-        await delete_system_bootstrap_key(conn, system_id)
+    # Provider teardown completed, so a cancellation/failure before core cleanup cannot erase
+    # mutation-retention evidence. The helper's System lock serializes exact-System discharge.
     # The investigation-scoped uploaded rootfs (ADR-0441) is a SHARED, investigation-owned base
     # reused across Systems, so teardown no longer reclaims it — the object + staged file + row are
     # reclaimed by the close-driven/TTL reconciler sweeps under the overlay-absence liveness gate
@@ -827,16 +852,13 @@ async def teardown_handler(
     # under pcap_dir(system_id), not the object store, so they are removed here rather than through
     # the object-store _reclaim_* helpers. rmtree ignore_errors makes it best-effort on its own, so
     # an object-store reclaim failure below cannot skip it (and vice versa).
-    await asyncio.to_thread(shutil.rmtree, str(pcap_dir(system_id)), ignore_errors=True)
-    try:
-        await _reclaim_console_artifacts(conn, artifact_store, system_id)
-        await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
-    except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
-        _log.warning(
-            "best-effort System-artifact reclaim for system %s failed",
-            system_id,
-            exc_info=True,
-        )
+    await reclaim_system_core_after_provider_teardown(
+        conn,
+        artifact_store,
+        system_id,
+        reclaim_snapshot_ledger=False,
+        discharge_mutation_obligations=True,
+    )
     return str(system_id)
 
 

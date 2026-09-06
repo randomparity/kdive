@@ -6,8 +6,12 @@ import json
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
+from kdive.domain.external_boot_activation import (
+    ExternalBootReleaseEvidenceV1,
+    ExternalBootTeardownEvidenceV1,
+)
 from kdive.providers.external_boot_authority import protocol
 from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
@@ -20,12 +24,15 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownResponseV1,
     JournalPhase,
     JournalRecordV1,
     RecoveryObjectBindingV1,
     canonical_record_bytes,
     decode_authority_request,
     record_digest,
+    teardown_proof_digest,
 )
 from tests.support.external_boot_plan import external_boot_plan
 
@@ -212,6 +219,30 @@ def test_values_are_closed() -> None:
         AuthorityTakeoverRequestV1.model_validate(_binding() | {"provider_definition": "secret"})
 
 
+def test_teardown_request_is_closed_without_recovery_point_fields() -> None:
+    request = AuthorityTeardownMutationRequestV1.model_validate(
+        _binding()
+        | {
+            "schema": "external-boot-authority-teardown-request-v1",
+            "purpose": "teardown",
+            "operation": "teardown",
+            "attempt_id": uuid4(),
+        }
+    )
+    assert decode_authority_request(protocol._canonical_bytes(request)) == request  # noqa: SLF001
+    with pytest.raises(ValidationError, match="operation"):
+        request.model_validate(
+            {**request.model_dump(mode="json", by_alias=True), "purpose": "recover"}
+        )
+    with pytest.raises(ValidationError):
+        request.model_validate(
+            {
+                **request.model_dump(mode="json", by_alias=True),
+                "expected_source_identity": _DIGEST,
+            }
+        )
+
+
 def test_mutation_requires_sorted_unique_recovery_objects() -> None:
     owner = _binding()
     first = RecoveryObjectBindingV1(
@@ -290,6 +321,64 @@ def test_observation_is_bounded_and_closed() -> None:
         )
 
 
+def test_teardown_response_binds_closed_proof_to_absent_observation() -> None:
+    activation_id, system_id = uuid4(), uuid4()
+    teardown = {
+        "schema": "external-boot-teardown-evidence-v1",
+        "system_id": str(system_id),
+        "system_state": "torn_down",
+        "observed_at": "2026-09-06T00:00:00Z",
+    }
+    release = {
+        "schema": "external-boot-release-evidence-v1",
+        "activation_id": str(activation_id),
+        "system_id": str(system_id),
+        "store_identity": {"ref": "store"},
+        "owner_key": {"ref": "owner"},
+        "reserved_bytes": 1,
+        "enumeration_complete": True,
+        "objects": [],
+        "verified_at": "2026-09-06T00:00:00Z",
+    }
+    release_identity = ExternalBootReleaseEvidenceV1.model_validate(release).identity
+    teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
+    proof = {
+        "disposition": "complete_ready",
+        "teardown_evidence": teardown,
+        "release_evidence": release,
+        "release_identity": release_identity,
+        "cleanup_evidence": {
+            "schema": "external-boot-cleanup-evidence-v1",
+            "activation_id": str(activation_id),
+            "system_id": str(system_id),
+            "release_identity": release_identity,
+            "mode": "system_teardown",
+            "teardown_identity": teardown_identity,
+            "completed_at": "2026-09-06T00:00:00Z",
+        },
+    }
+    proof_value = TypeAdapter(protocol.AuthorityTeardownProofV1).validate_python(proof)
+    response = AuthorityTeardownResponseV1(
+        observation=AuthorityObservationV1(
+            observation_id=uuid4(),
+            category="absent",
+            composite_state=teardown_proof_digest(proof_value),
+        ),
+        proof=proof_value,
+        journal_sequence=4,
+        journal_digest=_DIGEST,
+    )
+    assert response.proof.disposition == "complete_ready"
+    with pytest.raises(ValidationError, match="observation composite"):
+        AuthorityTeardownResponseV1.model_validate(
+            response.model_dump(mode="json", by_alias=True)
+            | {
+                "observation": response.observation.model_dump(mode="json", by_alias=True)
+                | {"composite_state": _OTHER_DIGEST}
+            }
+        )
+
+
 def _record(phase: JournalPhase, **changes: object) -> JournalRecordV1:
     values = _binding() | {
         "sequence": 1,
@@ -322,6 +411,40 @@ def test_takeover_and_mutation_records_are_disjoint() -> None:
     assert mutation.expected_source_identity == _DIGEST
     with pytest.raises(ValidationError):
         _record(JournalPhase.ADMITTED)
+
+
+def test_full_teardown_journal_records_allow_only_paired_null_identities() -> None:
+    record = _record(
+        JournalPhase.ADMITTED,
+        purpose="teardown",
+        operation="teardown",
+        expected_source_identity=None,
+        intended_target_identity=None,
+        recovery_objects=(),
+    )
+    assert record.expected_source_identity is None
+    assert record.intended_target_identity is None
+
+    for changes in (
+        {"expected_source_identity": _DIGEST},
+        {"recovery_objects": (_object(),)},
+        {"purpose": "recover", "operation": "recover"},
+        {"operation": "fail"},
+    ):
+        with pytest.raises(ValidationError, match="paired identities"):
+            _record(
+                JournalPhase.ADMITTED,
+                **(
+                    {
+                        "purpose": "teardown",
+                        "operation": "teardown",
+                        "expected_source_identity": None,
+                        "intended_target_identity": None,
+                        "recovery_objects": (),
+                    }
+                    | changes
+                ),
+            )
 
 
 @pytest.mark.parametrize(

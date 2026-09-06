@@ -579,6 +579,8 @@ async def check_database_role(connection: Any) -> None:
                     'text,uuid,uuid,uuid,text,text,text,text,text,text,text,text)'::regprocedure,
                 'public.resolve_current_external_boot_release_phase_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
+                'public.resolve_current_external_boot_teardown_authority(text,uuid,bigint,bigint,'
+                    'text)'::regprocedure,
                 'public.resolve_external_boot_recovery_orphan_authority(text,uuid,uuid,integer)'
                     ::regprocedure,
                 'public.commit_external_boot_recovery_orphan_disposition(text,uuid,uuid,integer,'
@@ -1342,7 +1344,11 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
         connection.close()
 
     adapter = RemoteExternalBootAuthorityAdapter(
-        binding.adapter, coordinator, module_executor, close=close_remote
+        binding.adapter,
+        coordinator,
+        module_executor,
+        remote_module_host=remote_module_host,
+        close=close_remote,
     )
 
     return ExternalBootAuthorityService(

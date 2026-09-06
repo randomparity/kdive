@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import inspect
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID, uuid4
@@ -27,6 +28,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
     RecoveryObjectBindingV1,
@@ -38,6 +40,10 @@ from kdive.providers.external_boot_authority.service import (
     AuthorityMutationAdapter,
     AuthorityServiceError,
     ExternalBootAuthorityService,
+)
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
 )
 from kdive.providers.local_libvirt import external_boot_authority as adapter_module
 from kdive.providers.local_libvirt.external_boot_authority import (
@@ -51,6 +57,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalLibvirtExternalBoot,
     LocalObservedState,
     LocalRecoveryMetadataV1,
+    LocalSystemTeardownAnchorV1,
+    LocalSystemTeardownIntentV1,
     RecoveryPhase,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalOperationLeaseScope
@@ -96,6 +104,28 @@ _BINDING = ExternalBootActivationBinding(
     activation_id=str(ACTIVATION_ID),
 )
 _RECOVERY_REF = OpaqueProviderRef(ref=f"local-recovery-v1/{SYSTEM_ID}/{ACTIVATION_ID}")
+_TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
+    disposition="ready",
+    store_identity=OpaqueProviderRef(ref="stores/private"),
+    owner_key=OpaqueProviderRef(ref="owners/private"),
+    reserved_bytes=4096,
+)
+
+
+def _teardown_facts(
+    intent: LocalSystemTeardownIntentV1, *, recovery_absent: bool = True
+) -> AuthoritySystemTeardownFacts:
+    return AuthoritySystemTeardownFacts(
+        intent_identity=intent.identity,
+        domain_absent=True,
+        overlay_absent=True,
+        baseline_absent=True,
+        recovery_absent=recovery_absent,
+        quarantine_retained=not recovery_absent,
+        completed_at=datetime(2026, 9, 6, tzinfo=UTC) if recovery_absent else None,
+        reservation=intent.reservation,
+    )
+
 
 # Provider-native vocabulary that must never appear in the adapter module: generic libvirt
 # power operations, domain-XML synthesis, and host-resource selectors.
@@ -185,6 +215,7 @@ class _FakeIO:
         self.reopen_error: BaseException | None = None
         self.partial_abort_result: Literal["removed", "absent", "not-partial"] = "not-partial"
         self.recovery_absent = False
+        self.begun_teardown_intent: LocalSystemTeardownIntentV1 | None = None
 
     # -- LocalExternalBootIO -------------------------------------------------------
     def open(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
@@ -201,6 +232,7 @@ class _FakeIO:
         self.tombstone = False
         self.cleanup_quarantine = None
         self.finalized_proof = proof
+        self.recovery_absent = True
         self.actions.append("finalize")
 
     def record_cleanup_quarantine(
@@ -335,6 +367,65 @@ class _FakeIO:
         self.actions.append("recovery-absence")
         return self.recovery_absent
 
+    def begin_system_teardown(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> AuthoritySystemTeardownFacts:
+        del authority
+        self.begun_teardown_intent = intent
+        self.actions.append("begin-system-teardown")
+        return _teardown_facts(intent, recovery_absent=self.recovery_absent)
+
+    def teardown_system(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> AuthoritySystemTeardownFacts:
+        del authority
+        self.actions.append("teardown-system")
+        return _teardown_facts(intent, recovery_absent=self.recovery_absent)
+
+    def observe_system_teardown(
+        self, intent: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+    ) -> AuthoritySystemTeardownFacts:
+        del authority
+        self.actions.append("observe-system-teardown")
+        return AuthoritySystemTeardownFacts(
+            intent_identity=intent.identity,
+            domain_absent=True,
+            overlay_absent=True,
+            baseline_absent=True,
+            recovery_absent=self.recovery_absent,
+            quarantine_retained=not self.recovery_absent,
+            completed_at=(datetime(2026, 9, 6, tzinfo=UTC) if self.recovery_absent else None),
+            reservation=_TEARDOWN_RESERVATION,
+        )
+
+    def system_teardown_recovery_point(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> RecoveryPoint | None:
+        del intent, authority
+        self.actions.append("system-teardown-recovery-point")
+        if self.reopen_error is not None:
+            return None
+        return _point(self.metadata)
+
+    def system_teardown_recovery_is_absent(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> bool:
+        del intent, authority
+        self.actions.append("system-teardown-recovery-absence")
+        return self.recovery_absent
+
+    def abort_system_teardown_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: str,
+        authority: OpaqueProviderRef,
+    ) -> Literal["removed", "absent", "not-partial"]:
+        del binding, plan_identity, authority
+        self.actions.append("abort-system-teardown-preparation")
+        if self.partial_abort_result in {"removed", "absent"}:
+            self.recovery_absent = True
+        return self.partial_abort_result
+
     def materialize(self, plan: object) -> object:
         raise AssertionError("the authority adapter must not materialize")
 
@@ -356,6 +447,186 @@ class _FakeContext:
 def _adapter(io: _FakeIO) -> LocalExternalBootAuthorityAdapter:
     ports = LocalLibvirtExternalBoot(cast(LocalExternalBootIO, io))
     return LocalExternalBootAuthorityAdapter(ports)
+
+
+@pytest.mark.parametrize(
+    ("partial", "initially_absent", "expects_abort"),
+    [("removed", False, True), ("not-partial", True, False)],
+)
+@pytest.mark.anyio
+async def test_system_teardown_persists_intent_before_pending_or_released_cleanup(
+    partial: Literal["removed", "not-partial"],
+    initially_absent: bool,
+    expects_abort: bool,
+) -> None:
+    io = _FakeIO()
+    io.reopen_error = FileNotFoundError("no recovery point")
+    io.partial_abort_result = partial
+    io.recovery_absent = initially_absent
+    adapter = _adapter(io)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN)
+    result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
+
+    assert result.complete
+    assert ("abort-system-teardown-preparation" in io.actions) is expects_abort
+    if expects_abort:
+        assert io.actions.index("begin-system-teardown") < io.actions.index(
+            "abort-system-teardown-preparation"
+        )
+    assert io.actions[-1] == "teardown-system"
+    assert io.begun_teardown_intent is not None
+    assert io.begun_teardown_intent.reservation == _TEARDOWN_RESERVATION
+    assert not hasattr(io.begun_teardown_intent, "expected_source_identity")
+    assert not hasattr(io.begun_teardown_intent, "recovery_references")
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_retains_unclassified_recovery_without_host_mutation() -> None:
+    io = _FakeIO()
+    io.reopen_error = FileNotFoundError("no recovery point")
+    io.partial_abort_result = "not-partial"
+    io.recovery_absent = False
+    adapter = _adapter(io)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN)
+
+    result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
+
+    assert result.quarantine_retained
+    assert io.actions[0] == "begin-system-teardown"
+    assert "teardown-system" not in io.actions
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_recovers_and_cleans_owned_point_before_host_mutation() -> None:
+    io = _FakeIO(_metadata("recovered"))
+    adapter = _adapter(io)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN)
+    result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
+
+    assert result.complete
+    assert io.actions.index("begin-system-teardown") < io.actions.index("finalize")
+    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    adapter.close()
+
+
+async def test_system_teardown_cancellation_waits_for_host_completion_and_releases_lease() -> None:
+    scope = LocalOperationLeaseScope()
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingTeardownIO(_FakeIO):
+        def teardown_system(
+            self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+        ) -> AuthoritySystemTeardownFacts:
+            assert scope.resolve(authority).binding == intent.binding
+            entered.set()
+            release.wait()
+            return super().teardown_system(intent, authority)
+
+    io = BlockingTeardownIO()
+    io.reopen_error = FileNotFoundError("no recovery point")
+    io.recovery_absent = True
+    ports = LocalLibvirtExternalBoot(cast(LocalExternalBootIO, io))
+    adapter = LocalExternalBootAuthorityAdapter(ports, scope)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN)
+    authority = adapter_module._authority_ref(request)
+    task = asyncio.create_task(
+        adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
+    )
+    await asyncio.to_thread(entered.wait)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
+    assert "teardown-system" in io.actions
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_rejects_nonmatching_mutation_context_before_provider_call() -> None:
+    io = _FakeIO()
+    adapter = _adapter(io)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN, operation_identity="other-operation")
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
+
+    assert io.actions == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_rejects_malformed_reservation_before_provider_call() -> None:
+    io = _FakeIO()
+    adapter = _adapter(io)
+    malformed = AuthorityTeardownReservationV1.model_construct(
+        disposition="ready",
+        store_identity=OpaqueProviderRef(ref="stores/private"),
+        owner_key=OpaqueProviderRef(ref="owners/private"),
+        reserved_bytes=0,
+    )
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.execute_system_teardown(
+            _system_teardown_request(),
+            _context(AuthorityOperation.TEARDOWN),
+            malformed,
+        )
+
+    assert io.actions == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_revalidates_provider_facts_before_destruction() -> None:
+    class MalformedFactsIO(_FakeIO):
+        def begin_system_teardown(
+            self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+        ) -> AuthoritySystemTeardownFacts:
+            valid = super().begin_system_teardown(intent, authority)
+            return valid.model_copy(update={"reservation": None})
+
+    io = MalformedFactsIO()
+    adapter = _adapter(io)
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.execute_system_teardown(
+            _system_teardown_request(),
+            _context(AuthorityOperation.TEARDOWN),
+            _TEARDOWN_RESERVATION,
+        )
+
+    assert io.actions == ["begin-system-teardown"]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_observation_calls_only_read_only_provider_seam() -> None:
+    io = _FakeIO()
+    io.recovery_absent = True
+    adapter = _adapter(io)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN)
+
+    result = await adapter.observe_system_teardown(request, context)
+
+    assert result.complete
+    assert io.actions == ["observe-system-teardown"]
+    adapter.close()
 
 
 @pytest.mark.anyio
@@ -490,6 +761,24 @@ def _request(
         expected_source_identity=expected_source,
         intended_target_identity=intended_target,
         recovery_objects=recovery_objects,
+    )
+
+
+def _system_teardown_request(*, generation: int = 7) -> AuthorityTeardownMutationRequestV1:
+    return AuthorityTeardownMutationRequestV1(
+        authority_id=AUTHORITY_ID,
+        generation=generation,
+        system_id=SYSTEM_ID,
+        activation_id=ACTIVATION_ID,
+        run_id=RUN_ID,
+        plan_identity=PLAN_IDENTITY,
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        provider_kind="local-libvirt",
+        authority_instance="local-authority",
+        operation_identity="op-1",
+        operation_digest="sha256:" + "9" * 64,
+        attempt_id=ATTEMPT_ID,
     )
 
 
