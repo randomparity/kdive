@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
@@ -467,6 +468,7 @@ class RemoteModuleOperationRuntime:
         recovery: RemoteModuleRecoveryRefV1,
         executor: RemoteModulePreparationExecutor,
         purpose: str,
+        deadline: float | None,
     ) -> None:
         if purpose == "scratch":
             await self._open_reap_evidence(recovery)
@@ -476,20 +478,28 @@ class RemoteModuleOperationRuntime:
         configured = self._volume_binding()
 
         def delete() -> None:
+            self._check_deadline(deadline)
             inspection = self._require_cleanup_inspection()
             delete_owned_attempt_volume(configured.storage, selected, inspection=inspection)
+            self._check_deadline(deadline)
 
         await executor.run(delete)
 
     async def delete_source(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
-        await self._delete(recovery, executor, "source")
+        await self._delete(recovery, executor, "source", deadline)
 
     async def delete_scratch(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
-        await self._delete(recovery, executor, "scratch")
+        await self._delete(recovery, executor, "scratch", deadline)
 
     def _marker_name(self, recovery: RemoteModuleRecoveryRefV1, state: str) -> str:
         return render_module_volume_name(
@@ -548,17 +558,38 @@ class RemoteModuleOperationRuntime:
         return "reaped" if reaped else "reaping"
 
     async def record_reaping(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
+        self._check_deadline(deadline)
         await self._open_reap_evidence(recovery)
         await self._record_marker(recovery, executor, "reaping")
+        self._check_deadline(deadline)
 
     async def record_reaped(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None:
+        self._check_deadline(deadline)
         await self._record_marker(recovery, executor, "reaped")
         async with self.pool.connection() as conn, conn.transaction():
             await self.repository.discharge_reap_obligation(conn, self._attempt(recovery))
+        self._check_deadline(deadline)
+
+    def _check_deadline(self, deadline: float | None) -> None:
+        if deadline is None:
+            return
+        clock = (
+            self.appliance_execution.monotonic
+            if self.appliance_execution is not None
+            else time.monotonic
+        )
+        if clock() >= deadline:
+            raise TimeoutError("remote module invocation deadline expired")
 
     async def resume_reap(
         self,

@@ -182,7 +182,7 @@ async def capture_install_modules(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"teardown_complete": False},
         )
-    await runtime.delete_source(recovery, executor)
+    await runtime.delete_source(recovery, executor, deadline)
     return recovery
 
 
@@ -237,9 +237,9 @@ async def restore_modules(
                 "remote module restore cleanup incomplete",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-        await runtime.delete_source(recovery, executor)
-        await runtime.delete_scratch(recovery, executor)
-        await runtime.record_reaped(recovery, executor)
+        await runtime.delete_source(recovery, executor, deadline)
+        await runtime.delete_scratch(recovery, executor, deadline)
+        await runtime.record_reaped(recovery, executor, deadline)
         return result
 
     capture = await runtime.reopen_capture_operation(recovery, deadline)
@@ -278,10 +278,10 @@ async def restore_modules(
             "remote module restore teardown incomplete",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
-    await runtime.record_reaping(recovery, executor)
-    await runtime.delete_source(recovery, executor)
-    await runtime.delete_scratch(recovery, executor)
-    await runtime.record_reaped(recovery, executor)
+    await runtime.record_reaping(recovery, executor, deadline)
+    await runtime.delete_source(recovery, executor, deadline)
+    await runtime.delete_scratch(recovery, executor, deadline)
+    await runtime.record_reaped(recovery, executor, deadline)
     return result
 
 
@@ -320,7 +320,7 @@ async def reap_module_attempt(
                 "remote module reap teardown incomplete",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-        await runtime.record_reaping(recovery, executor)
+        await runtime.record_reaping(recovery, executor, deadline)
     else:
         observation = await runtime.resume_reap(recovery, executor, deadline)
         if not observation.complete:
@@ -328,6 +328,6 @@ async def reap_module_attempt(
                 "remote module reap cleanup incomplete",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-    await runtime.delete_source(recovery, executor)
-    await runtime.delete_scratch(recovery, executor)
-    await runtime.record_reaped(recovery, executor)
+    await runtime.delete_source(recovery, executor, deadline)
+    await runtime.delete_scratch(recovery, executor, deadline)
+    await runtime.record_reaped(recovery, executor, deadline)

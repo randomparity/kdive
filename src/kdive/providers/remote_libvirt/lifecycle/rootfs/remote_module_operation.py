@@ -86,16 +86,28 @@ class ModuleOperationRuntime(Protocol):
         deadline: float,
     ) -> TeardownObservation: ...
     async def delete_source(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def delete_scratch(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def record_reaping(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def record_reaped(
-        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
     ) -> None: ...
     async def resume_reap(
         self,
