@@ -776,7 +776,7 @@ async def teardown_handler(
         if system.state is not SystemState.TORN_DOWN:
             old = system.state
             # This terminal admission fence prevents a slow provision from committing a new domain
-            # after teardown's provider reap has begun (ADR-0025 §8).
+            # after teardown's provider reap has begun (ADR-0025 §5).
             await SYSTEMS.update_state(conn, system_id, SystemState.TORN_DOWN)
             await audit_transition(
                 conn,
