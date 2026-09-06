@@ -45,6 +45,19 @@ _IDENTITY_PYTHON = "/usr/bin/python3"
 _FAULT_BARRIER_MAX_BYTES = 1024
 _FAULT_BARRIER_SOCKET = Path("/run/kdive/provider-authority/proof-control/control.sock")
 
+_FAULT_BARRIER_METADATA = """
+import os
+import pwd
+import stat
+
+path = "/run/kdive/provider-authority/proof-control/control.sock"
+metadata = os.stat(path, follow_symlinks=False)
+if (not stat.S_ISSOCK(metadata.st_mode)
+        or metadata.st_uid != pwd.getpwnam("kdive-provider-authority").pw_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o600):
+    raise SystemExit("fault barrier socket metadata is unsafe")
+"""
+
 _FAULT_BARRIER_CLIENT = """
 import json
 import socket
@@ -540,18 +553,11 @@ def require_fault_barrier(config: NativeAuthorityConfig) -> Path:
     if config.barrier_socket is None:
         raise RuntimeError("installed authority exposes no deterministic provider-effect barrier")
     try:
-        metadata = config.barrier_socket.stat(follow_symlinks=False)
-    except FileNotFoundError:
+        _output("sudo", "-n", _IDENTITY_PYTHON, "-c", _FAULT_BARRIER_METADATA)
+    except subprocess.CalledProcessError:
         raise RuntimeError(
             "installed authority exposes no deterministic provider-effect barrier"
         ) from None
-    authority_uid = pwd.getpwnam(_AUTHORITY_ACCOUNT).pw_uid
-    if (
-        not stat.S_ISSOCK(metadata.st_mode)
-        or metadata.st_uid != authority_uid
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-    ):
-        raise RuntimeError("installed authority provider-effect barrier is not a socket")
     return config.barrier_socket
 
 

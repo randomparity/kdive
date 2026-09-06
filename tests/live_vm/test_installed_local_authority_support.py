@@ -96,7 +96,7 @@ def test_ledger_rejects_unowned_and_cleans_exact_reverse_order() -> None:
     assert removed == [volume, domain]
 
 
-def test_missing_fault_barrier_fails_loud() -> None:
+def test_missing_fault_barrier_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
         system_id=uuid4(),
@@ -105,8 +105,40 @@ def test_missing_fault_barrier_fails_loud() -> None:
         authority_service="kdive-external-boot-authority.service",
         barrier_socket=Path("/run/kdive/provider-authority/proof-control/control.sock"),
     )
+
+    def refuse(*_argv: str) -> str:
+        raise subprocess.CalledProcessError(1, "proof socket metadata")
+
+    monkeypatch.setattr(carrier, "_output", refuse)
     with pytest.raises(RuntimeError, match="no deterministic provider-effect barrier"):
         require_fault_barrier(config)
+
+
+def test_fault_barrier_metadata_is_checked_by_root_not_the_denied_control_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+        barrier_socket=Path("/run/kdive/provider-authority/proof-control/control.sock"),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def denied_stat(*_args: object, **_kwargs: object) -> object:
+        raise PermissionError("private authority directory")
+
+    def output(*argv: str) -> str:
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(Path, "stat", denied_stat)
+    monkeypatch.setattr(carrier, "_output", output)
+    assert require_fault_barrier(config) == config.barrier_socket
+    assert len(calls) == 1
+    assert calls[0][:4] == ("sudo", "-n", "/usr/bin/python3", "-c")
 
 
 def test_fault_barrier_client_arms_and_releases_only_the_configured_system(
