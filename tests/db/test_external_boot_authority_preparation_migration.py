@@ -9,6 +9,12 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from kdive.providers.external_boot_authority.protocol import (
+    JournalPhase,
+    JournalRecordV1,
+    canonical_record_bytes,
+    record_digest,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
@@ -29,7 +35,7 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     with psycopg.connect(migrated_url) as admin:
-        case = _seed_case(admin, worker_suffix="p")
+        case = _seed_case(admin, worker_suffix="p", provider_kind="remote-libvirt")
         plan = external_boot_plan(case.system_id, case.run_id)
         marker = admin.execute(
             "SELECT payload->'external_boot_authority_v1' FROM jobs WHERE id = %s",
@@ -251,3 +257,130 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
         "running",
         "current",
     )
+    prepare_attempt_id = uuid4()
+    prepare_record = JournalRecordV1(
+        authority_id=authority_id,
+        generation=generation,
+        system_id=case.system_id,
+        activation_id=case.activation_id,
+        run_id=case.run_id,
+        plan_identity=plan.identity,
+        purpose="activate",
+        operation="prepare",
+        provider_kind=case.provider_kind,
+        authority_instance=case.authority_instance,
+        operation_identity=prepared[0],
+        operation_digest=prepared[1],
+        sequence=3,
+        previous_digest=journal_digest,
+        phase=JournalPhase.ADMITTED,
+        attempt_id=prepare_attempt_id,
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+    )
+    payload = prepare_record.model_dump(mode="json", by_alias=True)
+    payload["canonical_record"] = canonical_record_bytes(prepare_record).decode()
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as provider:
+        assert provider.execute(
+            "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,2,%s,%s)",
+            (case.worker_id, authority_id, generation, journal_digest, Jsonb(payload)),
+        ).fetchone() == ("advanced",)
+        admitted_digest = record_digest(prepare_record)
+        prepare_record = prepare_record.model_copy(
+            update={
+                "sequence": 4,
+                "previous_digest": admitted_digest,
+                "phase": JournalPhase.MUTATION_STARTED,
+            }
+        )
+        payload = prepare_record.model_dump(mode="json", by_alias=True)
+        payload["canonical_record"] = canonical_record_bytes(prepare_record).decode()
+        assert provider.execute(
+            "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,3,%s,%s)",
+            (case.worker_id, authority_id, generation, admitted_digest, Jsonb(payload)),
+        ).fetchone() == ("advanced",)
+        with psycopg.connect(migrated_url) as verifier:
+            verifier.execute(
+                "SELECT pg_advisory_xact_lock("
+                "pg_catalog.hashtextextended('kdive:system:' || %s::text, 2125))",
+                (case.system_id,),
+            )
+            provider.execute("SET statement_timeout='500ms'")
+            opened = provider.execute(
+                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
+                (
+                    case.worker_id,
+                    authority_id,
+                    generation,
+                    ack_digest,
+                    prepare_attempt_id,
+                    prepared[0],
+                    prepared[1],
+                ),
+            ).fetchone()
+            provider.execute("RESET statement_timeout")
+        assert opened is not None
+        assert opened[0]["module_attempt_obligation"] == {
+            "schema": "module-attempt-obligation-receipt-v1",
+            "system_id": str(case.system_id),
+            "run_id": str(case.run_id),
+            "operation_nonce": prepare_attempt_id.hex,
+        }
+        assert (
+            provider.execute(
+                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
+                (
+                    case.worker_id,
+                    authority_id,
+                    generation,
+                    ack_digest,
+                    prepare_attempt_id,
+                    prepared[0],
+                    prepared[1],
+                ),
+            ).fetchone()
+            == opened
+        )
+        assert provider.execute(
+            "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
+            (
+                case.worker_id,
+                authority_id,
+                generation,
+                ack_digest,
+                uuid4(),
+                prepared[0],
+                prepared[1],
+            ),
+        ).fetchone() == (None,)
+    open_arguments = (
+        case.worker_id,
+        authority_id,
+        generation,
+        ack_digest,
+        prepare_attempt_id,
+        prepared[0],
+        prepared[1],
+    )
+    with (
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        worker.execute(
+            "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
+            open_arguments,
+        )
+    with psycopg.connect(migrated_url) as admin:
+        admin.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s",
+            (case.job_id,),
+        )
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as provider:
+        assert provider.execute(
+            "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
+            open_arguments,
+        ).fetchone() == (None,)

@@ -55,6 +55,7 @@ class WorkerHandlerAssembly:
     capture_supervisor: CaptureOperationSupervisor
     worker_check_builders: diagnostics.WorkerCheckBuilders
     module_volume_reaper: ModuleVolumeReaper
+    pool: AsyncConnectionPool | None = None
     external_boot_client_factory: ExternalBootClientFactory | None = None
     recovery_orphan_authority_sender_factory: Callable[[], AuthorityRequestSender] | None = None
 
@@ -95,6 +96,7 @@ def build_worker_handler_assembly(
         module_volume_reaper=composition.build_worker_module_volume_reaper(
             authority_sender_factory=sender_factory
         ),
+        pool=pool,
         external_boot_client_factory=external_boot_client_factory(
             secret_backend_from_env(registry=composition.secret_registry),
             lambda: assembly.incarnation_credential,
@@ -154,6 +156,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
+            pool=assembly.pool,
             authority_client_factory=assembly.external_boot_client_factory,
         )
     )

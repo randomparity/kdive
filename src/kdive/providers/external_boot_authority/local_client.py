@@ -11,17 +11,17 @@ from pathlib import Path
 
 import kdive.config as config_registry
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.protocol import (
+    MAX_ENVELOPE_BYTES,
+    authority_server_name,
+    read_frame,
+)
 from kdive.providers.external_boot_authority.settings import (
     WORKER_AUTHORITY_CLIENT_CERT_REF,
     WORKER_AUTHORITY_CLIENT_KEY_REF,
     WORKER_AUTHORITY_INSTANCE,
     WORKER_AUTHORITY_REQUEST_SOCKET,
     WORKER_AUTHORITY_SERVER_CA_REF,
-)
-from kdive.providers.external_boot_authority.transport import (
-    MAX_ENVELOPE_BYTES,
-    authority_server_name,
-    read_frame,
 )
 
 _UNIX_PATH_MAX_BYTES = 107

@@ -372,13 +372,20 @@ def test_domain_definition_has_only_three_disks_and_bounded_console(
     assert on_crash is not None and on_crash.text == "destroy"
 
 
-def test_ansible_requires_both_architectures_and_verifies_digest() -> None:
+def test_ansible_installs_only_the_selected_supported_architectures() -> None:
     defaults = cast(
         dict[str, object],
         yaml.safe_load((ROLE / "defaults" / "main.yml").read_text(encoding="utf-8")),
     )
     images = cast(dict[str, object], defaults["remote_libvirt_module_appliance_images"])
     assert list(images) == ["x86_64", "ppc64le"]
+    authority_defaults = cast(
+        dict[str, object],
+        yaml.safe_load(
+            (ROLE.parent / "provider_authority_host/defaults/main.yml").read_text(encoding="utf-8")
+        ),
+    )
+    assert authority_defaults["provider_authority_host_remote_module_architectures"] == []
     tasks = (ROLE / "tasks" / "main.yml").read_text(encoding="utf-8")
     assert "ansible.builtin.get_url:" in tasks
     assert "ansible.builtin.unarchive:" in tasks
@@ -386,6 +393,8 @@ def test_ansible_requires_both_architectures_and_verifies_digest() -> None:
     assert "checksum_algorithm: sha256" in tasks
     assert "remote_libvirt_module_appliance_install_dir" in tasks
     assert 'mode: "0444"' in tasks
+    assert "item.key in provider_authority_host_remote_module_architectures" in tasks
+    assert "difference(['x86_64', 'ppc64le'])" in tasks
     site = (ROOT / "deploy" / "ansible" / "site.yml").read_text(encoding="utf-8")
     assert "role: remote_libvirt_module_appliance" in site
     assert "remote_libvirt_module_appliance_enabled | bool" in site

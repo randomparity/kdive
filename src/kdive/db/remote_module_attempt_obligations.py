@@ -24,7 +24,10 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.domain.remote_module_attempt_preparation import (
+    ModuleAttemptObligationReceiptV1,
+    ModuleAttemptPreparationRequestV1,
+)
 
 type MutationDischargeReason = Literal["restored", "baseline_committed", "terminal_escape"]
 
@@ -102,6 +105,22 @@ class ModuleAttemptTerminalEvidence:
                 f"installed_content_bytes must be between 0 and 8589934592, got "
                 f"{self.installed_content_bytes}"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleAttemptRestoredEvidence:
+    """Immutable restored result bound by the database to the original PREP evidence."""
+
+    restored_operation: dict[str, Any]
+    restored_operation_identity: str
+    restored_result: dict[str, Any]
+    restored_result_identity: str
+
+    def __post_init__(self) -> None:
+        for name in ("restored_operation_identity", "restored_result_identity"):
+            value = getattr(self, name)
+            if _DIGEST_RE.fullmatch(value) is None:
+                raise ValueError(f"{name} must be a sha256:<64 hex> digest, got {value!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +238,40 @@ class RemoteModuleAttemptObligationRepository:
             and state["reap_discharged_at"] is None
         )
 
+    async def reap_obligation_is_open(self, conn: AsyncConnection, attempt: ModuleAttempt) -> bool:
+        """Return whether exact terminal evidence retains this attempt's reap markers."""
+        state = await self._state(conn, attempt)
+        return (
+            state is not None
+            and state["has_evidence"]
+            and state["reap_opened_at"] is not None
+            and state["reap_discharged_at"] is None
+        )
+
+    async def read_reap_preparation(
+        self, conn: AsyncConnection, system_id: UUID, run_id: UUID
+    ) -> ModuleAttemptPreparationRequestV1 | None:
+        """Rebuild the one retained PREP receipt a lifecycle job must carry unchanged."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT system_id, run_id, operation_nonce "
+                "FROM remote_module_attempt_obligations "
+                "WHERE system_id = %s AND run_id = %s "
+                "AND reap_opened_at IS NOT NULL AND reap_discharged_at IS NULL "
+                "ORDER BY operation_nonce LIMIT 2",
+                (system_id, run_id),
+            )
+            rows = await cur.fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ModuleAttemptObligationError(
+                f"multiple retained module attempts exist for {system_id}/{run_id}"
+            )
+        return ModuleAttemptPreparationRequestV1(
+            module_attempt_obligation=ModuleAttemptObligationReceiptV1(**rows[0])
+        )
+
     async def discharge_mutation_obligation(
         self, conn: AsyncConnection, attempt: ModuleAttempt, *, reason: MutationDischargeReason
     ) -> bool:
@@ -325,6 +378,23 @@ class RemoteModuleAttemptObligationRepository:
             row = await cur.fetchone()
         return None if row is None else _evidence(row)
 
+    async def read_restored_evidence(
+        self, conn: AsyncConnection, attempt: ModuleAttempt
+    ) -> ModuleAttemptRestoredEvidence | None:
+        """Read the immutable restored result separately from original PREP provenance."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT restored_operation, restored_operation_identity, "
+                "restored_result, restored_result_identity "
+                "FROM remote_module_attempt_obligations "
+                "WHERE system_id = %s AND run_id = %s AND operation_nonce = %s",
+                attempt.key,
+            )
+            row = await cur.fetchone()
+        if row is None or row["restored_operation"] is None:
+            return None
+        return ModuleAttemptRestoredEvidence(**row)
+
     async def worker_record_terminal_evidence(
         self,
         conn: AsyncConnection,
@@ -336,6 +406,28 @@ class RemoteModuleAttemptObligationRepository:
         row = await conn.execute(
             "SELECT public.commit_worker_remote_module_evidence("
             "%s, %s, %s, %s, %s, %s, 'record-terminal', %s)",
+            (
+                context.job_id,
+                context.credential_hash,
+                context.job_attempt,
+                *attempt.key,
+                Jsonb(asdict(evidence)),
+            ),
+        )
+        value = await row.fetchone()
+        return value is not None and value[0] is True
+
+    async def worker_record_restored_evidence(
+        self,
+        conn: AsyncConnection,
+        context: ModuleAttemptWorkerWriteContext,
+        attempt: ModuleAttempt,
+        evidence: ModuleAttemptRestoredEvidence,
+    ) -> bool:
+        context.validate_attempt(attempt)
+        row = await conn.execute(
+            "SELECT public.commit_worker_remote_module_evidence("
+            "%s, %s, %s, %s, %s, %s, 'record-restored', %s)",
             (
                 context.job_id,
                 context.credential_hash,

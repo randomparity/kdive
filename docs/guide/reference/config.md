@@ -61,9 +61,11 @@
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR` | — | `/var/lib/kdive/provider-authority/journal` | no | Private root containing one exact external-boot authority journal lane per System. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS` | — | — | no | Optional numeric IPv4 listener address; requires the network port setting. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT` | — | — | no | Optional mutual-TLS TCP listener port; requires the network address setting. |
-| `KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET` | — | `/run/kdive/provider-authority/libvirt/libvirt-sock` | no | Dormant authority-owned provider mutation socket checked for local reachability. |
+| `KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET` | — | `/run/kdive/provider-authority/libvirt/libvirt-sock` | no | Authority-owned provider mutation socket checked for local reachability. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES` | — | — | no | Maximum retained reservation bytes in this authority recovery store. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES` | — | — | no | Fixed bytes reserved by each external-boot activation. |
+| `KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ARCHITECTURES` | — | `` | no | Comma-separated selected appliance architectures installed on this authority host. |
+| `KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED` | — | `false` | no | Whether this host exposes remote-module mutation through its private libvirt daemon. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET` | — | `/run/kdive/provider-authority/request/authority.sock` | no | Mutual-TLS AF_UNIX request socket owned by the external-boot authority. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY` | — | — | no | Opaque durable identity of the authority-owned recovery store. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_UID` | — | — | yes | Unix uid that owns and runs the external-boot authority host boundary. |

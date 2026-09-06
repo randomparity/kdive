@@ -9,6 +9,27 @@ from pathlib import Path
 from kdive.config.registry import Setting
 
 DEFAULT_DENIED_IDENTITIES = tuple([f"kdive-worker-{slot}" for slot in range(1, 9)] + ["kdive"])
+REMOTE_MODULE_ARCHITECTURES = frozenset({"x86_64", "ppc64le"})
+
+
+def _boolean(raw: str) -> bool:
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    raise ValueError("must be exactly 'true' or 'false'")
+
+
+def _remote_module_architectures(raw: str) -> tuple[str, ...]:
+    if raw == "":
+        return ()
+    architectures = tuple(raw.split(","))
+    if (
+        len(set(architectures)) != len(architectures)
+        or not set(architectures) <= REMOTE_MODULE_ARCHITECTURES
+    ):
+        raise ValueError("must contain unique supported remote-module architectures")
+    return architectures
 
 
 def _denied_identities(raw: str) -> tuple[str, ...]:
@@ -143,7 +164,7 @@ AUTHORITY_PROVIDER_SOCKET = Setting(
     parse=_absolute_path,
     default="/run/kdive/provider-authority/libvirt/libvirt-sock",
     group="external-boot-authority",
-    help="Dormant authority-owned provider mutation socket checked for local reachability.",
+    help="Authority-owned provider mutation socket checked for local reachability.",
 )
 AUTHORITY_PROOF_SOCKET = Setting(
     name="KDIVE_EXTERNAL_BOOT_AUTHORITY_PROOF_SOCKET",
@@ -181,6 +202,20 @@ AUTHORITY_NETWORK_PORT = Setting(
     parse=_network_port,
     group="external-boot-authority",
     help="Optional mutual-TLS TCP listener port; requires the network address setting.",
+)
+AUTHORITY_REMOTE_MODULE_ENABLED = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED",
+    parse=_boolean,
+    default="false",
+    group="external-boot-authority",
+    help="Whether this host exposes remote-module mutation through its private libvirt daemon.",
+)
+AUTHORITY_REMOTE_MODULE_ARCHITECTURES = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ARCHITECTURES",
+    parse=_remote_module_architectures,
+    default="",
+    group="external-boot-authority",
+    help="Comma-separated selected appliance architectures installed on this authority host.",
 )
 
 _WORKER = frozenset({"worker"})
@@ -241,6 +276,8 @@ SETTINGS = [
     AUTHORITY_RECOVERY_MAX_BYTES,
     AUTHORITY_NETWORK_ADDRESS,
     AUTHORITY_NETWORK_PORT,
+    AUTHORITY_REMOTE_MODULE_ENABLED,
+    AUTHORITY_REMOTE_MODULE_ARCHITECTURES,
     WORKER_AUTHORITY_INSTANCE,
     WORKER_AUTHORITY_REQUEST_SOCKET,
     WORKER_AUTHORITY_SERVER_CA_REF,

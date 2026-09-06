@@ -1,0 +1,67 @@
+# 0618 — Authority host owns remote module appliance inputs
+
+## Status
+
+Accepted (2026-09-06)
+
+## Context
+
+Remote PREPARE crosses from a worker that holds a read-only attempt verifier to an authenticated
+provider authority that owns the fixed libvirt binding. A worker-supplied root-volume key,
+appliance image, host path, or remote monotonic deadline would either extend worker authority or
+misrepresent a value whose clock is local to another process.
+
+The installed remote module appliance is a digest-verified direct-kernel bundle: fixed
+architecture-specific `vmlinuz` and `initramfs.cpio` assets, plus the System root, source, and
+scratch volumes. It is not a pool appliance volume.
+
+## Decision
+
+The authority host derives the System overlay volume and its identity from its fixed libvirt
+binding, and derives the appliance digest by rereading the installed verified bundle manifest.
+It persists the resulting closed operation descriptor with the begin receipt and accepts execute
+only when it exactly matches that descriptor. The worker receives that descriptor with the receipt
+and verifies its System, Run, plan, and source-manifest fields before retaining its ADR-0605
+verifier through completion.
+
+The authority converts the caller's bounded budget to its own monotonic deadline once at begin and
+reuses that deadline for exact replay. A worker monotonic timestamp is never compared directly to
+the authority host clock.
+
+Remote module mutation is a separate explicit authority-host opt-in and remains disabled by
+default. When enabled, the host opens its protected session libvirt socket, not the worker-visible
+system daemon, and uses one configured storage-pool name whose directory remains fixed beneath the
+authority state root. The same connection and pool feed materialization, module preparation, and
+lifecycle operations. The configured appliance architecture set is a nonempty subset of x86_64
+and ppc64le; readiness reopens every selected installed manifest and its direct-kernel files before
+the host accepts requests. Unselected architecture assets are neither required nor accepted.
+
+The worker commits the authenticated PREP terminal operation, result, recovery reference, and
+reap retention while the attempt verifier still holds the System lock. Those PREP fields remain
+immutable provenance. A later successful RESTORE is recorded in a separate immutable evidence
+group bound to that PREP baseline; ordinary CLEANUP requires it, while authenticated TEARDOWN may
+discard an installed-only baseline. Reap retention stays open from PREP until authenticated volume
+absence is committed.
+
+## Considered & rejected
+
+- Worker-selected root volumes, appliance assets, or provider paths would cross the fixed
+  provider-ownership boundary. The authority derives them from its configured binding instead.
+- A worker monotonic timestamp cannot be compared with the authority host clock. The authority
+  converts the bounded duration once and retains its own deadline for replay.
+- Overwriting PREP evidence after RESTORE would erase the baseline needed for recovery and reap
+  validation. RESTORE therefore has a separate immutable evidence group.
+- Enabling ordinary remote Resources from a private proof fixture would advertise an ownership
+  path that provisioning has not established. General advertisement remains disabled.
+
+## Consequences
+
+Provider authority provisioning must supply only fixed appliance assets and the fixed libvirt
+binding. The remote appliance renderer uses direct kernel/initrd boot and its three owned disks;
+it does not require a phantom appliance pool volume. Worker jobs retain no provider path, host
+credential, root-volume selector, or appliance selector.
+
+An installed proof fixture may create a disposable System inside this private namespace, but that
+does not authorize capability advertisement for ordinary remote Resources. General advertisement
+remains fail-closed until System provisioning itself establishes authority ownership without
+granting a worker access to the private provider endpoint.

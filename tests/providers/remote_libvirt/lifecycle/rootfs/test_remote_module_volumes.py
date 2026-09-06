@@ -1,6 +1,8 @@
 """Attempt-scoped remote module volume ownership."""
 
+import io
 import os
+import tarfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -11,6 +13,9 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    convert_kernel_bundle_modules,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
 )
@@ -640,6 +645,148 @@ def test_real_ext4_writer_has_closed_layout_and_appliance_manifest_parity(tmp_pa
         evidence.entry_count,
         evidence.content_bytes,
     )
+
+
+def _canonical_module_archive(tmp_path: Path) -> Path:
+    bundle_path = tmp_path / "bundle.tar.gz"
+    with tarfile.open(bundle_path, "w:gz") as bundle:
+        directory = tarfile.TarInfo("lib/modules/6.12.0/kernel")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o700
+        bundle.addfile(directory)
+        module = tarfile.TarInfo("lib/modules/6.12.0/kernel/a.ko")
+        module.mode = 0o744
+        module.size = len(b"module")
+        bundle.addfile(module, io.BytesIO(b"module"))
+        link = tarfile.TarInfo("lib/modules/6.12.0/alias")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "kernel/a.ko"
+        bundle.addfile(link)
+    archive_path = tmp_path / "modules.tar"
+    with bundle_path.open("rb") as source, archive_path.open("wb") as destination:
+        convert_kernel_bundle_modules(source, destination, release="6.12.0")
+    return archive_path
+
+
+def test_real_ext4_writer_builds_canonical_archive_with_manifest_parity(tmp_path: Path) -> None:
+    writer = Ext4SourceFilesystemWriter(tmp_path)
+    operation = OPERATION.to_wire_bytes()
+    archive = _canonical_module_archive(tmp_path)
+    expected = writer.build(
+        operation,
+        (
+            ModuleTreeEntry("kernel", 0o40755),
+            ModuleTreeEntry("kernel/a.ko", 0o100755, content=b"module"),
+            ModuleTreeEntry("alias", 0o120777, link_target="kernel/a.ko"),
+        ),
+    )
+    image = writer.build_from_archive(operation, archive)
+
+    try:
+        assert image.capacity_bytes == expected.capacity_bytes
+        assert image.evidence == expected.evidence == writer.inspect(image.path)
+        extracted = writer.extract(image.path, tmp_path / "archive-readback")
+        assert (extracted / "modules/kernel/a.ko").read_bytes() == b"module"
+        assert os.readlink(extracted / "modules/alias") == "kernel/a.ko"
+    finally:
+        expected.path.unlink(missing_ok=True)
+        image.path.unlink(missing_ok=True)
+
+
+def test_archive_writer_hashes_module_contents_without_read_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _canonical_module_archive(tmp_path)
+    original = Path.read_bytes
+
+    def bounded_read(path: Path) -> bytes:
+        if path.name == "a.ko":
+            raise AssertionError("module content must be hashed as a bounded stream")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", bounded_read)
+    image = Ext4SourceFilesystemWriter(tmp_path).build_from_archive(b"operation", archive)
+
+    image.path.unlink()
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "target"),
+    [
+        (tarfile.REGTYPE, "/absolute", ""),
+        (tarfile.REGTYPE, "../parent", ""),
+        (tarfile.FIFOTYPE, "device", ""),
+        (tarfile.LNKTYPE, "hardlink", "kernel/a.ko"),
+    ],
+)
+def test_archive_writer_rejects_malformed_paths_and_types(
+    tmp_path: Path, kind: bytes, name: str, target: str
+) -> None:
+    archive_path = tmp_path / "malformed.tar"
+    with tarfile.open(archive_path, "w", format=tarfile.PAX_FORMAT) as archive:
+        member = tarfile.TarInfo(name)
+        member.type = kind
+        member.linkname = target
+        member.pax_headers = {"KDIVE.xattrs-supported": "0"}
+        archive.addfile(member, io.BytesIO(b"") if member.isreg() else None)
+
+    with pytest.raises(CategorizedError, match="build remote module"):
+        Ext4SourceFilesystemWriter(tmp_path).build_from_archive(b"operation", archive_path)
+
+    assert not tuple(tmp_path.glob("kdive-module-source-*"))
+
+
+@pytest.mark.parametrize("target", ["/absolute", "../../escape"])
+def test_archive_writer_rejects_escaping_symlink(tmp_path: Path, target: str) -> None:
+    archive_path = tmp_path / "escaping-link.tar"
+    with tarfile.open(archive_path, "w", format=tarfile.PAX_FORMAT) as archive:
+        member = tarfile.TarInfo("kernel/link")
+        member.type = tarfile.SYMTYPE
+        member.linkname = target
+        member.pax_headers = {"KDIVE.xattrs-supported": "0"}
+        archive.addfile(member)
+
+    with pytest.raises(CategorizedError, match="build remote module"):
+        Ext4SourceFilesystemWriter(tmp_path).build_from_archive(b"operation", archive_path)
+
+    assert not tuple(tmp_path.glob("kdive-module-source-*"))
+
+
+@pytest.mark.parametrize(
+    ("limit", "value", "message"),
+    [
+        ("MAX_ENTRIES", 1, "entries"),
+        ("MAX_CONTENT_BYTES", 1, "content bytes"),
+        ("MAX_ARCHIVE_BYTES", 512, "archive bytes"),
+    ],
+)
+def test_archive_writer_enforces_every_source_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: str,
+    value: int,
+    message: str,
+) -> None:
+    import subprocess
+
+    from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes
+
+    archive_path = _canonical_module_archive(tmp_path)
+    monkeypatch.setattr(remote_module_volumes, limit, value)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("over-limit archive reached ext4 tools")
+        ),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        Ext4SourceFilesystemWriter(tmp_path).build_from_archive(b"operation", archive_path)
+
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert message in str(caught.value.__cause__)
+    assert not tuple(tmp_path.glob("kdive-module-source-*"))
 
 
 def test_same_operation_ext4_builds_use_distinct_secure_images(tmp_path: Path) -> None:

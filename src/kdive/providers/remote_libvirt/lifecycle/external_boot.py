@@ -16,6 +16,7 @@ import hashlib
 import json
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits a trusted tree after a defused parse
+from collections.abc import Callable
 from typing import Annotated, Literal, Protocol, Self
 from uuid import UUID
 
@@ -593,7 +594,11 @@ def _observed_state(
     return "other", preserved, boot
 
 
-def activate_definition(conn: ExternalBootConn, definition: RemoteExternalBootDefinition) -> None:
+def activate_definition(
+    conn: ExternalBootConn,
+    definition: RemoteExternalBootDefinition,
+    admit_mutation: Callable[[], None] | None = None,
+) -> None:
     """Compare-and-set the System's persistent definition to the external-boot target.
 
     Requires the domain inactive with the recorded source definition, defines the target, verifies
@@ -623,6 +628,8 @@ def activate_definition(conn: ExternalBootConn, definition: RemoteExternalBootDe
     if which == "target":
         if active:
             return
+        if admit_mutation is not None:
+            admit_mutation()
         _start(
             domain,
             definition,
@@ -632,6 +639,8 @@ def activate_definition(conn: ExternalBootConn, definition: RemoteExternalBootDe
         )
         return
 
+    if admit_mutation is not None:
+        admit_mutation()
     try:
         conn.defineXML(definition.target_xml)
     except libvirt.libvirtError as exc:
@@ -648,6 +657,8 @@ def activate_definition(conn: ExternalBootConn, definition: RemoteExternalBootDe
             observed_definition=preserved,
             observed_boot=boot,
         )
+    if admit_mutation is not None:
+        admit_mutation()
     _start(
         domain,
         definition,

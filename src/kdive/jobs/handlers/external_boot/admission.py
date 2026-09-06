@@ -21,6 +21,10 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttemptObligationError,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.payloads import (
@@ -36,6 +40,10 @@ from kdive.services.external_boot.routing import server_authority_instance
 __all__ = ["build_external_boot_payload"]
 
 _ACTIVATIONS = ExternalBootActivationRepository()
+_MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
+_REMOTE_MODULE_LIFECYCLE_OPERATIONS = frozenset(
+    {"recover", "resolve-conflict", "release", "cleanup", "teardown"}
+)
 
 
 def _refuse(message: str) -> CategorizedError:
@@ -93,6 +101,17 @@ async def build_external_boot_payload(
         ):
             raise _refuse("durable preparation plan does not match the activation")
 
+    remote_module_attempt = None
+    if binding.kind.value == "remote-libvirt" and operation in _REMOTE_MODULE_LIFECYCLE_OPERATIONS:
+        try:
+            remote_module_attempt = await _MODULE_ATTEMPTS.read_reap_preparation(
+                conn, activation.system_id, activation.run_id
+            )
+        except ModuleAttemptObligationError:
+            raise _refuse("remote module lifecycle PREP evidence is ambiguous") from None
+        if remote_module_attempt is None:
+            raise _refuse("remote module lifecycle has no retained PREP evidence")
+
     marker = {
         "activation_id": str(activation.id),
         "run_id": str(activation.run_id),
@@ -108,12 +127,17 @@ async def build_external_boot_payload(
         marker["expected_observed_composite"] = expected_observed_composite
     if purpose == "teardown":
         return JobKind.TEARDOWN, TeardownPayload.model_validate(
-            {"system_id": str(activation.system_id), "external_boot_authority_v1": marker}
+            {
+                "system_id": str(activation.system_id),
+                "external_boot_authority_v1": marker,
+                "remote_module_attempt_v1": remote_module_attempt,
+            }
         )
     return JobKind.BOOT, BootPayload.model_validate(
         {
             "run_id": str(activation.run_id),
             "external_boot_authority_v1": marker,
             "external_boot_plan_v1": preparation_plan,
+            "remote_module_attempt_v1": remote_module_attempt,
         }
     )

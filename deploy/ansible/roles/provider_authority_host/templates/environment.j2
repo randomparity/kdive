@@ -6,6 +6,11 @@ KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID={{ provider_authority_host_client_gid }
 KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR=/var/lib/kdive/provider-authority/journal
 KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock
 KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock
+KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED={{ 'true' if provider_authority_host_remote_module_enabled | default(false) else 'false' }}
+{% if provider_authority_host_remote_module_enabled | default(false) %}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ARCHITECTURES={{ provider_authority_host_remote_module_architectures | join(',') }}
+KDIVE_REMOTE_LIBVIRT_STORAGE_POOL={{ provider_authority_host_remote_libvirt_storage_pool }}
+{% endif %}
 {% if provider_authority_host_network_address %}
 KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS={{ provider_authority_host_network_address }}
 KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT={{ provider_authority_host_network_port }}
