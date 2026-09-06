@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final, Literal
 from uuid import NAMESPACE_URL, uuid5
@@ -185,9 +185,9 @@ def _phase_binding(context: OperationContext, operation: str) -> tuple[str, str]
 
 async def _materialize_preparing(
     conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
-) -> None:
+) -> ExternalBootActivation:
     if context.activation.state is not ExternalBootActivationState.PREPARING:
-        return
+        return context.activation
     executor = ports.preparation_executor
     if executor is None:
         raise _refuse("no external-boot authority preparation executor is configured")
@@ -233,6 +233,14 @@ async def _materialize_preparing(
 
     await execute_phase("materialize")
     await execute_phase("prepare")
+    refreshed = await _ACTIVATIONS.get(conn, context.marker.activation_id)
+    if refreshed is None or refreshed.state is not ExternalBootActivationState.PREPARED:
+        raise CategorizedError(
+            "external boot preparation commit did not publish prepared state",
+            category=ErrorCategory.STALE_HANDLE,
+            terminal=False,
+        )
+    return refreshed
 
 
 async def _resolve_port(
@@ -521,7 +529,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         secret_registry=ports.secret_registry,
         prerequisites=prerequisites,
     )
-    await _materialize_preparing(conn, context, ports)
+    context = replace(context, activation=await _materialize_preparing(conn, context, ports))
     try:
         if before_port is not None and (intermediate := before_port(context)) is not None:
             return intermediate

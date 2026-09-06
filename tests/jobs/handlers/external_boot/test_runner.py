@@ -29,6 +29,7 @@ import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.domain.capacity.state import ExternalBootActivationState
@@ -241,6 +242,8 @@ def test_preparing_executes_and_commits_exact_materialization(
 ) -> None:
     executed: list[AuthorityPreparationMutationRequestV1] = []
     committed: list[AuthorityPreparationMutationRequestV1] = []
+    vehicles: list[Vehicle] = []
+    seed_connections: list[AsyncConnection] = []
 
     class Executor:
         async def execute_preparation(
@@ -273,6 +276,16 @@ def test_preparing_executes_and_commits_exact_materialization(
 
     async def commit(_conn: AsyncConnection, **values: Any) -> str:
         committed.append(values["request"])
+        if values["request"].operation.value == "prepare" and commit_status == "applied":
+            await seed_connections[0].execute(
+                "UPDATE external_boot_activations SET state='prepared', materialization=%s, "
+                "recovery_point=%s WHERE id=%s",
+                (
+                    Jsonb(vehicles[0].materialization_json),
+                    Jsonb(vehicles[0].recovery_point_json),
+                    vehicles[0].activation_id,
+                ),
+            )
         return commit_status
 
     monkeypatch.setattr(
@@ -282,6 +295,8 @@ def test_preparing_executes_and_commits_exact_materialization(
 
     async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
         vehicle = build_vehicle()
+        vehicles.append(vehicle)
+        seed_connections.append(seed)
         case = await seed_case(
             seed,
             vehicle,
