@@ -19,6 +19,7 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptPreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
@@ -310,22 +311,49 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
         }
     )
 
+    deleted: set[str] = set()
+    looked_up: list[str] = []
+    modules_absent = False
+
+    def absent() -> libvirt.libvirtError:
+        error = libvirt.libvirtError("absent")
+        error.err = (libvirt.VIR_ERR_NO_STORAGE_VOL, 0, "absent", 0, "", "", "", 0, 0)
+        return error
+
     class Volume:
         def __init__(self, name: str) -> None:
-            self.name = name
+            self._name = name
 
         def path(self) -> str:
-            if self.name == recovery.materialization.artifacts.kernel.ref:
+            if self._name == recovery.materialization.artifacts.kernel.ref:
                 return "/artifacts/kernel"
             if recovery.materialization.artifacts.initrd is not None and (
-                self.name == recovery.materialization.artifacts.initrd.ref
+                self._name == recovery.materialization.artifacts.initrd.ref
             ):
                 return "/artifacts/initrd"
             return "/pool/owned"
 
+        def name(self) -> str:
+            return self._name
+
+        def delete(self, flags: int = 0) -> int:
+            del flags
+            deleted.add(self._name)
+            return 0
+
     class Pool:
         def storageVolLookupByName(self, name: str) -> Volume:
+            looked_up.append(name)
             assert OpaqueProviderRef(ref=name) in recovery.recovery_objects
+            if name in deleted or (
+                modules_absent
+                and name
+                in {
+                    recovery.module_recovery.source_volume.ref,
+                    recovery.module_recovery.scratch_volume.ref,
+                }
+            ):
+                raise absent()
             return Volume(name)
 
     class Domain:
@@ -367,7 +395,7 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
             return domain
 
         def storagePoolLookupByName(self, name: str) -> Pool:
-            assert name == "modules"
+            assert name in {"modules", recovery.module_recovery.pool.ref}
             return Pool()
 
         def defineXML(self, xml: str) -> Domain:
@@ -416,6 +444,27 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
     with pytest.raises(TimeoutError, match="activation deadline"):
         expiring.activate(recovery, authority, 2.0)
     assert domain.creates == 1
+
+    recovery = recovery.model_copy(
+        update={
+            "module_recovery": recovery.module_recovery.model_copy(
+                update={
+                    "authority_identity": RemoteModuleRecoveryRefV2.identity_for_authority(
+                        authority
+                    )
+                }
+            )
+        }
+    )
+    modules_absent = True
+    assert recovery.materialization.artifacts.initrd is not None
+    operations.cleanup(recovery, authority, 2.0)
+    operations.cleanup(recovery, authority, 2.0)
+    assert deleted == {
+        recovery.materialization.artifacts.kernel.ref,
+        recovery.materialization.artifacts.initrd.ref,
+    }
+    assert "kdive-sibling-volume" not in looked_up
 
 
 @pytest.mark.anyio
@@ -486,6 +535,87 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
     assert await adapter.preparation_receipt(prepare_request) is not None
     executor.shutdown()
     store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_changed_nonce_fails_before_provider_mutation() -> None:
+    record = _record()
+    calls: list[str] = []
+
+    class Coordinator:
+        def recovery_point(self, binding: object, plan_identity: str) -> RecoveryPoint:
+            del binding, plan_identity
+            calls.append("point")
+            return RecoveryPoint(
+                binding=record.binding,
+                plan_identity=record.plan_identity,
+                materialization_identity=record.materialization.identity,
+                recovery_ref=OpaqueProviderRef(ref="remote/recovery"),
+                source_state=record.source_state,
+                target_state=record.target_state,
+            )
+
+        def recovery_record(self, point: object) -> RemoteExternalBootRecoveryRecord:
+            del point
+            calls.append("record")
+            return record
+
+        def recover(self, point: object, authority: object) -> None:
+            del point, authority
+            calls.append("recover")
+
+        def cleanup(self, point: object, authority: object) -> None:
+            del point, authority
+            calls.append("cleanup")
+
+    class Delegate:
+        async def observe(self, request: object) -> object:
+            raise AssertionError(request)
+
+        async def commit(self, request: object, context: object) -> object:
+            raise AssertionError((request, context))
+
+    request = AuthorityMutationRequestV1(
+        authority_id=uuid4(),
+        generation=1,
+        system_id=UUID(record.binding.system_id),
+        activation_id=UUID(record.binding.activation_id),
+        run_id=UUID(record.binding.run_id),
+        plan_identity=record.plan_identity,
+        purpose="recover",
+        operation="recover",
+        provider_kind="remote-libvirt",
+        authority_instance="remote-a",
+        operation_identity="recover-cleanup",
+        operation_digest="sha256:" + "c" * 64,
+        attempt_id=uuid4(),
+        expected_source_identity=record.source_state.definition,
+        intended_target_identity=record.target_state.definition,
+        recovery_objects=(),
+    )
+    context = AuthorityCommitContextV1(
+        commit_point=AuthorityOperation.RECOVER,
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        journal_sequence=1,
+        journal_digest="sha256:" + "a" * 64,
+    )
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce="f" * 32,
+        cleanup_state="open",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(
+        cast(Any, Delegate()), cast(Any, Coordinator()), executor
+    )
+
+    with pytest.raises(ValueError, match="changed before provider deletion"):
+        await adapter.commit_cleanup(request, context, evidence)
+    assert calls == ["point", "record"]
+    executor.shutdown()
 
 
 def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:

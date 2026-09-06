@@ -1151,10 +1151,12 @@ class RemoteExternalBootAuthorityAdapter:
             run_id=str(request.run_id),
             activation_id=str(request.activation_id),
         )
-        point = await self._executor.run(
-            lambda: self._coordinator.recovery_point(binding, request.plan_identity)
-        )
-        record = self._coordinator.recovery_record(point)
+
+        def reopen() -> RemoteExternalBootRecoveryRecord:
+            point = self._coordinator.recovery_point(binding, request.plan_identity)
+            return self._coordinator.recovery_record(point)
+
+        record = await self._executor.run(reopen)
         return record.module_recovery.operation_nonce
 
     async def commit_cleanup(
@@ -1175,10 +1177,12 @@ class RemoteExternalBootAuthorityAdapter:
             run_id=str(request.run_id),
             activation_id=str(request.activation_id),
         )
-        point = await self._executor.run(
-            lambda: self._coordinator.recovery_point(binding, request.plan_identity)
-        )
-        record = self._coordinator.recovery_record(point)
+
+        def reopen() -> tuple[RecoveryPoint, RemoteExternalBootRecoveryRecord]:
+            point = self._coordinator.recovery_point(binding, request.plan_identity)
+            return point, self._coordinator.recovery_record(point)
+
+        point, record = await self._executor.run(reopen)
         reference = RemoteModuleRecoveryRefV2.model_validate_json(evidence.recovery_reference_json)
         if (
             reference != record.module_recovery
