@@ -35,6 +35,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.remote_libvirt import external_boot_materialization as materialization_module
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
     RemoteExternalBootAuthorityAdapter,
@@ -47,7 +48,13 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationResponseV1,
     RemoteModuleVolumePreparationStore,
 )
+from kdive.providers.remote_libvirt.external_boot_materialization import (
+    ConcreteRemoteExternalBootMaterializer,
+)
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
+from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
+    MaterializedBootArtifacts,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
 )
@@ -79,6 +86,107 @@ from tests.providers.remote_libvirt.lifecycle.test_external_boot import (
     _source_xml,
 )
 from tests.support.external_boot_plan import external_boot_plan
+
+
+def test_concrete_remote_materializer_binds_and_publishes_private_volume_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan()
+    binding = ExternalBootActivationBinding(
+        system_id=plan.ownership.system_id,
+        run_id=plan.ownership.run_id,
+        activation_id=str(uuid4()),
+    )
+    calls: list[tuple[UUID, UUID, str]] = []
+
+    class Connection:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    monkeypatch.setattr(
+        materialization_module.RealLocalExternalBootMaterializer,
+        "_fetch_and_validate",
+        lambda self, candidate, descriptor: Path(f"/proc/self/fd/{descriptor}/kernel").write_bytes(
+            b"kernel"
+        ),
+    )
+    monkeypatch.setattr(
+        materialization_module.RealLocalExternalBootMaterializer,
+        "_validate_local_bundle",
+        lambda self, candidate, descriptor: (
+            {
+                "vmlinuz_sha256": candidate.bundle.vmlinuz_sha256,
+                "module_source_manifest": candidate.module_obligation.source_manifest,
+                "release": candidate.module_obligation.release,
+                "gnu_build_id": "01020304",
+            },
+            "sha256:" + "1" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        materialization_module.RealLocalExternalBootMaterializer,
+        "_validate_local_initrd",
+        lambda self, candidate, descriptor: None,
+    )
+
+    def upload(
+        connection: object,
+        pool: str,
+        *,
+        system_id: UUID,
+        run_id: UUID,
+        kernel: Path,
+        initrd: Path | None,
+        max_bytes: int,
+    ) -> MaterializedBootArtifacts:
+        del connection, kernel, initrd, max_bytes
+        calls.append((system_id, run_id, pool))
+        return MaterializedBootArtifacts(
+            kernel=OpaqueProviderRef(ref="volumes/exact-private-kernel"),
+            initrd=OpaqueProviderRef(ref="volumes/exact-private-initrd"),
+        )
+
+    monkeypatch.setattr(materialization_module, "materialize_boot_artifacts", upload)
+    materializer = ConcreteRemoteExternalBootMaterializer(
+        object_store=cast(Any, object()),
+        connection=cast(Any, Connection),
+        pool_name="boot-pool",
+        capacity_bytes=64 * 1024**3,
+        monotonic=lambda: 1.0,
+    )
+    result = materializer.materialize(
+        plan, binding, OpaqueProviderRef(ref="authority/current"), 2.0
+    )
+
+    assert result.artifacts.kernel.ref == "volumes/exact-private-kernel"
+    assert result.plan_identity == plan.identity
+    assert result.ownership.system_id == binding.system_id
+    assert result.ownership.run_id == binding.run_id
+    assert calls == [(UUID(binding.system_id), UUID(binding.run_id), "boot-pool")]
+
+
+def test_concrete_remote_materializer_rejects_capacity_and_foreign_binding() -> None:
+    plan = _plan()
+    materializer = ConcreteRemoteExternalBootMaterializer(
+        object_store=cast(Any, object()),
+        connection=cast(Any, lambda: None),
+        pool_name="boot-pool",
+        capacity_bytes=1,
+        monotonic=lambda: 1.0,
+    )
+    binding = ExternalBootActivationBinding(
+        system_id=plan.ownership.system_id,
+        run_id=plan.ownership.run_id,
+        activation_id=str(uuid4()),
+    )
+    with pytest.raises(ValueError, match="configured capacity"):
+        materializer.materialize(plan, binding, OpaqueProviderRef(ref="authority/current"), 2.0)
+    foreign = binding.model_copy(update={"run_id": str(uuid4())})
+    with pytest.raises(ValueError, match="binding"):
+        materializer.materialize(plan, foreign, OpaqueProviderRef(ref="authority/current"), 2.0)
 
 
 def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
