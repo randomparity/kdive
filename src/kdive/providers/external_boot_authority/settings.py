@@ -29,6 +29,20 @@ def _nonempty(raw: str) -> str:
     return value
 
 
+def _bounded_opaque(raw: str) -> str:
+    value = raw.strip()
+    if not value or len(value.encode("utf-8")) > 1024 or "\0" in value:
+        raise ValueError("must contain 1 through 1024 UTF-8 bytes without NUL")
+    return value
+
+
+def _positive_bytes(raw: str) -> int:
+    value = int(raw)
+    if value <= 0:
+        raise ValueError("must be a positive byte count")
+    return value
+
+
 def _positive_unix_id(raw: str) -> int:
     value = int(raw)
     if value < 1:
@@ -130,6 +144,24 @@ AUTHORITY_PROVIDER_SOCKET = Setting(
     default="/run/kdive/provider-authority/libvirt/libvirt-sock",
     group="external-boot-authority",
     help="Dormant authority-owned provider mutation socket checked for local reachability.",
+)
+AUTHORITY_STORE_IDENTITY = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY",
+    parse=_bounded_opaque,
+    group="external-boot-authority",
+    help="Opaque durable identity of the authority-owned recovery store.",
+)
+AUTHORITY_RECOVERY_RESERVE_BYTES = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES",
+    parse=_positive_bytes,
+    group="external-boot-authority",
+    help="Fixed bytes reserved by each external-boot activation.",
+)
+AUTHORITY_RECOVERY_MAX_BYTES = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES",
+    parse=_positive_bytes,
+    group="external-boot-authority",
+    help="Maximum retained reservation bytes in this authority recovery store.",
 )
 
 AUTHORITY_NETWORK_ADDRESS = Setting(

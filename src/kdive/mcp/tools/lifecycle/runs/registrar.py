@@ -98,7 +98,7 @@ def register(
     _register_runs_set(app, pool)
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool, resolver)
-    _register_runs_boot(app, pool)
+    _register_runs_boot(app, pool, resolver)
     _register_runs_release_external_boot(app, pool)
 
 
@@ -631,7 +631,9 @@ def _register_runs_install(
         )
 
 
-def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _register_runs_boot(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="runs.boot",
         annotations=_docmeta.mutating(),
@@ -671,7 +673,12 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
         `runs.install` re-stage (a changed cmdline/crashkernel) or `force=true`.
         """
         return await _boot_run(
-            pool, current_context(), run_id, force=force, idempotency_key=idempotency_key
+            pool,
+            current_context(),
+            run_id,
+            force=force,
+            idempotency_key=idempotency_key,
+            resolver=resolver,
         )
 
 
