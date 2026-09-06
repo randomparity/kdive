@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import pytest
 from psycopg import AsyncConnection
+from pydantic import ValidationError
 
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from kdive.providers.external_boot_authority.protocol import AuthorityTeardownMutationRequestV1
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
+)
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 
 pytestmark = pytest.mark.anyio
@@ -25,6 +30,46 @@ _RUN_ID = UUID("00000000-0000-0000-0000-000000000004")
 _ATTEMPT_ID = UUID("00000000-0000-0000-0000-000000000005")
 _PEER = AuthenticatedPeer("worker-current")
 _ACK_DIGEST = "sha256:" + "a" * 64
+
+
+def _reservation(
+    disposition: Literal["pending", "ready", "released"] = "ready",
+) -> AuthorityTeardownReservationV1:
+    return AuthorityTeardownReservationV1(
+        disposition=disposition,
+        store_identity=OpaqueProviderRef(ref="stores/private"),
+        owner_key=OpaqueProviderRef(ref="owners/private"),
+        reserved_bytes=4096,
+    )
+
+
+def _complete_facts() -> dict[str, object]:
+    return {
+        "intent_identity": "sha256:" + "f" * 64,
+        "domain_absent": True,
+        "overlay_absent": True,
+        "baseline_absent": True,
+        "recovery_absent": True,
+        "quarantine_retained": False,
+        "completed_at": datetime(2026, 9, 6, tzinfo=UTC),
+        "reservation": _reservation(),
+    }
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"domain_absent": 1},
+        {"completed_at": datetime(2026, 9, 6)},
+        {"quarantine_retained": True},
+        {"reservation": None},
+    ],
+)
+def test_system_teardown_facts_fail_closed_on_malformed_completion(
+    change: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        AuthoritySystemTeardownFacts.model_validate(_complete_facts() | change)
 
 
 def _request() -> AuthorityTeardownMutationRequestV1:
@@ -137,10 +182,10 @@ async def test_resolve_current_teardown_returns_exact_typed_snapshot(disposition
 
     assert snapshot is not None
     assert snapshot.binding.authority_id == request.authority_id
-    assert snapshot.reservation_disposition == disposition
-    assert snapshot.store_identity == OpaqueProviderRef(ref="stores/private")
-    assert snapshot.owner_key == OpaqueProviderRef(ref="owners/private")
-    assert snapshot.reserved_bytes == 4096
+    assert snapshot.reservation.disposition == disposition
+    assert snapshot.reservation.store_identity == OpaqueProviderRef(ref="stores/private")
+    assert snapshot.reservation.owner_key == OpaqueProviderRef(ref="owners/private")
+    assert snapshot.reservation.reserved_bytes == 4096
     assert (snapshot.release_evidence is not None) == (disposition == "released")
     assert connection.call is not None
     assert "resolve_current_external_boot_teardown_authority" in connection.call[0]
@@ -169,7 +214,7 @@ async def test_resolve_current_teardown_preserves_sql_fence_denial() -> None:
     [
         ({"purpose": "release"}, "binding"),
         ({"reservation_disposition": "unknown"}, "disposition"),
-        ({"reserved_bytes": 0}, "positive"),
+        ({"reserved_bytes": 0}, "greater than"),
         ({"release_identity": "sha256:" + "d" * 64}, "release fields"),
     ],
 )

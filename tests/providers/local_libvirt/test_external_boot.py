@@ -20,6 +20,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     CleanupQuarantineReceiptV1,
@@ -91,6 +92,13 @@ from tests.providers.local_libvirt.external_boot_support import (
     _pre_stop,
 )
 
+_TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
+    disposition="ready",
+    store_identity=OpaqueProviderRef(ref="stores/private"),
+    owner_key=OpaqueProviderRef(ref="owners/private"),
+    reserved_bytes=4096,
+)
+
 
 def test_render_target_xml_changes_only_owned_boot_projection() -> None:
     rendered = render_target_xml(
@@ -140,16 +148,16 @@ def _raw_bundle(names: list[tuple[str, bytes]]) -> bytes:
 
 
 def _teardown_intent(
-    *, generation: int = 7, plan_identity: str = "sha256:" + "6" * 64
+    *,
+    generation: int = 7,
+    plan_identity: str = "sha256:" + "6" * 64,
+    reservation: AuthorityTeardownReservationV1 = _TEARDOWN_RESERVATION,
 ) -> LocalSystemTeardownIntentV1:
     return LocalSystemTeardownIntentV1(
         authority_id=UUID(int=generation),
         generation=generation,
         binding=_BINDING,
         plan_identity=plan_identity,
-        expected_source_identity="sha256:" + "b" * 64,
-        intended_target_identity="sha256:" + "c" * 64,
-        recovery_references=(f"local-recovery-v1/{_BINDING.system_id}/{_BINDING.activation_id}",),
         provider_kind="local-libvirt",
         authority_instance="local-authority",
         operation_identity=f"teardown-{generation}",
@@ -157,6 +165,7 @@ def _teardown_intent(
         attempt_id=UUID(int=generation + 10),
         journal_sequence=generation,
         journal_digest="sha256:" + "8" * 64,
+        reservation=reservation,
     )
 
 
@@ -186,14 +195,17 @@ def test_system_teardown_store_persists_exact_intent_and_adopts_only_same_subjec
             )
         with pytest.raises(ValueError, match="conflicts"):
             store.begin_system_teardown(_teardown_intent(generation=7), inspection)
+        with pytest.raises(ValueError, match="conflicts"):
+            store.begin_system_teardown(
+                _teardown_intent(
+                    generation=9,
+                    reservation=_TEARDOWN_RESERVATION.model_copy(
+                        update={"owner_key": OpaqueProviderRef(ref="owners/other")}
+                    ),
+                ),
+                inspection,
+            )
         assert store.read_system_teardown(_BINDING) == adopted
-
-
-def test_system_teardown_intent_accepts_only_the_exact_local_recovery_reference() -> None:
-    payload = _teardown_intent().model_dump(mode="json", by_alias=True)
-    payload["recovery_references"] = ["local-recovery-v1/other/object"]
-    with pytest.raises(ValidationError, match="recovery references are not exact"):
-        LocalSystemTeardownIntentV1.model_validate(payload)
 
 
 def test_system_teardown_store_refuses_unvalidated_present_overlay_without_write(
@@ -331,6 +343,7 @@ def test_system_teardown_resumes_after_mutation_before_checkpoint_without_repeat
 
     assert result.complete
     assert replay.completed_at == result.completed_at == datetime(2026, 9, 6, tzinfo=UTC)
+    assert replay.reservation == result.reservation == _TEARDOWN_RESERVATION
     assert getattr(session, counter) == 1
     assert sibling.read_bytes() == b"keep"
 
@@ -380,6 +393,7 @@ def test_system_teardown_observation_does_not_invent_completion_for_physical_abs
     assert observed.baseline_absent
     assert observed.recovery_absent
     assert observed.completed_at is None
+    assert observed.reservation is None
     assert not observed.complete
     assert list(root.iterdir()) == []
 
@@ -400,6 +414,25 @@ def test_system_teardown_observation_does_not_adopt_a_successor_request(tmp_path
 
     assert {path.name: path.read_bytes() for path in root.iterdir()} == before
     assert "destroy" not in session.actions
+
+
+def test_system_teardown_reopens_private_point_without_requiring_domain(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+    session = _SystemTeardownSession()
+    session.domain_present = False
+    io = _system_teardown_io(root, session)
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+
+    point = io.system_teardown_recovery_point(intent, authority)
+
+    assert point == _point(metadata)
+    assert not io.system_teardown_recovery_is_absent(intent, authority)
+    assert session.actions == ["close", "close"]
 
 
 def test_bundle_converter_is_deterministic_and_declares_xattrs_unsupported() -> None:
@@ -2257,6 +2290,33 @@ def test_pre_stop_abort_restores_running_source_before_removing_partial(tmp_path
             )
             == "absent"
         )
+
+
+def test_system_teardown_partial_abort_derives_identities_from_private_intent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata().model_copy(update={"prior_power": "running"})
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(_pre_stop(metadata))
+    preparation = _RealPreparation(metadata, root)
+    session = _RealSession(preparation)
+    session.inspection = replace(session.inspection, active=False)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+
+    result = operation.abort_system_teardown_preparation(
+        _BINDING, metadata.plan_identity, OpaqueProviderRef(ref="authority/current")
+    )
+
+    assert result == "removed"
+    assert preparation.actions == ["power:running", "readiness"]
 
 
 @pytest.mark.parametrize(

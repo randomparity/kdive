@@ -25,6 +25,10 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.build_artifacts import validation as build_validation
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
+)
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
@@ -208,19 +212,16 @@ class LocalPreStopIntentV1(_ClosedValue):
         return self
 
 
-class LocalSystemTeardownIntentV1(_ClosedValue):
-    """Exact authority request and mutation-started anchor persisted before teardown."""
+class LocalSystemTeardownAnchorV1(_ClosedValue):
+    """Path-free authority request and mutation-started anchor used for observation."""
 
-    schema_: Literal["local-libvirt-system-teardown-intent-v1"] = Field(
-        "local-libvirt-system-teardown-intent-v1", alias="schema"
+    schema_: Literal["local-libvirt-system-teardown-anchor-v1"] = Field(
+        "local-libvirt-system-teardown-anchor-v1", alias="schema"
     )
     authority_id: UUID
     generation: Annotated[int, Field(ge=1)]
     binding: ExternalBootActivationBinding
     plan_identity: Digest
-    expected_source_identity: Annotated[str, Field(min_length=1, max_length=1024)]
-    intended_target_identity: Annotated[str, Field(min_length=1, max_length=1024)]
-    recovery_references: Annotated[tuple[str, ...], Field(max_length=64)]
     provider_kind: Annotated[str, Field(min_length=1, max_length=255)]
     authority_instance: Annotated[str, Field(min_length=1, max_length=255)]
     operation_identity: Annotated[str, Field(min_length=1, max_length=255)]
@@ -229,35 +230,64 @@ class LocalSystemTeardownIntentV1(_ClosedValue):
     journal_sequence: Annotated[int, Field(ge=1)]
     journal_digest: Digest
 
-    @model_validator(mode="after")
-    def _recovery_references_are_exact(self) -> LocalSystemTeardownIntentV1:
-        expected = f"local-recovery-v1/{self.binding.system_id}/{self.binding.activation_id}"
-        if self.recovery_references not in {(), (expected,)}:
-            raise ValueError("System teardown recovery references are not exact")
-        return self
+    @property
+    def identity(self) -> str:
+        return "sha256:" + hashlib.sha256(_system_teardown_anchor_bytes(self)).hexdigest()
+
+
+class LocalSystemTeardownIntentV1(LocalSystemTeardownAnchorV1):
+    """Exact authority request and reservation persisted before teardown mutation."""
+
+    schema_: Literal["local-libvirt-system-teardown-intent-v1"] = Field(
+        "local-libvirt-system-teardown-intent-v1", alias="schema"
+    )
+    reservation: AuthorityTeardownReservationV1
 
     @property
     def identity(self) -> str:
         return "sha256:" + hashlib.sha256(_system_teardown_intent_bytes(self)).hexdigest()
+
+    def matches_anchor(self, anchor: LocalSystemTeardownAnchorV1) -> bool:
+        return (
+            self.authority_id,
+            self.generation,
+            self.binding,
+            self.plan_identity,
+            self.provider_kind,
+            self.authority_instance,
+            self.operation_identity,
+            self.operation_digest,
+            self.attempt_id,
+            self.journal_sequence,
+            self.journal_digest,
+        ) == (
+            anchor.authority_id,
+            anchor.generation,
+            anchor.binding,
+            anchor.plan_identity,
+            anchor.provider_kind,
+            anchor.authority_instance,
+            anchor.operation_identity,
+            anchor.operation_digest,
+            anchor.attempt_id,
+            anchor.journal_sequence,
+            anchor.journal_digest,
+        )
 
     def same_subject(self, other: LocalSystemTeardownIntentV1) -> bool:
         """Allow a fresh authority generation only for the exact same teardown subject."""
         return (
             self.binding,
             self.plan_identity,
-            self.expected_source_identity,
-            self.intended_target_identity,
-            self.recovery_references,
             self.provider_kind,
             self.authority_instance,
+            self.reservation,
         ) == (
             other.binding,
             other.plan_identity,
-            other.expected_source_identity,
-            other.intended_target_identity,
-            other.recovery_references,
             other.provider_kind,
             other.authority_instance,
+            other.reservation,
         )
 
 
@@ -279,30 +309,6 @@ class LocalSystemTeardownRecordV1(_ClosedValue):
         ):
             raise ValueError("System teardown completion timestamp must be UTC")
         return self
-
-
-@dataclass(frozen=True, slots=True)
-class LocalSystemTeardownFacts:
-    """Path-free local facts from one exact no-create System observation."""
-
-    intent_identity: str
-    domain_absent: bool
-    overlay_absent: bool
-    baseline_absent: bool
-    recovery_absent: bool
-    quarantine_retained: bool
-    completed_at: datetime | None
-
-    @property
-    def complete(self) -> bool:
-        return (
-            self.domain_absent
-            and self.overlay_absent
-            and self.baseline_absent
-            and self.recovery_absent
-            and not self.quarantine_retained
-            and self.completed_at is not None
-        )
 
 
 class FinalizeCleanupProof(_ClosedValue):
@@ -950,6 +956,12 @@ class LocalPartialRecoveryOperation(Protocol):
         target_identity: str,
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult: ...
+    def abort_system_teardown_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        authority: OpaqueProviderRef,
+    ) -> PartialAbortResult: ...
     def recovery_is_absent(self, binding: ExternalBootActivationBinding) -> bool: ...
 
 
@@ -991,13 +1003,19 @@ class LocalSystemTeardownIO(Protocol):
 
     def begin_system_teardown(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts: ...
+    ) -> AuthoritySystemTeardownFacts: ...
     def teardown_system(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts: ...
+    ) -> AuthoritySystemTeardownFacts: ...
     def observe_system_teardown(
+        self, anchor: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+    ) -> AuthoritySystemTeardownFacts: ...
+    def system_teardown_recovery_point(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts: ...
+    ) -> RecoveryPoint | None: ...
+    def system_teardown_recovery_is_absent(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> bool: ...
 
 
 class LocalExternalBootMaterializer(Protocol):
@@ -1588,40 +1606,86 @@ class RealLocalExternalBootIO:
 
     def begin_system_teardown(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts:
+    ) -> AuthoritySystemTeardownFacts:
         with self._open_system_teardown(intent, authority) as session:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 store.begin_system_teardown(intent, inspection)
                 recovery_absent = store.exact_recovery_absence(intent.binding)
-            return _system_teardown_facts(intent, inspection, recovery_absent, None)
+            return _system_teardown_facts(
+                intent, inspection, recovery_absent, None, intent.reservation
+            )
 
     def observe_system_teardown(
-        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts:
-        with self._open_system_teardown(intent, authority) as session:
+        self, anchor: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+    ) -> AuthoritySystemTeardownFacts:
+        with self._open_system_teardown(anchor, authority) as session:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
-                retained = store.read_system_teardown(intent.binding)
-                if retained is not None and retained.intent != intent:
+                retained = store.read_system_teardown(anchor.binding)
+                if retained is not None and not retained.intent.matches_anchor(anchor):
                     raise ValueError("System teardown observation conflicts with retained intent")
-                recovery_absent = store.exact_recovery_absence(intent.binding)
+                recovery_absent = store.exact_recovery_absence(anchor.binding)
             completed_at = (
                 retained.completed_at
                 if retained is not None and retained.phase == "complete"
                 else None
             )
-            return _system_teardown_facts(intent, inspection, recovery_absent, completed_at)
+            owner = retained.intent if retained is not None else anchor
+            reservation = retained.intent.reservation if retained is not None else None
+            return _system_teardown_facts(
+                owner, inspection, recovery_absent, completed_at, reservation
+            )
+
+    def system_teardown_recovery_point(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> RecoveryPoint | None:
+        """Resolve private recovery evidence without requiring a still-defined domain."""
+        with self._open_system_teardown(intent, authority):
+            reference = _recovery_ref(intent.binding)
+            with RecoveryMetadataStore(self._recovery_root) as store:
+                try:
+                    metadata = store.reopen(reference, intent.binding)
+                except FileNotFoundError:
+                    try:
+                        tombstone = store.reopen_tombstone(reference, intent.binding)
+                    except FileNotFoundError:
+                        return None
+                    point = tombstone.recovery_point
+                else:
+                    point = RecoveryPoint(
+                        binding=metadata.binding,
+                        plan_identity=metadata.plan_identity,
+                        materialization_identity=metadata.materialization_identity,
+                        recovery_ref=reference,
+                        source_state=metadata.source_state,
+                        target_state=metadata.target_state,
+                    )
+        if point.binding != intent.binding or point.plan_identity != intent.plan_identity:
+            raise ValueError("System teardown recovery point does not match retained intent")
+        return point
+
+    def system_teardown_recovery_is_absent(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> bool:
+        """Observe exact recovery absence without opening or creating activation state."""
+        with (
+            self._open_system_teardown(intent, authority),
+            RecoveryMetadataStore(self._recovery_root) as store,
+        ):
+            return store.exact_recovery_absence(intent.binding)
 
     def teardown_system(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts:
+    ) -> AuthoritySystemTeardownFacts:
         with self._open_system_teardown(intent, authority) as session:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 record = store.begin_system_teardown(intent, inspection)
                 if not store.exact_recovery_absence(intent.binding):
-                    return _system_teardown_facts(intent, inspection, False, None)
+                    return _system_teardown_facts(
+                        intent, inspection, False, None, intent.reservation
+                    )
             phases: tuple[tuple[SystemTeardownPhase, Callable[[], None]], ...] = (
                 ("domain-destroyed", session.destroy),
                 ("domain-undefined", session.undefine),
@@ -1646,12 +1710,18 @@ class RealLocalExternalBootIO:
                     record = store.record_system_teardown_phase(
                         record, "complete", completed_at=self._teardown_clock()
                     )
-                facts = _system_teardown_facts(intent, final, recovery_absent, record.completed_at)
+                facts = _system_teardown_facts(
+                    intent,
+                    final,
+                    recovery_absent,
+                    record.completed_at,
+                    intent.reservation,
+                )
             return facts
 
     @contextmanager
     def _open_system_teardown(
-        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+        self, intent: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
     ) -> Iterator[LocalSystemTeardownSession]:
         lease = self._resolve_operation_lease(authority)
         session = self._session_factory.open_teardown(lease, _expected_binding(intent.binding))
@@ -1668,18 +1738,19 @@ class RealLocalExternalBootIO:
 
 
 def _system_teardown_facts(
-    intent: LocalSystemTeardownIntentV1,
+    intent: LocalSystemTeardownAnchorV1,
     inspection: LocalSystemTeardownInspection,
     recovery_absent: bool,
     completed_at: datetime | None,
-) -> LocalSystemTeardownFacts:
+    reservation: AuthorityTeardownReservationV1 | None = None,
+) -> AuthoritySystemTeardownFacts:
     physically_absent = (
         inspection.domain_absent
         and inspection.overlay_absent
         and inspection.baseline_absent
         and recovery_absent
     )
-    return LocalSystemTeardownFacts(
+    return AuthoritySystemTeardownFacts(
         intent_identity=intent.identity,
         domain_absent=inspection.domain_absent,
         overlay_absent=inspection.overlay_absent,
@@ -1687,6 +1758,7 @@ def _system_teardown_facts(
         recovery_absent=recovery_absent,
         quarantine_retained=not physically_absent or completed_at is None,
         completed_at=completed_at,
+        reservation=reservation,
     )
 
 
@@ -2019,13 +2091,43 @@ class _RealLocalExternalBootOperation:
         target_identity: str,
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
+        return self._abort_preparation(
+            binding,
+            plan_identity,
+            authority,
+            expected_identities=(source_identity, target_identity),
+        )
+
+    def abort_system_teardown_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        authority: OpaqueProviderRef,
+    ) -> PartialAbortResult:
+        return self._abort_preparation(binding, plan_identity, authority, expected_identities=None)
+
+    def _abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        authority: OpaqueProviderRef,
+        *,
+        expected_identities: tuple[str, str] | None,
+    ) -> PartialAbortResult:
         with RecoveryMetadataStore(self._recovery_root) as store:
             partial = store.inspect_abortable_partial(binding, plan_identity, authority)
             if isinstance(partial, str):
                 return cast(PartialAbortResult, partial)
             intent = partial.intent
             if intent is not None:
-                if intent.source_boot != source_identity or intent.target_boot != target_identity:
+                if (
+                    expected_identities is not None
+                    and (
+                        intent.source_boot,
+                        intent.target_boot,
+                    )
+                    != expected_identities
+                ):
                     raise ValueError("recovery partial identity conflicts with teardown request")
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
                 if intent.prior_power == "running":
@@ -2307,18 +2409,32 @@ class LocalLibvirtExternalBoot:
 
     def begin_system_teardown(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts:
+    ) -> AuthoritySystemTeardownFacts:
         return cast(LocalSystemTeardownIO, self._io).begin_system_teardown(intent, authority)
 
     def teardown_system(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts:
+    ) -> AuthoritySystemTeardownFacts:
         return cast(LocalSystemTeardownIO, self._io).teardown_system(intent, authority)
 
     def observe_system_teardown(
-        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
-    ) -> LocalSystemTeardownFacts:
+        self, intent: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+    ) -> AuthoritySystemTeardownFacts:
         return cast(LocalSystemTeardownIO, self._io).observe_system_teardown(intent, authority)
+
+    def system_teardown_recovery_point(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> RecoveryPoint | None:
+        return cast(LocalSystemTeardownIO, self._io).system_teardown_recovery_point(
+            intent, authority
+        )
+
+    def system_teardown_recovery_is_absent(
+        self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
+    ) -> bool:
+        return cast(LocalSystemTeardownIO, self._io).system_teardown_recovery_is_absent(
+            intent, authority
+        )
 
     @staticmethod
     def point_digest(recovery: RecoveryPoint) -> str:
@@ -2664,6 +2780,16 @@ class LocalLibvirtExternalBoot:
                 binding, plan_identity, source_identity, target_identity, authority
             )
 
+    def abort_system_teardown_preparation(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        authority: OpaqueProviderRef,
+    ) -> PartialAbortResult:
+        with self._io.open(authority, _expected_binding(intent.binding)) as operation:
+            return cast(LocalPartialRecoveryOperation, operation).abort_system_teardown_preparation(
+                intent.binding, intent.plan_identity, authority
+            )
+
     def recovery_is_absent(
         self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
     ) -> bool:
@@ -2845,6 +2971,15 @@ def _preparation_bytes(receipts: LocalPreparationReceiptsV1) -> bytes:
 
 
 def _system_teardown_intent_bytes(intent: LocalSystemTeardownIntentV1) -> bytes:
+    return json.dumps(
+        intent.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
+def _system_teardown_anchor_bytes(intent: LocalSystemTeardownAnchorV1) -> bytes:
     return json.dumps(
         intent.model_dump(mode="json", by_alias=True),
         sort_keys=True,
