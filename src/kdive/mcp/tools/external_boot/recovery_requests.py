@@ -19,6 +19,7 @@ so an unauthorized caller learns nothing about whether the System carries an act
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from typing import LiteralString
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -236,6 +237,11 @@ def _quarantine_binding_digest(rows: Sequence[Mapping[str, object]]) -> str:
         ":".join(str(row[field]) for field in _QUARANTINE_BINDING_FIELDS) for row in rows
     )
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _quarantine_binding_snapshot(rows: Sequence[Mapping[str, object]]) -> list[dict[str, str]]:
+    """Persist the admitted facts; later provider work must not select fresh inventory."""
+    return [{field: str(row[field]) for field in _QUARANTINE_BINDING_FIELDS} for row in rows]
 
 
 def _conflict(
@@ -819,11 +825,8 @@ async def resolve_recovery_orphan(
             ):
                 return _executor_unavailable(system_id, ORPHAN_TOOL)
             binding_digest = _quarantine_binding_digest(rows)
-            operation_identity = (
-                "sha256:"
-                + hashlib.sha256(f"{uid}\0{disposition}\0{binding_digest}".encode()).hexdigest()
-            )
-            request_id = uuid5(NAMESPACE_URL, f"kdive:{operation_identity}")
+            binding_snapshot = _quarantine_binding_snapshot(rows)
+            request_id = uuid5(NAMESPACE_URL, f"kdive:{dedup_key}")
             assert metadata is not None
             payload = ResolveRecoveryOrphanPayload(
                 schema="resolve-recovery-orphan-v1",
@@ -842,14 +845,16 @@ async def resolve_recovery_orphan(
             object_ids = [row["id"] for row in rows]
             await conn.execute(
                 "INSERT INTO external_boot_recovery_orphan_requests "
-                "(id, system_id, disposition, binding_digest, object_ids, job_id, "
+                "(id, system_id, disposition, binding_digest, selection_snapshot, object_ids, "
+                "job_id, "
                 "readiness_deadline) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                "VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)",
                 (
                     request_id,
                     uid,
                     disposition,
                     binding_digest,
+                    json.dumps(binding_snapshot, separators=(",", ":")),
                     object_ids,
                     job.id,
                     metadata.readiness_deadline,

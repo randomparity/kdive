@@ -26,6 +26,12 @@ with a second fenced SQL function. The commit is idempotent for the same request
 stale attempt or changed ownership evidence. The ordinary worker role has no quarantine or orphan
 request table privilege.
 
+If cleanup reaches provider mutation but its private receipt cannot be finalized, the authority
+reopens that exact receipt on its bounded provider lane. It publishes the resulting bounded
+quarantine inventory only through an authority-role SQL function fenced by the authenticated
+current authority and its terminal journal head. The database records the provider evidence it was
+given; it does not inspect private storage.
+
 ## Consequences
 
 Lost authority responses can be replayed without a second provider mutation. A later worker claim

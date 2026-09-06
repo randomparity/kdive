@@ -63,6 +63,7 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
+    RecoveryObjectObservation,
     RecoveryPoint,
     RunningKernelObservation,
 )
@@ -172,6 +173,7 @@ class _FakeIO:
         self.actions: list[str] = []
         self.tombstone = False
         self.tombstone_error: BaseException | None = None
+        self.finalize_error: BaseException | None = None
         # `publish_tombstone` writes the tombstone and then unlinks `intent.json`. Modelling
         # both lets `finalize_tombstone` below refuse exactly where the real store refuses.
         self.intent_present = True
@@ -192,6 +194,8 @@ class _FakeIO:
 
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         del recovery
+        if self.finalize_error is not None:
+            raise self.finalize_error
         if self.tombstone and self.intent_present:
             self.intent_present = False
         self.tombstone = False
@@ -1397,6 +1401,34 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert terminal.outcome == "absent"
     assert terminal.observation is not None
     assert terminal.observation.category == "absent"
+
+
+async def test_cleanup_finalization_failure_publishes_reopened_private_receipt(
+    tmp_path: Path,
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.finalize_error = OSError("private receipt finalization interrupted")
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    mutation = _cleanup_mutation()
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, mutation)
+
+    assert io.cleanup_quarantine is not None
+    assert io.cleanup_quarantine.proof.operation_id == mutation.operation_identity
+    assert io.cleanup_quarantine.proof.attempt_id == str(mutation.attempt_id)
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert len(repository.published_cleanup_quarantines) == 1
+    published_peer, _, terminal, observations = repository.published_cleanup_quarantines[0]
+    assert published_peer == peer
+    assert isinstance(terminal, JournalRecordV1)
+    assert isinstance(observations, tuple)
+    assert terminal.phase is JournalPhase.TERMINAL
+    assert len(observations) == 1
+    assert isinstance(observations[0], RecoveryObjectObservation)
+    assert observations[0].binding.operation_identity == mutation.operation_identity
 
 
 async def test_a_teardown_commit_finalizes_the_tombstone(tmp_path: Path) -> None:

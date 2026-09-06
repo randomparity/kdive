@@ -121,6 +121,15 @@ class RecoveryOrphanAuthorityService:
     ) -> tuple[_Selection, ...]:
         async with self._connections() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
+                "SELECT verify_external_boot_recovery_orphan_inventory_authority(%s,%s,%s,%s)",
+                (
+                    str(peer.incarnation_id),
+                    request.request_id,
+                    request.job_id,
+                    request.job_attempt,
+                ),
+            )
+            await cur.execute(
                 "SELECT * FROM resolve_external_boot_recovery_orphan_authority(%s,%s,%s,%s)",
                 (
                     str(peer.incarnation_id),

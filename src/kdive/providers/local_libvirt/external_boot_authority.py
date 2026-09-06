@@ -231,6 +231,29 @@ class LocalExternalBootAuthorityAdapter:
             lambda: self._ports.adopt_object(binding, authority, digest),
         )
 
+    async def cleanup_quarantine_inventory(
+        self, request: AuthorityMutationRequestV1
+    ) -> tuple[RecoveryObjectObservation, ...]:
+        """Reopen only the exact unfinalized private cleanup receipt on the bounded lane."""
+        if request.operation not in _DELETING_OPERATIONS:
+            return ()
+        authority = _authority_ref(request)
+        binding = _activation_binding(request)
+        observations = await self._offload(
+            request, lambda: self._ports.quarantined_objects(binding, authority)
+        )
+        for observation in observations:
+            object_binding = observation.binding
+            if (
+                not observation.present
+                or observation.managed
+                or object_binding.binding != binding
+                or object_binding.operation_identity != request.operation_identity
+                or object_binding.attempt_id != str(request.attempt_id)
+            ):
+                raise AuthorityServiceError("provider_conflict")
+        return observations
+
     def close(self) -> None:
         with self._executor_lock:
             self._closed = True

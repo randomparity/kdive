@@ -35,6 +35,7 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
+    RecoveryObjectObservation,
     RunningKernelObservation,
 )
 
@@ -59,6 +60,13 @@ class AuthorityMutationFinalizer(Protocol):
     async def finalize(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> None: ...
+
+
+@runtime_checkable
+class AuthorityCleanupQuarantineInventory(Protocol):
+    async def cleanup_quarantine_inventory(
+        self, request: AuthorityMutationRequestV1
+    ) -> tuple[RecoveryObjectObservation, ...]: ...
 
 
 @runtime_checkable
@@ -164,6 +172,17 @@ class AuthorityPreparationRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
+
+
+@runtime_checkable
+class AuthorityCleanupQuarantineRepository(Protocol):
+    async def publish_cleanup_quarantine(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        terminal: JournalRecordV1,
+        observations: tuple[RecoveryObjectObservation, ...],
+    ) -> None: ...
 
 
 class AuthorityServiceError(RuntimeError):
@@ -551,6 +570,23 @@ class ExternalBootAuthorityService:
             raise
         except Exception:
             raise self._provider_error(request) from None
+
+    async def _publish_cleanup_quarantine(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1,
+        terminal: JournalRecordV1,
+    ) -> None:
+        """Publish only a receipt re-opened by the trusted private provider boundary."""
+        if not (
+            isinstance(self._adapter, AuthorityCleanupQuarantineInventory)
+            and isinstance(self._repository, AuthorityCleanupQuarantineRepository)
+        ):
+            return
+        observations = await self._adapter.cleanup_quarantine_inventory(request)
+        if observations:
+            await self._repository.publish_cleanup_quarantine(peer, binding, terminal, observations)
 
     async def _recover(
         self,
@@ -1186,7 +1222,13 @@ class ExternalBootAuthorityService:
                     if prior is not None and prior.phase is JournalPhase.TERMINAL:
                         if not self._operation_matches(prior, request) or prior.observation is None:
                             raise AuthorityServiceError("journal_conflict")
-                        await self._finalize_adapter(request, records)
+                        try:
+                            await self._finalize_adapter(request, records)
+                        except AuthorityServiceError:
+                            await self._publish_cleanup_quarantine(
+                                authenticated, binding, request, prior
+                            )
+                            raise
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
                     predecessor_receipt_identity: str | None = None
@@ -1389,7 +1431,13 @@ class ExternalBootAuthorityService:
                             outcome=outcome,
                         ),
                     )
-                    await self._finalize_adapter(request, records)
+                    try:
+                        await self._finalize_adapter(request, records)
+                    except AuthorityServiceError:
+                        await self._publish_cleanup_quarantine(
+                            authenticated, completion_binding, request, records[-1]
+                        )
+                        raise
                     return observation
             finally:
                 active.done.set()

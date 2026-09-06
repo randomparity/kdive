@@ -124,6 +124,10 @@ class _Repository:
         # changed, a check that ignored the scoping entirely would still see a matching
         # sequence and digest and pass, so the test would not discriminate.
         self.head_operation_identity_override: str | None = None
+        self.published_cleanup_quarantines: list[tuple[object, ...]] = []
+
+    async def publish_cleanup_quarantine(self, *args: object) -> None:
+        self.published_cleanup_quarantines.append(args)
 
     async def resolve_current_candidate(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1

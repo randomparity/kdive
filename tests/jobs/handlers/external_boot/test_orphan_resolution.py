@@ -84,9 +84,11 @@ def _ctx() -> RequestContext:
     )
 
 
-def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider(
+@pytest.mark.parametrize("disposition", ("delete", "adopt"))
+def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_provider(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
+    disposition: str,
 ) -> None:
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -180,7 +182,7 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     resolver=resolver,
                     system_id=str(system_id),
                     object_identities=list(identities),
-                    disposition="delete",
+                    disposition=disposition,
                 )
                 second = await resolve_recovery_orphan(
                     conn_pool,
@@ -188,7 +190,7 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     resolver=resolver,
                     system_id=str(system_id),
                     object_identities=list(identities),
-                    disposition="delete",
+                    disposition=disposition,
                 )
                 assert first.object_id == second.object_id
                 service = ExternalBootAuthorityService(
@@ -255,7 +257,7 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     )
                     interrupted = await runner.run_once(DEFAULT_JOB_DISPATCH_LANE)
                     assert interrupted is not None and str(interrupted.id) == first.object_id
-                    assert provider.recovery_object_mutations == [("delete", str(record_id))]
+                    assert provider.recovery_object_mutations == [(disposition, str(record_id))]
                     with pytest.raises(CategorizedError):
                         await sender.resolve_recovery_orphan(
                             AuthorityRecoveryOrphanDispositionRequestV1(
@@ -283,7 +285,7 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     await conn.execute("SELECT state FROM jobs WHERE id = %s", (completed.id,))
                 ).fetchone()
                 assert final == ("succeeded",)
-                assert provider.recovery_object_mutations == [("delete", str(record_id))]
+                assert provider.recovery_object_mutations == [(disposition, str(record_id))]
                 persisted = await (
                     await conn.execute(
                         "SELECT status, reserved_bytes FROM external_boot_recovery_quarantine "
@@ -291,13 +293,13 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                         (record_id,),
                     )
                 ).fetchone()
-                assert persisted == ("deleted", 4096)
+                assert persisted == (("deleted" if disposition == "delete" else "adopted"), 4096)
                 replay = await resolve_recovery_orphan(
                     conn_pool,
                     _ctx(),
                     system_id=str(system_id),
                     object_identities=list(identities),
-                    disposition="delete",
+                    disposition=disposition,
                     resolver=resolver,
                 )
                 assert replay.object_id == first.object_id
