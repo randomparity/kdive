@@ -19,6 +19,9 @@ composition/report wiring, and provider, fleet, lane, and loop tests.
   the completion-owned preparation executor used for blocking provider work.
 - Public error details contain only `pool` and `volume`. Never include host identity, URI,
   credentials, domain XML, or backing paths.
+- A single host sweep admits at most 4,096 distinct normalized paths across candidates, direct
+  disk-graph references, and named-volume canonical paths. Deduplicate before identity lookup;
+  discovery of path 4,097 fails with redacted `INFRASTRUCTURE_FAILURE` before any deletion.
 - Guardrails: focused pytest while iterating; `just lint`, `just type`, and `just test-changed`
   before review; `just ci > .agent/q2168-ci.log 2>&1 < /dev/null` before push.
 - Branch: `feat/reap-remote-module-volumes-2168`; base: `main`.
@@ -96,20 +99,29 @@ def reap_orphaned_module_volumes(
    feed every document through the shared reference helpers. Resolve direct file/device paths,
    candidate paths, and named-volume canonical paths through the supplied ADR-0603 identity port.
    Missing or malformed identity fails closed; timeout and operational resolution errors raise
-   infrastructure failure. Enforce one bounded identity-call budget across the complete preflight.
+   infrastructure failure. Normalize and deduplicate candidate, direct-reference, and named-volume
+   canonical paths before identity lookup. Admit exactly 4,096 distinct paths across the complete
+   host preflight; on discovering a 4,097th, raise redacted `INFRASTRUCTURE_FAILURE` before the
+   first delete and without exposing a path.
    The destructive function receives the port as an explicit positional dependency; no connection
    object, helper, or closure constructs or captures authority implicitly.
-4. Implement one complete enumeration, retention filtering, a complete reference/conflict
+4. Add boundary regressions proving 4,096 distinct normalized paths are admitted, a 4,097th fails
+   before identity lookup or deletion with no path in the error, and normalized lexical aliases
+   consume one identity lookup. Use a delete spy so every over-limit path proves no delete begins.
+5. Implement one complete enumeration, retention filtering, a complete reference/conflict
    preflight, then deletion. Add a fake-port regression that records candidate and domain-reference
    lookups, plus absent and malformed identity cases proving no delete begins. Translate libvirt
    errors with bounded details and count `VIR_ERR_NO_STORAGE_VOL` as removed.
-5. Run the focused command plus #2167's attachment tests and require every named and added
+6. Run the focused command plus #2167's attachment tests and require every named and added
    regression to pass. Commit the task.
 
 Acceptance: only whole-name matches can reach `delete`; `retained_owners` is first invoked after
 `listAllVolumes` returns; the complete protected set exists before the first delete; attached
 candidates are warned and skipped without starving independent candidates; direct-path lexical and
 managed aliases cannot bypass protection; no volume content API is called.
+At most 4,096 distinct normalized paths reach the identity port in one host sweep, aliases are
+deduplicated before lookup, and discovering one additional distinct path leaves every candidate
+undeleted.
 
 ## Task 2 — Async fleet port and provider composition
 

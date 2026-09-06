@@ -26,8 +26,12 @@ storage referenced by an active or inactive domain definition.
   `RemoteDeviceIdentityPort`; lexical equality is not an identity fallback. Missing identity,
   malformed identity, timeout, or operational lookup failure aborts the host preflight before the
   first delete. A volume-backed source contributes the identity of the canonical path returned by
-  its named pool and volume. One bounded traversal and identity-call budget covers the complete
-  host preflight.
+  its named pool and volume. One host preflight admits at most 4,096 distinct normalized paths
+  across candidate paths, direct disk-graph references, and named-volume canonical paths. It
+  deduplicates normalized paths before identity lookup, so lexical aliases consume one lookup only
+  when normalization makes them identical. Discovery of a 4,097th distinct path aborts with a
+  redacted `INFRASTRUCTURE_FAILURE` before the first delete. This whole-host ceiling bounds both
+  authenticated identity traffic and preflight latency.
 - A referenced candidate is reported with bounded conflict telemetry and left intact while
   independent candidates continue. Foreign and retained volumes are silent skips. Any libvirt
   error that prevents a complete reference set is categorized as infrastructure failure with
@@ -117,6 +121,9 @@ Unreachable remote hosts use the established per-host warning and are retried ne
 - Durable retention is read after enumeration and expanded by the kind-specific obligation flags.
 - Candidate and reference paths are sent only through the typed, bounded ADR-0603 identity request;
   they are never opened locally, executed, or interpolated into a shell command.
+- The host preflight performs no more than 4,096 identity lookups. It normalizes and deduplicates
+  all candidate, direct-reference, and named-volume canonical paths before lookup; exceeding the
+  distinct-path ceiling fails closed before deletion and reports no path.
 - Public errors expose only configured pool and volume identifiers. Connection credentials,
   domain XML, paths, and host identities do not enter error details.
 
@@ -140,8 +147,10 @@ exported helpers. Fleet-adapter tests prove the callback crosses from the worker
 required point, two cancellation requests cannot finish the adapter before the worker and callback
 finish, the cancellation count is preserved, and unreachable-host handling remains inherited.
 Fake identity-port tests record both candidate and reference lookups and prove absent or malformed
-identity prevents the first delete. A composition test proves the per-host port is passed through
-unchanged.
+identity prevents the first delete. Boundary tests prove exactly 4,096 distinct normalized paths
+are admitted, a 4,097th produces redacted `INFRASTRUCTURE_FAILURE` before deletion, and normalized
+aliases consume one lookup without weakening identity-based alias protection. A composition test
+proves the per-host port is passed through unchanged.
 Lane tests prove obligation expansion, catalog registration, reporting, failure isolation, and
 disabled composition. Focused lint and whole-tree typing cover the protocol boundary; `just ci` is
 the pre-push gate.
