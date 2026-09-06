@@ -251,6 +251,18 @@ try:
                     "authority_client_key_ref": os.environ.get(
                         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF"
                     ),
+                    "authority_store_identity": os.environ.get(
+                        "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY"
+                    ),
+                    "authority_recovery_reserve_bytes": os.environ.get(
+                        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES"
+                    ),
+                    "authority_recovery_max_bytes": os.environ.get(
+                        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES"
+                    ),
+                    "external_boot_capacity_bytes": os.environ.get(
+                        "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"
+                    ),
                 },
             }
         )

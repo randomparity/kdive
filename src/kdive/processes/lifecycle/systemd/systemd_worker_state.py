@@ -444,6 +444,22 @@ class SlotStore:
             "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": (
                 settings.authority_client_key_ref
             ),
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": settings.authority_store_identity,
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": (
+                None
+                if settings.authority_recovery_reserve_bytes is None
+                else str(settings.authority_recovery_reserve_bytes)
+            ),
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": (
+                None
+                if settings.authority_recovery_max_bytes is None
+                else str(settings.authority_recovery_max_bytes)
+            ),
+            "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": (
+                None
+                if settings.external_boot_capacity_bytes is None
+                else str(settings.external_boot_capacity_bytes)
+            ),
         }
         values.update(
             {name: value for name, value in authority_values.items() if value is not None}

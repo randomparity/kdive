@@ -5,17 +5,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import shlex
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pydantic import SecretStr
 
+import kdive.config as config_registry
 import kdive.processes.lifecycle.systemd.systemd_diagnostics as diagnostics_module
 import kdive.processes.lifecycle.systemd.systemd_worker_runtime as runtime_module
 import kdive.processes.lifecycle.systemd.systemd_worker_state as state_module
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     LifecycleRequest,
     LifecycleResponse,
@@ -40,7 +44,13 @@ from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     load_slot_redaction_values,
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_state import SlotState, SlotStore
+from kdive.providers.core.resolver import ProviderBinding
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.routing import (
+    AuthorityReservationGeometry,
+    authority_reservation_geometry,
+)
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
@@ -362,6 +372,10 @@ def _settings() -> WorkerSettings:
         authority_server_ca_ref="external-boot-authority/server-ca",
         authority_client_certificate_ref="external-boot-authority/client-certificate",
         authority_client_key_ref="external-boot-authority/client-key",  # pragma: allowlist secret
+        authority_store_identity="authority-recovery-store",
+        authority_recovery_reserve_bytes=4096,
+        authority_recovery_max_bytes=8192,
+        external_boot_capacity_bytes=4096,
     )
 
 
@@ -369,10 +383,51 @@ def _request(worker_count: int = 1) -> LifecycleRequest:
     return LifecycleRequest(operation="start", worker_count=worker_count, settings=_settings())
 
 
-def test_worker_settings_reject_incomplete_authority_route() -> None:
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        ("authority_client_key_ref", "worker authority route must be complete or absent"),
+        (
+            "authority_store_identity",
+            "worker authority reservation geometry must be complete or absent",
+        ),
+        (
+            "authority_recovery_reserve_bytes",
+            "worker authority reservation geometry must be complete or absent",
+        ),
+        (
+            "authority_recovery_max_bytes",
+            "worker authority reservation geometry must be complete or absent",
+        ),
+        (
+            "external_boot_capacity_bytes",
+            "worker authority reservation geometry must be complete or absent",
+        ),
+    ),
+)
+def test_worker_settings_reject_incomplete_authority_geometry(field: str, message: str) -> None:
     values = _settings().model_dump()
-    values["authority_client_key_ref"] = None
-    with pytest.raises(ValueError, match="authority route must be complete or absent"):
+    values[field] = None
+    with pytest.raises(ValueError, match=message):
+        WorkerSettings.model_validate(values)
+
+
+def test_worker_settings_allow_absent_geometry_and_reject_mismatched_geometry() -> None:
+    values = _settings().model_dump()
+    for field in (
+        "authority_store_identity",
+        "authority_recovery_reserve_bytes",
+        "authority_recovery_max_bytes",
+        "external_boot_capacity_bytes",
+    ):
+        values[field] = None
+    assert WorkerSettings.model_validate(values).authority_store_identity is None
+
+    values = _settings().model_dump()
+    values["external_boot_capacity_bytes"] = 4097
+    with pytest.raises(
+        ValueError, match="worker authority reservation geometry must match worker capacity"
+    ):
         WorkerSettings.model_validate(values)
 
 
@@ -1659,6 +1714,38 @@ def test_diagnostic_loader_reads_a_real_prepared_slot_store(
     assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF=" in environment
     assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF=" in environment
     assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF=" in environment
+    store_identity = "authority-recovery-store"  # pragma: allowlist secret - fixture identity
+    assert f"KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY={store_identity}\n" in environment
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES=4096\n" in environment
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES=8192\n" in environment
+    assert "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES=4096\n" in environment
+
+
+def test_generated_worker_environment_satisfies_local_authority_reservation_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "live-workers"
+    root.mkdir(mode=0o755)
+    root.chmod(0o755)
+    monkeypatch.setattr(state_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state_module.os, "fchown", lambda _fd, _uid, _gid: None)
+    monkeypatch.setattr(
+        state_module.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_gid=os.getgid()),
+    )
+    SlotStore(root=root, slot=1).prepare(_settings())
+
+    environment = {
+        name: value
+        for line in (root / "slots/1/worker.env").read_text(encoding="utf-8").splitlines()
+        for name, value in (shlex.split(line)[0].split("=", 1),)
+    }
+    config_registry.load(environment)
+
+    assert authority_reservation_geometry(
+        ProviderBinding(ResourceKind.LOCAL_LIBVIRT, cast(ProviderRuntime, object()))
+    ) == AuthorityReservationGeometry("authority-recovery-store", 4096, 8192)
 
 
 def _stat_mode(path: Path) -> int:
