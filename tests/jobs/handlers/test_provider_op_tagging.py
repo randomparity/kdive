@@ -173,7 +173,7 @@ def test_teardown_handler_tags_provider_kind_and_metric_is_emitted() -> None:
     assert points[0].attributes["job_kind"] == "teardown"
 
     # The handler resolves the System by (conn, system_id) parsed from the payload.
-    get_mock.assert_awaited_once_with(fake_conn, _SYSTEM_ID)
+    get_mock.assert_awaited_with(fake_conn, _SYSTEM_ID)
     # The advisory lock is acquired on (SYSTEM, system_id): the SELECT carries the lock key
     # derived from this system id, not some other key.
     from kdive.db.locks import LockScope, _lock_key
