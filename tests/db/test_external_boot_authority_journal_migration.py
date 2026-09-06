@@ -15,6 +15,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.db.external_boot_authority_journal import _suspended
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
@@ -145,9 +146,15 @@ def _head(conn: psycopg.Connection, case: Any, authority: Any) -> tuple[object, 
     ).fetchone()
 
 
-def _seed_allocated(migrated_url: str, role_dsns: _RoleDsns, suffix: str) -> tuple[Any, Any]:
+def _seed_allocated(
+    migrated_url: str, role_dsns: _RoleDsns, suffix: str, *, purpose: str | None = None
+) -> tuple[Any, Any]:
     with psycopg.connect(migrated_url) as conn:
-        case = _seed_case(conn, worker_suffix=suffix)
+        case = (
+            _seed_case(conn, worker_suffix=suffix)
+            if purpose is None
+            else _seed_case(conn, purpose=purpose, worker_suffix=suffix)
+        )
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
         authority = _allocate(worker, case)
     return case, authority
@@ -245,9 +252,10 @@ def _allocate_successor(
         conn.execute(
             "INSERT INTO jobs (id,kind,payload,state,attempt,max_attempts,worker_id,"
             "lease_expires_at,heartbeat_at,authorizing,dedup_key) VALUES "
-            "(%s,'boot',%s,'running',1,3,%s,now()+interval '5 minutes',now(),%s,%s)",
+            "(%s,%s,%s,'running',1,3,%s,now()+interval '5 minutes',now(),%s,%s)",
             (
                 successor_job,
+                "teardown" if case.purpose == "teardown" else "boot",
                 Jsonb({"external_boot_authority_v1": marker}),
                 worker_id,
                 Jsonb({"principal": "p", "project": "proj"}),
@@ -672,6 +680,7 @@ def test_full_current_mutation_phase_sequence_and_rejections(
                 == "conflict"
             )
             assert _head(connection, case, authority) == before
+
             invalid_attempt = _payload(record)
             invalid_attempt["attempt_id"] = "not-a-uuid"
             _canonicalize(invalid_attempt)
@@ -789,6 +798,121 @@ def test_full_current_mutation_phase_sequence_and_rejections(
             )
             == "advanced"
         )
+
+
+def test_full_teardown_journal_sequence_uses_the_null_identity_pair(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as seed:
+        case = _seed_case(seed, purpose="teardown", worker_suffix="t")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority")) as connection:
+        watermark = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+        assert (
+            _advance_raw(connection, case, authority, 0, GENESIS_DIGEST, _payload(watermark))
+            == "advanced"
+        )
+        acknowledgement = _record(
+            case,
+            authority,
+            2,
+            record_digest(watermark),
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            watermark_sequence=1,
+            watermark_digest=record_digest(watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                case,
+                authority,
+                1,
+                record_digest(watermark),
+                _payload(acknowledgement),
+            )
+            == "advanced"
+        )
+    _promote(migrated_url, case, authority, acknowledgement)
+    previous = acknowledgement
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority")) as connection:
+        for sequence, phase in enumerate(
+            (
+                JournalPhase.ADMITTED,
+                JournalPhase.MUTATION_STARTED,
+                JournalPhase.PROVIDER_RETURNED,
+                JournalPhase.OBSERVED,
+                JournalPhase.TERMINAL,
+            ),
+            start=3,
+        ):
+            changes: dict[str, object] = {
+                "expected_source_identity": None,
+                "intended_target_identity": None,
+                "recovery_objects": (),
+            }
+            if phase in {JournalPhase.OBSERVED, JournalPhase.TERMINAL}:
+                changes["observation"] = {
+                    "observation_id": str(uuid4()),
+                    "category": "absent",
+                    "composite_state": _DIGEST,
+                }
+            if phase is JournalPhase.TERMINAL:
+                changes["outcome"] = "absent"
+            record = _record(
+                case,
+                authority,
+                sequence,
+                record_digest(previous),
+                phase,
+                **changes,
+            )
+            assert (
+                _advance_raw(
+                    connection,
+                    case,
+                    authority,
+                    sequence - 1,
+                    record_digest(previous),
+                    _payload(record),
+                )
+                == "advanced"
+            )
+            previous = record
+
+
+def test_suspended_operation_parser_allows_only_the_full_teardown_null_pair() -> None:
+    value: dict[str, object] = {
+        "authority_id": str(uuid4()),
+        "generation": 1,
+        "system_id": str(uuid4()),
+        "activation_id": str(uuid4()),
+        "run_id": str(uuid4()),
+        "plan_identity": _DIGEST,
+        "operation_identity": "teardown-a",
+        "attempt_id": str(uuid4()),
+        "purpose": "teardown",
+        "operation": "teardown",
+        "provider_kind": "local-libvirt",
+        "authority_instance": "authority-a",
+        "request_digest": _DIGEST,
+        "phase": "mutation-started",
+        "source_identity": None,
+        "target_identity": None,
+        "ownership_digest": _DIGEST,
+    }
+    parsed = _suspended(value)
+    assert parsed is not None
+    assert (parsed.source_identity, parsed.target_identity) == (None, None)
+
+    for changes in (
+        {"source_identity": "source"},
+        {"target_identity": "target"},
+        {"purpose": "recover", "operation": "recover"},
+        {"operation": "fail"},
+    ):
+        with pytest.raises(ValueError, match="paired identities"):
+            _suspended(value | changes)
 
 
 @pytest.mark.anyio
@@ -1059,11 +1183,26 @@ def test_successor_takeover_has_exact_supersede_watermark_ack_order(
         assert final is not None and final[6] is None and final[7] is None
 
 
-@pytest.mark.parametrize("anchored_phase", [JournalPhase.ADMITTED, JournalPhase.MUTATION_STARTED])
+@pytest.mark.parametrize(
+    ("anchored_phase", "full_teardown"),
+    [
+        (JournalPhase.ADMITTED, False),
+        (JournalPhase.MUTATION_STARTED, False),
+        (JournalPhase.MUTATION_STARTED, True),
+    ],
+)
 def test_successor_inherits_and_completes_exact_older_operation(
-    migrated_url: str, authority_role_dsns: _RoleDsns, anchored_phase: JournalPhase
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    anchored_phase: JournalPhase,
+    full_teardown: bool,
 ) -> None:
-    case, authority = _seed_allocated(migrated_url, authority_role_dsns, anchored_phase.value[0])
+    case, authority = _seed_allocated(
+        migrated_url,
+        authority_role_dsns,
+        anchored_phase.value[0],
+        **({"purpose": "teardown"} if full_teardown else {}),
+    )
     with psycopg.connect(
         authority_role_dsns("kdive_provider_authority"), autocommit=True
     ) as connection:
@@ -1095,13 +1234,22 @@ def test_successor_inherits_and_completes_exact_older_operation(
         activation_id=case.activation_id,
         reference="recovery-a",
     )
+    identity_changes: dict[str, object] = (
+        {
+            "expected_source_identity": None,
+            "intended_target_identity": None,
+            "recovery_objects": (),
+        }
+        if full_teardown
+        else {"recovery_objects": (owned,)}
+    )
     admitted = _record(
         case,
         authority,
         sequence,
         record_digest(previous),
         JournalPhase.ADMITTED,
-        recovery_objects=(owned,),
+        **identity_changes,
     )
     with psycopg.connect(
         authority_role_dsns("kdive_provider_authority"), autocommit=True
@@ -1126,7 +1274,7 @@ def test_successor_inherits_and_completes_exact_older_operation(
                 sequence,
                 record_digest(previous),
                 JournalPhase.MUTATION_STARTED,
-                recovery_objects=(owned,),
+                **identity_changes,
             )
             assert (
                 _advance_raw(
@@ -1184,18 +1332,18 @@ def test_successor_inherits_and_completes_exact_older_operation(
             elif phase in {JournalPhase.OBSERVED, JournalPhase.TERMINAL}:
                 changes["observation"] = {
                     "observation_id": str(uuid4()),
-                    "category": "source",
+                    "category": "absent" if full_teardown else "source",
                     "composite_state": _DIGEST,
                 }
                 if phase is JournalPhase.TERMINAL:
-                    changes["outcome"] = "source"
+                    changes["outcome"] = "absent" if full_teardown else "source"
             completion = _record(
                 case,
                 authority,
                 sequence,
                 record_digest(previous),
                 phase,
-                recovery_objects=(owned,),
+                **identity_changes,
                 **changes,
             )
             before = _head(connection, successor_case, successor)

@@ -413,6 +413,40 @@ def test_takeover_and_mutation_records_are_disjoint() -> None:
         _record(JournalPhase.ADMITTED)
 
 
+def test_full_teardown_journal_records_allow_only_paired_null_identities() -> None:
+    record = _record(
+        JournalPhase.ADMITTED,
+        purpose="teardown",
+        operation="teardown",
+        expected_source_identity=None,
+        intended_target_identity=None,
+        recovery_objects=(),
+    )
+    assert record.expected_source_identity is None
+    assert record.intended_target_identity is None
+
+    for changes in (
+        {"expected_source_identity": _DIGEST},
+        {"recovery_objects": (_object(),)},
+        {"purpose": "recover", "operation": "recover"},
+        {"operation": "fail"},
+    ):
+        with pytest.raises(ValidationError, match="paired identities"):
+            _record(
+                JournalPhase.ADMITTED,
+                **(
+                    {
+                        "purpose": "teardown",
+                        "operation": "teardown",
+                        "expected_source_identity": None,
+                        "intended_target_identity": None,
+                        "recovery_objects": (),
+                    }
+                    | changes
+                ),
+            )
+
+
 @pytest.mark.parametrize(
     ("phase", "changes"),
     [

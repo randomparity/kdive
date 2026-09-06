@@ -603,8 +603,17 @@ class JournalRecordV1(_AuthorityBinding):
                 )
             ):
                 raise ValueError("mutation records forbid takeover linkage")
-            if self.expected_source_identity is None or self.intended_target_identity is None:
-                raise ValueError("mutation records require source and target identities")
+            missing_identities = (
+                self.expected_source_identity is None,
+                self.intended_target_identity is None,
+            )
+            if any(missing_identities) and (
+                missing_identities != (True, True)
+                or self.purpose != "teardown"
+                or self.operation is not AuthorityOperation.TEARDOWN
+                or self.recovery_objects
+            ):
+                raise ValueError("mutation records require paired identities")
             if any(
                 item.system_id != self.system_id or item.activation_id != self.activation_id
                 for item in self.recovery_objects

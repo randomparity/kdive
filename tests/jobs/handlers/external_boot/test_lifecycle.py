@@ -260,6 +260,13 @@ class _TeardownExecutor:
         return response
 
 
+class _DisconnectedTeardownExecutor:
+    async def execute_teardown(
+        self, _request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1:
+        raise OSError("authority transport disconnected")
+
+
 def _ports(
     case: SeededCase, vehicle: Vehicle, dsns: Callable[[str], str]
 ) -> ExternalBootHandlerPorts:
@@ -899,5 +906,39 @@ def test_teardown_consumes_the_typed_authority_response_and_terminal_head(
         assert await _system_state(seed, case.vehicle.system_id) == "torn_down"
         assert await _job_state(seed, case.job_id) == "succeeded"
         assert case.vehicle.port.calls == []
+
+    _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_teardown_transport_failure_is_a_bound_nonterminal_authority_failure(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """A sender disconnect keeps the admitted acknowledgement available to the worker commit."""
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        ports = replace(
+            _ports(case, case.vehicle, authority_role_dsns),
+            teardown_executor=_DisconnectedTeardownExecutor(),
+        )
+        handler = build_operations(ports).get("teardown")
+        assert handler is not None
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            with pytest.raises(ExternalBootAuthorityFailure) as caught:
+                await handler(
+                    worker,
+                    _job(case),
+                    ExternalBootAuthorityMarkerV1.model_validate(case.marker),
+                )
+
+        result = caught.value.result
+        assert _authority_binding_matches(
+            ExternalBootAuthorityMarkerV1.model_validate(case.marker), result
+        )
+        failure = result.result
+        assert isinstance(failure, _FailureResult)
+        assert failure.error_category.value == "infrastructure_failure"
+        assert failure.terminal is False
+        assert failure.failure_context.phase == "commit"
 
     _drive(migrated_url, authority_role_dsns, "teardown", body)
