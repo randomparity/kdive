@@ -1401,6 +1401,7 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     assert config.journal_dir == Path("/var/lib/kdive/provider-authority/journal")
     assert config.request_socket == Path("/run/kdive/provider-authority/request/authority.sock")
     assert config.provider_socket == Path("/run/kdive/provider-authority/libvirt/libvirt-sock")
+    assert config.proof_socket is None
     assert config.install_dir == Path("/opt/kdive-provider-authority")
     assert config.credentials_source_dir == Path("/etc/kdive/credentials/provider-authority")
     assert config.state_dir == Path("/var/lib/kdive/provider-authority")
@@ -1417,6 +1418,7 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_PROOF_SOCKET",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES",

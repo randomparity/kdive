@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.log import JsonFormatter
 from kdive.mcp.responses import ToolResponse
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
@@ -25,13 +32,23 @@ from tests.live_vm.installed_local_authority_support import (
     NormalOperationJobs,
     OwnedResource,
     ResourceLedger,
+    RunningJobClaim,
+    arm_fault_barrier,
     assert_root_release_completion,
     drive_normal_operations,
+    hide_authority_journal_lane,
     load_config,
     provision_authority_fixture,
+    release_fault_barrier,
     require_authority_artifact_confinement,
     require_deployed_revision,
     require_fault_barrier,
+    require_installed_authority_routes,
+    require_journal_inventory_refusal,
+    restart_authority_after_fault,
+    restore_after_journal_inventory_refusal,
+    restore_authority_journal_lane,
+    wait_for_fault_barrier,
 )
 
 
@@ -45,7 +62,7 @@ def _document(tmp_path: Path) -> Path:
                 "project": "kdive-2151-project",
                 "ownership_prefix": "kdive-2151-" + "1" * 12 + "-" + "2" * 8,
                 "authority_service": "kdive-external-boot-authority.service",
-                "barrier_socket": "/run/kdive/provider-authority/test-barrier.sock",
+                "barrier_socket": "/run/kdive/provider-authority/proof-control/control.sock",
             }
         ),
         encoding="utf-8",
@@ -92,17 +109,262 @@ def test_ledger_rejects_unowned_and_cleans_exact_reverse_order() -> None:
     assert removed == [volume, domain]
 
 
-def test_missing_fault_barrier_fails_loud(tmp_path: Path) -> None:
+def test_missing_fault_barrier_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
         system_id=uuid4(),
         project="kdive-2151-project",
         ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
         authority_service="kdive-external-boot-authority.service",
-        barrier_socket=tmp_path / "absent.sock",
+        barrier_socket=Path("/run/kdive/provider-authority/proof-control/control.sock"),
     )
+
+    def refuse(*_argv: str) -> str:
+        raise subprocess.CalledProcessError(1, "proof socket metadata")
+
+    monkeypatch.setattr(carrier, "_output", refuse)
     with pytest.raises(RuntimeError, match="no deterministic provider-effect barrier"):
         require_fault_barrier(config)
+
+
+def test_fault_barrier_metadata_is_checked_by_root_not_the_denied_control_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+        barrier_socket=Path("/run/kdive/provider-authority/proof-control/control.sock"),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def denied_stat(*_args: object, **_kwargs: object) -> object:
+        raise PermissionError("private authority directory")
+
+    def output(*argv: str) -> str:
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(Path, "stat", denied_stat)
+    monkeypatch.setattr(carrier, "_output", output)
+    assert require_fault_barrier(config) == config.barrier_socket
+    assert len(calls) == 1
+    assert calls[0][:4] == ("sudo", "-n", "/usr/bin/python3", "-c")
+
+
+def test_fault_barrier_client_arms_and_releases_only_the_configured_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    socket_path = tmp_path / "control.sock"
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+        barrier_socket=Path("/run/kdive/provider-authority/proof-control/control.sock"),
+    )
+    requests: list[dict[str, str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        requests.append(json.loads(cast(bytes, kwargs["input"])))
+        response = (
+            b'{"state":"armed"}' if requests[-1]["action"] == "arm" else b'{"state":"released"}'
+        )
+        return subprocess.CompletedProcess(argv, 0, response, b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(carrier, "require_fault_barrier", lambda _config: socket_path)
+    run_id = str(uuid4())
+    arm_fault_barrier(config, run_id, "activate", "after-provider")
+    release_fault_barrier(config)
+
+    assert requests == [
+        {
+            "action": "arm",
+            "system_id": str(config.system_id),
+            "run_id": run_id,
+            "operation": "activate",
+            "checkpoint": "after-provider",
+        },
+        {"action": "release"},
+    ]
+
+
+def test_fault_barrier_config_refuses_caller_selected_destination(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="fixed authority proof socket"):
+        NativeAuthorityConfig(
+            installed_revision="1" * 40,
+            system_id=uuid4(),
+            project="kdive-2151-project",
+            ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+            authority_service="kdive-external-boot-authority.service",
+            barrier_socket=tmp_path / "caller-selected.sock",
+        )
+
+
+def test_fault_barrier_waits_for_reached_state_then_restarts_only_configured_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    responses = iter(({"state": "armed"}, {"state": "reached"}))
+    commands: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(carrier, "fault_barrier_request", lambda *_args: next(responses))
+    monkeypatch.setattr(carrier.time, "sleep", lambda _seconds: None)
+    wait_for_fault_barrier(config)
+
+    def output(*argv: str) -> str:
+        commands.append(argv)
+        return "active" if argv[:2] == ("systemctl", "is-active") else ""
+
+    monkeypatch.setattr(carrier, "_output", output)
+    restart_authority_after_fault(config)
+    assert commands == [
+        ("sudo", "-n", "systemctl", "restart", config.authority_service),
+        ("systemctl", "is-active", config.authority_service),
+    ]
+
+
+def test_journal_loss_helper_moves_only_the_configured_lane_and_restores_exact_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    requests: list[dict[str, str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        assert argv[:4] == ["sudo", "-n", "/usr/bin/python3", "-c"]
+        request = json.loads(cast(bytes, kwargs["input"]))
+        requests.append(request)
+        response = (
+            {"device": "1", "inode": "2", "size": "3", "digest": "sha256:" + "a" * 64}
+            if request["action"] == "hide"
+            else {"state": "restored"}
+        )
+        return subprocess.CompletedProcess(argv, 0, json.dumps(response).encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    lane = hide_authority_journal_lane(config)
+    restore_authority_journal_lane(config, lane)
+
+    assert requests == [
+        {"action": "hide", "system_id": str(config.system_id)},
+        {
+            "action": "restore",
+            "system_id": str(config.system_id),
+            "device": "1",
+            "inode": "2",
+            "size": "3",
+            "digest": "sha256:" + "a" * 64,
+        },
+    ]
+
+
+def test_journal_lane_hold_is_outside_the_inventoried_journal_root() -> None:
+    """The startup refusal must be caused by the absent lane, not an unknown hold file."""
+    assert 'hold_root = "/var/lib/kdive/provider-authority"' in carrier._JOURNAL_LANE_CLIENT
+    assert "dst_dir_fd=hold_fd" in carrier._JOURNAL_LANE_CLIENT
+    assert "src_dir_fd=hold_fd, dst_dir_fd=root_fd" in carrier._JOURNAL_LANE_CLIENT
+    assert "os.fsync(root_fd)\n        os.fsync(hold_fd)" in carrier._JOURNAL_LANE_CLIENT
+
+
+def test_journal_loss_helper_refuses_an_unverified_or_unrestored_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, b'{"device":"1","inode":"2"}', b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(AssertionError, match="journal lane proof is malformed"):
+        hide_authority_journal_lane(config)
+
+
+def test_journal_refusal_requires_the_inventory_mismatch_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, b"", b"other failure"),
+    )
+    monkeypatch.setattr(carrier, "_output", lambda *_argv: "other-failure")
+
+    with pytest.raises(AssertionError, match="inventory-mismatch"):
+        require_journal_inventory_refusal(config)
+
+
+def test_journal_restoration_stops_a_failed_authority_before_restoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    proof = carrier.JournalLaneProof("1", "2", "3", "sha256:" + "a" * 64)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        carrier, "require_journal_inventory_refusal", lambda _config: events.append("refused")
+    )
+    monkeypatch.setattr(
+        carrier, "stop_authority_after_inventory_refusal", lambda _config: events.append("stopped")
+    )
+
+    def restore(_config: NativeAuthorityConfig, _proof: carrier.JournalLaneProof) -> None:
+        assert events == ["refused", "stopped"], "restore raced the failed authority"
+        events.append("restored")
+
+    def restart(_config: NativeAuthorityConfig) -> None:
+        assert events == ["refused", "stopped", "restored"], "restart preceded restoration"
+        events.append("restarted")
+
+    monkeypatch.setattr(
+        carrier,
+        "restore_authority_journal_lane",
+        restore,
+    )
+    monkeypatch.setattr(
+        carrier,
+        "restart_authority_after_fault",
+        restart,
+    )
+
+    restore_after_journal_inventory_refusal(config, proof)
+
+    assert events == ["refused", "stopped", "restored", "restarted"]
 
 
 def test_normal_driver_uses_public_tools_and_drains_jobs(
@@ -248,6 +510,292 @@ def test_deployed_revision_resolves_the_actual_checkout_abbreviation() -> None:
     )
 
 
+def test_installed_route_preflight_requires_exact_active_worker_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def output(*argv: str) -> str:
+        calls.append(argv)
+        return "route-ok"
+
+    monkeypatch.setattr(carrier, "_output", output)
+    require_installed_authority_routes(
+        config,
+        "kdive-live-worker@2.service loaded active running KDIVE retained live worker slot 2",
+    )
+
+    assert calls[0][:4] == ("sudo", "-n", "/usr/bin/python3", "-c")
+    assert calls[0][-1] == "2"
+    assert 'source_root = Path("/opt/kdive")' in carrier._INSTALLED_ROUTE_PREFLIGHT
+    assert 'python = source_root / ".venv/bin/python"' in carrier._INSTALLED_ROUTE_PREFLIGHT
+    assert "resolved_python = python.resolve(strict=True)" in carrier._INSTALLED_ROUTE_PREFLIGHT
+    assert "entry.stat().st_uid != owner_uid" in carrier._INSTALLED_ROUTE_PREFLIGHT
+
+
+def test_installed_route_preflight_rejects_an_unexpected_root_helper_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    monkeypatch.setattr(carrier, "_output", lambda *_argv: "other")
+
+    with pytest.raises(AssertionError, match="route preflight"):
+        require_installed_authority_routes(
+            config,
+            "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1",
+        )
+
+
+def test_exact_worker_hold_requires_retained_invocation_and_pidfd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = RunningJobClaim(
+        "local-systemd:kdive-live-worker@2.service:" + "a" * 32,
+        1,
+        datetime.now(UTC),
+        datetime.now(UTC),
+    )
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        carrier,
+        "_output",
+        lambda *argv: (
+            seen.append(argv) or json.dumps({"state": "stopped", "invocation_id": "b" * 32})
+        ),
+    )
+
+    assert carrier.set_exact_worker_hold(claim, "stop") == "b" * 32
+
+    assert seen[0][-2:] == (claim.worker_id, "stop")
+    assert 'state.get("phase") != "started"' in carrier._WORKER_HOLD_CLIENT
+    assert 'fields["InvocationID"] != state["invocation_id"]' in carrier._WORKER_HOLD_CLIENT
+    assert "metadata.st_uid != 0" in carrier._WORKER_HOLD_CLIENT
+    assert "stat.S_IMODE(metadata.st_mode) != 0o600" in carrier._WORKER_HOLD_CLIENT
+    assert "rechecked != fields" in carrier._WORKER_HOLD_CLIENT
+    assert "signal.pidfd_send_signal" in carrier._WORKER_HOLD_CLIENT
+
+
+def test_stale_provider_proof_accepts_only_derived_subjects_and_installed_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["stale-provider-client"])
+    with pytest.raises(SystemExit, match="invalid stale-provider proof subject"):
+        exec(compile(carrier._STALE_PROVIDER_CLIENT, "<stale-provider-client>", "exec"), {})
+
+
+def test_stale_provider_embedded_client_executes_complete_valid_setup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import kdive.config as config_registry
+    import kdive.jobs.authority_sender as sender_module
+    import kdive.providers.external_boot_authority.journal as journal_module
+    import kdive.providers.external_boot_authority.local_client as local_module
+    import kdive.providers.external_boot_authority.protocol as protocol_module
+    import kdive.security.secrets.secrets as secrets_module
+    import kdive.worker_lifecycle.worker_incarnation as incarnation_module
+
+    system_id, run_id, authority_id, job_id = (str(uuid4()) for _ in range(4))
+    invocation_id = "b" * 32
+    worker = "local-systemd:kdive-live-worker@2.service:" + "a" * 32
+    loaded: list[dict[str, str]] = []
+    resolved: list[str] = []
+    sent: list[tuple[protocol_module.AuthorityMutationRequestV1, float]] = []
+    document = "\n".join(
+        (
+            "KDIVE_DATABASE_URL=postgresql://worker",
+            "KDIVE_SECRETS_ROOT=/secrets",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE=authority-1",  # pragma: allowlist secret
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/authority.sock",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF=ca.pem",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF=cert.pem",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF=key.pem",
+            "UNRELATED_CALLER_VALUE=ignored",
+        )
+    ).encode()
+    record = protocol_module.JournalRecordV1(
+        sequence=1,
+        previous_digest=protocol_module.GENESIS_DIGEST,
+        phase=protocol_module.JournalPhase.MUTATION_STARTED,
+        authority_id=UUID(authority_id),
+        generation=1,
+        system_id=UUID(system_id),
+        run_id=UUID(run_id),
+        activation_id=uuid4(),
+        plan_identity="sha256:" + "1" * 64,
+        purpose="activate",
+        provider_kind="local-libvirt",
+        authority_instance="authority-1",
+        operation_identity="operation-1",
+        operation_digest="sha256:" + "2" * 64,
+        operation=protocol_module.AuthorityOperation.ACTIVATE,
+        attempt_id=uuid4(),
+        expected_source_identity="source",
+        intended_target_identity="target",
+        recovery_objects=(),
+    )
+
+    class FakeJournal:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def load(self) -> tuple[object, ...]:
+            return (record,)
+
+        def close(self) -> None:
+            return None
+
+    class Backend:
+        def resolve(self, ref: str) -> str:
+            resolved.append(ref)
+            return "material"
+
+    binding = SimpleNamespace(
+        server_ca_ref="ca.pem",  # pragma: allowlist secret
+        client_cert_ref="cert.pem",
+        client_key_ref="key.pem",  # pragma: allowlist secret
+    )
+
+    class Sender:
+        async def execute_mutation(
+            self, request: protocol_module.AuthorityMutationRequestV1, *, deadline: float
+        ) -> None:
+            sent.append((request, deadline))
+            raise CategorizedError(
+                "authority: superseded", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+
+    def sender_factory(
+        backend: Backend, borrow: Callable[[], SecretStr], *, binding: object
+    ) -> Sender:
+        assert borrow().get_secret_value() == "actual-projected-credential"
+        assert binding is not None
+        for ref in ("cert.pem", "key.pem", "ca.pem"):
+            backend.resolve(ref)
+        return Sender()
+
+    monkeypatch.setattr(
+        sys, "argv", ["client", system_id, run_id, worker, invocation_id, authority_id, "1", job_id]
+    )
+    isolated_environment: dict[str, str] = {}
+    monkeypatch.setattr(carrier.os, "environ", isolated_environment)
+    monkeypatch.setattr(carrier.os, "open", lambda *_args, **_kwargs: 10)
+    monkeypatch.setattr(
+        carrier.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(st_mode=0o100600, st_uid=0, st_nlink=1, st_size=len(document)),
+    )
+    monkeypatch.setattr(carrier.os, "read", lambda _fd, _size: document)
+    monkeypatch.setattr(carrier.os, "close", lambda _fd: None)
+    projected_env = (
+        b"CREDENTIALS_DIRECTORY="  # pragma: allowlist secret
+        b"/run/credentials/live-worker\0"  # pragma: allowlist secret
+    )
+    monkeypatch.setattr(Path, "read_bytes", lambda self: projected_env)
+    monkeypatch.setattr(carrier.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=991))
+    monkeypatch.setattr(
+        carrier.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, f"MainPID=123\nInvocationID={invocation_id}\n", ""
+        ),
+    )
+    monkeypatch.setattr(config_registry, "load", lambda env=None: loaded.append(dict(env or {})))
+    monkeypatch.setattr(journal_module, "FileAuthorityJournal", FakeJournal)
+    monkeypatch.setattr(local_module, "local_authority_binding", lambda: binding)
+    monkeypatch.setattr(secrets_module, "secret_backend_from_env", lambda **_kwargs: Backend())
+    monkeypatch.setattr(
+        incarnation_module,
+        "worker_incarnation_credential",
+        lambda path: (
+            SecretStr("actual-projected-credential")
+            if path == Path("/run/credentials/live-worker/worker-incarnation")
+            else pytest.fail("wrong credential projection")
+        ),
+    )
+    monkeypatch.setattr(sender_module, "local_authority_sender_factory", sender_factory)
+
+    exec(compile(carrier._STALE_PROVIDER_CLIENT, "<stale-provider-client>", "exec"), {})
+
+    assert loaded and "UNRELATED_CALLER_VALUE" not in loaded[0]
+    assert resolved == ["cert.pem", "key.pem", "ca.pem"]
+    assert len(sent) == 1
+    assert sent[0][0] == protocol_module.AuthorityMutationRequestV1(
+        authority_id=record.authority_id,
+        generation=record.generation,
+        system_id=record.system_id,
+        activation_id=record.activation_id,
+        run_id=record.run_id,
+        plan_identity=record.plan_identity,
+        purpose=record.purpose,
+        provider_kind=record.provider_kind,
+        authority_instance=record.authority_instance,
+        operation_identity=record.operation_identity,
+        operation_digest=record.operation_digest,
+        operation=record.operation,
+        attempt_id=record.attempt_id,
+        expected_source_identity=record.expected_source_identity or "",
+        intended_target_identity=record.intended_target_identity or "",
+        recovery_objects=record.recovery_objects,
+    )
+    assert isolated_environment == loaded[0]
+    assert capsys.readouterr().out == "superseded\n"
+
+
+def test_stale_commit_wait_requires_exact_invocation_and_job_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = str(uuid4())
+
+    def journal_entry(message: str, *, logger: str = "kdive.jobs.worker") -> str:
+        record = logging.LogRecord(logger, logging.WARNING, "", 0, message, (), None)
+        return json.dumps({"MESSAGE": JsonFormatter().format(record)}) + "\n"
+
+    responses = iter(
+        (
+            subprocess.CompletedProcess(
+                [],
+                0,
+                journal_entry(f"external boot job {uuid4()} was reclaimed; result dropped"),
+                "",
+            ),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                journal_entry(f"external boot job {job_id} was reclaimed; result dropped"),
+                "",
+            ),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return next(responses)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(carrier.asyncio, "sleep", no_sleep)
+    asyncio.run(carrier.wait_for_stale_worker_commit_observed(job_id, "a" * 32))
+
+    assert len(calls) == 2
+    assert calls[0][-1] == "_SYSTEMD_INVOCATION_ID=" + "a" * 32
+
+
 def test_identity_probe_limits_mutation_to_exact_authority_sentinels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -391,6 +939,7 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
     monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
     monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
     monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "require_installed_authority_routes", lambda *_args: None)
     monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
     monkeypatch.setattr(carrier, "require_authority_artifact_confinement", probe)
     monkeypatch.setattr(carrier, "LiveStackClient", StopBeforeMcpClient)
@@ -399,6 +948,157 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
 
     with pytest.raises(RuntimeError, match="stop before public MCP mutation"):
         carrier.run_installed_local_authority_normal_operations()
+
+
+def test_native_route_preflight_fails_before_fixture_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    fixture_called = False
+
+    def output(*argv: str) -> str:
+        if argv[:3] == ("sudo", "-n", "cat"):
+            return config.installed_revision
+        if argv[:2] == ("systemctl", "is-active"):
+            return "active"
+        return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
+
+    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+        nonlocal fixture_called
+        fixture_called = True
+
+    def reject_route(*_args: object) -> None:
+        raise RuntimeError("installed server authority route is incomplete")
+
+    monkeypatch.setattr(carrier, "load_config", lambda: config)
+    monkeypatch.setattr(carrier, "_output", output)
+    monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
+    monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
+    monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "require_installed_authority_routes", reject_route)
+    monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
+
+    with pytest.raises(RuntimeError, match="authority route is incomplete"):
+        carrier.run_installed_local_authority_normal_operations()
+    assert not fixture_called
+
+
+@pytest.mark.parametrize("restart_recovery", [False, True])
+def test_native_carriers_supply_the_required_cleanup_summary(
+    monkeypatch: pytest.MonkeyPatch, restart_recovery: bool
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    investigation_id = f"{config.ownership_prefix}-investigation"
+    run_id = str(uuid4())
+    cleanup_calls: list[tuple[str, dict[str, object]]] = []
+    armed: list[tuple[NativeAuthorityConfig, str, str, str]] = []
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def call_tool(self, name: str, **kwargs: object) -> ToolResponse:
+            cleanup_calls.append((name, kwargs))
+            return ToolResponse.success(investigation_id, "closed")
+
+    class ClientFactory:
+        @staticmethod
+        def over_http(_base_url: str, _token: str) -> Client:
+            return Client()
+
+    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+        return None
+
+    async def completed(_db_url: str, _operations: NormalOperationJobs) -> None:
+        return None
+
+    async def normal(
+        _client: object, _config: NativeAuthorityConfig, ledger: ResourceLedger
+    ) -> NormalOperationJobs:
+        ledger.record(OwnedResource(kind="investigation", identity=investigation_id))
+        return NormalOperationJobs(investigation_id, run_id, str(uuid4()), str(uuid4()))
+
+    async def activation(
+        _client: object,
+        _config: NativeAuthorityConfig,
+        ledger: ResourceLedger,
+        **_kwargs: object,
+    ) -> carrier.ActivationJob:
+        ledger.record(OwnedResource(kind="investigation", identity=investigation_id))
+        before_activate = cast(Callable[[str], None], _kwargs["before_activate"])
+        before_activate(run_id)
+        return carrier.ActivationJob(investigation_id, run_id, str(uuid4()))
+
+    async def success(*_args: object, **_kwargs: object) -> ToolResponse:
+        return ToolResponse.success(str(uuid4()), "succeeded")
+
+    monkeypatch.setattr(carrier, "load_config", lambda: config)
+    monkeypatch.setattr(
+        carrier,
+        "_output",
+        lambda *argv: (
+            config.installed_revision
+            if argv[:3] == ("sudo", "-n", "cat")
+            else (
+                "active"
+                if argv[:2] == ("systemctl", "is-active")
+                else "kdive-live-worker@1.service loaded active running KDIVE slot 1"
+            )
+        ),
+    )
+    monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
+    monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
+    monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "require_installed_authority_routes", lambda *_args: None)
+    monkeypatch.setattr(carrier, "mint_role_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
+    monkeypatch.setattr(carrier, "require_authority_artifact_confinement", lambda *_args: None)
+    monkeypatch.setattr(carrier, "LiveStackClient", ClientFactory)
+    monkeypatch.setattr(carrier, "assert_root_release_completion", completed)
+    monkeypatch.setattr(carrier, "drive_normal_operations", normal)
+    monkeypatch.setattr(carrier, "require_fault_barrier", lambda *_args: None)
+    monkeypatch.setattr(
+        carrier,
+        "arm_fault_barrier",
+        lambda *args: armed.append(cast(tuple[NativeAuthorityConfig, str, str, str], args)),
+    )
+    monkeypatch.setattr(carrier, "start_external_boot_activation", activation)
+    monkeypatch.setattr(carrier, "wait_for_fault_barrier", lambda *_args: None)
+    monkeypatch.setattr(carrier, "restart_authority_after_fault", lambda *_args: None)
+    monkeypatch.setattr(carrier, "drain_job", success)
+    monkeypatch.setattr(carrier, "scalar", success)
+    monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
+
+    if restart_recovery:
+        carrier.run_installed_local_authority_restart_recovery()
+    else:
+        carrier.run_installed_local_authority_normal_operations()
+
+    assert cleanup_calls == [
+        (
+            "investigations.close",
+            {
+                "investigation_id": investigation_id,
+                "summary": "Native authority proof cleanup",
+            },
+        )
+    ]
+    assert armed == ([(config, run_id, "activate", "after-provider")] if restart_recovery else [])
 
 
 async def _completed_root_release(migrated_url: str) -> NormalOperationJobs:
@@ -610,6 +1310,57 @@ def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
     assert argv[-1] == str(config.system_id)
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert json.loads(cast(str, kwargs["input"])) == {"schema_version": 1}
+
+
+def test_fixture_verification_uses_the_explicit_read_only_script_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+        fixture_mode="verify-existing",
+    )
+
+    class Cursor:
+        async def __aenter__(self) -> Cursor:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _query: str, _params: object) -> None:
+            return None
+
+        async def fetchone(self) -> tuple[dict[str, object]]:
+            return ({"schema_version": 1},)
+
+    class Connection:
+        async def __aenter__(self) -> Connection:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    async def connect(_dsn: str) -> Connection:
+        return Connection()
+
+    seen: dict[str, object] = {}
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(argv=argv, kwargs=kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
+    monkeypatch.setattr(subprocess, "run", run)
+    asyncio.run(provision_authority_fixture("postgresql://fixture", config))
+
+    assert cast(list[str], seen["argv"])[-2:] == ["--verify-existing", str(config.system_id)]
 
 
 def test_fixture_subprocess_snapshots_authority_uri_and_roots_before_provider_import() -> None:
