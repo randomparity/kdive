@@ -282,6 +282,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence remote module worker evidence
 - Materialize local external boot artifacts
 - Fence crashes to active owning runs
+- Add worker local authority client
 
 ### Changed
 
@@ -2178,6 +2179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recognize empty raw module scratch
 - Preserve short sparse module reads
 - Regenerate owning-run crash options
+- Redact malformed local authority binding
 
 ### Security
 
