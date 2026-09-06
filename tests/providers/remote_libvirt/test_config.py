@@ -19,6 +19,7 @@ from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.model import RemoteLibvirtInstance
 from kdive.providers.remote_libvirt.config import (
+    RemoteAuthorityBinding,
     RemoteLibvirtConfig,
     TlsCertRefs,
     all_remote_configs,
@@ -106,6 +107,52 @@ def test_by_name_builds_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert cfg.gdb_port_min == 47000
     assert cfg.gdb_port_max == 47099
     assert cfg.concurrent_allocation_cap == 1  # model default
+    assert cfg.authority is None
+
+
+def test_by_name_binds_each_resource_to_its_declared_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    authority_a = """
+authority_instance = "authority-a"
+authority_address = "192.0.2.20"
+authority_port = 47001
+authority_server_ca_ref = "authority-a/server-ca"
+authority_client_cert_ref = "authority-a/client-cert"
+authority_client_key_ref = "authority-a/client-key"  # pragma: allowlist secret
+"""
+    authority_b = (
+        authority_a.replace("authority-a", "authority-b")
+        .replace("192.0.2.20", "192.0.2.21")
+        .replace("47001", "47002")
+    )
+    second = _INSTANCE.replace('name = "ub24-big"', 'name = "ub24-small"')
+    _write_inventory(
+        tmp_path,
+        monkeypatch,
+        instances=f"{_INSTANCE}{authority_a}---{second}{authority_b}",
+    )
+
+    config_a = remote_config_for_resource("ub24-big")
+    config_b = remote_config_for_resource("ub24-small")
+
+    assert config_a.authority == RemoteAuthorityBinding(
+        authority_instance="authority-a",
+        address="192.0.2.20",
+        port=47001,
+        server_ca_ref="authority-a/server-ca",
+        client_cert_ref="authority-a/client-cert",
+        client_key_ref="authority-a/client-key",  # pragma: allowlist secret
+    )
+    assert config_b.authority == RemoteAuthorityBinding(
+        authority_instance="authority-b",
+        address="192.0.2.21",
+        port=47002,
+        server_ca_ref="authority-b/server-ca",
+        client_cert_ref="authority-b/client-cert",
+        client_key_ref="authority-b/client-key",  # pragma: allowlist secret
+    )
+    assert config_a.authority != config_b.authority
 
 
 def test_configured_detection_tracks_instance(

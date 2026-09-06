@@ -1330,65 +1330,14 @@
     group: "{{ github_runner_user }}"
     mode: "0700"
 
-- name: Ensure the authority systemd user unit directory exists
-  ansible.builtin.file:
-    path: "{{ live_vm_host_authority_home }}/.config/systemd/user"
-    state: directory
-    owner: "{{ live_vm_host_authority_account }}"
-    group: "{{ live_vm_host_authority_account }}"
-    mode: "0700"
-  when: live_vm_host_authority_enabled | bool
-
-- name: Install the dormant authority session-libvirtd user unit
-  ansible.builtin.copy:
-    dest: >-
-      {{ live_vm_host_authority_home
-      }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
-    content: |
-      [Unit]
-      Description=kdive dormant external-boot authority session libvirt daemon
-      ConditionPathIsDirectory=/run/kdive/provider-authority/libvirt
-
-      [Service]
-      Type=forking
-      Environment=XDG_RUNTIME_DIR=/run/kdive/provider-authority
-      ExecStart=/usr/sbin/libvirtd --daemon \
-        --config /etc/kdive/libvirtd-external-boot-authority.conf \
-        --pid-file /run/kdive/provider-authority/libvirt/libvirtd.pid
-      PIDFile=/run/kdive/provider-authority/libvirt/libvirtd.pid
-      Restart=on-failure
-      RestartSec=5s
-
-      [Install]
-      WantedBy=default.target
-    owner: "{{ live_vm_host_authority_account }}"
-    group: "{{ live_vm_host_authority_account }}"
-    mode: "0644"
-  register: live_vm_host_authority_user_unit
-  when: live_vm_host_authority_enabled | bool
-  notify: Restart the dormant authority session libvirtd after deployed changes
-
-- name: Enable the dormant authority session-libvirtd user unit
-  ansible.builtin.systemd_service:
-    name: kdive-libvirtd-external-boot-authority.service
-    scope: user
-    enabled: true
-    daemon_reload: true
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_authority_uid }}"
-  become: true
-  become_user: "{{ live_vm_host_authority_account }}"
-  when: live_vm_host_authority_enabled | bool
-
-- name: Start the dormant authority session libvirtd
-  ansible.builtin.systemd_service:
-    name: kdive-libvirtd-external-boot-authority.service
-    scope: user
-    state: started
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_authority_uid }}"
-  become: true
-  become_user: "{{ live_vm_host_authority_account }}"
+- name: Consume the shared private authority libvirt endpoint tasks
+  ansible.builtin.include_tasks: ../../provider_authority_host/tasks/libvirt.yml
+  vars:
+    provider_authority_host_account: "{{ live_vm_host_authority_account }}"
+    provider_authority_host_home: "{{ live_vm_host_authority_home }}"
+    provider_authority_host_uid: "{{ live_vm_host_authority_uid }}"
+    provider_authority_host_enabled: "{{ live_vm_host_authority_enabled }}"
+    provider_authority_host_libvirt_restart_handler: Restart the dormant authority session libvirtd after deployed changes
   when: live_vm_host_authority_enabled | bool
 
 - name: Start the external-boot authority service

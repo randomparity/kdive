@@ -1,0 +1,57 @@
+---
+- name: Stop and disable the retired authority service
+  ansible.builtin.systemd_service:
+    name: kdive-external-boot-authority.service
+    state: stopped
+    enabled: false
+  when: provider_authority_host_existing_unit.stat.exists
+
+- name: Inspect the private authority provider unit
+  ansible.builtin.stat:
+    path: /var/lib/kdive/provider-authority/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
+    follow: false
+  register: provider_authority_host_retired_libvirt
+
+- name: Stop the retired private provider endpoint
+  when: provider_authority_host_retired_libvirt.stat.exists
+  block:
+    - name: Resolve the retiring authority identity
+      ansible.builtin.getent:
+        database: passwd
+        key: kdive-provider-authority
+
+    - name: Stop and disable the retired authority provider user unit
+      ansible.builtin.systemd_service:
+        name: kdive-libvirtd-external-boot-authority.service
+        scope: user
+        state: stopped
+        enabled: false
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd['kdive-provider-authority'][1] }}"
+      become: true
+      become_user: kdive-provider-authority
+
+- name: Remove only authority execution configuration and copied credentials
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/kdive-external-boot-authority.service
+    - /etc/kdive/provider-authority.env
+    - /etc/kdive/credentials/provider-authority
+    - /etc/kdive/libvirtd-external-boot-authority.conf
+    - /etc/tmpfiles.d/kdive-provider-authority.conf
+    - /var/lib/kdive/provider-authority/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
+    - /var/lib/kdive/provider-authority/.ansible
+    - /run/kdive/provider-authority
+    - /opt/kdive-provider-authority
+  register: provider_authority_host_removed
+  notify: Reload systemd after authority removal
+
+- name: Retire authority user-service boot persistence
+  ansible.builtin.command:
+    argv: [loginctl, disable-linger, kdive-provider-authority]
+    removes: /var/lib/systemd/linger/kdive-provider-authority
+
+- name: Apply authority removal before completing cleanup
+  ansible.builtin.meta: flush_handlers

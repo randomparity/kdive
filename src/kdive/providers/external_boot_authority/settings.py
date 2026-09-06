@@ -2,9 +2,24 @@
 
 from __future__ import annotations
 
+import re
+from ipaddress import IPv4Address
 from pathlib import Path
 
 from kdive.config.registry import Setting
+
+DEFAULT_DENIED_IDENTITIES = tuple([f"kdive-worker-{slot}" for slot in range(1, 9)] + ["kdive"])
+
+
+def _denied_identities(raw: str) -> tuple[str, ...]:
+    names = tuple(raw.split(","))
+    if (
+        not 1 <= len(names) <= 32
+        or len(set(names)) != len(names)
+        or any(re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", name) is None for name in names)
+    ):
+        raise ValueError("must contain 1 through 32 unique canonical account names")
+    return names
 
 
 def _nonempty(raw: str) -> str:
@@ -32,6 +47,20 @@ def _always(_env: object) -> bool:
     return True
 
 
+def _network_address(raw: str) -> str:
+    address = IPv4Address(raw)
+    if str(address) != raw or address.is_multicast:
+        raise ValueError("must be a canonical numeric IPv4 bind address")
+    return raw
+
+
+def _network_port(raw: str) -> int:
+    value = int(raw)
+    if not 1 <= value <= 65535:
+        raise ValueError("must be a TCP port from 1 through 65535")
+    return value
+
+
 AUTHORITY_INSTANCE = Setting(
     name="KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
     parse=_nonempty,
@@ -39,6 +68,14 @@ AUTHORITY_INSTANCE = Setting(
     required_when=_always,
     help="Stable authority-instance identifier bound into the local TLS server identity.",
     suggest="a nonblank stable provider-host authority identifier",
+)
+AUTHORITY_DENIED_IDENTITIES = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES",
+    parse=_denied_identities,
+    default=",".join(DEFAULT_DENIED_IDENTITIES),
+    group="external-boot-authority",
+    help="Comma-separated list of 1 through 32 unique canonical local account names whose "
+    "exclusion the authority proves; each must exist and be outside the authority UID and groups.",
 )
 AUTHORITY_UID = Setting(
     name="KDIVE_EXTERNAL_BOOT_AUTHORITY_UID",
@@ -86,12 +123,28 @@ AUTHORITY_PROVIDER_SOCKET = Setting(
     help="Dormant authority-owned provider mutation socket checked for local reachability.",
 )
 
+AUTHORITY_NETWORK_ADDRESS = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS",
+    parse=_network_address,
+    group="external-boot-authority",
+    help="Optional numeric IPv4 listener address; requires the network port setting.",
+)
+AUTHORITY_NETWORK_PORT = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT",
+    parse=_network_port,
+    group="external-boot-authority",
+    help="Optional mutual-TLS TCP listener port; requires the network address setting.",
+)
+
 SETTINGS = [
     AUTHORITY_INSTANCE,
+    AUTHORITY_DENIED_IDENTITIES,
     AUTHORITY_UID,
     AUTHORITY_GID,
     AUTHORITY_CLIENT_GID,
     AUTHORITY_JOURNAL_DIR,
     AUTHORITY_REQUEST_SOCKET,
     AUTHORITY_PROVIDER_SOCKET,
+    AUTHORITY_NETWORK_ADDRESS,
+    AUTHORITY_NETWORK_PORT,
 ]

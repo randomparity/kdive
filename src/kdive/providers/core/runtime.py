@@ -17,6 +17,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.console import ConsoleSnapshotter, RemoteConsoleReader
 from kdive.providers.ports.debug import (
     AttachSeam,
@@ -181,6 +182,8 @@ class ProviderRuntime:
     # Server-owned materialize/prepare receipt seam (ADR-0595). Kept separate from worker
     # lifecycle mutation ports so composition can fail closed for providers without receipts.
     external_boot_preparation: ExternalBootPreparationPorts | None = None
+    # Internal worker route, not an advertised provider operation (ADR-0606).
+    authority: AuthorityRequestSender | None = None
 
     def __post_init__(self) -> None:
         _require_capability_port_parity(

@@ -1,0 +1,11 @@
+---
+- name: Exercise production authority input rejection before host mutation
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  gather_subset: ['!all', '!min', distribution]
+  tasks:
+    - name: Run the production authority preflight
+      ansible.builtin.import_role:
+        name: provider_authority_host
+        tasks_from: preflight

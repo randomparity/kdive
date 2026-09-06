@@ -1,0 +1,25 @@
+---
+# ADR-0606: base AF_UNIX authority and its additive network route are separate opt-ins.
+provider_authority_host_enabled: false
+provider_authority_host_network_address: ""
+provider_authority_host_network_port: null
+provider_authority_host_instance: ""
+provider_authority_host_additional_denied_identities: []
+provider_authority_host_account: kdive-provider-authority
+provider_authority_host_home: /var/lib/kdive/provider-authority
+provider_authority_host_libvirt_restart_handler: Restart provider authority libvirt after deployed changes
+# Stage the exact reviewed checkout and provision Python 3.14 + uv before this role.
+# No interpreter download, external package repository, or source checkout is implicit.
+provider_authority_host_source_root: ""
+provider_authority_host_python: /usr/bin/python3
+provider_authority_host_uv_bin: /usr/local/bin/uv
+provider_authority_host_database_dsn_source: ""
+provider_authority_host_server_key_source: ""
+provider_authority_host_server_certificate_source: ""
+provider_authority_host_server_ca_source: ""
+provider_authority_host_worker_client_ca_source: ""
+provider_authority_host_health_client_certificate_source: ""
+provider_authority_host_health_client_key_source: ""
+provider_authority_host_packages:
+  Debian: [acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev, libkdumpfile-dev]
+  RedHat: [acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel, elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel]
