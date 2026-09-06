@@ -1246,7 +1246,9 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         )
 
-    recovery_orphans = RecoveryOrphanAuthorityService(connections, binding.provider)
+    recovery_orphans = RecoveryOrphanAuthorityService(
+        connections, binding.provider, executor=binding.adapter
+    )
     if not config.remote_module_enabled:
         return ExternalBootAuthorityService(
             repository=repository,
