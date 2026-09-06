@@ -835,16 +835,21 @@ def test_retry_repairs_a_source_upload_a_dead_worker_left_partial(tmp_path: Path
     assert bytes(conn.pool.volumes[SOURCE_NAME].payload) == b"source-image"
 
 
-def test_retry_rejects_bad_source_capacity_before_creating_scratch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid", ["capacity", "owner"])
+def test_retry_rejects_bad_source_before_creating_scratch(tmp_path: Path, invalid: str) -> None:
     conn = Conn()
     wanted = request(tmp_path, inspect_attachments=_detached_source)
     revive = _kill_upload(conn)
     with pytest.raises(SystemExit):
         prepare_attempt_volumes(conn, wanted)
     revive()
-    conn.pool.volumes[SOURCE_NAME].capacity += 1
+    source = conn.pool.volumes[SOURCE_NAME]
+    if invalid == "capacity":
+        source.capacity += 1
+    else:
+        source.xml = source.xml.replace("a" * 32, "b" * 32)
 
-    with pytest.raises(CategorizedError, match="capacity"):
+    with pytest.raises(CategorizedError, match="capacity|ownership"):
         prepare_attempt_volumes(conn, wanted)
 
     assert not any(name.endswith("scratch.ext4") for name in conn.pool.volumes)

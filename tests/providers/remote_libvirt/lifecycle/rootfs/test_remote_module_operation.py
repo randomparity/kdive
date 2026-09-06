@@ -427,10 +427,12 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         }
     )
 
+    preparable = True
+
     class InspectionRepo:
         async def attempt_is_preparable(self, conn: object, attempt: ModuleAttempt) -> bool:
             del conn
-            return attempt.operation_nonce == operation.operation_nonce
+            return preparable and attempt.operation_nonce == operation.operation_nonce
 
     class InlineExecutor:
         async def run(self, action: Callable[[], object]) -> object:
@@ -512,6 +514,48 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         with pytest.raises(CategorizedError, match=message) as caught:
             await runtime.inspect_attempt(receipt, operation, executor, 10**12)
         assert caught.value.category is ErrorCategory.CONFLICT
+
+    monkeypatch.setattr(
+        "kdive.services.remote_module_operation.build_remote_device_identity_port",
+        lambda _authority, _deadline: object(),
+    )
+    phase_request = CaptureInstallRequest(
+        receipt, operation, cast(Any, object()), OpaqueProviderRef(ref="authority")
+    )
+    original_names = set(storage.pool.volumes)
+    del storage.pool.volumes[source_name]
+    with pytest.raises(CategorizedError, match="volume order"):
+        await capture_install_modules(
+            phase_request, runtime=runtime, executor=executor, deadline=10**12
+        )
+    assert set(storage.pool.volumes) == {scratch_name}
+
+    storage.pool.volumes[source_name] = cast(Any, SimpleNamespace(deleted=False))
+    del storage.pool.volumes[scratch_name]
+    for inspection in (
+        AttachmentInspection(True, True, True, frozenset()),
+        TimeoutError("attachment inspection unresolved"),
+    ):
+
+        def inspect_partial(_identity: object, _present: object, value=inspection):
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        object.__setattr__(runtime.volume_preparation, "inspect_attachments", inspect_partial)
+        with pytest.raises((CategorizedError, TimeoutError)):
+            await capture_install_modules(
+                phase_request, runtime=runtime, executor=executor, deadline=10**12
+            )
+        assert set(storage.pool.volumes) == {source_name}
+    assert original_names == {source_name, scratch_name}
+
+    preparable = False
+    with pytest.raises(CategorizedError, match="obligation is absent"):
+        await capture_install_modules(
+            phase_request, runtime=runtime, executor=executor, deadline=10**12
+        )
+    assert set(storage.pool.volumes) == {source_name}
 
 
 def test_real_receipt_guards_two_real_volume_creates(
