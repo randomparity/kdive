@@ -47,6 +47,32 @@ _FAULT_BARRIER_SOCKET = Path("/run/kdive/provider-authority/proof-control/contro
 _JOURNAL_ROOT = Path("/var/lib/kdive/provider-authority/journal")
 _JOURNAL_PROOF_MAX_BYTES = 512
 
+_JOURNAL_INVENTORY_FAILURE = """
+import subprocess
+
+unit = "kdive-external-boot-authority.service"
+state = subprocess.run(
+    ["systemctl", "show", unit, "--value", "--property=InvocationID", "--property=Result"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=False,
+    timeout=10,
+)
+values = state.stdout.decode("ascii", "strict").splitlines()
+if len(values) != 2 or not values[0] or values[1] != "exit-code":
+    raise SystemExit("authority startup has no failed invocation evidence")
+result = subprocess.run(
+    ["journalctl", "-b", "--no-pager", "-o", "cat", "_SYSTEMD_INVOCATION_ID=" + values[0]],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=False,
+    timeout=10,
+)
+if b"journal: inventory-mismatch" not in result.stdout:
+    raise SystemExit("authority startup did not reject the missing lane as inventory-mismatch")
+print("inventory-mismatch")
+"""
+
 _JOURNAL_LANE_CLIENT = """
 import hashlib
 import json
@@ -57,6 +83,7 @@ import stat
 import sys
 
 root = "/var/lib/kdive/provider-authority/journal"
+hold_root = "/var/lib/kdive/provider-authority"
 request = json.loads(sys.stdin.buffer.read(512))
 if not isinstance(request, dict) or request.get("action") not in {"hide", "restore"}:
     raise SystemExit("invalid journal proof request")
@@ -67,11 +94,17 @@ if not isinstance(system_id, str) or re.fullmatch(
     raise SystemExit("invalid journal proof system")
 uid = pwd.getpwnam("kdive-provider-authority").pw_uid
 root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+hold_fd = os.open(hold_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
 try:
     root_status = os.fstat(root_fd)
     if (not stat.S_ISDIR(root_status.st_mode) or root_status.st_uid != uid
             or stat.S_IMODE(root_status.st_mode) != 0o700):
         raise SystemExit("unsafe journal root")
+    hold_status = os.fstat(hold_fd)
+    if (not stat.S_ISDIR(hold_status.st_mode) or hold_status.st_uid != uid
+            or stat.S_IMODE(hold_status.st_mode) != 0o700
+            or hold_status.st_dev != root_status.st_dev):
+        raise SystemExit("unsafe journal proof root")
     name = system_id + ".jsonl"
     held = "." + system_id + ".native-proof-held"
     if request["action"] == "hide":
@@ -87,7 +120,7 @@ try:
         if len(content) != status.st_size or len(content) > 64 * 1024 * 1024:
             raise SystemExit("journal lane exceeds bound")
         try:
-            os.stat(held, dir_fd=root_fd, follow_symlinks=False)
+            os.stat(held, dir_fd=hold_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
@@ -97,8 +130,9 @@ try:
             "size": str(status.st_size),
             "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
         }
-        os.rename(name, held, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.rename(name, held, src_dir_fd=root_fd, dst_dir_fd=hold_fd)
         os.fsync(root_fd)
+        os.fsync(hold_fd)
         print(json.dumps(proof, sort_keys=True, separators=(",", ":")))
     else:
         required = {"action", "system_id", "device", "inode", "size", "digest"}
@@ -115,14 +149,14 @@ try:
             pass
         else:
             raise SystemExit("journal lane unexpectedly exists")
-        status = os.stat(held, dir_fd=root_fd, follow_symlinks=False)
+        status = os.stat(held, dir_fd=hold_fd, follow_symlinks=False)
         identity = str(status.st_dev), str(status.st_ino), str(status.st_size)
         expected = request["device"], request["inode"], request["size"]
         if (not stat.S_ISREG(status.st_mode) or status.st_uid != uid
                 or stat.S_IMODE(status.st_mode) != 0o600 or status.st_nlink != 1
                 or identity != expected):
             raise SystemExit("journal lane identity changed")
-        descriptor = os.open(held, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=root_fd)
+        descriptor = os.open(held, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=hold_fd)
         try:
             content = os.read(descriptor, 64 * 1024 * 1024 + 1)
         finally:
@@ -130,10 +164,12 @@ try:
         digest = "sha256:" + hashlib.sha256(content).hexdigest()
         if len(content) != status.st_size or digest != request["digest"]:
             raise SystemExit("journal lane content changed")
-        os.rename(held, name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.rename(held, name, src_dir_fd=hold_fd, dst_dir_fd=root_fd)
         os.fsync(root_fd)
+        os.fsync(hold_fd)
         print('{"state":"restored"}')
 finally:
+    os.close(hold_fd)
     os.close(root_fd)
 """
 
@@ -251,6 +287,7 @@ class NativeAuthorityConfig(BaseModel):
     ownership_prefix: str
     authority_service: Literal["kdive-external-boot-authority.service"]
     barrier_socket: Path | None = None
+    fixture_mode: Literal["create", "verify-existing"] = "create"
 
     @field_validator("ownership_prefix")
     @classmethod
@@ -819,6 +856,16 @@ def stop_authority_for_journal_loss(config: NativeAuthorityConfig) -> None:
         raise AssertionError("authority service remained active before journal-loss proof")
 
 
+def stop_authority_after_inventory_refusal(config: NativeAuthorityConfig) -> None:
+    """Fence an auto-restarting failed authority before restoring its hidden lane."""
+    _output("sudo", "-n", "systemctl", "stop", config.authority_service)
+    result = subprocess.run(
+        ["systemctl", "is-active", "--quiet", config.authority_service], check=False
+    )
+    if result.returncode == 0:
+        raise AssertionError("authority service remained active before journal lane restoration")
+
+
 def require_journal_inventory_refusal(config: NativeAuthorityConfig) -> None:
     """Require a hidden owned lane to prevent startup; a missing lane cannot silently recreate."""
     result = subprocess.run(
@@ -828,6 +875,24 @@ def require_journal_inventory_refusal(config: NativeAuthorityConfig) -> None:
     )
     if result.returncode == 0:
         raise AssertionError("authority accepted a missing journal lane")
+    if _output("sudo", "-n", _IDENTITY_PYTHON, "-c", _JOURNAL_INVENTORY_FAILURE) != (
+        "inventory-mismatch"
+    ):
+        raise AssertionError(
+            "authority startup did not refuse the missing lane as inventory-mismatch"
+        )
+
+
+def restore_after_journal_inventory_refusal(
+    config: NativeAuthorityConfig, proof: JournalLaneProof
+) -> None:
+    """Restore only after the failed authority is stopped, including auto-restart attempts."""
+    try:
+        require_journal_inventory_refusal(config)
+    finally:
+        stop_authority_after_inventory_refusal(config)
+        restore_authority_journal_lane(config, proof)
+        restart_authority_after_fault(config)
 
 
 def run_installed_local_authority_journal_restore_recovery() -> None:
@@ -870,11 +935,7 @@ def run_installed_local_authority_journal_restore_recovery() -> None:
                 wait_for_fault_barrier(config)
                 stop_authority_for_journal_loss(config)
                 proof = hide_authority_journal_lane(config)
-                try:
-                    require_journal_inventory_refusal(config)
-                finally:
-                    restore_authority_journal_lane(config, proof)
-                    restart_authority_after_fault(config)
+                restore_after_journal_inventory_refusal(config, proof)
                 await drain_job(client, "activate-journal-restore", activation.activate_job_id)
                 release = ok(
                     await scalar(client, "runs.release_external_boot", run_id=activation.run_id),
@@ -1009,7 +1070,7 @@ async def assert_root_release_completion(db_url: str, operations: NormalOperatio
 
 
 async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig) -> None:
-    """Re-provision only the selected disposable System under the installed authority uid."""
+    """Create or read-only verify only the selected disposable authority fixture."""
     async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT provisioning_profile FROM systems WHERE id = %s AND project = %s",
@@ -1021,14 +1082,17 @@ async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig
             "selected authority fixture System is absent or belongs to another project"
         )
     script = Path(__file__).resolve().parents[2] / "scripts/live-vm/provision-authority-fixture.py"
+    arguments = [
+        "sudo",
+        "-n",
+        "/opt/kdive-provider-authority/.venv/bin/python",
+        str(script),
+    ]
+    if config.fixture_mode == "verify-existing":
+        arguments.append("--verify-existing")
+    arguments.append(str(config.system_id))
     result = subprocess.run(
-        [
-            "sudo",
-            "-n",
-            "/opt/kdive-provider-authority/.venv/bin/python",
-            str(script),
-            str(config.system_id),
-        ],
+        arguments,
         input=json.dumps(row[0]),
         text=True,
         capture_output=True,
@@ -1036,7 +1100,7 @@ async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-1000:]
-        raise RuntimeError(f"authority fixture provisioning failed: {detail}")
+        raise RuntimeError(f"authority fixture {config.fixture_mode} failed: {detail}")
 
 
 async def drive_normal_operations(

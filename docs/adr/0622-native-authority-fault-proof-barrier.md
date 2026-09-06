@@ -32,6 +32,13 @@ assert the durable recovery path without timing luck. The socket is absent by de
 inaccessible to workers, and is an explicit operator proof surface rather than a product control
 API. It does not itself create journal-loss or stale-write evidence.
 
+The native carrier may use separate root-only, fixed-target helpers to stop or continue one
+fixed worker and temporarily rename the selected System's authority-owned journal lane. Those
+helpers retain and verify exact inode and content-digest evidence before restoring the lane. The
+held lane lives in a fixed authority-owned directory outside the inventoried journal root, and the
+carrier stops a failed or auto-restarting authority before restoring it. They do not expose
+credentials, accept paths, or add an authority listener or mutation API.
+
 ## Considered & rejected
 
 - **Restart the service at an arbitrary time.** It cannot establish the interval between a

@@ -36,7 +36,9 @@ from tests.live_vm.installed_local_authority_support import (
     require_authority_artifact_confinement,
     require_deployed_revision,
     require_fault_barrier,
+    require_journal_inventory_refusal,
     restart_authority_after_fault,
+    restore_after_journal_inventory_refusal,
     restore_authority_journal_lane,
     wait_for_fault_barrier,
 )
@@ -264,6 +266,14 @@ def test_journal_loss_helper_moves_only_the_configured_lane_and_restores_exact_b
     ]
 
 
+def test_journal_lane_hold_is_outside_the_inventoried_journal_root() -> None:
+    """The startup refusal must be caused by the absent lane, not an unknown hold file."""
+    assert 'hold_root = "/var/lib/kdive/provider-authority"' in carrier._JOURNAL_LANE_CLIENT
+    assert "dst_dir_fd=hold_fd" in carrier._JOURNAL_LANE_CLIENT
+    assert "src_dir_fd=hold_fd, dst_dir_fd=root_fd" in carrier._JOURNAL_LANE_CLIENT
+    assert "os.fsync(root_fd)\n        os.fsync(hold_fd)" in carrier._JOURNAL_LANE_CLIENT
+
+
 def test_journal_loss_helper_refuses_an_unverified_or_unrestored_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -281,6 +291,72 @@ def test_journal_loss_helper_refuses_an_unverified_or_unrestored_lane(
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(AssertionError, match="journal lane proof is malformed"):
         hide_authority_journal_lane(config)
+
+
+def test_journal_refusal_requires_the_inventory_mismatch_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, b"", b"other failure"),
+    )
+    monkeypatch.setattr(carrier, "_output", lambda *_argv: "other-failure")
+
+    with pytest.raises(AssertionError, match="inventory-mismatch"):
+        require_journal_inventory_refusal(config)
+
+
+def test_journal_restoration_stops_a_failed_authority_before_restoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    proof = carrier.JournalLaneProof("1", "2", "3", "sha256:" + "a" * 64)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        carrier, "require_journal_inventory_refusal", lambda _config: events.append("refused")
+    )
+    monkeypatch.setattr(
+        carrier, "stop_authority_after_inventory_refusal", lambda _config: events.append("stopped")
+    )
+
+    def restore(_config: NativeAuthorityConfig, _proof: carrier.JournalLaneProof) -> None:
+        assert events == ["refused", "stopped"], "restore raced the failed authority"
+        events.append("restored")
+
+    def restart(_config: NativeAuthorityConfig) -> None:
+        assert events == ["refused", "stopped", "restored"], "restart preceded restoration"
+        events.append("restarted")
+
+    monkeypatch.setattr(
+        carrier,
+        "restore_authority_journal_lane",
+        restore,
+    )
+    monkeypatch.setattr(
+        carrier,
+        "restart_authority_after_fault",
+        restart,
+    )
+
+    restore_after_journal_inventory_refusal(config, proof)
+
+    assert events == ["refused", "stopped", "restored", "restarted"]
 
 
 def test_normal_driver_uses_public_tools_and_drains_jobs(
@@ -899,6 +975,57 @@ def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
     assert argv[-1] == str(config.system_id)
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert json.loads(cast(str, kwargs["input"])) == {"schema_version": 1}
+
+
+def test_fixture_verification_uses_the_explicit_read_only_script_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+        fixture_mode="verify-existing",
+    )
+
+    class Cursor:
+        async def __aenter__(self) -> Cursor:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _query: str, _params: object) -> None:
+            return None
+
+        async def fetchone(self) -> tuple[dict[str, object]]:
+            return ({"schema_version": 1},)
+
+    class Connection:
+        async def __aenter__(self) -> Connection:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    async def connect(_dsn: str) -> Connection:
+        return Connection()
+
+    seen: dict[str, object] = {}
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(argv=argv, kwargs=kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
+    monkeypatch.setattr(subprocess, "run", run)
+    asyncio.run(provision_authority_fixture("postgresql://fixture", config))
+
+    assert cast(list[str], seen["argv"])[-2:] == ["--verify-existing", str(config.system_id)]
 
 
 def test_fixture_subprocess_snapshots_authority_uri_and_roots_before_provider_import() -> None:
