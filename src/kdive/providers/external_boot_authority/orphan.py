@@ -23,11 +23,28 @@ from kdive.providers.ports.external_boot import (
     ExternalBootRecoveryObjectPorts,
     OpaqueProviderRef,
     RecoveryObjectBinding,
+    RecoveryObjectObservation,
 )
 
 
 class AuthorityConnectionFactory(Protocol):
     def __call__(self) -> AbstractAsyncContextManager[AsyncConnection]: ...
+
+
+class RecoveryObjectExecutor(Protocol):
+    """Bounded provider-host executor for private recovery-object operations."""
+
+    async def observe_recovery_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
+    ) -> RecoveryObjectObservation: ...
+
+    async def delete_recovery_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef, digest: str
+    ) -> RecoveryObjectObservation: ...
+
+    async def adopt_recovery_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef, digest: str
+    ) -> RecoveryObjectObservation: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +92,11 @@ class RecoveryOrphanAuthorityService:
         self,
         connections: AuthorityConnectionFactory,
         ports: ExternalBootRecoveryObjectPorts,
+        executor: RecoveryObjectExecutor | None = None,
     ) -> None:
         self._connections = connections
         self._ports = ports
+        self._executor = executor
         self._lanes: dict[UUID, asyncio.Lock] = {}
         self._serializer: (
             Callable[
@@ -163,6 +182,31 @@ class RecoveryOrphanAuthorityService:
         if row is None or row[0] != "applied":
             raise AuthorityServiceError("superseded")
 
+    async def _observe(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
+    ) -> RecoveryObjectObservation:
+        if self._executor is not None:
+            return await self._executor.observe_recovery_object(binding, authority)
+        return self._ports.observe_object(binding, authority)
+
+    async def _disposition(
+        self,
+        selection: _Selection,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+    ) -> RecoveryObjectObservation:
+        if self._executor is not None:
+            if selection.disposition == "delete":
+                return await self._executor.delete_recovery_object(
+                    binding, authority, selection.observed_digest
+                )
+            return await self._executor.adopt_recovery_object(
+                binding, authority, selection.observed_digest
+            )
+        if selection.disposition == "delete":
+            return self._ports.delete_object(binding, authority, selection.observed_digest)
+        return self._ports.adopt_object(binding, authority, selection.observed_digest)
+
     async def resolve_recovery_orphan(
         self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
     ) -> AuthorityRecoveryOrphanDispositionResponseV1:
@@ -180,7 +224,7 @@ class RecoveryOrphanAuthorityService:
                     raise AuthorityServiceError("superseded")
                 binding = selection.binding()
                 authority = OpaqueProviderRef(ref=selection.authority_instance)
-                observed = self._ports.observe_object(binding, authority)
+                observed = await self._observe(binding, authority)
                 if observed.binding != binding:
                     raise AuthorityServiceError("journal_conflict")
                 done = (selection.disposition == "delete" and not observed.present) or (
@@ -189,11 +233,7 @@ class RecoveryOrphanAuthorityService:
                 if not done:
                     if observed.observed_digest != selection.observed_digest:
                         raise AuthorityServiceError("journal_conflict")
-                    observed = (
-                        self._ports.delete_object(binding, authority, selection.observed_digest)
-                        if selection.disposition == "delete"
-                        else self._ports.adopt_object(binding, authority, selection.observed_digest)
-                    )
+                    observed = await self._disposition(selection, binding, authority)
                     if observed.binding != binding:
                         raise AuthorityServiceError("journal_conflict")
                 if (selection.disposition == "delete" and observed.present) or (
