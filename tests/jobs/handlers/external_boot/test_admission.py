@@ -49,7 +49,7 @@ async def _authority_count(conn: AsyncConnection) -> int:
     return int(row["n"])
 
 
-def test_preparing_activation_is_prepared_through_production_admission_boundary(
+def test_preparing_activation_persists_plan_without_provider_mutation(
     migrated_url: str,
 ) -> None:
     async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
@@ -87,11 +87,12 @@ def test_preparing_activation_is_prepared_through_production_admission_boundary(
         )
         row = await activation.fetchone()
         assert row is not None
-        assert row[0] == ExternalBootActivationState.PREPARED.value
-        assert row[1] is not None and row[2] is not None
+        assert row == (ExternalBootActivationState.PREPARING.value, None, None)
         assert kind is JobKind.BOOT
+        assert isinstance(payload, BootPayload)
         assert payload.external_boot_authority_v1 is not None
-        assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
+        assert payload.external_boot_plan_v1 == vehicle.plan
+        assert provider.preparation_mutations == {"materialize": 0, "prepare": 0}
 
         # Re-entry uses identities derived only from the durable activation ownership tuple.
         await conn.execute(
@@ -110,7 +111,7 @@ def test_preparing_activation_is_prepared_through_production_admission_boundary(
             resolver=resolver,
             preparation_plan=vehicle.plan,
         )
-        assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
+        assert provider.preparation_mutations == {"materialize": 0, "prepare": 0}
 
     _drive(migrated_url, body)
 
