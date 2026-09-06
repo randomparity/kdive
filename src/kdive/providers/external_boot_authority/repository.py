@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from typing import Protocol
 
 from psycopg import AsyncConnection
@@ -25,6 +26,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.ports.external_boot import ExternalBootPlan
 
 
 class AuthorityConnectionFactory(Protocol):
@@ -43,12 +45,22 @@ class DatabaseAuthorityRepository:
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
     ) -> AuthorityBinding | None:
         async with self._connections() as conn, conn.transaction():
-            return await resolve_allocating_authority_binding(
+            binding = await resolve_allocating_authority_binding(
                 conn,
                 peer_incarnation_id=str(peer.incarnation_id),
                 authority_id=request.authority_id,
                 generation=request.generation,
             )
+            if binding is None or binding.purpose != "activate":
+                return binding
+            row = await conn.execute(
+                "SELECT resolve_allocating_external_boot_preparation_plan(%s,%s,%s)",
+                (str(peer.incarnation_id), request.authority_id, request.generation),
+            )
+            plan = await row.fetchone()
+            if plan is None or plan[0] is None:
+                return binding
+            return replace(binding, preparation_plan=ExternalBootPlan.model_validate(plan[0]))
 
     async def resolve_current(
         self,

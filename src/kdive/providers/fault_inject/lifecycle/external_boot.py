@@ -94,6 +94,28 @@ class FaultInjectExternalBoot:
             raise PreparationInterrupted(f"interrupted after {request.phase} receipt")
         return receipt
 
+    def adopt_preparation(
+        self,
+        request: ExternalBootPreparationRequest,
+        predecessor: ExternalBootPreparationRequest,
+    ) -> ExternalBootPreparationObservation:
+        receipt = self.observe_preparation(predecessor)
+        if (
+            receipt.state == "absent"
+            or request.phase != predecessor.phase
+            or request.binding != predecessor.binding
+            or request.plan.identity != predecessor.plan.identity
+        ):
+            raise ValueError("preparation predecessor cannot be adopted")
+        adopted = receipt.model_copy(
+            update={
+                "authority": request.authority,
+                "operation_identity": request.operation_identity,
+            }
+        )
+        self._preparation_receipts[(request.binding.activation_id, request.phase)] = adopted
+        return adopted
+
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef
     ) -> ExternalBootMaterialization:

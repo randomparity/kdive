@@ -1540,6 +1540,21 @@ class _ExternalIO:
         self.preparation_receipts[phase] = receipt
         return receipt
 
+    def adopt_preparation(
+        self,
+        request: ExternalBootPreparationRequest,
+        predecessor: ExternalBootPreparationRequest,
+    ) -> ExternalBootPreparationObservation:
+        receipt = self.observe_preparation(predecessor)
+        adopted = receipt.model_copy(
+            update={
+                "authority": request.authority,
+                "operation_identity": request.operation_identity,
+            }
+        )
+        self.preparation_receipts[request.phase] = adopted
+        return adopted
+
     def preparation_materialization(
         self, request: ExternalBootPreparationRequest
     ) -> ExternalBootMaterialization:
@@ -3994,6 +4009,45 @@ def test_local_preparation_receipt_replay_avoids_second_provider_mutation() -> N
 
     assert first == second == ports.observe_preparation(request)
     assert io.actions == ["materialize"]
+
+
+def test_preparation_receipt_adoption_rebinds_without_materialization(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    predecessor = _preparation_request("materialize")
+    materialization = _materialization().model_copy(
+        update={"plan_identity": predecessor.plan.identity}
+    )
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=predecessor.binding,
+        plan_identity=predecessor.plan.identity,
+        authority=predecessor.authority,
+        operation_identity=predecessor.operation_identity,
+        materialization=materialization,
+    )
+    successor = predecessor.model_copy(
+        update={
+            "authority": OpaqueProviderRef(ref="authority/successor"),
+            "operation_identity": "materialize-successor",
+        }
+    )
+
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        adopted = store.adopt_preparation(successor, predecessor)
+
+    assert adopted.materialization == materialization
+    assert adopted.authority == successor.authority
+    assert adopted.operation_identity == successor.operation_identity
+
+    foreign = predecessor.model_copy(
+        update={"authority": OpaqueProviderRef(ref="authority/foreign")}
+    )
+    with RecoveryMetadataStore(root) as store:
+        with pytest.raises(ValueError, match="identity conflicts"):
+            store.adopt_preparation(successor, foreign)
+        assert store.observe_preparation(successor) == adopted
 
 
 def test_local_prepare_receipt_replay_avoids_second_provider_mutation() -> None:

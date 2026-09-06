@@ -93,6 +93,32 @@ CREATE FUNCTION public.resolve_current_external_boot_preparation_authority(
       ), 'hex') = a.plan_identity
 $$;
 
+CREATE FUNCTION public.resolve_allocating_external_boot_preparation_plan(
+    p_peer_incarnation text, p_authority_id uuid, p_generation bigint
+) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
+    SELECT j.payload->'external_boot_plan_v1'
+    FROM public.external_boot_authorities AS a
+    JOIN public.worker_incarnations AS w ON w.incarnation = a.worker_incarnation
+    JOIN public.jobs AS j ON j.id = a.job_id AND j.attempt = a.job_attempt
+    WHERE pg_has_role(session_user, 'kdive_provider_authority', 'member')
+      AND w.incarnation = p_peer_incarnation AND w.state = 'active' AND w.fence_protocol = 4
+      AND a.id = p_authority_id AND a.generation = p_generation
+      AND a.state IN ('allocating', 'current')
+      AND a.purpose = 'activate' AND a.operation = 'activate'
+      AND j.state = 'running' AND j.worker_id = p_peer_incarnation
+      AND j.lease_expires_at > clock_timestamp()
+      AND jsonb_typeof(j.payload->'external_boot_plan_v1') = 'object'
+      AND j.payload #>> '{external_boot_plan_v1,ownership,system_id}' = a.system_id::text
+      AND j.payload #>> '{external_boot_plan_v1,ownership,run_id}' = a.run_id::text
+      AND 'sha256:' || encode(sha256(
+          convert_to('kdive-external-boot-plan-v1', 'UTF8') || decode('00', 'hex') ||
+          convert_to(public.canonical_external_boot_authority_json(
+              j.payload->'external_boot_plan_v1'
+          ), 'UTF8')
+      ), 'hex') = a.plan_identity
+$$;
+
 -- A preparing activation is now admitted to the same activate authority that will finish it.
 DO $$
 DECLARE
@@ -452,6 +478,7 @@ REVOKE ALL ON FUNCTION
     public.resolve_current_external_boot_preparation_authority(
         text, uuid, bigint, bigint, text, text
     ),
+    public.resolve_allocating_external_boot_preparation_plan(text, uuid, bigint),
     public.commit_external_boot_preparation_result(
         bytea, uuid, integer, uuid, bigint, text, uuid, text, text, bigint, text, text, jsonb
     )
@@ -460,6 +487,9 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
 
 GRANT EXECUTE ON FUNCTION public.resolve_current_external_boot_preparation_authority(
     text, uuid, bigint, bigint, text, text
+) TO kdive_provider_authority;
+GRANT EXECUTE ON FUNCTION public.resolve_allocating_external_boot_preparation_plan(
+    text, uuid, bigint
 ) TO kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION public.commit_external_boot_preparation_result(
     bytea, uuid, integer, uuid, bigint, text, uuid, text, text, bigint, text, text, jsonb
