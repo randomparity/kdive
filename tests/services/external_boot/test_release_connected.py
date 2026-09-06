@@ -7,7 +7,8 @@ import hashlib
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, LiteralString, cast
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -18,6 +19,7 @@ from pydantic import SecretStr
 from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
+from kdive.jobs.handlers.external_boot import lifecycle
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.handlers.external_boot.router import route_marked
@@ -131,14 +133,19 @@ async def _retire_seed_authority(conn: AsyncConnection, case: Any) -> None:
     )
 
 
+@pytest.mark.parametrize("interrupt_after", [None, "recover", "cleanup"])
 def test_public_active_release_claims_and_completes_through_worker(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt_after: Literal["recover", "cleanup"] | None,
 ) -> None:
     async def run() -> None:
         vehicle = build_vehicle()
         adapter = _ReleaseFaultAuthorityAdapter(vehicle)
+        retry_incarnation = f"docker:release-retry-{uuid4()}"
+        retry_credential = f"release-retry-credential-{uuid4()}"
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
             case = await seed_case(
                 seed,
@@ -159,16 +166,22 @@ def test_public_active_release_claims_and_completes_through_worker(
                 adapter=adapter,
             )
 
+            credentials = {
+                case.credential: case.worker_incarnation,
+                retry_credential: retry_incarnation,
+            }
+
             async def authenticate(credential: SecretStr) -> AuthenticatedPeer:
-                assert credential.get_secret_value() == case.credential
-                return AuthenticatedPeer(case.worker_incarnation)
+                return AuthenticatedPeer(credentials[credential.get_secret_value()])
 
             class Backend:
                 async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
                     assert deadline > asyncio.get_running_loop().time()
                     return await _dispatch(envelope, authenticate, service)
 
-            sender = AuthorityRequestSender(Backend, lambda: SecretStr(case.credential))
+            def sender_for(credential: str) -> AuthorityRequestSender:
+                return AuthorityRequestSender(Backend, lambda: SecretStr(credential))
+
             async with runs_support.pool(migrated_url) as pool:
                 requested = await request_release(
                     pool,
@@ -181,18 +194,44 @@ def test_public_active_release_claims_and_completes_through_worker(
             async def must_not_run(_conn: AsyncConnection, _job: Job) -> str:
                 raise AssertionError("a marked release reached the ordinary boot handler")
 
-            operations = build_operations(
-                ExternalBootHandlerPorts(
-                    resolver=provider_resolver(external_boot=None),
-                    incarnation_credential=SecretStr(case.credential),
-                    secret_registry=SecretRegistry(),
-                    authority_client_factory=lambda binding, marker, deadline: (
-                        ExternalBootAuthorityClient(sender, marker, deadline)
-                    ),
+            def registry_for(credential: str) -> HandlerRegistry:
+                operations = build_operations(
+                    ExternalBootHandlerPorts(
+                        resolver=provider_resolver(external_boot=None),
+                        incarnation_credential=SecretStr(credential),
+                        secret_registry=SecretRegistry(),
+                        authority_client_factory=lambda binding, marker, deadline: (
+                            ExternalBootAuthorityClient(sender_for(credential), marker, deadline)
+                        ),
+                    )
                 )
-            )
-            registry = HandlerRegistry()
-            registry.register(JobKind.BOOT, route_marked(operations, must_not_run))
+                registry = HandlerRegistry()
+                registry.register(JobKind.BOOT, route_marked(operations, must_not_run))
+                return registry
+
+            registry = registry_for(case.credential)
+            interrupted = False
+            original_status = lifecycle._derived_release_status
+
+            async def interrupting_status(
+                conn: AsyncConnection, sql: LiteralString, args: tuple[object, ...]
+            ) -> str:
+                nonlocal interrupted
+                stage = (
+                    "commit_external_boot_derived_release_recovery"
+                    if interrupt_after == "recover"
+                    else "finalize_external_boot_derived_release"
+                )
+                if interrupt_after == "cleanup" and not interrupted and stage in sql:
+                    interrupted = True
+                    raise RuntimeError("injected release interruption")
+                status = await original_status(conn, sql, args)
+                if interrupt_after is not None and not interrupted and stage in sql:
+                    interrupted = True
+                    raise RuntimeError("injected release interruption")
+                return status
+
+            monkeypatch.setattr(lifecycle, "_derived_release_status", interrupting_status)
             async with AsyncConnectionPool(
                 authority_role_dsns("kdive_worker"), min_size=5, max_size=5
             ) as worker_pool:
@@ -204,6 +243,62 @@ def test_public_active_release_claims_and_completes_through_worker(
                     secret_registry=SecretRegistry(),
                 )
                 claimed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+                if interrupt_after is not None:
+                    assert interrupted
+                    assert claimed is not None
+                    async with seed.cursor() as cur:
+                        await cur.execute(
+                            "SELECT authority.id, authority.generation, ack.journal_sequence, "
+                            "ack.journal_digest, authority.state, authority.job_attempt "
+                            "FROM external_boot_authorities AS authority "
+                            "JOIN external_boot_authority_acknowledgements AS ack "
+                            "ON ack.authority_id = authority.id "
+                            "WHERE authority.job_id = %s ORDER BY authority.generation",
+                            (claimed.id,),
+                        )
+                        old_authority = await cur.fetchone()
+                        assert old_authority is not None
+                        old_id, old_generation, old_sequence, old_digest, state, old_attempt = (
+                            old_authority
+                        )
+                        assert (state, old_attempt) == ("retired", 1)
+                        await cur.execute(
+                            "SELECT operation_identity FROM "
+                            "resolve_current_external_boot_release_phase_authority("
+                            "%s,%s,%s,%s,%s,%s)",
+                            (
+                                case.worker_incarnation,
+                                old_id,
+                                old_generation,
+                                old_sequence,
+                                old_digest,
+                                "cleanup",
+                            ),
+                        )
+                        assert await cur.fetchone() is None
+                        if interrupt_after == "cleanup":
+                            await cur.execute(
+                                "SELECT consumed FROM external_boot_release_cleanup_receipts "
+                                "WHERE job_id = %s",
+                                (claimed.id,),
+                            )
+                            assert await cur.fetchall() == [(False,)]
+                    await seed.execute(
+                        "INSERT INTO worker_incarnations "
+                        "(incarnation, authority_kind, authority_binding, credential_hash, "
+                        "fence_protocol) "
+                        "VALUES (%s, 'docker', '{}'::jsonb, sha256(convert_to(%s, 'UTF8')), 4)",
+                        (retry_incarnation, retry_credential),
+                    )
+                    retry_worker = Worker(
+                        worker_pool,
+                        registry_for(retry_credential),
+                        worker_id=retry_incarnation,
+                        incarnation_credential=SecretStr(retry_credential),
+                        secret_registry=SecretRegistry(),
+                    )
+                    claimed = await retry_worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+                    assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
             assert claimed is not None and str(claimed.id) == requested.object_id
 
             async with seed.cursor() as cur:
@@ -219,10 +314,37 @@ def test_public_active_release_claims_and_completes_through_worker(
                 )
                 assert await cur.fetchone() == ("retired",)
                 await cur.execute(
-                    "SELECT consumed FROM external_boot_release_cleanup_receipts WHERE job_id = %s",
+                    "SELECT state, job_attempt, worker_incarnation FROM external_boot_authorities "
+                    "WHERE job_id = %s ORDER BY generation",
                     (claimed.id,),
                 )
-                assert await cur.fetchone() == (True,)
+                expected_authorities = (
+                    [("retired", 1, case.worker_incarnation)]
+                    if interrupt_after is None
+                    else [
+                        ("retired", 1, case.worker_incarnation),
+                        ("retired", 2, retry_incarnation),
+                    ]
+                )
+                assert await cur.fetchall() == expected_authorities
+                await cur.execute(
+                    "SELECT consumed, adopted_from_root_authority_id IS NOT NULL "
+                    "FROM external_boot_release_cleanup_receipts WHERE job_id = %s "
+                    "ORDER BY created_at",
+                    (claimed.id,),
+                )
+                expected_receipts = (
+                    [(True, False)]
+                    if interrupt_after != "cleanup"
+                    else [(False, False), (True, True)]
+                )
+                assert await cur.fetchall() == expected_receipts
+                await cur.execute(
+                    "SELECT count(*) FROM external_boot_reservation_releases "
+                    "WHERE activation_id = %s",
+                    (vehicle.activation_id,),
+                )
+                assert await cur.fetchone() == (1,)
         assert adapter.mutations == ["recover", "cleanup"]
         assert vehicle.port.calls == ["recover", "cleanup"]
 

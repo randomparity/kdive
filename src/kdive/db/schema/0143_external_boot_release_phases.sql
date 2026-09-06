@@ -15,10 +15,14 @@ CREATE TABLE public.external_boot_release_cleanup_receipts (
     journal_sequence bigint NOT NULL CHECK (journal_sequence > 0),
     journal_digest text NOT NULL CHECK (journal_digest ~ '^sha256:[0-9a-f]{64}$'),
     observed_absent_digest text NOT NULL CHECK (observed_absent_digest ~ '^sha256:[0-9a-f]{64}$'),
+    adopted_from_root_authority_id uuid REFERENCES public.external_boot_authorities (id)
+        ON DELETE RESTRICT,
     consumed boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     consumed_at timestamptz,
-    CHECK (consumed = (consumed_at IS NOT NULL))
+    CHECK (consumed = (consumed_at IS NOT NULL)),
+    CHECK (adopted_from_root_authority_id IS NULL
+           OR adopted_from_root_authority_id <> root_authority_id)
 );
 
 CREATE FUNCTION public.derive_external_boot_release_phase_binding(
@@ -470,6 +474,11 @@ BEGIN
         E'                AND p_record->>''operation'' = ''activate'')\n' ||
         E'            OR (v_head.phase = ''takeover-acknowledged''\n' ||
         E'                AND p_record->>''operation'' = ''recover'')\n' ||
+        E'            OR (v_head.phase = ''takeover-acknowledged''\n' ||
+        E'                AND p_record->>''operation'' = ''cleanup''\n' ||
+        E'                AND EXISTS (SELECT 1 FROM public.external_boot_activations AS activation\n' ||
+        E'                            WHERE activation.id = v_authority.activation_id\n' ||
+        E'                              AND activation.state = ''recovered''))\n' ||
         E'            OR (v_head.phase = ''terminal''\n' ||
         E'                AND v_head.head_record->>''operation'' = ''recover''\n' ||
         E'                AND p_record->>''operation'' = ''cleanup'')'
@@ -510,6 +519,74 @@ BEGIN
     );
 END $$;
 
+CREATE FUNCTION public.adopt_external_boot_release_cleanup_receipt_from_head(
+    p_credential_hash bytea, p_job_id uuid, p_attempt integer,
+    p_authority_id uuid, p_generation bigint, p_observed_absent_digest text
+) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_authority public.external_boot_authorities%ROWTYPE;
+    v_job public.jobs%ROWTYPE;
+    v_head public.external_boot_authority_journal_heads%ROWTYPE;
+    v_source public.external_boot_release_cleanup_receipts%ROWTYPE;
+    v_bound record;
+    v_incarnation text;
+BEGIN
+    IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
+        RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
+    END IF;
+    SELECT incarnation INTO v_incarnation FROM public.worker_incarnations
+    WHERE credential_hash = p_credential_hash AND state = 'active' AND fence_protocol = 4;
+    SELECT * INTO v_authority FROM public.external_boot_authorities
+    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    IF v_incarnation IS NULL OR v_authority.id IS NULL THEN RETURN 'superseded'; END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'kdive:system:' || v_authority.system_id::text, 2125));
+    SELECT * INTO v_job FROM public.jobs WHERE id = p_job_id FOR UPDATE;
+    SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
+    WHERE system_id = v_authority.system_id AND authority_instance = v_authority.authority_instance
+    FOR UPDATE;
+    SELECT * INTO v_bound FROM public.derive_external_boot_release_phase_binding(jsonb_build_object(
+        'authority_id', v_authority.id, 'generation', v_authority.generation,
+        'system_id', v_authority.system_id, 'activation_id', v_authority.activation_id,
+        'run_id', v_authority.run_id, 'plan_identity', v_authority.plan_identity,
+        'provider_kind', v_authority.provider_kind, 'authority_instance', v_authority.authority_instance,
+        'worker_incarnation', v_authority.worker_incarnation,
+        'root_operation_identity', v_authority.operation_identity,
+        'root_operation_digest', v_authority.operation_digest), 'cleanup');
+    SELECT receipt.* INTO v_source FROM public.external_boot_release_cleanup_receipts AS receipt
+    JOIN public.external_boot_authorities AS source ON source.id = receipt.root_authority_id
+    WHERE receipt.activation_id = v_authority.activation_id
+      AND receipt.system_id = v_authority.system_id AND receipt.run_id = v_authority.run_id
+      AND receipt.plan_identity = v_authority.plan_identity AND receipt.job_id = p_job_id
+      AND NOT receipt.consumed AND source.state IN ('retired', 'superseded')
+    ORDER BY receipt.created_at DESC LIMIT 1 FOR UPDATE OF receipt;
+    IF v_source.root_authority_id IS NULL THEN RETURN 'not_applicable'; END IF;
+    IF (v_authority.state = 'current' AND v_authority.purpose = 'release'
+        AND v_authority.operation = 'release' AND v_authority.worker_incarnation = v_incarnation
+        AND v_authority.job_id = p_job_id AND v_authority.job_attempt = p_attempt
+        AND v_job.state = 'running' AND v_job.worker_id = v_incarnation
+        AND v_job.attempt = p_attempt AND v_job.lease_expires_at > clock_timestamp()
+        AND v_head.authority_id = p_authority_id AND v_head.generation = p_generation
+        AND v_head.phase = 'terminal' AND v_head.head_record->>'operation' = 'cleanup'
+        AND v_head.head_record->>'operation_identity' = v_bound.operation_identity
+        AND v_head.head_record->>'operation_digest' = v_bound.operation_digest
+        AND v_head.head_record #>> '{observation,category}' = 'absent'
+        AND v_head.head_record #>> '{observation,composite_state}' = p_observed_absent_digest
+        AND v_source.observed_absent_digest = p_observed_absent_digest
+    ) IS NOT TRUE THEN RETURN 'superseded'; END IF;
+    INSERT INTO public.external_boot_release_cleanup_receipts (
+        root_authority_id, job_id, job_attempt, activation_id, system_id, run_id,
+        plan_identity, operation_identity, operation_digest, journal_sequence,
+        journal_digest, observed_absent_digest, adopted_from_root_authority_id
+    ) VALUES (
+        p_authority_id, p_job_id, p_attempt, v_authority.activation_id, v_authority.system_id,
+        v_authority.run_id, v_authority.plan_identity, v_bound.operation_identity,
+        v_bound.operation_digest, v_head.sequence, v_head.digest, p_observed_absent_digest,
+        v_source.root_authority_id
+    ) ON CONFLICT (root_authority_id) DO NOTHING;
+    RETURN 'applied';
+END $$;
+
 REVOKE ALL ON public.external_boot_release_cleanup_receipts FROM PUBLIC;
 GRANT SELECT ON public.external_boot_release_cleanup_receipts TO kdive_worker;
 REVOKE ALL ON FUNCTION public.derive_external_boot_release_phase_binding(jsonb,text),
@@ -519,10 +596,13 @@ REVOKE ALL ON FUNCTION public.derive_external_boot_release_phase_binding(jsonb,t
         bytea,uuid,integer,uuid,bigint,text,text,bigint,text,text),
     public.begin_external_boot_derived_release_recovery(bytea,uuid,integer,uuid,bigint,uuid,timestamptz),
     public.commit_external_boot_derived_release_recovery(bytea,uuid,integer,uuid,bigint,text,text,jsonb),
+    public.adopt_external_boot_release_cleanup_receipt_from_head(bytea,uuid,integer,uuid,bigint,text),
     public.record_external_boot_release_cleanup_receipt_from_head(bytea,uuid,integer,uuid,bigint,text)
 FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.record_external_boot_release_cleanup_receipt(
     bytea,uuid,integer,uuid,bigint,text,text,bigint,text,text) TO kdive_worker;
+GRANT EXECUTE ON FUNCTION public.adopt_external_boot_release_cleanup_receipt_from_head(
+    bytea,uuid,integer,uuid,bigint,text) TO kdive_worker;
 GRANT EXECUTE ON FUNCTION public.begin_external_boot_derived_release_recovery(
     bytea,uuid,integer,uuid,bigint,uuid,timestamptz),
     public.commit_external_boot_derived_release_recovery(bytea,uuid,integer,uuid,bigint,text,text,jsonb),

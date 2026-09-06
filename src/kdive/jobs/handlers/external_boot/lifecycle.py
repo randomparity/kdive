@@ -87,7 +87,7 @@ async def _derived_release_status(
     async with conn.cursor() as cur:
         await cur.execute(sql, args)
         row = await cur.fetchone()
-    if row is None or row[0] not in {"applied", "superseded", "conflict"}:
+    if row is None or row[0] not in {"applied", "superseded", "conflict", "not_applicable"}:
         raise RuntimeError("derived release function returned an invalid status")
     return str(row[0])
 
@@ -204,7 +204,7 @@ async def _run_active_release(context: OperationContext) -> ExternalBootDerivedR
     _require_category(context, observed, "absent")
     status = await _derived_release_status(
         context.prerequisites["connection"],
-        "SELECT public.record_external_boot_release_cleanup_receipt_from_head(%s,%s,%s,%s,%s,%s)",
+        "SELECT public.adopt_external_boot_release_cleanup_receipt_from_head(%s,%s,%s,%s,%s,%s)",
         (
             credential,
             context.job.id,
@@ -214,6 +214,20 @@ async def _run_active_release(context: OperationContext) -> ExternalBootDerivedR
             observed.composite_state,
         ),
     )
+    if status == "not_applicable":
+        status = await _derived_release_status(
+            context.prerequisites["connection"],
+            "SELECT public.record_external_boot_release_cleanup_receipt_from_head("
+            "%s,%s,%s,%s,%s,%s)",
+            (
+                credential,
+                context.job.id,
+                context.job.attempt,
+                context.authority.authority_id,
+                context.authority.generation,
+                observed.composite_state,
+            ),
+        )
     if status != "applied":
         raise CategorizedError(
             "derived release cleanup receipt was superseded", category=ErrorCategory.STALE_HANDLE

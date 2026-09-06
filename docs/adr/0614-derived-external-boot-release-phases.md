@@ -31,6 +31,25 @@ it never repeats a phase whose exact terminal journal and committed receipt alre
 Low-level release handling for already recovered legacy callers remains supported, but an active
 public release always uses the derived sequence.
 
+### Amendment (2026-09-06)
+
+If a worker is interrupted after a derived phase has reached terminal journal evidence, it does not
+retain the root authority. The queue retires that root attempt. A later claim allocates and
+acknowledges an ordinary fresh root authority; the old attempt and credential cannot mutate under
+the new authority.
+
+A fresh release root may adopt cleanup only after the authority journal proves an exact older
+terminal `cleanup` observation with category `absent`. The authority writes the fresh root's own
+derived cleanup journal records without repeating provider deletion. SQL then creates a second
+receipt for that fresh root only when an unconsumed receipt from a retired or superseded root has
+the same activation, system, run, plan, job, and absence digest. The original receipt is never
+rewritten; the adopted receipt records its source root. The ordinary finalizer consumes only the
+fresh receipt, so the reservation release remains a one-credit transaction.
+
+Fresh adoption rejects a missing source receipt, a different phase identity, a non-absent prior
+observation, or any stale root binding. Re-entry after recovery therefore performs cleanup under
+the new root, while re-entry after cleanup reuses only verified terminal evidence.
+
 ## Consequences
 
 Provider deletion and verified absence precede capacity credit. One public job remains running for

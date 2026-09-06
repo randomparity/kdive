@@ -1143,6 +1143,7 @@ class ExternalBootAuthorityService:
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
                     predecessor_receipt_identity: str | None = None
+                    adopted_cleanup: AuthorityObservationV1 | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1182,6 +1183,45 @@ class ExternalBootAuthorityService:
                             )
                             if not self._operation_matches(predecessor_record, predecessor):
                                 raise AuthorityServiceError("journal_conflict")
+                    if (
+                        request.purpose == "release"
+                        and request.operation is AuthorityOperation.CLEANUP
+                    ):
+                        prior_cleanup = next(
+                            (
+                                record
+                                for record in reversed(records)
+                                if record.phase is JournalPhase.TERMINAL
+                                and record.operation == "cleanup"
+                                and record.generation < request.generation
+                            ),
+                            None,
+                        )
+                        if prior_cleanup is not None:
+                            candidate = request.model_copy(
+                                update={
+                                    "authority_id": prior_cleanup.authority_id,
+                                    "generation": prior_cleanup.generation,
+                                    "attempt_id": prior_cleanup.attempt_id,
+                                    "operation_identity": prior_cleanup.operation_identity,
+                                    "operation_digest": prior_cleanup.operation_digest,
+                                    "expected_source_identity": (
+                                        prior_cleanup.expected_source_identity
+                                    ),
+                                    "intended_target_identity": (
+                                        prior_cleanup.intended_target_identity
+                                    ),
+                                    "recovery_objects": prior_cleanup.recovery_objects,
+                                }
+                            )
+                            if (
+                                prior_cleanup.outcome != "absent"
+                                or prior_cleanup.observation is None
+                                or prior_cleanup.observation.category != "absent"
+                                or not self._operation_matches(prior_cleanup, candidate)
+                            ):
+                                raise AuthorityServiceError("journal_conflict")
+                            adopted_cleanup = prior_cleanup.observation
                     unresolved = next(
                         (
                             record
@@ -1291,7 +1331,7 @@ class ExternalBootAuthorityService:
                             cast(str, predecessor_receipt_identity),
                             context,
                         )
-                    else:
+                    elif adopted_cleanup is None:
                         await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
@@ -1308,7 +1348,11 @@ class ExternalBootAuthorityService:
                         self._record(request, records, JournalPhase.PROVIDER_RETURNED),
                     )
                 try:
-                    observation = await self._adapter.observe(request)
+                    observation = (
+                        adopted_cleanup
+                        if adopted_cleanup is not None
+                        else await self._adapter.observe(request)
+                    )
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
