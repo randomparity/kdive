@@ -27,6 +27,7 @@ non-autocommit pool connection so the real transaction framing is exercised.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -45,6 +46,7 @@ from kdive.domain.catalog.images import ImageCatalogEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.capability_signals import render_direct_kernel_signal
 from kdive.images.kdump_support import KernelVersion
+from kdive.images.rootfs.fetch import RootfsObjectStore, fetch_public_provisioning_rootfs
 from kdive.images.rootfs.staged_provenance import sidecar_path, write_sidecar
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.model import InventoryDoc
@@ -52,11 +54,13 @@ from kdive.inventory.reconcile.coefficients import reconcile_coefficients
 from kdive.inventory.reconcile.images import reconcile_images
 from kdive.inventory.reconcile.records import ReconcileDiff
 from kdive.inventory.reconcile.resources import reconcile_resources
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.inventory import InventoryReconcilePass, _cwd_inventory_shadowed
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
+from kdive.services.systems.root_provenance import resolve_root_provenance
 from tests.reconcile_helpers import make_reconcile_config, null_image_store
 
 # `migrated_url` is provided as a fixture by tests/integration/conftest.py (re-exported from
@@ -3461,6 +3465,37 @@ def _staged_path_body(path: str, *, name: str = "local-rootfs") -> str:
     )
 
 
+def _verified_root_provenance(image: Path, *, architecture: str = "x86_64") -> dict[str, object]:
+    digest = "sha256:" + hashlib.sha256(image.read_bytes()).hexdigest()
+    return {
+        "root_spec": {
+            "schema": "root-spec-v1",
+            "architecture": architecture,
+            "root": "UUID=abc",
+            "arguments": ["root=UUID=abc", "rootfstype=ext4"],
+            "authority": "stage-inspection",
+            "source": {"kind": "staged-image", "identity": digest},
+        }
+    }
+
+
+def _local_profile(image: Path, digest: str) -> ProvisioningProfile:
+    return ProvisioningProfile.parse(
+        {
+            "schema_version": 1,
+            "arch": "x86_64",
+            "vcpu": 2,
+            "memory_mb": 2048,
+            "disk_gb": 20,
+            "boot_method": "direct-kernel",
+            "kernel_source_ref": "/src/linux",
+            "provider": {
+                "local-libvirt": {"rootfs": {"kind": "local", "path": str(image), "sha256": digest}}
+            },
+        }
+    )
+
+
 async def _reconcile(url: str, doc: InventoryDoc, store: _FakeImageStore) -> ReconcileDiff:
     async with (
         AsyncConnectionPool(url, min_size=1, max_size=2) as pool,
@@ -3501,6 +3536,81 @@ def test_staged_path_persists_sidecar_provenance(migrated_url: str, tmp_path: Pa
     asyncio.run(_run())
 
 
+def test_staged_path_promotes_verified_root_identity_to_catalog_digest(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        image = tmp_path / "img.qcow2"
+        image.write_bytes(b"mechanically-inspected-rootfs")
+        provenance = _verified_root_provenance(image)
+        write_sidecar(image, provenance=provenance)
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(image))))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        root_spec = cast(dict[str, object], provenance["root_spec"])
+        source = cast(dict[str, object], root_spec["source"])
+        assert row["digest"] == source["identity"]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "root_spec",
+    [
+        {"schema": "root-spec-v1", "architecture": "x86_64"},
+        {
+            "schema": "root-spec-v1",
+            "architecture": "ppc64le",
+            "root": "UUID=abc",
+            "arguments": ["root=UUID=abc", "rootfstype=ext4"],
+            "authority": "stage-inspection",
+            "source": {"kind": "staged-image", "identity": "sha256:" + "a" * 64},
+        },
+    ],
+    ids=["malformed", "architecture-mismatch"],
+)
+def test_staged_path_refuses_unusable_root_identity_promotion(
+    migrated_url: str, tmp_path: Path, root_spec: dict[str, object]
+) -> None:
+    async def _run() -> None:
+        image = tmp_path / "img.qcow2"
+        image.write_bytes(b"rootfs")
+        write_sidecar(image, provenance={"root_spec": root_spec})
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(image))))
+        diff = await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["digest"] is None
+        assert [record.name for record in diff.warned] == ["local-rootfs"]
+
+    asyncio.run(_run())
+
+
+def test_reconciled_staged_path_resolves_verified_root_snapshot(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        image = tmp_path / "img.qcow2"
+        image.write_bytes(b"mechanically-inspected-rootfs")
+        provenance = _verified_root_provenance(image)
+        root_spec = cast(dict[str, object], provenance["root_spec"])
+        source = cast(dict[str, object], root_spec["source"])
+        digest = cast(str, source["identity"])
+        write_sidecar(image, provenance=provenance)
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(image))))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            snapshot = await resolve_root_provenance(
+                check, _local_profile(image, digest), "project-a"
+            )
+        assert snapshot is not None
+        assert snapshot.image_digest == digest
+        assert snapshot.root_spec.root == "UUID=abc"
+
+    asyncio.run(_run())
+
+
 def test_staged_path_without_sidecar_stays_unverified(migrated_url: str, tmp_path: Path) -> None:
     """No sidecar → row provenance stays {} and the signal reads unverified (crit 4)."""
 
@@ -3511,8 +3621,61 @@ def test_staged_path_without_sidecar_stays_unverified(migrated_url: str, tmp_pat
         async with await _connect(migrated_url) as check:
             row = await _one(check, "local-rootfs")
         assert row["provenance"] == {}
+        assert row["digest"] is None
         entry = ImageCatalogEntry.model_validate(row)
         assert render_direct_kernel_signal(entry, _ANY_KERNEL)["status"] == "unverified"
+
+    asyncio.run(_run())
+
+
+def test_changed_path_without_sidecar_keeps_digest_and_fails_before_provision(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        original = tmp_path / "original.qcow2"
+        original.write_bytes(b"mechanically-inspected-rootfs")
+        provenance = _verified_root_provenance(original)
+        root_spec = cast(dict[str, object], provenance["root_spec"])
+        source = cast(dict[str, object], root_spec["source"])
+        digest = cast(str, source["identity"])
+        write_sidecar(original, provenance=provenance)
+        await _reconcile(
+            migrated_url,
+            load_inventory(_write_toml(tmp_path, _staged_path_body(str(original)))),
+            _FakeImageStore(),
+        )
+
+        changed = tmp_path / "changed.qcow2"
+        changed.write_bytes(b"different-rootfs-bytes")
+        diff = await _reconcile(
+            migrated_url,
+            load_inventory(_write_toml(tmp_path, _staged_path_body(str(changed)))),
+            _FakeImageStore(),
+        )
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["path"] == str(changed)
+        assert row["digest"] == digest
+        assert row["provenance"] == provenance
+        assert [record.name for record in diff.updated] == ["local-rootfs"]
+
+        def _unexpected_store() -> RootfsObjectStore:
+            raise AssertionError("staged-path materialization must not construct an object store")
+
+        with (
+            psycopg.connect(migrated_url, autocommit=True) as sync_conn,
+            pytest.raises(CategorizedError, match="sha256 does not match") as caught,
+        ):
+            fetch_public_provisioning_rootfs(
+                sync_conn,
+                _unexpected_store,
+                allowed_roots=[tmp_path],
+                provider="local-libvirt",
+                name="local-rootfs",
+                arch="x86_64",
+                cache_dir=tmp_path / ".cache",
+            )
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
     asyncio.run(_run())
 
