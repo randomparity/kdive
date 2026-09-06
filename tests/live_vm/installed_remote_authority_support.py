@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shlex
+import signal
 import stat
 import subprocess
+import time
+from contextlib import suppress
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import IO, Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -46,9 +50,12 @@ try:
     connection.settimeout(10)
     connection.connect(path)
     connection.sendall(len(request).to_bytes(4, "big") + request)
-    header = connection.recv(4)
-    if len(header) != 4:
-        raise SystemExit("fault barrier response is incomplete")
+    header = bytearray()
+    while len(header) < 4:
+        chunk = connection.recv(4 - len(header))
+        if not chunk:
+            raise SystemExit("fault barrier response is incomplete")
+        header.extend(chunk)
     size = int.from_bytes(header, "big")
     if size > 1024:
         raise SystemExit("fault barrier response is oversized")
@@ -135,8 +142,8 @@ def _ssh(
     *,
     payload: bytes = b"",
 ) -> bytes:
-    result = subprocess.run(
-        [
+    stdout, stderr, returncode = _run_bounded_command(
+        (
             "ssh",
             "-o",
             "BatchMode=yes",
@@ -145,18 +152,101 @@ def _ssh(
             "--",
             config.ssh_target,
             shlex.join(command),
-        ],
-        input=payload,
-        capture_output=True,
-        check=False,
+        ),
+        payload=payload,
         timeout=15,
+        stdout_limit=_MAX_CONTROL_BYTES,
+        stderr_limit=_MAX_CONTROL_BYTES,
     )
-    if result.returncode != 0:
-        detail = result.stderr.decode(errors="replace").strip()[-1000:]
+    if returncode != 0:
+        detail = stderr.decode(errors="replace").strip()
         raise RuntimeError(f"remote authority control failed: {detail}")
-    if len(result.stdout) > _MAX_CONTROL_BYTES:
-        raise AssertionError("remote authority control response is oversized")
-    return result.stdout
+    return stdout
+
+
+def _run_bounded_command(
+    argv: tuple[str, ...],
+    *,
+    payload: bytes,
+    timeout: float,
+    stdout_limit: int,
+    stderr_limit: int,
+) -> tuple[bytes, bytes, int]:
+    """Run one fixed command with bounded pipes and completion-owned cleanup."""
+    process = subprocess.Popen(  # noqa: S603 - fixed SSH or test argv only
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        _terminate_process_group(process)
+        raise RuntimeError("bounded remote control did not expose all pipes")
+    stdout = bytearray()
+    stderr = bytearray()
+    streams = (
+        (process.stdout, "stdout", stdout_limit, stdout),
+        (process.stderr, "stderr", stderr_limit, stderr),
+    )
+    selector = selectors.DefaultSelector()
+    try:
+        try:
+            process.stdin.write(payload)
+            process.stdin.flush()
+        except BrokenPipeError:
+            pass
+        finally:
+            process.stdin.close()
+        for stream, name, limit, output in streams:
+            selector.register(stream, selectors.EVENT_READ, (name, limit, output, stream))
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            ready = selector.select(remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _ in ready:
+                name, limit, output, stream = cast(tuple[str, int, bytearray, IO[bytes]], key.data)
+                chunk = os.read(key.fd, min(65_536, limit + 1 - len(output)))
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                output.extend(chunk)
+                if len(output) > limit:
+                    raise AssertionError(f"remote authority control {name} is oversized")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        returncode = process.wait(timeout=remaining)
+    except BaseException:
+        _terminate_process_group(process)
+        raise
+    finally:
+        selector.close()
+        with suppress(BrokenPipeError):
+            process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()
+    return (
+        bytes(stdout),
+        bytes(stderr),
+        returncode,
+    )
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Terminate the child session and synchronously reap its leader."""
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    with suppress(ProcessLookupError):
+        process.kill()
+    process.wait()
 
 
 def require_fault_barrier(config: RemoteAuthorityProofConfig) -> Path:

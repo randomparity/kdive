@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
-from typing import cast
 
 import pytest
 
+from tests.live_vm import installed_remote_authority_support as carrier
 from tests.live_vm.installed_remote_authority_support import (
     CONFIG_ENV,
     RemoteAuthorityProofConfig,
@@ -97,14 +101,20 @@ def _config() -> RemoteAuthorityProofConfig:
 def test_fault_barrier_uses_only_fixed_bounded_remote_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[list[str], dict[str, object]]] = []
+    calls: list[tuple[tuple[str, ...], bytes, float, int, int]] = []
 
-    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        calls.append((argv, kwargs))
-        stdout = b"" if len(calls) == 1 else b'{"state":"armed"}'
-        return subprocess.CompletedProcess(argv, 0, stdout, b"")
+    def run(
+        argv: tuple[str, ...],
+        *,
+        payload: bytes,
+        timeout: float,
+        stdout_limit: int,
+        stderr_limit: int,
+    ) -> tuple[bytes, bytes, int]:
+        calls.append((argv, payload, timeout, stdout_limit, stderr_limit))
+        return (b"" if len(calls) == 1 else b'{"state":"armed"}', b"", 0)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(carrier, "_run_bounded_command", run)
     response = fault_barrier_request(
         _config(),
         {
@@ -117,8 +127,8 @@ def test_fault_barrier_uses_only_fixed_bounded_remote_commands(
     )
     assert response == {"state": "armed"}
     assert len(calls) == 2
-    for argv, kwargs in calls:
-        assert argv[:7] == [
+    for argv, _payload, timeout, stdout_limit, stderr_limit in calls:
+        assert argv[:7] == (
             "ssh",
             "-o",
             "BatchMode=yes",
@@ -126,12 +136,12 @@ def test_fault_barrier_uses_only_fixed_bounded_remote_commands(
             "ConnectTimeout=10",
             "--",
             "authority-proof-host",
-        ]
+        )
         assert argv[7].startswith("sudo -n /usr/bin/python3 -c ")
-        assert kwargs["timeout"] == 15
-        assert kwargs["capture_output"] is True
-        assert kwargs["check"] is False
-    request = json.loads(cast(bytes, calls[1][1]["input"]))
+        assert timeout == 15
+        assert stdout_limit == 1024
+        assert stderr_limit == 1024
+    request = json.loads(calls[1][1])
     assert request["operation"] == "activate"
     assert "/run/kdive/provider-authority/proof-control/control.sock" in calls[1][0][7]
 
@@ -140,8 +150,8 @@ def test_fault_barrier_rejects_oversized_requests_without_ssh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        subprocess,
-        "run",
+        carrier,
+        "_run_bounded_command",
         lambda *_args, **_kwargs: pytest.fail("oversized input reached ssh"),
     )
     with pytest.raises(ValueError, match="byte limit"):
@@ -154,12 +164,12 @@ def test_fault_barrier_rejects_malformed_or_oversized_responses(
 ) -> None:
     calls = 0
 
-    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def run(_argv: tuple[str, ...], **_kwargs: object) -> tuple[bytes, bytes, int]:
         nonlocal calls
         calls += 1
-        return subprocess.CompletedProcess(argv, 0, b"" if calls == 1 else stdout, b"")
+        return (b"" if calls == 1 else stdout, b"", 0)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(carrier, "_run_bounded_command", run)
     with pytest.raises(AssertionError):
         fault_barrier_request(_config(), {"action": "status"})
 
@@ -169,13 +179,104 @@ def test_restart_targets_only_the_fixed_authority_service(
 ) -> None:
     commands: list[str] = []
 
-    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def run(argv: tuple[str, ...], **_kwargs: object) -> tuple[bytes, bytes, int]:
         commands.append(argv[-1])
         stdout = b"active\n" if "is-active" in argv[-1] else b""
-        return subprocess.CompletedProcess(argv, 0, stdout, b"")
+        return stdout, b"", 0
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(carrier, "_run_bounded_command", run)
     restart_authority_after_fault(_config())
     assert len(commands) == 2
     assert "systemctl restart kdive-external-boot-authority.service" in commands[0]
     assert "systemctl is-active kdive-external-boot-authority.service" in commands[1]
+
+
+def test_fault_barrier_client_reads_a_fragmented_header(tmp_path: Path) -> None:
+    response = b'{"state":"armed"}'
+    (tmp_path / "socket.py").write_text(
+        """
+AF_UNIX = 1
+SOCK_STREAM = 1
+
+class FakeSocket:
+    def __init__(self):
+        response = b'{"state":"armed"}'
+        header = len(response).to_bytes(4, 'big')
+        self.chunks = [header[:1], header[1:3], header[3:], response]
+    def settimeout(self, _timeout): pass
+    def connect(self, _path): pass
+    def sendall(self, _payload): pass
+    def recv(self, maximum):
+        chunk = self.chunks.pop(0) if self.chunks else b''
+        assert len(chunk) <= maximum
+        return chunk
+    def close(self): pass
+
+def socket(_family, _kind):
+    return FakeSocket()
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", carrier._FAULT_BARRIER_CLIENT],
+        input=b'{"action":"status"}',
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert result.stdout == response
+
+
+def _wait_for_process_exit(pid: int) -> None:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    os.kill(pid, signal.SIGKILL)
+    pytest.fail(f"bounded command left process {pid} running")
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_bounded_command_reaps_a_child_on_output_overflow(tmp_path: Path, stream: str) -> None:
+    pid_file = tmp_path / "pid"
+    program = (
+        "import os,pathlib,sys,time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        f"sys.{stream}.buffer.write(b'x' * 2048); sys.{stream}.flush(); time.sleep(60)"
+    )
+    with pytest.raises(AssertionError, match=f"{stream}.*oversized"):
+        carrier._run_bounded_command(
+            (sys.executable, "-c", program, str(pid_file)),
+            payload=b"",
+            timeout=5,
+            stdout_limit=1024,
+            stderr_limit=1024,
+        )
+    _wait_for_process_exit(int(pid_file.read_text(encoding="utf-8")))
+
+
+def test_bounded_command_timeout_terminates_and_reaps_the_process_group(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "pids"
+    program = (
+        "import os,pathlib,subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {child.pid}'); time.sleep(60)"
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        carrier._run_bounded_command(
+            (sys.executable, "-c", program, str(pid_file)),
+            payload=b"",
+            timeout=1,
+            stdout_limit=1024,
+            stderr_limit=1024,
+        )
+    parent, child = (int(value) for value in pid_file.read_text(encoding="utf-8").split())
+    _wait_for_process_exit(parent)
+    _wait_for_process_exit(child)
