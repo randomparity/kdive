@@ -110,7 +110,7 @@ def test_start_requires_the_complete_allowlisted_settings() -> None:
         LifecycleRequest.model_validate(payload)
 
 
-def test_start_does_not_require_authority_owned_storage_settings() -> None:
+def test_start_does_not_require_authority_reservation_settings() -> None:
     payload = start_payload()
     settings = cast(dict[str, object], payload["settings"])
     settings.pop("libvirt_recovery_root", None)
@@ -118,18 +118,30 @@ def test_start_does_not_require_authority_owned_storage_settings() -> None:
     assert LifecycleRequest.model_validate(payload).operation == "start"
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("libvirt_recovery_root", "/private/authority"), ("external_boot_capacity_bytes", 1024)],
-)
-def test_start_rejects_authority_owned_storage_settings(field: str, value: object) -> None:
+def test_start_rejects_authority_owned_recovery_path() -> None:
     payload = start_payload()
     settings = cast(dict[str, object], payload["settings"])
     settings.pop("libvirt_recovery_root", None)
     settings.pop("external_boot_capacity_bytes", None)
-    settings[field] = value
+    settings["libvirt_recovery_root"] = "/private/authority"
     with pytest.raises(ValidationError, match="extra_forbidden"):
         LifecycleRequest.model_validate(payload)
+
+
+def test_start_accepts_capacity_only_with_complete_authority_geometry() -> None:
+    payload = start_payload()
+    settings = cast(dict[str, object], payload["settings"])
+    settings["external_boot_capacity_bytes"] = 1024
+    with pytest.raises(ValidationError, match="geometry must be complete or absent"):
+        LifecycleRequest.model_validate(payload)
+    settings.update(
+        authority_store_identity="authority-recovery-store",
+        authority_recovery_reserve_bytes=1024,
+        authority_recovery_max_bytes=2048,
+    )
+    request = LifecycleRequest.model_validate(payload)
+    assert request.settings is not None
+    assert request.settings.external_boot_capacity_bytes == 1024
 
 
 def test_start_rejects_relative_worker_paths() -> None:
