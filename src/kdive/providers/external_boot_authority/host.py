@@ -1073,6 +1073,7 @@ async def _authenticate(config: AuthorityHostConfig, credential: SecretStr) -> A
 
 def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
     """Build mutation support only on a host with an explicitly provisioned local root."""
+    from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
     from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
     from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
     from kdive.providers.local_libvirt.composition import build_local_external_boot_authority
@@ -1095,6 +1096,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         ),
         adapter=binding.adapter,
+        recovery_orphans=RecoveryOrphanAuthorityService(connections, binding.provider),
     )
 
 

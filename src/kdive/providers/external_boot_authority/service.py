@@ -25,6 +25,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
@@ -96,6 +98,25 @@ class AuthorityPreparationAdopter(Protocol):
 @runtime_checkable
 class AuthorityAdapterCloser(Protocol):
     def close(self) -> None: ...
+
+
+class AuthorityRecoveryOrphanResolver(Protocol):
+    """Private recovery-object disposition service hosted on an authority lane."""
+
+    def set_serializer(
+        self,
+        serializer: Callable[
+            [
+                UUID,
+                Callable[[], Awaitable[AuthorityRecoveryOrphanDispositionResponseV1]],
+            ],
+            Awaitable[AuthorityRecoveryOrphanDispositionResponseV1],
+        ],
+    ) -> None: ...
+
+    async def resolve_recovery_orphan(
+        self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1: ...
 
 
 class AuthorityRepository(Protocol):
@@ -286,13 +307,17 @@ class ExternalBootAuthorityService:
         journal_factory: Callable[[UUID], FileAuthorityJournal],
         adapter: AuthorityMutationAdapter,
         metrics: AuthorityServiceMetrics | None = None,
+        recovery_orphans: AuthorityRecoveryOrphanResolver | None = None,
     ) -> None:
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
         self.metrics = metrics or AuthorityServiceMetrics.empty()
+        self._recovery_orphans = recovery_orphans
         self._lanes: dict[UUID, _Lane] = {}
         self._logger = logging.getLogger(__name__)
+        if recovery_orphans is not None:
+            recovery_orphans.set_serializer(self._serialize_recovery_orphan)
 
     def close(self) -> None:
         if isinstance(self._adapter, AuthorityAdapterCloser):
@@ -309,6 +334,28 @@ class ExternalBootAuthorityService:
             self._lanes.pop(system_id)
             if lane.journal is not None:
                 lane.journal.close()
+
+    async def _serialize_recovery_orphan(
+        self,
+        system_id: UUID,
+        operation: Callable[[], Awaitable[AuthorityRecoveryOrphanDispositionResponseV1]],
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        lane = self._lane(system_id)
+        try:
+            async with lane.lock:
+                return await operation()
+        finally:
+            self._release_lane(system_id, lane)
+
+    async def resolve_recovery_orphan(
+        self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        """Run a bounded orphan disposition on the same System lane as mutations."""
+        if self._recovery_orphans is None:
+            raise AuthorityServiceError("superseded")
+        if peer is None or not isinstance(peer.incarnation_id, UUID | str):
+            raise AuthorityServiceError("unauthenticated")
+        return await self._recovery_orphans.resolve_recovery_orphan(peer, request)
 
     def _lane_journal(
         self, system_id: UUID, lane: _Lane

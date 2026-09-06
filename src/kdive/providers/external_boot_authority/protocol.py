@@ -34,6 +34,7 @@ type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PositiveBigInt = Annotated[int, Field(ge=1, le=MAX_SIGNED_BIGINT)]
 type Purpose = Literal["activate", "recover", "resolve-conflict", "release", "teardown"]
 type ObservationCategory = Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
+type RecoveryOrphanDisposition = Literal["delete", "adopt"]
 
 
 def _bounded_text(value: str, *, maximum: int = 255) -> str:
@@ -278,12 +279,35 @@ class AuthorityHealthAcknowledgementV1(_ClosedValue):
     )
 
 
+class AuthorityRecoveryOrphanDispositionRequestV1(_ClosedValue):
+    """Closed fixed-route request for one claimed quarantine disposition job."""
+
+    schema_: Literal["external-boot-authority-orphan-disposition-v1"] = Field(
+        "external-boot-authority-orphan-disposition-v1", alias="schema"
+    )
+    request_id: UUID
+    job_id: UUID
+    job_attempt: PositiveBigInt
+
+
+class AuthorityRecoveryOrphanDispositionResponseV1(_ClosedValue):
+    """Durable result for the same exact orphan disposition request."""
+
+    schema_: Literal["external-boot-authority-orphan-disposition-v1"] = Field(
+        "external-boot-authority-orphan-disposition-v1", alias="schema"
+    )
+    request_id: UUID
+    disposition: RecoveryOrphanDisposition
+    objects: Annotated[int, Field(ge=0, le=64)]
+
+
 type AuthorityRequestV1 = (
     AuthorityTakeoverRequestV1
     | AuthorityConflictResolutionRequestV1
     | AuthorityMutationRequestV1
     | AuthorityPreparationMutationRequestV1
     | AuthorityHealthRequestV1
+    | AuthorityRecoveryOrphanDispositionRequestV1
 )
 _AUTHORITY_REQUEST_ADAPTER = TypeAdapter(AuthorityRequestV1)
 

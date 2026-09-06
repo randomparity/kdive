@@ -19,6 +19,7 @@ so an unauthorized caller learns nothing about whether the System carries an act
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from typing import LiteralString
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -141,6 +142,24 @@ _QUARANTINE_SQL: LiteralString = (
     "AND q.object_identity = ANY(%s) ORDER BY q.object_identity FOR UPDATE OF q"
 )
 
+_QUARANTINE_BINDING_FIELDS = (
+    "id",
+    "resource_id",
+    "activation_id",
+    "provider_kind",
+    "authority_instance",
+    "object_kind",
+    "object_reference",
+    "ownership_digest",
+    "observed_digest",
+    "reserved_bytes",
+    "resource_kind",
+    "operation_identity",
+    "attempt_id",
+    "mutation_journal_sequence",
+    "mutation_journal_digest",
+)
+
 _RELEASE_AUTHORITY_SQL: LiteralString = (
     "SELECT provider_kind, authority_instance "
     "FROM resolve_external_boot_release_dispatch_binding(%s, %s, %s, %s)"
@@ -209,6 +228,14 @@ def _config_error(object_id: str, *, reason: str, detail: str, next_action: str)
         suggested_next_actions=[next_action],
         data={"reason": reason},
     )
+
+
+def _quarantine_binding_digest(rows: Sequence[Mapping[str, object]]) -> str:
+    """Bind every immutable selected provider and ownership fact in admission order."""
+    canonical = "\0".join(
+        ":".join(str(row[field]) for field in _QUARANTINE_BINDING_FIELDS) for row in rows
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _conflict(
@@ -791,15 +818,13 @@ async def resolve_recovery_orphan(
                 or binding.runtime.external_boot_recovery_objects is None
             ):
                 return _executor_unavailable(system_id, ORPHAN_TOOL)
-            canonical = "\0".join(
-                f"{row['id']}:{row['ownership_digest']}:{row['observed_digest']}" for row in rows
-            )
-            binding_digest = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+            binding_digest = _quarantine_binding_digest(rows)
             operation_identity = (
                 "sha256:"
                 + hashlib.sha256(f"{uid}\0{disposition}\0{binding_digest}".encode()).hexdigest()
             )
             request_id = uuid5(NAMESPACE_URL, f"kdive:{operation_identity}")
+            assert metadata is not None
             payload = ResolveRecoveryOrphanPayload(
                 schema="resolve-recovery-orphan-v1",
                 system_id=str(uid),
@@ -817,9 +842,18 @@ async def resolve_recovery_orphan(
             object_ids = [row["id"] for row in rows]
             await conn.execute(
                 "INSERT INTO external_boot_recovery_orphan_requests "
-                "(id, system_id, disposition, binding_digest, object_ids, job_id) "
-                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-                (request_id, uid, disposition, binding_digest, object_ids, job.id),
+                "(id, system_id, disposition, binding_digest, object_ids, job_id, "
+                "readiness_deadline) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (
+                    request_id,
+                    uid,
+                    disposition,
+                    binding_digest,
+                    object_ids,
+                    job.id,
+                    metadata.readiness_deadline,
+                ),
             )
     return recovery_response(job, "system_id", str(uid))
 
