@@ -6,11 +6,14 @@ import asyncio
 import json
 import posixpath
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.protocol import MAX_MESSAGE_BYTES
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     HostStatDeviceIdentity,
@@ -115,6 +118,79 @@ def decode_device_identity_response(payload: bytes) -> DeviceIdentityResponseV1:
 
 class _IdentityLookup(Protocol):
     def __call__(self, path: str) -> RemoteDeviceIdentity | None: ...
+
+
+class _IdentitySender(Protocol):
+    async def resolve_device_identity(
+        self, request: DeviceIdentityRequestV1, *, deadline: float
+    ) -> DeviceIdentityResponseV1: ...
+
+
+class RemoteAuthorityDeviceIdentity:
+    """Synchronous ADR-0603 port over one fixed Resource-bound sender."""
+
+    def __init__(
+        self,
+        sender: _IdentitySender,
+        preparation_deadline: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._sender = sender
+        self._preparation_deadline = preparation_deadline
+        self._clock = clock
+
+    def identity(self, path: str) -> RemoteDeviceIdentity | None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise CategorizedError(
+                "remote device identity lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        remaining = self._preparation_deadline - self._clock()
+        if remaining <= 0:
+            raise CategorizedError(
+                "remote device identity lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        request = DeviceIdentityRequestV1(path=path)
+
+        async def resolve() -> DeviceIdentityResponseV1:
+            loop = asyncio.get_running_loop()
+            return await self._sender.resolve_device_identity(
+                request, deadline=loop.time() + remaining
+            )
+
+        try:
+            response = asyncio.run(resolve())
+        except CategorizedError:
+            raise
+        except Exception:
+            raise CategorizedError(
+                "remote device identity lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from None
+        if isinstance(response, DeviceIdentityAbsentV1):
+            return None
+        if isinstance(response, DeviceIdentityBlockV1):
+            return RemoteDeviceIdentity(kind="block", primary=response.primary, secondary=0)
+        if isinstance(response, DeviceIdentityInodeV1):
+            return RemoteDeviceIdentity(
+                kind="inode", primary=response.primary, secondary=response.secondary
+            )
+        raise CategorizedError("remote device identity is invalid", category=ErrorCategory.CONFLICT)
+
+
+def build_remote_device_identity_port(
+    sender: _IdentitySender | None, preparation_deadline: float
+) -> RemoteAuthorityDeviceIdentity | None:
+    """Build the port only for a configured Resource-bound authority sender."""
+    if sender is None:
+        return None
+    return RemoteAuthorityDeviceIdentity(sender, preparation_deadline)
 
 
 class RemoteDeviceIdentityService:

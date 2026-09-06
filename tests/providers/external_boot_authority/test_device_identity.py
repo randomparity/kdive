@@ -12,7 +12,9 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityBlockV1,
     DeviceIdentityInodeV1,
     DeviceIdentityRequestV1,
+    RemoteAuthorityDeviceIdentity,
     RemoteDeviceIdentityService,
+    build_remote_device_identity_port,
     decode_device_identity_request,
     decode_device_identity_response,
 )
@@ -136,3 +138,46 @@ def test_identity_service_close_is_nonwaiting_and_rejects_new_work() -> None:
     task.cancel()
     with pytest.raises(RuntimeError, match="provider-failure"):
         asyncio.run(service.resolve(DeviceIdentityRequestV1(path="/two")))
+
+
+def test_synchronous_identity_adapter_uses_captured_deadline_and_maps_identity() -> None:
+    seen: list[tuple[str, float]] = []
+
+    class Sender:
+        async def resolve_device_identity(
+            self, request: DeviceIdentityRequestV1, *, deadline: float
+        ) -> DeviceIdentityInodeV1:
+            seen.append((request.path, deadline - asyncio.get_running_loop().time()))
+            return DeviceIdentityInodeV1(primary=4, secondary=5)
+
+    port = RemoteAuthorityDeviceIdentity(Sender(), 110.0, clock=lambda: 100.0)
+    assert port.identity("/disk") == RemoteDeviceIdentity("inode", 4, 5)
+    assert seen[0][0] == "/disk"
+    assert seen[0][1] == pytest.approx(10.0)
+
+
+def test_synchronous_identity_adapter_rejects_expiry_and_running_loop() -> None:
+    class Sender:
+        called = False
+
+        async def resolve_device_identity(
+            self, request: DeviceIdentityRequestV1, *, deadline: float
+        ) -> DeviceIdentityAbsentV1:
+            del request, deadline
+            self.called = True
+            return DeviceIdentityAbsentV1()
+
+    sender = Sender()
+    with pytest.raises(Exception, match="remote device identity lookup failed"):
+        RemoteAuthorityDeviceIdentity(sender, 100.0, clock=lambda: 100.0).identity("/disk")
+
+    async def exercise() -> None:
+        with pytest.raises(Exception, match="remote device identity lookup failed"):
+            RemoteAuthorityDeviceIdentity(sender, 110.0, clock=lambda: 100.0).identity("/disk")
+
+    asyncio.run(exercise())
+    assert sender.called is False
+
+
+def test_unconfigured_device_identity_port_is_absent() -> None:
+    assert build_remote_device_identity_port(None, 100.0) is None
