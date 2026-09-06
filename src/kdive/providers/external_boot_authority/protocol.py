@@ -18,7 +18,10 @@ from pydantic import (
     model_validator,
 )
 
-from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.providers.ports.external_boot import (
+    ExternalBootPlan,
+    ExternalBootPreparationObservation,
+)
 
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
 MAX_MESSAGE_BYTES = 1_048_576
@@ -309,6 +312,24 @@ class AuthorityObservationV1(_ClosedValue):
     observation_id: UUID
     category: ObservationCategory
     composite_state: Digest
+
+
+class AuthorityPreparationResponseV1(_ClosedValue):
+    """Exact terminal checkpoint and provider receipt for one preparation phase."""
+
+    schema_: Literal["external-boot-authority-preparation-response-v1"] = Field(
+        "external-boot-authority-preparation-response-v1", alias="schema"
+    )
+    observation: AuthorityObservationV1
+    receipt: ExternalBootPreparationObservation
+    journal_sequence: PositiveBigInt
+    journal_digest: Digest
+
+    @model_validator(mode="after")
+    def _receipt_matches_observation(self) -> Self:
+        if self.receipt.identity != self.observation.composite_state:
+            raise ValueError("preparation receipt does not match its journal observation")
+        return self
 
 
 class JournalPhase(StrEnum):

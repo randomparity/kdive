@@ -22,6 +22,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
@@ -1093,7 +1094,7 @@ class ExternalBootAuthorityService:
         self,
         peer: AuthenticatedPeer | None,
         request: AuthorityPreparationMutationRequestV1,
-    ) -> tuple[AuthorityObservationV1, ExternalBootPreparationObservation]:
+    ) -> AuthorityPreparationResponseV1:
         """Execute through the authenticated lane, then reopen its durable receipt."""
         observation = await self.execute_mutation(peer, cast(AuthorityMutationRequestV1, request))
         if not isinstance(self._adapter, AuthorityPreparationAdapter):
@@ -1106,4 +1107,26 @@ class ExternalBootAuthorityService:
             raise self._provider_error(request) from None
         if receipt.identity != observation.composite_state:
             raise self._provider_error(request)
-        return observation, receipt
+        journal = self._journal_factory(request.system_id)
+        try:
+            terminal = next(
+                (
+                    record
+                    for record in reversed(list(journal.load()))
+                    if record.operation_identity == request.operation_identity
+                    and record.attempt_id == request.attempt_id
+                    and record.phase is JournalPhase.TERMINAL
+                    and record.observation == observation
+                ),
+                None,
+            )
+        finally:
+            journal.close()
+        if terminal is None:
+            raise AuthorityServiceError("journal_conflict")
+        return AuthorityPreparationResponseV1(
+            observation=observation,
+            receipt=receipt,
+            journal_sequence=terminal.sequence,
+            journal_digest=record_digest(terminal),
+        )

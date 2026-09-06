@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
@@ -31,6 +31,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityHealthRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
     decode_authority_request,
 )
@@ -51,7 +53,11 @@ _MAX_JSON_NESTING = 64
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
 type Operation = Literal[
-    "acknowledge-takeover", "execute-mutation", "health", "resolve-device-identity"
+    "acknowledge-takeover",
+    "execute-mutation",
+    "execute-preparation",
+    "health",
+    "resolve-device-identity",
 ]
 type AuthenticatePeer = Callable[[SecretStr], Awaitable[AuthenticatedPeer]]
 
@@ -64,6 +70,13 @@ class AuthorityService(Protocol):
     async def execute_mutation(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityPreparationService(Protocol):
+    async def execute_preparation(
+        self, peer: AuthenticatedPeer, request: AuthorityPreparationMutationRequestV1
+    ) -> AuthorityPreparationResponseV1: ...
 
 
 class DeviceIdentityService(Protocol):
@@ -110,6 +123,10 @@ def encode_request_envelope(
     if operation == "acknowledge-takeover" and not isinstance(decoded, AuthorityTakeoverRequestV1):
         raise ValueError("invalid-request")
     if operation == "execute-mutation" and not isinstance(decoded, AuthorityMutationRequestV1):
+        raise ValueError("invalid-request")
+    if operation == "execute-preparation" and not isinstance(
+        decoded, AuthorityPreparationMutationRequestV1
+    ):
         raise ValueError("invalid-request")
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
         raise ValueError("invalid-request")
@@ -170,6 +187,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
         if operation not in {
             "acknowledge-takeover",
             "execute-mutation",
+            "execute-preparation",
             "health",
             "resolve-device-identity",
         }:
@@ -191,6 +209,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             raise ValueError
         if operation == "execute-mutation" and not isinstance(request, AuthorityMutationRequestV1):
             raise ValueError
+        if operation == "execute-preparation" and not isinstance(
+            request, AuthorityPreparationMutationRequestV1
+        ):
+            raise ValueError
         if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
             raise ValueError
         if operation == "resolve-device-identity" and not isinstance(
@@ -205,6 +227,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
 def _success(
     value: AuthorityAcknowledgementV1
     | AuthorityObservationV1
+    | AuthorityPreparationResponseV1
     | AuthorityHealthAcknowledgementV1
     | DeviceIdentityResponseV1,
 ) -> bytes:
@@ -250,6 +273,12 @@ async def _dispatch(
             if not isinstance(request, AuthorityTakeoverRequestV1):
                 raise _TransportError("invalid-request")
             return _success(await service.acknowledge_takeover(peer, request))
+        if operation == "execute-preparation":
+            if not isinstance(request, AuthorityPreparationMutationRequestV1):
+                raise _TransportError("invalid-request")
+            if not isinstance(service, AuthorityPreparationService):
+                return _error("provider-not-configured")
+            return _success(await service.execute_preparation(peer, request))
         if not isinstance(request, AuthorityMutationRequestV1):
             raise _TransportError("invalid-request")
         return _success(await service.execute_mutation(peer, request))

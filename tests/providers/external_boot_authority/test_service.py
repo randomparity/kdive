@@ -122,10 +122,13 @@ async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: P
     adapter = _PreparationAdapter(receipt)
     service._adapter = cast(Any, adapter)
 
-    observation, reopened = await service.execute_preparation(peer, request)
+    response = await service.execute_preparation(peer, request)
 
-    assert reopened == receipt
-    assert observation.composite_state == receipt.identity
+    assert response.receipt == receipt
+    assert response.observation.composite_state == receipt.identity
+    terminal = repository.records[-1]
+    assert response.journal_sequence == terminal.sequence
+    assert response.journal_digest == record_digest(terminal)
     assert adapter.calls == ["commit:materialize", "observe"]
     assert repository.records[-1].phase is JournalPhase.TERMINAL
 
