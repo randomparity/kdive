@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import fcntl
 import hashlib
 import json
@@ -26,7 +25,7 @@ from kdive.providers.external_boot_authority.device_identity import (
     decode_device_identity_request,
 )
 from kdive.providers.external_boot_authority.protocol import (
-    MAX_MESSAGE_BYTES,
+    MAX_ENVELOPE_BYTES,
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityHealthAcknowledgementV1,
@@ -39,7 +38,9 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
+    authority_server_name,
     decode_authority_request,
+    read_frame,
 )
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
@@ -57,7 +58,6 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.host import AuthorityHostConfig
 
-MAX_ENVELOPE_BYTES = MAX_MESSAGE_BYTES
 MAX_CREDENTIAL_BYTES = 4_096
 SOCKET_MODE = 0o660
 SOCKET_DIRECTORY_MODE = 0o2750
@@ -158,13 +158,6 @@ class SocketLockBusyError(OSError):
     """The fixed authority-socket probe lock is already held."""
 
 
-def authority_server_name(authority_instance: str) -> str:
-    """Derive the stable reserved DNS name bound into an authority server certificate."""
-    digest = hashlib.sha256(authority_instance.encode("utf-8")).digest()
-    encoded = base64.b32encode(digest).decode("ascii").rstrip("=").lower()
-    return f"{encoded}.authority.kdive.invalid"
-
-
 def _canonical_json(value: object) -> bytes:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     if not encoded or len(encoded) > MAX_ENVELOPE_BYTES:
@@ -232,14 +225,6 @@ def encode_request_envelope(
     if operation == "resolve-device-identity" and not isinstance(decoded, DeviceIdentityRequestV1):
         raise ValueError("invalid-request")
     return _canonical_json({"credential": credential, "operation": operation, "request": request})
-
-
-async def read_frame(reader: asyncio.StreamReader, *, maximum: int) -> bytes:
-    """Read one network-order frame after rejecting its bound before allocation."""
-    size = int.from_bytes(await reader.readexactly(4), "big")
-    if size < 1 or size > maximum:
-        raise ValueError("invalid-request")
-    return await reader.readexactly(size)
 
 
 async def _write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:

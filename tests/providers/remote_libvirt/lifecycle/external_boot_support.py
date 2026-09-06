@@ -21,6 +21,7 @@ from kdive.providers.ports.external_boot import (
     RootSpecV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name, render_domain_xml
+from kdive.providers.shared.guest_agent import AgentExecResult
 
 _SYSTEM_ID = UUID("00000000-0000-0000-0000-00000000beef")
 _RUN_ID = "00000000-0000-0000-0000-000000000001"
@@ -30,6 +31,46 @@ _INITRD_SHA = "sha256:" + "22" * 32
 _MANIFEST = "sha256:" + "33" * 32
 _TREE = "sha256:" + "44" * 32
 _ROOT_IDENTITY = "sha256:" + "55" * 32
+_NOTES = bytes.fromhex("040000000800000003000000474e5500") + bytes.fromhex("ab" * 8)
+_CMDLINE = b"root=/dev/vda1 console=ttyS0\n"
+
+
+class _FakeAgentExec:
+    """Answers an exact argv with a canned result; an unconfigured argv is a hard failure."""
+
+    def __init__(self, replies: dict[tuple[str, ...], AgentExecResult]) -> None:
+        self._replies = replies
+        self.argvs: list[list[str]] = []
+        self.error: BaseException | None = None
+
+    def run(
+        self, domain: Any, argv: list[str], *, input_data: str | None = None
+    ) -> AgentExecResult:
+        del domain, input_data
+        self.argvs.append(list(argv))
+        if self.error is not None:
+            raise self.error
+        key = tuple(argv)
+        if key not in self._replies:
+            raise AssertionError(f"unconfigured argv: {argv}")
+        return self._replies[key]
+
+
+def _replies(
+    *,
+    release: bytes = b"6.9.0-kdive\n",
+    machine: bytes = b"x86_64\n",
+    cmdline: bytes = _CMDLINE,
+    notes: bytes = _NOTES,
+    exits: dict[str, int] | None = None,
+) -> dict[tuple[str, ...], AgentExecResult]:
+    codes = exits or {}
+    return {
+        ("/usr/bin/uname", "-r"): AgentExecResult(codes.get("release", 0), release, b""),
+        ("/usr/bin/uname", "-m"): AgentExecResult(codes.get("machine", 0), machine, b""),
+        ("/usr/bin/cat", "/proc/cmdline"): AgentExecResult(codes.get("cmdline", 0), cmdline, b""),
+        ("/usr/bin/cat", "/sys/kernel/notes"): AgentExecResult(codes.get("notes", 0), notes, b""),
+    }
 
 
 def _remote_profile(**section_overrides: Any) -> ProvisioningProfile:

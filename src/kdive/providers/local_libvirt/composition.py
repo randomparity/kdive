@@ -97,6 +97,7 @@ from kdive.providers.local_libvirt.settings import (
     LIBVIRT_RECOVERY_ROOT,
     LIBVIRT_URI,
 )
+from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
@@ -299,6 +300,11 @@ def build_local_external_boot_authority(
     return LocalExternalBootAuthorityBinding(
         provider, LocalExternalBootAuthorityAdapter(provider, mechanisms.lease_scope)
     )
+
+
+def build_external_boot_artifact_stager(store: ObjectStore) -> ExternalBootArtifactStager:
+    """Build the local staging implementation behind the composition boundary."""
+    return RealLocalExternalBootMaterializer(store)
 
 
 def external_boot_authority_is_configured() -> bool:

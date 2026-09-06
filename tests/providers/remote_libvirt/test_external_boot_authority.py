@@ -106,16 +106,14 @@ from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
 from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
+    _FakeAgentExec,
     _materialization,
     _plan,
+    _replies,
     _source_xml,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as module_operation,
-)
-from tests.providers.remote_libvirt.lifecycle.test_external_boot import (
-    _FakeAgentExec,
-    _replies,
 )
 from tests.support.external_boot_plan import external_boot_plan
 

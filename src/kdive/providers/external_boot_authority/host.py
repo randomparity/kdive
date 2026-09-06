@@ -525,6 +525,10 @@ async def check_database_role(connection: Any) -> None:
                     ::regprocedure,
                 'public.resolve_current_external_boot_preparation_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
+                'public.open_external_boot_remote_module_attempt(text,uuid,bigint,bigint,'
+                    'text,uuid,text,text)'::regprocedure,
+                'public.read_authorized_remote_module_cleanup_evidence(text,uuid,bigint,bigint,'
+                    'text,uuid,uuid,uuid,text,text,text,text,text,text,text,text)'::regprocedure,
                 'public.resolve_current_external_boot_release_phase_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
                 'public.resolve_external_boot_recovery_orphan_authority(text,uuid,uuid,integer)'
@@ -1111,6 +1115,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
 
     from kdive import config as runtime_config
     from kdive.providers.assembly.composition import (
+        build_authority_artifact_stager,
         build_authority_mutation_binding,
         object_store_from_env,
     )
@@ -1119,9 +1124,6 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     from kdive.providers.external_boot_authority.service import (
         AuthorityAdapterCloser,
         ExternalBootAuthorityService,
-    )
-    from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-        RealLocalExternalBootMaterializer,
     )
     from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
     from kdive.providers.remote_libvirt.external_boot_authority import (
@@ -1167,7 +1169,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     def provider_connection() -> Iterator[Any]:
         yield connection
 
-    artifact_stager = RealLocalExternalBootMaterializer(object_store)
+    artifact_stager = build_authority_artifact_stager(object_store)
     module_factory = RemoteModuleAuthorityHostFactory(
         connection=connection,
         pool_name=config.remote_libvirt_storage_pool,

@@ -46,6 +46,7 @@ from kdive.providers.infra.reaping import (
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
 from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.ports.traffic import (
     CaptureExecutionRequest,
     LocalCaptureConfiguration,
@@ -78,6 +79,11 @@ def build_authority_mutation_binding(
     return local_composition.build_local_external_boot_authority(
         object_store if object_store is not None else object_store_from_env(), provider_socket
     )
+
+
+def build_authority_artifact_stager(object_store: ObjectStore) -> ExternalBootArtifactStager:
+    """Build authority-host staging without exposing local provider implementation imports."""
+    return local_composition.build_external_boot_artifact_stager(object_store)
 
 
 def build_authority_mutation_adapter(
