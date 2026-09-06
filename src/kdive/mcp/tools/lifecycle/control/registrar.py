@@ -231,12 +231,32 @@ async def _op_opt_in(
     return runtime.profile_policy.destructive_opt_in(profile, op_kind)
 
 
+async def _optional_run_for_system(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run_id: str | None,
+    system_id: UUID,
+) -> UUID | ToolResponse:
+    """Validate an optional readable Run is bound to the target System."""
+    if run_id is None:
+        return system_id
+    uid = _as_uuid(run_id)
+    if uid is None:
+        return _invalid_uuid_error("run_id", run_id)
+    run = await RUNS.get(conn, uid)
+    if run is None or run.project not in ctx.projects or run.system_id != system_id:
+        return _config_error(run_id)
+    require_role(ctx, run.project, Role.VIEWER)
+    return uid
+
+
 async def force_crash_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     system_id: str,
     resolver: ProviderResolver,
+    run_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Gate, admit, and enqueue a `force_crash` job for a `ready` System (admin + gate).
@@ -252,6 +272,9 @@ async def force_crash_system(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
+            run = await _optional_run_for_system(conn, ctx, run_id, uid)
+            if isinstance(run, ToolResponse):
+                return run
             gated = await _authorize_destructive(
                 conn, ctx, system, uid, _FORCE_CRASH, resolver=resolver, tool="control.force_crash"
             )
@@ -270,11 +293,6 @@ async def force_crash_system(
             async def _enqueue() -> ToolResponse:
                 # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
                 # fresh enqueue is guarded: an activation must not un-idempotent a retry.
-                #
-                # ADR-0583's owning-Run modifier on force-crash is unenforced here — this handler
-                # carries no caller Run; the bound is the admin role plus the ADR-0130 gate. See
-                # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
-                #
                 # `f"{uid}:force_crash"` is stable across calls and recycles nothing, so an
                 # unkeyed repeat returns the prior job unchanged. That must stay a replay: the
                 # crash job is queued and will fire, and telling the agent it was refused
@@ -289,7 +307,11 @@ async def force_crash_system(
                     return job_envelope(replay, "system_id", uid)
                 try:
                     await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.FORCE_CRASH, project=system.project
+                        conn,
+                        uid,
+                        ExternalBootOperation.FORCE_CRASH,
+                        project=system.project,
+                        run_id=run if run_id is not None else None,
                     )
                 except ExternalBootDenied as exc:
                     return _external_boot_denial(system_id, exc, ctx)
@@ -397,6 +419,7 @@ async def watch_for_crash_system(
     system_id: str,
     deadline_s: float,
     resolver: ProviderResolver,
+    run_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit an out-of-band crash-signature console watch on a ready, crash-watch-capable System.
@@ -419,6 +442,9 @@ async def watch_for_crash_system(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
+            run = await _optional_run_for_system(conn, ctx, run_id, uid)
+            if isinstance(run, ToolResponse):
+                return run
             require_role(ctx, system.project, Role.CONTRIBUTOR)
             binding = await resolver.binding_for_system(conn, system.id)
             if not binding.runtime.support.supports_crash_watch:
@@ -447,10 +473,7 @@ async def watch_for_crash_system(
                 #
                 # The guard sits inside the closure, so `keyed_mutation`'s replay lookup runs
                 # first and only a fresh enqueue is guarded: an activation must not un-idempotent
-                # a retry. ADR-0583's owning-Run modifier is unenforced here — this handler
-                # carries no caller Run. The record below covers `SYSTEM_WATCH_CRASH` too. See
-                # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
-                #
+                # a retry.
                 # The stable key described above is exactly a replay, so it is probed ahead of
                 # the guard. Terminal-or-canceled rows are recycled into a fresh watch, so
                 # `dedup_replay` correctly reports those as fresh work the matrix must decide.
@@ -461,7 +484,11 @@ async def watch_for_crash_system(
                     return job_envelope(replay, "system_id", uid)
                 try:
                     await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH, project=system.project
+                        conn,
+                        uid,
+                        ExternalBootOperation.SYSTEM_WATCH_CRASH,
+                        project=system.project,
+                        run_id=run if run_id is not None else None,
                     )
                 except ExternalBootDenied as exc:
                     return _external_boot_denial(system_id, exc, ctx)
@@ -695,15 +722,26 @@ def _register_control_force_crash(
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
+        run_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional Run bound to this System. Required while an active external boot "
+                    "is owned by a Run; it must name that owner."
+                )
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Inject an NMI to crash a ready System; drives ready->crashing->crashed.
 
-        Requires admin + gate."""
+        Requires admin + gate. While an active external boot restricts the System, provide its
+        owning `run_id`; another Run or no Run is refused."""
         return await force_crash_system(
             pool,
             current_context(),
             system_id=system_id,
             resolver=resolver,
+            run_id=run_id,
             idempotency_key=idempotency_key,
         )
 
@@ -794,12 +832,23 @@ def _register_control_watch_for_crash(
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
+        run_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional Run bound to this System. Required while an active external boot "
+                    "is owned by a Run; it must name that owner."
+                )
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Watch a ready guest's serial console out-of-band for a kernel-crash signature
         (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on the first
         hit. The bound provider must support out-of-band crash-watch (today local-libvirt and
         remote-libvirt); a provider that does not is refused with a `capability_unsupported`
-        `configuration_error`. Use this to catch a crash your own reproducer provokes: drive the
+        `configuration_error`. While an active external boot restricts the System, provide its
+        owning `run_id`; another Run or no Run is refused. Use this to catch a crash your own
+        reproducer provokes: drive the
         repeat-until-crash loop over your root SSH, and this watches the console — which survives
         the panic that drops SSH. Requires contributor; enqueues a job and returns
         `{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
@@ -816,6 +865,7 @@ def _register_control_watch_for_crash(
             system_id=system_id,
             deadline_s=deadline_s,
             resolver=resolver,
+            run_id=run_id,
             idempotency_key=idempotency_key,
         )
 

@@ -296,6 +296,7 @@ async def _watch_for_crash(restricted: _Restricted) -> ToolResponse:
         restricted.pool,
         _ctx(),
         system_id=restricted.system_id,
+        run_id=restricted.owning_run_id,
         deadline_s=5.0,
         resolver=_resolver(),
     )
@@ -372,10 +373,10 @@ async def _power_keyed(
 
 
 async def _force_crash_keyed(
-    pool: AsyncConnectionPool, system_id: str, _run: str, key: str
+    pool: AsyncConnectionPool, system_id: str, run_id: str, key: str
 ) -> ToolResponse:
     return await force_crash_system(
-        pool, _ctx(), system_id=system_id, resolver=_resolver(), idempotency_key=key
+        pool, _ctx(), system_id=system_id, run_id=run_id, resolver=_resolver(), idempotency_key=key
     )
 
 
@@ -393,12 +394,13 @@ async def _sysrq_keyed(
 
 
 async def _watch_keyed(
-    pool: AsyncConnectionPool, system_id: str, _run: str, key: str
+    pool: AsyncConnectionPool, system_id: str, run_id: str, key: str
 ) -> ToolResponse:
     return await watch_for_crash_system(
         pool,
         _ctx(),
         system_id=system_id,
+        run_id=run_id,
         deadline_s=5.0,
         resolver=_resolver(),
         idempotency_key=key,
@@ -538,10 +540,10 @@ def test_traffic_capture_is_admitted_for_the_owning_run(
     assert capture.error_category is None
 
 
-def test_watch_for_crash_is_admitted_while_active_and_denied_once_recovery_conflicts(
+def test_watch_for_crash_is_admitted_for_owner_and_denied_once_recovery_conflicts(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
-    """``SYSTEM_WATCH_CRASH`` is admitted in ``active`` for any caller (it carries no Run)."""
+    """``SYSTEM_WATCH_CRASH`` requires the active activation's owning Run."""
 
     async def _run() -> tuple[ToolResponse, ToolResponse]:
         async with runs_support.pool(migrated_url) as conn_pool:
@@ -567,6 +569,7 @@ def test_force_crash_is_admitted_while_active_and_denied_once_recovery_conflicts
                 conn_pool,
                 _ctx(),
                 system_id=active.system_id,
+                run_id=active.owning_run_id,
                 resolver=_resolver(),
             )
             conflicted = await _restricted_ready_system(
@@ -576,12 +579,61 @@ def test_force_crash_is_admitted_while_active_and_denied_once_recovery_conflicts
                 conn_pool,
                 _ctx(),
                 system_id=conflicted.system_id,
+                run_id=conflicted.owning_run_id,
                 resolver=_resolver(),
             )
         assert admitted.status == "queued", admitted.model_dump()
         _assert_denied(denied, _CONFLICT_ACTIONS)
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("operation", ("force_crash", "watch_for_crash"))
+def test_crash_operations_deny_missing_or_nonowning_run_while_active(
+    migrated_url: str, seeded_activation: SeedActivation, operation: str
+) -> None:
+    async def _run() -> tuple[ToolResponse, ToolResponse]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            restricted = await _restricted_ready_system(conn_pool, seeded_activation)
+            investigation_id = await runs_support.seed_investigation(conn_pool)
+            other_run = await _insert_run(
+                conn_pool,
+                investigation_id=UUID(investigation_id),
+                system_id=restricted.system_id,
+                state=RunState.SUCCEEDED,
+            )
+            if operation == "force_crash":
+                missing = await force_crash_system(
+                    conn_pool, _ctx(), system_id=restricted.system_id, resolver=_resolver()
+                )
+                nonowning = await force_crash_system(
+                    conn_pool,
+                    _ctx(),
+                    system_id=restricted.system_id,
+                    run_id=other_run,
+                    resolver=_resolver(),
+                )
+            else:
+                missing = await watch_for_crash_system(
+                    conn_pool,
+                    _ctx(),
+                    system_id=restricted.system_id,
+                    deadline_s=5.0,
+                    resolver=_resolver(),
+                )
+                nonowning = await watch_for_crash_system(
+                    conn_pool,
+                    _ctx(),
+                    system_id=restricted.system_id,
+                    run_id=other_run,
+                    deadline_s=5.0,
+                    resolver=_resolver(),
+                )
+        return missing, nonowning
+
+    missing, nonowning = asyncio.run(_run())
+    _assert_denied(missing, _ACTIVE_ACTIONS)
+    _assert_denied(nonowning, _ACTIVE_ACTIONS)
 
 
 def test_teardown_is_admitted_in_every_restricted_state(
