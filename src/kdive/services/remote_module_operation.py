@@ -73,7 +73,7 @@ class RemoteModuleOperationRuntime:
 
     pool: AsyncConnectionPool
     repository: RemoteModuleAttemptObligationRepository
-    read_scratch_result: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]]
+    read_scratch_result: Callable[..., Awaitable[bytes | None]]
     volume_preparation: RemoteModuleVolumePreparation | None = None
     appliance_execution: RemoteModuleApplianceExecution | None = None
     module_volume_reaper: ModuleVolumeReaper | None = None
@@ -711,9 +711,9 @@ class RemoteModuleOperationRuntime:
         )
 
     async def reopen_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1:
-        raw = await self.read_scratch_result(recovery)
+        raw = await self._read_scratch(recovery, deadline)
         if raw is None:
             return (await self._evidence(recovery))[0]
         result = self._decode_scratch(raw)
@@ -731,14 +731,14 @@ class RemoteModuleOperationRuntime:
         return operation
 
     async def reopen_capture_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1:
-        return self._operation_from_result(await self.reopen_installed_result(recovery))
+        return self._operation_from_result(await self.reopen_installed_result(recovery, deadline))
 
     async def reopen_installed_result(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleResultV1:
-        result = await self.reopen_result(recovery)
+        result = await self.reopen_result(recovery, deadline)
         return self._installed_result(result, recovery)
 
     @staticmethod
@@ -750,8 +750,10 @@ class RemoteModuleOperationRuntime:
                 "remote module scratch result is invalid", category=ErrorCategory.CONFLICT
             ) from None
 
-    async def reopen_result(self, recovery: RemoteModuleRecoveryRefV1) -> RemoteModuleResultV1:
-        raw = await self.read_scratch_result(recovery)
+    async def reopen_result(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
+    ) -> RemoteModuleResultV1:
+        raw = await self._read_scratch(recovery, deadline)
         if raw is None:
             return (await self._evidence(recovery))[1]
         result = self._decode_scratch(raw)
@@ -767,3 +769,10 @@ class RemoteModuleOperationRuntime:
                 category=ErrorCategory.CONFLICT,
             )
         return result
+
+    async def _read_scratch(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None
+    ) -> bytes | None:
+        if deadline is None:
+            return await self.read_scratch_result(recovery)
+        return await self.read_scratch_result(recovery, deadline)

@@ -228,7 +228,7 @@ async def restore_modules(
         ) from exc
     reap_state = await runtime.reap_state(recovery, executor)
     if reap_state != "absent":
-        result = await runtime.reopen_result(recovery)
+        result = await runtime.reopen_result(recovery, deadline)
         if reap_state == "reaped":
             return result
         observation = await runtime.resume_reap(recovery, executor, deadline)
@@ -242,8 +242,8 @@ async def restore_modules(
         await runtime.record_reaped(recovery, executor)
         return result
 
-    capture = await runtime.reopen_capture_operation(recovery)
-    installed = await runtime.reopen_installed_result(recovery)
+    capture = await runtime.reopen_capture_operation(recovery, deadline)
+    installed = await runtime.reopen_installed_result(recovery, deadline)
     _validate_result(capture, installed)
     if (
         identity_for(capture) != recovery.operation_identity
@@ -254,8 +254,8 @@ async def restore_modules(
             category=ErrorCategory.CONFLICT,
         )
     restore = _restore_operation(capture, installed)
-    current_operation = await runtime.reopen_operation(recovery)
-    result = await runtime.reopen_result(recovery)
+    current_operation = await runtime.reopen_operation(recovery, deadline)
+    result = await runtime.reopen_result(recovery, deadline)
     if current_operation not in {capture, restore}:
         raise CategorizedError(
             "remote module current operation differs from restore baseline",

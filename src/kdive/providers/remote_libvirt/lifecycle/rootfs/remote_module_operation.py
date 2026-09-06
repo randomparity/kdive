@@ -53,14 +53,16 @@ class ModuleOperationRuntime(Protocol):
         self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
     ) -> PreparedModuleVolumes: ...
     async def reopen_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1: ...
-    async def reopen_result(self, recovery: RemoteModuleRecoveryRefV1) -> RemoteModuleResultV1: ...
+    async def reopen_result(
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
+    ) -> RemoteModuleResultV1: ...
     async def reopen_capture_operation(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleOperationV1: ...
     async def reopen_installed_result(
-        self, recovery: RemoteModuleRecoveryRefV1
+        self, recovery: RemoteModuleRecoveryRefV1, deadline: float | None = None
     ) -> RemoteModuleResultV1: ...
     async def prepare(
         self,

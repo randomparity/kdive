@@ -166,6 +166,19 @@ def test_scratch_result_reopens_before_terminal_evidence() -> None:
     assert asyncio.run(runtime.reopen_result(_recovery(result))) == result
 
 
+def test_scratch_reopen_passes_inherited_absolute_deadline() -> None:
+    result = RemoteModuleResultV1.model_validate(_result())
+    observed: list[float] = []
+
+    async def read(_: RemoteModuleRecoveryRefV2, deadline: float) -> bytes:
+        observed.append(deadline)
+        return result.to_wire_bytes()
+
+    runtime = _runtime(cast(Any, read))
+    assert asyncio.run(runtime.reopen_result(_recovery(result), 123.5)) == result
+    assert observed == [123.5]
+
+
 @pytest.mark.parametrize("raw", [b"not json\n", None])
 def test_missing_or_malformed_scratch_is_redacted_conflict(raw: bytes | None) -> None:
     result = RemoteModuleResultV1.model_validate(_result())
