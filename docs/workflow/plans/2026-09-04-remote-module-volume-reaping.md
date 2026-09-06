@@ -14,7 +14,9 @@ composition/report wiring, and provider, fleet, lane, and loop tests.
 - The host is x86_64. Project targets are x86_64 and ppc64le; native ppc64le live testing is
   excluded from this campaign run.
 - ADR-0588 governs whole-name ownership, enumerate-before-retained-read ordering, distinct mutation
-  and reap obligations, immediate domain-reference preflight, and idempotent deletion.
+  and reap obligations, immediate domain-reference preflight, and idempotent deletion. ADR-0603 and
+  ADR-0604 govern typed remote identity and its Resource-bound authority transport. #2170 supplies
+  the completion-owned preparation executor used for blocking provider work.
 - Public error details contain only `pool` and `volume`. Never include host identity, URI,
   credentials, domain XML, or backing paths.
 - Guardrails: focused pytest while iterating; `just lint`, `just type`, and `just test-changed`
@@ -90,10 +92,10 @@ def reap_orphaned_module_volumes(
    enumeration, retention-read, path lookup, and delete order; run the focused command and observe
    the missing-module failure.
 3. Implement protocols and parse each active and inactive definition with #2167's bounded parser;
-   feed every document through the shared reference helpers. Direct file/device paths and candidate
-   paths use remote POSIX lexical normalization, managed direct aliases resolve through
-   `storageVolLookupByPath`, volume references resolve through their named pool and volume, and any
-   missing required volume attribute or operational resolution error raises infrastructure failure.
+   feed every document through the shared reference helpers. Resolve direct file/device paths,
+   candidate paths, and named-volume canonical paths through the supplied ADR-0603 identity port.
+   Missing or malformed identity fails closed; timeout and operational resolution errors raise
+   infrastructure failure. Enforce one bounded identity-call budget across the complete preflight.
 4. Implement one complete enumeration, retention filtering, a complete reference/conflict
    preflight, then deletion. Translate libvirt errors with bounded details and count
    `VIR_ERR_NO_STORAGE_VOL` as removed.
@@ -126,9 +128,12 @@ class ModuleVolumeReaper(Protocol):
 ```
 
 `NullModuleVolumeReaper` returns zero without calling the callback.
-`RemoteLibvirtModuleVolumeReaper.from_env(secret_registry=...)` consumes the existing
-`remote_libvirt_reaper_connections`, calls Task 1 on each reachable host's `storage_pool`, and
-bridges each synchronous retention read to the owning asyncio loop.
+`RemoteLibvirtModuleVolumeReaper.from_env(secret_registry=..., authority_sender_factory=...)`
+consumes the existing `remote_libvirt_reaper_connections`, #2170's
+`RemoteModulePreparationExecutor`, and each configuration's immutable authority binding. It builds
+the same typed Resource-bound sender and ADR-0603 identity adapter used by preparation, calls Task 1
+on each reachable host's `storage_pool`, and bridges each synchronous retention read to the owning
+asyncio loop. One bounded deadline covers each host sweep.
 
 ### Verification
 
@@ -143,22 +148,24 @@ bridges each synchronous retention read to the owning asyncio loop.
 1. Add protocol/null tests and a fake two-host connection bundle that asserts the callback runs on
    the event-loop thread only after the worker has enumerated each host; observe missing symbols.
 2. Implement the provider-neutral key/port and null port.
-3. Implement the remote fleet adapter using `asyncio.to_thread` and
-   `asyncio.run_coroutine_threadsafe`; convert immutable keys to `ModuleVolumeOwner` inside the
-   provider boundary and aggregate per-host removal counts. Hold a task for the offload and shield
-   it. After cancellation, loop on the same shielded task, catching every subsequent
-   `CancelledError` without calling `Task.uncancel`, until the worker is done; retrieve and log any
-   terminal worker exception, then re-raise cancellation. Add a controlled test that cancels twice
-   during the drain and proves the adapter remains pending until both callback and worker finish,
-   after which it raises cancellation with the cancellation count preserved.
+3. Implement the remote fleet adapter with `asyncio.run_coroutine_threadsafe` for the retained-owner
+   callback and #2170's completion-owned executor for each blocking host operation; convert
+   immutable keys to `ModuleVolumeOwner` inside the provider boundary and aggregate per-host removal
+   counts. Build the host's typed sender and ADR-0603 identity adapter from its fixed authority
+   binding. Add a controlled test that cancels twice during the drain and proves the adapter remains
+   pending until both callback and worker finish, after which it raises cancellation with the
+   cancellation count preserved. Reuse the executor's existing shutdown and capacity regressions;
+   do not duplicate its cancellation loop.
 4. Add the remote factory to the provider descriptor and expose
    `ProviderComposition.build_reconciler_module_volume_reaper`, returning the null port when remote
    libvirt is disabled.
 5. Run the focused command and expect all selected tests to pass. Commit the task.
 
-Acceptance: provider construction opens no connection; one unreachable host does not block later
-hosts; a reachable-host operation error propagates; no callback is invoked when no host is reached;
-cancellation does not outlive or abandon the worker thread or retained-owner future.
+Acceptance: provider construction opens no connection or authority credential; one unreachable host
+does not block later hosts; a reachable-host operation or missing authority fails closed; no
+callback is invoked when no host is reached; cancellation does not outlive or abandon the worker
+thread or retained-owner future; caller-selected destinations and local identity fallback remain
+impossible.
 
 ## Task 3 — Durable-obligation lane and reconciler registration
 

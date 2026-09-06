@@ -21,14 +21,13 @@ storage referenced by an active or inactive domain definition.
   protects `reaping.journal` and `reaped.journal`.
 - The domain-reference set is resolved after retained owners and before deletion. The collector
   reuses #2167's landed complete disk-graph traversal: every `source` below a disk, including
-  nested backing stores and data stores, plus active and legacy mirror path attributes. File and
-  device sources are normalized lexically with POSIX path rules on both sides of the comparison; local
-  `realpath` is forbidden because the paths belong to the remote host. The connection also attempts
-  `storageVolLookupByPath` so a libvirt-managed alias resolves to the volume's canonical path. An
-  unmanaged direct path falls back only on lexical normalization; an operational lookup error
-  aborts the preflight. A volume-backed source contributes the canonical path returned by its named
-  pool and volume. Any unresolved volume-backed source aborts the host sweep before the first
-  delete.
+  nested backing stores and data stores, plus active and legacy mirror path attributes. Every
+  candidate and referenced path is resolved through ADR-0603's landed, Resource-bound
+  `RemoteDeviceIdentityPort`; lexical equality is not an identity fallback. Missing identity,
+  malformed identity, timeout, or operational lookup failure aborts the host preflight before the
+  first delete. A volume-backed source contributes the identity of the canonical path returned by
+  its named pool and volume. One bounded traversal and identity-call budget covers the complete
+  host preflight.
 - A referenced candidate is reported with bounded conflict telemetry and left intact while
   independent candidates continue. Foreign and retained volumes are silent skips. Any libvirt
   error that prevents a complete reference set is categorized as infrastructure failure with
@@ -47,19 +46,21 @@ promotes those two landed private helpers to provider-package interfaces without
 behavior, so the attempt-scoped inspector and whole-pool sweep cannot drift onto different disk
 graphs.
 
-`RemoteLibvirtModuleVolumeReaper` is the asynchronous fleet port. Its libvirt work runs in one
-worker thread through the existing remote-reaper connection bundle. The low-level algorithm's
+`RemoteLibvirtModuleVolumeReaper` is the asynchronous fleet port. Its libvirt work runs through
+#2170's landed completion-owned `RemoteModulePreparationExecutor` and the existing remote-reaper
+connection bundle. Each fleet configuration supplies its immutable Resource-bound authority
+binding; the adapter materializes the existing typed authority sender and ADR-0603 identity port
+for that host with one bounded sweep deadline. A configured host without an authority route fails
+closed rather than falling back to local or lexical identity. The low-level algorithm's
 synchronous retained-owner callback bridges back to the reconciler event loop with
 `asyncio.run_coroutine_threadsafe`; the event loop remains free while awaiting the worker thread,
 so the callback can query Postgres at the exact point required by ADR-0588. This avoids a pre-read,
-a second enumeration, and a new synchronous database connection. Once started, the adapter shields
-the worker task from cancellation. After the first `CancelledError`, it repeatedly awaits that same
-shielded task and catches every later `CancelledError` until the worker is terminal; it never calls
-`Task.uncancel`, so the caller task's cancellation count remains intact. It retrieves the worker's
-result or exception, logging a terminal worker exception, and then propagates cancellation. Thus a
-second or later cancellation cannot orphan the destructive thread or its retained-owner future. A
-reachable-host operation error aborts the lane; connection-open failures retain the existing fleet
-behavior of logging and skipping only that unreachable host.
+a second enumeration, and a new synchronous database connection. The landed executor retains
+capacity through true worker completion, drains repeated cancellation without changing the
+caller's cancellation count, and does not wait during process shutdown. Thus later cancellation
+cannot orphan the destructive thread or its retained-owner future. A reachable-host operation or
+authority error aborts the lane; connection-open failures retain the existing fleet behavior of
+logging and skipping only that unreachable host.
 
 The provider-neutral `ModuleVolumeReaper` port accepts an async callback returning immutable
 `ModuleVolumeKey` values. The remote adapter converts those values to its provider-specific
@@ -108,11 +109,12 @@ Unreachable remote hosts use the established per-host warning and are retried ne
 - Domain XML is parsed with the landed bounded parser, and the shared traversal covers top-level
   and nested source, backing-store, data-store, and mirror forms. Volume references must resolve
   through libvirt or the entire deletion preflight fails closed.
-  Direct paths are normalized as remote POSIX paths; managed aliases resolve through libvirt, and
-  operational lookup failures fail closed. No local filesystem resolution participates.
+  Every direct or managed path must then resolve through the Resource-bound identity port;
+  unavailable, malformed, or operationally failed identity lookup fails closed. No local
+  filesystem resolution participates.
 - Durable retention is read after enumeration and expanded by the kind-specific obligation flags.
-- Candidate paths are compared only to libvirt-returned paths; they are never opened, executed, or
-  interpolated into a shell command.
+- Candidate and reference paths are sent only through the typed, bounded ADR-0603 identity request;
+  they are never opened locally, executed, or interpolated into a shell command.
 - Public errors expose only configured pool and volume identifiers. Connection credentials,
   domain XML, paths, and host identities do not enter error details.
 
@@ -127,13 +129,14 @@ campaign run.
 
 ## Verification
 
-The provider tests cover the eleven named Task 5 behaviors, including foreign-name exclusion,
+The provider tests cover every named Task 5 behavior, including foreign-name exclusion,
 both obligation classes, the enumeration/read interleaving, unresolved references, attachment
 conflicts, mixed attached/orphan pools, active and inactive lexical aliases, nested backing/data/
-mirror references, managed direct-path aliases, and idempotent disappearance. A shared-traversal
-test pins the reaper to #2167's exported helpers. Fleet-adapter tests prove the callback crosses from the
-worker thread at the required point, two cancellation requests cannot finish the adapter before
-the worker and callback finish, the cancellation count is preserved, and unreachable-host handling
-remains inherited. Lane tests prove obligation expansion, catalog registration, reporting, failure
-isolation, and disabled composition. Focused lint and whole-tree typing cover the protocol
-boundary; `just ci` is the pre-push gate.
+mirror references, symlink, hard-link, bind, and block-device aliases, distinct-device
+non-conflicts, and idempotent disappearance. A shared-traversal test pins the reaper to #2167's
+exported helpers. Fleet-adapter tests prove the callback crosses from the worker thread at the
+required point, two cancellation requests cannot finish the adapter before the worker and callback
+finish, the cancellation count is preserved, and unreachable-host handling remains inherited.
+Lane tests prove obligation expansion, catalog registration, reporting, failure isolation, and
+disabled composition. Focused lint and whole-tree typing cover the protocol boundary; `just ci` is
+the pre-push gate.
