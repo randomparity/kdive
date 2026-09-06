@@ -31,6 +31,7 @@ from kdive.jobs.payloads import (
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
 from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.services.external_boot.routing import server_authority_instance
 
 __all__ = ["build_external_boot_payload"]
 
@@ -52,6 +53,7 @@ async def build_external_boot_payload(
     operation_identity: str,
     resolver: ProviderResolver,
     preparation_plan: ExternalBootPlan | None = None,
+    expected_observed_composite: str | None = None,
 ) -> tuple[JobKind, BootPayload | TeardownPayload]:
     """Return the ``JobKind`` and payload one authority-marked operation must be enqueued as.
 
@@ -74,18 +76,16 @@ async def build_external_boot_payload(
             f"bound for system {activation.system_id}"
         )
     if binding.runtime.external_boot is None:
-        raise _refuse(
-            f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
-            "has no external_boot port"
-        )
+        if activation.state.value != "preparing":
+            raise _refuse(
+                f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
+                "has no external_boot port"
+            )
+        if server_authority_instance(binding) != authority_instance:
+            raise _refuse("authority_instance does not match the fixed server route")
     if activation.state.value == "preparing":
         if preparation_plan is None:
             raise _refuse("a preparing activation requires its durable preparation plan")
-        if binding.runtime.external_boot_preparation is None:
-            raise _refuse(
-                f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
-                "has no external_boot_preparation port"
-            )
         if (
             preparation_plan.identity != activation.plan_identity
             or preparation_plan.ownership.system_id != str(activation.system_id)
@@ -104,6 +104,8 @@ async def build_external_boot_payload(
         "operation": operation,
         "operation_identity": operation_identity,
     }
+    if expected_observed_composite is not None:
+        marker["expected_observed_composite"] = expected_observed_composite
     if purpose == "teardown":
         return JobKind.TEARDOWN, TeardownPayload.model_validate(
             {"system_id": str(activation.system_id), "external_boot_authority_v1": marker}

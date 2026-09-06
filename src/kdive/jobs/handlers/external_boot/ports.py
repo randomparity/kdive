@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import SecretStr
 
 from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
-from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
@@ -20,6 +20,10 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTakeoverRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.routing import AuthorityReservationGeometry
+
+if TYPE_CHECKING:
+    from kdive.jobs.external_boot_authority_client import ExternalBootClientFactory
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
@@ -82,6 +86,8 @@ class ExternalBootHandlerPorts:
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
     authority_executor: ExternalBootAuthorityExecutor | None = None
     preparation_executor: ExternalBootAuthorityPreparationExecutor | None = None
+    authority_client_factory: ExternalBootClientFactory | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     activation_readiness_timeout: timedelta = timedelta(minutes=5)
     recovery_readiness_timeout: timedelta = timedelta(minutes=5)
+    reservation_geometry: Callable[[ProviderBinding], AuthorityReservationGeometry] | None = None

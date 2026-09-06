@@ -246,6 +246,9 @@ class RemoteLibvirtInstance(_Instance):
     authority_server_ca_ref: str | None = None
     authority_client_cert_ref: str | None = None
     authority_client_key_ref: str | None = None
+    authority_store_identity: str | None = Field(default=None, min_length=1, max_length=1024)
+    authority_recovery_reserve_bytes: int | None = Field(default=None, gt=0, strict=True)
+    authority_recovery_max_bytes: int | None = Field(default=None, gt=0, strict=True)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -254,6 +257,7 @@ class RemoteLibvirtInstance(_Instance):
         "authority_server_ca_ref",
         "authority_client_cert_ref",
         "authority_client_key_ref",
+        "authority_store_identity",
     )
     @classmethod
     def _authority_text_is_non_empty(cls, value: str | None, info: ValidationInfo) -> str | None:
@@ -288,6 +292,9 @@ class RemoteLibvirtInstance(_Instance):
             self.authority_server_ca_ref,
             self.authority_client_cert_ref,
             self.authority_client_key_ref,
+            self.authority_store_identity,
+            self.authority_recovery_reserve_bytes,
+            self.authority_recovery_max_bytes,
         )
         if all(value is None for value in values):
             return self
@@ -300,6 +307,10 @@ class RemoteLibvirtInstance(_Instance):
         }
         if len(refs) != 3:
             raise ValueError("authority secret references must be distinct")
+        assert self.authority_recovery_reserve_bytes is not None
+        assert self.authority_recovery_max_bytes is not None
+        if self.authority_recovery_reserve_bytes > self.authority_recovery_max_bytes:
+            raise ValueError("authority recovery reserve bytes must not exceed maximum bytes")
         return self
 
 

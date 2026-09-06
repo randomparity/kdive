@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
@@ -40,6 +41,7 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.routing import authority_reservation_geometry
 
 __all__ = [
     "COMMITTABLE_ERROR_CATEGORIES",
@@ -128,7 +130,7 @@ class OperationContext:
     marker: ExternalBootAuthorityMarkerV1
     activation: ExternalBootActivation
     binding: ProviderBinding
-    port: ExternalBootPorts
+    port: ExternalBootPorts | None
     authority: AllocatedAuthority
     acknowledgement: AuthorityAcknowledgementV1
     secret_registry: SecretRegistry
@@ -243,11 +245,62 @@ async def _materialize_preparing(
     return refreshed
 
 
+async def _debit_preparing(
+    conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
+) -> ExternalBootActivation:
+    if context.activation.state is not ExternalBootActivationState.PREPARING:
+        return context.activation
+    geometry = (
+        ports.reservation_geometry(context.binding)
+        if ports.reservation_geometry is not None
+        else authority_reservation_geometry(context.binding)
+    )
+    reservation = await _ACTIVATIONS.get_reservation(conn, context.activation.id)
+    if (
+        reservation is None
+        or reservation.store_identity != geometry.store_identity
+        or reservation.reserved_bytes != geometry.reserve_bytes
+    ):
+        raise _refuse("pending reservation does not match configured recovery geometry")
+    async with conn.transaction():
+        status = await _ACTIVATIONS.mark_reservation_ready_for_job(
+            conn,
+            credential_hash=hashlib.sha256(
+                ports.incarnation_credential.get_secret_value().encode()
+            ).digest(),
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            activation_id=context.activation.id,
+            system_id=context.activation.system_id,
+            operation_owner_id=context.activation.operation_owner_id,
+            authority_generation=context.activation.authority_generation,
+            store_identity=geometry.store_identity,
+            reserve_bytes=geometry.reserve_bytes,
+            recovery_max_bytes=geometry.max_bytes,
+        )
+    if status.value == "capacity_exhausted":
+        raise CategorizedError(
+            "external-boot recovery capacity is exhausted",
+            category=ErrorCategory.CAPACITY_EXHAUSTED,
+            terminal=False,
+        )
+    if status.value != "applied":
+        raise CategorizedError(
+            "external-boot reservation debit was superseded",
+            category=ErrorCategory.STALE_HANDLE,
+            terminal=False,
+        )
+    refreshed = await _ACTIVATIONS.get(conn, context.activation.id)
+    if refreshed is None:
+        raise _refuse("activation disappeared after reservation debit")
+    return refreshed
+
+
 async def _resolve_port(
     conn: AsyncConnection,
     marker: ExternalBootAuthorityMarkerV1,
     ports: ExternalBootHandlerPorts,
-) -> tuple[ProviderBinding, ExternalBootPorts]:
+) -> tuple[ProviderBinding, ExternalBootPorts | None]:
     """Step 1. Refuse a marker whose provider_kind disagrees with the System's bound runtime."""
     binding = await ports.resolver.binding_for_system(conn, marker.system_id)
     if binding.kind.value != marker.provider_kind:
@@ -255,7 +308,7 @@ async def _resolve_port(
             f"marker provider_kind {marker.provider_kind!r} does not match the "
             f"{binding.kind.value!r} runtime bound for system {marker.system_id}"
         )
-    if binding.runtime.external_boot is None:
+    if binding.runtime.external_boot is None and ports.authority_client_factory is None:
         raise _refuse(
             f"the {binding.kind.value!r} runtime bound for system {marker.system_id} "
             "has no external_boot port"
@@ -464,7 +517,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     ],
     call_port: Callable[[OperationContext], Any],
     build_result: Callable[[OperationContext, Any], R],
-    before_port: Callable[[OperationContext], R | None] | None = None,
+    before_port: Callable[[OperationContext], R | None | Awaitable[R | None]] | None = None,
 ) -> R:
     """Run one authority-bound operation and return its result for the worker to commit.
 
@@ -491,6 +544,18 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     nothing type-check clean.
     """
     binding, port = await _resolve_port(conn, marker, ports)
+    if ports.authority_client_factory is not None:
+        timeout = (
+            ports.activation_readiness_timeout
+            if marker.purpose == "activate"
+            else ports.recovery_readiness_timeout
+        )
+        client = ports.authority_client_factory(
+            binding, marker, asyncio.get_running_loop().time() + timeout.total_seconds()
+        )
+        ports = replace(
+            ports, acknowledger=client, authority_executor=client, preparation_executor=client
+        )
     activation = await _read_activation(
         conn,
         marker,
@@ -498,6 +563,8 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         require_activation_evidence=require_activation_evidence,
     )
     prerequisites = await require_preconditions(conn, activation, marker)
+    if ports.authority_client_factory is not None:
+        prerequisites = dict(prerequisites) | {"authority_executor": ports.authority_executor}
     if (
         activation.state is ExternalBootActivationState.PREPARING
         and ports.preparation_executor is None
@@ -529,10 +596,14 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         secret_registry=ports.secret_registry,
         prerequisites=prerequisites,
     )
+    context = replace(context, activation=await _debit_preparing(conn, context, ports))
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))
     try:
-        if before_port is not None and (intermediate := before_port(context)) is not None:
-            return intermediate
+        intermediate = before_port(context) if before_port is not None else None
+        if inspect.isawaitable(intermediate):
+            intermediate = await intermediate
+        if intermediate is not None:
+            return cast(R, intermediate)
     except Exception as exc:
         raise _bound_failure(
             context,

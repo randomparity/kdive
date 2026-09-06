@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 from typing import Protocol
 
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 
 from kdive.db.external_boot_authority_journal import (
     AdvanceStatus,
@@ -18,7 +20,9 @@ from kdive.db.external_boot_authority_journal import (
     resolve_current_authority_binding,
     resolve_current_authority_candidate,
     resolve_current_preparation_authority_binding,
+    resolve_current_release_phase_authority_binding,
 )
+from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
@@ -27,7 +31,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
-from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.providers.ports.external_boot import ExternalBootPlan, RecoveryObjectObservation
 
 
 class AuthorityConnectionFactory(Protocol):
@@ -103,6 +107,27 @@ class DatabaseAuthorityRepository:
             raise ValueError("preparation authority operation must be materialize or prepare")
         async with self._connections() as conn, conn.transaction():
             return await resolve_current_preparation_authority_binding(
+                conn,
+                peer_incarnation_id=str(peer.incarnation_id),
+                authority_id=request.authority_id,
+                generation=request.generation,
+                acknowledgement_sequence=acknowledgement_sequence,
+                acknowledgement_digest=acknowledgement_digest,
+                operation=operation,
+            )
+
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None:
+        operation = request.operation.value
+        if operation not in {"recover", "cleanup"}:
+            raise ValueError("release phase operation must be recover or cleanup")
+        async with self._connections() as conn, conn.transaction():
+            return await resolve_current_release_phase_authority_binding(
                 conn,
                 peer_incarnation_id=str(peer.incarnation_id),
                 authority_id=request.authority_id,
@@ -205,3 +230,66 @@ class DatabaseAuthorityRepository:
                 expected_digest=expected_digest,
                 record=record,
             )
+
+    async def publish_cleanup_quarantine(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        terminal: JournalRecordV1,
+        observations: tuple[RecoveryObjectObservation, ...],
+    ) -> None:
+        """Publish bounded private receipt evidence only under the current terminal authority."""
+        if terminal.system_id != binding.system_id or terminal.phase.value != "terminal":
+            raise ValueError("cleanup quarantine terminal record does not match authority")
+        objects = []
+        for observation in observations:
+            object_binding = observation.binding
+            if (
+                not observation.present
+                or observation.managed
+                or object_binding.binding.system_id != str(binding.system_id)
+                or object_binding.binding.activation_id != str(binding.activation_id)
+                or object_binding.binding.run_id != str(binding.run_id)
+                or object_binding.operation_identity != binding.operation_identity
+            ):
+                raise ValueError("cleanup quarantine receipt does not match current authority")
+            identity = (
+                "sha256:"
+                + hashlib.sha256(
+                    (
+                        "kdive-recovery-quarantine-object-v1\0"
+                        f"{object_binding.record_id}\0{object_binding.reference.ref}\0"
+                        f"{object_binding.ownership_digest}\0{object_binding.mutation_journal_digest}"
+                    ).encode()
+                ).hexdigest()
+            )
+            objects.append(
+                {
+                    "id": str(object_binding.record_id),
+                    "object_identity": identity,
+                    "object_kind": object_binding.kind,
+                    "object_reference": object_binding.reference.ref,
+                    "ownership_digest": object_binding.ownership_digest,
+                    "observed_digest": observation.observed_digest,
+                    "attempt_id": str(object_binding.attempt_id),
+                    "mutation_journal_sequence": object_binding.mutation_journal_sequence,
+                    "mutation_journal_digest": object_binding.mutation_journal_digest,
+                    "reserved_bytes": object_binding.reserved_bytes,
+                }
+            )
+        async with self._connections() as conn, conn.transaction():
+            row = await conn.execute(
+                "SELECT publish_external_boot_recovery_quarantine_authority(%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    str(peer.incarnation_id),
+                    binding.authority_id,
+                    binding.generation,
+                    binding.operation_identity,
+                    terminal.sequence,
+                    record_digest(terminal),
+                    Jsonb(objects),
+                ),
+            )
+            result = await row.fetchone()
+        if result is None or result[0] != len(objects):
+            raise RuntimeError("cleanup quarantine publication was not applied")

@@ -156,12 +156,57 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    both resources for every slot. See
    [ADR-0575](../../adr/0575-host-workers-use-kvm-provider-authority.md).
 
-### Dormant external-boot authority diagnosis
+### External-boot authority diagnosis
 
-The authority host is a deployed boundary, not a provider path. The fixed workers retain their
-existing `kdive-live-libvirt` and `kvm` access, and external-boot capability advertisement remains
-disabled until #2140 binds and proves the replacement adapter. Do not route a live test or worker
-through the authority request socket while that hold applies.
+The production `provider_authority_host` role defaults to identity-only operation. To let that
+authority perform local external-boot mutations, enable its closed local-mutation contract in the
+protected host vars used for the authority play:
+
+```yaml
+provider_authority_host_enabled: true
+provider_authority_host_local_mutation_enabled: true
+provider_authority_host_recovery_root: /var/lib/kdive/provider-authority/recovery
+provider_authority_host_external_boot_capacity_bytes: 34359738368
+provider_authority_host_s3_endpoint_url: https://objects.example.invalid
+provider_authority_host_s3_bucket: kdive-artifacts
+provider_authority_host_s3_region: us-east-1
+provider_authority_host_s3_credentials_source: /protected/provider-authority-s3-credentials
+```
+
+The capacity is bytes per activation. The S3 credential source is a mode-`0400` or mode-`0600`
+boto3 shared-credentials file on the Ansible controller. The role copies it owner-only and projects
+it through systemd credentials; credential values never enter the environment file. The endpoint
+must be an `http` or `https` URL without embedded credentials, and the bucket and region must be
+canonical nonblank names. Any partial local-mutation configuration fails in preflight before host
+mutation. Leaving the opt-in false requires the mutation-only values to remain unset and preserves
+the identity-only account, device isolation, and service writable paths.
+
+The local mode installs the target-native qemu/libguestfs tools, grants only the authority account
+the distro `kvm` group, creates the fixed recovery root as authority-owned mode `0700`, and gives
+the service access only to `/dev/kvm` plus that root. Fixed workers and the control identity retain
+no access to the provider socket or recovery root.
+
+On a `live_vm_host` that runs the eight fixed workers beside the authority, enable the worker
+client route in the same protected vars file. The instance must be the authority's configured
+instance; the default already references `live_vm_host_authority_instance` so the TLS server
+identity and worker expectation cannot drift independently.
+
+```yaml
+live_vm_host_worker_authority_enabled: true
+live_vm_host_worker_authority_instance: "{{ live_vm_host_authority_instance }}"
+live_vm_host_worker_authority_request_socket: /run/kdive/provider-authority/request/authority.sock
+live_vm_host_worker_authority_server_ca_source: /protected/provider-authority-server-ca.pem
+live_vm_host_worker_authority_client_certificate_source: /protected/worker-client.pem
+live_vm_host_worker_authority_client_key_source: /protected/worker-client-key.pem
+```
+
+The three sources must be nonempty mode-`0400` or mode-`0600` regular files on the controller.
+Provisioning copies them under `/var/lib/kdive/secrets/external-boot-authority` as root-owned,
+client-group-readable files and publishes only their root-relative references in worker
+environments. Enabling only part of this contract fails before host mutation. The client group may
+traverse the request directory but still cannot traverse the authority's provider socket, recovery
+root, journal, installation, or credential directories; the control and reconciler identities
+remain outside the client group.
 
 The normal runner play leaves this dormant boundary disabled. To install it, prepare a protected
 mode-`0600` vars file on the control host, set `live_vm_host_authority_enabled: true`, and provide
@@ -216,6 +261,14 @@ restoration, so retain the lane files for operator inspection. For request-socke
 failures, verify the authority client group can traverse the setgid request directory and that the
 socket owner, group, and mode match the provisioned contract; do not use a fixed worker credential
 as a health client.
+
+Local mutation is a separate opt-in. Set
+`live_vm_host_authority_local_mutation_enabled: true` only with the capacity, S3, protected S3
+credential source, and recovery-root inputs required by the role preflight. Systems selected for
+that route must already be defined on the authority's fixed private libvirt daemon, with their
+rootfs overlay and console log owned by the authority account. An ordinary System provisioned by
+a legacy fixed worker does not meet that ownership contract and must be rejected before mutation;
+do not repair it by adding workers to authority groups or widening authority access to `/var/lib`.
 
 To retire an opted-in authority host, put `authority_database_admin_dsn` and any non-default LOGIN
 name in a protected vars file, then run the explicit teardown twice to prove convergence:

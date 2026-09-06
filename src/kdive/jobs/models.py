@@ -155,6 +155,7 @@ class _RecoveryAttemptResult(_ResultBase):
     attempt_id: UUID
     recovery_basis: Literal["recovery_point", "pre_recovery"]
     deadline: datetime
+    observed_composite_state: _Digest | None = None
 
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
@@ -281,6 +282,7 @@ class ExternalBootAuthorityMarkerV1(BaseModel):
         "fail",
     ]
     operation_identity: str = Field(min_length=1, max_length=255)
+    expected_observed_composite: _Digest | None = None
 
     @field_validator("authority_instance", "operation_identity")
     @classmethod
@@ -288,6 +290,15 @@ class ExternalBootAuthorityMarkerV1(BaseModel):
         if not value.strip():
             raise ValueError("must be nonblank")
         return _utf8_bytes(value, 255)
+
+    @model_validator(mode="after")
+    def _conflict_resolution_carries_its_exact_observation(self) -> ExternalBootAuthorityMarkerV1:
+        conflict = self.purpose == "resolve-conflict" and self.operation == "resolve-conflict"
+        if conflict != (self.expected_observed_composite is not None):
+            raise ValueError(
+                "only a resolve-conflict marker carries an expected observed composite"
+            )
+        return self
 
 
 class ExternalBootAuthorityResultV1(BaseModel):
@@ -439,6 +450,10 @@ class ExternalBootAuthorityFailure(CategorizedError):
             terminal=failure.terminal,
         )
         self.result = result
+
+
+class ExternalBootDerivedReleaseCompletion(ExternalBootAuthoritySuccessV1):
+    """The release handler already committed its exact root job transaction."""
 
 
 type JobHandlerResult = str | None | ExternalBootAuthorityResultV1

@@ -18,21 +18,30 @@ from kdive.services.systems.root_provenance import insert_root_provenance, resol
 _DIGEST = "sha256:" + "a" * 64
 
 
-def _profile(*, checksum: str | None = _DIGEST, arch: str = "x86_64") -> ProvisioningProfile:
+def _profile(
+    *, checksum: str | None = _DIGEST, arch: str = "x86_64", provider: str = "remote-libvirt"
+) -> ProvisioningProfile:
     source: dict[str, object] = {"kind": "local", "path": "/images/base.qcow2"}
     if checksum is not None:
         source["sha256"] = checksum
-    return ProvisioningProfile.parse(
-        {
-            "schema_version": 1,
-            "arch": arch,
-            "vcpu": 2,
-            "memory_mb": 2048,
-            "disk_gb": 20,
-            "boot_method": "disk-image",
-            "provider": {"remote-libvirt": {"base_image_source": source}},
-        }
-    )
+    document: dict[str, object] = {
+        "schema_version": 1,
+        "arch": arch,
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": 20,
+        "boot_method": "disk-image" if provider == "remote-libvirt" else "direct-kernel",
+        "provider": {
+            provider: (
+                {"base_image_source": source}
+                if provider == "remote-libvirt"
+                else {"rootfs": source}
+            )
+        },
+    }
+    if provider == "local-libvirt":
+        document["kernel_source_ref"] = "/src/linux"
+    return ProvisioningProfile.parse(document)
 
 
 def _row(**changes: object) -> dict[str, object]:
@@ -89,6 +98,14 @@ def test_resolves_verified_digest_bound_root() -> None:
     assert result is not None
     assert result.project == "project-a"
     assert result.root_spec.root == "UUID=abc"
+
+
+def test_resolves_checksum_pinned_local_root() -> None:
+    result = asyncio.run(
+        resolve_root_provenance(_conn([_row()]), _profile(provider="local-libvirt"), "project-a")
+    )
+    assert result is not None
+    assert result.image_digest == _DIGEST
 
 
 def test_missing_checksum_or_catalog_row_is_disk_grub_only() -> None:

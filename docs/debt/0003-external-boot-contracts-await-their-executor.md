@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2027-03-02
+> **Resolved by #2204** (2026-09-06)
 
 ## Concern
 
@@ -81,3 +80,18 @@ Found by the `$oathbind` scope audit on the #2117 branch on 2026-09-02 (finding 
 fetched #2118's body and confirmed the promotion obligation appears nowhere in it. The
 obligation itself was recorded by the operator on #2117 the same day.
 tracker: #2118
+
+## Resolution
+
+All three contracts enqueue durable jobs through the fixed authority route, accept idempotency
+keys, and return the recorded absolute recovery-readiness deadline. Release completes its derived
+recover and cleanup phases before one capacity credit; conflict resolution rechecks the recorded
+identity; administrative orphan repair deletes or adopts only the authenticated selection.
+Missing deployment configuration still fails before enqueue, but is no longer described as a
+missing implementation. Registered metadata, wrapper descriptions, and served toolset resources
+describe the live job contract.
+
+The connected release and conflict tests drive the public entry point through the real worker and
+authority-role database. Orphan tests additionally drive actual private recovery storage through
+interruption and reclaim for both dispositions. Admission denial tests remain in place. Installed
+native-provider acceptance is tracked separately by #2151.

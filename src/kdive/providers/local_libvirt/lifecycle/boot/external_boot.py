@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, BinaryIO, Literal, Protocol, cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
@@ -67,6 +67,8 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
     RecoveryPoint,
     RunningKernelObservation,
 )
@@ -229,6 +231,26 @@ class CleanupTombstoneV1(_ClosedValue):
             raise ValueError("cleanup tombstone recovery point has different ownership")
         if LocalLibvirtExternalBoot.point_digest(self.recovery_point) != self.point_digest:
             raise ValueError("cleanup tombstone recovery point digest does not match")
+        return self
+
+
+class CleanupQuarantineReceiptV1(_ClosedValue):
+    """Provider-private exact proof retained only when cleanup finalization is interrupted."""
+
+    schema_: Literal["local-libvirt-cleanup-quarantine-v1"] = Field(
+        "local-libvirt-cleanup-quarantine-v1", alias="schema"
+    )
+    tombstone: CleanupTombstoneV1
+    proof: FinalizeCleanupProof
+    managed: bool = False
+
+    @model_validator(mode="after")
+    def _proof_matches_tombstone(self) -> CleanupQuarantineReceiptV1:
+        if (
+            self.proof.binding != self.tombstone.binding
+            or self.proof.point_digest != self.tombstone.point_digest
+        ):
+            raise ValueError("cleanup quarantine proof does not match tombstone")
         return self
 
 
@@ -832,6 +854,13 @@ class LocalExternalBootIO(Protocol):
         expected: ExpectedOperationOwnership,
     ) -> AbstractContextManager[LocalExternalBootOperation]: ...
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None: ...
+    def read_cleanup_quarantine(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None: ...
+    def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None: ...
     def observe_preparation(
         self, request: ExternalBootPreparationRequest
     ) -> ExternalBootPreparationObservation: ...
@@ -1389,6 +1418,22 @@ class RealLocalExternalBootIO:
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         with RecoveryMetadataStore(self._recovery_root) as store:
             store.finalize_tombstone(recovery.recovery_ref, recovery, proof)
+
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            store.record_cleanup_quarantine(recovery, proof)
+
+    def read_cleanup_quarantine(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.read_cleanup_quarantine(binding)
+
+    def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            store.adopt_cleanup_quarantine(receipt)
 
     def observe_preparation(
         self, request: ExternalBootPreparationRequest
@@ -2217,6 +2262,112 @@ class LocalLibvirtExternalBoot:
                 raise ValueError("external-boot recovery must complete before cleanup")
             operation.cleanup(metadata, self.point_digest(recovery))
 
+    @staticmethod
+    def _quarantine_observation(
+        receipt: CleanupQuarantineReceiptV1,
+    ) -> RecoveryObjectObservation:
+        point = receipt.tombstone.recovery_point
+        proof = receipt.proof
+        binding = RecoveryObjectBinding(
+            record_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"kdive/local-recovery/{point.recovery_ref.ref}/{proof.journal_digest}",
+                )
+            ),
+            binding=point.binding,
+            kind="recovery-record",
+            reference=point.recovery_ref,
+            ownership_digest=receipt.tombstone.point_digest,
+            operation_identity=proof.operation_id,
+            attempt_id=proof.attempt_id,
+            mutation_journal_sequence=proof.journal_sequence,
+            mutation_journal_digest=proof.journal_digest,
+            reserved_bytes=0,
+        )
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                b"kdive-local-cleanup-quarantine-observation-v1\0"
+                + _cleanup_quarantine_bytes(receipt)
+            ).hexdigest()
+        )
+        return RecoveryObjectObservation(
+            binding=binding,
+            present=True,
+            managed=receipt.managed,
+            observed_digest=digest,
+        )
+
+    def quarantined_objects(
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> tuple[RecoveryObjectObservation, ...]:
+        with self._io.open(authority, _expected_binding(binding)):
+            receipt = self._io.read_cleanup_quarantine(binding)
+        if receipt is None or receipt.managed:
+            return ()
+        return (self._quarantine_observation(receipt),)
+
+    def record_cleanup_quarantine(
+        self,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        with self._io.open(authority, _expected_binding(recovery.binding)):
+            self._io.record_cleanup_quarantine(recovery, proof)
+
+    def observe_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
+    ) -> RecoveryObjectObservation:
+        with self._io.open(authority, _expected_binding(binding.binding)):
+            receipt = self._io.read_cleanup_quarantine(binding.binding)
+        if receipt is None:
+            return RecoveryObjectObservation(
+                binding=binding,
+                present=False,
+                managed=False,
+                observed_digest=binding.mutation_journal_digest,
+            )
+        observation = self._quarantine_observation(receipt)
+        if observation.binding != binding:
+            raise ValueError("cleanup quarantine ownership conflicts with request")
+        return observation
+
+    def delete_recovery_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: Digest,
+    ) -> RecoveryObjectObservation:
+        observed = self.observe_object(binding, authority)
+        if observed.observed_digest != expected_observed_digest:
+            raise ValueError("cleanup quarantine observation changed before delete")
+        receipt = self._io.read_cleanup_quarantine(binding.binding)
+        if receipt is not None:
+            current = self._quarantine_observation(receipt)
+            if current.observed_digest != expected_observed_digest or current.managed:
+                raise ValueError("cleanup quarantine observation changed before delete")
+            self._io.finalize_tombstone(receipt.tombstone.recovery_point, receipt.proof)
+        return self.observe_object(binding, authority)
+
+    def adopt_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: Digest,
+    ) -> RecoveryObjectObservation:
+        observed = self.observe_object(binding, authority)
+        if observed.observed_digest != expected_observed_digest or not observed.present:
+            raise ValueError("cleanup quarantine observation changed before adopt")
+        receipt = self._io.read_cleanup_quarantine(binding.binding)
+        if receipt is None:
+            raise ValueError("cleanup quarantine disappeared before adopt")
+        self._io.adopt_cleanup_quarantine(receipt)
+        return self.observe_object(binding, authority)
+
     def recovery_point(
         self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
     ) -> RecoveryPoint:
@@ -2348,6 +2499,7 @@ def recovery_directory_name(
 _INTENT_NAME = "intent.json"
 _INITIAL_INTENT_TEMPORARY_NAME = ".intent.initial"
 _TOMBSTONE_NAME = "tombstone.json"
+_QUARANTINE_NAME = "cleanup-quarantine.json"
 _PREPARATION_NAME = "preparation-result.json"
 _MAX_METADATA_BYTES = 262_144
 
@@ -2407,6 +2559,15 @@ class LocalPreparationReceiptsV1(BaseModel):
 def _metadata_bytes(metadata: LocalRecoveryMetadataV1) -> bytes:
     return json.dumps(
         metadata.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
+def _cleanup_quarantine_bytes(receipt: CleanupQuarantineReceiptV1) -> bytes:
+    return json.dumps(
+        receipt.model_dump(mode="json", by_alias=True),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -2868,12 +3029,14 @@ class RecoveryMetadataStore:
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
             entries = set(os.listdir(directory_fd))
-            allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME}
+            allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
             if entries - allowed:
                 raise ValueError("cleanup tombstone directory contains unexpected payload")
             if self._read_tombstone(directory_fd) != expected:
                 raise ValueError("cleanup tombstone changed before finalization")
             self._validate_tombstone_residue(directory_fd, entries, expected)
+            with suppress(FileNotFoundError):
+                os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
             for residual in (_INTENT_NAME, _PREPARATION_NAME):
                 if residual in entries:
                     os.unlink(residual, dir_fd=directory_fd)
@@ -2889,6 +3052,73 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             return
         raise ValueError("cleanup tombstone remained after finalization")
+
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        """Persist the exact mutation proof beside an exact cleanup tombstone."""
+        self._require_open()
+        name = recovery_directory_name(recovery.recovery_ref, recovery.binding)
+        tombstone = self._read_tombstone_named(name)
+        receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            temporary = ".cleanup-quarantine.next"
+            _replace_private_file(
+                directory_fd,
+                temporary,
+                _QUARANTINE_NAME,
+                _cleanup_quarantine_bytes(receipt),
+            )
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        if self.read_cleanup_quarantine(recovery.binding) != receipt:
+            raise ValueError("cleanup quarantine receipt failed exact reopen")
+
+    def read_cleanup_quarantine(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        self._require_open()
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        try:
+            directory_fd = _open_private_directory(self._root_fd, name)
+        except FileNotFoundError:
+            return None
+        try:
+            try:
+                data = _read_private_file(directory_fd, _QUARANTINE_NAME)
+            except FileNotFoundError:
+                return None
+            receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
+            if _cleanup_quarantine_bytes(receipt) != data:
+                raise ValueError("cleanup quarantine receipt is not canonical JSON")
+            if receipt.tombstone.binding != binding:
+                raise ValueError("cleanup quarantine receipt ownership changed")
+            return receipt
+        finally:
+            os.close(directory_fd)
+
+    def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
+        self._require_open()
+        current = self.read_cleanup_quarantine(receipt.tombstone.binding)
+        if current != receipt:
+            raise ValueError("cleanup quarantine receipt changed before adoption")
+        adopted = receipt.model_copy(update={"managed": True})
+        name = recovery_directory_name(
+            receipt.tombstone.recovery_point.recovery_ref, receipt.tombstone.binding
+        )
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            _replace_private_file(
+                directory_fd,
+                ".cleanup-quarantine.next",
+                _QUARANTINE_NAME,
+                _cleanup_quarantine_bytes(adopted),
+            )
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def _validate_tombstone_residue(
         self,

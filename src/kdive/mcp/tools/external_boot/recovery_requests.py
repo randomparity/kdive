@@ -1,27 +1,21 @@
 """The three external-boot recovery contracts (ADR-0583, #2117).
 
-Each service resolves its object, authorizes the caller, decides admission against the
-System-wide matrix, and then reports that the external-boot recovery executor is not
-installed. None of them writes, so every response is a failure envelope.
-
-Why none of them writes: no production caller drives ``ExternalBootActivationRepository``'s
-transition methods on this branch, ``allocate_external_boot_authority`` (migration 0122) is
-gated on ``kdive_worker`` membership and revoked from the ``kdive_server`` role the MCP
-server runs as, and ``ExternalBootAuthorityMarkerV1`` requires a ``provider_kind`` and
-``authority_instance`` that neither an activation nor a reservation row carries. A tool that
-began a recovery attempt here could not finish it, so these report the missing executor
-instead and #2118 promotes them with it.
-
-Ordering is resolve, authorize, admit, report. Authorization runs before the admission read
-so an unauthorized caller learns nothing about whether the System carries an activation.
+Each service authorizes the caller, validates its exact durable selection and provider binding,
+then enqueues an idempotent worker job. The worker executes through the authenticated authority;
+server admission never grants direct provider access. Missing provider configuration fails before
+enqueue. Authorization precedes admission reads so a denied caller learns no activation state.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
 from typing import LiteralString
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import TypeAdapter, ValidationError
 
@@ -29,16 +23,22 @@ from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import Digest
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
+from kdive.jobs.payloads import ResolveRecoveryOrphanPayload
 from kdive.log import bind_context
 from kdive.mcp.platform_auth import audit_platform_denial
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_request, recovery_response
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     AuthorizationError,
@@ -58,8 +58,6 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-
-_UNAVAILABLE_REASON = "recovery_executor_unavailable"
 
 RELEASE_TOOL = "runs.release_external_boot"
 RESOLVE_CONFLICT_TOOL = "systems.resolve_external_boot_conflict"
@@ -89,12 +87,12 @@ _ACTIVE_JOB_STATES = [JobState.QUEUED.value, JobState.RUNNING.value]
 # `system_id` arm plans as `Index Scan using jobs_payload_system_id_idx` (migration 0082, an
 # expression index on exactly `payload->>'system_id'`) and reads 3 buffers.
 #
-# The `run_id` arm still scans every row: no index covers `payload->>'run_id'`
-# (`jobs_live_install_run_id_idx`, migration 0101, is partial on `kind = 'install'`), so its
-# per-arm `LIMIT` can only stop early when rows actually match — and the ordinary case, where
-# nothing blocks the release, is the one that scans the whole table while this holds the
-# System-wide advisory lock. Closing that needs an index this issue's surface does not cover;
-# the deferral is docs/debt/0008-external-boot-release-job-scan-under-the-system-lock.md.
+# The `run_id` arm uses `jobs_payload_run_id_idx` (migration 0137). It remains a separate arm:
+# combining the two expressions under `OR` made PostgreSQL ignore the `system_id` index, while a
+# global `ORDER BY` prevented either arm's `LIMIT` from stopping after the bounded result page.
+# PostgreSQL 17 remeasurement on 200k jobs/5k Runs (2026-09-06, no matching job): System index
+# 2 shared buffers; Run bitmap index 3, entire Run arm 6; union 8 and 0.055 ms. This synthetic
+# observation resolves debt 0008; no test fixes a planner choice or promises production latency.
 #
 # `UNION` rather than `UNION ALL`: nothing enforces that a payload carries only one of the two
 # keys, and a row matching both arms would otherwise be counted twice against
@@ -113,58 +111,60 @@ _ACTIVE_JOBS_SQL: LiteralString = (
 _REPOSITORY = ExternalBootActivationRepository()
 _IDENTITY = TypeAdapter(Digest)
 
-_PROMOTION = (
-    "Promoted when the external-boot recovery job handler and worker claim path land (#2118)."
+_CONFLICT_AUTHORITY_SQL: LiteralString = (
+    "SELECT provider_kind, authority_instance "
+    "FROM resolve_external_boot_conflict_dispatch_binding(%s, %s, %s, %s)"
 )
 
-#: The `maturity_detail` text the two admission contracts register with.
-ADMISSION_STUB_DETAIL = (
-    "Validates the caller's identity, role, and the System-wide external-boot admission "
-    "matrix, then reports configuration_error with reason=recovery_executor_unavailable. No "
-    "activation transition is committed and no recovery job is enqueued, because the "
-    "external-boot recovery executor is not installed."
+_QUARANTINE_SQL: LiteralString = (
+    "SELECT q.id, q.object_identity, q.resource_id, q.activation_id, q.provider_kind, "
+    "q.authority_instance, q.object_kind, q.object_reference, q.ownership_digest, "
+    "q.observed_digest, q.reserved_bytes, r.kind AS resource_kind, "
+    "q.operation_identity, q.attempt_id, q.mutation_journal_sequence, "
+    "q.mutation_journal_digest "
+    "FROM external_boot_recovery_quarantine AS q "
+    "JOIN systems AS s ON s.id = q.system_id "
+    "JOIN allocations AS a ON a.id = s.allocation_id "
+    "JOIN resources AS r ON r.id = a.resource_id AND r.id = q.resource_id "
+    "WHERE q.system_id = %s AND q.status = 'quarantined' "
+    "AND q.object_identity = ANY(%s) ORDER BY q.object_identity FOR UPDATE OF q"
 )
 
-#: The `maturity_detail` text the quarantined-object repair registers with.
-ORPHAN_STUB_DETAIL = (
-    "Validates the caller's platform role and the bounded repair reference, then reports "
-    "configuration_error with reason=recovery_executor_unavailable. No quarantined object is "
-    "deleted or adopted and no recovery job is enqueued, because the external-boot recovery "
-    "executor is not installed."
+_QUARANTINE_BINDING_FIELDS = (
+    "id",
+    "resource_id",
+    "activation_id",
+    "provider_kind",
+    "authority_instance",
+    "object_kind",
+    "object_reference",
+    "ownership_digest",
+    "observed_digest",
+    "reserved_bytes",
+    "resource_kind",
+    "operation_identity",
+    "attempt_id",
+    "mutation_journal_sequence",
+    "mutation_journal_digest",
+)
+
+_RELEASE_AUTHORITY_SQL: LiteralString = (
+    "SELECT provider_kind, authority_instance "
+    "FROM resolve_external_boot_release_dispatch_binding(%s, %s, %s, %s)"
 )
 
 
-def degraded_stub_meta(detail: str) -> dict[str, object]:
-    """Build the `partial` tool metadata a contract registers with.
-
-    Built here rather than at each registrar so the reason a tool reports and the reason its
-    schema advertises cannot drift apart, and so all three promote on one issue reference.
-    """
-    return _docmeta.maturity_meta("partial") | {
-        "maturity_detail": {
-            "reason": "degraded_stub",
-            "detail": detail,
-            "promotion": _PROMOTION,
-        }
-    }
-
-
-def _executor_unavailable(object_id: str, tool: str) -> ToolResponse:
-    """The one terminal response all three contracts share.
-
-    One reason string for all three because one thing is missing: the external-boot recovery
-    executor #2118 owns. Built here rather than at each call site so the reason and the
-    disclosure cannot drift apart.
-    """
+def _provider_unconfigured(object_id: str, tool: str) -> ToolResponse:
+    """Refuse before enqueue when this System has no configured recovery provider."""
     return ToolResponse.failure(
         object_id,
         ErrorCategory.CONFIGURATION_ERROR,
         detail=(
-            f"{tool} accepted this request but cannot serve it: the external-boot recovery "
-            "executor is not installed, so nothing was changed"
+            f"{tool} requires a configured authority-backed recovery provider for this System; "
+            "inspect the System's provider configuration before retrying. No job was enqueued"
         ),
         suggested_next_actions=["systems.get"],
-        data={"reason": _UNAVAILABLE_REASON},
+        data={"reason": "recovery_provider_not_configured"},
     )
 
 
@@ -176,6 +176,19 @@ def _config_error(object_id: str, *, reason: str, detail: str, next_action: str)
         suggested_next_actions=[next_action],
         data={"reason": reason},
     )
+
+
+def _quarantine_binding_digest(rows: Sequence[Mapping[str, object]]) -> str:
+    """Bind every immutable selected provider and ownership fact in admission order."""
+    canonical = "\0".join(
+        ":".join(str(row[field]) for field in _QUARANTINE_BINDING_FIELDS) for row in rows
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _quarantine_binding_snapshot(rows: Sequence[Mapping[str, object]]) -> list[dict[str, str]]:
+    """Persist the admitted facts; later provider work must not select fresh inventory."""
+    return [{field: str(row[field]) for field in _QUARANTINE_BINDING_FIELDS} for row in rows]
 
 
 def _conflict(
@@ -268,15 +281,19 @@ async def _active_job_ids_for_system(conn: AsyncConnection, system_id: UUID) -> 
 
 
 async def request_release(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: str,
+    resolver: ProviderResolver | None = None,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit a release of the Run's external-boot activation, then report the missing executor.
+    """Admit and durably enqueue release of the Run's external-boot activation.
 
     Resolves and authorizes the Run, then decides ``external_boot_release`` against the
     activation restricting its System and refuses the two conditions ADR-0583 names as
-    blocking a release. The caller gets the same refusal it will get once the executor lands;
-    an admissible request gets ``configuration_error`` with
-    ``reason=recovery_executor_unavailable`` and no activation row is touched.
+    blocking a release. An admissible request resolves its exact server-owned durable
+    authority and atomically enqueues the recovery job without provider I/O.
     """
     uid = _as_uuid(run_id)
     if uid is None:
@@ -298,16 +315,21 @@ async def request_release(
                     detail="this Run is bound to no System, so it holds no external boot",
                     next_action="runs.get",
                 )
-            return await _release_locked(conn, ctx, run, run.system_id)
+            return await _release_locked(conn, ctx, run, run.system_id, resolver, idempotency_key)
 
 
 async def _release_locked(
-    conn: AsyncConnection, ctx: RequestContext, run: Run, system_id: UUID
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    system_id: UUID,
+    resolver: ProviderResolver | None,
+    idempotency_key: str | None,
 ) -> ToolResponse:
     """Decide the release under the System lock, so every read sees one consistent activation.
 
     ``conn`` has already read the Run, so this transaction is a SAVEPOINT and the lock releases
-    at end-of-request; only the envelope render follows the block, and nothing is written.
+    at end-of-request. Authority resolution and durable enqueue remain inside that lock.
 
     The restricting activation is read directly before the guard because the guard cannot
     express "nothing to release": it returns ``None`` both for an admitted operation and for a
@@ -317,13 +339,39 @@ async def _release_locked(
     """
     object_id = str(run.id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        if await _REPOSITORY.get_restricting_for_system(conn, system_id) is None:
+        dedup_key = ""
+        metadata = None
+        if idempotency_key is not None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RELEASE_TOOL,
+                object_key="run_id",
+                object_id=object_id,
+                arguments=(),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
+        activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
+        if activation is None:
             return _conflict(
                 object_id,
                 reason="no_active_activation",
                 detail="no external-boot activation restricts this Run's System",
                 next_actions=["runs.get"],
             )
+        if idempotency_key is None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RELEASE_TOOL,
+                object_key="run_id",
+                object_id=object_id,
+                arguments=(),
+                idempotency_key=None,
+                scope_identity=str(activation.id),
+            )
+            if replay is not None:
+                return replay
         try:
             await check_external_boot_admission(
                 conn,
@@ -334,6 +382,12 @@ async def _release_locked(
             )
         except ExternalBootDenied as exc:
             return _external_boot_denial(object_id, exc, ctx)
+        operation_identity = (
+            "sha256:"
+            + hashlib.sha256(
+                f"{activation.id}\0release\0{activation.plan_identity}\0{dedup_key}".encode()
+            ).hexdigest()
+        )
         job_ids = await _active_job_ids_for_system(conn, system_id)
         if job_ids:
             return _conflict(
@@ -355,7 +409,48 @@ async def _release_locked(
                 next_actions=["debug.detach", "runs.get"],
                 data=_bounded_ids("session_ids", session_ids),
             )
-    return _executor_unavailable(object_id, RELEASE_TOOL)
+        if resolver is None:
+            return _provider_unconfigured(object_id, RELEASE_TOOL)
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _RELEASE_AUTHORITY_SQL,
+                (activation.id, activation.system_id, activation.run_id, activation.plan_identity),
+            )
+            authorities = await cur.fetchall()
+        if len(authorities) != 1:
+            return _config_error(
+                object_id,
+                reason="release_authority_unresolved",
+                detail="the exact durable external-boot release authority is unavailable",
+                next_action="runs.get",
+            )
+        authority = authorities[0]
+        try:
+            kind, payload = await build_external_boot_payload(
+                conn,
+                activation_id=activation.id,
+                purpose="release",
+                operation="release",
+                provider_kind=str(authority["provider_kind"]),
+                authority_instance=str(authority["authority_instance"]),
+                operation_identity=operation_identity,
+                resolver=resolver,
+            )
+        except CategorizedError as exc:
+            return _config_error(
+                object_id,
+                reason="release_authority_unresolved",
+                detail=f"the durable release authority cannot dispatch recovery: {exc}",
+                next_action="runs.get",
+            )
+        job = await queue.enqueue(
+            conn,
+            kind,
+            payload.model_copy(update={"recovery_request_v1": metadata}),
+            job_authorizing(ctx, run.project),
+            dedup_key,
+        )
+    return recovery_response(job, "run_id", object_id)
 
 
 def _resolution_input_error(
@@ -400,9 +495,11 @@ async def resolve_conflict(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
+    resolver: ProviderResolver,
     system_id: str,
     operation: str,
     observed_identity: str,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit a recovery-conflict resolution, then report the missing executor.
 
@@ -423,26 +520,66 @@ async def resolve_conflict(
             invalid = _resolution_input_error(system_id, operation, observed_identity)
             if invalid is not None:
                 return invalid
-            return await _resolve_conflict_locked(conn, ctx, uid, system.project)
+            return await _resolve_conflict_locked(
+                conn,
+                ctx,
+                resolver,
+                uid,
+                system.project,
+                observed_identity,
+                idempotency_key,
+            )
 
 
 async def _resolve_conflict_locked(
-    conn: AsyncConnection, ctx: RequestContext, system_id: UUID, project: str
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    resolver: ProviderResolver,
+    system_id: UUID,
+    project: str,
+    observed_identity: str,
+    idempotency_key: str | None,
 ) -> ToolResponse:
-    """Decide the resolution under the System lock.
+    """Decide and enqueue the resolution atomically under the System lock.
 
     See :func:`_release_locked` for why the restricting activation is read directly rather
     than inferred from the guard.
     """
     object_id = str(system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        if await _REPOSITORY.get_restricting_for_system(conn, system_id) is None:
+        dedup_key = ""
+        metadata = None
+        if idempotency_key is not None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RESOLVE_CONFLICT_TOOL,
+                object_key="system_id",
+                object_id=object_id,
+                arguments=(SUPPORTED_RESOLUTION_OPERATION, observed_identity),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
+        activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
+        if activation is None:
             return _conflict(
                 object_id,
                 reason="no_recovery_conflict",
                 detail="no external-boot activation restricts this System, so none is conflicted",
                 next_actions=["runs.get"],
             )
+        if idempotency_key is None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RESOLVE_CONFLICT_TOOL,
+                object_key="system_id",
+                object_id=object_id,
+                arguments=(SUPPORTED_RESOLUTION_OPERATION, observed_identity),
+                idempotency_key=None,
+                scope_identity=str(activation.id),
+            )
+            if replay is not None:
+                return replay
         try:
             await check_external_boot_admission(
                 conn,
@@ -452,7 +589,68 @@ async def _resolve_conflict_locked(
             )
         except ExternalBootDenied as exc:
             return _external_boot_denial(object_id, exc, ctx)
-    return _executor_unavailable(object_id, RESOLVE_CONFLICT_TOOL)
+
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _CONFLICT_AUTHORITY_SQL,
+                (
+                    activation.id,
+                    activation.system_id,
+                    activation.run_id,
+                    activation.plan_identity,
+                ),
+            )
+            authorities = await cur.fetchall()
+        if not authorities:
+            return _config_error(
+                object_id,
+                reason="conflict_authority_unresolved",
+                detail=(
+                    "the restricting activation has no unambiguous durable authority binding "
+                    "from which recovery can be dispatched"
+                ),
+                next_action="systems.get",
+            )
+
+        authority = authorities[0]
+        operation_identity = (
+            "sha256:"
+            + hashlib.sha256(
+                (
+                    f"{activation.id}\0{SUPPORTED_RESOLUTION_OPERATION}\0{observed_identity}"
+                    f"\0{dedup_key}"
+                ).encode()
+            ).hexdigest()
+        )
+        try:
+            kind, payload = await build_external_boot_payload(
+                conn,
+                activation_id=activation.id,
+                purpose="resolve-conflict",
+                operation="resolve-conflict",
+                provider_kind=str(authority["provider_kind"]),
+                authority_instance=str(authority["authority_instance"]),
+                operation_identity=operation_identity,
+                expected_observed_composite=observed_identity,
+                resolver=resolver,
+            )
+        except CategorizedError as exc:
+            # Admission failures at this boundary are closed configuration refusals. They occur
+            # before enqueue, and the surrounding transaction protects future additions here.
+            return _config_error(
+                object_id,
+                reason="conflict_authority_unresolved",
+                detail=f"the durable conflict authority cannot dispatch recovery: {exc}",
+                next_action="systems.get",
+            )
+        job = await queue.enqueue(
+            conn,
+            kind,
+            payload.model_copy(update={"recovery_request_v1": metadata}),
+            job_authorizing(ctx, project),
+            dedup_key,
+        )
+    return recovery_response(job, "system_id", object_id)
 
 
 def _orphan_input_error(
@@ -488,15 +686,18 @@ async def resolve_recovery_orphan(
     system_id: str,
     object_identities: list[str],
     disposition: str,
+    resolver: ProviderResolver | None = None,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit a quarantined recovery-object repair, then report the missing executor.
+    """Atomically admit a bounded, durable quarantined recovery-object repair.
 
     The platform role is enforced before the System is *resolved*, matching the break-glass
     ``ops`` tools this one registers beside: a caller without ``platform_admin`` learns nothing
     about which System ids exist. Only the id's syntax is checked first, so the denial audit
     below records a bounded identifier rather than arbitrary caller input. It runs no admission
     check — ADR-0583 scopes the repair to quarantined recovery objects, which are not the
-    activation the matrix keys on, and no quarantine record exists to read yet.
+    activation the matrix keys on. Object references and provider authority come only from
+    exact durable quarantine rows; caller identities are selectors, never provider paths.
     """
     uid = _as_uuid(system_id)
     if uid is None:
@@ -508,29 +709,108 @@ async def resolve_recovery_orphan(
             pool, ctx, tool=ORPHAN_TOOL, scope=f"denied:{uid}", args={"system_id": str(uid)}
         )
         return ToolResponse.denied(system_id, missing_roles=[PlatformRole.PLATFORM_ADMIN])
+    invalid = _orphan_input_error(system_id, object_identities, disposition)
+    if invalid is not None:
+        return invalid
+    if len(object_identities) != len(set(object_identities)):
+        return _config_error(
+            system_id,
+            reason="duplicate_object_identities",
+            detail="object_identities must not contain duplicates",
+            next_action="systems.get",
+        )
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
+        async with (
+            pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.SYSTEM, uid),
+        ):
             system = await SYSTEMS.get(conn, uid)
-        if system is None:
-            return _unresolved_system(system_id)
-        invalid = _orphan_input_error(system_id, object_identities, disposition)
-        if invalid is not None:
-            return invalid
-        return _executor_unavailable(system_id, ORPHAN_TOOL)
+            if system is None:
+                return _unresolved_system(system_id)
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=ORPHAN_TOOL,
+                object_key="system_id",
+                object_id=str(uid),
+                arguments=(disposition, *sorted(object_identities)),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
+            if resolver is None:
+                return _provider_unconfigured(system_id, ORPHAN_TOOL)
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(_QUARANTINE_SQL, (uid, object_identities))
+                rows = await cur.fetchall()
+            if len(rows) != len(object_identities):
+                return _conflict(
+                    system_id,
+                    reason="quarantine_binding_mismatch",
+                    detail="the exact quarantined recovery-object set is unavailable",
+                    next_actions=["systems.get"],
+                )
+            if any(row["provider_kind"] != row["resource_kind"] for row in rows):
+                return _conflict(
+                    system_id,
+                    reason="quarantine_binding_mismatch",
+                    detail="the quarantined recovery-object provider binding no longer matches",
+                    next_actions=["systems.get"],
+                )
+            binding = await resolver.binding_for_system(conn, uid)
+            if (
+                any(row["provider_kind"] != binding.kind.value for row in rows)
+                or binding.runtime.external_boot_recovery_objects is None
+            ):
+                return _provider_unconfigured(system_id, ORPHAN_TOOL)
+            binding_digest = _quarantine_binding_digest(rows)
+            binding_snapshot = _quarantine_binding_snapshot(rows)
+            request_id = uuid5(NAMESPACE_URL, f"kdive:{dedup_key}")
+            assert metadata is not None
+            payload = ResolveRecoveryOrphanPayload(
+                schema="resolve-recovery-orphan-v1",
+                system_id=str(uid),
+                request_id=str(request_id),
+                binding_digest=binding_digest,
+                recovery_request_v1=metadata,
+            )
+            job = await queue.enqueue(
+                conn,
+                JobKind.RESOLVE_RECOVERY_ORPHAN,
+                payload,
+                job_authorizing(ctx, system.project),
+                dedup_key,
+            )
+            object_ids = [row["id"] for row in rows]
+            await conn.execute(
+                "INSERT INTO external_boot_recovery_orphan_requests "
+                "(id, system_id, disposition, binding_digest, selection_snapshot, object_ids, "
+                "job_id, "
+                "readiness_deadline) "
+                "VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)",
+                (
+                    request_id,
+                    uid,
+                    disposition,
+                    binding_digest,
+                    json.dumps(binding_snapshot, separators=(",", ":")),
+                    object_ids,
+                    job.id,
+                    metadata.readiness_deadline,
+                ),
+            )
+    return recovery_response(job, "system_id", str(uid))
 
 
 __all__ = [
-    "ADMISSION_STUB_DETAIL",
     "MAX_OBJECT_IDENTITIES",
     "MAX_OBJECT_IDENTITY_LENGTH",
     "MAX_OBSERVED_IDENTITY_LENGTH",
-    "ORPHAN_STUB_DETAIL",
     "ORPHAN_TOOL",
     "RELEASE_TOOL",
     "RESOLVE_CONFLICT_TOOL",
     "SUPPORTED_DISPOSITIONS",
     "SUPPORTED_RESOLUTION_OPERATION",
-    "degraded_stub_meta",
     "request_release",
     "resolve_conflict",
     "resolve_recovery_orphan",

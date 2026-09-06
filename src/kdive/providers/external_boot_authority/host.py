@@ -256,14 +256,15 @@ def _validate_access_boundary(config: AuthorityHostConfig) -> None:
         if attributes & _POSIX_ACL_XATTRS:
             raise HostReadinessError("access-boundary", "unsafe-acl")
 
-    authority_groups = {config.authority_gid, config.authority_client_gid}
     for identity in config.denied_identities:
         try:
             account = pwd.getpwnam(identity)
             identity_groups = set(os.getgrouplist(identity, account.pw_gid))
         except KeyError, OSError:
             raise HostReadinessError("access-boundary", "identity-missing") from None
-        if account.pw_uid in {0, config.authority_uid} or identity_groups & authority_groups:
+        # ADR-0619: the client group grants only request-socket transport; fixed workers are
+        # intended members. The distinct authority owner group remains forbidden.
+        if account.pw_uid in {0, config.authority_uid} or config.authority_gid in identity_groups:
             raise HostReadinessError("access-boundary", "denied-identity")
 
 
@@ -501,6 +502,16 @@ async def check_database_role(connection: Any) -> None:
                     ::regprocedure,
                 'public.resolve_current_external_boot_preparation_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
+                'public.resolve_current_external_boot_release_phase_authority(text,uuid,bigint,'
+                    'bigint,text,text)'::regprocedure,
+                'public.resolve_external_boot_recovery_orphan_authority(text,uuid,uuid,integer)'
+                    ::regprocedure,
+                'public.commit_external_boot_recovery_orphan_disposition(text,uuid,uuid,integer,'
+                    'uuid,text,text)'::regprocedure,
+                'public.verify_external_boot_recovery_orphan_inventory_authority(text,uuid,uuid,'
+                    'integer)'::regprocedure,
+                'public.publish_external_boot_recovery_quarantine_authority(text,uuid,bigint,'
+                    'text,bigint,text,jsonb)'::regprocedure,
                 'public.read_external_boot_authority_journal_head(text,uuid,bigint,text)'
                     ::regprocedure,
                 'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,'
@@ -1073,12 +1084,13 @@ async def _authenticate(config: AuthorityHostConfig, credential: SecretStr) -> A
 
 def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
     """Build mutation support only on a host with an explicitly provisioned local root."""
-    from kdive.providers.assembly.composition import build_authority_mutation_adapter
+    from kdive.providers.assembly.composition import build_authority_mutation_binding
+    from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
     from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
     from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 
-    adapter = build_authority_mutation_adapter(config.provider_socket)
-    if adapter is None:
+    binding = build_authority_mutation_binding(config.provider_socket)
+    if binding is None:
         return None
 
     @asynccontextmanager
@@ -1092,7 +1104,10 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
         journal_factory=lambda system_id: FileAuthorityJournal(
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         ),
-        adapter=adapter,
+        adapter=binding.adapter,
+        recovery_orphans=RecoveryOrphanAuthorityService(
+            connections, binding.provider, executor=binding.adapter
+        ),
     )
 
 

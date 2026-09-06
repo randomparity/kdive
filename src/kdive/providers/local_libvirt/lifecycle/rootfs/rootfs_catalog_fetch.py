@@ -17,12 +17,11 @@ from kdive.components.references import CatalogComponentRef
 from kdive.config.core_settings import DATABASE_URL
 from kdive.images.rootfs.fetch import fetch_public_provisioning_rootfs
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import CatalogFetch
-from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.store.objectstore import object_store_from_env
 
 # The s3-fetch cache lives OUTSIDE allowed_roots (which default to [ROOTFS_DIR]) so a cached image
 # is never reachable as a staged-path candidate, keeping the no-escape invariant true.
-_CACHE_DIR = Path(ROOTFS_DIR).parent / "rootfs-cache"
+_CACHE_DIR = Path("/var/lib/kdive/rootfs-cache")
 
 
 def rootfs_catalog_fetch_from_env(allowed_roots: list[Path]) -> CatalogFetch:

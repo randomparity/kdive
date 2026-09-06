@@ -27,12 +27,16 @@ from kdive.providers.external_boot_authority.device_identity import (
 from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
     AuthorityAcknowledgementV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityHealthAcknowledgementV1,
     AuthorityHealthRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityRecoveryOrphanDispositionResponseV1,
+    AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
     decode_authority_request,
 )
@@ -54,10 +58,14 @@ _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_defa
 
 type Operation = Literal[
     "acknowledge-takeover",
+    "observe-authority",
+    "observe-running",
+    "execute-conflict-resolution",
     "execute-mutation",
     "execute-preparation",
     "health",
     "resolve-device-identity",
+    "resolve-recovery-orphan",
 ]
 type AuthenticatePeer = Callable[[SecretStr], Awaitable[AuthenticatedPeer]]
 
@@ -71,12 +79,34 @@ class AuthorityService(Protocol):
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1: ...
 
+    async def observe_authority(
+        self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1: ...
+
+    async def execute_conflict_resolution(
+        self, peer: AuthenticatedPeer, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityRunningService(Protocol):
+    async def observe_running(
+        self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+    ) -> AuthorityRunningObservationV1: ...
+
 
 @runtime_checkable
 class AuthorityPreparationService(Protocol):
     async def execute_preparation(
         self, peer: AuthenticatedPeer, request: AuthorityPreparationMutationRequestV1
     ) -> AuthorityPreparationResponseV1: ...
+
+
+@runtime_checkable
+class AuthorityRecoveryOrphanService(Protocol):
+    async def resolve_recovery_orphan(
+        self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1: ...
 
 
 class DeviceIdentityService(Protocol):
@@ -122,10 +152,20 @@ def encode_request_envelope(
     )
     if operation == "acknowledge-takeover" and not isinstance(decoded, AuthorityTakeoverRequestV1):
         raise ValueError("invalid-request")
-    if operation == "execute-mutation" and not isinstance(decoded, AuthorityMutationRequestV1):
+    if operation in {"execute-mutation", "observe-authority", "observe-running"} and not isinstance(
+        decoded, AuthorityMutationRequestV1
+    ):
+        raise ValueError("invalid-request")
+    if operation == "execute-conflict-resolution" and not isinstance(
+        decoded, AuthorityConflictResolutionRequestV1
+    ):
         raise ValueError("invalid-request")
     if operation == "execute-preparation" and not isinstance(
         decoded, AuthorityPreparationMutationRequestV1
+    ):
+        raise ValueError("invalid-request")
+    if operation == "resolve-recovery-orphan" and not isinstance(
+        decoded, AuthorityRecoveryOrphanDispositionRequestV1
     ):
         raise ValueError("invalid-request")
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
@@ -186,10 +226,14 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
         request_value = value["request"]
         if operation not in {
             "acknowledge-takeover",
+            "observe-authority",
+            "observe-running",
+            "execute-conflict-resolution",
             "execute-mutation",
             "execute-preparation",
             "health",
             "resolve-device-identity",
+            "resolve-recovery-orphan",
         }:
             raise ValueError
         if not isinstance(credential, str) or not isinstance(request_value, dict):
@@ -207,10 +251,22 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, AuthorityTakeoverRequestV1
         ):
             raise ValueError
-        if operation == "execute-mutation" and not isinstance(request, AuthorityMutationRequestV1):
+        if operation in {
+            "execute-mutation",
+            "observe-authority",
+            "observe-running",
+        } and not isinstance(request, AuthorityMutationRequestV1):
+            raise ValueError
+        if operation == "execute-conflict-resolution" and not isinstance(
+            request, AuthorityConflictResolutionRequestV1
+        ):
             raise ValueError
         if operation == "execute-preparation" and not isinstance(
             request, AuthorityPreparationMutationRequestV1
+        ):
+            raise ValueError
+        if operation == "resolve-recovery-orphan" and not isinstance(
+            request, AuthorityRecoveryOrphanDispositionRequestV1
         ):
             raise ValueError
         if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
@@ -228,7 +284,9 @@ def _success(
     value: AuthorityAcknowledgementV1
     | AuthorityObservationV1
     | AuthorityPreparationResponseV1
+    | AuthorityRunningObservationV1
     | AuthorityHealthAcknowledgementV1
+    | AuthorityRecoveryOrphanDispositionResponseV1
     | DeviceIdentityResponseV1,
 ) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
@@ -279,6 +337,26 @@ async def _dispatch(
             if not isinstance(service, AuthorityPreparationService):
                 return _error("provider-not-configured")
             return _success(await service.execute_preparation(peer, request))
+        if operation == "resolve-recovery-orphan":
+            if not isinstance(request, AuthorityRecoveryOrphanDispositionRequestV1):
+                raise _TransportError("invalid-request")
+            if not isinstance(service, AuthorityRecoveryOrphanService):
+                return _error("provider-not-configured")
+            return _success(await service.resolve_recovery_orphan(peer, request))
+        if operation == "observe-running":
+            if not isinstance(request, AuthorityMutationRequestV1):
+                raise _TransportError("invalid-request")
+            if not isinstance(service, AuthorityRunningService):
+                return _error("provider-not-configured")
+            return _success(await service.observe_running(peer, request))
+        if operation == "observe-authority":
+            if not isinstance(request, AuthorityMutationRequestV1):
+                raise _TransportError("invalid-request")
+            return _success(await service.observe_authority(peer, request))
+        if operation == "execute-conflict-resolution":
+            if not isinstance(request, AuthorityConflictResolutionRequestV1):
+                raise _TransportError("invalid-request")
+            return _success(await service.execute_conflict_resolution(peer, request))
         if not isinstance(request, AuthorityMutationRequestV1):
             raise _TransportError("invalid-request")
         return _success(await service.execute_mutation(peer, request))

@@ -132,6 +132,56 @@ runner cannot masquerade as "no environment":
 
 ## Running each tier
 
+### Installed local authority carrier
+
+Issue #2151's local x86_64 carrier is selected by the `live_vm` marker but remains dormant unless
+`KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file.
+The closed file contains `installed_revision` (the exact 40-character SHA), `system_id` (a
+pre-provisioned disposable System UUID), its `project`, `ownership_prefix`
+(`kdive-2151-<sha12>-<nonce8>`), and the literal
+`kdive-external-boot-authority.service` service name. `barrier_socket` is optional and belongs only
+to the separate deterministic fault arms.
+It contains no credentials; the active fixed worker owns authentication.
+
+Run only the focused carrier after provisioning and backend bring-up:
+
+```sh
+KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG=/protected/local-authority-carrier.json \
+  uv run python -m pytest tests/live_vm/test_installed_local_authority.py -q
+```
+
+An unset trigger skips. Any configured mismatch fails before mutation: the carrier requires the
+authority disk revision and the `/readyz` build revision from the server and every active fixed
+worker slot to resolve as commits exactly equal to `installed_revision` (abbreviated reports are
+resolved against the checkout; unknown, ambiguous, and ref-name reports fail). After its disposable
+fixture is re-provisioned, the carrier runs non-writing `O_RDWR` open attempts as every active fixed
+worker and the invoking control identity against that fixture's exact private overlay and console.
+It also requires both identities to fail unlink and replacement attempts against invocation-owned
+sentinels in those same private parents; only the authority identity creates and removes those exact
+sentinels. The normal carrier then opens a uniquely titled
+Investigation, creates a labeled Run on the operator-provided disposable System, uploads the
+kernel through the public artifact contract, and drains the real install, activate, and root
+release jobs with `jobs.wait`. The root release owns its derived recover and cleanup phases; the
+carrier requires their terminal journal/receipt evidence, receipt consumption, and one reservation
+credit before it closes that exact Investigation. The provider and database retain their ordinary
+audit/history records; do not run a prefix-wide or host-wide reaper.
+
+The current installed authority has no deterministic provider-effect barrier for suspending a real
+operation after its host effect but before journal/core terminal persistence. Consequently the
+fault arms fail loud rather than claiming unresolved-takeover, restart, journal-loss, or
+stale-write acceptance from timing luck or fake ports. They do not gate the ordinary
+activate/release/cleanup path. Helper tests under
+`test_installed_local_authority_support.py` prove only input and cleanup orchestration; they are not
+native acceptance. Recover, resolve-conflict, and teardown remain separate state/fault arms.
+
+Before opening the carrier Run, the native test re-provisions only the configured disposable
+System on the fixed private authority daemon. The setup reads that exact System's durable
+provisioning profile, removes only its UUID-derived legacy domain/overlay/baseline/console fixture,
+drops to the authority uid, and recreates the same domain and artifacts. It then verifies the
+overlay and console owner and the live private-daemon domain before any public install or boot
+request. The configured System must be disposable; this setup is not a migration mechanism for
+ordinary worker-owned Systems.
+
 ### `live_stack` — drive the running stack over HTTP
 
 ```

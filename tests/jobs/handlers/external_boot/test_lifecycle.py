@@ -47,6 +47,7 @@ from kdive.jobs.models import (
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
 )
@@ -145,6 +146,18 @@ class _VehicleExecutor:
             observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
         )
 
+    async def observe(self, _request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid4(),
+            category="source",
+            composite_state=getattr(self.vehicle.port, "observed_composite", "sha256:" + "8" * 64),
+        )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        return await self.execute(request)
+
 
 class _ReceiptExecutor(_VehicleExecutor):
     """Model the authority journal's terminal-observation replay at the handler boundary."""
@@ -195,7 +208,7 @@ async def _durable_rows(conn: AsyncConnection, activation_id: Any) -> tuple[Any,
     return activation["value"], attempts
 
 
-@pytest.mark.parametrize("operation", ["activate", "release", "recover", "cleanup"])
+@pytest.mark.parametrize("operation", ["activate", "recover", "cleanup"])
 def test_post_provider_interruption_replays_without_a_second_mutation(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
@@ -322,7 +335,7 @@ def _drive(
     asyncio.run(_main())
 
 
-@pytest.mark.parametrize("operation", list(CASES))
+@pytest.mark.parametrize("operation", [operation for operation in CASES if operation != "release"])
 def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
     migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
 ) -> None:
@@ -358,11 +371,38 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
         assert committed is not None
         row = await _activation_row(seed, case.vehicle.activation_id)
         assert row["state"] == spec["after"]
+        if operation == "resolve-conflict":
+            observed = await _one(
+                seed,
+                "SELECT observed_composite_state FROM external_boot_recovery_attempts "
+                "WHERE activation_id = %s ORDER BY attempt_number DESC LIMIT 1",
+                (case.vehicle.activation_id,),
+            )
+            assert observed["observed_composite_state"] == "sha256:" + "8" * 64
 
         # 4. criterion 6, applied half
         assert await _job_state(seed, case.job_id) == "succeeded"
 
     _drive(migrated_url, authority_role_dsns, operation, body)
+
+
+def test_resolve_conflict_refuses_changed_observation_before_provider_mutation(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        case.vehicle.port.__dict__["observed_composite"] = "sha256:" + "9" * 64
+
+        with pytest.raises(ExternalBootAuthorityFailure) as raised:
+            await _run_operation(authority_role_dsns, seed, case, "resolve-conflict")
+
+        failure = raised.value.result.result
+        assert isinstance(failure, _FailureResult)
+        assert failure.error_category == "stale_handle"
+        assert case.vehicle.port.calls == []
+        row = await _activation_row(seed, case.vehicle.activation_id)
+        assert row["state"] == "recovery_conflict"
+
+    _drive(migrated_url, authority_role_dsns, "resolve-conflict", body)
 
 
 def test_activate_reuses_the_persisted_readiness_deadline(
@@ -631,7 +671,7 @@ def test_cmdline_failure_redacts_before_authority_persistence(
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
-@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict", "release"])
+@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict"])
 def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
     migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
 ) -> None:

@@ -436,6 +436,22 @@ class SlotStore:
         }
         if health_bind := settings.health_binds.get(self.slot):
             values["KDIVE_HEALTH_BIND_ADDR"] = health_bind
+        authority_values = {
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": settings.authority_instance,
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": (
+                settings.authority_request_socket
+            ),
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": settings.authority_server_ca_ref,
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": (
+                settings.authority_client_certificate_ref
+            ),
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": (
+                settings.authority_client_key_ref
+            ),
+        }
+        values.update(
+            {name: value for name, value in authority_values.items() if value is not None}
+        )
         if any("\n" in value or "\x00" in value for value in values.values()):
             raise ValueError("worker environment values cannot contain newlines or NUL bytes")
         return "".join(f"{name}={shlex.quote(value)}\n" for name, value in sorted(values.items()))

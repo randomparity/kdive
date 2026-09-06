@@ -398,19 +398,15 @@ or adoption, and live-provider behavior are owned elsewhere and are not represen
 behavior here. Authority-host deployment hardening is ADR-0584's and #2150's. Denial-of-service
 through repeated denied calls is bounded by the existing per-tool authorization path and writes
 nothing. Two of the three perform at most one indexed single-row read under the per-System lock.
-`request_release` also runs the blocking-job query, and that query is **not** fully bounded. It is
-two separately-planned arms rather than one `OR`, because an `OR` across an indexed and an
-unindexed expression is planned as neither: measured on 200k `jobs` rows with both indexes present
-and nothing matching, the single-statement form walked `jobs_pkey` end to end (201041 buffers,
-`Rows Removed by Filter: 200000`) and never touched the expression index. Split, the
-`payload->>'system_id'` arm plans as `Index Scan using jobs_payload_system_id_idx` and reads 3
-buffers. The `run_id` arm has no covering index — none exists for `payload->>'run_id'` — so it
-scans every job, and its `LIMIT` can end the scan early only when rows match, which the ordinary
-no-blocker case is not. That residual scan runs under the per-System advisory lock and is the
-weakest claim in this section: it is a real amplifier, not bounded work, and it is deferred to
-#2118 with the index that would close it in
-`docs/debt/0008-external-boot-release-job-scan-under-the-system-lock.md`. Until the executor lands
-the tool refuses before any of this can be reached in anger.
+`request_release` also runs the blocking-job query under the per-System advisory lock. It keeps
+two separately planned, limited arms and no global ordering. Migration 0137 adds the missing
+`jobs((payload->>'run_id'))` expression index. A PostgreSQL 17 remeasurement on 2026-09-06 used
+200,000 queued jobs and 5,000 Runs in an isolated schema with the migrated jobs column layout;
+the selected System had one Run and no matching job. The System index used two shared buffers,
+the Run job bitmap index used three, the complete Run arm used six, and the union used eight.
+Execution took 0.055 ms. This synthetic observation resolves the previously measured scan in
+`docs/debt/0008-external-boot-release-job-scan-under-the-system-lock.md`; it does not promise a
+fixed planner choice or production latency. Tests assert index existence and query shape only.
 
 ## Verification
 

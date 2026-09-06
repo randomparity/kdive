@@ -57,6 +57,10 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "control.power": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.diagnostic_sysrq": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.watch_for_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
+    "runs.release_external_boot": ("tests/services/external_boot/test_recovery_requests.py",),
+    "systems.resolve_external_boot_conflict": (
+        "tests/services/external_boot/test_recovery_requests.py",
+    ),
     "control.capture_traffic": ("tests/mcp/lifecycle/test_control_tools.py",),
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.backtrace": ("tests/mcp/debug/test_debug_ops.py",),
@@ -112,6 +116,10 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "ops.diagnostics": ("tests/mcp/ops/test_diagnostics.py",),
     "ops.force_release": ("tests/mcp/ops/test_breakglass.py",),
     "ops.force_teardown": ("tests/mcp/ops/test_breakglass.py",),
+    "ops.resolve_recovery_orphan": (
+        "tests/services/external_boot/test_recovery_requests.py",
+        "tests/jobs/handlers/external_boot/test_orphan_resolution.py",
+    ),
     "ops.jobs_list": ("tests/mcp/ops/test_queue_tools.py",),
     "ops.build_uses_list": ("tests/mcp/ops/test_build_use_recovery.py",),
     "ops.recover_build_use": ("tests/mcp/ops/test_build_use_recovery.py",),
@@ -740,13 +748,7 @@ def test_every_tool_has_a_valid_maturity() -> None:
 # validates its request and then reports that the recovery executor is absent (#2117, #2118).
 # Pinned so a new partial tool is a deliberate entry, and so promoting one has to be recorded
 # here as well as at its registration.
-_PARTIAL_TOOLS = frozenset(
-    {
-        "ops.resolve_recovery_orphan",
-        "runs.release_external_boot",
-        "systems.resolve_external_boot_conflict",
-    }
-)
+_PARTIAL_TOOLS: frozenset[str] = frozenset()
 
 
 def test_exactly_the_partial_tools_carry_a_maturity_detail() -> None:
@@ -996,6 +998,9 @@ _JOB_HANDLE_TOOLS = frozenset(
         "control.capture_traffic",
         "control.diagnostic_sysrq",
         "control.watch_for_crash",
+        "ops.resolve_recovery_orphan",
+        "runs.release_external_boot",
+        "systems.resolve_external_boot_conflict",
         "systems.authorize_ssh_key",
         "systems.check_ssh_reachable",
         "systems.snapshot",

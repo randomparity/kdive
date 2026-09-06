@@ -131,6 +131,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG",
+        "test",
+        None,
+        "Path to the owner-only JSON configuration for the installed local-authority native "
+        "carrier (#2151). Names an exact installed revision and disposable System; unset skips, "
+        "while unsafe configuration or mismatched running builds fails before fixture mutation.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_SYSTEM_ID",
         "test",
         None,

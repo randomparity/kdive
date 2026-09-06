@@ -285,7 +285,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _pool_only_plane_registrar(ops_resource_host_tools.register),
         _resolver_tools_registrar(ops_resource_mutation_tools.register, assembly.resolver),
         _resolver_tools_registrar(allocations_tools.register, assembly.resolver),
-        _pool_only_plane_registrar(ops_breakglass_tools.register),
+        _resolver_tools_registrar(ops_breakglass_tools.register, assembly.resolver),
         _resolver_tools_registrar(systems_tools.register, assembly.resolver),
         _pool_only_plane_registrar(investigations.register),
         _runs_tools_registrar(assembly.resolver, assembly.secret_registry),

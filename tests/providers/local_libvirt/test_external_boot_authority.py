@@ -44,6 +44,7 @@ from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    CleanupQuarantineReceiptV1,
     CleanupTombstoneV1,
     FinalizeCleanupProof,
     LocalExternalBootIO,
@@ -62,6 +63,7 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
+    RecoveryObjectObservation,
     RecoveryPoint,
     RunningKernelObservation,
 )
@@ -171,10 +173,12 @@ class _FakeIO:
         self.actions: list[str] = []
         self.tombstone = False
         self.tombstone_error: BaseException | None = None
+        self.finalize_error: BaseException | None = None
         # `publish_tombstone` writes the tombstone and then unlinks `intent.json`. Modelling
         # both lets `finalize_tombstone` below refuse exactly where the real store refuses.
         self.intent_present = True
         self.finalized_proof: FinalizeCleanupProof | None = None
+        self.cleanup_quarantine: CleanupQuarantineReceiptV1 | None = None
         # Raised by `reopen_binding` in place of returning the record. `FileNotFoundError` is
         # what the real store raises for every state in which the recovery record cannot be
         # rebuilt; `OSError` stands for a read that merely failed.
@@ -190,11 +194,35 @@ class _FakeIO:
 
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         del recovery
+        if self.finalize_error is not None:
+            raise self.finalize_error
         if self.tombstone and self.intent_present:
             self.intent_present = False
         self.tombstone = False
+        self.cleanup_quarantine = None
         self.finalized_proof = proof
         self.actions.append("finalize")
+
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        self.cleanup_quarantine = CleanupQuarantineReceiptV1(
+            tombstone=CleanupTombstoneV1(
+                binding=recovery.binding,
+                recovery_point=recovery,
+                point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+            ),
+            proof=proof,
+        )
+
+    def read_cleanup_quarantine(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        del binding
+        return self.cleanup_quarantine
+
+    def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
+        self.cleanup_quarantine = receipt.model_copy(update={"managed": True})
 
     # -- LocalExternalBootOperation ------------------------------------------------
     def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
@@ -792,6 +820,32 @@ async def test_observe_classifies_every_source_target_category(
     assert "observe-state" in io.actions
 
 
+async def test_running_read_uses_matching_recovery_point_without_mutation() -> None:
+    io = _FakeIO(metadata=_metadata("target-defined"))
+    adapter = _adapter(io)
+    try:
+        observed = await adapter.observe_running(_request())
+        assert observed.cmdline == b"root=UUID=x"
+        assert "observe-running" in io.actions
+        assert all(
+            action in {"observe-running", "reopen"} or action.startswith("open:")
+            for action in io.actions
+        )
+    finally:
+        adapter.close()
+
+
+async def test_running_read_refuses_mismatched_source_before_guest_access() -> None:
+    io = _FakeIO()
+    adapter = _adapter(io)
+    try:
+        with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+            await adapter.observe_running(_request(expected_source="sha256:" + "f" * 64))
+        assert "observe-running" not in io.actions
+    finally:
+        adapter.close()
+
+
 async def test_composite_state_moves_when_either_observed_identity_moves() -> None:
     baseline = await _adapter(_FakeIO(observed=_observed(SOURCE_IDENTITY, SOURCE_MODULES))).observe(
         _request()
@@ -1264,10 +1318,10 @@ def _cleanup_takeover() -> AuthorityTakeoverRequestV1:
         run_id=RUN_ID,
         plan_identity=PLAN_IDENTITY,
         purpose="release",
-        operation=AuthorityOperation.RELEASE,
+        operation=AuthorityOperation.CLEANUP,
         provider_kind="local-libvirt",
         authority_instance="local-authority",
-        operation_identity="takeover-release",
+        operation_identity="cleanup-1",
         operation_digest="sha256:" + "9" * 64,
     )
 
@@ -1347,6 +1401,34 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert terminal.outcome == "absent"
     assert terminal.observation is not None
     assert terminal.observation.category == "absent"
+
+
+async def test_cleanup_finalization_failure_publishes_reopened_private_receipt(
+    tmp_path: Path,
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.finalize_error = OSError("private receipt finalization interrupted")
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    mutation = _cleanup_mutation()
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, mutation)
+
+    assert io.cleanup_quarantine is not None
+    assert io.cleanup_quarantine.proof.operation_id == mutation.operation_identity
+    assert io.cleanup_quarantine.proof.attempt_id == str(mutation.attempt_id)
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert len(repository.published_cleanup_quarantines) == 1
+    published_peer, _, terminal, observations = repository.published_cleanup_quarantines[0]
+    assert published_peer == peer
+    assert isinstance(terminal, JournalRecordV1)
+    assert isinstance(observations, tuple)
+    assert terminal.phase is JournalPhase.TERMINAL
+    assert len(observations) == 1
+    assert isinstance(observations[0], RecoveryObjectObservation)
+    assert observations[0].binding.operation_identity == mutation.operation_identity
 
 
 async def test_a_teardown_commit_finalizes_the_tombstone(tmp_path: Path) -> None:

@@ -168,6 +168,9 @@ _PROTECTED_TABLES = {
     "external_boot_authority_audit",
     "external_boot_authority_counters",
     "external_boot_authority_journal_heads",
+    "external_boot_recovery_quarantine",
+    "external_boot_recovery_orphan_requests",
+    "external_boot_release_cleanup_receipts",
     "investigation_build_use_recoveries",
     "investigation_build_uses",
     "schema_migrations",
@@ -390,7 +393,12 @@ _RECONCILER_MUTATIONS = {
     },
 }
 _EXPECTED_ROLE_TABLE_PRIVILEGES = {
-    "kdive_server": {"SELECT": _ORDINARY_TABLES, **_SERVER_MUTATIONS},
+    "kdive_server": {
+        **_SERVER_MUTATIONS,
+        "SELECT": _ORDINARY_TABLES
+        | {"external_boot_recovery_quarantine", "external_boot_recovery_orphan_requests"},
+        "INSERT": _SERVER_MUTATIONS["INSERT"] | {"external_boot_recovery_orphan_requests"},
+    },
     "kdive_worker": {"SELECT": _WORKER_SELECT, **_WORKER_MUTATIONS},
     "kdive_reconciler": {"SELECT": _RECONCILER_SELECT, **_RECONCILER_MUTATIONS},
     "kdive_lifecycle_witness": {},

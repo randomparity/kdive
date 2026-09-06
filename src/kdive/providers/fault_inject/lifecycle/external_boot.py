@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -13,6 +15,8 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
     RecoveryPoint,
     RunningKernelObservation,
 )
@@ -31,6 +35,86 @@ class FaultInjectExternalBoot:
         self._preparation_receipts: dict[tuple[str, str], ExternalBootPreparationObservation] = {}
         self._interrupt_after_receipt: set[str] = set()
         self.preparation_mutations = {"materialize": 0, "prepare": 0}
+        self._recovery_objects: dict[str, RecoveryObjectObservation] = {}
+        self.recovery_object_mutations: list[tuple[str, str]] = []
+
+    @staticmethod
+    def _object_observation(
+        binding: RecoveryObjectBinding, *, present: bool, managed: bool
+    ) -> RecoveryObjectObservation:
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                b"kdive-fault-inject-recovery-object-v1\0"
+                + binding.to_canonical_json()
+                + f"\0{present!s}\0{managed!s}".encode()
+            ).hexdigest()
+        )
+        return RecoveryObjectObservation(
+            binding=binding,
+            present=present,
+            managed=managed,
+            observed_digest=digest,
+        )
+
+    def register_recovery_object(self, binding: RecoveryObjectBinding) -> RecoveryObjectObservation:
+        """Seed a provider-owned quarantined object for a connected failure-path test."""
+        observation = self._object_observation(binding, present=True, managed=False)
+        self._recovery_objects[binding.record_id] = observation
+        return observation
+
+    def observe_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
+    ) -> RecoveryObjectObservation:
+        del authority
+        observation = self._recovery_objects.get(binding.record_id)
+        if observation is None:
+            return self._object_observation(binding, present=False, managed=False)
+        if observation.binding != binding:
+            raise ValueError("recovery-object ownership conflicts with request")
+        return observation
+
+    def quarantined_objects(
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> tuple[RecoveryObjectObservation, ...]:
+        del authority
+        return tuple(
+            observation
+            for _, observation in sorted(self._recovery_objects.items())
+            if observation.binding.binding == binding
+            and observation.present
+            and not observation.managed
+        )
+
+    def delete_recovery_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: str,
+    ) -> RecoveryObjectObservation:
+        observed = self.observe_object(binding, authority)
+        if observed.observed_digest != expected_observed_digest:
+            raise ValueError("recovery-object observation changed before delete")
+        result = self._object_observation(binding, present=False, managed=False)
+        self._recovery_objects[binding.record_id] = result
+        self.recovery_object_mutations.append(("delete", binding.record_id))
+        return result
+
+    def adopt_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: str,
+    ) -> RecoveryObjectObservation:
+        observed = self.observe_object(binding, authority)
+        if observed.observed_digest != expected_observed_digest or not observed.present:
+            raise ValueError("recovery-object observation changed before adopt")
+        result = self._object_observation(binding, present=True, managed=True)
+        self._recovery_objects[binding.record_id] = result
+        self.recovery_object_mutations.append(("adopt", binding.record_id))
+        return result
 
     def interrupt_after_receipt(self, phase: str) -> None:
         """Arm a one-shot interruption after ``phase`` publishes its receipt."""

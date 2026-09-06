@@ -17,6 +17,7 @@ the claim about what they mean is corrected.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -33,6 +34,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -77,8 +79,15 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.routing import AuthorityReservationGeometry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
-from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
+from tests.jobs.handlers.external_boot.seeding import (
+    RESERVED_BYTES,
+    RecordingAcknowledger,
+    SeededCase,
+    seed_case,
+    store_identity,
+)
 from tests.jobs.handlers.external_boot.support import build_job
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
 from tests.mcp.systems_support import provider_resolver
@@ -96,6 +105,307 @@ def test_cmdline_rendering_redacts_before_distinct_bounded_escaping() -> None:
     assert "secret" not in rendered
     assert rendered == "[REDACTED] \\\\ literal\\x00\\x01\\xFF"
     assert len(_render_cmdline(b"a" * 9000, Redactor(registry=registry)).encode()) == 8192
+
+
+def test_preparing_capacity_exhaustion_precedes_materialize_and_retries_after_release(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    class NoMutation:
+        async def execute_preparation(self, request: object) -> object:
+            raise AssertionError("capacity exhaustion must precede MATERIALIZE")
+
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        target_vehicle = build_vehicle()
+        target_store = store_identity(target_vehicle)
+        blocker_vehicle = build_vehicle()
+        await seed_case(
+            seed,
+            blocker_vehicle,
+            purpose="release",
+            activation_state="active",
+            with_reservation=True,
+            reservation_store_identity=target_store,
+        )
+        target = await seed_case(
+            seed,
+            target_vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        ports = replace(
+            _ports(
+                target,
+                resolver=resolver_for(target_vehicle),
+                acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+            ),
+            preparation_executor=cast(Any, NoMutation()),
+            reservation_geometry=lambda _binding: AuthorityReservationGeometry(
+                target_store, RESERVED_BYTES, RESERVED_BYTES
+            ),
+        )
+        with pytest.raises(CategorizedError) as raised:
+            await _run(
+                worker,
+                target,
+                ports=ports,
+                require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+                call_port=lambda _context: None,
+            )
+        assert raised.value.category is ErrorCategory.CAPACITY_EXHAUSTED
+        row = await (
+            await seed.execute(
+                "SELECT state FROM external_boot_reservations WHERE activation_id=%s",
+                (target.vehicle.activation_id,),
+            )
+        ).fetchone()
+        assert row == ("pending",)
+        await seed.execute(
+            "DELETE FROM external_boot_reservations WHERE activation_id=%s",
+            (blocker_vehicle.activation_id,),
+        )
+        repository = ExternalBootActivationRepository()
+        activation = await repository.get(worker, target.vehicle.activation_id)
+        assert activation is not None
+        await seed.execute(
+            "UPDATE jobs SET lease_expires_at=clock_timestamp() - interval '1 second' WHERE id=%s",
+            (target.job_id,),
+        )
+        async with worker.transaction():
+            stale = await repository.mark_reservation_ready_for_job(
+                worker,
+                credential_hash=hashlib.sha256(target.credential.encode()).digest(),
+                job_id=target.job_id,
+                job_attempt=target.attempt,
+                activation_id=target.vehicle.activation_id,
+                system_id=target.vehicle.system_id,
+                operation_owner_id=activation.operation_owner_id,
+                authority_generation=activation.authority_generation,
+                store_identity=target_store,
+                reserve_bytes=RESERVED_BYTES,
+                recovery_max_bytes=RESERVED_BYTES,
+            )
+        assert stale.value == "superseded"
+        await seed.execute(
+            "UPDATE jobs SET lease_expires_at=clock_timestamp() + interval '5 minutes' WHERE id=%s",
+            (target.job_id,),
+        )
+        await seed.execute(
+            "UPDATE worker_incarnations SET state='terminated', "
+            "terminated_at=clock_timestamp(), outcome='killed' WHERE incarnation=%s",
+            (target.worker_incarnation,),
+        )
+        async with worker.transaction():
+            inactive = await repository.mark_reservation_ready_for_job(
+                worker,
+                credential_hash=hashlib.sha256(target.credential.encode()).digest(),
+                job_id=target.job_id,
+                job_attempt=target.attempt,
+                activation_id=target.vehicle.activation_id,
+                system_id=target.vehicle.system_id,
+                operation_owner_id=activation.operation_owner_id,
+                authority_generation=activation.authority_generation,
+                store_identity=target_store,
+                reserve_bytes=RESERVED_BYTES,
+                recovery_max_bytes=RESERVED_BYTES,
+            )
+        assert inactive.value == "superseded"
+        await seed.execute(
+            "UPDATE worker_incarnations SET state='active', terminated_at=NULL, outcome=NULL "
+            "WHERE incarnation=%s",
+            (target.worker_incarnation,),
+        )
+
+        async def debit(connection: AsyncConnection) -> str:
+            async with connection.transaction():
+                status = await repository.mark_reservation_ready_for_job(
+                    connection,
+                    credential_hash=hashlib.sha256(target.credential.encode()).digest(),
+                    job_id=target.job_id,
+                    job_attempt=target.attempt,
+                    activation_id=target.vehicle.activation_id,
+                    system_id=target.vehicle.system_id,
+                    operation_owner_id=activation.operation_owner_id,
+                    authority_generation=activation.authority_generation,
+                    store_identity=target_store,
+                    reserve_bytes=RESERVED_BYTES,
+                    recovery_max_bytes=RESERVED_BYTES,
+                )
+            return status.value
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as competitor:
+            assert await asyncio.gather(debit(worker), debit(competitor)) == ["applied", "applied"]
+        used = await (
+            await seed.execute(
+                "SELECT sum(reserved_bytes) FROM external_boot_reservations "
+                "WHERE store_identity=%s AND state='ready'",
+                (target_store,),
+            )
+        ).fetchone()
+        assert used == (RESERVED_BYTES,)
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_competing_activations_serialize_recovery_capacity_debit(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    class NoMutation:
+        async def execute_preparation(self, request: object) -> object:
+            raise AssertionError("capacity exhaustion must precede MATERIALIZE")
+
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        shared_store = store_identity(build_vehicle())
+        blocker = build_vehicle()
+        await seed_case(
+            seed,
+            blocker,
+            purpose="release",
+            activation_state="active",
+            with_reservation=True,
+            reservation_store_identity=shared_store,
+        )
+        targets = [
+            await seed_case(
+                seed,
+                build_vehicle(),
+                purpose="activate",
+                activation_state="preparing",
+                with_materialization=False,
+                with_recovery_point=False,
+                reservation_store_identity=shared_store,
+            )
+            for _ in range(2)
+        ]
+        for target in targets:
+            ports = replace(
+                _ports(
+                    target,
+                    resolver=resolver_for(target.vehicle),
+                    acknowledger=RecordingAcknowledger(
+                        authority_role_dsns("kdive_provider_authority")
+                    ),
+                ),
+                preparation_executor=cast(Any, NoMutation()),
+                reservation_geometry=lambda _binding: AuthorityReservationGeometry(
+                    shared_store, RESERVED_BYTES, RESERVED_BYTES
+                ),
+            )
+            with pytest.raises(CategorizedError) as raised:
+                await _run(
+                    worker,
+                    target,
+                    ports=ports,
+                    require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+                    call_port=lambda _context: None,
+                )
+            assert raised.value.category is ErrorCategory.CAPACITY_EXHAUSTED
+        await seed.execute(
+            "DELETE FROM external_boot_reservations WHERE activation_id=%s",
+            (blocker.activation_id,),
+        )
+        repository = ExternalBootActivationRepository()
+        activations = [await repository.get(worker, case.vehicle.activation_id) for case in targets]
+        assert all(activation is not None for activation in activations)
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as competitor:
+            connections = (worker, competitor)
+            entered = [asyncio.Event(), asyncio.Event()]
+
+            async def debit(index: int) -> str:
+                case = targets[index]
+                activation = activations[index]
+                assert activation is not None
+                entered[index].set()
+                async with connections[index].transaction():
+                    result = await repository.mark_reservation_ready_for_job(
+                        connections[index],
+                        credential_hash=hashlib.sha256(case.credential.encode()).digest(),
+                        job_id=case.job_id,
+                        job_attempt=case.attempt,
+                        activation_id=case.vehicle.activation_id,
+                        system_id=case.vehicle.system_id,
+                        operation_owner_id=activation.operation_owner_id,
+                        authority_generation=activation.authority_generation,
+                        store_identity=shared_store,
+                        reserve_bytes=RESERVED_BYTES,
+                        recovery_max_bytes=RESERVED_BYTES,
+                    )
+                return result.value
+
+            owner = await (
+                await seed.execute(
+                    "SELECT owner_key FROM external_boot_reservations WHERE activation_id=%s",
+                    (targets[0].vehicle.activation_id,),
+                )
+            ).fetchone()
+            assert owner is not None
+            await seed.execute(
+                "DELETE FROM external_boot_reservations WHERE activation_id=%s",
+                (targets[0].vehicle.activation_id,),
+            )
+            assert await debit(0) == "superseded"
+            await seed.execute(
+                "INSERT INTO external_boot_reservations "
+                "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                "VALUES (%s, %s, %s, %s, 'pending')",
+                (targets[0].vehicle.activation_id, shared_store, owner[0], RESERVED_BYTES),
+            )
+
+            async with (
+                seed.transaction(),
+                advisory_xact_lock(seed, LockScope.RECOVERY_STORE, shared_store),
+            ):
+                contenders = [asyncio.create_task(debit(index)) for index in range(2)]
+                await asyncio.gather(*(event.wait() for event in entered))
+                async with asyncio.timeout(10):
+                    while True:
+                        blocked = await (
+                            await seed.execute(
+                                "SELECT count(*) FROM pg_stat_activity "
+                                "WHERE pid = ANY(%s) "
+                                "AND %s = ANY(pg_blocking_pids(pid))",
+                                (
+                                    [connection.info.backend_pid for connection in connections],
+                                    seed.info.backend_pid,
+                                ),
+                            )
+                        ).fetchone()
+                        if blocked == (2,):
+                            break
+                        assert not any(task.done() for task in contenders)
+                        await asyncio.sleep(0.01)
+            results = await asyncio.gather(*contenders)
+            assert sorted(results) == ["applied", "capacity_exhausted"]
+
+            ready = await (
+                await seed.execute(
+                    "SELECT activation_id FROM external_boot_reservations "
+                    "WHERE store_identity=%s AND state='ready'",
+                    (shared_store,),
+                )
+            ).fetchall()
+            assert len(ready) == 1
+            winner = ready[0][0]
+            loser_index = next(
+                index for index, case in enumerate(targets) if case.vehicle.activation_id != winner
+            )
+            await seed.execute(
+                "DELETE FROM external_boot_reservations WHERE activation_id=%s", (winner,)
+            )
+            assert await debit(loser_index) == "applied"
+            assert await debit(loser_index) == "applied"
+            total = await (
+                await seed.execute(
+                    "SELECT COALESCE(sum(reserved_bytes), 0) FROM external_boot_reservations "
+                    "WHERE store_identity=%s AND state='ready'",
+                    (shared_store,),
+                )
+            ).fetchone()
+            assert total == (RESERVED_BYTES,)
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
 async def _no_preconditions(
@@ -134,6 +444,7 @@ def _job(case: SeededCase) -> Job:
 def _observe(context: OperationContext) -> RunningKernelObservation:
     recovery = context.activation.recovery_point
     assert recovery is not None
+    assert context.port is not None
     return context.port.observe(recovery, authority_ref(context))
 
 
@@ -163,6 +474,9 @@ def _ports(
         incarnation_credential=SecretStr(case.credential),
         secret_registry=SecretRegistry(),
         acknowledger=cast(Any, acknowledger),
+        reservation_geometry=lambda _binding: AuthorityReservationGeometry(
+            store_identity(case.vehicle), RESERVED_BYTES, RESERVED_BYTES * 2
+        ),
     )
 
 

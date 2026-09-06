@@ -43,6 +43,16 @@ class RecordingExecutor:
         self.category = category
         self.requests: list[AuthorityMutationRequestV1] = []
 
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
+        )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        return await self.execute(request)
+
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         self.requests.append(request)
         return AuthorityObservationV1(
@@ -155,7 +165,6 @@ def test_sender_disconnect_returns_nonterminal_bound_failure_with_same_operation
         ("activate", "target"),
         ("recover", "source"),
         ("resolve-conflict", "source"),
-        ("release", "source"),
         ("cleanup", "absent"),
     ],
 )
@@ -165,6 +174,12 @@ def test_worker_uses_authority_observation_with_only_the_readiness_read(
     operation: str,
     category: Literal["absent", "source", "target", "mixed", "unreadable", "conflict"],
 ) -> None:
+    """Direct operations use exactly one authority observation after their readiness read.
+
+    Derived ``release`` instead journals real ``recover`` and ``cleanup`` phases; its worker path
+    is covered by ``test_release_connected.py``.
+    """
+
     async def main() -> None:
         vehicle = build_vehicle()
         spec = CASES[operation]

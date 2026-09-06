@@ -15,8 +15,10 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config_registry
 from kdive.db.locks import LockScope, _lock_key
 from kdive.db.repositories import RUNS, SNAPSHOTS, SYSTEMS
 from kdive.domain.capacity.state import (
@@ -38,7 +40,7 @@ from kdive.mcp.tools.lifecycle.control.registrar import (
 )
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
-from kdive.mcp.tools.lifecycle.runs.steps import boot_run
+from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
@@ -54,6 +56,8 @@ from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.debug import lifecycle as debug_lifecycle
 from kdive.services.external_boot import ExternalBootDenied
+from kdive.services.external_boot.admission import DENIAL_REASON
+from tests.db_waits import wait_until_any_backend_waiting, wait_until_backend_waiting
 from tests.mcp._seed import seed_run_on_system
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import (
@@ -188,6 +192,70 @@ async def _mark_installed(pool: AsyncConnectionPool, run_id: str) -> None:
         )
 
 
+async def _prepare_external_boot_admission(
+    pool: AsyncConnectionPool, system_id: str, run_id: str
+) -> None:
+    """Persist the immutable evidence and fixed route required for external boot admission."""
+    digest = "sha256:" + "1" * 64
+    async with pool.connection() as conn:
+        investigation = await (
+            await conn.execute("SELECT investigation_id FROM runs WHERE id=%s", (run_id,))
+        ).fetchone()
+        assert investigation is not None
+    build_ref = await runs_support.seed_investigation_build(pool, str(investigation[0]))
+    evidence = {
+        "schema": "external-boot-evidence-v1",
+        "architecture": "x86_64",
+        "bundle_sha256": digest,
+        "archive_member_count": 1,
+        "archive_uncompressed_bytes": 4096,
+        "vmlinuz_sha256": digest,
+        "vmlinuz_size_bytes": 2048,
+        "decoded_kernel_size_bytes": 4096,
+        "elf_metadata_bytes": 512,
+        "gnu_build_id_size_bytes": 8,
+        "release": "6.9.0-kdive",
+        "module_source_manifest": digest,
+        "module_member_count": 1,
+        "module_uncompressed_bytes": 64,
+    }
+    root = {
+        "schema": "root-spec-v1",
+        "architecture": "x86_64",
+        "root": "/dev/vda1",
+        "arguments": ["root=/dev/vda1"],
+        "authority": "stage-inspection",
+        "source": {"kind": "staged-image", "identity": digest},
+    }
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE runs SET build_ref=%s WHERE id=%s", (build_ref, run_id))
+        await conn.execute(
+            "UPDATE investigation_builds SET canonical_document=%s, build_result=%s, "
+            "artifacts=%s WHERE build_ref=%s",
+            (
+                Jsonb({"version": 2, "external_boot_evidence": evidence}),
+                Jsonb({"kernel_ref": "build/kernel.tar", "build_id": "id"}),
+                Jsonb({"kernel": {"version_id": "kernel-v1"}}),
+                build_ref,
+            ),
+        )
+        await conn.execute(
+            "INSERT INTO system_root_provenance "
+            "(system_id, source_image_id, project, architecture, image_digest, root_spec) "
+            "VALUES (%s, %s, 'proj', 'x86_64', %s, %s)",
+            (system_id, uuid4(), digest, Jsonb(root)),
+        )
+    config_registry.load(
+        {
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": "store-local",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "4096",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "8192",
+            "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "4096",
+        }
+    )
+
+
 async def _set_system_state(pool: AsyncConnectionPool, system_id: str, state: SystemState) -> None:
     async with pool.connection() as conn:
         await conn.execute(
@@ -277,6 +345,180 @@ async def _install_owning_run(restricted: _Restricted) -> ToolResponse:
 async def _boot_owning_run(restricted: _Restricted) -> ToolResponse:
     await _mark_installed(restricted.pool, restricted.owning_run_id)
     return await boot_run(restricted.pool, _ctx(), restricted.owning_run_id)
+
+
+@pytest.mark.parametrize("state", [_STATE.ACTIVE, _STATE.RECOVERING])
+def test_configured_authority_boot_preserves_public_admission_denial(
+    migrated_url: str, seeded_activation: SeedActivation, state: ExternalBootActivationState
+) -> None:
+    async def run() -> tuple[ToolResponse, tuple[int, ...], tuple[int, ...]]:
+        async with runs_support.pool(migrated_url) as pool:
+            restricted = await _restricted_ready_system(pool, seeded_activation, state=state)
+            await _mark_installed(pool, restricted.owning_run_id)
+            config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local"})
+            async with pool.connection() as conn:
+                before = tuple(
+                    int(value[0])
+                    for value in (
+                        await (
+                            await conn.execute(
+                                "SELECT count(*) FROM external_boot_activations "
+                                "UNION ALL SELECT count(*) FROM jobs"
+                            )
+                        ).fetchall()
+                    )
+                )
+            response = await boot_run(pool, _ctx(), restricted.owning_run_id, resolver=_resolver())
+            async with pool.connection() as conn:
+                after = tuple(
+                    int(value[0])
+                    for value in (
+                        await (
+                            await conn.execute(
+                                "SELECT count(*) FROM external_boot_activations "
+                                "UNION ALL SELECT count(*) FROM jobs"
+                            )
+                        ).fetchall()
+                    )
+                )
+            return response, before, after
+
+    response, before, after = asyncio.run(run())
+    assert response.error_category == "conflict"
+    assert response.data["reason"] == DENIAL_REASON
+    assert before == after
+
+
+def test_public_boot_atomically_admits_configured_external_boot(migrated_url: str) -> None:
+    async def run() -> ToolResponse:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            return await boot_run(pool, _ctx(), run_id, resolver=_resolver())
+
+    response = asyncio.run(run())
+    assert response.status == "queued", response.model_dump()
+    assert response.data["replayed"] is False
+
+
+def test_external_boot_rechecks_install_after_a_queued_restage(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A boot that passed its initial check cannot admit after an earlier restage clears it."""
+
+    async def _run() -> tuple[ToolResponse, ToolResponse, int, int]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, run_id = await _ready_system_with_run(conn_pool)
+            await _mark_installed(conn_pool, run_id)
+            await _prepare_external_boot_admission(conn_pool, system_id, run_id)
+            boot_resolver = _resolver()
+            binding_for_system = boot_resolver.binding_for_system
+            boot_precheck_complete = asyncio.Event()
+            boot_waiter_pid: int | None = None
+
+            async def _observed_binding(
+                conn: psycopg.AsyncConnection, bound_system_id: UUID
+            ) -> Any:
+                nonlocal boot_waiter_pid
+                binding = await binding_for_system(conn, bound_system_id)
+                if boot_waiter_pid is None:
+                    row = await (await conn.execute("SELECT pg_backend_pid()")).fetchone()
+                    assert row is not None
+                    boot_waiter_pid = int(row[0])
+                    boot_precheck_complete.set()
+                return binding
+
+            monkeypatch.setattr(boot_resolver, "binding_for_system", _observed_binding)
+            holder = await psycopg.AsyncConnection.connect(migrated_url)
+            async with holder, holder.transaction():
+                await holder.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (_lock_key(LockScope.SYSTEM, UUID(system_id)),),
+                )
+                restage = asyncio.create_task(
+                    install_run(
+                        conn_pool,
+                        _ctx(),
+                        run_id,
+                        cmdline="restaged=1",
+                        resolver=_resolver(),
+                    )
+                )
+                await wait_until_any_backend_waiting(holder, locktype="advisory")
+                boot = asyncio.create_task(
+                    boot_run(conn_pool, _ctx(), run_id, resolver=boot_resolver)
+                )
+                await boot_precheck_complete.wait()
+                assert boot_waiter_pid is not None
+                await wait_until_backend_waiting(holder, boot_waiter_pid, locktype="advisory")
+            restaged = await restage
+            boot_response = await boot
+            async with conn_pool.connection() as conn:
+                activation_row = await (
+                    await conn.execute("SELECT count(*) FROM external_boot_activations")
+                ).fetchone()
+            assert activation_row is not None
+            return (
+                restaged,
+                boot_response,
+                await _boot_jobs(conn_pool, run_id),
+                int(activation_row[0]),
+            )
+
+    restaged, boot, boot_jobs, activations = asyncio.run(_run())
+    assert restaged.status == "queued", restaged.model_dump()
+    assert boot.error_category == "configuration_error", boot.model_dump()
+    assert boot.data["reason"] == "install_first"
+    assert boot_jobs == 0
+    assert activations == 0
+
+
+def test_force_preflight_failure_preserves_settled_boot_evidence(
+    migrated_url: str,
+) -> None:
+    """The connected setup above covers admission; this case guards destructive ordering."""
+
+    async def run() -> tuple[ToolResponse, tuple[int, int], tuple[int, int]]:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 'boot', 'succeeded')",
+                    (run_id,),
+                )
+                before = await (
+                    await conn.execute(
+                        "SELECT (SELECT count(*) FROM run_steps WHERE run_id=%s AND step='boot'), "
+                        "(SELECT count(*) FROM jobs WHERE payload->>'run_id'=%s)",
+                        (run_id, run_id),
+                    )
+                ).fetchone()
+            config_registry.load(
+                {
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": "store-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "4096",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "8192",
+                    "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "4096",
+                }
+            )
+            response = await boot_run(pool, _ctx(), run_id, resolver=_resolver(), force=True)
+            async with pool.connection() as conn:
+                after = await (
+                    await conn.execute(
+                        "SELECT (SELECT count(*) FROM run_steps WHERE run_id=%s AND step='boot'), "
+                        "(SELECT count(*) FROM jobs WHERE payload->>'run_id'=%s)",
+                        (run_id, run_id),
+                    )
+                ).fetchone()
+            assert before is not None and after is not None
+            return response, cast(tuple[int, int], before), cast(tuple[int, int], after)
+
+    response, before, after = asyncio.run(run())
+    assert response.data["reason"] == "external_boot_provenance_missing"
+    assert after == before
 
 
 async def _power(restricted: _Restricted) -> ToolResponse:
@@ -683,7 +925,7 @@ def test_supplied_crash_run_is_nonleaking_and_never_enqueues(
     assert after == before
 
 
-def test_teardown_is_admitted_in_every_restricted_state(
+def test_teardown_fails_closed_in_recovery_failed_until_authority_chain_lands(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
     async def _run() -> None:
@@ -692,7 +934,10 @@ def test_teardown_is_admitted_in_every_restricted_state(
                 conn_pool, seeded_activation, state=_STATE.RECOVERY_FAILED
             )
             response = await teardown_system(conn_pool, _ctx(), restricted.system_id)
-        assert response.status == "queued", response.model_dump()
+        assert response.status == "error", response.model_dump()
+        assert response.error_category == "conflict"
+        assert response.data["reason"] == "external_boot_teardown_not_supported"
+        assert response.suggested_next_actions == ["runs.get"]
 
     asyncio.run(_run())
 
@@ -1247,6 +1492,11 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
     the activation — `keyed_mutation` short-circuits to `do_work()` when `idempotency_key is
     None`, so on that path the dedup key is the only replay there is and a guard ahead of it
     turns an agent's poll into a refusal while the job it is polling stays queued and runs.
+
+    ``systems.teardown`` is the deliberate exception while its authority-fenced execution chain
+    is incomplete: an ordinary job created before the activation is no longer safe to execute, so
+    the current activation must replace its replay with a refusal. The worker independently fences
+    that already-queued job before System or provider mutation.
     """
     case = _JOB_TOOLS[tool]
 
@@ -1268,6 +1518,13 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
         # there is no replay for the guard to preempt.
         return
     assert held_first.status == "queued", held_first.model_dump()
+    if tool == "systems.teardown":
+        # A queued ordinary teardown predates the activation and therefore lacks authority.
+        # Replaying its envelope would advertise executable destructive work even though the
+        # worker now refuses it; the current activation wins over the old dedup row.
+        assert held_second.error_category == "conflict", held_second.model_dump()
+        assert held_second.data["reason"] == "external_boot_release_required"
+        return
     assert held_second.error_category is None, held_second.model_dump()
     # The same job, not the same envelope: a replay may annotate itself (`data.replayed`).
     assert held_second.object_id == held_first.object_id
@@ -1430,7 +1687,8 @@ def test_a_boot_admitted_before_the_activation_still_replays(
             await _mark_installed(conn_pool, run_id)
             first = await boot_run(conn_pool, _ctx(), run_id)
             await _restrict(conn_pool, seeded_activation, system_id, run_id, _STATE.ACTIVE)
-            replay = await boot_run(conn_pool, _ctx(), run_id)
+            config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local"})
+            replay = await boot_run(conn_pool, _ctx(), run_id, resolver=_resolver())
             return first, replay, await _boot_jobs(conn_pool, run_id)
 
     first, replay, enqueued = asyncio.run(_run())

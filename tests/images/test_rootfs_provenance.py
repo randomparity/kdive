@@ -15,6 +15,16 @@ from kdive.images.planes.base import (
 from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 
 
+def _local_root() -> RootSpecV1:
+    return RootSpecV1(
+        architecture="x86_64",
+        root="/dev/vda",
+        arguments=("root=/dev/vda",),
+        authority="stage-inspection",
+        source=RootSource(kind="staged-image", identity="sha256:" + "a" * 64),
+    )
+
+
 def _spec() -> RootfsBuildSpec:
     return RootfsBuildSpec(
         provider="local-libvirt",
@@ -41,6 +51,7 @@ def test_local_provenance_serializes_optional_operands_and_keeps_zero_count() ->
         boot_kernel_count=0,
         default_kernel_version="",
         os_release={"id": "fedora", "version_id": "43"},
+        root_spec=_local_root(),
     ).to_dict()
 
     assert provenance["plane"] == "local-libvirt"
@@ -67,6 +78,7 @@ def test_local_provenance_omits_drgn_version_when_absent() -> None:
         boot_kernel_count=None,
         default_kernel_version=None,
         os_release=None,
+        root_spec=_local_root(),
     ).to_dict()
 
     assert PROVENANCE_DRGN_VERSION not in provenance

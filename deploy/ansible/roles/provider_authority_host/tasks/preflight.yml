@@ -22,6 +22,7 @@
       - -c
       - |
         import grp, ipaddress, json, os, pwd, re, sys
+        from urllib.parse import urlsplit
         try:
             value = json.load(sys.stdin)
             assert type(value['enabled']) is bool
@@ -62,6 +63,22 @@
                 for path in value['paths']:
                     assert type(path) is str and path.startswith('/') and '\n' not in path
                     assert '\r' not in path and '\x00' not in path
+                local_mutation = value['local_mutation']
+                assert type(local_mutation) is bool
+                capacity, endpoint = value['capacity'], value['endpoint']
+                bucket, region = value['bucket'], value['region']
+                s3_credentials = value['s3_credentials']
+                if local_mutation:
+                    assert type(capacity) is int and capacity > 0
+                    parsed = urlsplit(endpoint)
+                    assert parsed.scheme in ('http', 'https') and parsed.netloc
+                    assert not parsed.username and not parsed.password and not parsed.fragment
+                    assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,254}', bucket)
+                    assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,254}', region)
+                    assert type(s3_credentials) is str and s3_credentials.startswith('/')
+                else:
+                    assert capacity is None and endpoint == '' and bucket == ''
+                    assert s3_credentials == ''
         except Exception:
             sys.exit('invalid or incomplete provider authority deployment inputs')
     stdin: >-
@@ -79,7 +96,16 @@
                     provider_authority_host_server_ca_source,
                     provider_authority_host_worker_client_ca_source,
                     provider_authority_host_health_client_certificate_source,
-                    provider_authority_host_health_client_key_source]} | to_json }}
+                    provider_authority_host_health_client_key_source,
+                    provider_authority_host_recovery_root,
+                    provider_authority_host_rootfs_root,
+                    provider_authority_host_console_root],
+          'local_mutation': provider_authority_host_local_mutation_enabled,
+          'capacity': provider_authority_host_external_boot_capacity_bytes,
+          'endpoint': provider_authority_host_s3_endpoint_url,
+          'bucket': provider_authority_host_s3_bucket,
+          'region': provider_authority_host_s3_region,
+          's3_credentials': provider_authority_host_s3_credentials_source} | to_json }}
   changed_when: false
   check_mode: false
   no_log: true
@@ -97,10 +123,15 @@
     - "{{ provider_authority_host_worker_client_ca_source }}"
     - "{{ provider_authority_host_health_client_certificate_source }}"
     - "{{ provider_authority_host_health_client_key_source }}"
+    - "{{ provider_authority_host_s3_credentials_source }}"
   delegate_to: localhost
   become: false
   register: provider_authority_host_sources
-  when: provider_authority_host_enabled | bool
+  when:
+    - provider_authority_host_enabled | bool
+    - >-
+      item != provider_authority_host_s3_credentials_source
+      or provider_authority_host_local_mutation_enabled | bool
   no_log: true
   tags: [provider_authority_preflight]
 
@@ -114,7 +145,39 @@
       - item.stat.size > 0
     quiet: true
   loop: "{{ provider_authority_host_sources.results }}"
-  when: provider_authority_host_enabled | bool
+  when:
+    - provider_authority_host_enabled | bool
+    - >-
+      item.item != provider_authority_host_s3_credentials_source
+      or provider_authority_host_local_mutation_enabled | bool
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Validate the protected S3 shared-credentials profile
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -c
+      - |
+        import configparser, pathlib, sys
+        try:
+            path = pathlib.Path(sys.argv[1])
+            parser = configparser.RawConfigParser()
+            with path.open(encoding='utf-8') as stream:
+                parser.read_file(stream)
+            section = parser['default']
+            assert section.get('aws_access_key_id', '').strip()
+            assert section.get('aws_secret_access_key', '').strip()
+        except Exception:
+            sys.exit('invalid provider authority S3 shared-credentials profile')
+      - "{{ provider_authority_host_s3_credentials_source }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  check_mode: false
+  when:
+    - provider_authority_host_enabled | bool
+    - provider_authority_host_local_mutation_enabled | bool
   no_log: true
   tags: [provider_authority_preflight]
 

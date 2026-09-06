@@ -203,7 +203,7 @@ def _job(marker: object = ...) -> Job:
 def _marker(
     carrier: ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityFailureV1,
 ) -> dict[str, str]:
-    return {
+    marker = {
         "activation_id": str(carrier.activation_id),
         "run_id": str(carrier.run_id),
         "system_id": str(carrier.system_id),
@@ -214,6 +214,9 @@ def _marker(
         "operation": carrier.admitted_operation,
         "operation_identity": carrier.operation_identity,
     }
+    if carrier.admitted_operation == "resolve-conflict":
+        marker["expected_observed_composite"] = _DIGEST
+    return marker
 
 
 def _success(operation: str = "deadline") -> ExternalBootAuthoritySuccessV1:

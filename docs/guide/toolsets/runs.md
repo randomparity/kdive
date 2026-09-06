@@ -19,9 +19,9 @@ tool's own description.
 
 - `runs.install` — install the built kernel and modules onto the bound system.
 - `runs.boot` — boot the system into the built kernel.
-- `runs.release_external_boot` — release the external-boot activation restricting the run's
-  system. Not served yet: it validates your role and the activation's state, then reports
-  `recovery_executor_unavailable` and changes nothing (#2118 promotes it).
+- `runs.release_external_boot` — enqueue recovery and cleanup of the run's active external boot.
+  Poll the returned job with `jobs.wait`; capacity is credited only after cleanup is accounted.
+  Reuse the idempotency key to recover the same job without extending its server-clock deadline.
 
 ## Inspecting and stopping
 

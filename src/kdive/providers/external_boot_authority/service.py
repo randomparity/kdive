@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
@@ -18,18 +18,26 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityRecoveryOrphanDispositionResponseV1,
+    AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.ports.external_boot import ExternalBootPreparationObservation
+from kdive.providers.ports.external_boot import (
+    ExternalBootPreparationObservation,
+    RecoveryObjectObservation,
+    RunningKernelObservation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,12 +63,26 @@ class AuthorityMutationFinalizer(Protocol):
 
 
 @runtime_checkable
+class AuthorityCleanupQuarantineInventory(Protocol):
+    async def cleanup_quarantine_inventory(
+        self, request: AuthorityMutationRequestV1
+    ) -> tuple[RecoveryObjectObservation, ...]: ...
+
+
+@runtime_checkable
 class AuthorityRecoveryObserver(Protocol):
     async def observe_recovery(
         self,
         request: AuthorityMutationRequestV1,
         context: AuthorityRecoveryObservationContextV1,
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityRunningObserver(Protocol):
+    async def observe_running(
+        self, request: AuthorityMutationRequestV1
+    ) -> RunningKernelObservation: ...
 
 
 @runtime_checkable
@@ -84,6 +106,25 @@ class AuthorityPreparationAdopter(Protocol):
 @runtime_checkable
 class AuthorityAdapterCloser(Protocol):
     def close(self) -> None: ...
+
+
+class AuthorityRecoveryOrphanResolver(Protocol):
+    """Private recovery-object disposition service hosted on an authority lane."""
+
+    def set_serializer(
+        self,
+        serializer: Callable[
+            [
+                UUID,
+                Callable[[], Awaitable[AuthorityRecoveryOrphanDispositionResponseV1]],
+            ],
+            Awaitable[AuthorityRecoveryOrphanDispositionResponseV1],
+        ],
+    ) -> None: ...
+
+    async def resolve_recovery_orphan(
+        self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1: ...
 
 
 class AuthorityRepository(Protocol):
@@ -128,6 +169,28 @@ class AuthorityPreparationRepository(Protocol):
         self,
         peer: AuthenticatedPeer,
         request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None: ...
+
+
+@runtime_checkable
+class AuthorityCleanupQuarantineRepository(Protocol):
+    async def publish_cleanup_quarantine(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        terminal: JournalRecordV1,
+        observations: tuple[RecoveryObjectObservation, ...],
+    ) -> None: ...
+
+
+@runtime_checkable
+class AuthorityReleasePhaseRepository(Protocol):
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
@@ -274,16 +337,20 @@ class ExternalBootAuthorityService:
         journal_factory: Callable[[UUID], FileAuthorityJournal],
         adapter: AuthorityMutationAdapter,
         metrics: AuthorityServiceMetrics | None = None,
+        recovery_orphans: AuthorityRecoveryOrphanResolver | None = None,
     ) -> None:
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
         self.metrics = metrics or AuthorityServiceMetrics.empty()
+        self._recovery_orphans = recovery_orphans
         self._lanes: dict[UUID, _Lane] = {}
         self._completion_tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
         self._closed = False
         self._logger = logging.getLogger(__name__)
+        if recovery_orphans is not None:
+            recovery_orphans.set_serializer(self._serialize_recovery_orphan)
 
     async def close(self) -> None:
         """Stop admission, drain completion-owned mutations, then close the adapter."""
@@ -322,6 +389,37 @@ class ExternalBootAuthorityService:
             self._lanes.pop(system_id)
             if lane.journal is not None:
                 lane.journal.close()
+
+    async def _serialize_recovery_orphan(
+        self,
+        system_id: UUID,
+        operation: Callable[[], Awaitable[AuthorityRecoveryOrphanDispositionResponseV1]],
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        lane = self._lane(system_id)
+        try:
+            async with lane.lock:
+                return await operation()
+        finally:
+            self._release_lane(system_id, lane)
+
+    async def resolve_recovery_orphan(
+        self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        """Run a bounded orphan disposition on the same System lane as mutations."""
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        task = asyncio.create_task(self._resolve_recovery_orphan(peer, request))
+        self._track_completion(task)
+        return await asyncio.shield(task)
+
+    async def _resolve_recovery_orphan(
+        self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        if self._recovery_orphans is None:
+            raise AuthorityServiceError("superseded")
+        if peer is None or not isinstance(peer.incarnation_id, UUID | str):
+            raise AuthorityServiceError("unauthenticated")
+        return await self._recovery_orphans.resolve_recovery_orphan(peer, request)
 
     def _lane_journal(
         self, system_id: UUID, lane: _Lane
@@ -421,6 +519,25 @@ class ExternalBootAuthorityService:
             and binding.authority_instance == request.authority_instance
         )
 
+    @staticmethod
+    def _root_candidate_matches_release_phase(
+        binding: AuthorityBinding, request: AuthorityMutationRequestV1
+    ) -> bool:
+        return (
+            request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+            and binding.authority_id == request.authority_id
+            and binding.generation == request.generation
+            and binding.system_id == request.system_id
+            and binding.activation_id == request.activation_id
+            and binding.run_id == request.run_id
+            and binding.plan_identity == request.plan_identity
+            and binding.purpose == "release"
+            and binding.operation is AuthorityOperation.RELEASE
+            and binding.provider_kind == request.provider_kind
+            and binding.authority_instance == request.authority_instance
+        )
+
     async def _resolve_confirmed(
         self,
         peer: AuthenticatedPeer,
@@ -431,6 +548,19 @@ class ExternalBootAuthorityService:
             if not isinstance(self._repository, AuthorityPreparationRepository):
                 return None
             return await self._repository.resolve_current_preparation(
+                peer,
+                request,
+                acknowledgement.sequence,
+                record_digest(acknowledgement),
+            )
+        if (
+            acknowledgement.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+        ):
+            if not isinstance(self._repository, AuthorityReleasePhaseRepository):
+                return None
+            return await self._repository.resolve_current_release_phase(
                 peer,
                 request,
                 acknowledgement.sequence,
@@ -484,6 +614,23 @@ class ExternalBootAuthorityService:
         except Exception:
             raise self._provider_error(request) from None
 
+    async def _publish_cleanup_quarantine(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1,
+        terminal: JournalRecordV1,
+    ) -> None:
+        """Publish only a receipt re-opened by the trusted private provider boundary."""
+        if not (
+            isinstance(self._adapter, AuthorityCleanupQuarantineInventory)
+            and isinstance(self._repository, AuthorityCleanupQuarantineRepository)
+        ):
+            return
+        observations = await self._adapter.cleanup_quarantine_inventory(request)
+        if observations:
+            await self._repository.publish_cleanup_quarantine(peer, binding, terminal, observations)
+
     async def _recover(
         self,
         binding: AuthorityBinding,
@@ -517,6 +664,31 @@ class ExternalBootAuthorityService:
         ):
             raise AuthorityServiceError("journal_conflict")
         return records
+
+    async def _observation_head_is_current(
+        self, binding: AuthorityBinding, records: list[JournalRecordV1]
+    ) -> None:
+        """Refuse an observation unless its local journal ends at the trusted exact head.
+
+        Unlike mutation recovery, this only compares durable facts.  An observation must not
+        repair, append, or truncate local history merely to make a provider read admissible.
+        """
+        if not records:
+            raise AuthorityServiceError("journal_conflict")
+        head = await self._repository.read_head(binding)
+        last = records[-1]
+        if (
+            head is None
+            or head.authority_instance != binding.authority_instance
+            or head.system_id != binding.system_id
+            or head.sequence != last.sequence
+            or head.digest != record_digest(last)
+            or head.phase is not last.phase
+            or head.authority_id != last.authority_id
+            or head.generation != last.generation
+            or head.operation_identity != last.operation_identity
+        ):
+            raise AuthorityServiceError("journal_conflict")
 
     async def _anchor(
         self,
@@ -636,6 +808,7 @@ class ExternalBootAuthorityService:
             "attempt_id": getattr(request, "attempt_id", request.authority_id),
         }
         values.pop("plan", None)
+        values.pop("expected_observed_composite", None)
         if not isinstance(request, AuthorityTakeoverRequestV1):
             values |= {
                 "expected_source_identity": request.expected_source_identity,
@@ -1054,6 +1227,10 @@ class ExternalBootAuthorityService:
         candidate_matches = trusted is not None and (
             self._root_candidate_matches_preparation(trusted, request)
             if isinstance(request, AuthorityPreparationMutationRequestV1)
+            else self._root_candidate_matches_release_phase(trusted, request)
+            if trusted.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
             else self._binding_matches(trusted, request)
         )
         if not candidate_matches:
@@ -1092,10 +1269,17 @@ class ExternalBootAuthorityService:
                     if prior is not None and prior.phase is JournalPhase.TERMINAL:
                         if not self._operation_matches(prior, request) or prior.observation is None:
                             raise AuthorityServiceError("journal_conflict")
-                        await self._finalize_adapter(request, records)
+                        try:
+                            await self._finalize_adapter(request, records)
+                        except AuthorityServiceError:
+                            await self._publish_cleanup_quarantine(
+                                authenticated, binding, request, prior
+                            )
+                            raise
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
                     predecessor_receipt_identity: str | None = None
+                    adopted_release_phase: AuthorityObservationV1 | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1135,6 +1319,50 @@ class ExternalBootAuthorityService:
                             )
                             if not self._operation_matches(predecessor_record, predecessor):
                                 raise AuthorityServiceError("journal_conflict")
+                    if request.purpose == "release" and request.operation in {
+                        AuthorityOperation.RECOVER,
+                        AuthorityOperation.CLEANUP,
+                    }:
+                        prior_release_phase = next(
+                            (
+                                record
+                                for record in reversed(records)
+                                if record.phase is JournalPhase.TERMINAL
+                                and record.operation == request.operation
+                                and record.generation < request.generation
+                            ),
+                            None,
+                        )
+                        if prior_release_phase is not None:
+                            candidate = request.model_copy(
+                                update={
+                                    "authority_id": prior_release_phase.authority_id,
+                                    "generation": prior_release_phase.generation,
+                                    "attempt_id": prior_release_phase.attempt_id,
+                                    "operation_identity": prior_release_phase.operation_identity,
+                                    "operation_digest": prior_release_phase.operation_digest,
+                                    "expected_source_identity": (
+                                        prior_release_phase.expected_source_identity
+                                    ),
+                                    "intended_target_identity": (
+                                        prior_release_phase.intended_target_identity
+                                    ),
+                                    "recovery_objects": prior_release_phase.recovery_objects,
+                                }
+                            )
+                            expected_outcome = (
+                                "source"
+                                if request.operation is AuthorityOperation.RECOVER
+                                else "absent"
+                            )
+                            if (
+                                prior_release_phase.outcome != expected_outcome
+                                or prior_release_phase.observation is None
+                                or prior_release_phase.observation.category != expected_outcome
+                                or not self._operation_matches(prior_release_phase, candidate)
+                            ):
+                                raise AuthorityServiceError("journal_conflict")
+                            adopted_release_phase = prior_release_phase.observation
                     unresolved = next(
                         (
                             record
@@ -1227,6 +1455,13 @@ class ExternalBootAuthorityService:
                 # cannot reconcile, not a state it should paper over.
                 if not await self._head_still_anchors(binding, context):
                     raise AuthorityServiceError("journal_conflict")
+                if isinstance(request, AuthorityConflictResolutionRequestV1):
+                    observed = await self._adapter.observe(request)
+                    if (
+                        observed.category == "unreadable"
+                        or observed.composite_state != request.expected_observed_composite
+                    ):
+                        raise AuthorityServiceError("superseded")
                 try:
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
@@ -1237,7 +1472,7 @@ class ExternalBootAuthorityService:
                             cast(str, predecessor_receipt_identity),
                             context,
                         )
-                    else:
+                    elif adopted_release_phase is None:
                         await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
@@ -1254,7 +1489,11 @@ class ExternalBootAuthorityService:
                         self._record(request, records, JournalPhase.PROVIDER_RETURNED),
                     )
                 try:
-                    observation = await self._adapter.observe(request)
+                    observation = (
+                        adopted_release_phase
+                        if adopted_release_phase is not None
+                        else await self._adapter.observe(request)
+                    )
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
@@ -1288,7 +1527,13 @@ class ExternalBootAuthorityService:
                             outcome=outcome,
                         ),
                     )
-                    await self._finalize_adapter(request, records)
+                    try:
+                        await self._finalize_adapter(request, records)
+                    except AuthorityServiceError:
+                        await self._publish_cleanup_quarantine(
+                            authenticated, completion_binding, request, records[-1]
+                        )
+                        raise
                     return observation
             finally:
                 active.done.set()
@@ -1301,6 +1546,94 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("superseded")
         task = asyncio.create_task(run())
         self._track_completion(task)
+        try:
+            return await asyncio.shield(task)
+        except AuthorityServiceError as error:
+            self._ensure_rejection(request, error)
+            raise
+
+    async def execute_conflict_resolution(
+        self, peer: AuthenticatedPeer | None, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        """Mutate only after the authority re-observes the caller-bound conflict identity."""
+        return await self.execute_mutation(peer, request)
+
+    async def observe_authority(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        """Read one current authority-bound provider state without changing its journal or provider.
+
+        The acknowledgement and current authority are checked both before and after the provider
+        read.  A concurrent takeover therefore cannot turn an observation made under a stale
+        generation into an admission fact for a later mutation.
+        """
+        return await self._observe_current(peer, request, self._adapter.observe)
+
+    async def observe_running(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityRunningObservationV1:
+        """Read bounded kernel evidence through the same authenticated read-only lane."""
+
+        async def read(request: AuthorityMutationRequestV1) -> AuthorityRunningObservationV1:
+            if not isinstance(self._adapter, AuthorityRunningObserver):
+                raise AuthorityServiceError("provider_conflict")
+            observed = await self._adapter.observe_running(request)
+            return AuthorityRunningObservationV1.from_observation(observed)
+
+        return await self._observe_current(peer, request, read)
+
+    async def _observe_current[T](
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityMutationRequestV1,
+        read: Callable[[AuthorityMutationRequestV1], Awaitable[T]],
+    ) -> T:
+        authenticated = self._require_peer(peer, request)
+        trusted = await self._repository.resolve_current_candidate(authenticated, request)
+        if trusted is None or not self._binding_matches(trusted, request):
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
+
+        async def run() -> T:
+            try:
+                async with lane.lock:
+                    if lane.failed:
+                        raise AuthorityServiceError("journal_conflict")
+                    if lane.active is not None:
+                        raise AuthorityServiceError("superseded")
+                    _journal, records = self._lane_journal(request.system_id, lane)
+                    await self._observation_head_is_current(trusted, records)
+                    acknowledgements = [
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.generation == request.generation
+                    ]
+                    if not acknowledgements:
+                        raise AuthorityServiceError("superseded")
+                    acknowledgement = acknowledgements[-1]
+                    confirmed = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if confirmed is None or not self._binding_matches(confirmed, request):
+                        raise AuthorityServiceError("superseded")
+                    try:
+                        observation = await read(request)
+                    except AuthorityServiceError:
+                        raise
+                    except Exception:
+                        raise self._provider_error(request) from None
+                    rechecked = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if rechecked is None or not self._binding_matches(rechecked, request):
+                        raise AuthorityServiceError("superseded")
+                    await self._observation_head_is_current(rechecked, records)
+                    return observation
+            finally:
+                self._release_lane(trusted.system_id, lane)
+
+        task = asyncio.create_task(run())
         try:
             return await asyncio.shield(task)
         except AuthorityServiceError as error:

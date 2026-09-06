@@ -124,6 +124,10 @@ class _Repository:
         # changed, a check that ignored the scoping entirely would still see a matching
         # sequence and digest and pass, so the test would not discriminate.
         self.head_operation_identity_override: str | None = None
+        self.published_cleanup_quarantines: list[tuple[object, ...]] = []
+
+    async def publish_cleanup_quarantine(self, *args: object) -> None:
+        self.published_cleanup_quarantines.append(args)
 
     async def resolve_current_candidate(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
@@ -142,11 +146,12 @@ class _Repository:
             or request.authority_instance != self.request.authority_instance
         ):
             return None
-        binding = _binding(
-            peer,
-            self.request if isinstance(request, AuthorityPreparationMutationRequestV1) else request,
-            "current",
+        uses_root_binding = isinstance(request, AuthorityPreparationMutationRequestV1) or (
+            self.request.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
         )
+        binding = _binding(peer, self.request if uses_root_binding else request, "current")
         return (
             replace(binding, operation=self.operation_override)
             if self.operation_override
@@ -215,6 +220,17 @@ class _Repository:
         ):
             return None
         return _binding(peer, request, "current")
+
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None:
+        return await self.resolve_current(
+            peer, request, acknowledgement_sequence, acknowledgement_digest
+        )
 
     async def resolve_current_preparation(
         self,
@@ -337,6 +353,9 @@ class _Adapter:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.release.set()
+        self.observe_entered = asyncio.Event()
+        self.observe_release = asyncio.Event()
+        self.observe_release.set()
         self.fail_commit = False
         self.fail_observe = False
         # An already-bounded failure the adapter is entitled to reach on its own.
@@ -365,6 +384,8 @@ class _Adapter:
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         self.calls.append("observe")
         self.operations.append(request.operation)
+        self.observe_entered.set()
+        await self.observe_release.wait()
         if self.fail_observe:
             raise RuntimeError(self.provider_output)
         return self._observation("target")

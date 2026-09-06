@@ -10,3 +10,12 @@ KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET=/run/kdive/provider-authority/libv
 KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS={{ provider_authority_host_network_address }}
 KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT={{ provider_authority_host_network_port }}
 {% endif %}
+{% if provider_authority_host_local_mutation_enabled | default(false) %}
+KDIVE_LIBVIRT_RECOVERY_ROOT={{ provider_authority_host_recovery_root }}
+KDIVE_LIBVIRT_ROOTFS_ROOT={{ provider_authority_host_rootfs_root }}
+KDIVE_LIBVIRT_CONSOLE_ROOT={{ provider_authority_host_console_root }}
+KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES={{ provider_authority_host_external_boot_capacity_bytes }}
+KDIVE_S3_ENDPOINT_URL={{ provider_authority_host_s3_endpoint_url }}
+KDIVE_S3_BUCKET={{ provider_authority_host_s3_bucket }}
+KDIVE_S3_REGION={{ provider_authority_host_s3_region }}
+{% endif %}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,9 +14,14 @@ import kdive.config as config
 from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs.authority_sender import authority_sender_factory
+from kdive.jobs.authority_sender import AuthorityRequestSender, authority_sender_factory
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
+from kdive.jobs.external_boot_authority_client import (
+    ExternalBootClientFactory,
+    external_boot_client_factory,
+    recovery_orphan_authority_sender_factory,
+)
 from kdive.jobs.handlers import (
     diagnostics,
     external_boot,
@@ -27,6 +33,7 @@ from kdive.jobs.handlers.artifacts import rootfs_reclaim, vmcore
 from kdive.jobs.handlers.console import console_rotate
 from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.control import capture_traffic, control, diagnostic_sysrq, watch_for_crash
+from kdive.jobs.handlers.external_boot import orphan
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
@@ -48,6 +55,8 @@ class WorkerHandlerAssembly:
     capture_supervisor: CaptureOperationSupervisor
     worker_check_builders: diagnostics.WorkerCheckBuilders
     module_volume_reaper: ModuleVolumeReaper
+    external_boot_client_factory: ExternalBootClientFactory | None = None
+    recovery_orphan_authority_sender_factory: Callable[[], AuthorityRequestSender] | None = None
 
 
 def build_worker_handler_assembly(
@@ -85,6 +94,14 @@ def build_worker_handler_assembly(
         },
         module_volume_reaper=composition.build_worker_module_volume_reaper(
             authority_sender_factory=sender_factory
+        ),
+        external_boot_client_factory=external_boot_client_factory(
+            secret_backend_from_env(registry=composition.secret_registry),
+            lambda: assembly.incarnation_credential,
+        ),
+        recovery_orphan_authority_sender_factory=recovery_orphan_authority_sender_factory(
+            secret_backend_from_env(registry=composition.secret_registry),
+            lambda: assembly.incarnation_credential,
         ),
     )
     return assembly
@@ -137,7 +154,12 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
+            authority_client_factory=assembly.external_boot_client_factory,
         )
+    )
+    orphan.register_handlers(
+        registry,
+        sender_factory=assembly.recovery_orphan_authority_sender_factory,
     )
     systems.register_handlers(
         registry,

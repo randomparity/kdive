@@ -21,6 +21,8 @@ from pydantic import (
 from kdive.providers.ports.external_boot import (
     ExternalBootPlan,
     ExternalBootPreparationObservation,
+    KernelIdentity,
+    RunningKernelObservation,
 )
 
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
@@ -32,6 +34,7 @@ type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PositiveBigInt = Annotated[int, Field(ge=1, le=MAX_SIGNED_BIGINT)]
 type Purpose = Literal["activate", "recover", "resolve-conflict", "release", "teardown"]
 type ObservationCategory = Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
+type RecoveryOrphanDisposition = Literal["delete", "adopt"]
 
 
 def _bounded_text(value: str, *, maximum: int = 255) -> str:
@@ -95,7 +98,12 @@ _PURPOSE_OPERATIONS: dict[str, frozenset[AuthorityOperation]] = {
     ),
     "resolve-conflict": frozenset({AuthorityOperation.RESOLVE_CONFLICT, AuthorityOperation.FAIL}),
     "release": frozenset(
-        {AuthorityOperation.RELEASE, AuthorityOperation.CLEANUP, AuthorityOperation.FAIL}
+        {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.RELEASE,
+            AuthorityOperation.CLEANUP,
+            AuthorityOperation.FAIL,
+        }
     ),
     "teardown": frozenset({AuthorityOperation.TEARDOWN, AuthorityOperation.FAIL}),
 }
@@ -209,6 +217,21 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
         return self
 
 
+class AuthorityConflictResolutionRequestV1(AuthorityMutationRequestV1):
+    """Closed conflict mutation carrying the caller observation the authority must recheck."""
+
+    expected_observed_composite: Digest
+
+    @model_validator(mode="after")
+    def _is_only_the_conflict_resolution_commit(self) -> Self:
+        if (
+            self.purpose != "resolve-conflict"
+            or self.operation is not AuthorityOperation.RESOLVE_CONFLICT
+        ):
+            raise ValueError("expected observed composite requires resolve-conflict")
+        return self
+
+
 class AuthorityPreparationMutationRequestV1(_AuthorityBinding):
     """A materialize or prepare mutation carrying its trusted durable plan projection."""
 
@@ -261,11 +284,35 @@ class AuthorityHealthAcknowledgementV1(_ClosedValue):
     )
 
 
+class AuthorityRecoveryOrphanDispositionRequestV1(_ClosedValue):
+    """Closed fixed-route request for one claimed quarantine disposition job."""
+
+    schema_: Literal["external-boot-authority-orphan-disposition-v1"] = Field(
+        "external-boot-authority-orphan-disposition-v1", alias="schema"
+    )
+    request_id: UUID
+    job_id: UUID
+    job_attempt: PositiveBigInt
+
+
+class AuthorityRecoveryOrphanDispositionResponseV1(_ClosedValue):
+    """Durable result for the same exact orphan disposition request."""
+
+    schema_: Literal["external-boot-authority-orphan-disposition-v1"] = Field(
+        "external-boot-authority-orphan-disposition-v1", alias="schema"
+    )
+    request_id: UUID
+    disposition: RecoveryOrphanDisposition
+    objects: Annotated[int, Field(ge=0, le=64)]
+
+
 type AuthorityRequestV1 = (
     AuthorityTakeoverRequestV1
+    | AuthorityConflictResolutionRequestV1
     | AuthorityMutationRequestV1
     | AuthorityPreparationMutationRequestV1
     | AuthorityHealthRequestV1
+    | AuthorityRecoveryOrphanDispositionRequestV1
 )
 _AUTHORITY_REQUEST_ADAPTER = TypeAdapter(AuthorityRequestV1)
 
@@ -312,6 +359,32 @@ class AuthorityObservationV1(_ClosedValue):
     observation_id: UUID
     category: ObservationCategory
     composite_state: Digest
+
+
+class AuthorityRunningObservationV1(_ClosedValue):
+    """Read-only kernel evidence; separate from retained version-1 journal observations."""
+
+    schema_: Literal["external-boot-running-observation-v1"] = Field(
+        "external-boot-running-observation-v1", alias="schema"
+    )
+    identity: KernelIdentity
+    cmdline_hex: Annotated[str, Field(max_length=4096, pattern=r"^(?:[0-9a-f]{2})*$")]
+    expected_cmdline_hex: Annotated[str, Field(max_length=4096, pattern=r"^(?:[0-9a-f]{2})*$")]
+
+    @classmethod
+    def from_observation(cls, value: RunningKernelObservation) -> Self:
+        return cls(
+            identity=value.identity,
+            cmdline_hex=value.cmdline.hex(),
+            expected_cmdline_hex=value.expected_cmdline.hex(),
+        )
+
+    def to_observation(self) -> RunningKernelObservation:
+        return RunningKernelObservation(
+            identity=self.identity,
+            cmdline=bytes.fromhex(self.cmdline_hex),
+            expected_cmdline=bytes.fromhex(self.expected_cmdline_hex),
+        )
 
 
 class AuthorityPreparationResponseV1(_ClosedValue):
