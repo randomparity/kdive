@@ -27,10 +27,13 @@ from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
+    RemoteExternalBootRecovery,
     _AgentRunner,
     activate_definition,
     observe_guest_identity,
+    parse_domain_xml,
     prepare_target_definition,
+    recover_disk_grub_baseline,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
@@ -200,9 +203,26 @@ class ConcreteRemoteExternalBootOperations:
                 or parsed.digest != digest
             ):
                 raise ValueError("remote recovery boot artifact identity differs")
-        for reference in expected:
-            if not pool.storageVolLookupByName(reference.ref).path().startswith("/"):
+        paths = {
+            reference: pool.storageVolLookupByName(reference.ref).path() for reference in expected
+        }
+        for path in paths.values():
+            if not path.startswith("/"):
                 raise ValueError("remote recovery artifact path is not absolute")
+        os_element = parse_domain_xml(recovery.definition.target_xml).find("os")
+        if os_element is None:
+            raise ValueError("remote target definition omitted operating-system paths")
+        recorded_kernel = os_element.findtext("kernel")
+        recorded_initrd = os_element.findtext("initrd")
+        if (
+            recorded_kernel != paths[recovery.materialization.artifacts.kernel]
+            or (recovery.materialization.artifacts.initrd is None and recorded_initrd is not None)
+            or (
+                recovery.materialization.artifacts.initrd is not None
+                and recorded_initrd != paths[recovery.materialization.artifacts.initrd]
+            )
+        ):
+            raise ValueError("remote recovery artifact paths differ from target definition")
 
     def activate(
         self,
@@ -215,7 +235,12 @@ class ConcreteRemoteExternalBootOperations:
             raise TimeoutError("remote external-boot activation deadline expired")
         with self._connection() as connection:
             self._validate_owned_artifacts(connection, recovery)
-            activate_definition(connection, recovery.definition)
+            self._require_deadline(deadline, "activation")
+            activate_definition(
+                connection,
+                recovery.definition,
+                lambda: self._require_deadline(deadline, "activation"),
+            )
 
     def observe(
         self,
@@ -230,3 +255,25 @@ class ConcreteRemoteExternalBootOperations:
             self._validate_owned_artifacts(connection, recovery)
             domain = connection.lookupByName(domain_name_for(UUID(recovery.binding.system_id)))
             return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+
+    def recover(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        deadline: float,
+    ) -> None:
+        del authority
+        if self._monotonic() >= deadline:
+            raise TimeoutError("remote external-boot recovery deadline expired")
+        with self._connection() as connection:
+            self._validate_owned_artifacts(connection, recovery)
+            recover_disk_grub_baseline(
+                connection,
+                RemoteExternalBootRecovery(
+                    definition=recovery.definition, prior_power=recovery.prior_power
+                ),
+            )
+
+    def _require_deadline(self, deadline: float, operation: str) -> None:
+        if self._monotonic() >= deadline:
+            raise TimeoutError(f"remote external-boot {operation} deadline expired")

@@ -311,13 +311,22 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
     )
 
     class Volume:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
         def path(self) -> str:
+            if self.name == recovery.materialization.artifacts.kernel.ref:
+                return "/artifacts/kernel"
+            if recovery.materialization.artifacts.initrd is not None and (
+                self.name == recovery.materialization.artifacts.initrd.ref
+            ):
+                return "/artifacts/initrd"
             return "/pool/owned"
 
     class Pool:
         def storageVolLookupByName(self, name: str) -> Volume:
             assert OpaqueProviderRef(ref=name) in recovery.recovery_objects
-            return Volume()
+            return Volume(name)
 
     class Domain:
         def __init__(self) -> None:
@@ -382,6 +391,10 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
     assert domain.creates == 1
     assert observation.identity == recovery.materialization.kernel_observation
     assert observation.cmdline == recovery.definition.expected_cmdline.encode()
+    operations.recover(recovery, authority, 2.0)
+    operations.recover(recovery, authority, 2.0)
+    assert domain.xml == recovery.definition.source_xml
+    assert not domain.active
 
     incomplete = recovery.model_copy(
         update={
@@ -394,6 +407,14 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
     )
     with pytest.raises(ValueError, match="omitted an owned private artifact"):
         operations.activate(incomplete, authority, 2.0)
+    assert domain.creates == 1
+
+    clock = iter((1.0, 3.0))
+    expiring = ConcreteRemoteExternalBootOperations(
+        cast(Any, object()), cast(Any, Connection), "modules", lambda: next(clock), agent
+    )
+    with pytest.raises(TimeoutError, match="activation deadline"):
+        expiring.activate(recovery, authority, 2.0)
     assert domain.creates == 1
 
 
