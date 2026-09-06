@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
@@ -53,6 +55,44 @@ class CaptureInstallRequest:
     operation: RemoteModuleOperationV1
     authority: AuthorityRequestSender
     authority_reference: OpaqueProviderRef
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleAttemptInventoryItem:
+    key: ModuleVolumeKey
+    state: Literal["retained", "drainable"]
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleAttemptInventory:
+    items: tuple[ModuleAttemptInventoryItem, ...]
+    complete: bool
+
+    @property
+    def rollback_safe(self) -> bool:
+        return self.complete and all(item.state == "drainable" for item in self.items)
+
+
+async def inventory_module_attempts(
+    runtimes: tuple[ModuleOperationRuntime, ...],
+    retained: Collection[ModuleVolumeKey],
+    executor: RemoteModulePreparationExecutor,
+) -> ModuleAttemptInventory:
+    """Classify only bounded whole-name-owned keys; unreadable inventories are incomplete."""
+    items: list[ModuleAttemptInventoryItem] = []
+    complete = True
+    retained_keys = set(retained)
+    for runtime in runtimes:
+        try:
+            observed = await runtime.inventory(executor)
+        except Exception:
+            complete = False
+            continue
+        items.extend(
+            ModuleAttemptInventoryItem(key, "retained" if key in retained_keys else "drainable")
+            for key in observed
+        )
+    return ModuleAttemptInventory(tuple(items), complete)
 
 
 def _validate_result(operation: RemoteModuleOperationV1, result: RemoteModuleResultV1) -> None:

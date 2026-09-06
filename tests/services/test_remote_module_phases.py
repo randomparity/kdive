@@ -10,6 +10,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
@@ -30,6 +31,7 @@ from kdive.services.remote_module_phases import (
     CaptureInstallRequest,
     capture_install_modules,
     classify_phase,
+    inventory_module_attempts,
     restore_modules,
 )
 
@@ -279,3 +281,35 @@ async def test_restore_resumes_from_installed_and_commits_reap_before_deletion()
         "delete-scratch",
         "record-reaped",
     ]
+
+
+@pytest.mark.anyio
+async def test_inventory_uses_only_owned_keys_and_marks_unreadable_incomplete() -> None:
+    retained = ModuleVolumeKey(
+        "12345678-1234-4234-8234-123456789abc",
+        "87654321-4321-4321-8321-cba987654321",
+        "2" * 32,
+        "source.ext4",
+    )
+    drainable = ModuleVolumeKey(retained.system_id, retained.run_id, "3" * 32, "scratch.ext4")
+
+    class Readable:
+        async def inventory(self, _executor: object) -> tuple[ModuleVolumeKey, ...]:
+            return retained, drainable
+
+    class Unreadable:
+        async def inventory(self, _executor: object) -> tuple[ModuleVolumeKey, ...]:
+            raise OSError("provider unavailable")
+
+    inventory = await inventory_module_attempts(
+        (cast(Any, Readable()), cast(Any, Unreadable())),
+        {retained},
+        cast(Any, SimpleNamespace()),
+    )
+
+    assert [(item.key, item.state) for item in inventory.items] == [
+        (retained, "retained"),
+        (drainable, "drainable"),
+    ]
+    assert inventory.complete is False
+    assert inventory.rollback_safe is False
