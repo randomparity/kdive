@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
@@ -19,12 +19,15 @@ from kdive.jobs.models import (
     ExternalBootAuthorityFailureContext,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthoritySuccessV1,
+    ExternalBootDerivedTeardownCompletion,
 )
 from kdive.jobs.worker import Worker
 from kdive.jobs.worker_telemetry import JobSpan
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityTeardownProofV1,
+    teardown_proof_digest,
 )
 
 _DIGEST = "sha256:" + "a" * 64
@@ -251,33 +254,41 @@ def test_queue_serializes_schema_alias_and_canonical_utc_timestamp() -> None:
     asyncio.run(exercise())
 
 
-def _teardown() -> ExternalBootAuthoritySuccessV1:
+def _teardown() -> ExternalBootDerivedTeardownCompletion:
     activation_id = uuid4()
     system_id = uuid4()
-    data = _carrier(
+    proof = TypeAdapter(AuthorityTeardownProofV1).validate_python(
         {
-            "schema": "external-boot-authority-result-v1",
-            "operation": "teardown",
-            "result_ref": None,
+            "disposition": "complete_released",
             "teardown_evidence": {
                 "schema": "external-boot-teardown-evidence-v1",
                 "system_id": system_id,
                 "system_state": "torn_down",
                 "observed_at": "2026-08-29T00:00:00Z",
             },
-            "cleanup_evidence": {
-                "schema": "external-boot-cleanup-evidence-v1",
-                "activation_id": activation_id,
-                "system_id": system_id,
-                "release_identity": _DIGEST,
-                "mode": "system_teardown",
-                "teardown_identity": _DIGEST,
-                "completed_at": "2026-08-29T00:00:01Z",
+        }
+    )
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "teardown",
+            "result_ref": None,
+            "response": {
+                "schema": "external-boot-authority-teardown-response-v1",
+                "observation": {
+                    "schema": "external-boot-authority-v1",
+                    "observation_id": uuid4(),
+                    "category": "absent",
+                    "composite_state": teardown_proof_digest(proof),
+                },
+                "proof": proof.model_dump(mode="json", by_alias=True),
+                "journal_sequence": 1,
+                "journal_digest": _DIGEST,
             },
         }
     )
     data.update({"activation_id": activation_id, "system_id": system_id, "purpose": "teardown"})
-    return ExternalBootAuthoritySuccessV1.model_validate(data)
+    return ExternalBootDerivedTeardownCompletion.model_validate(data)
 
 
 def _failure(*, terminal: bool) -> ExternalBootAuthorityFailureV1:
@@ -382,7 +393,7 @@ def test_worker_routes_success_and_stale_result_through_authority_adapter(monkey
     asyncio.run(exercise())
 
 
-def test_worker_routes_teardown_evidence_through_authority_adapter(monkeypatch) -> None:
+def test_worker_does_not_repeat_a_derived_teardown_finalizer(monkeypatch) -> None:
     async def exercise() -> None:
         carrier = _teardown()
         complete = AsyncMock(return_value=SimpleNamespace())
@@ -390,7 +401,7 @@ def test_worker_routes_teardown_evidence_through_authority_adapter(monkeypatch) 
         monkeypatch.setattr(queue, "complete_external_boot", complete)
         monkeypatch.setattr(queue, "complete", generic)
         await _worker()._finalize_handler(_job(_marker(carrier)), _span(), _task_result(carrier))
-        complete.assert_awaited_once()
+        complete.assert_not_awaited()
         generic.assert_not_awaited()
 
     asyncio.run(exercise())
@@ -459,11 +470,10 @@ def test_carrier_rejects_foreign_evidence_ownership_and_wrong_outcome() -> None:
         ExternalBootAuthoritySuccessV1.model_validate(data)
 
 
-def test_carrier_rejects_teardown_evidence_with_foreign_owner_or_mode() -> None:
+def test_carrier_rejects_teardown_response_with_a_different_journal_head() -> None:
     data = _teardown().model_dump(mode="json", by_alias=True)
-    data["result"]["cleanup_evidence"]["mode"] = "ordinary"
-    data["result"]["teardown_evidence"]["system_id"] = str(uuid4())
-    with pytest.raises(ValidationError, match="ownership or mode"):
+    data["result"]["response"]["journal_digest"] = "sha256:" + "b" * 64
+    with pytest.raises(ValidationError, match="response journal"):
         ExternalBootAuthoritySuccessV1.model_validate(data)
 
 

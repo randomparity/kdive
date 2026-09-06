@@ -10,7 +10,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
@@ -31,9 +31,19 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownProofV1,
+    AuthorityTeardownResponseV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
+    teardown_proof_digest,
+)
+from kdive.providers.external_boot_authority.service_teardown import teardown_proof
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
+    AuthorityTeardownSnapshot,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
@@ -75,6 +85,20 @@ class AuthorityProofCheckpoint(Protocol):
         operation: AuthorityOperation,
         checkpoint: Literal["before-provider", "after-provider"],
     ) -> None: ...
+
+
+@runtime_checkable
+class AuthoritySystemTeardownAdapter(Protocol):
+    async def execute_system_teardown(
+        self,
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+        reservation: AuthorityTeardownReservationV1,
+    ) -> AuthoritySystemTeardownFacts: ...
+
+    async def observe_system_teardown(
+        self, request: AuthorityTeardownMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> AuthoritySystemTeardownFacts: ...
 
 
 @runtime_checkable
@@ -206,6 +230,17 @@ class AuthorityPreparationRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
+
+
+@runtime_checkable
+class AuthorityTeardownRepository(Protocol):
+    async def resolve_current_teardown(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityTeardownMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityTeardownSnapshot | None: ...
 
 
 @runtime_checkable
@@ -679,6 +714,8 @@ class ExternalBootAuthorityService:
         request: AuthorityMutationRequestV1,
         records: list[JournalRecordV1],
     ) -> None:
+        if isinstance(request, AuthorityTeardownMutationRequestV1):
+            return
         if not isinstance(self._adapter, AuthorityMutationFinalizer):
             return
         started = next(
@@ -894,7 +931,9 @@ class ExternalBootAuthorityService:
         }
         values.pop("plan", None)
         values.pop("expected_observed_composite", None)
-        if not isinstance(request, AuthorityTakeoverRequestV1):
+        if isinstance(request, AuthorityTeardownMutationRequestV1):
+            values["schema"] = "external-boot-authority-v1"
+        elif not isinstance(request, AuthorityTakeoverRequestV1):
             values |= {
                 "expected_source_identity": request.expected_source_identity,
                 "intended_target_identity": request.intended_target_identity,
@@ -925,6 +964,22 @@ class ExternalBootAuthorityService:
             intended_target_identity=record.intended_target_identity or "",
             recovery_objects=record.recovery_objects,
         )
+        if (
+            record.operation is AuthorityOperation.TEARDOWN
+            and record.expected_source_identity is None
+            and record.intended_target_identity is None
+            and not record.recovery_objects
+        ):
+            for name in (
+                "expected_source_identity",
+                "intended_target_identity",
+                "recovery_objects",
+            ):
+                values.pop(name)
+            return cast(
+                AuthorityMutationRequestV1,
+                AuthorityTeardownMutationRequestV1.model_validate(values),
+            )
         if record.operation in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
             if binding.preparation_plan is None:
                 raise AuthorityServiceError("journal_conflict")
@@ -990,7 +1045,7 @@ class ExternalBootAuthorityService:
             return await self._anchor(binding, journal, records, terminal)
         if prior.phase is JournalPhase.MUTATION_STARTED:
             try:
-                observation = await self._recovery_observation(request, prior)
+                observation = await self._recovery_observation(request, prior, records)
             except AuthorityServiceError:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
@@ -1005,7 +1060,7 @@ class ExternalBootAuthorityService:
             )
         elif prior.phase is JournalPhase.PROVIDER_RETURNED:
             try:
-                observation = await self._recovery_observation(request, prior)
+                observation = await self._recovery_observation(request, prior, records)
             except AuthorityServiceError:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
@@ -1027,7 +1082,7 @@ class ExternalBootAuthorityService:
             )
         outcome = (
             observation.category
-            if observation.category in {"source", "target", "conflict"}
+            if observation.category in {"absent", "source", "target", "conflict"}
             else "conflict"
         )
         return await self._anchor(
@@ -1044,8 +1099,28 @@ class ExternalBootAuthorityService:
         )
 
     async def _recovery_observation(
-        self, request: AuthorityMutationRequestV1, record: JournalRecordV1
+        self,
+        request: AuthorityMutationRequestV1,
+        record: JournalRecordV1,
+        records: list[JournalRecordV1],
     ) -> AuthorityObservationV1:
+        if isinstance(request, AuthorityTeardownMutationRequestV1):
+            started = next(
+                (
+                    item
+                    for item in records
+                    if item.phase is JournalPhase.MUTATION_STARTED
+                    and item.operation_identity == record.operation_identity
+                    and item.attempt_id == record.attempt_id
+                ),
+                None,
+            )
+            if started is None:
+                raise AuthorityServiceError("journal_conflict")
+            facts = await self._system_teardown_facts(
+                request, AuthorityCommitContextV1.for_record(started)
+            )
+            return self._teardown_observation(teardown_proof(request, facts))
         if request.operation is AuthorityOperation.TEARDOWN and isinstance(
             self._adapter, AuthorityRecoveryObserver
         ):
@@ -1346,6 +1421,10 @@ class ExternalBootAuthorityService:
                     if confirmed is None or not self._binding_matches(confirmed, request):
                         raise AuthorityServiceError("superseded")
                     binding = confirmed
+                    if isinstance(request, AuthorityTeardownMutationRequestV1):
+                        # Reject a request whose acknowledged teardown binding cannot be
+                        # resolved before creating any journal admission records.
+                        await self._teardown_snapshot(authenticated, request, acknowledgement)
                     records = await self._recover(binding, journal, records)
                     phases_by_operation: dict[str, JournalRecordV1] = {}
                     for record in reversed(records):
@@ -1564,6 +1643,15 @@ class ExternalBootAuthorityService:
                             cast(str, predecessor_receipt_identity),
                             context,
                         )
+                    elif isinstance(request, AuthorityTeardownMutationRequestV1):
+                        if not isinstance(self._adapter, AuthoritySystemTeardownAdapter):
+                            raise AuthorityServiceError("provider_conflict")
+                        teardown_snapshot = await self._teardown_snapshot(
+                            authenticated, request, acknowledgement
+                        )
+                        await self._adapter.execute_system_teardown(
+                            request, context, teardown_snapshot.reservation
+                        )
                     elif adopted_release_phase is None:
                         cleanup_operations = {
                             AuthorityOperation.RECOVER,
@@ -1612,7 +1700,15 @@ class ExternalBootAuthorityService:
                     )
                 try:
                     observation = (
-                        adopted_release_phase
+                        self._teardown_observation(
+                            teardown_proof(
+                                request,
+                                await self._system_teardown_facts(request, context),
+                            )
+                        )
+                        if isinstance(request, AuthorityTeardownMutationRequestV1)
+                        and teardown_snapshot is not None
+                        else adopted_release_phase
                         if adopted_release_phase is not None
                         else await self._adapter.observe(request)
                     )
@@ -2016,6 +2112,118 @@ class ExternalBootAuthorityService:
     ) -> AuthorityObservationV1:
         """Mutate only after the authority re-observes the caller-bound conflict identity."""
         return await self.execute_mutation(peer, request)
+
+    async def _teardown_snapshot(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityTeardownMutationRequestV1,
+        acknowledgement: JournalRecordV1,
+    ) -> AuthorityTeardownSnapshot:
+        if not isinstance(self._repository, AuthorityTeardownRepository):
+            raise AuthorityServiceError("provider_conflict")
+        snapshot = await self._repository.resolve_current_teardown(
+            peer, request, acknowledgement.sequence, record_digest(acknowledgement)
+        )
+        if snapshot is None or not self._binding_matches(
+            snapshot.binding, cast(AuthorityMutationRequestV1, request)
+        ):
+            raise AuthorityServiceError("superseded")
+        return snapshot
+
+    async def _system_teardown_facts(
+        self, request: AuthorityTeardownMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> AuthoritySystemTeardownFacts:
+        if not isinstance(self._adapter, AuthoritySystemTeardownAdapter):
+            raise AuthorityServiceError("provider_conflict")
+        facts = await self._adapter.observe_system_teardown(request, context)
+        if not isinstance(facts, AuthoritySystemTeardownFacts):
+            raise AuthorityServiceError("provider_conflict")
+        try:
+            return AuthoritySystemTeardownFacts.model_validate(facts.model_dump(warnings=False))
+        except ValueError:
+            raise AuthorityServiceError("provider_conflict") from None
+
+    @staticmethod
+    def _teardown_observation(proof: AuthorityTeardownProofV1) -> AuthorityObservationV1:
+        digest = teardown_proof_digest(proof)
+        return AuthorityObservationV1(
+            observation_id=uuid5(NAMESPACE_URL, digest),
+            category="conflict" if proof.disposition == "retained_quarantine" else "absent",
+            composite_state=digest,
+        )
+
+    async def execute_teardown(
+        self, peer: AuthenticatedPeer | None, request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1:
+        """Return only an anchored proof whose exact ownership is still current."""
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        task = asyncio.create_task(self._execute_teardown(peer, request))
+        self._track_completion(task)
+        return await asyncio.shield(task)
+
+    async def _execute_teardown(
+        self, peer: AuthenticatedPeer | None, request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1:
+        mutation = cast(AuthorityMutationRequestV1, request)
+        observation = await self.execute_mutation(peer, mutation)
+        authenticated = self._require_peer(peer, mutation)
+        journal = self._journal_factory(request.system_id)
+        try:
+            records = list(journal.load())
+        finally:
+            journal.close()
+        operation_records = [
+            record
+            for record in records
+            if record.operation_identity == request.operation_identity
+            and record.attempt_id == request.attempt_id
+        ]
+        started = next(
+            (
+                record
+                for record in operation_records
+                if record.phase is JournalPhase.MUTATION_STARTED
+            ),
+            None,
+        )
+        terminal = next(
+            (
+                record
+                for record in reversed(operation_records)
+                if record.phase is JournalPhase.TERMINAL and record.observation == observation
+            ),
+            None,
+        )
+        acknowledgement = next(
+            (
+                record
+                for record in reversed(records)
+                if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                and record.generation == request.generation
+            ),
+            None,
+        )
+        if started is None or terminal is None or acknowledgement is None:
+            raise AuthorityServiceError("journal_conflict")
+        facts = await self._system_teardown_facts(
+            request, AuthorityCommitContextV1.for_record(started)
+        )
+        proof = teardown_proof(request, facts)
+        if self._teardown_observation(proof) != observation:
+            raise AuthorityServiceError("provider_conflict")
+        # The provider persists this reservation as the host-side teardown intent before it
+        # destroys anything.  A concurrent release may change current accounting from ready to
+        # released while that intent is in flight; that is a valid completion, not a reason to
+        # discard host-proved absence.  The final lookup still fences the acknowledgement and
+        # current authority binding, but its mutable reservation must not replace the intent.
+        await self._teardown_snapshot(authenticated, request, acknowledgement)
+        return AuthorityTeardownResponseV1(
+            observation=observation,
+            proof=proof,
+            journal_sequence=terminal.sequence,
+            journal_digest=record_digest(terminal),
+        )
 
     async def observe_authority(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1

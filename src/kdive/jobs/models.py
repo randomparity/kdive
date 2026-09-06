@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootTerminalEvidenceV1
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.providers.external_boot_authority.protocol import AuthorityTeardownResponseV1
 
 type _Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type _ResultRef = Annotated[str, Field(min_length=1, max_length=2048)] | None
@@ -139,8 +140,7 @@ class _CleanupResult(_ResultBase):
 class _TeardownResult(_ResultBase):
     operation: Literal["teardown"]
     result_ref: _ResultRef
-    teardown_evidence: _TeardownEvidence
-    cleanup_evidence: _CleanupEvidence
+    response: AuthorityTeardownResponseV1
 
 
 class _DeadlineResult(_ResultBase):
@@ -405,16 +405,11 @@ class ExternalBootAuthorityResultV1(BaseModel):
             and result.evidence.teardown_identity is not None
         ):
             raise ValueError("ordinary cleanup cannot carry teardown identity")
-        if isinstance(result, _TeardownResult):
-            cleanup = result.cleanup_evidence
-            if (
-                result.teardown_evidence.system_id != self.system_id
-                or cleanup.activation_id != self.activation_id
-                or cleanup.system_id != self.system_id
-                or cleanup.mode != "system_teardown"
-                or cleanup.teardown_identity is None
-            ):
-                raise ValueError("teardown evidence ownership or mode is invalid")
+        if isinstance(result, _TeardownResult) and (self.journal_sequence, self.journal_digest) != (
+            result.response.journal_sequence,
+            result.response.journal_digest,
+        ):
+            raise ValueError("teardown response journal does not match authority result")
 
 
 class ExternalBootAuthoritySuccessV1(ExternalBootAuthorityResultV1):
@@ -454,6 +449,10 @@ class ExternalBootAuthorityFailure(CategorizedError):
 
 class ExternalBootDerivedReleaseCompletion(ExternalBootAuthoritySuccessV1):
     """The release handler already committed its exact root job transaction."""
+
+
+class ExternalBootDerivedTeardownCompletion(ExternalBootAuthoritySuccessV1):
+    """The teardown handler already consumed its exact authority receipt transaction."""
 
 
 type JobHandlerResult = str | None | ExternalBootAuthorityResultV1

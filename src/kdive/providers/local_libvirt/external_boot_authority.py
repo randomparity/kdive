@@ -27,14 +27,21 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityTeardownMutationRequestV1,
     ObservationCategory,
     operation_is_permitted,
 )
 from kdive.providers.external_boot_authority.service import AuthorityServiceError
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
     LocalObservedState,
+    LocalSystemTeardownAnchorV1,
+    LocalSystemTeardownIntentV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalOperationLeaseScope,
@@ -83,7 +90,9 @@ _DELETING_OPERATIONS = frozenset({AuthorityOperation.CLEANUP, AuthorityOperation
 
 
 def _authority_ref(
-    request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    request: AuthorityMutationRequestV1
+    | AuthorityPreparationMutationRequestV1
+    | AuthorityTeardownMutationRequestV1,
 ) -> OpaqueProviderRef:
     """Derive the opaque provider reference for a request's authority binding.
 
@@ -97,7 +106,9 @@ def _authority_ref(
 
 
 def _activation_binding(
-    request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    request: AuthorityMutationRequestV1
+    | AuthorityPreparationMutationRequestV1
+    | AuthorityTeardownMutationRequestV1,
 ) -> ExternalBootActivationBinding:
     return ExternalBootActivationBinding(
         system_id=str(request.system_id),
@@ -161,7 +172,9 @@ class LocalExternalBootAuthorityAdapter:
 
     async def _offload[T](
         self,
-        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        request: AuthorityMutationRequestV1
+        | AuthorityPreparationMutationRequestV1
+        | AuthorityTeardownMutationRequestV1,
         operation: Callable[[], T],
     ) -> T:
         def scoped() -> T:
@@ -180,6 +193,68 @@ class LocalExternalBootAuthorityAdapter:
                 raise RuntimeError("local external-boot provider capacity is unavailable") from None
         future.add_done_callback(lambda _future: self._admission.release())
         return await self._await_completion(future)
+
+    async def execute_system_teardown(
+        self,
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+        reservation: AuthorityTeardownReservationV1,
+    ) -> AuthoritySystemTeardownFacts:
+        """Destroy one local System under an anchored authority commit and fixed host binding."""
+        anchor = self._system_teardown_anchor(request, context)
+        try:
+            retained_reservation = AuthorityTeardownReservationV1.model_validate(
+                reservation.model_dump(mode="json")
+            )
+            intent = LocalSystemTeardownIntentV1.model_validate(
+                anchor.model_dump(exclude={"schema_"}) | {"reservation": retained_reservation}
+            )
+        except (AttributeError, ValueError) as error:
+            raise AuthorityServiceError("provider_conflict") from error
+        self._require_admissible_generation(request)
+
+        def execute() -> AuthoritySystemTeardownFacts:
+            authority = _authority_ref(request)
+            begun = self._validated_system_teardown_facts(
+                self._ports.begin_system_teardown(intent, authority), intent
+            )
+            if not self._prepare_system_teardown_recovery(intent, authority, context):
+                return begun
+            return self._validated_system_teardown_facts(
+                self._ports.teardown_system(intent, authority), intent
+            )
+
+        return await self._offload(request, execute)
+
+    async def observe_system_teardown(
+        self,
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+    ) -> AuthoritySystemTeardownFacts:
+        """Read local teardown facts without creating, deleting, or resuming provider state."""
+        anchor = self._system_teardown_anchor(request, context)
+        return await self._offload(
+            request,
+            lambda: self._validated_system_teardown_facts(
+                self._ports.observe_system_teardown(anchor, _authority_ref(request))
+            ),
+        )
+
+    @staticmethod
+    def _validated_system_teardown_facts(
+        facts: AuthoritySystemTeardownFacts,
+        intent: LocalSystemTeardownIntentV1 | None = None,
+    ) -> AuthoritySystemTeardownFacts:
+        try:
+            validated = AuthoritySystemTeardownFacts.model_validate(facts.model_dump(mode="python"))
+        except (AttributeError, ValueError) as error:
+            raise AuthorityServiceError("provider_conflict") from error
+        if intent is not None and (
+            validated.intent_identity != intent.identity
+            or validated.reservation != intent.reservation
+        ):
+            raise AuthorityServiceError("provider_conflict")
+        return validated
 
     async def _offload_recovery_object[T](
         self,
@@ -408,7 +483,10 @@ class LocalExternalBootAuthorityAdapter:
         return operation
 
     def _require_admissible_generation(
-        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+        self,
+        request: AuthorityMutationRequestV1
+        | AuthorityPreparationMutationRequestV1
+        | AuthorityTeardownMutationRequestV1,
     ) -> None:
         lane = (str(request.system_id), str(request.activation_id))
         admitted = self._admitted.get(lane)
@@ -418,6 +496,61 @@ class LocalExternalBootAuthorityAdapter:
             # Insertion-ordered, so this drops the least recently first-seen lane.
             del self._admitted[next(iter(self._admitted))]
         self._admitted[lane] = max(admitted or 0, request.generation)
+
+    @staticmethod
+    def _system_teardown_anchor(
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+    ) -> LocalSystemTeardownAnchorV1:
+        if (
+            request.operation is not AuthorityOperation.TEARDOWN
+            or request.purpose != "teardown"
+            or context.commit_point is not AuthorityOperation.TEARDOWN
+            or context.operation_identity != request.operation_identity
+            or context.attempt_id != request.attempt_id
+        ):
+            raise AuthorityServiceError("provider_conflict")
+        return LocalSystemTeardownAnchorV1(
+            authority_id=request.authority_id,
+            generation=request.generation,
+            binding=_activation_binding(request),
+            plan_identity=request.plan_identity,
+            provider_kind=request.provider_kind,
+            authority_instance=request.authority_instance,
+            operation_identity=request.operation_identity,
+            operation_digest=request.operation_digest,
+            attempt_id=request.attempt_id,
+            journal_sequence=context.journal_sequence,
+            journal_digest=context.journal_digest,
+        )
+
+    def _prepare_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        authority: OpaqueProviderRef,
+        context: AuthorityCommitContextV1,
+    ) -> bool:
+        binding = intent.binding
+        if self._ports.system_teardown_recovery_is_absent(intent, authority):
+            return True
+        point = self._ports.system_teardown_recovery_point(intent, authority)
+        if point is not None:
+            if point.binding != binding or point.plan_identity != intent.plan_identity:
+                raise AuthorityServiceError("provider_conflict")
+            self._ports.recover(point, authority)
+            if not self._ports.cleanup_is_accounted(point, authority):
+                self._ports.cleanup(point, authority)
+                self._ports.record_cleanup_quarantine(
+                    point, _cleanup_proof(context, point), authority
+                )
+            self._ports.finalize_cleanup_tombstone(point, _cleanup_proof(context, point), authority)
+        else:
+            result = self._ports.abort_system_teardown_preparation(intent, authority)
+            if result == "not-partial" and not self._ports.system_teardown_recovery_is_absent(
+                intent, authority
+            ):
+                return False
+        return self._ports.system_teardown_recovery_is_absent(intent, authority)
 
     def _commit(
         self,

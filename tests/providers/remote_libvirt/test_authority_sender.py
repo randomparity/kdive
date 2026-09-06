@@ -340,6 +340,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "acknowledge_takeover",
         "execute_mutation",
         "execute_preparation",
+        "execute_teardown",
         "execute_remote_module_preparation",
         "execute_remote_module_lifecycle",
         "open_remote_module_attempt",

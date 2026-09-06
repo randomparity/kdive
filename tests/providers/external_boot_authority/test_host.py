@@ -970,6 +970,7 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     assert captured == [(store, config.provider_socket)]
     remote_module_host = cast(Any, service._remote_module_host)  # noqa: SLF001
     assert remote_module_host._host._factory._pool_name == "authority-systems"  # noqa: SLF001
+    assert cast(Any, service._adapter)._remote_module_host is remote_module_host  # noqa: SLF001
     operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
     assert operations._pool_name == "authority-systems"  # noqa: SLF001
     assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001

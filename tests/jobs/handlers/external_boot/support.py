@@ -11,11 +11,28 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from pydantic import TypeAdapter
+
 from kdive.domain.capacity.state import JobState
+from kdive.domain.external_boot_activation import (
+    ExternalBootReleaseEvidenceV1,
+    ExternalBootTeardownEvidenceV1,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityObservationV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownProofV1,
+    AuthorityTeardownResponseV1,
+    teardown_proof_digest,
+)
 
 DIGEST = "sha256:" + "a" * 64
+_TEARDOWN_AT = "2026-09-06T00:00:00Z"
 
 # operation -> (purpose, activation state, port calls, seeding, activation state after the commit)
 CASES: dict[str, dict[str, Any]] = {
@@ -62,6 +79,97 @@ CASES: dict[str, dict[str, Any]] = {
         "after": "recovery_failed",
     },
 }
+
+
+class RecordingTeardownExecutor:
+    """Publish one valid terminal teardown receipt while recording the closed provider call."""
+
+    def __init__(self, conn: AsyncConnection) -> None:
+        self._conn = conn
+        self.calls: list[AuthorityTeardownMutationRequestV1] = []
+
+    async def execute_teardown(
+        self, request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1:
+        self.calls.append(request)
+        proof = await self._proof(request)
+        response = AuthorityTeardownResponseV1(
+            observation=AuthorityObservationV1(
+                observation_id=uuid4(),
+                category="absent",
+                composite_state=teardown_proof_digest(proof),
+            ),
+            proof=proof,
+            journal_sequence=2,
+            journal_digest="sha256:" + "8" * 64,
+        )
+        await self._conn.execute(
+            "INSERT INTO external_boot_authority_journal_heads "
+            "(authority_instance,system_id,sequence,digest,phase,authority_id,generation,"
+            "operation_identity,head_record) VALUES (%s,%s,%s,%s,'terminal',%s,%s,%s,%s) "
+            "ON CONFLICT (authority_instance,system_id) DO UPDATE SET "
+            "sequence=excluded.sequence,digest=excluded.digest,phase=excluded.phase,"
+            "authority_id=excluded.authority_id,generation=excluded.generation,"
+            "operation_identity=excluded.operation_identity,head_record=excluded.head_record",
+            (
+                request.authority_instance,
+                request.system_id,
+                response.journal_sequence,
+                response.journal_digest,
+                request.authority_id,
+                request.generation,
+                request.operation_identity,
+                Jsonb({"observation": response.observation.model_dump(mode="json", by_alias=True)}),
+            ),
+        )
+        return response
+
+    async def _proof(self, request: AuthorityTeardownMutationRequestV1) -> AuthorityTeardownProofV1:
+        teardown = {
+            "schema": "external-boot-teardown-evidence-v1",
+            "system_id": str(request.system_id),
+            "system_state": "torn_down",
+            "observed_at": _TEARDOWN_AT,
+        }
+        async with self._conn.cursor(row_factory=dict_row) as cursor:
+            await cursor.execute(
+                "SELECT store_identity,owner_key,reserved_bytes,state "
+                "FROM external_boot_reservations WHERE activation_id=%s",
+                (request.activation_id,),
+            )
+            reservation = await cursor.fetchone()
+        assert reservation is not None
+        assert reservation["state"] == "ready"
+        release_value = {
+            "schema": "external-boot-release-evidence-v1",
+            "activation_id": str(request.activation_id),
+            "system_id": str(request.system_id),
+            "store_identity": {"ref": reservation["store_identity"]},
+            "owner_key": {"ref": reservation["owner_key"]},
+            "reserved_bytes": reservation["reserved_bytes"],
+            "enumeration_complete": True,
+            "objects": [],
+            "verified_at": _TEARDOWN_AT,
+        }
+        release_identity = ExternalBootReleaseEvidenceV1.model_validate(release_value).identity
+        teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
+        return TypeAdapter(AuthorityTeardownProofV1).validate_python(
+            {
+                "disposition": "complete_ready",
+                "teardown_evidence": teardown,
+                "release_evidence": release_value,
+                "release_identity": release_identity,
+                "cleanup_evidence": {
+                    "schema": "external-boot-cleanup-evidence-v1",
+                    "activation_id": str(request.activation_id),
+                    "system_id": str(request.system_id),
+                    "release_identity": release_identity,
+                    "mode": "system_teardown",
+                    "teardown_identity": teardown_identity,
+                    "completed_at": _TEARDOWN_AT,
+                },
+            }
+        )
 
 
 def marker_fields(

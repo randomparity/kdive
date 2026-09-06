@@ -100,6 +100,9 @@ _ADMITTED: Mapping[ExternalBootActivationState, frozenset[ExternalBootOperation]
     },
     ExternalBootActivationState.RECOVERED: _ALWAYS_ADMITTED,
     ExternalBootActivationState.ABANDONED: _ALWAYS_ADMITTED,
+    # A valid cleaned terminal row is excluded by ``get_restricting_for_system``. Keep the
+    # closed table total and fail closed if stale or injected repository data reaches this guard.
+    ExternalBootActivationState.TORN_DOWN: frozenset(),
 }
 
 # Admitted only for the Run that owns the activation. Teardown and conflict resolution are

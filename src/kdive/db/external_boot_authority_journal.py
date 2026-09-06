@@ -95,8 +95,8 @@ class SuspendedOperation:
     authority_instance: str
     request_digest: str
     phase: Literal["admitted", "mutation-started", "provider-returned", "observed"]
-    source_identity: str
-    target_identity: str
+    source_identity: str | None
+    target_identity: str | None
     ownership_digest: str
 
 
@@ -271,6 +271,21 @@ def _pending(value: dict[str, Any] | None) -> PendingTakeover | None:
 def _suspended(value: dict[str, Any] | None) -> SuspendedOperation | None:
     if value is None:
         return None
+    purpose = _bounded(value["purpose"])
+    operation = _bounded(value["operation"])
+    source_identity = value["source_identity"]
+    target_identity = value["target_identity"]
+    if source_identity is None or target_identity is None:
+        if (
+            source_identity is not None
+            or target_identity is not None
+            or purpose != "teardown"
+            or operation != "teardown"
+        ):
+            raise ValueError("suspended operation has invalid paired identities")
+    else:
+        source_identity = _bounded(source_identity, 1024)
+        target_identity = _bounded(target_identity, 1024)
     return SuspendedOperation(
         authority_id=_uuid(value["authority_id"]),
         generation=_positive(value["generation"]),
@@ -280,14 +295,14 @@ def _suspended(value: dict[str, Any] | None) -> SuspendedOperation | None:
         plan_identity=_bounded(value["plan_identity"]),
         operation_identity=_bounded(value["operation_identity"]),
         attempt_id=_uuid(value["attempt_id"]),
-        purpose=_bounded(value["purpose"]),
-        operation=_bounded(value["operation"]),
+        purpose=purpose,
+        operation=operation,
         provider_kind=_bounded(value["provider_kind"]),
         authority_instance=_bounded(value["authority_instance"]),
         request_digest=_bounded(value["request_digest"]),
         phase=value["phase"],
-        source_identity=_bounded(value["source_identity"], 1024),
-        target_identity=_bounded(value["target_identity"], 1024),
+        source_identity=source_identity,
+        target_identity=target_identity,
         ownership_digest=_bounded(value["ownership_digest"]),
     )
 

@@ -11,6 +11,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
+from uuid import UUID
 
 import libvirt
 from defusedxml.common import DefusedXmlException
@@ -20,7 +21,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import (
     XmlEnumerationBudget,
     parse_libvirt_xml,
 )
-from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
+from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, remote_metadata_system_id
+from kdive.providers.shared.runtime_paths import domain_name_for
 
 _DOMAIN_UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
@@ -265,6 +267,94 @@ def path_references(root: ET.Element) -> set[str]:
     return paths
 
 
+def _system_ownership(root: ET.Element, *, domain: str | None) -> str | None:
+    tags = [
+        *root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}system"),
+        *root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}domain/{{{KDIVE_METADATA_NS}}}system"),
+    ]
+    if len(tags) > 1:
+        raise _conflict("duplicate System ownership metadata", domain=domain)
+    if not tags:
+        return None
+    grouped = remote_metadata_system_id(root)
+    direct = (tags[0].text or "").strip()
+    return grouped or direct or None
+
+
+def prove_no_foreign_storage_references(
+    conn: AttachmentConn,
+    identity_port: RemoteDeviceIdentityPort,
+    owner_system_id: str,
+    protected: frozenset[tuple[str, str]],
+) -> None:
+    """Reject any foreign domain graph that aliases a volume about to be destroyed."""
+    identities: dict[str, RemoteDeviceIdentity] = {}
+
+    def resolve(path: str) -> RemoteDeviceIdentity:
+        normalized = _normalize_storage_path(path)
+        if normalized not in identities:
+            if len(identities) >= _MAX_PATH_IDENTITIES:
+                raise _infrastructure("remote device identity lookup budget exceeded")
+            identities[normalized] = _device_identity(identity_port, normalized)
+        return identities[normalized]
+
+    protected_identities: set[RemoteDeviceIdentity] = set()
+    for pool, volume in sorted(protected):
+        try:
+            path = _volume_path(conn, pool, volume)
+        except CategorizedError as error:
+            cause = error.__cause__
+            if isinstance(cause, libvirt.libvirtError) and (
+                cause.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL
+            ):
+                continue
+            raise
+        protected_identities.add(resolve(path))
+    try:
+        domains = conn.listAllDomains(0)
+    except libvirt.libvirtError as exc:
+        raise _infrastructure("could not enumerate remote teardown attachments") from exc
+    budget = XmlEnumerationBudget()
+    seen_names: set[str] = set()
+    for domain in domains:
+        try:
+            active = bool(domain.isActive())
+            documents = [domain.XMLDesc(0)]
+            if active and domain.isPersistent():
+                documents.append(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        except libvirt.libvirtError as exc:
+            raise _infrastructure("could not read a remote teardown attachment") from exc
+        for index, document in enumerate(documents):
+            try:
+                root = budget.parse(document)
+            except (ET.ParseError, DefusedXmlException, ValueError) as exc:
+                raise _conflict("could not inspect a remote teardown attachment") from exc
+            name = root.findtext("name")
+            if index == 0:
+                if not name or name in seen_names:
+                    raise _conflict("duplicate or unnamed remote teardown domain")
+                seen_names.add(name)
+            owner = _system_ownership(root, domain=name)
+            references = volume_references(root)
+            paths = path_references(root)
+            paths.update(
+                value
+                for value in (root.findtext("./os/kernel"), root.findtext("./os/initrd"))
+                if value is not None
+            )
+            document_identities = {resolve(path) for path in paths}
+            document_identities.update(
+                resolve(_volume_path(conn, pool, volume)) for pool, volume in references
+            )
+            direct = set(references) & set(protected)
+            aliases = document_identities & protected_identities
+            exact_owner = owner == owner_system_id and name == domain_name_for(
+                UUID(owner_system_id)
+            )
+            if (direct or aliases) and not exact_owner:
+                raise _conflict("another domain references remote teardown storage", domain=name)
+
+
 def _volume_path(conn: AttachmentConn, pool_name: str, volume_name: str) -> str:
     try:
         pool = conn.storagePoolLookupByName(pool_name)
@@ -354,10 +444,7 @@ def _inspect_definition(
     if len(paths) > _MAX_PATH_IDENTITIES:
         raise _infrastructure("remote device identity lookup budget exceeded")
     direct_identities = {_device_identity(identity_port, path) for path in paths}
-    system_tags = root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
-    if len(system_tags) > 1:
-        raise _conflict("duplicate System ownership metadata", domain=name)
-    system_tag = system_tags[0].text if system_tags else None
+    system_tag = _system_ownership(root, domain=name)
     if system_tag == expected.system_id:
         resolved_identities = [
             _device_identity(identity_port, _volume_path(conn, pool, volume))
