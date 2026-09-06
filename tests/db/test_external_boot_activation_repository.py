@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TypedDict
+from typing import Any, TypedDict, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -390,7 +390,9 @@ def test_capacity_write_takes_system_before_recovery_store_lock(migrated_url: st
     asyncio.run(_run())
 
 
-def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> None:
+def test_capacity_release_cleanup_and_post_cleanup_fence(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def _run() -> None:
         repo = ExternalBootActivationRepository()
         async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
@@ -428,6 +430,34 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
                 )
             ).status is CasStatus.SUPERSEDED
             assert await obligations.mutation_obligation_is_open(conn, attempt) is True
+            original = RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations
+
+            async def fault(self: object, target: object, system: object) -> int:
+                count = await original(cast(Any, self), cast(Any, target), cast(UUID, system))
+                raise RuntimeError(f"after discharge {count}")
+
+            monkeypatch.setattr(
+                RemoteModuleAttemptObligationRepository,
+                "discharge_system_mutation_obligations",
+                fault,
+            )
+            with pytest.raises(RuntimeError, match="after discharge 1"):
+                async with conn.transaction():
+                    await repo.transition(
+                        conn,
+                        **_authority(activation),
+                        expected_state=ExternalBootActivationState.PREPARING,
+                        new_state=ExternalBootActivationState.ABANDONED,
+                        terminal_evidence=terminal,
+                    )
+            current = await repo.get(conn, activation.id)
+            assert current is not None and current.state is ExternalBootActivationState.PREPARING
+            assert await obligations.mutation_obligation_is_open(conn, attempt) is True
+            monkeypatch.setattr(
+                RemoteModuleAttemptObligationRepository,
+                "discharge_system_mutation_obligations",
+                original,
+            )
             abandoned = await repo.transition(
                 conn,
                 **_authority(activation),
@@ -937,7 +967,7 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
     ],
 )
 def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
-    migrated_url: str, cleanup_state: ExternalBootActivationState
+    migrated_url: str, cleanup_state: ExternalBootActivationState, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _run() -> None:
         repo = ExternalBootActivationRepository()
@@ -1023,6 +1053,38 @@ def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
                     )
                 ).status is CasStatus.SUPERSEDED
                 assert await obligations.mutation_obligation_is_open(conn, attempt) is True
+                original = (
+                    RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations
+                )
+
+                async def fault(self: object, target: object, system: object) -> int:
+                    count = await original(cast(Any, self), cast(Any, target), cast(UUID, system))
+                    raise RuntimeError(f"after discharge {count}")
+
+                monkeypatch.setattr(
+                    RemoteModuleAttemptObligationRepository,
+                    "discharge_system_mutation_obligations",
+                    fault,
+                )
+                with pytest.raises(RuntimeError, match="after discharge 1"):
+                    async with conn.transaction():
+                        await repo.finish_recovery_attempt(
+                            conn,
+                            **_authority(activation),
+                            expected_state=ExternalBootActivationState.RECOVERING,
+                            attempt_id=attempt_id,
+                            new_state=ExternalBootActivationState.RECOVERY_FAILED,
+                            terminal_evidence=failure,
+                        )
+                current = await repo.get(conn, activation.id)
+                assert current is not None
+                assert current.state is ExternalBootActivationState.RECOVERING
+                assert await obligations.mutation_obligation_is_open(conn, attempt) is True
+                monkeypatch.setattr(
+                    RemoteModuleAttemptObligationRepository,
+                    "discharge_system_mutation_obligations",
+                    original,
+                )
                 await repo.finish_recovery_attempt(
                     conn,
                     **_authority(activation),
