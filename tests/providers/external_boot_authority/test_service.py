@@ -117,6 +117,35 @@ async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) 
 
 
 @pytest.mark.anyio
+async def test_cancelling_observation_keeps_its_system_lane_until_provider_completion(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    adapter.observe_release.clear()
+    first = asyncio.create_task(service.observe_authority(peer, _mutation(takeover)))
+    await adapter.observe_entered.wait()
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second_started = asyncio.Event()
+
+    async def observe_again() -> AuthorityObservationV1:
+        second_started.set()
+        return await service.observe_authority(peer, _mutation(takeover))
+
+    second = asyncio.create_task(observe_again())
+    await second_started.wait()
+    assert adapter.calls == ["observe"]
+    adapter.observe_release.set()
+    await second
+    assert adapter.calls == ["observe", "observe"]
+
+
+@pytest.mark.anyio
 async def test_read_only_observation_rejects_a_stale_trusted_head_before_provider_access(
     tmp_path: Path,
 ) -> None:

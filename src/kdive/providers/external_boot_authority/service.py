@@ -1176,42 +1176,52 @@ class ExternalBootAuthorityService:
         if trusted is None or not self._binding_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
+
+        async def run() -> AuthorityObservationV1:
+            try:
+                async with lane.lock:
+                    if lane.failed:
+                        raise AuthorityServiceError("journal_conflict")
+                    if lane.active is not None:
+                        raise AuthorityServiceError("superseded")
+                    _journal, records = self._lane_journal(request.system_id, lane)
+                    await self._observation_head_is_current(trusted, records)
+                    acknowledgements = [
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.generation == request.generation
+                    ]
+                    if not acknowledgements:
+                        raise AuthorityServiceError("superseded")
+                    acknowledgement = acknowledgements[-1]
+                    confirmed = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if confirmed is None or not self._binding_matches(confirmed, request):
+                        raise AuthorityServiceError("superseded")
+                    try:
+                        observation = await self._adapter.observe(request)
+                    except AuthorityServiceError:
+                        raise
+                    except Exception:
+                        raise self._provider_error(request) from None
+                    rechecked = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if rechecked is None or not self._binding_matches(rechecked, request):
+                        raise AuthorityServiceError("superseded")
+                    await self._observation_head_is_current(rechecked, records)
+                    return observation
+            finally:
+                self._release_lane(trusted.system_id, lane)
+
+        task = asyncio.create_task(run())
         try:
-            async with lane.lock:
-                if lane.failed:
-                    raise AuthorityServiceError("journal_conflict")
-                if lane.active is not None:
-                    raise AuthorityServiceError("superseded")
-                _journal, records = self._lane_journal(request.system_id, lane)
-                await self._observation_head_is_current(trusted, records)
-                acknowledgements = [
-                    record
-                    for record in records
-                    if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
-                    and record.generation == request.generation
-                ]
-                if not acknowledgements:
-                    raise AuthorityServiceError("superseded")
-                acknowledgement = acknowledgements[-1]
-                confirmed = await self._resolve_confirmed(authenticated, request, acknowledgement)
-                if confirmed is None or not self._binding_matches(confirmed, request):
-                    raise AuthorityServiceError("superseded")
-                try:
-                    observation = await self._adapter.observe(request)
-                except AuthorityServiceError:
-                    raise
-                except Exception:
-                    raise self._provider_error(request) from None
-                rechecked = await self._resolve_confirmed(authenticated, request, acknowledgement)
-                if rechecked is None or not self._binding_matches(rechecked, request):
-                    raise AuthorityServiceError("superseded")
-                await self._observation_head_is_current(rechecked, records)
-                return observation
+            return await asyncio.shield(task)
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
             raise
-        finally:
-            self._release_lane(trusted.system_id, lane)
 
     async def execute_preparation(
         self,
