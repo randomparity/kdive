@@ -469,6 +469,35 @@ def test_existing_worker_provider_contract_is_preserved() -> None:
     assert "live_vm_host_authority_client_group not in" in verify
 
 
+def test_authority_group_verification_tracks_local_mutation_kvm_requirement() -> None:
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(item for item in tasks if item.get("name") == "Read the authority account groups")
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["bool"] = bool
+    failed = environment.compile_expression(task["failed_when"])
+
+    for local_mutation, groups, expected_failure in (
+        (False, "kdive-provider-authority kdive-provider-authority-client", False),
+        (False, "kdive-provider-authority kdive-provider-authority-client kvm", True),
+        (True, "kdive-provider-authority kdive-provider-authority-client kvm", False),
+        (True, "kdive-provider-authority kdive-provider-authority-client", True),
+        (
+            True,
+            "kdive-provider-authority kdive-provider-authority-client kdive-live-libvirt kvm",
+            True,
+        ),
+    ):
+        assert (
+            failed(
+                live_vm_host_authority_group_result={"stdout": groups},
+                live_vm_host_authority_client_group="kdive-provider-authority-client",
+                live_vm_host_worker_libvirt_group="kdive-live-libvirt",
+                live_vm_host_authority_local_mutation_enabled=local_mutation,
+            )
+            is expected_failure
+        )
+
+
 def test_ansible_installs_authority_in_clean_host_order() -> None:
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)
