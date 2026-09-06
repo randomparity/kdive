@@ -28,7 +28,7 @@ to one activation even when two activations share a Run and projection digest.
 Terminal cleanup receives the authenticated recovery metadata, not only its binding. A local
 reclaimer derives the one projection digest and activation names from that metadata, opens every
 directory descriptor-relative with no-follow and owner-only checks, and removes only an explicit
-bounded set of files. It removes the exact digest directory, then prunes the Run and System
+bounded set of files. It removes the exact digest directory, then prunes the activation, Run, and System
 parents only when empty. Absence is retry success; an unexpected entry, shape, mode, owner, or
 record is reported and left untouched. No recursive deletion is used.
 
@@ -38,10 +38,13 @@ preparation receipt or pre-stop intent, then asks the provider-local operation t
 A receipt-only partial is removed directly because no guest operation has begun. A pre-stop partial
 first verifies that the domain still has its recorded source definition and has not reached a
 target/mutated state; it restores recorded prior power, then removes only its known files and
-directory. After it removes the partial, or when a retry proves it already absent, the adapter uses
-the exact service-constructed `mutation-started` context to return a stable terminal `absent`
-observation without entering recovery-point-dependent categorization. Absence without that exact
-journal proof does not authorize deletion or a terminal result. A normal prepare retry instead resumes the same matching partial. Any malformed,
+directory. After it removes the partial, or when a retry proves it already absent, the adapter
+records a bounded pending-absence handoff containing the exact admitted request. The same adapter
+accepts that handoff only for a byte-for-byte equal request and returns the stable terminal
+`absent` observation without entering recovery-point-dependent categorization. The handoff is
+adapter-local, capacity bounded, and oldest-entry evicted; eviction or process restart causes the
+authenticated retry to re-run the idempotent absence proof and recreate it. Absence without that
+exact request proof does not authorize deletion or a terminal result. A normal prepare retry instead resumes the same matching partial. Any malformed,
 foreign, symlinked, wide-mode, non-directory, or ambiguous partial is retained and reported.
 
 Host-artifact cleanup is separated from guest mutation. Opening or changing the overlay, module

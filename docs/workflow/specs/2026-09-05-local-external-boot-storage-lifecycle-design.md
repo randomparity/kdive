@@ -42,7 +42,7 @@ guest-tree access retain their existing inactive checks.
    only the bounded preparation/pre-stop files and archive temporary/final names. Reopen and parse
    its durable record; delete it only when it authenticates the same binding. Any other contents
    or shape produce a path-redacted `ValueError` before that directory is changed.
-5. Prune the Run and System directories with `rmdir`. `ENOENT` and `ENOTEMPTY` mean converged or a
+5. Prune the activation, Run, and System directories with `rmdir`, in that order. `ENOENT` and `ENOTEMPTY` mean converged or a
    sibling remains; other errors are reported without a host path. Fsync each changed parent.
 
 Each unlink treats absence as success, so interruption and retry converge. Every candidate name is
@@ -67,12 +67,15 @@ intent, archive, and archive-temporary names and the exact partial directory. Ev
 idempotent; teardown retries this arm until it returns absent.
 
 `abort_preparation` returns a closed result: `removed`, `absent`, or `not-partial`. `removed` and
-`absent` are terminal only when the adapter has verified that `context.phase` is
-`mutation-started`, its commit point is TEARDOWN, and its operation identity and attempt match the
-request already admitted by the authority service. The adapter then constructs a stable `absent`
-`AuthorityObservationV1` from the request's closed identities and the absence token; it does not
-call `_resolve_point`, `_require_matching_identities`, or the RecoveryPoint-dependent state
-categorizer. A present malformed/foreign partial raises `provider_conflict`; an I/O failure is
+`absent` create an adapter-local pending-absence handoff only after the adapter has verified that
+`context.phase` is `mutation-started`, its commit point is TEARDOWN, and the admitted request owns
+the partial or exact absence just proved. The handoff stores the complete validated
+`AuthorityMutationRequestV1`, keyed by operation identity, and can be consumed only by an exactly
+equal request. The adapter then constructs a stable `absent` `AuthorityObservationV1` without
+calling `_resolve_point`, `_require_matching_identities`, or the RecoveryPoint-dependent state
+categorizer. The map is bounded to the existing admitted-lane capacity and evicts its oldest entry;
+an evicted or post-restart retry repeats the idempotent provider absence proof before recreating the
+handoff. A mismatched request cannot consume or replace an entry. A present malformed/foreign partial raises `provider_conflict`; an I/O failure is
 bounded to `provider_conflict` and is never converted to absence. `not-partial` falls through to
 normal complete-recovery teardown. Lost response and already-absent retries return the same
 observation id and category.
@@ -130,7 +133,7 @@ intentionally retained.
 
 ## Verification
 
-Focused tests cover inactive and restored-running cleanup; exact projection and parent pruning;
+Focused tests cover inactive and restored-running cleanup; exact projection, activation, and parent pruning;
 every unlink/rmdir interruption followed by retry; sibling preservation; partial record/shape,
 symlink, mode, owner, and ambiguity refusals; and retained guest mutation gates. Deployment tests
 cover the worker environment and all capacity-gate branches. An Ansible check-mode/syntax run and
@@ -140,7 +143,8 @@ guardrails remain the final gate.
 The partial proof drives the real adapter teardown path for three crash windows: preparation receipt
 only, pre-stop intent before stop, and published archive before completion rename. It also proves a
 same-Run/same-digest sibling remains openable after the first activation's terminal cleanup.
-First execution, lost-response retry, already-absent retry, malformed partial, and read failure each
+First execution, lost-response retry, already-absent retry, handoff mismatch, bounded eviction,
+adapter restart, malformed partial, and read failure each
 assert the exact terminal/nonterminal authority observation contract.
 
 Capacity tests exercise equality and one-byte-over cases against the real local materializer before

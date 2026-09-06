@@ -82,7 +82,7 @@ and expect green.
 Steps:
 
 1. Add successful exact-hierarchy cleanup and sibling-preservation tests; observe the leak.
-2. Implement descriptor-relative exact projection and empty-parent pruning.
+2. Implement descriptor-relative exact projection plus activation/Run/System empty-parent pruning.
 3. Add matching partial and malformed/foreign/symlink/mode/non-directory/ambiguous refusal tests.
 4. Implement bounded partial validation and exact removal with redacted failures.
 5. Inject interruption at every removal, retry, and assert convergence without sibling changes.
@@ -109,10 +109,13 @@ Steps:
 2. Implement canonical partial inspection and explicit bounded unlink/rmdir helpers.
 3. Implement abort preparation, including source-state verification and prior-power restoration.
 4. Route TEARDOWN to abort preparation only when complete recovery-point resolution is absent.
-5. Return stable terminal `absent` directly from the adapter for an authenticated `removed` or
-   `absent` result; keep `not-partial` on normal RecoveryPoint handling and failures nonterminal.
-6. Add first-call, lost-response, already-absent, malformed, and I/O-failure observation tests.
-7. Inject interruption at each removal and prove request retry converges.
+5. Record `removed` or `absent` in a bounded adapter-local handoff containing the exact validated
+   request; consume it only for the equal request to return stable terminal `absent`. Keep
+   `not-partial` on normal RecoveryPoint handling and failures nonterminal.
+6. Add first-call, lost-response, already-absent, mismatched-request, bounded-eviction,
+   adapter-restart, malformed, and I/O-failure observation tests.
+7. Inject interruption at each removal, including activation-directory pruning, and prove request
+   retry converges without changing sibling activation directories.
 8. Run focused tests and commit `feat(local-libvirt): reclaim interrupted preparation`.
 
 ## Task 5 — propagate the per-slot recovery root
