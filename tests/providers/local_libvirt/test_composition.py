@@ -21,6 +21,7 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
+    RealLocalExternalBootIO,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     LocalExternalBootReadiness,
@@ -394,6 +395,27 @@ def test_build_external_boot_session_mechanisms_opens_nothing(
     assert mechanisms.recovery_root == seam
     assert opened == []
     assert sorted(seam.iterdir()) == []
+
+
+def test_local_authority_builder_shares_scope_with_real_io(
+    seam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_require = composition.config.require
+
+    def require(setting: object) -> object:
+        if setting is composition.LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES:
+            return 4096
+        return original_require(setting)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(composition.config, "require", require)
+    binding = composition.build_local_external_boot_authority(cast(ObjectStore, object()))
+    io = cast(RealLocalExternalBootIO, binding.provider._io)  # noqa: SLF001
+
+    pin = cast(Any, io._session_factory._pin_lease)  # noqa: SLF001
+    assert pin.__self__ is not None
+    resolver = cast(Any, io._resolve_operation_lease)  # noqa: SLF001
+    assert binding.adapter._lease_scope is resolver.__self__  # noqa: SLF001
+    assert io._recovery_root == seam  # noqa: SLF001
 
 
 def test_mechanisms_share_one_recovery_root(seam: Path) -> None:

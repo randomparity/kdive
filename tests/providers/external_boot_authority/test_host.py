@@ -448,6 +448,7 @@ def test_host_database_role_query_inventories_all_application_privileges() -> No
     assert "aclexplode" in query
     assert "acldefault" in query
     assert "pg_shdepend" in query
+    assert "resolve_current_external_boot_preparation_authority" in query
     assert "acl.grantee IN (0, role.oid, accepted_role.oid)" in query
     assert "accepted_public_function" in query
     for attribute in (
@@ -747,6 +748,52 @@ def test_host_notifies_readiness_state(monkeypatch: pytest.MonkeyPatch, tmp_path
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run_authority_host(config))
     assert notices == ["READY=1", "WATCHDOG=1", "STOPPING=1"]
+
+
+def test_host_shares_one_mutation_service_between_listeners(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(_config(tmp_path), network_address="127.0.0.1", network_port=9443)
+    service = object()
+    received: list[object | None] = []
+
+    class Listener:
+        def validate(self) -> None:
+            return None
+
+        async def start_serving(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def serve(*_args: object, **kwargs: object) -> Listener:
+        received.append(kwargs.get("service"))
+        return Listener()
+
+    async def ready(*_args: object) -> None:
+        return None
+
+    async def stop(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(host, "_build_mutation_service", lambda _config: service)
+    monkeypatch.setattr(host, "serve_authority_transport", serve)
+    monkeypatch.setattr(host, "serve_authority_network_transport", serve)
+    monkeypatch.setattr(host, "_check_static_authority_host", ready)
+    monkeypatch.setattr(host, "check_tls_health", ready)
+    monkeypatch.setattr(host, "_notify_systemd", lambda _message: None)
+    monkeypatch.setattr(host.asyncio, "sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_authority_host(config))
+    assert received == [service, service]
+
+
+def test_host_keeps_identity_only_mode_without_local_recovery_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_RECOVERY_ROOT", raising=False)
+    assert host._build_mutation_service(_config(tmp_path)) is None  # noqa: SLF001
 
 
 def test_host_validates_listener_before_ready(

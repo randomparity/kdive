@@ -187,8 +187,10 @@ class LocalOperationLeaseScope:
         try:
             yield
         finally:
-            lease.release()
-            self._local.active = None
+            try:
+                lease.release()
+            finally:
+                self._local.active = None
 
     def resolve(self, authority: OpaqueProviderRef) -> LocalOperationLease:
         active = getattr(self._local, "active", None)
