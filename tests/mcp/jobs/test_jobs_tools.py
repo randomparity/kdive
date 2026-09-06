@@ -29,6 +29,7 @@ from kdive.jobs.payloads import (
     BuildPayload,
     CheckSshReachablePayload,
     InstallPayload,
+    RemoteModuleVolumeReapPayload,
     SystemPayload,
     TeardownPayload,
     WatchForCrashPayload,
@@ -53,6 +54,12 @@ CONTRIB_CTX = RequestContext(
 )
 VIEWER_CTX = RequestContext(
     principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.VIEWER}
+)
+_INTERNAL_CTX = RequestContext(
+    principal="user-1",
+    agent_session="s",
+    projects=("remote-libvirt",),
+    roles={"remote-libvirt": Role.OPERATOR},
 )
 
 
@@ -101,6 +108,18 @@ async def _enqueue_in(pool: AsyncConnectionPool, dedup: str, project: str) -> st
 async def _enqueue(pool: AsyncConnectionPool, dedup: str) -> str:
     """Enqueue a job in ``CTX``'s project (the common case for these tests)."""
     return await _enqueue_in(pool, dedup, "proj")
+
+
+async def _enqueue_internal(pool: AsyncConnectionPool, dedup: str) -> str:
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            JobKind.REMOTE_MODULE_VOLUME_REAP,
+            RemoteModuleVolumeReapPayload(schema="remote-module-volume-reap-v1"),
+            Authorizing(principal="remote-libvirt", project="remote-libvirt"),
+            dedup,
+        )
+    return str(job.id)
 
 
 async def _list_jobs(
@@ -714,6 +733,25 @@ def test_list_jobs_isolates_invariant_violating_row(
 # --- cross-project isolation (#11): a job is visible only to its project's members ---
 
 _OTHER = RequestContext(principal="user-2", agent_session="s", projects=("other",))
+
+
+def test_internal_reap_job_is_hidden_from_colliding_tenant_read_cancel_and_list(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_internal(pool, "internal-1")
+            await _enqueue_internal(pool, "internal-2")
+            visible = await _enqueue_in(pool, "tenant", "remote-libvirt")
+            read = await jobs_tools.wait_job(pool, _INTERNAL_CTX, job_id, timeout_s=0)
+            canceled = await jobs_tools.cancel_job(pool, _INTERNAL_CTX, job_id)
+            listed = await _list_jobs(pool, _INTERNAL_CTX, limit=1)
+        assert read.error_category == "not_found"
+        assert canceled.error_category == "not_found"
+        assert [item.object_id for item in listed.items] == [visible]
+        assert listed.data["truncated"] is False
+
+    asyncio.run(_run())
 
 
 def test_get_job_in_unowned_project_is_indistinguishable_from_not_found(migrated_url: str) -> None:

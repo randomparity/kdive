@@ -13,10 +13,10 @@ from psycopg import AsyncConnection
 from kdive.db.remote_module_attempt_obligations import ModuleAttempt, RetainedModuleAttempt
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.providers.infra.reaping import ModuleVolumeKey
-from kdive.reconciler.cleanup.provider_resources.module_volume_reaping import (
+from kdive.jobs.handlers.module_volume_reaping import (
     remote_module_volume_reap_handler,
 )
+from kdive.providers.infra.reaping import ModuleVolumeKey
 
 SYSTEM = UUID("00000000-0000-0000-0000-000000000001")
 RUN = UUID("00000000-0000-0000-0000-000000000002")

@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Final, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
@@ -64,7 +64,7 @@ class _PayloadBase(BaseModel):
 class RemoteModuleVolumeReapPayload(_PayloadBase):
     """Closed worker-maintenance payload; selects no remote authority or target."""
 
-    schema: Literal["remote-module-volume-reap-v1"]
+    schema_: Literal["remote-module-volume-reap-v1"] = Field(alias="schema")
 
 
 class Authorizing(_PayloadBase):
@@ -571,7 +571,7 @@ def dump_payload(kind: JobKind, payload: ActivePayloadModel | dict[str, Any]) ->
         model = payload if isinstance(payload, model_class) else model_class.model_validate(payload)
     except ValidationError as exc:
         raise _validation_error(f"{kind.value} payload", exc) from exc
-    dumped = model.model_dump(mode="json", exclude_none=True)
+    dumped = model.model_dump(mode="json", exclude_none=True, by_alias=True)
     if EXTERNAL_BOOT_AUTHORITY_MARKER_KEY in dumped and kind not in _MARKED_JOB_KINDS:
         # Subclassing leaves one hole, closed here rather than at each of the many call sites:
         # TeardownPayload *is* a SystemPayload, so the isinstance above accepts a marked one for

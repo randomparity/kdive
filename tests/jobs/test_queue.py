@@ -30,6 +30,7 @@ from kdive.jobs.payloads import (
     AuthorizeSshKeyPayload,
     Authorizing,
     InstallPayload,
+    RemoteModuleVolumeReapPayload,
     ReprovisionPayload,
     RestorePayload,
     SnapshotPayload,
@@ -1343,6 +1344,45 @@ def test_recent_jobs_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             assert await queue.recent_jobs(conn, limit=10, projects=["proj"]) == []
+
+    asyncio.run(_run())
+
+
+def test_internal_reap_job_deduplicates_and_recycles_terminal_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        payload = RemoteModuleVolumeReapPayload(schema="remote-module-volume-reap-v1")
+        authorizing = Authorizing(principal="remote-libvirt", project="remote-libvirt")
+        async with await _connect(migrated_url) as conn:
+            first, inserted = await queue.enqueue_with_status(
+                conn,
+                JobKind.REMOTE_MODULE_VOLUME_REAP,
+                payload,
+                authorizing,
+                "reap:v1",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
+            duplicate, admitted = await queue.enqueue_with_status(
+                conn,
+                JobKind.REMOTE_MODULE_VOLUME_REAP,
+                payload,
+                authorizing,
+                "reap:v1",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
+            assert inserted and not admitted and duplicate.id == first.id
+            await conn.execute(
+                "UPDATE jobs SET state = 'succeeded', attempt = 2 WHERE id = %s", (first.id,)
+            )
+            recycled, admitted = await queue.enqueue_with_status(
+                conn,
+                JobKind.REMOTE_MODULE_VOLUME_REAP,
+                payload,
+                authorizing,
+                "reap:v1",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
+        assert admitted and recycled.id == first.id
+        assert recycled.state is JobState.QUEUED and recycled.attempt == 0
 
     asyncio.run(_run())
 
