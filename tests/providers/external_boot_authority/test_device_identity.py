@@ -185,7 +185,9 @@ def test_synchronous_identity_adapter_uses_captured_deadline_and_maps_identity()
     port = RemoteAuthorityDeviceIdentity(Sender(), 110.0, clock=lambda: 100.0)
     assert port.identity("/disk") == RemoteDeviceIdentity("inode", 4, 5)
     assert seen[0][0] == "/disk"
-    assert seen[0][1] == pytest.approx(10.0)
+    # The adapter must preserve almost all of the captured budget. Event-loop creation
+    # consumes a small, scheduler-dependent amount before the sender observes it.
+    assert 9.9 <= seen[0][1] <= 10.0
 
 
 def test_synchronous_identity_adapter_rejects_expiry_and_running_loop() -> None:
