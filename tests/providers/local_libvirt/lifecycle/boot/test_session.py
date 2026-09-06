@@ -304,10 +304,7 @@ def test_authority_semantic_identity_accepts_sanitized_native_inactive_readback(
         '<cpu mode="host-passthrough" check="none" migratable="on"/>',
         '<cpu mode="host-passthrough"/>',
     )
-    overlay = (
-        "/var/lib/kdive/provider-authority/rootfs/"
-        "11111111-1111-1111-1111-111111111111-overlay.qcow2"
-    )
+    overlay = "/example/provider/rootfs/11111111-1111-1111-1111-111111111111-overlay.qcow2"
 
     assert owned_system_semantic_identity(
         rendered, SYSTEM_ID, overlay
