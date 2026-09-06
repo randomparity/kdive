@@ -77,7 +77,12 @@ def _failure(reason: str) -> CategorizedError:
         "remote-module-failed": ErrorCategory.CONFLICT,
         "remote-module-refused": ErrorCategory.CONFIGURATION_ERROR,
     }.get(reason, ErrorCategory.INFRASTRUCTURE_FAILURE)
-    return CategorizedError(f"authority: {reason}", category=category)
+    details: dict[str, object] | None = None
+    if reason == "remote-module-failed":
+        details = {"completion": "failed-after-mutation"}
+    elif reason == "remote-module-refused":
+        details = {"completion": "refused-before-mutation"}
+    return CategorizedError(f"authority: {reason}", category=category, details=details)
 
 
 def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Value:

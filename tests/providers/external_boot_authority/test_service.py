@@ -579,7 +579,7 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
 
 
 @pytest.mark.anyio
-async def test_remote_lifecycle_serializes_and_reopens_exact_completion_after_rebinding(
+async def test_remote_lifecycle_reopens_completion_only_for_current_authenticated_binding(
     tmp_path: Path,
 ) -> None:
     peer = AuthenticatedPeer(uuid4())
@@ -658,7 +658,8 @@ async def test_remote_lifecycle_serializes_and_reopens_exact_completion_after_re
     assert calls == 1
 
     repository.current = False
-    assert await service.execute_remote_module_lifecycle(peer, remote) is completed
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_remote_module_lifecycle(peer, remote)
     assert calls == 1
 
 

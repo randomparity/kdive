@@ -305,6 +305,7 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
     with pytest.raises(CategorizedError, match="remote-module-failed") as failed:
         await sender.execute_remote_module_preparation(remote_request, deadline=123.0)
     assert failed.value.category is ErrorCategory.CONFLICT
+    assert failed.value.details == {"completion": "failed-after-mutation"}
 
 
 async def test_sender_borrows_only_while_encoding_and_authenticates_active_incarnation() -> None:

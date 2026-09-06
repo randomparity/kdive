@@ -13,12 +13,15 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import libvirt
+import psycopg
 import pytest
+from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr, ValidationError
 
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     ModuleAttemptWorkerWriteContext,
+    RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import (
@@ -56,6 +59,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootRecoveryRecord,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationHost,
     RemoteModuleVolumePreparationRequestV1,
@@ -95,6 +99,11 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.services.remote_module_authority_preparation import (
     RemoteModulePreparationInputs,
     execute_remote_module_lifecycle_on_authority_host,
+    prepare_remote_module_on_authority_host,
+)
+from tests.db.external_boot_authority_support import _RoleDsns
+from tests.db.external_boot_authority_support import (
+    authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
 from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
     _materialization,
@@ -800,6 +809,158 @@ def _restored_response(
     )
 
 
+async def _seed_remote_attempt(
+    conn: psycopg.AsyncConnection, request: RemoteModuleVolumePreparationRequestV1
+) -> ModuleAttempt:
+    resource_id, allocation_id, investigation_id = uuid4(), uuid4(), uuid4()
+    authority = request.authority
+    await conn.execute(
+        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
+        "VALUES (%s, 'remote-libvirt', 'default', 'standard', 'available', "
+        "'qemu+tls://example.invalid/system')",
+        (resource_id,),
+    )
+    await conn.execute(
+        "INSERT INTO allocations (id, resource_id, state, principal, project) "
+        "VALUES (%s, %s, 'granted', 'p', 'proj')",
+        (allocation_id, resource_id),
+    )
+    await conn.execute(
+        "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, project) "
+        "VALUES (%s, %s, 'ready', '{}'::jsonb, 'p', 'proj')",
+        (authority.system_id, allocation_id),
+    )
+    await conn.execute(
+        "INSERT INTO investigations (id, principal, project, title, state) "
+        "VALUES (%s, 'p', 'proj', 't', 'open')",
+        (investigation_id,),
+    )
+    await conn.execute(
+        "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, build_profile, "
+        "principal, project) VALUES "
+        "(%s, %s, %s, 'remote-libvirt', 'created', '{}'::jsonb, 'p', 'proj')",
+        (authority.run_id, investigation_id, authority.system_id),
+    )
+    return ModuleAttempt(authority.system_id, authority.run_id, request.operation.operation_nonce)
+
+
+def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def run() -> None:
+        request = _remote_preparation_request()
+        response = _terminal_response(request)
+        backing = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            attempt = await _seed_remote_attempt(admin, request)
+            await backing.open_mutation_obligation(admin, attempt)
+
+        class Repository:
+            async def attempt_is_preparable(self, conn: object, candidate: ModuleAttempt) -> bool:
+                return await backing.attempt_is_preparable(cast(Any, conn), candidate)
+
+            async def mutation_obligation_is_open(
+                self, conn: object, candidate: ModuleAttempt
+            ) -> bool:
+                return await backing.mutation_obligation_is_open(cast(Any, conn), candidate)
+
+            async def read_terminal_evidence(
+                self, _conn: object, _candidate: ModuleAttempt
+            ) -> None:
+                return None
+
+            async def worker_record_terminal_evidence(self, *_args: object) -> bool:
+                return True
+
+        preparation = ModuleAttemptPreparationRequestV1(
+            module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+                system_id=attempt.system_id,
+                run_id=attempt.run_id,
+                operation_nonce=attempt.operation_nonce,
+            )
+        )
+        host_release = asyncio.Event()
+        host_completed = asyncio.Event()
+        retry_refused = asyncio.Event()
+        host_task: asyncio.Task[None] | None = None
+        calls = 0
+
+        async def run_host() -> None:
+            await host_release.wait()
+            host_completed.set()
+
+        class Sender:
+            async def open_remote_module_attempt(
+                self, _begin: object, *, deadline: float
+            ) -> RemoteModulePreparationBeginResponseV1:
+                assert deadline > asyncio.get_running_loop().time()
+                return RemoteModulePreparationBeginResponseV1(
+                    preparation=preparation, operation=request.operation
+                )
+
+            async def execute_remote_module_preparation(
+                self, candidate: RemoteModuleVolumePreparationRequestV1, *, deadline: float
+            ) -> RemoteModuleTerminalPreparationResponseV1:
+                nonlocal calls, host_task
+                assert candidate == request
+                assert deadline > asyncio.get_running_loop().time()
+                calls += 1
+                if calls == 1:
+                    host_task = asyncio.create_task(run_host())
+                    raise TimeoutError
+                if not host_completed.is_set():
+                    retry_refused.set()
+                    raise CategorizedError(
+                        "authority: provider-conflict", category=ErrorCategory.CONFLICT
+                    )
+                return response
+
+        executor = RemoteModulePreparationExecutor()
+        worker = AsyncConnectionPool(
+            authority_role_dsns("kdive_worker"), min_size=1, max_size=1, open=False
+        )
+        await worker.open()
+        try:
+            task = asyncio.create_task(
+                prepare_remote_module_on_authority_host(
+                    pool=worker,
+                    repository=cast(Any, Repository()),
+                    sender=cast(Any, Sender()),
+                    inputs=RemoteModulePreparationInputs(authority=request.authority),
+                    executor=executor,
+                    job_id=uuid4(),
+                    job_attempt=1,
+                    incarnation_credential=SecretStr("worker-credential"),
+                    deadline=asyncio.get_running_loop().time() + 10,
+                )
+            )
+            await asyncio.wait_for(retry_refused.wait(), 1)
+            assert not task.done()
+            async with await psycopg.AsyncConnection.connect(migrated_url) as contender:
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    async with contender.transaction():
+                        await contender.execute("SET LOCAL lock_timeout = '100ms'")
+                        await backing.discharge_mutation_obligation(
+                            contender, attempt, reason="restored"
+                        )
+            host_release.set()
+            assert await asyncio.wait_for(task, 2) == response
+            assert host_task is not None
+            await host_task
+            async with await psycopg.AsyncConnection.connect(migrated_url) as contender:
+                assert await backing.discharge_mutation_obligation(
+                    contender, attempt, reason="restored"
+                )
+        finally:
+            host_release.set()
+            if host_task is not None:
+                await host_task
+            await worker.close()
+            executor.shutdown()
+
+    asyncio.run(run())
+
+
 def _record() -> RemoteExternalBootRecoveryRecord:
     system_id = "00000000-0000-4000-8000-000000000001"
     run_id = "00000000-0000-4000-8000-000000000002"
@@ -1367,7 +1528,73 @@ async def test_worker_reap_requires_retained_terminal_evidence_before_dispatch()
 
 
 @pytest.mark.anyio
-async def test_worker_lifecycle_stops_on_authenticated_refusal_after_lost_reply() -> None:
+@pytest.mark.parametrize(
+    "later_category", [ErrorCategory.CONFIGURATION_ERROR, ErrorCategory.STALE_HANDLE]
+)
+async def test_worker_lifecycle_keeps_later_denial_indeterminate_until_matching_completion(
+    later_category: ErrorCategory,
+) -> None:
+    preparation_request = _remote_preparation_request()
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=preparation_request.authority.system_id,
+            run_id=preparation_request.authority.run_id,
+            operation_nonce=preparation_request.operation.operation_nonce,
+        )
+    )
+    response = _restored_response(preparation_request)
+    later_denial = asyncio.Event()
+    host_release = asyncio.Event()
+    calls = 0
+
+    class Repository:
+        async def read_restored_evidence(self, *_args: object) -> None:
+            return None
+
+        async def worker_record_restored_evidence(self, *_args: object) -> bool:
+            return True
+
+    class Sender:
+        async def execute_remote_module_lifecycle(
+            self, *_args: object, **_kwargs: object
+        ) -> RemoteModuleLifecycleResponseV1:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError
+            if not host_release.is_set():
+                later_denial.set()
+                raise CategorizedError("authority: later-denial", category=later_category)
+            return response
+
+    task = asyncio.create_task(
+        execute_remote_module_lifecycle_on_authority_host(
+            connection=cast(Any, object()),
+            repository=cast(Any, Repository()),
+            sender=cast(Any, Sender()),
+            authority=_module_lifecycle_request(preparation_request).authority,
+            preparation=preparation,
+            worker_context=ModuleAttemptWorkerWriteContext(
+                job_id=uuid4(),
+                job_attempt=1,
+                incarnation_credential=SecretStr("worker-credential"),
+                preparation=preparation,
+            ),
+            action="restore",
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+    )
+    await asyncio.wait_for(later_denial.wait(), 1)
+    assert not task.done()
+    host_release.set()
+    assert await asyncio.wait_for(task, 1) == response
+    assert calls >= 3
+
+
+@pytest.mark.anyio
+async def test_worker_lifecycle_accepts_only_authenticated_terminal_failure_after_lost_reply() -> (
+    None
+):
     preparation_request = _remote_preparation_request()
     preparation = ModuleAttemptPreparationRequestV1(
         module_attempt_obligation=ModuleAttemptObligationReceiptV1(
@@ -1385,11 +1612,12 @@ async def test_worker_lifecycle_stops_on_authenticated_refusal_after_lost_reply(
             if calls == 1:
                 raise TimeoutError
             raise CategorizedError(
-                "authority: remote-module-refused",
-                category=ErrorCategory.CONFIGURATION_ERROR,
+                "authority: remote-module-failed",
+                category=ErrorCategory.CONFLICT,
+                details={"completion": "failed-after-mutation"},
             )
 
-    with pytest.raises(CategorizedError, match="remote-module-refused"):
+    with pytest.raises(CategorizedError, match="remote-module-failed"):
         await asyncio.wait_for(
             execute_remote_module_lifecycle_on_authority_host(
                 connection=cast(Any, object()),
@@ -1421,15 +1649,28 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
             operation_nonce=preparation_request.operation.operation_nonce,
         )
     )
+    response = _restored_response(preparation_request)
     second = asyncio.Event()
+    release = asyncio.Event()
     calls = 0
 
+    class Repository:
+        async def read_restored_evidence(self, *_args: object) -> None:
+            return None
+
+        async def worker_record_restored_evidence(self, *_args: object) -> bool:
+            return True
+
     class Sender:
-        async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> None:
+        async def execute_remote_module_lifecycle(
+            self, *_args: object, **_kwargs: object
+        ) -> RemoteModuleLifecycleResponseV1:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise TimeoutError
+            if release.is_set():
+                return response
             second.set()
             raise CategorizedError(
                 "authority: superseded", category=ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -1438,7 +1679,7 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
     task = asyncio.create_task(
         execute_remote_module_lifecycle_on_authority_host(
             connection=cast(Any, object()),
-            repository=cast(Any, object()),
+            repository=cast(Any, Repository()),
             sender=cast(Any, Sender()),
             authority=_module_lifecycle_request(preparation_request).authority,
             preparation=preparation,
@@ -1456,9 +1697,12 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
     await asyncio.sleep(0)
     assert not task.done()
     task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
     with pytest.raises(asyncio.CancelledError):
-        await task
-    assert calls >= 2
+        await asyncio.wait_for(task, 1)
+    assert calls >= 3
 
 
 def test_durable_remote_preparation_preserves_first_authority_clock_deadline(

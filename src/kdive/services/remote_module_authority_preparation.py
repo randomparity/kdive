@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -180,14 +181,22 @@ async def prepare_remote_module_on_authority_host(
                 result.validate_terminal_for(operation, authority)
                 return result
             except CategorizedError as exc:
-                if exc.category is ErrorCategory.CONFLICT:
-                    raise
-                if not indeterminate and exc.category is not ErrorCategory.INFRASTRUCTURE_FAILURE:
+                terminal_failure = (
+                    exc.category is ErrorCategory.CONFLICT
+                    and exc.details.get("completion") == "failed-after-mutation"
+                )
+                if terminal_failure or (
+                    not indeterminate and exc.category is not ErrorCategory.INFRASTRUCTURE_FAILURE
+                ):
                     raise
                 indeterminate = True
                 await asyncio.sleep(0.1)
             except TimeoutError:
                 indeterminate = True
+                await asyncio.sleep(0.1)
+            except Exception:  # noqa: BLE001 - no later error proves an ambiguous dispatch stopped
+                if not indeterminate:
+                    raise
                 await asyncio.sleep(0.1)
 
     async def commit_result(
@@ -272,21 +281,45 @@ async def execute_remote_module_lifecycle_on_authority_host(
                 "remote module teardown requires retained PREP evidence",
                 category=ErrorCategory.CONFLICT,
             )
-    while True:
-        try:
-            transport_deadline = max(deadline, asyncio.get_running_loop().time() + 5.0)
-            response = await sender.execute_remote_module_lifecycle(
-                request, deadline=transport_deadline
-            )
-            break
-        except CategorizedError as exc:
-            if exc.category is ErrorCategory.CONFLICT:
-                raise
-            if exc.category is not ErrorCategory.INFRASTRUCTURE_FAILURE:
-                raise
-            await asyncio.sleep(0.1)
-        except TimeoutError:
-            await asyncio.sleep(0.1)
+
+    async def observe_completion() -> RemoteModuleLifecycleResponseV1:
+        indeterminate = False
+        while True:
+            try:
+                transport_deadline = max(deadline, asyncio.get_running_loop().time() + 5.0)
+                response = await sender.execute_remote_module_lifecycle(
+                    request, deadline=transport_deadline
+                )
+                return response
+            except CategorizedError as exc:
+                terminal_failure = (
+                    exc.category is ErrorCategory.CONFLICT
+                    and exc.details.get("completion") == "failed-after-mutation"
+                )
+                if terminal_failure or (
+                    not indeterminate and exc.category is not ErrorCategory.INFRASTRUCTURE_FAILURE
+                ):
+                    raise
+                indeterminate = True
+                await asyncio.sleep(0.1)
+            except TimeoutError:
+                indeterminate = True
+                await asyncio.sleep(0.1)
+            except Exception:  # noqa: BLE001 - no later error proves an ambiguous dispatch stopped
+                if not indeterminate:
+                    raise
+                await asyncio.sleep(0.1)
+
+    completion = asyncio.create_task(observe_completion())
+    try:
+        response = await asyncio.shield(completion)
+    except asyncio.CancelledError as cancelled:
+        while not completion.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(completion)
+        if not completion.cancelled():
+            completion.exception()
+        raise cancelled from None
     if (
         response.action != action
         or response.recovery.system_id != str(receipt.system_id)

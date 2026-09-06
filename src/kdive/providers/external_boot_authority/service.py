@@ -1940,8 +1940,6 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("provider_conflict")
         request = remote.authority
         authenticated = self._require_peer(peer, request)
-        if completed := await host.observe_lifecycle(remote):
-            return completed
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
         if trusted is None or not self._binding_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
@@ -1950,8 +1948,6 @@ class ExternalBootAuthorityService:
         async def run() -> RemoteModuleLifecycleResponseV1:
             try:
                 async with lane.lock:
-                    if completed := await host.observe_lifecycle(remote):
-                        return completed
                     if lane.failed:
                         raise AuthorityServiceError("journal_conflict")
                     journal, records = self._lane_journal(request.system_id, lane)
@@ -1973,6 +1969,8 @@ class ExternalBootAuthorityService:
                     )
                     if confirmed is None or not self._binding_matches(confirmed, request):
                         raise AuthorityServiceError("superseded")
+                    if completed := await host.observe_lifecycle(remote):
+                        return completed
                     return await host.execute_lifecycle(remote)
             finally:
                 self._release_lane(trusted.system_id, lane)
