@@ -2,27 +2,29 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
 import stat
 import subprocess
-import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kdive.mcp.dev_harness import LiveStackClient
+from tests.integration.live_stack.skew import _fetch_version, readyz_urls
 from tests.integration.live_stack.spine import build_and_upload_kernel, drain_job, ok, scalar
 
 CONFIG_ENV = "KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG"
 OPERATIONS = ("activate", "recover", "resolve-conflict", "release", "cleanup", "teardown")
 _PREFIX = re.compile(r"kdive-2151-[0-9a-f]{12}-[0-9a-f]{8}")
+_FIXED_WORKER_UNIT = re.compile(r"kdive-live-worker@([1-8])\.service")
 
 
 class NativeAuthorityConfig(BaseModel):
@@ -52,6 +54,58 @@ class NativeAuthorityConfig(BaseModel):
         if not value.is_absolute():
             raise ValueError("barrier socket must be absolute")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class NormalOperationJobs:
+    """The public operations whose exact durable completion the carrier verifies."""
+
+    investigation_id: str
+    run_id: str
+    activate_job_id: str
+    release_job_id: str
+
+
+def require_deployed_revision(
+    config: NativeAuthorityConfig,
+    base_url: str,
+    running_workers: str,
+    *,
+    fetch: Callable[[str], dict[str, object] | None] = _fetch_version,
+) -> None:
+    """Refuse carrier mutation unless server and every active fixed worker report one build."""
+    default_urls = readyz_urls(base_url, {})
+    server_url = default_urls["server"]
+    worker_urls = _active_worker_readyz_urls(base_url, running_workers)
+    for process, url in (("server", server_url), *worker_urls):
+        version = fetch(url)
+        commit = version.get("commit") if version is not None else None
+        if commit != config.installed_revision:
+            reported = commit if isinstance(commit, str) else "unknown"
+            raise AssertionError(
+                f"deployed {process} revision {reported!r} does not match configured "
+                f"installed revision {config.installed_revision}"
+            )
+
+
+def _active_worker_readyz_urls(base_url: str, running_workers: str) -> tuple[tuple[str, str], ...]:
+    """Derive fixed-slot aux URLs from the lifecycle provisioner's assigned bind map."""
+    slots = sorted({int(slot) for slot in _FIXED_WORKER_UNIT.findall(running_workers)})
+    if not slots:
+        raise AssertionError("native authority carrier requires an active fixed worker incarnation")
+    parsed = urlsplit(base_url)
+    host = parsed.hostname
+    if host is None:
+        raise AssertionError("native authority carrier stack URL has no host")
+    authority = f"[{host}]" if ":" in host else host
+    scheme = parsed.scheme or "http"
+    return tuple(
+        (
+            f"worker slot {slot}",
+            f"{scheme}://{authority}:{9465 if slot == 1 else 9468 + slot}/readyz",
+        )
+        for slot in slots
+    )
 
 
 def load_config(environment: dict[str, str] | None = None) -> NativeAuthorityConfig | None:
@@ -143,31 +197,95 @@ def require_fault_barrier(config: NativeAuthorityConfig) -> Path:
     return config.barrier_socket
 
 
-async def await_completed_operations(
-    db_url: str,
-    run_id: str,
-    expected: frozenset[str],
-    *,
-    deadline_s: float = 600.0,
-) -> None:
-    """Wait until durable jobs prove each expected authority operation succeeded."""
-    deadline = time.monotonic() + deadline_s
-    while True:
-        async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+async def assert_root_release_completion(db_url: str, operations: NormalOperationJobs) -> None:
+    """Require the root release job's exact derived recover/cleanup finalizer evidence."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+        for job_id, operation in (
+            (operations.activate_job_id, "activate"),
+            (operations.release_job_id, "release"),
+        ):
             await cur.execute(
-                "SELECT payload->'external_boot_authority_v1'->>'operation', state "
-                "FROM jobs WHERE payload->'external_boot_authority_v1'->>'run_id' = %s",
-                (run_id,),
+                "SELECT state, payload->'external_boot_authority_v1'->>'operation', "
+                "payload->'external_boot_authority_v1'->>'run_id' FROM jobs WHERE id = %s",
+                (job_id,),
             )
-            completed = {
-                operation for operation, state in await cur.fetchall() if state == "succeeded"
-            }
-        if expected <= completed:
-            return
-        if time.monotonic() >= deadline:
-            missing = sorted(expected - completed)
-            raise AssertionError(f"authority operations did not succeed before deadline: {missing}")
-        await asyncio.sleep(2.0)
+            if await cur.fetchall() != [("succeeded", operation, operations.run_id)]:
+                raise AssertionError(
+                    f"root release completion lacks succeeded {operation} job {job_id}"
+                )
+        await cur.execute(
+            "SELECT activation.state, activation.cleanup_complete, attempt.state, "
+            "attempt.authority_generation = root.generation, "
+            "attempt.terminal_evidence IS NOT NULL, root.state, root.purpose, root.operation, "
+            "root.activation_id = activation.id, root.system_id = activation.system_id, "
+            "root.run_id = activation.run_id, root.plan_identity = activation.plan_identity, "
+            "root.job_id = receipt.job_id, root.job_attempt = receipt.job_attempt, "
+            "receipt.consumed, "
+            "receipt.adopted_from_root_authority_id IS NULL, head.phase, "
+            "head.authority_id = root.id, head.generation = root.generation, "
+            "head.sequence = receipt.journal_sequence, head.digest = receipt.journal_digest, "
+            "head.head_record->>'operation', "
+            "head.head_record->>'operation_identity' = receipt.operation_identity, "
+            "head.head_record->>'operation_digest' = receipt.operation_digest, "
+            "head.head_record #>> '{observation,category}', "
+            "head.head_record #>> '{observation,composite_state}' = "
+            "receipt.observed_absent_digest, "
+            "(SELECT count(*) FROM external_boot_reservation_releases AS credit "
+            " WHERE credit.activation_id = activation.id), "
+            "NOT EXISTS (SELECT 1 FROM external_boot_reservations AS pending "
+            "            WHERE pending.activation_id = activation.id) "
+            "FROM external_boot_activations AS activation "
+            "JOIN external_boot_recovery_attempts AS attempt "
+            "  ON attempt.activation_id = activation.id "
+            " AND attempt.attempt_id = activation.current_attempt_id "
+            "JOIN external_boot_release_cleanup_receipts AS receipt "
+            "  ON receipt.activation_id = activation.id "
+            "JOIN external_boot_authorities AS root ON root.id = receipt.root_authority_id "
+            "JOIN external_boot_authority_journal_heads AS head "
+            "  ON head.system_id = root.system_id "
+            " AND head.authority_instance = root.authority_instance "
+            "WHERE activation.run_id = %s AND receipt.job_id = %s "
+            "  AND receipt.run_id = activation.run_id AND receipt.system_id = activation.system_id "
+            "  AND receipt.plan_identity = activation.plan_identity",
+            (operations.run_id, operations.release_job_id),
+        )
+        expected = [
+            (
+                "recovered",
+                True,
+                "recovered",
+                True,
+                True,
+                "retired",
+                "release",
+                "release",
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                "terminal",
+                True,
+                True,
+                True,
+                True,
+                "cleanup",
+                True,
+                True,
+                "absent",
+                True,
+                1,
+                True,
+            )
+        ]
+        actual = await cur.fetchall()
+        if actual != expected:
+            raise AssertionError(
+                f"root release completion lacks exact derived finalizer evidence: {actual!r}"
+            )
 
 
 async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig) -> None:
@@ -205,12 +323,12 @@ async def drive_normal_operations(
     client: LiveStackClient,
     config: NativeAuthorityConfig,
     ledger: ResourceLedger,
-) -> tuple[str, str]:
+) -> NormalOperationJobs:
     """Drive activate then release/cleanup through public tools and real job polling.
 
     ``runs.boot`` is the public activation admission. ``runs.release_external_boot`` is the
-    public release admission; its job performs release and the reconciler-created cleanup is
-    observed separately by the native test from durable job markers.
+    public release admission; its one root release job owns the derived recover and cleanup
+    phases, whose durable finalizer evidence the native carrier verifies after polling.
     """
     opened = ok(
         await scalar(
@@ -246,4 +364,9 @@ async def drive_normal_operations(
         "release",
     )
     await drain_job(client, "release", release.object_id)
-    return investigation_id, run_id
+    return NormalOperationJobs(
+        investigation_id=investigation_id,
+        run_id=run_id,
+        activate_job_id=activate.object_id,
+        release_job_id=release.object_id,
+    )

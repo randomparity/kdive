@@ -150,11 +150,15 @@ KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG=/protected/local-authority-carrier.json \
   uv run python -m pytest tests/live_vm/test_installed_local_authority.py -q
 ```
 
-An unset trigger skips. Any configured mismatch fails before mutation. The normal carrier opens a
-uniquely titled Investigation, creates a labeled Run on the operator-provided disposable System,
-uploads the kernel through the public artifact contract, and drains the real install, activate, and
-release jobs with `jobs.wait`. It then closes that exact Investigation. The provider and database
-retain their ordinary audit/history records; do not run a prefix-wide or host-wide reaper.
+An unset trigger skips. Any configured mismatch fails before mutation: the carrier requires the
+authority disk revision and the `/readyz` build revision from the server and every active fixed
+worker slot to equal `installed_revision`. The normal carrier opens a uniquely titled
+Investigation, creates a labeled Run on the operator-provided disposable System, uploads the
+kernel through the public artifact contract, and drains the real install, activate, and root
+release jobs with `jobs.wait`. The root release owns its derived recover and cleanup phases; the
+carrier requires their terminal journal/receipt evidence, receipt consumption, and one reservation
+credit before it closes that exact Investigation. The provider and database retain their ordinary
+audit/history records; do not run a prefix-wide or host-wide reaper.
 
 The current installed authority has no deterministic provider-effect barrier for suspending a real
 operation after its host effect but before journal/core terminal persistence. Consequently the
