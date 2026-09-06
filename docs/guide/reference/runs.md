@@ -270,6 +270,7 @@ with `systems.teardown` instead; `runs.get` reports the current state either way
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `idempotency_key` | string (nullable) | no | Optional replay key, bounded to 255 UTF-8 bytes. |
 | `run_id` | string | yes | The Run whose external-boot activation to release. |
 
 ## `runs.set`

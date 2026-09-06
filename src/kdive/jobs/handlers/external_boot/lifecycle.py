@@ -40,6 +40,7 @@ from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
 )
+from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
@@ -56,6 +57,14 @@ __all__ = [
     "resolve_conflict_handler",
     "teardown_handler",
 ]
+
+
+def _request_deadline(context: OperationContext, fallback: datetime) -> datetime:
+    raw = context.job.payload.get("recovery_request_v1")
+    if raw is None:
+        return fallback
+    return RecoveryRequestV1.model_validate(raw).readiness_deadline
+
 
 _ACTIVATION_EVIDENCE: Final = frozenset({"materialization", "recovery_point"})
 _RECOVERY_STATES: Final = frozenset(
@@ -489,7 +498,13 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
                     terminal=True,
                 )
             return None
-        deadline = ports.clock() + ports.recovery_readiness_timeout
+        deadline = _request_deadline(context, ports.clock() + ports.recovery_readiness_timeout)
+        if ports.clock() >= deadline:
+            raise CategorizedError(
+                "recovery readiness deadline expired",
+                category=ErrorCategory.READINESS_FAILURE,
+                terminal=True,
+            )
         attempt_id = uuid5(
             NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
         )
@@ -561,7 +576,13 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
                 category=ErrorCategory.STALE_HANDLE,
                 terminal=True,
             )
-        deadline = ports.clock() + ports.recovery_readiness_timeout
+        deadline = _request_deadline(context, ports.clock() + ports.recovery_readiness_timeout)
+        if ports.clock() >= deadline:
+            raise CategorizedError(
+                "recovery readiness deadline expired",
+                category=ErrorCategory.READINESS_FAILURE,
+                terminal=True,
+            )
         attempt_id = uuid5(
             NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
         )

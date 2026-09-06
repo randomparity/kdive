@@ -155,6 +155,19 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     )
                 ).fetchone()
                 assert persisted == ("deleted", 4096)
+                replay = await resolve_recovery_orphan(
+                    conn_pool,
+                    _ctx(),
+                    system_id=str(system_id),
+                    object_identities=list(identities),
+                    disposition="delete",
+                    resolver=resolver,
+                )
+                assert replay.object_id == first.object_id
+                assert (
+                    replay.data["recovery_readiness_deadline"]
+                    == first.data["recovery_readiness_deadline"]
+                )
         finally:
             await conn.close()
 

@@ -345,6 +345,10 @@ def register(
                 )
             ),
         ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(max_length=255, description="Optional replay key, bounded to 255 UTF-8 bytes."),
+        ] = None,
     ) -> ToolResponse:
         """Validate a quarantined recovery-object repair, then report the executor is missing.
 
@@ -365,4 +369,5 @@ def register(
             object_identities=object_identities,
             disposition=disposition,
             resolver=resolver,
+            idempotency_key=idempotency_key,
         )
