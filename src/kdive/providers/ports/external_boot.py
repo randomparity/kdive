@@ -397,6 +397,7 @@ class ExternalBootPreparationPorts(Protocol):
         self,
         request: ExternalBootPreparationRequest,
         predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
     ) -> ExternalBootPreparationObservation: ...
 
 

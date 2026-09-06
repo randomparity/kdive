@@ -493,6 +493,8 @@ async def check_database_role(connection: Any) -> None:
                     ::regprocedure,
                 'public.resolve_allocating_external_boot_authority(text,uuid,bigint)'
                     ::regprocedure,
+                'public.resolve_allocating_external_boot_preparation_plan(text,uuid,bigint)'
+                    ::regprocedure,
                 'public.resolve_current_external_boot_authority_candidate(text,uuid,bigint)'
                     ::regprocedure,
                 'public.resolve_current_external_boot_authority(text,uuid,bigint,bigint,text)'
@@ -1086,7 +1088,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
             await check_database_role(connection)
             yield connection
 
-    binding = build_local_external_boot_authority(object_store_from_env())
+    binding = build_local_external_boot_authority(object_store_from_env(), config.provider_socket)
     return ExternalBootAuthorityService(
         repository=DatabaseAuthorityRepository(connections),
         journal_factory=lambda system_id: FileAuthorityJournal(

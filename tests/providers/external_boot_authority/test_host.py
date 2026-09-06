@@ -796,6 +796,32 @@ def test_host_keeps_identity_only_mode_without_local_recovery_root(
     assert host._build_mutation_service(_config(tmp_path)) is None  # noqa: SLF001
 
 
+def test_host_constructs_mutation_chain_for_checked_provider_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kdive import config as kdive_config
+    from kdive.providers.local_libvirt import composition
+    from kdive.store import objectstore
+
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir(mode=0o700)
+    kdive_config.load({"KDIVE_LIBVIRT_RECOVERY_ROOT": str(recovery_root)})
+    store = object()
+    captured: list[tuple[object, Path]] = []
+    monkeypatch.setattr(objectstore, "object_store_from_env", lambda: store)
+    monkeypatch.setattr(
+        composition,
+        "build_local_external_boot_authority",
+        lambda actual_store, socket: (
+            captured.append((actual_store, socket)) or SimpleNamespace(adapter=object())
+        ),
+    )
+    config = _config(tmp_path)
+
+    assert host._build_mutation_service(config) is not None  # noqa: SLF001
+    assert captured == [(store, config.provider_socket)]
+
+
 def test_host_validates_listener_before_ready(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1106,6 +1132,11 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF",
     }
 
 

@@ -76,6 +76,7 @@ class AuthorityPreparationAdopter(Protocol):
         self,
         request: AuthorityPreparationMutationRequestV1,
         predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
         context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1: ...
 
@@ -1029,6 +1030,7 @@ class ExternalBootAuthorityService:
                         await self._finalize_adapter(request, records)
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
+                    predecessor_receipt_identity: str | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1041,6 +1043,15 @@ class ExternalBootAuthorityService:
                             None,
                         )
                         if predecessor_record is not None:
+                            if (
+                                predecessor_record.outcome != "target"
+                                or predecessor_record.observation is None
+                                or predecessor_record.observation.category != "target"
+                            ):
+                                raise AuthorityServiceError("journal_conflict")
+                            predecessor_receipt_identity = (
+                                predecessor_record.observation.composite_state
+                            )
                             predecessor = request.model_copy(
                                 update={
                                     "authority_id": predecessor_record.authority_id,
@@ -1158,6 +1169,7 @@ class ExternalBootAuthorityService:
                         await self._adapter.adopt_preparation(
                             cast(AuthorityPreparationMutationRequestV1, request),
                             predecessor,
+                            cast(str, predecessor_receipt_identity),
                             context,
                         )
                     else:

@@ -197,14 +197,18 @@ class LocalExternalBootAuthorityAdapter:
         self,
         request: AuthorityPreparationMutationRequestV1,
         predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
         context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1:
         self._require_permitted_commit_point(request, context)
         self._require_admissible_generation(request)
-        receipt = await asyncio.to_thread(
-            self._ports.adopt_preparation,
-            self._preparation_request(request),
-            self._preparation_request(predecessor),
+        receipt = await self._offload(
+            request,
+            lambda: self._ports.adopt_preparation(
+                self._preparation_request(request),
+                self._preparation_request(predecessor),
+                predecessor_receipt_identity,
+            ),
         )
         return self._preparation_observation(receipt)
 

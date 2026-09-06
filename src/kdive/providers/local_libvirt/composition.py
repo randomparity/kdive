@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+from urllib.parse import quote
 from uuid import UUID
 
 import libvirt
@@ -214,9 +215,10 @@ def build_external_boot_session_factory(
     readiness: ReadinessProbe | None,
     observe_running: RunningObserver | None,
     cleanup_payloads: CleanupPayloads,
+    uri: str | None = None,
 ) -> LocalExternalBootSessionFactory:
     """Build the internal operation-session factory without opening host resources."""
-    uri = config.require(LIBVIRT_URI)
+    uri = uri or config.require(LIBVIRT_URI)
     return LocalExternalBootSessionFactory(
         pin_lease=pin_lease,
         connect=cast(Connect, lambda: libvirt.open(uri)),
@@ -251,7 +253,9 @@ class LocalExternalBootAuthorityBinding:
     adapter: LocalExternalBootAuthorityAdapter
 
 
-def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
+def build_external_boot_session_mechanisms(
+    *, provider_socket: Path | None = None
+) -> LocalExternalBootMechanisms:
     """Assemble the local external-boot host mechanisms (ADR-0591); opens nothing here.
 
     Takes no parameters: the only path into these mechanisms is the composition seam, so no
@@ -260,6 +264,11 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
     root = config.require(LIBVIRT_RECOVERY_ROOT)
     lease_scope = LocalOperationLeaseScope()
     lane = LocalOperationLane()
+    uri = (
+        None
+        if provider_socket is None
+        else f"qemu+unix:///system?socket={quote(str(provider_socket), safe='/')}"
+    )
     factory = build_external_boot_session_factory(
         pin_lease=lane.pin,
         open_artifact_root=LocalArtifactRoot(root).open,
@@ -268,13 +277,16 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
         readiness=LocalExternalBootReadiness(),
         observe_running=LocalRunningObserver(),
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
+        uri=uri,
     )
     return LocalExternalBootMechanisms(factory=factory, recovery_root=root, lease_scope=lease_scope)
 
 
-def build_local_external_boot_authority(store: ObjectStore) -> LocalExternalBootAuthorityBinding:
+def build_local_external_boot_authority(
+    store: ObjectStore, provider_socket: Path
+) -> LocalExternalBootAuthorityBinding:
     """Build the local provider and authority adapter over one exact lease scope."""
-    mechanisms = build_external_boot_session_mechanisms()
+    mechanisms = build_external_boot_session_mechanisms(provider_socket=provider_socket)
     io = RealLocalExternalBootIO(
         mechanisms.recovery_root,
         RealLocalExternalBootMaterializer(store),

@@ -408,9 +408,17 @@ def test_local_authority_builder_shares_scope_with_real_io(
         return original_require(setting)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(composition.config, "require", require)
-    binding = composition.build_local_external_boot_authority(cast(ObjectStore, object()))
+    opened: list[str] = []
+    monkeypatch.setattr(composition.libvirt, "open", lambda uri: opened.append(uri))
+    provider_socket = seam / "libvirt?socket=foreign"
+    binding = composition.build_local_external_boot_authority(
+        cast(ObjectStore, object()), provider_socket
+    )
     io = cast(RealLocalExternalBootIO, binding.provider._io)  # noqa: SLF001
 
+    assert opened == []
+    io._session_factory._connect()  # noqa: SLF001
+    assert opened == [f"qemu+unix:///system?socket={seam}/libvirt%3Fsocket%3Dforeign"]
     pin = cast(Any, io._session_factory._pin_lease)  # noqa: SLF001
     assert pin.__self__ is not None
     resolver = cast(Any, io._resolve_operation_lease)  # noqa: SLF001
@@ -487,8 +495,11 @@ def test_configuration_comes_only_from_the_composition_seam(
         "LocalArtifactRoot": ["providers/local_libvirt/composition.py"],
         "LocalPayloadCleanup": ["providers/local_libvirt/composition.py"],
     }
-    # The builder takes no parameters, so no caller can inject configuration into it.
-    assert inspect.signature(composition.build_external_boot_session_mechanisms).parameters == {}
+    # The only optional input is the host-validated provider socket; all filesystem roots
+    # still come from the registry rather than a request.
+    assert tuple(
+        inspect.signature(composition.build_external_boot_session_mechanisms).parameters
+    ) == ("provider_socket",)
     # And the value it constructs them with is the one config.require returned.
     # Equality, not identity: the seam hands out a fresh Path per resolution (see the
     # fixture), and what this asserts is provenance -- the value came from require.

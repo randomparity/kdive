@@ -842,6 +842,7 @@ class LocalExternalBootIO(Protocol):
         self,
         request: ExternalBootPreparationRequest,
         predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
     ) -> ExternalBootPreparationObservation: ...
     def preparation_materialization(
         self, request: ExternalBootPreparationRequest
@@ -1405,9 +1406,10 @@ class RealLocalExternalBootIO:
         self,
         request: ExternalBootPreparationRequest,
         predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
     ) -> ExternalBootPreparationObservation:
         with RecoveryMetadataStore(self._recovery_root) as store:
-            return store.adopt_preparation(request, predecessor)
+            return store.adopt_preparation(request, predecessor, predecessor_receipt_identity)
 
     def preparation_materialization(
         self, request: ExternalBootPreparationRequest
@@ -2074,8 +2076,9 @@ class LocalLibvirtExternalBoot:
         self,
         request: ExternalBootPreparationRequest,
         predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
     ) -> ExternalBootPreparationObservation:
-        return self._io.adopt_preparation(request, predecessor)
+        return self._io.adopt_preparation(request, predecessor, predecessor_receipt_identity)
 
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef
@@ -2528,7 +2531,7 @@ class RecoveryMetadataStore:
         return receipt.materialization
 
     def publish_preparation(
-        self, receipt: ExternalBootPreparationObservation, *, replace_existing: bool = False
+        self, receipt: ExternalBootPreparationObservation
     ) -> ExternalBootPreparationObservation:
         """Atomically publish one phase into the activation's preparation record."""
         self._require_open()
@@ -2537,7 +2540,7 @@ class RecoveryMetadataStore:
             raise ValueError("only completed preparation receipts may be published")
         existing = self._try_preparation(receipt.binding)
         if existing is not None and getattr(existing, phase) is not None:
-            if getattr(existing, phase) != receipt and not replace_existing:
+            if getattr(existing, phase) != receipt:
                 raise ValueError("existing preparation receipt conflicts with result")
             if getattr(existing, phase) == receipt:
                 return receipt
@@ -2566,10 +2569,12 @@ class RecoveryMetadataStore:
         self,
         request: ExternalBootPreparationRequest,
         predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
     ) -> ExternalBootPreparationObservation:
         receipt = self.observe_preparation(predecessor)
         if (
             receipt.state == "absent"
+            or receipt.identity != predecessor_receipt_identity
             or request.phase != predecessor.phase
             or request.binding != predecessor.binding
             or request.plan.identity != predecessor.plan.identity
@@ -2581,7 +2586,26 @@ class RecoveryMetadataStore:
                 "operation_identity": request.operation_identity,
             }
         )
-        return self.publish_preparation(adopted, replace_existing=True)
+        phase = "materialize" if adopted.state == "materialized" else "prepare"
+        existing = self._try_preparation(adopted.binding)
+        if existing is None or getattr(existing, phase) != receipt:
+            raise ValueError("preparation predecessor changed during adoption")
+        updated = existing.model_copy(update={phase: adopted})
+        directory_fd = self._open_preparation_directory(adopted.binding, create=False)
+        try:
+            _replace_private_file(
+                directory_fd,
+                ".preparation.next",
+                _PREPARATION_NAME,
+                _preparation_bytes(updated),
+            )
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.fsync(self._root_fd)
+        if self.observe_preparation(request) != adopted:
+            raise ValueError("adopted preparation receipt failed exact reopen")
+        return adopted
 
     def publish(self, metadata: LocalRecoveryMetadataV1) -> OpaqueProviderRef:
         """Publish canonical intent with file, directory, rename, and parent fsyncs."""
