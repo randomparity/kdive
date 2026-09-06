@@ -221,6 +221,17 @@ class InstallPayload(RunPayload):
 
     cmdline: str | None = None
     crashkernel: str | None = None
+    authority_instance: str | None = None
+
+    @field_validator("authority_instance")
+    @classmethod
+    def _bounded_authority_instance(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped or len(stripped.encode("utf-8")) > 255:
+            raise ValueError("authority_instance must contain 1 through 255 UTF-8 bytes")
+        return stripped
 
     @field_validator("cmdline")
     @classmethod

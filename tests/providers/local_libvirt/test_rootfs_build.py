@@ -57,6 +57,7 @@ from kdive.providers.local_libvirt.rootfs_build import (
     _parse_os_release,
     family_for,
 )
+from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 
 
 def test_feature_strip_needed_true_when_orphan_file_present() -> None:
@@ -237,6 +238,13 @@ def _dependencies(
         probe_boot_entries=probe_boot_entries,
         probe_os_release=probe_os_release,
         probe_kernel_config=probe_kernel_config,
+        inspect_root_boot=lambda _path, arch, digest: RootSpecV1(
+            architecture=arch,
+            root="/dev/vda",
+            arguments=("root=/dev/vda",),
+            authority="stage-inspection",
+            source=RootSource(kind="staged-image", identity=digest),
+        ),
     )
     return acquisition, customization, provenance
 
@@ -380,6 +388,14 @@ def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None
         "readiness_marker": "kdive-ready",
         "layout": "whole-disk-ext4-qcow2",
         "guest_mac": "selinux-permissive",
+        "root_spec": {
+            "schema": "root-spec-v1",
+            "architecture": "x86_64",
+            "root": "/dev/vda",
+            "arguments": ["root=/dev/vda"],
+            "authority": "stage-inspection",
+            "source": {"kind": "staged-image", "identity": out.digest},
+        },
     }
     assert rec.acquired_sources == [entry.source], "the catalog source is acquired"
 
@@ -955,6 +971,13 @@ class _RecordingBootTools:
             probe_boot_entries=_no_boot_entries,
             probe_os_release=_no_os_release,
             probe_kernel_config=_no_kernel_config,
+            inspect_root_boot=lambda _path, arch, digest: RootSpecV1(
+                architecture=arch,
+                root="/dev/vda",
+                arguments=("root=/dev/vda",),
+                authority="stage-inspection",
+                source=RootSource(kind="staged-image", identity=digest),
+            ),
         )
         return acquisition, customization, provenance
 
