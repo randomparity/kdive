@@ -4,6 +4,8 @@
 
 Accepted (2026-08-28)
 
+Debug-detach restrictions superseded by [ADR-0617](0617-external-boot-detach-remains-an-unblocking-operation.md).
+
 ## Context
 
 `InstallRequest` carries a combined kernel/modules bundle, an optional initrd, a composed command
