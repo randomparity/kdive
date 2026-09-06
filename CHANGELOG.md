@@ -2369,11 +2369,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close authority install root provenance payload
 - Retain authority orphan completion executor
 - Package bootable remote module appliance runtime
+- Commit authority role validation transaction
 - Complete preparing boot in one claim
 - Validate native proof socket with operator privileges
 - Bind fault proof to exact run
 - Inspect installed authority route
-- Commit authority role validation transaction
+- Project authority reservation geometry to workers
 
 ### Security
 
