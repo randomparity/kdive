@@ -8,8 +8,10 @@ doubled.
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import inspect
+import threading
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID, uuid4
@@ -50,6 +52,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalRecoveryMetadataV1,
     RecoveryPhase,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalOperationLeaseScope
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
@@ -327,6 +330,111 @@ def _adapter(io: _FakeIO) -> LocalExternalBootAuthorityAdapter:
     return LocalExternalBootAuthorityAdapter(ports)
 
 
+@pytest.mark.anyio
+async def test_cancellation_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    request = _request()
+    authority = adapter_module._authority_ref(request)
+
+    def operation() -> None:
+        assert scope.resolve(authority).binding == _BINDING
+        entered.set()
+        release.wait()
+
+    task = asyncio.create_task(adapter._offload(request, operation))
+    await asyncio.to_thread(entered.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
+
+
+@pytest.mark.anyio
+async def test_repeated_cancellation_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    request = _request()
+
+    task = asyncio.create_task(adapter._offload(request, lambda: entered.set() or release.wait()))
+    await asyncio.to_thread(entered.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelling() == 2
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_close_does_not_wait_for_running_provider_call() -> None:
+    adapter = _adapter(_FakeIO())
+    entered = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    def close() -> None:
+        adapter.close()
+        closed.set()
+
+    task = asyncio.create_task(
+        adapter._offload(_request(), lambda: entered.set() or release.wait())
+    )
+    await asyncio.to_thread(entered.wait)
+    closer = threading.Thread(target=close)
+    closer.start()
+    try:
+        assert await asyncio.to_thread(closed.wait, 2), "shutdown waited for live provider IO"
+        assert not task.done()
+        with pytest.raises(RuntimeError, match="capacity is unavailable"):
+            await adapter._offload(_request(), lambda: None)
+    finally:
+        release.set()
+        await task
+        await asyncio.to_thread(closer.join)
+
+
+def test_event_loop_shutdown_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    request = _request()
+
+    def blocked() -> None:
+        entered.set()
+        release.wait()
+        finished.set()
+
+    async def abandon_task() -> None:
+        asyncio.create_task(adapter._offload(request, blocked))
+        await asyncio.to_thread(entered.wait)
+        threading.Timer(0.05, release.set).start()
+
+    asyncio.run(abandon_task())
+    assert finished.is_set()
+    adapter.close()
+
+
 def _request(
     *,
     purpose: str = "activate",
@@ -598,7 +706,12 @@ def test_adapter_module_names_no_generic_power_operation_or_domain_xml() -> None
     source = Path(inspect.getfile(adapter_module)).read_text()
     tree = ast.parse(source)
 
-    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    # Closing the owned ThreadPoolExecutor is not a provider power operation.
+    attributes = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and ast.unparse(node) != "self._executor.shutdown"
+    }
     called = {
         node.func.id
         for node in ast.walk(tree)
@@ -788,10 +901,10 @@ async def test_unproven_recovery_object_is_quarantined_not_reused_or_deleted() -
 # --------------------------------------------------------------------------------------
 
 
-def test_construction_takes_only_the_coordinator() -> None:
+def test_construction_takes_only_the_coordinator_and_local_lease_scope() -> None:
     parameters = list(inspect.signature(LocalExternalBootAuthorityAdapter.__init__).parameters)
 
-    assert parameters == ["self", "ports"]
+    assert parameters == ["self", "ports", "lease_scope"]
 
 
 def test_no_request_field_can_select_a_host_resource() -> None:

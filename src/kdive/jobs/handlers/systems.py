@@ -773,20 +773,10 @@ async def teardown_handler(
         if system is None:
             return None
         domain_name = system.domain_name or domain_name_for(system_id)
-    binding = await resolver.binding_for_system(conn, system_id)
-    set_provider_kind(binding.kind.value)
-    provisioner = binding.runtime.provisioner
-    await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
-    await asyncio.to_thread(provisioner.teardown, domain_name)
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        system = await SYSTEMS.get(conn, system_id)
-        if system is None:
-            return None
         if system.state is not SystemState.TORN_DOWN:
             old = system.state
-            # The console_rotate teardown-race guard (console_rotate.py) relies on this terminal
-            # state write happening under the SYSTEM lock: once it commits, a rotation job that
-            # acquires the lock sees torn_down and seals nothing. Keep the state-set under the lock.
+            # This terminal admission fence prevents a slow provision from committing a new domain
+            # after teardown's provider reap has begun (ADR-0025 §5).
             await SYSTEMS.update_state(conn, system_id, SystemState.TORN_DOWN)
             await audit_transition(
                 conn,
@@ -796,6 +786,14 @@ async def teardown_handler(
                 transition=f"{old.value}->torn_down",
                 tool="systems.teardown",
             )
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    provisioner = binding.runtime.provisioner
+    await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
+    await asyncio.to_thread(provisioner.teardown, domain_name)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        # Provider teardown completed, so a cancellation/failure before this transaction cannot
+        # erase mutation-retention evidence. The System lock serializes exact-System discharge.
         await RemoteModuleAttemptObligationRepository().discharge_system_mutation_obligations(
             conn, system_id
         )

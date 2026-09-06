@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+from urllib.parse import quote
 from uuid import UUID
 
 import libvirt
@@ -41,14 +42,18 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
+    RealLocalExternalBootIO,
+    RealLocalExternalBootMaterializer,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     LocalExternalBootReadiness,
     prepare_console_readiness_window,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import RealGuestRecoveryWriter
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     Connect,
@@ -63,6 +68,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
+    LocalOperationLeaseScope,
     LocalPayloadCleanup,
     LocalRunningObserver,
     open_libguestfs_guest,
@@ -86,7 +92,11 @@ from kdive.providers.local_libvirt.reaping import (
 )
 from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT, LIBVIRT_URI
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
+    LIBVIRT_RECOVERY_ROOT,
+    LIBVIRT_URI,
+)
 from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
@@ -205,9 +215,10 @@ def build_external_boot_session_factory(
     readiness: ReadinessProbe | None,
     observe_running: RunningObserver | None,
     cleanup_payloads: CleanupPayloads,
+    uri: str | None = None,
 ) -> LocalExternalBootSessionFactory:
     """Build the internal operation-session factory without opening host resources."""
-    uri = config.require(LIBVIRT_URI)
+    uri = uri or config.require(LIBVIRT_URI)
     return LocalExternalBootSessionFactory(
         pin_lease=pin_lease,
         connect=cast(Connect, lambda: libvirt.open(uri)),
@@ -233,25 +244,61 @@ class LocalExternalBootMechanisms:
 
     factory: LocalExternalBootSessionFactory
     recovery_root: Path
+    lease_scope: LocalOperationLeaseScope
 
 
-def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
+@dataclass(frozen=True, slots=True)
+class LocalExternalBootAuthorityBinding:
+    provider: LocalLibvirtExternalBoot
+    adapter: LocalExternalBootAuthorityAdapter
+
+
+def build_external_boot_session_mechanisms(
+    *, provider_socket: Path | None = None
+) -> LocalExternalBootMechanisms:
     """Assemble the local external-boot host mechanisms (ADR-0591); opens nothing here.
 
-    Takes no parameters: the only path into these mechanisms is the composition seam, so no
-    caller can inject a root, URI, path, command or credential into them.
+    The authority host may bind its already validated provider socket; the recovery root and
+    every other host resource still come from fixed configuration or concrete mechanisms.
     """
     root = config.require(LIBVIRT_RECOVERY_ROOT)
+    lease_scope = LocalOperationLeaseScope()
+    lane = LocalOperationLane()
+    uri = (
+        None
+        if provider_socket is None
+        else f"qemu+unix:///system?socket={quote(str(provider_socket), safe='/')}"
+    )
     factory = build_external_boot_session_factory(
-        pin_lease=LocalOperationLane().pin,
+        pin_lease=lane.pin,
         open_artifact_root=LocalArtifactRoot(root).open,
         open_guest=open_libguestfs_guest,
         prepare_console=prepare_console_readiness_window,
         readiness=LocalExternalBootReadiness(),
         observe_running=LocalRunningObserver(),
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
+        uri=uri,
     )
-    return LocalExternalBootMechanisms(factory=factory, recovery_root=root)
+    return LocalExternalBootMechanisms(factory=factory, recovery_root=root, lease_scope=lease_scope)
+
+
+def build_local_external_boot_authority(
+    store: ObjectStore, provider_socket: Path
+) -> LocalExternalBootAuthorityBinding:
+    """Build the local provider and authority adapter over one exact lease scope."""
+    mechanisms = build_external_boot_session_mechanisms(provider_socket=provider_socket)
+    io = RealLocalExternalBootIO(
+        mechanisms.recovery_root,
+        RealLocalExternalBootMaterializer(store),
+        RealGuestRecoveryWriter(),
+        mechanisms.lease_scope.resolve,
+        mechanisms.factory,
+        config.require(LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES),
+    )
+    provider = LocalLibvirtExternalBoot(io)
+    return LocalExternalBootAuthorityBinding(
+        provider, LocalExternalBootAuthorityAdapter(provider, mechanisms.lease_scope)
+    )
 
 
 def external_boot_authority_is_configured() -> bool:

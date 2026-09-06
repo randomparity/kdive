@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 from pydantic import BaseModel, SecretStr
 
@@ -12,6 +13,10 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
     decode_device_identity_response,
+)
+from kdive.providers.external_boot_authority.local_client import (
+    _AuthorityUnixTransport,
+    local_authority_binding,
 )
 from kdive.providers.external_boot_authority.network_client import (
     _AuthorityNetworkTransport,
@@ -23,6 +28,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityHealthRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
 )
 from kdive.providers.external_boot_authority.transport import (
@@ -44,6 +51,10 @@ _PEER_REASONS = frozenset(
         "provider-failure",
     }
 )
+
+
+class _AuthorityTransport(Protocol):
+    def _request_frame(self, envelope: bytes, *, deadline: float) -> Awaitable[bytes]: ...
 
 
 def _failure(reason: str) -> CategorizedError:
@@ -83,7 +94,7 @@ class AuthorityRequestSender:
 
     def __init__(
         self,
-        transport_factory: Callable[[], _AuthorityNetworkTransport],
+        transport_factory: Callable[[], _AuthorityTransport],
         borrow: Callable[[], SecretStr],
     ) -> None:
         self._transport_factory = transport_factory
@@ -159,6 +170,14 @@ class AuthorityRequestSender:
         )
         return _decode_response(response, AuthorityObservationV1)
 
+    async def execute_preparation(
+        self, request: AuthorityPreparationMutationRequestV1, *, deadline: float
+    ) -> AuthorityPreparationResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("execute-preparation", request), deadline=deadline
+        )
+        return _decode_response(response, AuthorityPreparationResponseV1)
+
 
 def authority_sender_factory(
     secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
@@ -174,3 +193,16 @@ def authority_sender_factory(
         )
 
     return build
+
+
+def local_authority_sender_factory(
+    secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
+) -> AuthorityRequestSender | None:
+    """Build the configured worker-local sender without accepting a caller route."""
+    binding = local_authority_binding()
+    if binding is None:
+        return None
+    return AuthorityRequestSender(
+        lambda: _AuthorityUnixTransport(binding, _resolve_tls_material(binding, secret_backend)),
+        borrow,
+    )

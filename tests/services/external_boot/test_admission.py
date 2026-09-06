@@ -73,6 +73,8 @@ _NEVER_ADMITTED = frozenset(
 _OWNING_RUN_SCOPED = frozenset(
     {
         _OP.EXTERNAL_BOOT_RELEASE,
+        _OP.FORCE_CRASH,
+        _OP.SYSTEM_WATCH_CRASH,
         _OP.CAPTURE_VMCORE,
         _OP.CAPTURE_TRAFFIC,
         _OP.DEBUG_ATTACH,

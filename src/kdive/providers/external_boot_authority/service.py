@@ -76,8 +76,14 @@ class AuthorityPreparationAdopter(Protocol):
         self,
         request: AuthorityPreparationMutationRequestV1,
         predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
         context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityAdapterCloser(Protocol):
+    def close(self) -> None: ...
 
 
 class AuthorityRepository(Protocol):
@@ -98,6 +104,14 @@ class AuthorityRepository(Protocol):
     ) -> AuthorityBinding | None: ...
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None: ...
+
+    async def acknowledge(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityTakeoverRequestV1,
+        acknowledgement: AuthorityAcknowledgementV1,
+    ) -> AuthorityAcknowledgementV1 | None: ...
 
     async def advance(
         self,
@@ -266,7 +280,36 @@ class ExternalBootAuthorityService:
         self._adapter = adapter
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._lanes: dict[UUID, _Lane] = {}
+        self._completion_tasks: set[asyncio.Task[object]] = set()
+        self._accepting = True
+        self._closed = False
         self._logger = logging.getLogger(__name__)
+
+    async def close(self) -> None:
+        """Stop admission, drain completion-owned mutations, then close the adapter."""
+        self._accepting = False
+        cancellation: asyncio.CancelledError | None = None
+        while self._completion_tasks:
+            pending = asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError as error:
+                cancellation = error
+        if not self._closed and isinstance(self._adapter, AuthorityAdapterCloser):
+            self._adapter.close()
+        self._closed = True
+        if cancellation is not None:
+            raise cancellation
+
+    def _track_completion(self, task: asyncio.Task[object]) -> None:
+        self._completion_tasks.add(task)
+
+        def completed(done: asyncio.Task[object]) -> None:
+            self._completion_tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(completed)
 
     def _lane(self, system_id: UUID) -> _Lane:
         lane = self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
@@ -756,6 +799,15 @@ class ExternalBootAuthorityService:
     async def acknowledge_takeover(
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
     ) -> AuthorityAcknowledgementV1:
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        task = asyncio.create_task(self._acknowledge_takeover(peer, request))
+        self._track_completion(task)
+        return await asyncio.shield(task)
+
+    async def _acknowledge_takeover(
+        self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
+    ) -> AuthorityAcknowledgementV1:
         authenticated = self._require_peer(peer, request)
         binding = await self._repository.resolve_allocating(authenticated, request)
         if binding is None or not self._binding_matches(binding, request):
@@ -846,9 +898,15 @@ class ExternalBootAuthorityService:
                     )
                     if watermark is None:
                         raise AuthorityServiceError("journal_conflict")
-                    return self._acknowledgement_response(
+                    response = self._acknowledgement_response(
                         request, records[: acknowledgement.sequence], watermark, acknowledgement
                     )
+                    projected = await self._repository.acknowledge(
+                        authenticated, binding, request, response
+                    )
+                    if projected is None or projected != response:
+                        raise AuthorityServiceError("superseded")
+                    return projected
                 trusted = await self._repository.read_head(binding)
                 watermark: JournalRecordV1 | None = None
                 pending = trusted.pending_takeover if trusted is not None else None
@@ -978,11 +1036,19 @@ class ExternalBootAuthorityService:
                 lane.failed = True
                 raise
             self.metrics.set_unresolved((request.provider_kind, request.authority_instance), False)
-            return self._acknowledgement_response(request, records, watermark, acknowledgement)
+            response = self._acknowledgement_response(request, records, watermark, acknowledgement)
+            projected = await self._repository.acknowledge(
+                authenticated, binding, request, response
+            )
+            if projected is None or projected != response:
+                raise AuthorityServiceError("superseded")
+            return projected
 
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1:
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
         candidate_matches = trusted is not None and (
@@ -1029,6 +1095,7 @@ class ExternalBootAuthorityService:
                         await self._finalize_adapter(request, records)
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
+                    predecessor_receipt_identity: str | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1041,6 +1108,15 @@ class ExternalBootAuthorityService:
                             None,
                         )
                         if predecessor_record is not None:
+                            if (
+                                predecessor_record.outcome != "target"
+                                or predecessor_record.observation is None
+                                or predecessor_record.observation.category != "target"
+                            ):
+                                raise AuthorityServiceError("journal_conflict")
+                            predecessor_receipt_identity = (
+                                predecessor_record.observation.composite_state
+                            )
                             predecessor = request.model_copy(
                                 update={
                                     "authority_id": predecessor_record.authority_id,
@@ -1158,6 +1234,7 @@ class ExternalBootAuthorityService:
                         await self._adapter.adopt_preparation(
                             cast(AuthorityPreparationMutationRequestV1, request),
                             predecessor,
+                            cast(str, predecessor_receipt_identity),
                             context,
                         )
                     else:
@@ -1219,7 +1296,11 @@ class ExternalBootAuthorityService:
                     lane.active = None
                 self._release_lane(trusted.system_id, lane)
 
+        if not self._accepting:
+            self._release_lane(trusted.system_id, lane)
+            raise AuthorityServiceError("superseded")
         task = asyncio.create_task(run())
+        self._track_completion(task)
         try:
             return await asyncio.shield(task)
         except AuthorityServiceError as error:
@@ -1232,6 +1313,17 @@ class ExternalBootAuthorityService:
         request: AuthorityPreparationMutationRequestV1,
     ) -> AuthorityPreparationResponseV1:
         """Execute through the authenticated lane, then reopen its durable receipt."""
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        task = asyncio.create_task(self._execute_preparation(peer, request))
+        self._track_completion(task)
+        return await asyncio.shield(task)
+
+    async def _execute_preparation(
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> AuthorityPreparationResponseV1:
         observation = await self.execute_mutation(peer, cast(AuthorityMutationRequestV1, request))
         if not isinstance(self._adapter, AuthorityPreparationAdapter):
             raise self._provider_error(request)

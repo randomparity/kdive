@@ -424,6 +424,37 @@ async def test_caller_cancellation_does_not_cancel_started_lane(tmp_path: Path) 
 
 
 @pytest.mark.anyio
+async def test_shutdown_drains_started_lane_before_closing_adapter(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.release.clear()
+    mutation = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+    await adapter.entered.wait()
+
+    shutdown = asyncio.create_task(service.close())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    assert not adapter.closed
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    assert not adapter.closed
+
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, _mutation(request))
+    adapter.release.set()
+    await mutation
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+    assert shutdown.cancelling() == 2
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert adapter.closed
+
+
+@pytest.mark.anyio
 async def test_readiness_requires_exact_local_and_trusted_head(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

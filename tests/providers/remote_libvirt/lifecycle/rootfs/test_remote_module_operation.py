@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -52,6 +53,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names 
     render_module_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+    SCRATCH_CAPACITY_BYTES,
     BuiltSourceImage,
     ModuleTreeEntry,
     PreparedVolume,
@@ -444,6 +446,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         lambda _recovery: asyncio.sleep(0, result=None),
         cast(RemoteModuleAttemptObligationRepository, InspectionRepo()),
     )
+
     object.__setattr__(
         runtime,
         "volume_preparation",
@@ -561,6 +564,147 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
             phase_request, runtime=runtime, executor=executor, deadline=10**12
         )
     assert set(storage.pool.volumes) == {source_name}
+
+
+@pytest.mark.anyio
+async def test_phase_inspection_reopens_a_raw_owned_scratch_without_duplicate_volumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = RemoteModuleResultV1.model_validate(_result())
+    operation = RemoteModuleOperationRuntime._operation_from_result(result)
+    receipt = ModuleAttemptPreparationRequestV1.model_validate(
+        {
+            "module_attempt_obligation": {
+                "system_id": UUID(operation.system_id),
+                "run_id": UUID(operation.run_id),
+                "operation_nonce": operation.operation_nonce,
+            }
+        }
+    )
+
+    class InspectionRepo:
+        async def attempt_is_preparable(self, conn: object, attempt: ModuleAttempt) -> bool:
+            del conn
+            return attempt.operation_nonce == operation.operation_nonce
+
+    class InlineExecutor:
+        async def run(self, action: Callable[[], object]) -> object:
+            return action()
+
+    class SparseStream:
+        fail_download_stage = None
+        download_payload = b""
+
+        def sparseRecvAll(self, data, hole, opaque) -> None:  # noqa: N802, ANN001
+            if self.download_payload:
+                data(self, self.download_payload, opaque)
+                hole(self, SCRATCH_CAPACITY_BYTES - len(self.download_payload), opaque)
+            else:
+                hole(self, SCRATCH_CAPACITY_BYTES, opaque)
+
+        def finish(self) -> int:
+            return 0
+
+        def abort(self) -> int:
+            return 0
+
+    class ExactWriter:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.evidence: SourceFilesystemEvidence | None = None
+
+        def build(self, operation: bytes, entries: tuple[ModuleTreeEntry, ...]) -> BuiltSourceImage:
+            self.path.write_bytes(b"source-image")
+            self.evidence = SourceFilesystemEvidence(
+                operation,
+                "sha256:" + "d" * 64,
+                len(entries),
+                sum(len(entry.content or b"") for entry in entries),
+            )
+            return BuiltSourceImage(self.path, self.path.stat().st_size, self.evidence)
+
+        def inspect(self, path: Path) -> SourceFilesystemEvidence:
+            del path
+            assert self.evidence is not None
+            return self.evidence
+
+    storage = Conn()
+    writer = ExactWriter(tmp_path / "phase-source.ext4")
+    volumes_request = volume_request(
+        tmp_path,
+        operation=operation,
+        system_id=operation.system_id,
+        run_id=operation.run_id,
+        operation_nonce=operation.operation_nonce,
+        source_manifest=operation.source_manifest,
+        writer=writer,
+    )
+    prepared = prepare_attempt_volumes(storage, volumes_request)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(Any, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+    cast(Any, storage).newStream = lambda _flags=0: SparseStream()
+    monkeypatch.setattr(
+        "kdive.services.remote_module_operation.build_remote_device_identity_port",
+        lambda _authority, _deadline: object(),
+    )
+    runtime = _runtime(
+        lambda _recovery: asyncio.sleep(0, result=None),
+        cast(RemoteModuleAttemptObligationRepository, InspectionRepo()),
+    )
+
+    def read_scratch(volume: PreparedVolume, deadline: float) -> bytes | None:
+        return reader.read_volume(volume, deadline=deadline)
+
+    object.__setattr__(
+        runtime,
+        "volume_preparation",
+        RemoteModuleVolumePreparation(
+            storage,
+            "systems",
+            (),
+            writer,
+            lambda identity_port, present_attempt_volumes=None: AttachmentInspection(
+                True,
+                True,
+                False,
+                frozenset(
+                    {
+                        ("systems", prepared.source.name),
+                        ("systems", prepared.scratch.name),
+                    }
+                ),
+            ),
+            tmp_path,
+        ),
+    )
+    object.__setattr__(
+        runtime,
+        "appliance_execution",
+        SimpleNamespace(
+            read_scratch_result=read_scratch,
+            deadline_executor=CompletionDeadlineExecutor(),
+            monotonic=lambda: 0.0,
+        ),
+    )
+    executor = cast(RemoteModulePreparationExecutor, InlineExecutor())
+    authority = cast(Any, object())
+    deadline = time.monotonic() + 10
+    names_before = set(storage.pool.volumes)
+
+    assert await runtime.inspect_attempt(receipt, operation, executor, deadline, authority) is None
+    assert set(storage.pool.volumes) == names_before
+
+    storage.pool.volumes[prepared.scratch.name].payload.extend(b"x")
+    assert storage.pool.volumes[prepared.scratch.name].payload == b"x"
+    with pytest.raises(CategorizedError, match="durable filesystem is unreadable"):
+        reader.read_volume(prepared.scratch)
+    with pytest.raises(CategorizedError, match="durable filesystem is unreadable") as caught:
+        await runtime.inspect_attempt(receipt, operation, executor, deadline, authority)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert set(storage.pool.volumes) == names_before
 
 
 def test_real_receipt_guards_two_real_volume_creates(
