@@ -483,6 +483,22 @@ def test_recovery_observation_context_refuses_non_teardown_and_terminal_records(
         AuthorityRecoveryObservationContextV1.for_record(
             _anchored(JournalPhase.MUTATION_STARTED, sequence=5)
         )
+
+
+@pytest.mark.parametrize("identity", ["", "x" * 256])
+def test_recovery_observation_context_bounds_operation_identity(identity: str) -> None:
+    values = AuthorityRecoveryObservationContextV1.for_record(
+        _anchored(
+            JournalPhase.MUTATION_STARTED,
+            sequence=5,
+            purpose="teardown",
+            operation="teardown",
+        )
+    ).model_dump(mode="json", by_alias=True)
+    with pytest.raises(ValidationError):
+        AuthorityRecoveryObservationContextV1.model_validate(
+            values | {"operation_identity": identity}
+        )
     with pytest.raises(ValueError, match="anchored teardown"):
         AuthorityRecoveryObservationContextV1.for_record(
             _anchored(

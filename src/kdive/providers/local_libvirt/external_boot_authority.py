@@ -113,6 +113,7 @@ class LocalExternalBootAuthorityAdapter:
         # must re-derive admission from the journal rather than trust its own memory.
         self._admitted: dict[tuple[str, str], int] = {}
         self._pending_cleanup_finalization: dict[str, RecoveryPoint] = {}
+        self._pending_absence: dict[str, AuthorityMutationRequestV1] = {}
 
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         """Classify observed provider state against the request's exact identities."""
@@ -129,7 +130,7 @@ class LocalExternalBootAuthorityAdapter:
             or context.attempt_id != request.attempt_id
         ):
             raise AuthorityServiceError("provider_conflict")
-        return await self.observe(request)
+        return await asyncio.to_thread(self._observe_recovery, request)
 
     async def commit(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
@@ -210,6 +211,25 @@ class LocalExternalBootAuthorityAdapter:
         )
         if point is None and request.operation in _DELETING_OPERATIONS:
             point = self._pending_cleanup_finalization.get(request.operation_identity)
+        if point is None and operation is AuthorityOperation.TEARDOWN:
+            if not request.recovery_objects:
+                raise AuthorityServiceError("provider_conflict")
+            try:
+                result = self._ports.abort_preparation(
+                    binding,
+                    authority,
+                    plan_identity=request.plan_identity,
+                    source_identity=request.expected_source_identity,
+                    target_identity=request.intended_target_identity,
+                )
+            except Exception:
+                logger.exception("external-boot partial preparation abort failed")
+                raise AuthorityServiceError("provider_conflict") from None
+            if result in {"removed", "absent"}:
+                if len(self._pending_absence) >= _MAX_ADMITTED_LANES:
+                    del self._pending_absence[next(iter(self._pending_absence))]
+                self._pending_absence[request.operation_identity] = request
+                return self._absent_observation(request, binding, authority)
         matched = self._require_matching_identities(request, point)
         if not _ownership_is_proven(
             request, matched, require_named=operation in _DELETING_OPERATIONS
@@ -280,6 +300,42 @@ class LocalExternalBootAuthorityAdapter:
                 composite_state=composite_state,
             )
         return self._observation(request, binding, authority, point)
+
+    def _observe_recovery(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        binding = _activation_binding(request)
+        authority = _authority_ref(request)
+        pending = self._pending_absence.get(request.operation_identity)
+        if pending is not None:
+            if pending != request:
+                raise AuthorityServiceError("provider_conflict")
+            del self._pending_absence[request.operation_identity]
+            return self._absent_observation(request, binding, authority)
+        point = self._resolve_point(binding, authority, allow_cleanup_receipt=True)
+        if point is not None:
+            self._require_matching_identities(request, point)
+            return self._observe(request)
+        try:
+            absent = self._ports.recovery_is_absent(binding, authority)
+        except Exception:
+            logger.exception("external-boot recovery absence is unprovable")
+            raise AuthorityServiceError("provider_conflict") from None
+        if not absent:
+            raise AuthorityServiceError("provider_conflict")
+        return self._absent_observation(request, binding, authority)
+
+    def _absent_observation(
+        self,
+        request: AuthorityMutationRequestV1,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> AuthorityObservationV1:
+        observed = self._read_state(binding, authority)
+        composite = self._composite_state(request, observed)
+        return AuthorityObservationV1(
+            observation_id=self._observation_id(request, composite, "absent"),
+            category="absent",
+            composite_state=composite,
+        )
 
     def _resolve_point(
         self,

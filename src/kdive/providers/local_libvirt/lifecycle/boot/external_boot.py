@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
+    _ARCHIVE_NAME,
     MAX_ARCHIVE_BYTES,
     MAX_ENTRIES,
     MAX_REGULAR_BYTES,
@@ -95,6 +96,7 @@ type RecoveryPhase = Literal[
     "cleaned",
 ]
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+type PartialAbortResult = Literal["removed", "absent", "not-partial"]
 
 
 class _ClosedValue(BaseModel):
@@ -259,6 +261,7 @@ class TargetProjectionV1(_ClosedValue):
 _PROJECTION_NAME = "target-projection.json"
 _PROJECTION_TEMPORARY_NAME = ".target-projection.next"
 _MAX_PROJECTION_BYTES = 16_384
+_MAX_RECOVERY_METADATA_BYTES = 65_536
 
 
 class TargetProjectionStore:
@@ -780,6 +783,18 @@ class LocalExternalBootOperation(Protocol):
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None: ...
 
 
+class LocalPartialRecoveryOperation(Protocol):
+    def abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        source_identity: str,
+        target_identity: str,
+        authority: OpaqueProviderRef,
+    ) -> PartialAbortResult: ...
+    def recovery_is_absent(self, binding: ExternalBootActivationBinding) -> bool: ...
+
+
 class LocalExternalBootIO(Protocol):
     """Opens one authenticated capability for each public coordinator call."""
 
@@ -828,12 +843,16 @@ class RealLocalExternalBootIO:
         recovery_writer: GuestRecoveryWriter,
         resolve_operation_lease: ResolveOperationLease,
         session_factory: LocalExternalBootSessionFactory,
+        capacity_bytes: int,
     ) -> None:
+        if capacity_bytes <= 0:
+            raise ValueError("external-boot capacity must be positive")
         self._recovery_root = recovery_root
         self._materializer = materializer
         self._recovery_writer = recovery_writer
         self._resolve_operation_lease = resolve_operation_lease
         self._session_factory = session_factory
+        self._capacity_bytes = capacity_bytes
 
     @contextmanager
     def open(
@@ -848,6 +867,7 @@ class RealLocalExternalBootIO:
             self._materializer,
             self._recovery_writer,
             session,
+            self._capacity_bytes,
         )
         try:
             yield operation
@@ -890,13 +910,27 @@ class _RealLocalExternalBootOperation:
         materializer: LocalExternalBootMaterializer,
         recovery_writer: GuestRecoveryWriter,
         session: LocalExternalBootSession,
+        capacity_bytes: int,
     ) -> None:
         self._recovery_root = recovery_root
         self._materializer = materializer
         self._recovery_writer = recovery_writer
         self._session = session
+        self._capacity_bytes = capacity_bytes
 
     def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
+        initrd_bytes = 0 if plan.initrd is None else plan.initrd.size_bytes
+        reservation = (
+            plan.bundle.decoded_kernel_size_bytes
+            + initrd_bytes
+            + plan.module_obligation.uncompressed_bytes
+            + plan.module_obligation.member_count * 1024
+            + MAX_ARCHIVE_BYTES * 2
+            + _MAX_PROJECTION_BYTES
+            + _MAX_RECOVERY_METADATA_BYTES
+        )
+        if reservation > self._capacity_bytes:
+            raise ValueError("external-boot materialization exceeds configured capacity")
         return self._materializer.materialize(plan, self._session)
 
     def prepare(
@@ -1188,6 +1222,34 @@ class _RealLocalExternalBootOperation:
                 raise ValueError("recovery metadata changed before cleanup")
             self._session.cleanup_payloads(metadata)
             store.publish_tombstone(reference, metadata.binding, metadata, point_digest)
+
+    def abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        source_identity: str,
+        target_identity: str,
+        authority: OpaqueProviderRef,
+    ) -> PartialAbortResult:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            intent = store.inspect_abortable_partial(binding, plan_identity, authority)
+            if isinstance(intent, str):
+                return cast(PartialAbortResult, intent)
+            if intent is not None:
+                if intent.source_boot != source_identity or intent.target_boot != target_identity:
+                    raise ValueError("recovery partial identity conflicts with teardown request")
+                _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
+                if intent.prior_power == "running":
+                    self._session.restore_power("running")
+                    readiness = self._session.readiness()
+                    if not readiness.ok:
+                        raise ValueError("source readiness failed while aborting preparation")
+            store.remove_abortable_partial(binding)
+            return "removed"
+
+    def recovery_is_absent(self, binding: ExternalBootActivationBinding) -> bool:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.exact_recovery_absence(binding)
 
     def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
         ownership = ActivationOwnership(
@@ -1667,6 +1729,26 @@ class LocalLibvirtExternalBoot:
             if tombstone.binding != binding:
                 raise ValueError("cleanup tombstone does not match requested binding")
             return tombstone.recovery_point
+
+    def abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+        *,
+        plan_identity: Digest,
+        source_identity: str,
+        target_identity: str,
+    ) -> PartialAbortResult:
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            return cast(LocalPartialRecoveryOperation, operation).abort_preparation(
+                binding, plan_identity, source_identity, target_identity, authority
+            )
+
+    def recovery_is_absent(
+        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+    ) -> bool:
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            return cast(LocalPartialRecoveryOperation, operation).recovery_is_absent(binding)
 
     def observe_state(
         self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
@@ -2264,6 +2346,113 @@ class RecoveryMetadataStore:
         except FileExistsError:
             pass
         return _open_private_directory(self._root_fd, name)
+
+    def inspect_abortable_partial(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        authority: OpaqueProviderRef,
+    ) -> LocalPreStopIntentV1 | None | Literal["absent", "not-partial"]:
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        try:
+            complete_fd = _open_private_directory(self._root_fd, name)
+        except FileNotFoundError:
+            pass
+        else:
+            os.close(complete_fd)
+            return "not-partial"
+        partial_name = f".{name}.partial"
+        try:
+            directory_fd = _open_private_directory(self._root_fd, partial_name)
+        except FileNotFoundError:
+            return "absent"
+        try:
+            entries = set(os.listdir(directory_fd))
+            allowed = {
+                _INTENT_NAME,
+                _INITIAL_INTENT_TEMPORARY_NAME,
+                _PREPARATION_NAME,
+                _ARCHIVE_NAME,
+                f".{_ARCHIVE_NAME}.partial",
+            }
+            if entries - allowed:
+                raise ValueError("recovery partial contains unexpected residue")
+            intent: LocalPreStopIntentV1 | None = None
+            if _INTENT_NAME in entries:
+                intent = self._read_pre_stop(directory_fd)
+                if intent.binding != binding or intent.plan_identity != plan_identity:
+                    raise ValueError("recovery partial does not match teardown request")
+            if _PREPARATION_NAME in entries:
+                receipts = self._read_preparation(directory_fd)
+                for receipt in (receipts.materialize, receipts.prepare):
+                    if receipt is not None and (
+                        receipt.binding != binding
+                        or receipt.plan_identity != plan_identity
+                        or receipt.authority != authority
+                    ):
+                        raise ValueError("recovery partial does not match teardown request")
+            if intent is None and _PREPARATION_NAME not in entries:
+                raise ValueError("recovery partial has no owned record")
+            return intent
+        finally:
+            os.close(directory_fd)
+
+    def remove_abortable_partial(self, binding: ExternalBootActivationBinding) -> None:
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        partial_name = f".{name}.partial"
+        try:
+            directory_fd = _open_private_directory(self._root_fd, partial_name)
+        except FileNotFoundError:
+            return
+        try:
+            for entry in (
+                f".{_ARCHIVE_NAME}.partial",
+                _ARCHIVE_NAME,
+                _INITIAL_INTENT_TEMPORARY_NAME,
+                _INTENT_NAME,
+                _PREPARATION_NAME,
+            ):
+                with suppress(FileNotFoundError):
+                    os.unlink(entry, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        with suppress(FileNotFoundError):
+            os.rmdir(partial_name, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+
+    def exact_recovery_absence(self, binding: ExternalBootActivationBinding) -> bool:
+        """Read-only proof that every exact activation-owned storage location is absent."""
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        for candidate in (name, f".{name}.partial"):
+            try:
+                descriptor = _open_private_directory(self._root_fd, candidate)
+            except FileNotFoundError:
+                continue
+            else:
+                os.close(descriptor)
+                return False
+        try:
+            system_fd = _open_private_directory(self._root_fd, binding.system_id)
+        except FileNotFoundError:
+            return True
+        try:
+            try:
+                run_fd = _open_private_directory(system_fd, binding.run_id)
+            except FileNotFoundError:
+                return True
+            try:
+                try:
+                    activation_fd = _open_private_directory(run_fd, binding.activation_id)
+                except FileNotFoundError:
+                    return True
+                else:
+                    os.close(activation_fd)
+                    return False
+            finally:
+                os.close(run_fd)
+        finally:
+            os.close(system_fd)
 
     def _open_preparation_directory(
         self, binding: ExternalBootActivationBinding, *, create: bool

@@ -949,6 +949,64 @@ def test_pre_stop_substitution_conflicts_before_complete_publication(tmp_path: P
             )
 
 
+def test_receipt_only_partial_is_authenticated_and_removed(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": request.plan.identity}
+        ),
+    )
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        assert (
+            store.inspect_abortable_partial(_BINDING, request.plan.identity, request.authority)
+            is None
+        )
+        store.remove_abortable_partial(_BINDING)
+        assert (
+            store.inspect_abortable_partial(_BINDING, request.plan.identity, request.authority)
+            == "absent"
+        )
+
+
+def test_complete_record_takes_precedence_over_partial_absence(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+        assert (
+            store.inspect_abortable_partial(
+                _BINDING,
+                metadata.plan_identity,
+                OpaqueProviderRef(ref="authority/current"),
+            )
+            == "not-partial"
+        )
+        assert store.exact_recovery_absence(_BINDING) is False
+
+
+def test_exact_recovery_absence_includes_activation_artifacts(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    activation = root / _BINDING.system_id / _BINDING.run_id / _BINDING.activation_id
+    activation.mkdir(mode=0o700, parents=True)
+    for parent in (activation.parent, activation.parent.parent):
+        parent.chmod(0o700)
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING) is False
+    activation.rmdir()
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING) is True
+
+
 def _materialization() -> ExternalBootMaterialization:
     return ExternalBootMaterialization(
         architecture="x86_64",
@@ -971,6 +1029,46 @@ def _materialization() -> ExternalBootMaterialization:
             initrd=None,
         ),
     )
+
+
+def test_real_materializer_capacity_accepts_equality_and_refuses_one_over() -> None:
+    plan = _plan()
+    reservation = (
+        plan.bundle.decoded_kernel_size_bytes
+        + (0 if plan.initrd is None else plan.initrd.size_bytes)
+        + plan.module_obligation.uncompressed_bytes
+        + plan.module_obligation.member_count * 1024
+        + external_boot_module.MAX_ARCHIVE_BYTES * 2
+        + external_boot_module._MAX_PROJECTION_BYTES
+        + external_boot_module._MAX_RECOVERY_METADATA_BYTES
+    )
+    calls: list[ExternalBootPlan] = []
+
+    class Materializer:
+        def materialize(self, value: ExternalBootPlan, _session: object):
+            calls.append(value)
+            return _materialization()
+
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        Path("/unused"),
+        cast(external_boot_module.LocalExternalBootMaterializer, Materializer()),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, object()),
+        reservation,
+    )
+    operation.materialize(plan)
+    assert calls == [plan]
+
+    over = external_boot_module._RealLocalExternalBootOperation(
+        Path("/unused"),
+        cast(external_boot_module.LocalExternalBootMaterializer, Materializer()),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, object()),
+        reservation - 1,
+    )
+    with pytest.raises(ValueError, match="configured capacity"):
+        over.materialize(plan)
+    assert calls == [plan]
 
 
 def _plan() -> ExternalBootPlan:
@@ -1978,6 +2076,7 @@ def _restart_fixture(
         writer,
         lambda _authority: cast(LocalExternalBootOperationLease, object()),
         factory,
+        32 * 1024**3,
     )
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
@@ -2087,6 +2186,7 @@ class _FreshRestartHarness:
             writer,
             lambda _authority: cast(LocalExternalBootOperationLease, object()),
             cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+            32 * 1024**3,
         )
         self.sessions.append(session)
         self._invocations += 1
@@ -3071,6 +3171,7 @@ def test_real_adapter_captures_recovery_through_session_owned_capabilities(
         writer,
         lambda _authority: cast(LocalExternalBootOperationLease, object()),
         cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
     )
 
     prepared = _real_prepare(io, materialization)
@@ -3146,6 +3247,7 @@ def _real_io(
         _RecordingRecoveryWriter(preparation),
         lambda _authority: cast(LocalExternalBootOperationLease, object()),
         factory,
+        32 * 1024**3,
     )
     return io, session
 
@@ -3604,6 +3706,7 @@ def test_real_adapter_cleanup_complete_still_validates_authority(
         _RecordingRecoveryWriter(host),
         resolve,
         cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
     )
     ports = LocalLibvirtExternalBoot(io)
     with RecoveryMetadataStore(root) as store:
@@ -3635,6 +3738,7 @@ def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path:
         _RecordingRecoveryWriter(host),
         reject_session,
         cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
     )
     ports = LocalLibvirtExternalBoot(io)
     proof = FinalizeCleanupProof(

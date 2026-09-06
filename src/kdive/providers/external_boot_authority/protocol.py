@@ -432,6 +432,11 @@ class AuthorityRecoveryObservationContextV1(_ClosedValue):
     journal_digest: Digest
     phase: Literal[JournalPhase.MUTATION_STARTED, JournalPhase.PROVIDER_RETURNED]
 
+    @field_validator("operation_identity")
+    @classmethod
+    def _identity_is_bounded(cls, value: str) -> str:
+        return _bounded_text(value)
+
     @classmethod
     def for_record(cls, record: JournalRecordV1) -> AuthorityRecoveryObservationContextV1:
         if record.operation is not AuthorityOperation.TEARDOWN or record.phase not in {
