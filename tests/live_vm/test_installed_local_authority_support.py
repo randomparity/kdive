@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from kdive.mcp.responses import ToolResponse
@@ -18,6 +20,7 @@ from tests.live_vm.installed_local_authority_support import (
     ResourceLedger,
     drive_normal_operations,
     load_config,
+    provision_authority_fixture,
     require_fault_barrier,
 )
 
@@ -148,3 +151,57 @@ def test_normal_driver_uses_public_tools_and_drains_jobs(
     ]
     assert [phase for phase, _ in drained] == ["install", "activate", "release"]
     assert [resource.kind for resource in ledger.resources] == ["investigation", "run"]
+
+
+def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    class Cursor:
+        async def __aenter__(self) -> Cursor:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, query: str, params: object) -> None:
+            assert "WHERE id = %s AND project = %s" in query
+            assert params == (config.system_id, config.project)
+
+        async def fetchone(self) -> tuple[dict[str, object]]:
+            return ({"schema_version": 1},)
+
+    class Connection:
+        async def __aenter__(self) -> Connection:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    async def connect(_dsn: str) -> Connection:
+        return Connection()
+
+    seen: dict[str, object] = {}
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(argv=argv, kwargs=kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
+    monkeypatch.setattr(subprocess, "run", run)
+    asyncio.run(provision_authority_fixture("postgresql://fixture", config))
+    argv = cast(list[str], seen["argv"])
+    assert argv[:3] == ["sudo", "-n", "/opt/kdive-provider-authority/.venv/bin/python"]
+    assert argv[-1] == str(config.system_id)
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert json.loads(cast(str, kwargs["input"])) == {"schema_version": 1}

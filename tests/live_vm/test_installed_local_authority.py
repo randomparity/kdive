@@ -19,6 +19,7 @@ from tests.live_vm.installed_local_authority_support import (
     await_completed_operations,
     drive_normal_operations,
     load_config,
+    provision_authority_fixture,
 )
 
 
@@ -61,6 +62,7 @@ def test_installed_local_authority_normal_operations() -> None:
     ledger = ResourceLedger(config.ownership_prefix)
 
     async def run() -> None:
+        await provision_authority_fixture(db_url, config)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
             primary: Exception | None = None

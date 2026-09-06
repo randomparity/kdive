@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import stat
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -166,6 +168,37 @@ async def await_completed_operations(
             missing = sorted(expected - completed)
             raise AssertionError(f"authority operations did not succeed before deadline: {missing}")
         await asyncio.sleep(2.0)
+
+
+async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig) -> None:
+    """Re-provision only the selected disposable System under the installed authority uid."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT provisioning_profile FROM systems WHERE id = %s AND project = %s",
+            (config.system_id, config.project),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        raise ValueError(
+            "selected authority fixture System is absent or belongs to another project"
+        )
+    script = Path(__file__).resolve().parents[2] / "scripts/live-vm/provision-authority-fixture.py"
+    result = subprocess.run(
+        [
+            "sudo",
+            "-n",
+            "/opt/kdive-provider-authority/.venv/bin/python",
+            str(script),
+            str(config.system_id),
+        ],
+        input=json.dumps(row[0]),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-1000:]
+        raise RuntimeError(f"authority fixture provisioning failed: {detail}")
 
 
 async def drive_normal_operations(

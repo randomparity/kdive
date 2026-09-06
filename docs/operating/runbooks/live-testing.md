@@ -164,6 +164,14 @@ activate/release/cleanup path. Helper tests under
 `test_installed_local_authority_support.py` prove only input and cleanup orchestration; they are not
 native acceptance. Recover, resolve-conflict, and teardown remain separate state/fault arms.
 
+Before opening the carrier Run, the native test re-provisions only the configured disposable
+System on the fixed private authority daemon. The setup reads that exact System's durable
+provisioning profile, removes only its UUID-derived legacy domain/overlay/baseline/console fixture,
+drops to the authority uid, and recreates the same domain and artifacts. It then verifies the
+overlay and console owner and the live private-daemon domain before any public install or boot
+request. The configured System must be disposable; this setup is not a migration mechanism for
+ordinary worker-owned Systems.
+
 ### `live_stack` — drive the running stack over HTTP
 
 ```
