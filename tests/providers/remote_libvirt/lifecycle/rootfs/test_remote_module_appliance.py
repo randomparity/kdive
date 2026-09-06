@@ -929,6 +929,28 @@ class BlockingAbortConn(Conn):
         return self.blocking_stream
 
 
+class CompletedBlockingAbortStream(BlockingAbortStream):
+    def __init__(self, release: threading.Event, clock: Clock) -> None:
+        super().__init__(release, clock)
+        self.chunks = []
+
+
+class CompletedBlockingAbortConn(Conn):
+    def __init__(
+        self,
+        release: threading.Event,
+        clock: Clock,
+        *,
+        existing: Domain | None = None,
+    ) -> None:
+        super().__init__([], clock, existing=existing)
+        self.blocking_stream = CompletedBlockingAbortStream(release, clock)
+
+    def newStream(self, flags: int = 0) -> CompletedBlockingAbortStream:  # noqa: N802
+        self.stream = self.blocking_stream
+        return self.blocking_stream
+
+
 def test_genuinely_blocking_libvirt_call_times_out_without_waiting_for_rpc() -> None:
     clock = Clock()
     release = threading.Event()
@@ -993,6 +1015,50 @@ def test_genuinely_blocking_console_abort_preserves_appliance() -> None:
             replace(request(clock), executor=ThreadDeadlineExecutor()),
         )
         assert outcome.timed_out and outcome.result is None
+        assert conn.domain is not None and not conn.domain.destroyed
+    finally:
+        release.set()
+
+
+def test_synchronous_console_failure_with_unresolved_abort_suppresses_teardown() -> None:
+    clock = Clock()
+    release = threading.Event()
+    req = request(clock)
+    domain = FailingOpenDomain(render_remote_module_appliance(req), RuntimeError("open failed"))
+    conn = CompletedBlockingAbortConn(release, clock, existing=domain)
+    try:
+        outcome = run_or_adopt_appliance(
+            conn,
+            replace(req, executor=ThreadDeadlineExecutor()),
+        )
+        assert outcome.timed_out and outcome.result is None
+        assert not domain.destroyed
+    finally:
+        release.set()
+
+
+def test_completed_console_with_unresolved_abort_skips_scratch_and_teardown() -> None:
+    clock = Clock()
+    release = threading.Event()
+    scratch_reads = 0
+
+    def malformed_scratch() -> bytes:
+        nonlocal scratch_reads
+        scratch_reads += 1
+        return b"not-json"
+
+    conn = CompletedBlockingAbortConn(release, clock)
+    try:
+        outcome = run_or_adopt_appliance(
+            conn,
+            replace(
+                request(clock),
+                executor=ThreadDeadlineExecutor(),
+                read_scratch_result=malformed_scratch,
+            ),
+        )
+        assert outcome.timed_out and outcome.result is None
+        assert scratch_reads == 0
         assert conn.domain is not None and not conn.domain.destroyed
     finally:
         release.set()

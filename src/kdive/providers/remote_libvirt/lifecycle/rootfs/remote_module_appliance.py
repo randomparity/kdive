@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import codecs
-import contextlib
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -257,8 +256,12 @@ def _read_console(
         # transient domain and its durable scratch state remain retryable.
         raise
     except Exception:
-        with contextlib.suppress(libvirt.libvirtError, TimeoutError):
+        try:
             request.executor.call(stream.abort, deadline)
+        except UnresolvedCallError:
+            raise
+        except libvirt.libvirtError, TimeoutError:
+            pass
         raise
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     text = ""
@@ -309,10 +312,7 @@ def _read_console(
             try:
                 request.executor.call(stream.abort, cancellation_deadline)
             except UnresolvedCallError:
-                # Only a failed read leaves the stream's state load-bearing; after a
-                # complete read the abort is a best-effort server-side release and
-                # must not turn a finished run into an unresolved one.
-                unresolved_rpc = timed_out
+                unresolved_rpc = True
             except libvirt.libvirtError, TimeoutError:
                 pass
     text += decoder.decode(b"", final=True)
@@ -421,6 +421,8 @@ def run_or_adopt_appliance(conn: ApplianceConn, request: ApplianceRequest) -> Ap
             _wait_deadline(request, invocation_deadline),
             invocation_deadline,
         )
+        if unresolved_rpc:
+            return ApplianceOutcome(None, console_tail, True)
         if timed_out:
             if not unresolved_rpc:
                 _attempt_timeout_teardown(domain, request, invocation_deadline)
