@@ -35,6 +35,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
 from kdive.serialization import _MAX_ERROR_ENTRIES
 from tests.mcp.lifecycle import runs_support
+from tests.mcp.systems_support import provider_resolver
 from tests.reconciler.conftest import connect, seed_debug_session, seed_run, seed_system
 from tests.services.external_boot.conftest import seed_activation
 
@@ -46,6 +47,7 @@ _ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot", "systems.teardown"]
 _CONFLICT_ACTIONS = ["runs.get", "systems.teardown"]
 _AUTHORIZING = {"principal": "alice", "agent_session": None, "project": "proj"}
 _CAP = _MAX_ERROR_ENTRIES
+_RESOLVER = provider_resolver(external_boot=object())
 
 # Every name that begins, advances, or finishes an external-boot activation transition, plus the
 # authority marker and the job enqueue such a transition would need. The amendment's hard rule is
@@ -56,7 +58,6 @@ _ACTIVATION_WRITING_NAMES = frozenset(
         "ExternalBootAuthorityMarkerV1",
         "begin_recovery_attempt",
         "create",
-        "enqueue",
         "finish_recovery_attempt",
         "mark_cleanup_complete",
         "record_conflict",
@@ -145,6 +146,50 @@ async def _seed_queued_job(
     return UUID(str(row[0]))
 
 
+async def _seed_retired_conflict_authority(
+    conn: psycopg.AsyncConnection, seeded: _Seeded, *, authority_instance: str = "authority-a"
+) -> None:
+    """Persist the server-owned binding from which conflict admission must dispatch."""
+    assert seeded.activation_id is not None
+    job_id = await _seed_queued_job(conn, kind="boot", payload={"run_id": str(seeded.run_id)})
+    worker = f"worker-{uuid4()}"
+    await conn.execute(
+        "INSERT INTO worker_incarnations "
+        "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
+        "VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
+        (worker, b"1" * 32),
+    )
+    cur = await conn.execute(
+        "SELECT s.allocation_id, e.plan_identity FROM systems s "
+        "JOIN allocations a ON a.id = s.allocation_id "
+        "JOIN external_boot_activations e ON e.system_id = s.id "
+        "WHERE s.id = %s AND e.id = %s",
+        (seeded.system_id, seeded.activation_id),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    await conn.execute(
+        "INSERT INTO external_boot_authorities "
+        "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, job_attempt, "
+        "purpose, provider_kind, authority_instance, worker_incarnation, operation, "
+        "operation_identity, operation_digest, generation, state, acknowledged_at, retired_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 1, 'recover', 'local-libvirt', %s, %s, "
+        "'recover', %s, %s, 1, 'retired', now(), now())",
+        (
+            seeded.system_id,
+            row[0],
+            seeded.activation_id,
+            seeded.run_id,
+            row[1],
+            job_id,
+            authority_instance,
+            worker,
+            "prior-recovery",
+            "sha256:" + "2" * 64,
+        ),
+    )
+
+
 async def _activation_row(
     conn: psycopg.AsyncConnection, activation_id: UUID
 ) -> dict[str, Any] | None:
@@ -215,6 +260,7 @@ def test_conflict_resolution_denies_a_contributor(migrated_url: str) -> None:
             await resolve_conflict(
                 fixture.pool,
                 _ctx(Role.CONTRIBUTOR),
+                resolver=_RESOLVER,
                 system_id=str(seeded.system_id),
                 operation=_RESOLUTION,
                 observed_identity=_DIGEST,
@@ -309,6 +355,7 @@ def test_conflict_resolution_rejects_a_malformed_and_a_missing_system(migrated_u
         malformed = await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id="not-a-uuid",
             operation=_RESOLUTION,
             observed_identity=_DIGEST,
@@ -316,6 +363,7 @@ def test_conflict_resolution_rejects_a_malformed_and_a_missing_system(migrated_u
         missing = await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(uuid4()),
             operation=_RESOLUTION,
             observed_identity=_DIGEST,
@@ -365,6 +413,7 @@ def test_conflict_resolution_conflicts_when_no_activation_restricts_the_system(
         return await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(seeded.system_id),
             operation=_RESOLUTION,
             observed_identity=_DIGEST,
@@ -413,6 +462,7 @@ def test_conflict_resolution_is_denied_outside_recovery_conflict(migrated_url: s
         return await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(seeded.system_id),
             operation=_RESOLUTION,
             observed_identity=_DIGEST,
@@ -558,6 +608,7 @@ def test_conflict_resolution_rejects_an_unsupported_operation(
         return await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(seeded.system_id),
             operation=operation,
             observed_identity=_DIGEST,
@@ -579,6 +630,7 @@ def test_conflict_resolution_rejects_an_out_of_shape_observed_identity(
         return await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(seeded.system_id),
             operation=_RESOLUTION,
             observed_identity=observed_identity,
@@ -587,22 +639,43 @@ def test_conflict_resolution_rejects_an_out_of_shape_observed_identity(
     _assert_reason(_drive(migrated_url, _body), "configuration_error", "invalid_observed_identity")
 
 
-def test_conflict_resolution_accepts_an_identity_that_does_not_match_the_stored_state(
+def test_conflict_resolution_enqueues_the_exact_observed_identity_idempotently(
     migrated_url: str,
 ) -> None:
-    """Shape only: the compare-and-set that would consume this lands with the executor."""
+    """The worker, not MCP admission, compares the exact observation with fresh provider state."""
 
-    async def _body(fixture: _Fixture) -> ToolResponse:
+    async def _body(fixture: _Fixture) -> tuple[ToolResponse, ToolResponse, dict[str, Any]]:
         seeded = await _seed(fixture.conn, state=_STATE.RECOVERY_CONFLICT)
-        return await resolve_conflict(
+        await _seed_retired_conflict_authority(fixture.conn, seeded)
+        first = await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(seeded.system_id),
             operation=_RESOLUTION,
             observed_identity="sha256:" + "f" * 64,
         )
+        second = await resolve_conflict(
+            fixture.pool,
+            _ctx(),
+            resolver=_RESOLVER,
+            system_id=str(seeded.system_id),
+            operation=_RESOLUTION,
+            observed_identity="sha256:" + "f" * 64,
+        )
+        cur = await fixture.conn.execute(
+            "SELECT payload FROM jobs WHERE id = %s", (first.object_id,)
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        return first, second, row[0]
 
-    _assert_unavailable(_drive(migrated_url, _body))
+    first, second, payload = _drive(migrated_url, _body)
+    assert first.status == second.status == "queued"
+    assert first.object_id == second.object_id
+    assert payload["external_boot_authority_v1"]["expected_observed_composite"] == (
+        "sha256:" + "f" * 64
+    )
 
 
 @pytest.mark.parametrize("disposition", ["", "purge", "Delete"])
@@ -655,12 +728,13 @@ def test_release_reports_the_executor_is_unavailable(migrated_url: str) -> None:
     assert "runs.release_external_boot" in (response.detail or "")
 
 
-def test_conflict_resolution_reports_the_executor_is_unavailable(migrated_url: str) -> None:
+def test_conflict_resolution_without_durable_authority_fails_closed(migrated_url: str) -> None:
     async def _body(fixture: _Fixture) -> tuple[ToolResponse, str]:
         seeded = await _seed(fixture.conn, state=_STATE.RECOVERY_CONFLICT)
         response = await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(seeded.system_id),
             operation=_RESOLUTION,
             observed_identity=_DIGEST,
@@ -668,8 +742,8 @@ def test_conflict_resolution_reports_the_executor_is_unavailable(migrated_url: s
         return response, str(seeded.system_id)
 
     response, system_id = _drive(migrated_url, _body)
-    _assert_unavailable(response, system_id)
-    assert "systems.resolve_external_boot_conflict" in (response.detail or "")
+    _assert_reason(response, "configuration_error", "conflict_authority_unresolved")
+    assert response.object_id == system_id
 
 
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])
@@ -727,7 +801,7 @@ def _reachable_names(source: str, bound: set[str]) -> set[str]:
 
 
 def test_no_activation_writing_name_is_reachable() -> None:
-    """No tool commits a transition it cannot complete — held statically, not just in Postgres.
+    """MCP admission may enqueue but cannot start the worker-owned activation transition.
 
     A later edit that reintroduces a write fails here at import time rather than needing a
     seeded database to expose it.
@@ -777,14 +851,18 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.db.repositories:RUNS",
         "kdive.db.repositories:SYSTEMS",
         "kdive.domain.capacity.state:JobState",
+        "kdive.domain.errors:CategorizedError",
         "kdive.domain.errors:ErrorCategory",
         "kdive.domain.external_boot_activation:Digest",
         "kdive.domain.lifecycle.records:Run",
+        "kdive.jobs.handlers.external_boot.admission:build_external_boot_payload",
+        "kdive.jobs:queue",
         "kdive.log:bind_context",
         "kdive.mcp.platform_auth:audit_platform_denial",
         "kdive.mcp.responses:ToolResponse",
         "kdive.mcp.tools:_docmeta",
         "kdive.mcp.tools._common:as_uuid",
+        "kdive.mcp.tools._common:authorizing",
         "kdive.mcp.tools._common:external_boot_denial",
         "kdive.mcp.tools._common:invalid_uuid_error",
         "kdive.security.authz.context:RequestContext",
@@ -799,6 +877,7 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.services.external_boot:ExternalBootDenied",
         "kdive.services.external_boot:ExternalBootOperation",
         "kdive.services.external_boot:check_external_boot_admission",
+        "kdive.providers.core.resolver:ProviderResolver",
     }
 )
 
@@ -825,8 +904,8 @@ def test_the_import_closure_gate_bites() -> None:
     assert _kdive_imports("import os\nfrom collections import abc\n") == set()
 
 
-def test_no_service_changes_any_durable_row(migrated_url: str) -> None:
-    """No tool commits a transition it cannot complete (the 2026-09-02 amendment).
+def test_conflict_enqueue_leaves_activation_unchanged(migrated_url: str) -> None:
+    """Conflict admission durably enqueues without starting the worker-owned transition.
 
     Both admissible activations are read whole before and after all three services run, so a
     changed ``state``, ``current_attempt_id``, or ``updated_at`` fails here regardless of which
@@ -839,6 +918,7 @@ def test_no_service_changes_any_durable_row(migrated_url: str) -> None:
         active = await _seed(conn, state=_STATE.ACTIVE)
         conflicted = await _seed(conn, state=_STATE.RECOVERY_CONFLICT)
         assert active.activation_id is not None and conflicted.activation_id is not None
+        await _seed_retired_conflict_authority(conn, conflicted)
 
         before = (
             await _activation_row(conn, active.activation_id),
@@ -857,6 +937,7 @@ def test_no_service_changes_any_durable_row(migrated_url: str) -> None:
         resolved = await resolve_conflict(
             fixture.pool,
             _ctx(),
+            resolver=_RESOLVER,
             system_id=str(conflicted.system_id),
             operation=_RESOLUTION,
             observed_identity=_DIGEST,
@@ -868,8 +949,9 @@ def test_no_service_changes_any_durable_row(migrated_url: str) -> None:
             object_identities=["objects/orphan-1"],
             disposition="delete",
         )
-        for response in (released, resolved, repaired):
+        for response in (released, repaired):
             _assert_unavailable(response, response.object_id)
+        assert resolved.status == "queued"
 
         assert (
             await _activation_row(conn, active.activation_id),
@@ -882,6 +964,6 @@ def test_no_service_changes_any_durable_row(migrated_url: str) -> None:
         assert (
             await _count(conn, _SYSTEM_JOBS_SQL, str(active.system_id), active.system_id),
             await _count(conn, _SYSTEM_JOBS_SQL, str(conflicted.system_id), conflicted.system_id),
-        ) == jobs_before
+        ) == (jobs_before[0], jobs_before[1] + 1)
 
     _drive(migrated_url, _body)
