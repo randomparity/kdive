@@ -26,6 +26,7 @@ from kdive.jobs.models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthorityResultV1,
 )
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
@@ -450,7 +451,7 @@ def _recovery_deadline(ports: ExternalBootHandlerPorts, exc: Exception) -> datet
     return None
 
 
-async def run_operation[R](
+async def run_operation[R: ExternalBootAuthorityResultV1](
     conn: AsyncConnection,
     job: Job,
     marker: ExternalBootAuthorityMarkerV1,

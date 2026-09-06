@@ -258,7 +258,18 @@ async def _run_active_release(context: OperationContext) -> ExternalBootDerivedR
         raise CategorizedError(
             "derived release finalization was superseded", category=ErrorCategory.STALE_HANDLE
         )
-    return ExternalBootDerivedReleaseCompletion.model_construct()
+    return ExternalBootDerivedReleaseCompletion.model_validate(
+        authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "release",
+                "result_ref": None,
+                "release_identity": identity,
+                "evidence": release,
+            },
+        ).model_dump(mode="json", by_alias=True)
+    )
 
 
 def _refuse(message: str) -> CategorizedError:
@@ -825,8 +836,10 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         prerequisites = dict(context.prerequisites)
         prerequisites.update(
             connection=context.prerequisites["connection"],
-            incarnation_credential=ports.incarnation_credential.get_secret_value(),
-            deadline=ports.clock() + ports.recovery_readiness_timeout,
+            incarnation_credential=hashlib.sha256(
+                ports.incarnation_credential.get_secret_value().encode("utf-8")
+            ).digest(),
+            deadline=_request_deadline(context, ports.clock() + ports.recovery_readiness_timeout),
         )
         return await _run_active_release(replace(context, prerequisites=prerequisites))
 
@@ -847,15 +860,23 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
                 require_preconditions=lambda conn, activation, marker: _with_executor(
                     _release_prerequisites, ports, conn, activation, marker
                 ),
-                call_port=lambda _context: (_ for _ in ()).throw(AssertionError("unreachable")),
-                build_result=lambda _context, _observation: (_ for _ in ()).throw(
-                    AssertionError("unreachable")
-                ),
+                call_port=_unreachable_release_port,
+                build_result=_unreachable_release_result,
                 before_port=complete,
             ),
         )
 
     return handler
+
+
+def _unreachable_release_port(_context: OperationContext) -> None:
+    raise AssertionError("derived release completion must run before a provider port")
+
+
+def _unreachable_release_result(
+    _context: OperationContext, _observation: object
+) -> ExternalBootDerivedReleaseCompletion:
+    raise AssertionError("derived release completion must run before result construction")
 
 
 async def _release_prerequisites(

@@ -543,6 +543,12 @@ class Worker:
         marker = _external_marker(job)
         if marker is not None:
             if isinstance(result_ref, ExternalBootDerivedReleaseCompletion):
+                if _authority_binding_matches(marker, result_ref):
+                    return
+                _log.warning(
+                    "marked external boot job %s returned a mismatched derived release completion",
+                    job.id,
+                )
                 return
             if isinstance(result_ref, ExternalBootAuthorityResultV1) and _authority_binding_matches(
                 marker, result_ref
