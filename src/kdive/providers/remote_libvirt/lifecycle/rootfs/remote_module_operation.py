@@ -40,6 +40,12 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 class ModuleOperationRuntime(Protocol):
+    async def inspect_attempt(
+        self,
+        request: ModuleAttemptPreparationRequestV1,
+        operation: RemoteModuleOperationV1,
+        executor: RemoteModulePreparationExecutor,
+    ) -> ModuleAttemptInspection | None: ...
     async def reopen_operation(
         self, recovery: RemoteModuleRecoveryRefV1
     ) -> RemoteModuleOperationV1: ...
@@ -93,6 +99,14 @@ class ModuleOperationRuntime(Protocol):
         self, executor: RemoteModulePreparationExecutor
     ) -> tuple[ModuleVolumeKey, ...]: ...
     async def reap(self, retained: Callable[[], Awaitable[Collection[ModuleVolumeKey]]]) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleAttemptInspection:
+    """Validated current-attempt volumes and their exact durable scratch result."""
+
+    volumes: PreparedModuleVolumes
+    result: RemoteModuleResultV1
 
 
 @dataclass(frozen=True, slots=True)

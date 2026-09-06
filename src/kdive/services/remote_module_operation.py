@@ -39,6 +39,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
     RemoteModuleRecoveryRefV2 as RemoteModuleRecoveryRefV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
+    ModuleAttemptInspection,
     RemoteModuleApplianceExecution,
     RemoteModuleVolumePreparation,
     RemoteModuleVolumeRecovery,
@@ -157,6 +158,98 @@ class RemoteModuleOperationRuntime:
             authority,
             deadline,
             prepare_volumes,
+        )
+
+    async def inspect_attempt(
+        self,
+        request: ModuleAttemptPreparationRequestV1,
+        operation: RemoteModuleOperationV1,
+        executor: RemoteModulePreparationExecutor,
+    ) -> ModuleAttemptInspection | None:
+        """Read exact current-attempt state only when its durable obligation remains open."""
+        attempt = self._attempt_for_operation(operation)
+        receipt = request.module_attempt_obligation
+        if (
+            receipt.system_id != attempt.system_id
+            or receipt.run_id != attempt.run_id
+            or receipt.operation_nonce != attempt.operation_nonce
+        ):
+            raise CategorizedError(
+                "remote module inspection obligation differs from operation",
+                category=ErrorCategory.CONFLICT,
+            )
+        async with self.pool.connection() as conn:
+            if not await self.repository.mutation_obligation_is_open(conn, attempt):
+                raise CategorizedError(
+                    "remote module inspection obligation is absent",
+                    category=ErrorCategory.CONFLICT,
+                )
+        configured = self.volume_preparation
+        appliance = self.appliance_execution
+        if configured is None or appliance is None:
+            raise CategorizedError(
+                "remote module attempt inspection is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+        def inspect() -> ModuleAttemptInspection | None:
+            volume_request = self._volume_request(operation)
+            pool = configured.storage.storagePoolLookupByName(configured.pool_name)
+            names = (
+                render_module_volume_name(
+                    operation.system_id, operation.run_id, operation.operation_nonce, "source.ext4"
+                ),
+                render_module_volume_name(
+                    operation.system_id,
+                    operation.run_id,
+                    operation.operation_nonce,
+                    "scratch.ext4",
+                ),
+            )
+            present: list[bool] = []
+            for name in names:
+                try:
+                    pool.storageVolLookupByName(name)
+                    present.append(True)
+                except libvirt.libvirtError as exc:
+                    if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                        raise
+                    present.append(False)
+            if not any(present):
+                return None
+            if not all(present):
+                raise CategorizedError(
+                    "remote module attempt volumes are incomplete",
+                    category=ErrorCategory.CONFLICT,
+                )
+            volumes = validate_attempt_volumes(configured.storage, volume_request)
+            raw = appliance.read_scratch_result(volumes.scratch)
+            if raw is None:
+                raise CategorizedError(
+                    "remote module attempt result is absent",
+                    category=ErrorCategory.CONFLICT,
+                )
+            try:
+                result = RemoteModuleResultV1.from_wire_bytes(raw)
+                result.validate_for(operation)
+            except ValueError:
+                raise CategorizedError(
+                    "remote module attempt result is invalid",
+                    category=ErrorCategory.CONFLICT,
+                ) from None
+            if not result.is_identity_complete:
+                raise CategorizedError(
+                    "remote module attempt result lacks identity",
+                    category=ErrorCategory.CONFLICT,
+                )
+            return ModuleAttemptInspection(volumes, result)
+
+        return await executor.run(inspect)
+
+    @staticmethod
+    def _attempt_for_operation(operation: RemoteModuleOperationV1) -> ModuleAttempt:
+        return ModuleAttempt(
+            UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
         )
 
     async def _evidence(

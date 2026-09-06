@@ -368,6 +368,93 @@ async def test_prepare_passes_exact_attempt_and_caller_receipt_to_verifier(
     assert inspected_with == [observed[5]]
 
 
+@pytest.mark.anyio
+async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = RemoteModuleResultV1.model_validate(_result())
+    operation = RemoteModuleOperationRuntime._operation_from_result(result)
+    receipt = ModuleAttemptPreparationRequestV1.model_validate(
+        {
+            "module_attempt_obligation": {
+                "system_id": UUID(operation.system_id),
+                "run_id": UUID(operation.run_id),
+                "operation_nonce": operation.operation_nonce,
+            }
+        }
+    )
+
+    class InspectionRepo:
+        async def mutation_obligation_is_open(self, conn: object, attempt: ModuleAttempt) -> bool:
+            del conn
+            return attempt.operation_nonce == operation.operation_nonce
+
+    class InlineExecutor:
+        async def run(self, action: Callable[[], object]) -> object:
+            return action()
+
+    storage = Conn()
+    runtime = _runtime(
+        lambda _recovery: asyncio.sleep(0, result=None),
+        cast(RemoteModuleAttemptObligationRepository, InspectionRepo()),
+    )
+    object.__setattr__(
+        runtime,
+        "volume_preparation",
+        RemoteModuleVolumePreparation(
+            storage,
+            "systems",
+            (),
+            cast(Any, SimpleNamespace()),
+            lambda _identity: cast(Any, SimpleNamespace()),
+            tmp_path,
+        ),
+    )
+    object.__setattr__(
+        runtime,
+        "appliance_execution",
+        SimpleNamespace(read_scratch_result=lambda _volume: result.to_wire_bytes()),
+    )
+    executor = cast(RemoteModulePreparationExecutor, InlineExecutor())
+
+    assert await runtime.inspect_attempt(receipt, operation, executor) is None
+
+    source_name = render_module_volume_name(
+        operation.system_id, operation.run_id, operation.operation_nonce, "source.ext4"
+    )
+    scratch_name = render_module_volume_name(
+        operation.system_id, operation.run_id, operation.operation_nonce, "scratch.ext4"
+    )
+    storage.pool.volumes[source_name] = cast(Any, SimpleNamespace(deleted=False))
+    storage.pool.volumes[scratch_name] = cast(Any, SimpleNamespace(deleted=False))
+    volumes = cast(Any, SimpleNamespace(source=object(), scratch=object()))
+    monkeypatch.setattr(
+        "kdive.services.remote_module_operation.validate_attempt_volumes",
+        lambda _storage, _request: volumes,
+    )
+
+    inspected = await runtime.inspect_attempt(receipt, operation, executor)
+    assert inspected is not None
+    assert inspected.volumes is volumes
+    assert inspected.result == result
+
+    for raw, message in (
+        (b"not-json\n", "result is invalid"),
+        (
+            result.model_copy(update={"source_manifest": "sha256:" + "f" * 64}).to_wire_bytes(),
+            "result is invalid",
+        ),
+    ):
+        object.__setattr__(
+            runtime,
+            "appliance_execution",
+            SimpleNamespace(read_scratch_result=lambda _volume, value=raw: value),
+        )
+        with pytest.raises(CategorizedError, match=message) as caught:
+            await runtime.inspect_attempt(receipt, operation, executor)
+        assert caught.value.category is ErrorCategory.CONFLICT
+
+
 def test_real_receipt_guards_two_real_volume_creates(
     migrated_url: str,
     authority_role_dsns: _RoleDsns,
