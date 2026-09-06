@@ -244,6 +244,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add a resource-bound network client
 - Compose worker authority routes
 - Deploy authority network routes
+- Add device identity wire values
+- Serve bounded device identity lookups
+- Add authenticated identity port
 
 ### Changed
 
@@ -1261,6 +1264,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plan readiness window implementation
 - Correct readiness window design
 - Define readiness descriptor ownership
+- Define remote identity transport
+- Capture preparation identity deadline
 - Design module attempt obligation receipt
 - Define obligation receipt verification evidence
 - Fence module attempt authorization lifetime
@@ -1274,6 +1279,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align authority host configuration errors
 - Configure denied authority identities
 - Defer route materialization to typed use
+- Consume resource-bound authority route
+- Bind identity transport to authority route
+- Bound identity lookup executor
 
 ### Fixed
 
@@ -2064,6 +2072,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify installed authority source revisions
 - Retain interrupted authority firewall intent
 - Defer TLS resolution to typed calls
+- Preserve provider import boundary
+- Guarantee identity service cleanup
 
 ### Security
 
