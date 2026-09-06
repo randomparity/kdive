@@ -401,6 +401,7 @@ class ExternalBootRecoveryAttempt(_ClosedRow):
     resolution_operation: Annotated[str, Field(min_length=1, max_length=255)] | None = None
     resolution_identity: Digest | None = None
     acknowledged_composite_state: Digest | None = None
+    observed_composite_state: Digest | None = None
     recovery_readiness_deadline: UtcDateTime | None = None
     state: ExternalBootRecoveryAttemptState
     conflict_evidence: ExternalBootConflictEvidenceV1 | None = None
