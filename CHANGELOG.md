@@ -2345,6 +2345,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close authority import boundaries
 - Gate authority host deployment
 - Retain authority orphan completion executor
+- Package bootable remote module appliance runtime
 
 ### Security
 
