@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
+import pytest
 import yaml
 from jinja2 import Environment, StrictUndefined
 
@@ -496,6 +497,37 @@ def test_authority_group_verification_tracks_local_mutation_kvm_requirement() ->
             )
             is expected_failure
         )
+
+
+@pytest.mark.parametrize(
+    ("local_mutation", "result", "expected_failure"),
+    [
+        (False, {"rc": 0, "stdout": ""}, False),
+        (False, {"rc": 0, "stdout": "fixture-domain\n"}, True),
+        (True, {"rc": 0, "stdout": "fixture-domain\n"}, False),
+        (True, {"rc": 1, "stdout": ""}, True),
+    ],
+)
+def test_authority_domain_verification_tracks_local_mutation_and_command_failure(
+    local_mutation: bool, result: dict[str, object], expected_failure: bool
+) -> None:
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(
+        item
+        for item in tasks
+        if item.get("name") == "Verify the authority can use its private provider endpoint"
+    )
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["bool"] = bool
+    failed = environment.compile_expression(task["failed_when"])
+
+    assert (
+        failed(
+            live_vm_host_authority_domains=result,
+            live_vm_host_authority_local_mutation_enabled=local_mutation,
+        )
+        is expected_failure
+    )
 
 
 def test_ansible_installs_authority_in_clean_host_order() -> None:
