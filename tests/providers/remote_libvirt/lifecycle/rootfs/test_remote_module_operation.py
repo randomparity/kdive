@@ -452,7 +452,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
             "systems",
             (),
             cast(Any, SimpleNamespace()),
-            lambda _identity: cast(Any, SimpleNamespace()),
+            lambda identity_port, present_attempt_volumes=None: cast(Any, SimpleNamespace()),
             tmp_path,
         ),
     )
@@ -538,7 +538,11 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         TimeoutError("attachment inspection unresolved"),
     ):
 
-        def inspect_partial(_identity: object, _present: object, value=inspection):
+        def inspect_partial(
+            identity_port: object,
+            present_attempt_volumes: frozenset[str] | None = None,
+            value=inspection,
+        ):
             if isinstance(value, BaseException):
                 raise value
             return value
@@ -623,7 +627,9 @@ def test_real_receipt_guards_two_real_volume_creates(
                     "systems",
                     (ModuleTreeEntry("kernel.ko", 0o100644, content=b"abc"),),
                     Writer(),
-                    lambda _identity: cast(Any, SimpleNamespace()),
+                    lambda identity_port, present_attempt_volumes=None: cast(
+                        Any, SimpleNamespace()
+                    ),
                     tmp_path,
                 ),
             )
@@ -786,7 +792,7 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
         "pool",
         entries,
         Writer(),
-        lambda _identity: inspection(),
+        lambda identity_port, present_attempt_volumes=None: inspection(),
         tmp_path,
     )
     runtime = _runtime(lambda _recovery: asyncio.sleep(0, result=None))
@@ -981,11 +987,14 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
             "systems",
             (),
             Writer(),
-            lambda _identity, present=None: AttachmentInspection(
+            lambda identity_port, present_attempt_volumes=None: AttachmentInspection(
                 True,
                 True,
                 False,
-                frozenset(("systems", name) for name in (present or {source_name, scratch_name})),
+                frozenset(
+                    ("systems", name)
+                    for name in (present_attempt_volumes or {source_name, scratch_name})
+                ),
             ),
             tmp_path,
         )
@@ -1296,7 +1305,7 @@ def test_run_cancellation_waits_for_provider_cleanup(tmp_path: Path) -> None:
                 "pool",
                 entries,
                 Writer(),
-                lambda _identity: reference.inspect_attachments(),
+                lambda identity_port, present_attempt_volumes=None: reference.inspect_attachments(),
                 tmp_path,
             ),
         )
@@ -1426,7 +1435,7 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
             wanted.pool,
             wanted.entries,
             wanted.writer,
-            lambda _identity: wanted.inspect_attachments(),
+            lambda identity_port, present_attempt_volumes=None: wanted.inspect_attachments(),
             tmp_path,
         ),
         worker_write_context=_worker_context(recovery),
@@ -1559,7 +1568,7 @@ def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
             "pool",
             wanted.entries,
             wanted.writer,
-            lambda _identity: detached(),
+            lambda identity_port, present_attempt_volumes=None: detached(),
             tmp_path,
         ),
     )
@@ -1674,7 +1683,7 @@ def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: 
             wanted.pool,
             wanted.entries,
             wanted.writer,
-            lambda _identity: wanted.inspect_attachments(),
+            lambda identity_port, present_attempt_volumes=None: wanted.inspect_attachments(),
             tmp_path,
         ),
         worker_write_context=_worker_context(recovery),
@@ -1725,7 +1734,7 @@ def test_delete_source_cancellation_waits_for_blocked_provider_delete(tmp_path: 
             wanted.pool,
             wanted.entries,
             wanted.writer,
-            lambda _identity: wanted.inspect_attachments(),
+            lambda identity_port, present_attempt_volumes=None: wanted.inspect_attachments(),
             tmp_path,
         ),
     )
