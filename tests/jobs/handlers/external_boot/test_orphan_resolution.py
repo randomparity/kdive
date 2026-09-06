@@ -120,8 +120,17 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                     mutation_journal_digest="sha256:" + "b" * 64,
                     reserved_bytes=4096,
                 )
+                sibling_record_id = uuid4()
+                sibling_binding = object_binding.model_copy(
+                    update={
+                        "record_id": str(sibling_record_id),
+                        "reference": OpaqueProviderRef(ref="modules/quarantined-b"),
+                        "operation_identity": "cleanup-b",
+                    }
+                )
                 provider = FaultInjectExternalBoot()
                 provider.register_recovery_object(object_binding)
+                provider.register_recovery_object(sibling_binding)
                 authority_job = await (
                     await conn.execute(
                         "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, "
@@ -174,7 +183,7 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                         object_binding.binding, OpaqueProviderRef(ref="authority/a")
                     ),
                 )
-                assert len(identities) == 1
+                assert len(identities) == 2
                 resolver = provider_resolver(external_boot_recovery_objects=provider)
                 first = await resolve_recovery_orphan(
                     conn_pool,
@@ -257,7 +266,10 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                     )
                     interrupted = await runner.run_once(DEFAULT_JOB_DISPATCH_LANE)
                     assert interrupted is not None and str(interrupted.id) == first.object_id
-                    assert provider.recovery_object_mutations == [(disposition, str(record_id))]
+                    assert set(provider.recovery_object_mutations) == {
+                        (disposition, str(record_id)),
+                        (disposition, str(sibling_record_id)),
+                    }
                     with pytest.raises(CategorizedError):
                         await sender.resolve_recovery_orphan(
                             AuthorityRecoveryOrphanDispositionRequestV1(
@@ -285,7 +297,10 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                     await conn.execute("SELECT state FROM jobs WHERE id = %s", (completed.id,))
                 ).fetchone()
                 assert final == ("succeeded",)
-                assert provider.recovery_object_mutations == [(disposition, str(record_id))]
+                assert set(provider.recovery_object_mutations) == {
+                    (disposition, str(record_id)),
+                    (disposition, str(sibling_record_id)),
+                }
                 persisted = await (
                     await conn.execute(
                         "SELECT status, reserved_bytes FROM external_boot_recovery_quarantine "
