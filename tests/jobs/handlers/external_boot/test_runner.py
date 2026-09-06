@@ -35,6 +35,7 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
@@ -243,6 +244,130 @@ def test_preparing_capacity_exhaustion_precedes_materialize_and_retries_after_re
             )
         ).fetchone()
         assert used == (RESERVED_BYTES,)
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_competing_activations_serialize_recovery_capacity_debit(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    class NoMutation:
+        async def execute_preparation(self, request: object) -> object:
+            raise AssertionError("capacity exhaustion must precede MATERIALIZE")
+
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        shared_store = store_identity(build_vehicle())
+        blocker = build_vehicle()
+        await seed_case(
+            seed,
+            blocker,
+            purpose="release",
+            activation_state="active",
+            with_reservation=True,
+            reservation_store_identity=shared_store,
+        )
+        targets = [
+            await seed_case(
+                seed,
+                build_vehicle(),
+                purpose="activate",
+                activation_state="preparing",
+                with_materialization=False,
+                with_recovery_point=False,
+                reservation_store_identity=shared_store,
+            )
+            for _ in range(2)
+        ]
+        for target in targets:
+            ports = replace(
+                _ports(
+                    target,
+                    resolver=resolver_for(target.vehicle),
+                    acknowledger=RecordingAcknowledger(
+                        authority_role_dsns("kdive_provider_authority")
+                    ),
+                ),
+                preparation_executor=cast(Any, NoMutation()),
+                reservation_geometry=lambda _binding: AuthorityReservationGeometry(
+                    shared_store, RESERVED_BYTES, RESERVED_BYTES
+                ),
+            )
+            with pytest.raises(CategorizedError) as raised:
+                await _run(
+                    worker,
+                    target,
+                    ports=ports,
+                    require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+                    call_port=lambda _context: None,
+                )
+            assert raised.value.category is ErrorCategory.CAPACITY_EXHAUSTED
+        await seed.execute(
+            "DELETE FROM external_boot_reservations WHERE activation_id=%s",
+            (blocker.activation_id,),
+        )
+        repository = ExternalBootActivationRepository()
+        activations = [await repository.get(worker, case.vehicle.activation_id) for case in targets]
+        assert all(activation is not None for activation in activations)
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as competitor:
+            connections = (worker, competitor)
+            entered = [asyncio.Event(), asyncio.Event()]
+
+            async def debit(index: int) -> str:
+                case = targets[index]
+                activation = activations[index]
+                assert activation is not None
+                entered[index].set()
+                async with connections[index].transaction():
+                    result = await repository.mark_reservation_ready_for_job(
+                        connections[index],
+                        credential_hash=hashlib.sha256(case.credential.encode()).digest(),
+                        job_id=case.job_id,
+                        job_attempt=case.attempt,
+                        activation_id=case.vehicle.activation_id,
+                        system_id=case.vehicle.system_id,
+                        operation_owner_id=activation.operation_owner_id,
+                        authority_generation=activation.authority_generation,
+                        store_identity=shared_store,
+                        reserve_bytes=RESERVED_BYTES,
+                        recovery_max_bytes=RESERVED_BYTES,
+                    )
+                return result.value
+
+            async with (
+                seed.transaction(),
+                advisory_xact_lock(seed, LockScope.RECOVERY_STORE, shared_store),
+            ):
+                contenders = [asyncio.create_task(debit(index)) for index in range(2)]
+                await asyncio.gather(*(event.wait() for event in entered))
+            results = await asyncio.gather(*contenders)
+            assert sorted(results) == ["applied", "capacity_exhausted"]
+
+            ready = await (
+                await seed.execute(
+                    "SELECT activation_id FROM external_boot_reservations "
+                    "WHERE store_identity=%s AND state='ready'",
+                    (shared_store,),
+                )
+            ).fetchall()
+            assert len(ready) == 1
+            winner = ready[0][0]
+            loser_index = next(
+                index for index, case in enumerate(targets) if case.vehicle.activation_id != winner
+            )
+            await seed.execute(
+                "DELETE FROM external_boot_reservations WHERE activation_id=%s", (winner,)
+            )
+            assert await debit(loser_index) == "applied"
+            assert await debit(loser_index) == "applied"
+            total = await (
+                await seed.execute(
+                    "SELECT COALESCE(sum(reserved_bytes), 0) FROM external_boot_reservations "
+                    "WHERE store_identity=%s AND state='ready'",
+                    (shared_store,),
+                )
+            ).fetchone()
+            assert total == (RESERVED_BYTES,)
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
