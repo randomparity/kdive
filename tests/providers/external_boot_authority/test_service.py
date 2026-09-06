@@ -117,6 +117,47 @@ async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) 
 
 
 @pytest.mark.anyio
+async def test_read_only_observation_rejects_a_stale_trusted_head_before_provider_access(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    repository._head_override_armed = True
+    repository.corrupt_head_field = "digest"
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await restarted.observe_authority(peer, _mutation(takeover))
+
+    assert adapter.calls == []
+
+
+@pytest.mark.anyio
+async def test_read_only_observation_rejects_unresolved_restart_before_provider_access(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    journal_name = "empty-observation.journal"
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda _system_id: FileAuthorityJournal(tmp_path, journal_name),
+        adapter=adapter,
+    )
+
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await restarted.observe_authority(peer, _mutation(takeover))
+
+    assert adapter.calls == []
+
+
+@pytest.mark.anyio
 async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: Path) -> None:
     service, repository, _adapter, peer, takeover = _service(tmp_path)
     plan = external_boot_plan(takeover.system_id, takeover.run_id)

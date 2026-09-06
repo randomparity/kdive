@@ -465,6 +465,31 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("journal_conflict")
         return records
 
+    async def _observation_head_is_current(
+        self, binding: AuthorityBinding, records: list[JournalRecordV1]
+    ) -> None:
+        """Refuse an observation unless its local journal ends at the trusted exact head.
+
+        Unlike mutation recovery, this only compares durable facts.  An observation must not
+        repair, append, or truncate local history merely to make a provider read admissible.
+        """
+        if not records:
+            raise AuthorityServiceError("journal_conflict")
+        head = await self._repository.read_head(binding)
+        last = records[-1]
+        if (
+            head is None
+            or head.authority_instance != binding.authority_instance
+            or head.system_id != binding.system_id
+            or head.sequence != last.sequence
+            or head.digest != record_digest(last)
+            or head.phase is not last.phase
+            or head.authority_id != last.authority_id
+            or head.generation != last.generation
+            or head.operation_identity != last.operation_identity
+        ):
+            raise AuthorityServiceError("journal_conflict")
+
     async def _anchor(
         self,
         binding: AuthorityBinding,
@@ -1157,7 +1182,8 @@ class ExternalBootAuthorityService:
                     raise AuthorityServiceError("journal_conflict")
                 if lane.active is not None:
                     raise AuthorityServiceError("superseded")
-                journal, records = self._lane_journal(request.system_id, lane)
+                _journal, records = self._lane_journal(request.system_id, lane)
+                await self._observation_head_is_current(trusted, records)
                 acknowledgements = [
                     record
                     for record in records
@@ -1179,6 +1205,7 @@ class ExternalBootAuthorityService:
                 rechecked = await self._resolve_confirmed(authenticated, request, acknowledgement)
                 if rechecked is None or not self._binding_matches(rechecked, request):
                     raise AuthorityServiceError("superseded")
+                await self._observation_head_is_current(rechecked, records)
                 return observation
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
