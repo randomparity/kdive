@@ -606,6 +606,8 @@ class LocalAuthoritySystemProvider:
             descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
         except FileNotFoundError:
             return None
+        except OSError as error:
+            raise LocalAuthoritySystemError("local authority intent directory is unsafe") from error
         try:
             _require_private_directory(os.fstat(descriptor), self._owner_uid, self._owner_gid)
         except BaseException:

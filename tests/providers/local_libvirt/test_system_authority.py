@@ -106,6 +106,14 @@ def test_private_intent_symlink_is_rejected(tmp_path: Path) -> None:
         provider._load_intent(intent.system_id)
 
 
+def test_private_intent_root_symlink_is_rejected(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    (tmp_path / "intents").symlink_to(tmp_path / "other")
+
+    with pytest.raises(LocalAuthoritySystemError, match="unsafe"):
+        provider._load_intent(uuid4())
+
+
 def test_cancellation_drains_the_completion_owned_host_operation(tmp_path: Path) -> None:
     asyncio.run(_cancel_and_drain(tmp_path))
 
