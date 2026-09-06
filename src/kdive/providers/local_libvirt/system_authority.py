@@ -16,12 +16,17 @@ import stat
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import UUID
 
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
+    authorized_key_customizer,
+)
+from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.system_authority import (
     AuthoritySystemAbsenceFacts,
     AuthoritySystemCommitContextV1,
@@ -74,6 +79,9 @@ class LocalAuthoritySystemTopology:
     overlay_root: Path
     baseline_root: Path
     staged_bases: Mapping[str, Path]
+    guest_egress: bool = False
+    accel: str = "kvm"
+    emulator: str | None = None
 
     def base_for(self, root_identity: str) -> Path:
         try:
@@ -294,9 +302,11 @@ class LocalAuthoritySystemProvider:
         intent = self._load_intent(request.system_id)
         if intent is None:
             intent = self._candidate_intent(request, snapshot)
-            # The actual fsync is intentionally deferred to the provisioning callback supplied by
-            # the authority assembly.  This method does no rootfs mutation itself.
-            self._store_intent(intent)
+            # A retained baseline performs no extraction callback.  Persist before the overlay can
+            # be touched on that retry path; otherwise the local provisioner's callback runs after
+            # the guestfs read-only selection and before it resets any extraction staging.
+            if Path(intent.baseline).is_dir():
+                self._store_intent(self._intent_with_xml(intent, snapshot, None))
         self._require_matching_intent(intent, request, snapshot)
         if intent.deadline <= self._now():
             raise LocalAuthoritySystemError("local authority provision deadline expired")
@@ -304,7 +314,19 @@ class LocalAuthoritySystemProvider:
             request.system_id,
             snapshot.profile,
             bootstrap_pubkey=snapshot.bootstrap_public_key,
+            overlay_customizers=(authorized_key_customizer(snapshot.bootstrap_public_key),),
+            selected_gdb_port=intent.gdb_port,
+            selected_ssh_port=intent.ssh_port,
+            before_extract_baseline=lambda baseline: self._store_intent(
+                self._intent_with_xml(intent, snapshot, baseline)
+            ),
         )
+        persisted = self._load_intent(request.system_id)
+        if persisted is None:
+            raise LocalAuthoritySystemError(
+                "local authority provision failed to persist its intent"
+            )
+        intent = persisted
         return self._provision_facts(intent, ready=self._readiness_probe(request.system_id))
 
     def _observe_system_provision(
@@ -404,6 +426,37 @@ class LocalAuthoritySystemProvider:
             gdb_port=gdb_port,
             ssh_port=self._allocate_port(),
             xml_digest=None,
+        )
+
+    def _intent_with_xml(
+        self,
+        intent: _Intent,
+        snapshot: AuthoritySystemProvisionSnapshot,
+        baseline: BaselineKernel | None,
+    ) -> _Intent:
+        baseline_root = Path(intent.baseline)
+        if baseline is None:
+            kernel = baseline_root / "kernel"
+            possible_initrd = baseline_root / "initrd"
+            initrd = possible_initrd if possible_initrd.is_file() else None
+        else:
+            kernel = baseline.kernel
+            initrd = baseline.initrd
+        xml = render_domain_xml(
+            intent.system_id,
+            snapshot.profile,
+            disk_path=intent.overlay,
+            gdb_port=intent.gdb_port,
+            ssh_port=intent.ssh_port,
+            kernel_path=kernel,
+            initrd_path=initrd,
+            guest_egress=self._topology.guest_egress,
+            accel=self._topology.accel,
+            emulator=self._topology.emulator,
+        )
+        return replace(
+            intent,
+            xml_digest="sha256:" + hashlib.sha256(xml.encode("utf-8")).hexdigest(),
         )
 
     def _provision_facts(self, intent: _Intent, *, ready: bool) -> AuthoritySystemProvisionFacts:

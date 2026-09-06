@@ -70,7 +70,6 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
     ROOTFS_DIR,
     UPLOADS_DIR,
     ProvisioningFiles,
-    baseline_dir,
     overlay_path,
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
@@ -257,6 +256,9 @@ class LocalLibvirtProvisioning:
         overlay_customizers: tuple[OverlayCustomizer, ...] = (),
         bootstrap_pubkey: str | None = None,
         job_id: UUID | None = None,
+        selected_gdb_port: int | None = None,
+        selected_ssh_port: int | None = None,
+        before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
     ) -> str:
         """Define and start the tagged domain; return its name.
 
@@ -298,17 +300,22 @@ class LocalLibvirtProvisioning:
         # investigation-owned artifact (ADR-0441) and is deliberately NOT in this per-call reclaim.
         baseline_created = overlay_created = False
         try:
+            gdb_port = self._selected_gdb_port(system_id, profile, selected_gdb_port)
+            ssh_port = self._selected_ssh_port(system_id, selected_ssh_port)
             base = self._materialize_rootfs(section.rootfs, system_id, profile.arch, job_id=job_id)
             baseline_created = not pre_existing.baseline
-            baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
+            baseline = self._prepare_baseline_kernel(
+                system_id,
+                base,
+                section.baseline_kernel,
+                before_extract_baseline=before_extract_baseline,
+            )
             overlay_created = not pre_existing.overlay
             overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
-            gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
             # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is
             # always allocated. drgn-live no longer needs a profile credential — it
             # authenticates with the per-System bootstrap key (ADR-0289/0315).
             # Reuse-on-retry (_ssh_port_for) is unchanged.
-            ssh_port = self._ssh_port_for(system_id)
             if self._guest_egress:
                 # Positive, greppable signal for a security-relevant state: the operator opted
                 # this resource into guest egress, so the guest NIC renders restrict=off
@@ -345,11 +352,43 @@ class LocalLibvirtProvisioning:
             raise
         return domain_name_for(system_id)
 
+    def _selected_gdb_port(
+        self, system_id: UUID, profile: ProvisioningProfile, selected: int | None
+    ) -> int | None:
+        if not profile.provider.local_libvirt.debug.gdbstub:
+            if selected is not None:
+                raise CategorizedError(
+                    "a gdbstub-disabled profile cannot select a gdbstub port",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            return None
+        return (
+            self._validate_selected_port(selected)
+            if selected is not None
+            else self._gdb_port_for(system_id)
+        )
+
+    def _selected_ssh_port(self, system_id: UUID, selected: int | None) -> int:
+        return (
+            self._validate_selected_port(selected)
+            if selected is not None
+            else self._ssh_port_for(system_id)
+        )
+
+    @staticmethod
+    def _validate_selected_port(port: int) -> int:
+        if not 1 <= port <= 65535:
+            raise CategorizedError(
+                "selected local-libvirt port is outside the TCP range",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        return port
+
     def _snapshot_pre_existing(self, system_id: UUID) -> _MaterializedPreExistence:
         """Record which per-System host artifacts exist before materialization (ADR-0435)."""
         return _MaterializedPreExistence(
-            overlay=self._files.overlay_exists(overlay_path(system_id)),
-            baseline=self._files.baseline_exists(baseline_dir(system_id)),
+            overlay=self._files.overlay_exists(self._files.overlay_path_for(system_id)),
+            baseline=self._files.baseline_exists(self._files.baseline_dir_for(system_id)),
         )
 
     def _reclaim_materialized_on_failure(
@@ -387,7 +426,12 @@ class LocalLibvirtProvisioning:
             )
 
     def _prepare_baseline_kernel(
-        self, system_id: UUID, base: str, baseline_kernel: str | None
+        self,
+        system_id: UUID,
+        base: str,
+        baseline_kernel: str | None,
+        *,
+        before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
     ) -> BaselineKernel:
         """Extract the rootfs's baseline kernel once; reuse an already-extracted directory.
 
@@ -400,12 +444,13 @@ class LocalLibvirtProvisioning:
         multi-kernel ``/boot``; it is consulted only on a fresh extraction — a reused directory
         already holds the resolved kernel, so an idempotent retry stays stable.
         """
-        dest = Path(baseline_dir(system_id))
+        dest = Path(self._files.baseline_dir_for(system_id))
         if self._files.baseline_exists(str(dest)):
             initrd = dest / "initrd"
             present_initrd = initrd if self._files.baseline_exists(str(initrd)) else None
             return BaselineKernel(kernel=dest / "kernel", initrd=present_initrd)
-        if self._before_extract_baseline is None:
+        callback = before_extract_baseline or self._before_extract_baseline
+        if callback is None:
             return self._extract_baseline_kernel(Path(base), dest, baseline_kernel)
         extractor = self._extract_baseline_kernel
         if extractor is not _real_extract_baseline_kernel:
@@ -417,7 +462,7 @@ class LocalLibvirtProvisioning:
             Path(base),
             dest,
             baseline_kernel,
-            before_extract=self._before_extract_baseline,
+            before_extract=callback,
         )
 
     def _gdb_port_for(self, system_id: UUID) -> int:

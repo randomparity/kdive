@@ -874,6 +874,23 @@ def test_provision_defines_and_starts_returns_name() -> None:
     assert conn.closed == 3
 
 
+def test_provision_uses_authority_selected_ports_without_reallocating() -> None:
+    conn = _ProvConn()
+    provisioner = _prov(
+        conn, free_port=lambda: (_ for _ in ()).throw(AssertionError("reallocated"))
+    )
+
+    provisioner.provision(
+        _SYS,
+        _profile(debug={"gdbstub": True}),
+        selected_gdb_port=40123,
+        selected_ssh_port=40124,
+    )
+
+    assert recorded_gdb_port(conn.recorded_xml[-1]) == 40123
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40124
+
+
 # Capabilities fixtures mirroring the #1140 live ground truth: an x86_64 host advertises
 # x86_64 (kvm) and ppc64le (tcg, /usr/bin/qemu-system-ppc64).
 _CAPS_X86_KVM_PPC_TCG = (
