@@ -13,6 +13,10 @@ import tarfile
 from pathlib import Path
 
 ARCHITECTURES = ("x86_64", "ppc64le")
+ARCHITECTURE_LOADERS = {
+    "x86_64": "lib64/ld-linux-x86-64.so.2",
+    "ppc64le": "lib64/ld64.so.2",
+}
 BLOCKED_PARTS = {"bin/sh", "bin/ash", "bin/bash", "usr/bin/sh", "usr/bin/bash"}
 BLOCKED_NAMES = {"socket.py", "socket.pyc", "socketserver.py", "socketserver.pyc"}
 STARTUP_HOOK_NAMES = {
@@ -33,9 +37,9 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _runtime_files(root: Path) -> list[tuple[str, bytes, int]]:
+def _runtime_files(root: Path, architecture: str) -> list[tuple[str, bytes, int]]:
     selected: list[tuple[str, bytes, int]] = []
-    required = {"usr/bin/python3", "sbin/depmod"}
+    required = {"usr/bin/python3", "sbin/depmod", ARCHITECTURE_LOADERS[architecture]}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
         if path.name in STARTUP_HOOK_NAMES or path.suffix == ".pth":
@@ -45,7 +49,9 @@ def _runtime_files(root: Path) -> list[tuple[str, bytes, int]]:
         include = (
             relative in {"usr/bin/python3", "sbin/depmod"}
             or relative.startswith("lib/")
+            or relative.startswith("lib64/")
             or relative.startswith("usr/lib/")
+            or relative.startswith("usr/lib64/")
         )
         if not include or path.is_dir():
             continue
@@ -140,7 +146,7 @@ def build(*, architecture: str, kernel: Path, runtime_root: Path, output: Path) 
         raise ValueError(f"unsupported architecture: {architecture}")
     kernel_data = kernel.read_bytes()
     init_data = (Path(__file__).with_name("appliance.py")).read_bytes()
-    initramfs_files = [("init", init_data, 0o555), *_runtime_files(runtime_root)]
+    initramfs_files = [("init", init_data, 0o555), *_runtime_files(runtime_root, architecture)]
     initramfs = _initramfs(initramfs_files)
     members = [
         ("image/vmlinuz", kernel_data, 0o444),

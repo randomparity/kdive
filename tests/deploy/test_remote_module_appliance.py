@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import tarfile
@@ -20,6 +21,10 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[2]
 APPLIANCE = ROOT / "deploy" / "remote_module_appliance"
 ROLE = ROOT / "deploy" / "ansible" / "roles" / "remote_libvirt_module_appliance"
+LOADERS = {
+    "x86_64": "lib64/ld-linux-x86-64.so.2",
+    "ppc64le": "lib64/ld64.so.2",
+}
 
 
 def _json(name: str) -> dict[str, object]:
@@ -51,21 +56,26 @@ def _module() -> Any:
     return module
 
 
-def _newc_names(data: bytes) -> list[str]:
-    names: list[str] = []
+def _newc_entries(data: bytes) -> dict[str, int]:
+    entries: dict[str, int] = {}
     offset = 0
     while True:
         header = data[offset : offset + 110]
         assert header[:6] == b"070701"
+        mode = int(header[14:22], 16)
         file_size = int(header[54:62], 16)
         name_size = int(header[94:102], 16)
         offset += 110
         name = data[offset : offset + name_size - 1].decode("utf-8")
         offset = (offset + name_size + 3) & ~3
         if name == "TRAILER!!!":
-            return names
-        names.append(name)
+            return entries
+        entries[name] = mode
         offset = (offset + file_size + 3) & ~3
+
+
+def _newc_names(data: bytes) -> list[str]:
+    return list(_newc_entries(data))
 
 
 def test_protocol_is_closed_and_rejects_caller_paths_or_commands() -> None:
@@ -282,6 +292,7 @@ def test_image_build_is_reproducible_and_excludes_shell_and_network(
     for relative, content in {
         "usr/bin/python3": b"python",
         "sbin/depmod": b"depmod",
+        LOADERS[architecture]: b"native-loader",
         "lib/ld-musl-test.so.1": b"loader",
         "usr/lib/python3.14/json/__init__.py": b"json",
         "usr/lib/python3.14/socket.py": b"network",
@@ -340,6 +351,83 @@ def test_image_build_is_reproducible_and_excludes_shell_and_network(
             ],
             check=True,
         )
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_image_build_packages_native_loader_and_lib64_closure(
+    tmp_path: Path, architecture: str
+) -> None:
+    kernel = tmp_path / "vmlinuz"
+    kernel.write_bytes(b"kernel\n")
+    runtime = tmp_path / "runtime"
+    files = {
+        "usr/bin/python3": b"python",
+        "sbin/depmod": b"depmod",
+        LOADERS[architecture]: b"native-loader",
+        "lib64/libc.so.6": b"libc",
+        "usr/lib64/python3.14/lib-dynload/_json.so": b"python-extension",
+    }
+    for relative, content in files.items():
+        path = runtime / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    output = tmp_path / "appliance.tar"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(APPLIANCE / "build_image.py"),
+            "--architecture",
+            architecture,
+            "--kernel",
+            str(kernel),
+            "--runtime-root",
+            str(runtime),
+            "--output",
+            str(output),
+        ],
+        check=True,
+    )
+
+    with tarfile.open(output) as archive:
+        initramfs = archive.extractfile("image/initramfs.cpio")
+        assert initramfs is not None
+        entries = _newc_entries(initramfs.read())
+    assert stat.S_IMODE(entries[LOADERS[architecture]]) == 0o555
+    assert stat.S_IMODE(entries["lib64/libc.so.6"]) == 0o444
+    assert stat.S_IMODE(entries["usr/lib64/python3.14/lib-dynload/_json.so"]) == 0o444
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_image_build_requires_the_architecture_loader(tmp_path: Path, architecture: str) -> None:
+    kernel = tmp_path / "vmlinuz"
+    kernel.write_bytes(b"kernel\n")
+    runtime = tmp_path / "runtime"
+    for relative in ("usr/bin/python3", "sbin/depmod"):
+        path = runtime / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(relative.encode())
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(APPLIANCE / "build_image.py"),
+            "--architecture",
+            architecture,
+            "--kernel",
+            str(kernel),
+            "--runtime-root",
+            str(runtime),
+            "--output",
+            str(tmp_path / "appliance.tar"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert LOADERS[architecture] in completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -421,6 +509,38 @@ def test_appliance_source_has_fixed_depmod_and_no_guest_exec_or_network() -> Non
     assert "subprocess.run(" in source and '[DEPMOD, "-b"' in source
     assert "200_000" in source
     assert "8 * 1024**3" in source
+
+
+def test_appliance_devtmpfs_mount_allows_its_device_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    mounts: list[tuple[str, Path, str, int]] = []
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(
+        appliance,
+        "_mount",
+        lambda source, target, filesystem, flags: mounts.append(
+            (source, target, filesystem, flags)
+        ),
+    )
+    monkeypatch.setattr(appliance, "_mount_root", lambda: None)
+    monkeypatch.setattr(appliance, "_read_operation", lambda _path: _operation())
+    monkeypatch.setattr(appliance, "execute", lambda _document: {})
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(
+        appliance,
+        "_poweroff",
+        lambda _document: (_ for _ in ()).throw(PoweredOff),
+    )
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert mounts[0] == ("devtmpfs", Path("/dev"), "devtmpfs", 2 | 8)
 
 
 def test_capture_install_and_restore_round_trip(
