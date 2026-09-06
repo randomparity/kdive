@@ -294,7 +294,10 @@
     home: /var/lib/kdive/provider-authority
     shell: /usr/sbin/nologin
     group: "{{ live_vm_host_authority_account }}"
-    groups: ["{{ live_vm_host_authority_client_group }}"]
+    groups: >-
+      {{ [live_vm_host_authority_client_group, 'kvm']
+         if live_vm_host_authority_local_mutation_enabled else
+         [live_vm_host_authority_client_group] }}
     append: false
   when: live_vm_host_authority_enabled | bool
 
@@ -710,6 +713,51 @@
   changed_when: true
   notify: Restart the external-boot authority service after deployed changes
 
+- name: Symlink the target-native libguestfs binding into the authority venv
+  ansible.builtin.file:
+    src: "{{ item.path }}"
+    dest: >-
+      {{ live_vm_host_authority_runtime_install }}/.venv/lib/python{{ ansible_python.version.major }}.{{
+      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    state: link
+    force: true
+  loop: "{{ live_vm_host_libguestfs_files.files }}"
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_local_mutation_enabled | bool
+
+- name: Inspect the authority recovery root without following links
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_authority_recovery_root }}"
+    follow: false
+  register: live_vm_host_authority_recovery_root_before
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_local_mutation_enabled | bool
+
+- name: Refuse a substituted authority recovery root
+  ansible.builtin.assert:
+    that: >-
+      not live_vm_host_authority_recovery_root_before.stat.exists or
+      (live_vm_host_authority_recovery_root_before.stat.isdir and
+       not live_vm_host_authority_recovery_root_before.stat.islnk)
+    quiet: true
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_local_mutation_enabled | bool
+
+- name: Create the owner-only authority recovery root
+  ansible.builtin.file:
+    path: "{{ live_vm_host_authority_recovery_root }}"
+    state: directory
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0700"
+    follow: false
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_local_mutation_enabled | bool
+
 - name: Record the installed external-boot authority revision
   ansible.builtin.copy:
     dest: "{{ live_vm_host_authority_runtime_install }}/revision"
@@ -740,17 +788,23 @@
   when: live_vm_host_authority_enabled | bool
   notify: Restart the external-boot authority service after deployed changes
 
-- name: Install the external-boot authority environment
+- name: Install protected authority S3 credentials
   ansible.builtin.copy:
+    src: "{{ live_vm_host_authority_s3_credentials_source }}"
+    dest: "{{ live_vm_host_authority_credentials_dir }}/s3-credentials"
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0400"
+  no_log: true
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_local_mutation_enabled | bool
+  notify: Restart the external-boot authority service after deployed changes
+
+- name: Install the external-boot authority environment
+  ansible.builtin.template:
+    src: provider-authority.env.j2
     dest: "{{ live_vm_host_authority_environment }}"
-    content: |
-      KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE={{ live_vm_host_authority_instance }}
-      KDIVE_EXTERNAL_BOOT_AUTHORITY_UID={{ live_vm_host_authority_uid }}
-      KDIVE_EXTERNAL_BOOT_AUTHORITY_GID={{ live_vm_host_authority_gid }}
-      KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID={{ live_vm_host_authority_client_gid }}
-      KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR=/var/lib/kdive/provider-authority/journal
-      KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock
-      KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock
     owner: root
     group: "{{ live_vm_host_authority_account }}"
     mode: "0640"
@@ -759,10 +813,9 @@
   notify: Restart the external-boot authority service after deployed changes
 
 - name: Install the external-boot authority service unit
-  ansible.builtin.copy:
-    src: "{{ live_vm_venv }}/deploy/systemd/system/kdive-external-boot-authority.service"
+  ansible.builtin.template:
+    src: external-boot-authority.service.j2
     dest: /etc/systemd/system/kdive-external-boot-authority.service
-    remote_src: true
     owner: root
     group: root
     mode: "0644"
