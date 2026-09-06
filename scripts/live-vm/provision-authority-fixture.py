@@ -39,8 +39,7 @@ def _remove_regular(path: Path) -> None:
     path.unlink()
 
 
-def _remove_baseline(system_id: UUID) -> None:
-    path = Path(baseline_dir(system_id))
+def _remove_directory(path: Path) -> None:
     try:
         opened = path.lstat()
     except FileNotFoundError:
@@ -48,6 +47,26 @@ def _remove_baseline(system_id: UUID) -> None:
     if not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(opened.st_mode):
         raise ValueError("refusing unexpected fixture baseline")
     shutil.rmtree(path)
+
+
+def _remove_baseline(system_id: UUID) -> None:
+    _remove_directory(Path(baseline_dir(system_id)))
+
+
+def _refuse_existing_authority_domain(system_id: UUID) -> None:
+    conn = libvirt.open(_AUTHORITY_URI)
+    if conn is None:
+        raise RuntimeError("authority fixture daemon connection returned no handle")
+    try:
+        try:
+            conn.lookupByName(domain_name_for(system_id))
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return
+            raise
+        raise ValueError("refusing to replace an existing private authority fixture domain")
+    finally:
+        conn.close()
 
 
 def _undefine_worker_domain(system_id: UUID) -> None:
@@ -75,12 +94,12 @@ def main() -> None:
     profile = ProvisioningProfile.model_validate(json.load(sys.stdin))
     if profile.provider.local_libvirt_section is None:
         raise ValueError("authority fixture requires a local-libvirt profile")
+    _refuse_existing_authority_domain(system_id)
     _undefine_worker_domain(system_id)
     _remove_regular(Path("/var/lib/kdive/rootfs") / overlay_name(system_id))
     _remove_regular(Path("/var/lib/kdive/console") / f"{system_id}.log")
     legacy_baseline = Path("/var/lib/kdive/rootfs") / f"{system_id}-baseline"
-    if legacy_baseline.exists():
-        shutil.rmtree(legacy_baseline)
+    _remove_directory(legacy_baseline)
     _remove_regular(Path(overlay_path(system_id)))
     _remove_regular(console_log_path(system_id))
     _remove_baseline(system_id)
