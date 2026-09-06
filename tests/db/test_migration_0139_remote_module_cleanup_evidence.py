@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
+
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
 from tests.db.external_boot_authority_support import (
@@ -24,12 +29,16 @@ _NONCE = "0" * 32
 
 
 def _read(
-    provider: psycopg.Connection, case: _AuthorityCase, allocated: _Allocated
+    provider: psycopg.Connection,
+    case: _AuthorityCase,
+    allocated: _Allocated,
+    *,
+    authority_instance: str | None = None,
 ) -> tuple | None:
     return provider.execute(
         "SELECT cleanup_state, recovery_reference "
         "FROM read_authorized_remote_module_cleanup_evidence("
-        "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             case.worker_id,
             allocated.authority_id,
@@ -40,6 +49,10 @@ def _read(
             case.activation_id,
             case.run_id,
             _PLAN,
+            case.purpose,
+            case.operation,
+            "remote-libvirt",
+            authority_instance or case.authority_instance,
             case.operation_identity,
             allocated.operation_digest,
             _NONCE,
@@ -47,11 +60,38 @@ def _read(
     ).fetchone()
 
 
+def _identity(document: Mapping[str, object]) -> str:
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    return (
+        "sha256:"
+        + hashlib.sha256(str(document["protocol"]).encode() + b"\0" + canonical).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("operation", ["recover", "teardown"])
 def test_cleanup_evidence_follows_restored_open_then_discharged_order(
-    migrated_url: str, authority_role_dsns: _RoleDsns
+    migrated_url: str, authority_role_dsns: _RoleDsns, operation: str
 ) -> None:
     with psycopg.connect(migrated_url) as admin:
-        case = _seed_case(admin, purpose="teardown", worker_suffix="z")
+        case = _seed_case(
+            admin, purpose=operation, worker_suffix="z", provider_kind="remote-libvirt"
+        )
+        if operation == "recover":
+            admin.execute(
+                "UPDATE external_boot_activations SET state='active', "
+                "terminal_evidence=%s, activation_readiness_deadline=now() WHERE id=%s",
+                (
+                    Jsonb(
+                        {
+                            "schema": "external-boot-terminal-evidence-v1",
+                            "activation_id": str(case.activation_id),
+                            "system_id": str(case.system_id),
+                            "outcome": "active",
+                        }
+                    ),
+                    case.activation_id,
+                ),
+            )
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         allocated = _allocate(worker, case)
     with psycopg.connect(authority_role_dsns("kdive_provider_authority")) as provider:
@@ -100,6 +140,12 @@ def test_cleanup_evidence_follows_restored_open_then_discharged_order(
         "plan_identity": _PLAN,
         "operation_nonce": _NONCE,
     }
+    terminal_operation = {
+        "protocol": "remote-module-operation-v1",
+        "system_id": str(case.system_id),
+        "run_id": str(case.run_id),
+        "operation_nonce": _NONCE,
+    }
     with psycopg.connect(migrated_url) as admin:
         admin.execute(
             "INSERT INTO remote_module_attempt_obligations "
@@ -112,17 +158,10 @@ def test_cleanup_evidence_follows_restored_open_then_discharged_order(
                 case.system_id,
                 case.run_id,
                 _NONCE,
-                Jsonb(
-                    {
-                        "protocol": "remote-module-operation-v1",
-                        "system_id": str(case.system_id),
-                        "run_id": str(case.run_id),
-                        "operation_nonce": _NONCE,
-                    }
-                ),
-                _DIGEST,
+                Jsonb(terminal_operation),
+                _identity(terminal_operation),
                 Jsonb(result),
-                _DIGEST,
+                _identity(result),
                 _DIGEST,
                 _DIGEST,
                 Jsonb(recovery),
@@ -130,7 +169,19 @@ def test_cleanup_evidence_follows_restored_open_then_discharged_order(
         )
     with psycopg.connect(authority_role_dsns("kdive_provider_authority")) as provider:
         assert _read(provider, case, allocated) == ("open", recovery)
+        assert _read(provider, case, allocated, authority_instance="foreign") is None
     with psycopg.connect(migrated_url) as admin:
+        admin.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s",
+            (case.job_id,),
+        )
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority")) as provider:
+        assert _read(provider, case, allocated) is None
+    with psycopg.connect(migrated_url) as admin:
+        admin.execute(
+            "UPDATE jobs SET lease_expires_at=now()+interval '5 minutes' WHERE id=%s",
+            (case.job_id,),
+        )
         admin.execute(
             "UPDATE remote_module_attempt_obligations SET reap_discharged_at=now() "
             "WHERE system_id=%s AND run_id=%s AND operation_nonce=%s",

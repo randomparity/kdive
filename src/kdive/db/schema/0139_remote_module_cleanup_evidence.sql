@@ -10,6 +10,10 @@ CREATE FUNCTION public.read_authorized_remote_module_cleanup_evidence(
     p_activation_id uuid,
     p_run_id uuid,
     p_plan_identity text,
+    p_purpose text,
+    p_operation text,
+    p_provider_kind text,
+    p_authority_instance text,
     p_operation_identity text,
     p_operation_digest text,
     p_operation_nonce text
@@ -33,6 +37,11 @@ BEGIN
         AND p_ack_digest ~ '^sha256:[0-9a-f]{64}$'
         AND p_system_id IS NOT NULL AND p_activation_id IS NOT NULL AND p_run_id IS NOT NULL
         AND p_plan_identity ~ '^sha256:[0-9a-f]{64}$'
+        AND p_purpose IN ('activate', 'recover', 'teardown', 'resolve-conflict')
+        AND p_operation IN ('recover', 'teardown', 'resolve-conflict')
+        AND p_provider_kind = 'remote-libvirt'
+        AND p_authority_instance IS NOT NULL
+        AND octet_length(p_authority_instance) BETWEEN 1 AND 255
         AND p_operation_identity IS NOT NULL AND octet_length(p_operation_identity) BETWEEN 1 AND 255
         AND p_operation_digest ~ '^sha256:[0-9a-f]{64}$'
         AND p_operation_nonce ~ '^[0-9a-f]{32}$') IS NOT TRUE THEN
@@ -46,6 +55,8 @@ BEGIN
       ON worker.incarnation = authority.worker_incarnation
     JOIN public.external_boot_authority_acknowledgements AS acknowledgement
       ON acknowledgement.authority_id = authority.id
+    JOIN public.jobs AS job
+      ON job.id = authority.job_id AND job.attempt = authority.job_attempt
     WHERE authority.id = p_authority_id
       AND authority.generation = p_generation
       AND authority.worker_incarnation = p_peer_incarnation
@@ -53,13 +64,24 @@ BEGIN
       AND authority.activation_id = p_activation_id
       AND authority.run_id = p_run_id
       AND authority.plan_identity = p_plan_identity
-      AND authority.operation = 'teardown'
+      AND authority.purpose = p_purpose
+      AND authority.operation = p_operation
+      AND authority.provider_kind = p_provider_kind
+      AND authority.authority_instance = p_authority_instance
       AND authority.operation_identity = p_operation_identity
       AND authority.operation_digest = p_operation_digest
       AND authority.state = 'current'
       AND worker.state = 'active' AND worker.fence_protocol = 4
+      AND job.state = 'running' AND job.worker_id = p_peer_incarnation
+      AND job.lease_expires_at > pg_catalog.clock_timestamp()
       AND acknowledgement.journal_sequence = p_ack_sequence
       AND acknowledgement.journal_digest = p_ack_digest
+      AND NOT EXISTS (
+          SELECT 1 FROM public.external_boot_authorities AS successor
+          WHERE successor.system_id = authority.system_id
+            AND successor.generation > authority.generation
+            AND successor.state IN ('allocating', 'current')
+      )
     FOR SHARE OF authority, worker, acknowledgement;
     IF NOT FOUND THEN
         RETURN;
@@ -90,7 +112,21 @@ BEGIN
         AND v_obligation.baseline_operation_identity =
             v_obligation.recovery_reference->>'operation_identity'
         AND v_obligation.baseline_result_identity =
-            v_obligation.recovery_reference->>'result_identity') IS NOT TRUE THEN
+            v_obligation.recovery_reference->>'result_identity'
+        AND v_obligation.terminal_operation_identity = 'sha256:' || encode(sha256(
+            convert_to(v_obligation.terminal_operation->>'protocol', 'UTF8') ||
+            decode('00', 'hex') || convert_to(
+                public.canonical_external_boot_authority_json(v_obligation.terminal_operation),
+                'UTF8'
+            )
+        ), 'hex')
+        AND v_obligation.terminal_result_identity = 'sha256:' || encode(sha256(
+            convert_to(v_obligation.terminal_result->>'protocol', 'UTF8') ||
+            decode('00', 'hex') || convert_to(
+                public.canonical_external_boot_authority_json(v_obligation.terminal_result),
+                'UTF8'
+            )
+        ), 'hex')) IS NOT TRUE THEN
         RETURN;
     END IF;
 
@@ -104,8 +140,10 @@ END
 $$;
 
 REVOKE ALL ON FUNCTION public.read_authorized_remote_module_cleanup_evidence(
-    text, uuid, bigint, bigint, text, uuid, uuid, uuid, text, text, text, text
+    text, uuid, bigint, bigint, text, uuid, uuid, uuid, text, text, text, text, text,
+    text, text, text
 ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.read_authorized_remote_module_cleanup_evidence(
-    text, uuid, bigint, bigint, text, uuid, uuid, uuid, text, text, text, text
+    text, uuid, bigint, bigint, text, uuid, uuid, uuid, text, text, text, text, text,
+    text, text, text
 ) TO kdive_provider_authority;
