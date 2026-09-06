@@ -9,6 +9,7 @@ import pwd
 import re
 import stat
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,39 @@ _AUTHORITY_ARTIFACT_ROOTS = (
     Path("/var/lib/kdive/provider-authority/console"),
 )
 _IDENTITY_PYTHON = "/usr/bin/python3"
+_FAULT_BARRIER_MAX_BYTES = 1024
+_FAULT_BARRIER_SOCKET = Path("/run/kdive/provider-authority/proof-control/control.sock")
+
+_FAULT_BARRIER_CLIENT = """
+import json
+import socket
+import sys
+
+path = sys.argv[1]
+request = sys.stdin.buffer.read()
+if not request or len(request) > 1024:
+    raise SystemExit("fault barrier request is unsafe")
+connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    connection.settimeout(10)
+    connection.connect(path)
+    connection.sendall(len(request).to_bytes(4, "big") + request)
+    header = connection.recv(4)
+    if len(header) != 4:
+        raise SystemExit("fault barrier response is incomplete")
+    size = int.from_bytes(header, "big")
+    if size > 1024:
+        raise SystemExit("fault barrier response is oversized")
+    response = bytearray()
+    while len(response) < size:
+        chunk = connection.recv(size - len(response))
+        if not chunk:
+            raise SystemExit("fault barrier response is incomplete")
+        response.extend(chunk)
+finally:
+    connection.close()
+sys.stdout.buffer.write(response)
+"""
 
 _CREATE_SENTINELS = """
 import json
@@ -125,8 +159,8 @@ class NativeAuthorityConfig(BaseModel):
     def validate_barrier(cls, value: Path | None) -> Path | None:
         if value is None:
             return None
-        if not value.is_absolute():
-            raise ValueError("barrier socket must be absolute")
+        if value != _FAULT_BARRIER_SOCKET:
+            raise ValueError("barrier socket must be the fixed authority proof socket")
         return value
 
 
@@ -138,6 +172,15 @@ class NormalOperationJobs:
     run_id: str
     activate_job_id: str
     release_job_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationJob:
+    """One publicly admitted activation whose job has not yet been drained."""
+
+    investigation_id: str
+    run_id: str
+    activate_job_id: str
 
 
 def _output(*argv: str) -> str:
@@ -195,6 +238,94 @@ def run_installed_local_authority_normal_operations() -> None:
                 primary = exc
             cleanup_failures: list[Exception] = []
             investigations = [r for r in ledger.resources if r.kind == "investigation"]
+            for resource in reversed(investigations):
+                try:
+                    closed = await client.call_tool(
+                        "investigations.close", investigation_id=resource.identity
+                    )
+                    assert not isinstance(closed, list)
+                    assert closed.status not in {"error", "failed"}
+                except Exception as exc:
+                    cleanup_failures.append(exc)
+            if primary is not None:
+                cleanup_failures.insert(0, primary)
+            if len(cleanup_failures) == 1:
+                raise cleanup_failures[0]
+            if cleanup_failures:
+                raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
+
+    asyncio.run(run())
+
+
+def run_installed_local_authority_restart_recovery() -> None:
+    """Prove a real authority restart after provider effect, before its journal return record."""
+    config = load_config()
+    if config is None:
+        pytest.skip("installed local-authority carrier is not configured")
+    require_fault_barrier(config)
+
+    installed = _output("sudo", "-n", "cat", "/opt/kdive-provider-authority/revision")
+    assert installed == config.installed_revision, (
+        f"installed authority revision {installed!r} does not match configured coherent revision"
+    )
+    assert _output("systemctl", "is-active", config.authority_service) == "active"
+    running_workers = _output(
+        "systemctl",
+        "list-units",
+        "kdive-live-worker@*.service",
+        "--state=running",
+        "--no-legend",
+    )
+
+    issuer = require_issuer()
+    base_url = require_stack()
+    require_deployed_revision(config, base_url, running_workers)
+    db_url = os.environ.get("KDIVE_DATABASE_URL")
+    assert db_url, "native authority carrier requires KDIVE_DATABASE_URL"
+    token = mint_role_token(
+        issuer,
+        project=config.project,
+        agent_session=config.ownership_prefix,
+        role="admin",
+    )
+    ledger = ResourceLedger(config.ownership_prefix)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config)
+        require_authority_artifact_confinement(config, running_workers)
+        client = LiveStackClient.over_http(base_url, token)
+        async with client:
+            primary: Exception | None = None
+            try:
+                activation = await start_external_boot_activation(
+                    client,
+                    config,
+                    ledger,
+                    before_activate=lambda: arm_fault_barrier(config, "activate", "after-provider"),
+                )
+                wait_for_fault_barrier(config)
+                restart_authority_after_fault(config)
+                await drain_job(client, "activate-restart-recovery", activation.activate_job_id)
+                release = ok(
+                    await scalar(client, "runs.release_external_boot", run_id=activation.run_id),
+                    "release",
+                )
+                await drain_job(client, "release", release.object_id)
+                await assert_root_release_completion(
+                    db_url,
+                    NormalOperationJobs(
+                        investigation_id=activation.investigation_id,
+                        run_id=activation.run_id,
+                        activate_job_id=activation.activate_job_id,
+                        release_job_id=release.object_id,
+                    ),
+                )
+            except Exception as exc:  # preserve the native failure while still attempting cleanup
+                primary = exc
+            cleanup_failures: list[Exception] = []
+            investigations = [
+                resource for resource in ledger.resources if resource.kind == "investigation"
+            ]
             for resource in reversed(investigations):
                 try:
                     closed = await client.call_tool(
@@ -414,9 +545,92 @@ def require_fault_barrier(config: NativeAuthorityConfig) -> Path:
         raise RuntimeError(
             "installed authority exposes no deterministic provider-effect barrier"
         ) from None
-    if not stat.S_ISSOCK(metadata.st_mode):
+    authority_uid = pwd.getpwnam(_AUTHORITY_ACCOUNT).pw_uid
+    if (
+        not stat.S_ISSOCK(metadata.st_mode)
+        or metadata.st_uid != authority_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
         raise RuntimeError("installed authority provider-effect barrier is not a socket")
     return config.barrier_socket
+
+
+def fault_barrier_request(config: NativeAuthorityConfig, request: dict[str, str]) -> dict[str, str]:
+    """Send one bounded closed proof request through the root-only installed socket."""
+    socket_path = require_fault_barrier(config)
+    payload = json.dumps(request, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if not payload or len(payload) > _FAULT_BARRIER_MAX_BYTES:
+        raise ValueError("fault barrier request exceeds its closed byte limit")
+    result = subprocess.run(
+        ["sudo", "-n", _IDENTITY_PYTHON, "-c", _FAULT_BARRIER_CLIENT, str(socket_path)],
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode(errors="replace").strip()[-1000:]
+        raise RuntimeError(f"installed authority fault barrier request failed: {detail}")
+    if len(result.stdout) > _FAULT_BARRIER_MAX_BYTES:
+        raise AssertionError("installed authority fault barrier response is oversized")
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise AssertionError("installed authority fault barrier response is malformed") from None
+    if not isinstance(response, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in response.items()
+    ):
+        raise AssertionError("installed authority fault barrier response is malformed")
+    return response
+
+
+def arm_fault_barrier(
+    config: NativeAuthorityConfig,
+    operation: Literal["activate", "recover", "cleanup"],
+    checkpoint: Literal["before-provider", "after-provider"],
+) -> None:
+    """Arm one exact configured-System provider checkpoint or fail loud."""
+    response = fault_barrier_request(
+        config,
+        {
+            "action": "arm",
+            "system_id": str(config.system_id),
+            "operation": operation,
+            "checkpoint": checkpoint,
+        },
+    )
+    if response != {"state": "armed"}:
+        raise RuntimeError(f"installed authority fault barrier refused arm: {response!r}")
+
+
+def release_fault_barrier(config: NativeAuthorityConfig) -> None:
+    """Release the sole configured-System fault checkpoint or fail loud."""
+    response = fault_barrier_request(config, {"action": "release"})
+    if response != {"state": "released"}:
+        raise RuntimeError(f"installed authority fault barrier refused release: {response!r}")
+
+
+def wait_for_fault_barrier(config: NativeAuthorityConfig, *, timeout_seconds: float = 60.0) -> None:
+    """Wait for the configured checkpoint by its observable state, never elapsed-time luck."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        response = fault_barrier_request(config, {"action": "status"})
+        if response == {"state": "reached"}:
+            return
+        if response != {"state": "armed"}:
+            raise RuntimeError(f"installed authority fault barrier lost its arm: {response!r}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "installed authority provider effect did not reach its armed barrier"
+            )
+        time.sleep(min(0.1, remaining))
+
+
+def restart_authority_after_fault(config: NativeAuthorityConfig) -> None:
+    """Restart only the configured authority service after a reached native checkpoint."""
+    _output("sudo", "-n", "systemctl", "restart", config.authority_service)
+    if _output("systemctl", "is-active", config.authority_service) != "active":
+        raise AssertionError("authority service did not return active after fault restart")
 
 
 async def assert_root_release_completion(db_url: str, operations: NormalOperationJobs) -> None:
@@ -552,6 +766,29 @@ async def drive_normal_operations(
     public release admission; its one root release job owns the derived recover and cleanup
     phases, whose durable finalizer evidence the native carrier verifies after polling.
     """
+    activation = await start_external_boot_activation(client, config, ledger)
+    await drain_job(client, "activate", activation.activate_job_id)
+    release = ok(
+        await scalar(client, "runs.release_external_boot", run_id=activation.run_id),
+        "release",
+    )
+    await drain_job(client, "release", release.object_id)
+    return NormalOperationJobs(
+        investigation_id=activation.investigation_id,
+        run_id=activation.run_id,
+        activate_job_id=activation.activate_job_id,
+        release_job_id=release.object_id,
+    )
+
+
+async def start_external_boot_activation(
+    client: LiveStackClient,
+    config: NativeAuthorityConfig,
+    ledger: ResourceLedger,
+    *,
+    before_activate: Callable[[], None] | None = None,
+) -> ActivationJob:
+    """Create, install, and publicly admit one activation without polling its job."""
     opened = ok(
         await scalar(
             client,
@@ -579,16 +816,11 @@ async def drive_normal_operations(
     await build_and_upload_kernel(client, run_id=run_id)
     install = ok(await scalar(client, "runs.install", run_id=run_id), "install")
     await drain_job(client, "install", install.object_id)
+    if before_activate is not None:
+        before_activate()
     activate = ok(await scalar(client, "runs.boot", run_id=run_id), "activate")
-    await drain_job(client, "activate", activate.object_id)
-    release = ok(
-        await scalar(client, "runs.release_external_boot", run_id=run_id),
-        "release",
-    )
-    await drain_job(client, "release", release.object_id)
-    return NormalOperationJobs(
+    return ActivationJob(
         investigation_id=investigation_id,
         run_id=run_id,
         activate_job_id=activate.object_id,
-        release_job_id=release.object_id,
     )

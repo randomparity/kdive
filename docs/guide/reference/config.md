@@ -68,6 +68,12 @@
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY` | — | — | no | Opaque durable identity of the authority-owned recovery store. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_UID` | — | — | yes | Unix uid that owns and runs the external-boot authority host boundary. |
 
+## external-boot-authority-proof
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_EXTERNAL_BOOT_AUTHORITY_PROOF_SOCKET` | — | — | no | Optional fixed root-only AF_UNIX socket for the native authority fault proof. |
+
 ## fault-inject
 
 | Variable | Processes | Default | Required | Value |

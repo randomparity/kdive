@@ -358,6 +358,9 @@
       d /run/kdive/provider-authority 0710 {{ live_vm_host_authority_account }} {{ live_vm_host_authority_client_group }} -
       d /run/kdive/provider-authority/request 2750 {{ live_vm_host_authority_account }} {{ live_vm_host_authority_client_group }} -
       d /run/kdive/provider-authority/libvirt 0700 {{ live_vm_host_authority_account }} {{ live_vm_host_authority_account }} -
+      {% if live_vm_host_authority_fault_proof_enabled | bool %}
+      d /run/kdive/provider-authority/proof-control 0700 {{ live_vm_host_authority_account }} {{ live_vm_host_authority_account }} -
+      {% endif %}
   register: live_vm_host_authority_tmpfiles_policy
   when: live_vm_host_authority_enabled | bool
   notify:

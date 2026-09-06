@@ -277,6 +277,7 @@ def test_authority_endpoint_is_a_distinct_session() -> None:
     defaults = _yaml(DEFAULTS)
     assert defaults["live_vm_host_authority_enabled"] is False
     assert defaults["live_vm_host_authority_local_mutation_enabled"] is False
+    assert defaults["live_vm_host_authority_fault_proof_enabled"] is False
     assert defaults["live_vm_host_authority_account"] == "kdive-provider-authority"
     assert defaults["live_vm_host_authority_client_group"] == ("kdive-provider-authority-client")
     assert defaults["live_vm_host_authority_runtime_root"] == ("/run/kdive/provider-authority")

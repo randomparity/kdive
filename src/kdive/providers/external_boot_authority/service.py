@@ -55,6 +55,17 @@ class AuthorityMutationAdapter(Protocol):
     ) -> AuthorityObservationV1: ...
 
 
+class AuthorityProofCheckpoint(Protocol):
+    """Optional native-only pause boundary around one already-admitted provider commit."""
+
+    async def checkpoint(
+        self,
+        system_id: UUID,
+        operation: AuthorityOperation,
+        checkpoint: Literal["before-provider", "after-provider"],
+    ) -> None: ...
+
+
 @runtime_checkable
 class AuthorityMutationFinalizer(Protocol):
     async def finalize(
@@ -338,12 +349,14 @@ class ExternalBootAuthorityService:
         adapter: AuthorityMutationAdapter,
         metrics: AuthorityServiceMetrics | None = None,
         recovery_orphans: AuthorityRecoveryOrphanResolver | None = None,
+        proof_checkpoint: AuthorityProofCheckpoint | None = None,
     ) -> None:
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._recovery_orphans = recovery_orphans
+        self._proof_checkpoint = proof_checkpoint
         self._lanes: dict[UUID, _Lane] = {}
         self._completion_tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
@@ -1463,6 +1476,10 @@ class ExternalBootAuthorityService:
                     ):
                         raise AuthorityServiceError("superseded")
                 try:
+                    if self._proof_checkpoint is not None and adopted_release_phase is None:
+                        await self._proof_checkpoint.checkpoint(
+                            request.system_id, request.operation, "before-provider"
+                        )
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
                             raise AuthorityServiceError("provider_conflict")
@@ -1474,6 +1491,10 @@ class ExternalBootAuthorityService:
                         )
                     elif adopted_release_phase is None:
                         await self._adapter.commit(request, context)
+                    if self._proof_checkpoint is not None and adopted_release_phase is None:
+                        await self._proof_checkpoint.checkpoint(
+                            request.system_id, request.operation, "after-provider"
+                        )
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.

@@ -25,13 +25,17 @@ from tests.live_vm.installed_local_authority_support import (
     NormalOperationJobs,
     OwnedResource,
     ResourceLedger,
+    arm_fault_barrier,
     assert_root_release_completion,
     drive_normal_operations,
     load_config,
     provision_authority_fixture,
+    release_fault_barrier,
     require_authority_artifact_confinement,
     require_deployed_revision,
     require_fault_barrier,
+    restart_authority_after_fault,
+    wait_for_fault_barrier,
 )
 
 
@@ -45,7 +49,7 @@ def _document(tmp_path: Path) -> Path:
                 "project": "kdive-2151-project",
                 "ownership_prefix": "kdive-2151-" + "1" * 12 + "-" + "2" * 8,
                 "authority_service": "kdive-external-boot-authority.service",
-                "barrier_socket": "/run/kdive/provider-authority/test-barrier.sock",
+                "barrier_socket": "/run/kdive/provider-authority/proof-control/control.sock",
             }
         ),
         encoding="utf-8",
@@ -92,17 +96,95 @@ def test_ledger_rejects_unowned_and_cleans_exact_reverse_order() -> None:
     assert removed == [volume, domain]
 
 
-def test_missing_fault_barrier_fails_loud(tmp_path: Path) -> None:
+def test_missing_fault_barrier_fails_loud() -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
         system_id=uuid4(),
         project="kdive-2151-project",
         ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
         authority_service="kdive-external-boot-authority.service",
-        barrier_socket=tmp_path / "absent.sock",
+        barrier_socket=Path("/run/kdive/provider-authority/proof-control/control.sock"),
     )
     with pytest.raises(RuntimeError, match="no deterministic provider-effect barrier"):
         require_fault_barrier(config)
+
+
+def test_fault_barrier_client_arms_and_releases_only_the_configured_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    socket_path = tmp_path / "control.sock"
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+        barrier_socket=Path("/run/kdive/provider-authority/proof-control/control.sock"),
+    )
+    requests: list[dict[str, str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        requests.append(json.loads(cast(bytes, kwargs["input"])))
+        response = (
+            b'{"state":"armed"}' if requests[-1]["action"] == "arm" else b'{"state":"released"}'
+        )
+        return subprocess.CompletedProcess(argv, 0, response, b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(carrier, "require_fault_barrier", lambda _config: socket_path)
+    arm_fault_barrier(config, "activate", "after-provider")
+    release_fault_barrier(config)
+
+    assert requests == [
+        {
+            "action": "arm",
+            "system_id": str(config.system_id),
+            "operation": "activate",
+            "checkpoint": "after-provider",
+        },
+        {"action": "release"},
+    ]
+
+
+def test_fault_barrier_config_refuses_caller_selected_destination(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="fixed authority proof socket"):
+        NativeAuthorityConfig(
+            installed_revision="1" * 40,
+            system_id=uuid4(),
+            project="kdive-2151-project",
+            ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+            authority_service="kdive-external-boot-authority.service",
+            barrier_socket=tmp_path / "caller-selected.sock",
+        )
+
+
+def test_fault_barrier_waits_for_reached_state_then_restarts_only_configured_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    responses = iter(({"state": "armed"}, {"state": "reached"}))
+    commands: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(carrier, "fault_barrier_request", lambda *_args: next(responses))
+    monkeypatch.setattr(carrier.time, "sleep", lambda _seconds: None)
+    wait_for_fault_barrier(config)
+
+    def output(*argv: str) -> str:
+        commands.append(argv)
+        return "active" if argv[:2] == ("systemctl", "is-active") else ""
+
+    monkeypatch.setattr(carrier, "_output", output)
+    restart_authority_after_fault(config)
+    assert commands == [
+        ("sudo", "-n", "systemctl", "restart", config.authority_service),
+        ("systemctl", "is-active", config.authority_service),
+    ]
 
 
 def test_normal_driver_uses_public_tools_and_drains_jobs(
