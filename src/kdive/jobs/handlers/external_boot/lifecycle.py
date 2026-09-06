@@ -567,6 +567,7 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
                 "attempt_id": str(attempt_id),
                 "recovery_basis": "pre_recovery",
                 "deadline": deadline.isoformat().replace("+00:00", "Z"),
+                "observed_composite_state": expected,
             },
         )
 

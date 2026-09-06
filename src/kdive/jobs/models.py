@@ -155,6 +155,7 @@ class _RecoveryAttemptResult(_ResultBase):
     attempt_id: UUID
     recovery_basis: Literal["recovery_point", "pre_recovery"]
     deadline: datetime
+    observed_composite_state: _Digest | None = None
 
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
