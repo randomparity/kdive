@@ -58,6 +58,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     prepare_attempt_volumes,
     recovery_attempt_volumes,
     validate_attempt_volumes,
+    validate_scratch_volume,
 )
 from kdive.providers.remote_libvirt.reaping.module_volumes import (
     ModuleVolumeReaperConn,
@@ -227,11 +228,16 @@ class RemoteModuleOperationRuntime:
                     present.append(False)
             if not any(present):
                 return None
-            if not all(present):
+            if present == [True, False]:
                 raise CategorizedError(
                     "remote module attempt volumes are incomplete",
                     category=ErrorCategory.CONFLICT,
                 )
+            if present == [False, True]:
+                async_evidence = None
+                # Scratch-only state is attributable only through exact write-once DB evidence.
+                # The async read happens below after leaving this provider executor callback.
+                return cast(ModuleAttemptInspection, async_evidence)
             volumes = validate_attempt_volumes(configured.storage, volume_request)
             raw = appliance.read_scratch_result(volumes.scratch)
             if raw is None:
@@ -254,7 +260,45 @@ class RemoteModuleOperationRuntime:
                 )
             return ModuleAttemptInspection(volumes, result)
 
-        return await executor.run(inspect)
+        inspected = await executor.run(inspect)
+        if inspected is not None:
+            return inspected
+        # Both-absent returned above before this point. Distinguish it from the scratch-only
+        # sentinel using an exact volume-name lookup without trusting arbitrary metadata.
+        pool = configured.storage.storagePoolLookupByName(configured.pool_name)
+        scratch_name = render_module_volume_name(
+            operation.system_id, operation.run_id, operation.operation_nonce, "scratch.ext4"
+        )
+        try:
+            pool.storageVolLookupByName(scratch_name)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return None
+            raise
+        async with self.pool.connection() as conn:
+            evidence = await self.repository.read_terminal_evidence(conn, attempt)
+        if evidence is None:
+            raise CategorizedError(
+                "remote module scratch-only attempt lacks terminal evidence",
+                category=ErrorCategory.CONFLICT,
+            )
+        try:
+            recovery = RemoteModuleRecoveryRefV1.model_validate(evidence.recovery_reference)
+        except ValueError:
+            raise CategorizedError(
+                "remote module terminal recovery evidence is invalid",
+                category=ErrorCategory.CONFLICT,
+            ) from None
+        terminal_operation, result = await self._evidence(recovery)
+        if terminal_operation != operation or result.phase != "installed":
+            raise CategorizedError(
+                "remote module terminal evidence is not the installed current attempt",
+                category=ErrorCategory.CONFLICT,
+            )
+        await executor.run(
+            lambda: validate_scratch_volume(configured.storage, self._volume_request(operation))
+        )
+        return ModuleAttemptInspection(None, result, recovery)
 
     @staticmethod
     def _attempt_for_operation(operation: RemoteModuleOperationV1) -> ModuleAttempt:
@@ -440,7 +484,9 @@ class RemoteModuleOperationRuntime:
             lambda: teardown_remote_module_appliance(configured.appliance, request)
         )
 
-    async def _open_reap_evidence(self, recovery: RemoteModuleRecoveryRefV1) -> None:
+    async def _record_terminal_evidence(
+        self, recovery: RemoteModuleRecoveryRefV1, *, open_reap: bool
+    ) -> None:
         operation = await self.reopen_operation(recovery)
         result = await self.reopen_result(recovery)
         if recovery.installed_entry_count is None or recovery.installed_content_bytes is None:
@@ -461,7 +507,22 @@ class RemoteModuleOperationRuntime:
         )
         async with self.pool.connection() as conn, conn.transaction():
             await self.repository.record_terminal_evidence(conn, self._attempt(recovery), evidence)
-            await self.repository.open_reap_obligation(conn, self._attempt(recovery))
+            if open_reap:
+                await self.repository.open_reap_obligation(conn, self._attempt(recovery))
+
+    async def record_installed(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float | None = None,
+    ) -> None:
+        del executor
+        self._check_deadline(deadline)
+        await self._record_terminal_evidence(recovery, open_reap=False)
+        self._check_deadline(deadline)
+
+    async def _open_reap_evidence(self, recovery: RemoteModuleRecoveryRefV1) -> None:
+        await self._record_terminal_evidence(recovery, open_reap=True)
 
     async def _delete(
         self,
