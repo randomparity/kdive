@@ -342,12 +342,14 @@ class RemoteLibvirtModuleVolumeReaper:
                     clock=self._clock,
                 )
 
+            configs = self._connections.configs()
             results = map_over_fleet(
                 self._connections,
                 reap_host,
                 operation="module-volume reaping",
+                configs=configs,
             )
-            if self._connections.configs() and not results:
+            if configs and not results:
                 raise _infra("no remote module-volume host was reachable")
             return sum(results)
 

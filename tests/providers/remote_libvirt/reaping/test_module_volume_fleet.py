@@ -191,6 +191,30 @@ def test_no_reachable_host_fails_for_worker_retry_without_reading_retention() ->
     assert not called
 
 
+def test_fleet_configuration_is_snapshotted_for_unreachable_outcome() -> None:
+    class ChangingFleet(Fleet):
+        def __init__(self) -> None:
+            super().__init__([(_config("down"), RuntimeError("down"))])
+            self.config_reads = 0
+
+        def configs(self) -> list[RemoteLibvirtConfig]:
+            self.config_reads += 1
+            return super().configs() if self.config_reads == 1 else []
+
+    fleet = ChangingFleet()
+
+    async def retained() -> list[ModuleVolumeKey]:
+        pytest.fail("retention must not run for an unreachable fleet")
+
+    async def scenario() -> None:
+        with pytest.raises(CategorizedError) as caught:
+            await _reaper(fleet).reap_module_volumes(retained)
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+    asyncio.run(scenario())
+    assert fleet.config_reads == 1
+
+
 def test_repeated_cancellation_waits_for_callback_and_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
