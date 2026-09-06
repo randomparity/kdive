@@ -1,5 +1,3 @@
-"""Closed provider-private documents for the ADR-0585 appliance protocol."""
-
 from __future__ import annotations
 
 import importlib.util
@@ -7,15 +5,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[5]
-
 APPLIANCE = ROOT / "deploy" / "remote_module_appliance"
-
 SYSTEM_ID = "00000000-0000-4000-8000-000000000001"
-
 RUN_ID = "00000000-0000-4000-8000-000000000002"
-
 DIGESTS = {letter: "sha256:" + letter * 64 for letter in "abcdef"}
-
 NONCE = "b" * 32
 
 

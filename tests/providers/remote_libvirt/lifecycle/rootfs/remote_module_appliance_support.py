@@ -22,11 +22,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 UUID1 = "12345678-1234-4123-8123-123456789abc"
-
 UUID2 = "22345678-1234-4123-8123-123456789abc"
-
 DIGEST = "sha256:" + "a" * 64
-
 MANIFEST = "sha256:" + "b" * 64
 
 

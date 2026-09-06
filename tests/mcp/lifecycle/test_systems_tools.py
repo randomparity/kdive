@@ -21,6 +21,10 @@ from kdive.components.references import (
     ComponentRef,
     LocalComponentRef,
 )
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
@@ -1385,6 +1389,104 @@ def test_teardown_handler_destroys_and_sets_torn_down(migrated_url: str) -> None
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 row = await cur.fetchone()
         assert row is not None and row["state"] == "torn_down"
+
+    asyncio.run(_run())
+
+
+async def _open_teardown_obligation(
+    pool: AsyncConnectionPool, system_id: str
+) -> tuple[RemoteModuleAttemptObligationRepository, ModuleAttempt]:
+    run_id = await _seed_run(pool, system_id, RunState.CREATED)
+    attempt = ModuleAttempt(UUID(system_id), UUID(run_id), "a" * 32)
+    repository = RemoteModuleAttemptObligationRepository()
+    async with pool.connection() as conn:
+        assert await repository.open_mutation_obligation(conn, attempt) is True
+    return repository, attempt
+
+
+def test_teardown_discharges_system_module_mutation_obligations(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, alloc_id, SystemState.READY)
+            repository, attempt = await _open_teardown_obligation(pool, system_id)
+            job = await _enqueue_teardown(pool, system_id)
+            async with pool.connection() as conn:
+                await systems_handlers.teardown_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(provisioner=FakeProvisioning()),
+                    artifact_store=INERT_OBJECT_STORE,
+                )
+            async with pool.connection() as conn:
+                assert await repository.mutation_obligation_is_open(conn, attempt) is False
+
+    asyncio.run(_run())
+
+
+def test_teardown_provider_failure_leaves_mutation_obligation_open(migrated_url: str) -> None:
+    class FailingProvisioning(FakeProvisioning):
+        def teardown(self, domain_name: str) -> None:
+            super().teardown(domain_name)
+            raise CategorizedError("teardown failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, alloc_id, SystemState.READY)
+            repository, attempt = await _open_teardown_obligation(pool, system_id)
+            job = await _enqueue_teardown(pool, system_id)
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError, match="teardown failed"):
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=FailingProvisioning()),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, UUID(system_id))
+                assert system is not None and system.state is SystemState.READY
+                assert await repository.mutation_obligation_is_open(conn, attempt) is True
+
+    asyncio.run(_run())
+
+
+def test_teardown_rolls_back_terminal_state_and_obligation(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations
+
+    async def fail_after_discharge(
+        self: RemoteModuleAttemptObligationRepository, conn: object, system_id: object
+    ) -> int:
+        count = await original(self, cast(Any, conn), cast(UUID, system_id))
+        raise RuntimeError(f"rollback after {count}")
+
+    monkeypatch.setattr(
+        RemoteModuleAttemptObligationRepository,
+        "discharge_system_mutation_obligations",
+        fail_after_discharge,
+    )
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, alloc_id, SystemState.READY)
+            repository, attempt = await _open_teardown_obligation(pool, system_id)
+            job = await _enqueue_teardown(pool, system_id)
+            async with pool.connection() as conn:
+                with pytest.raises(RuntimeError, match="rollback after 1"):
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=FakeProvisioning()),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, UUID(system_id))
+                assert system is not None and system.state is SystemState.READY
+                assert await repository.mutation_obligation_is_open(conn, attempt) is True
 
     asyncio.run(_run())
 
