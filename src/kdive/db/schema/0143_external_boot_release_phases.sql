@@ -248,7 +248,20 @@ BEGIN
     IF v_activation.state = 'recovering' AND v_activation.current_attempt_id = p_attempt_id THEN
         RETURN 'applied';
     END IF;
-    IF v_activation.state <> 'active' THEN RETURN 'superseded'; END IF;
+    IF v_activation.state = 'recovering' THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.external_boot_authorities AS prior
+            JOIN public.external_boot_recovery_attempts AS attempt
+              ON attempt.activation_id = v_activation.id
+             AND attempt.attempt_id = v_activation.current_attempt_id
+             AND attempt.authority_generation = prior.generation
+            WHERE prior.activation_id = v_activation.id AND prior.job_id = p_job_id
+              AND prior.purpose = 'release' AND prior.operation = 'release'
+              AND prior.state = 'superseded' AND attempt.state = 'recovering'
+        ) THEN RETURN 'superseded'; END IF;
+    ELSIF v_activation.state <> 'active' THEN
+        RETURN 'superseded';
+    END IF;
     INSERT INTO public.external_boot_recovery_attempts (
         activation_id, attempt_number, attempt_id, authority_generation, recovery_basis,
         recovery_readiness_deadline, state
@@ -259,8 +272,39 @@ BEGIN
         p_attempt_id, p_generation, 'recovery_point', p_deadline, 'recovering'
     );
     UPDATE public.external_boot_activations SET state = 'recovering', current_attempt_id = p_attempt_id
-    WHERE id = v_activation.id AND state = 'active';
+    WHERE id = v_activation.id AND state IN ('active', 'recovering');
     RETURN 'applied';
+END $$;
+
+-- A reclaimed attempt of the same durable release job may allocate a fresh root while the prior
+-- exact recovery attempt awaits terminal-journal reconciliation by the authority service.
+DO $$
+DECLARE
+    v_definition text;
+    v_old text := E'OR (p_purpose = ''release'' AND v_activation.state NOT IN (\n' ||
+                  E'           ''active'', ''recovered'', ''abandoned'', ' ||
+                  E'''recovery_conflict'', ''recovery_failed''\n       ))';
+    v_new text := E'OR (p_purpose = ''release'' AND (v_activation.state NOT IN (\n' ||
+                  E'           ''active'', ''recovered'', ''abandoned'', ''recovery_conflict'', ' ||
+                  E'''recovery_failed'', ''recovering''\n' ||
+                  E'       ) OR (v_activation.state = ''recovering'' AND NOT EXISTS (\n' ||
+                  E'           SELECT 1 FROM public.external_boot_authorities AS prior\n' ||
+                  E'           JOIN public.external_boot_recovery_attempts AS attempt\n' ||
+                  E'             ON attempt.activation_id = v_activation.id\n' ||
+                  E'            AND attempt.attempt_id = v_activation.current_attempt_id\n' ||
+                  E'            AND attempt.authority_generation = prior.generation\n' ||
+                  E'           WHERE prior.activation_id = v_activation.id\n' ||
+                  E'             AND prior.job_id = p_job_id AND prior.purpose = ''release''\n' ||
+                  E'             AND prior.operation = ''release'' AND prior.state = ''current''\n' ||
+                  E'             AND attempt.state = ''recovering''\n       ))))';
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.allocate_external_boot_authority(bytea,uuid,integer,uuid,uuid,uuid,text,text,text,text,text)'::regprocedure
+    ) INTO v_definition;
+    IF v_definition NOT LIKE '%' || v_old || '%' THEN
+        RAISE EXCEPTION 'external boot release allocation state shape changed';
+    END IF;
+    EXECUTE replace(v_definition, v_old, v_new);
 END $$;
 
 CREATE FUNCTION public.commit_external_boot_derived_release_recovery(

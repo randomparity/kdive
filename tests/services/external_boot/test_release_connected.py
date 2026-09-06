@@ -140,13 +140,15 @@ async def _retire_seed_authority(conn: AsyncConnection, case: Any) -> None:
     )
 
 
-@pytest.mark.parametrize("interrupt_after", [None, "recover", "cleanup", "cancel-cleanup"])
+@pytest.mark.parametrize(
+    "interrupt_after", [None, "recover", "cleanup", "cancel-recover", "cancel-cleanup"]
+)
 def test_public_active_release_claims_and_completes_through_worker(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    interrupt_after: Literal["recover", "cleanup", "cancel-cleanup"] | None,
+    interrupt_after: Literal["recover", "cleanup", "cancel-recover", "cancel-cleanup"] | None,
 ) -> None:
     async def run() -> None:
         vehicle = build_vehicle()

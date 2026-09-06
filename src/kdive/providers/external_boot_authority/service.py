@@ -1143,7 +1143,7 @@ class ExternalBootAuthorityService:
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
                     predecessor_receipt_identity: str | None = None
-                    adopted_cleanup: AuthorityObservationV1 | None = None
+                    adopted_release_phase: AuthorityObservationV1 | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1183,45 +1183,50 @@ class ExternalBootAuthorityService:
                             )
                             if not self._operation_matches(predecessor_record, predecessor):
                                 raise AuthorityServiceError("journal_conflict")
-                    if (
-                        request.purpose == "release"
-                        and request.operation is AuthorityOperation.CLEANUP
-                    ):
-                        prior_cleanup = next(
+                    if request.purpose == "release" and request.operation in {
+                        AuthorityOperation.RECOVER,
+                        AuthorityOperation.CLEANUP,
+                    }:
+                        prior_release_phase = next(
                             (
                                 record
                                 for record in reversed(records)
                                 if record.phase is JournalPhase.TERMINAL
-                                and record.operation == "cleanup"
+                                and record.operation == request.operation
                                 and record.generation < request.generation
                             ),
                             None,
                         )
-                        if prior_cleanup is not None:
+                        if prior_release_phase is not None:
                             candidate = request.model_copy(
                                 update={
-                                    "authority_id": prior_cleanup.authority_id,
-                                    "generation": prior_cleanup.generation,
-                                    "attempt_id": prior_cleanup.attempt_id,
-                                    "operation_identity": prior_cleanup.operation_identity,
-                                    "operation_digest": prior_cleanup.operation_digest,
+                                    "authority_id": prior_release_phase.authority_id,
+                                    "generation": prior_release_phase.generation,
+                                    "attempt_id": prior_release_phase.attempt_id,
+                                    "operation_identity": prior_release_phase.operation_identity,
+                                    "operation_digest": prior_release_phase.operation_digest,
                                     "expected_source_identity": (
-                                        prior_cleanup.expected_source_identity
+                                        prior_release_phase.expected_source_identity
                                     ),
                                     "intended_target_identity": (
-                                        prior_cleanup.intended_target_identity
+                                        prior_release_phase.intended_target_identity
                                     ),
-                                    "recovery_objects": prior_cleanup.recovery_objects,
+                                    "recovery_objects": prior_release_phase.recovery_objects,
                                 }
                             )
+                            expected_outcome = (
+                                "source"
+                                if request.operation is AuthorityOperation.RECOVER
+                                else "absent"
+                            )
                             if (
-                                prior_cleanup.outcome != "absent"
-                                or prior_cleanup.observation is None
-                                or prior_cleanup.observation.category != "absent"
-                                or not self._operation_matches(prior_cleanup, candidate)
+                                prior_release_phase.outcome != expected_outcome
+                                or prior_release_phase.observation is None
+                                or prior_release_phase.observation.category != expected_outcome
+                                or not self._operation_matches(prior_release_phase, candidate)
                             ):
                                 raise AuthorityServiceError("journal_conflict")
-                            adopted_cleanup = prior_cleanup.observation
+                            adopted_release_phase = prior_release_phase.observation
                     unresolved = next(
                         (
                             record
@@ -1331,7 +1336,7 @@ class ExternalBootAuthorityService:
                             cast(str, predecessor_receipt_identity),
                             context,
                         )
-                    elif adopted_cleanup is None:
+                    elif adopted_release_phase is None:
                         await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
@@ -1349,8 +1354,8 @@ class ExternalBootAuthorityService:
                     )
                 try:
                     observation = (
-                        adopted_cleanup
-                        if adopted_cleanup is not None
+                        adopted_release_phase
+                        if adopted_release_phase is not None
                         else await self._adapter.observe(request)
                     )
                 except AuthorityServiceError:

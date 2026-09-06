@@ -133,7 +133,7 @@ def _derived_request(context: OperationContext, operation: str) -> AuthorityMuta
             "authority_instance": context.marker.authority_instance,
             "operation_identity": identity,
             "operation_digest": digest,
-            "attempt_id": uuid5(NAMESPACE_URL, f"{context.marker.operation_identity}/recover"),
+            "attempt_id": uuid5(NAMESPACE_URL, identity),
             "expected_source_identity": recovery.source_state.definition,
             "intended_target_identity": recovery.target_state.definition,
             "recovery_objects": (
