@@ -877,6 +877,7 @@ def test_host_keeps_local_mutation_without_remote_module_dependencies(
 
     from kdive import config as kdive_config
     from kdive.providers.assembly import composition as provider_assembly
+    from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
     from kdive.providers.local_libvirt import composition
 
     recovery_root = tmp_path / "recovery"
@@ -900,6 +901,8 @@ def test_host_keeps_local_mutation_without_remote_module_dependencies(
     assert service is not None
     assert service._adapter is binding.adapter  # noqa: SLF001
     assert service._remote_module_host is None  # noqa: SLF001
+    assert isinstance(service._recovery_orphans, RecoveryOrphanAuthorityService)  # noqa: SLF001
+    assert service._recovery_orphans._executor is binding.adapter  # noqa: SLF001
 
 
 def test_host_constructs_mutation_chain_for_checked_provider_socket(
