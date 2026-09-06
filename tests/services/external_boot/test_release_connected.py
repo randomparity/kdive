@@ -62,6 +62,10 @@ class _ReleaseFaultAuthorityAdapter:
     def __init__(self, vehicle: Vehicle) -> None:
         self._vehicle = vehicle
         self.mutations: list[str] = []
+        self.block_operation: str | None = None
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.release.set()
 
     def _observation(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         category = "source" if request.operation.value == "recover" else "absent"
@@ -88,6 +92,9 @@ class _ReleaseFaultAuthorityAdapter:
         else:
             self._vehicle.port.cleanup(self._vehicle.recovery_point, authority)
         self.mutations.append(request.operation.value)
+        if request.operation.value == self.block_operation:
+            self.entered.set()
+            await self.release.wait()
         return self._observation(request)
 
 
@@ -133,17 +140,20 @@ async def _retire_seed_authority(conn: AsyncConnection, case: Any) -> None:
     )
 
 
-@pytest.mark.parametrize("interrupt_after", [None, "recover", "cleanup"])
+@pytest.mark.parametrize("interrupt_after", [None, "recover", "cleanup", "cancel-cleanup"])
 def test_public_active_release_claims_and_completes_through_worker(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    interrupt_after: Literal["recover", "cleanup"] | None,
+    interrupt_after: Literal["recover", "cleanup", "cancel-cleanup"] | None,
 ) -> None:
     async def run() -> None:
         vehicle = build_vehicle()
         adapter = _ReleaseFaultAuthorityAdapter(vehicle)
+        if interrupt_after is not None and interrupt_after.startswith("cancel-"):
+            adapter.block_operation = interrupt_after.removeprefix("cancel-")
+            adapter.release.clear()
         retry_incarnation = f"docker:release-retry-{uuid4()}"
         retry_credential = f"release-retry-credential-{uuid4()}"
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
@@ -226,7 +236,7 @@ def test_public_active_release_claims_and_completes_through_worker(
                     interrupted = True
                     raise RuntimeError("injected release interruption")
                 status = await original_status(conn, sql, args)
-                if interrupt_after is not None and not interrupted and stage in sql:
+                if interrupt_after in {"recover", "cleanup"} and not interrupted and stage in sql:
                     interrupted = True
                     raise RuntimeError("injected release interruption")
                 return status
@@ -242,10 +252,35 @@ def test_public_active_release_claims_and_completes_through_worker(
                     incarnation_credential=SecretStr(case.credential),
                     secret_registry=SecretRegistry(),
                 )
-                claimed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+                if adapter.block_operation is None:
+                    claimed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+                else:
+                    dispatch = asyncio.create_task(worker.run_once(DEFAULT_JOB_DISPATCH_LANE))
+                    await adapter.entered.wait()
+                    dispatch.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await dispatch
+                    adapter.release.set()
+                    for _ in range(100):
+                        journal = FileAuthorityJournal(tmp_path, f"{vehicle.system_id}.journal")
+                        try:
+                            records = list(journal.load())
+                        finally:
+                            journal.close()
+                        if any(
+                            record.phase.value == "terminal"
+                            and record.operation == adapter.block_operation
+                            for record in records
+                        ):
+                            break
+                        await asyncio.sleep(0)
+                    else:
+                        raise AssertionError("cancelled authority phase did not reach terminal")
+                    claimed = None
                 if interrupt_after is not None:
-                    assert interrupted
-                    assert claimed is not None
+                    if not interrupt_after.startswith("cancel-"):
+                        assert interrupted
+                        assert claimed is not None
                     async with seed.cursor() as cur:
                         await cur.execute(
                             "SELECT authority.id, authority.generation, ack.journal_sequence, "
@@ -254,33 +289,37 @@ def test_public_active_release_claims_and_completes_through_worker(
                             "JOIN external_boot_authority_acknowledgements AS ack "
                             "ON ack.authority_id = authority.id "
                             "WHERE authority.job_id = %s ORDER BY authority.generation",
-                            (claimed.id,),
+                            (requested.object_id,),
                         )
                         old_authority = await cur.fetchone()
                         assert old_authority is not None
                         old_id, old_generation, old_sequence, old_digest, state, old_attempt = (
                             old_authority
                         )
-                        assert (state, old_attempt) == ("retired", 1)
-                        await cur.execute(
-                            "SELECT operation_identity FROM "
-                            "resolve_current_external_boot_release_phase_authority("
-                            "%s,%s,%s,%s,%s,%s)",
-                            (
-                                case.worker_incarnation,
-                                old_id,
-                                old_generation,
-                                old_sequence,
-                                old_digest,
-                                "cleanup",
-                            ),
+                        expected_state = (
+                            "current" if interrupt_after.startswith("cancel-") else "retired"
                         )
-                        assert await cur.fetchone() is None
+                        assert (state, old_attempt) == (expected_state, 1)
+                        if not interrupt_after.startswith("cancel-"):
+                            await cur.execute(
+                                "SELECT operation_identity FROM "
+                                "resolve_current_external_boot_release_phase_authority("
+                                "%s,%s,%s,%s,%s,%s)",
+                                (
+                                    case.worker_incarnation,
+                                    old_id,
+                                    old_generation,
+                                    old_sequence,
+                                    old_digest,
+                                    "cleanup",
+                                ),
+                            )
+                            assert await cur.fetchone() is None
                         if interrupt_after == "cleanup":
                             await cur.execute(
                                 "SELECT consumed FROM external_boot_release_cleanup_receipts "
                                 "WHERE job_id = %s",
-                                (claimed.id,),
+                                (requested.object_id,),
                             )
                             assert await cur.fetchall() == [(False,)]
                     await seed.execute(
@@ -297,6 +336,13 @@ def test_public_active_release_claims_and_completes_through_worker(
                         incarnation_credential=SecretStr(retry_credential),
                         secret_registry=SecretRegistry(),
                     )
+                    if interrupt_after.startswith("cancel-"):
+                        assert await retry_worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
+                        await seed.execute(
+                            "UPDATE jobs SET lease_expires_at = now() - interval '1 min' "
+                            "WHERE id = %s",
+                            (requested.object_id,),
+                        )
                     claimed = await retry_worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
                     assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
             assert claimed is not None and str(claimed.id) == requested.object_id
@@ -310,7 +356,9 @@ def test_public_active_release_claims_and_completes_through_worker(
                 await cur.execute("SELECT state FROM jobs WHERE id = %s", (claimed.id,))
                 assert await cur.fetchone() == ("succeeded",)
                 await cur.execute(
-                    "SELECT state FROM external_boot_authorities WHERE job_id = %s", (claimed.id,)
+                    "SELECT state FROM external_boot_authorities WHERE job_id = %s "
+                    "ORDER BY generation DESC",
+                    (claimed.id,),
                 )
                 assert await cur.fetchone() == ("retired",)
                 await cur.execute(
@@ -322,7 +370,11 @@ def test_public_active_release_claims_and_completes_through_worker(
                     [("retired", 1, case.worker_incarnation)]
                     if interrupt_after is None
                     else [
-                        ("retired", 1, case.worker_incarnation),
+                        (
+                            "superseded" if interrupt_after.startswith("cancel-") else "retired",
+                            1,
+                            case.worker_incarnation,
+                        ),
                         ("retired", 2, retry_incarnation),
                     ]
                 )
