@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from botocore.exceptions import ReadTimeoutError
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.build_artifacts import validation
@@ -123,7 +124,7 @@ class _Session:
             system_id=_SYSTEM, run_id=_RUN, activation_id=_ACTIVATION
         )
         self.root = root
-        self.root.mkdir(mode=0o700)
+        self.root.mkdir(mode=0o700, exist_ok=True)
 
     @contextmanager
     def projection_directory(self, projection: TargetProjectionV1):
@@ -209,7 +210,8 @@ def test_materialize_streams_exact_version_publishes_last_and_retries(tmp_path: 
     session = _Session(tmp_path / "activation")
 
     first = materializer.materialize(plan, cast(LocalExternalBootSession, session))
-    second = materializer.materialize(plan, cast(LocalExternalBootSession, session))
+    restarted = _Session(session.root)
+    second = materializer.materialize(plan, cast(LocalExternalBootSession, restarted))
 
     assert second == first
     digest_dir = session.root / first.artifacts.kernel.ref.split("/")[4]
@@ -220,6 +222,51 @@ def test_materialize_streams_exact_version_publishes_last_and_retries(tmp_path: 
     ]
     assert all(body.closed_by_store for body in client.bodies)
     assert set(client.requests) == {("build/kernel", "kernel-v1")}
+
+
+class _InterruptedBody(_Body):
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self._reads = 0
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self._reads += 1
+        if self._reads > 1:
+            raise ReadTimeoutError(endpoint_url="http://object-store")
+        return super().read(16 if size is None else min(size, 16))
+
+
+class _InterruptedClient(_Client):
+    def get_object(self, **request: object) -> dict[str, object]:
+        key = cast(str, request["Key"])
+        version = cast(str, request["VersionId"])
+        self.requests.append((key, version))
+        body = _InterruptedBody(self.objects[(key, version)])
+        self.bodies.append(body)
+        return {
+            "Metadata": {"sensitivity": "redacted", "retention-class": "build"},
+            "Body": body,
+        }
+
+
+def test_interrupted_fetch_closes_stream_and_retry_commits_cleanly(tmp_path: Path) -> None:
+    bundle = _bundle()
+    plan = _plan(bundle)
+    interrupted = _InterruptedClient({("build/kernel", "kernel-v1"): bundle})
+    session = _Session(tmp_path / "activation")
+
+    with pytest.raises(Exception, match="get_object"):
+        RealLocalExternalBootMaterializer(ObjectStore(interrupted, "bucket")).materialize(
+            plan, cast(LocalExternalBootSession, session)
+        )
+
+    assert all(body.closed_by_store for body in interrupted.bodies)
+    assert not list(session.root.rglob("target-projection.json"))
+    clean = _Client({("build/kernel", "kernel-v1"): bundle})
+    result = RealLocalExternalBootMaterializer(ObjectStore(clean, "bucket")).materialize(
+        plan, cast(LocalExternalBootSession, _Session(session.root))
+    )
+    assert result.verified_bundle_sha256 == plan.bundle.sha256
 
 
 def test_inspect_prepare_uses_reopened_bytes_and_preserves_source(tmp_path: Path) -> None:
@@ -246,6 +293,12 @@ def test_inspect_prepare_uses_reopened_bytes_and_preserves_source(tmp_path: Path
     assert intent.source_xml == _SOURCE_XML
     assert intent.expected_running == result.kernel_observation
     assert intent.materialized_modules_bytes > 0
+
+    forged = result.model_copy(update={"installed_module_tree": "sha256:" + "f" * 64})
+    with pytest.raises(ValueError, match="module tree"):
+        materializer.inspect_prepare(
+            forged, session.binding, inspection, cast(LocalExternalBootSession, session)
+        )
 
 
 def test_exact_retry_rejects_changed_source_digest_without_replacing(tmp_path: Path) -> None:

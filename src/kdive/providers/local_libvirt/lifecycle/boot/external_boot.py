@@ -53,12 +53,14 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ActivationOwnership,
     ArtifactSource,
+    BundleSource,
     ComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
     ExternalBootPreparationObservation,
     ExternalBootPreparationRequest,
+    InitrdSource,
     KernelIdentity,
     KernelRelease,
     MaterializedArtifacts,
@@ -949,9 +951,12 @@ class RealLocalExternalBootMaterializer:
             raise ValueError("external-boot materialization does not match target projection")
         with session.projection_directory(projection) as directory_fd:
             modules_digest, modules_bytes = _descriptor_digest(directory_fd, "modules")
+            installed_manifest = _installed_module_manifest(directory_fd)
             kernel_digest, _ = _descriptor_digest(directory_fd, "kernel")
             if kernel_digest != materialization.extracted_vmlinuz_sha256:
                 raise ValueError("materialized kernel bytes do not match materialization")
+            if installed_manifest != materialization.installed_module_tree:
+                raise ValueError("materialized module tree does not match materialization")
         source_xml = inspection.xml.decode()
         kernel_path = session.projection_artifact_path(projection, "kernel")
         initrd_path = (
@@ -1070,13 +1075,7 @@ class RealLocalExternalBootMaterializer:
             or kernel_size != plan.bundle.vmlinuz_size_bytes
         ):
             raise ValueError("materialized kernel bytes do not match external-boot plan")
-        modules_fd = os.open("modules", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-        try:
-            with os.fdopen(os.dup(modules_fd), "rb") as modules:
-                entries = recovery_validation._validate_archive(modules)  # noqa: SLF001
-            installed_manifest = recovery_validation._manifest(entries)[1]  # noqa: SLF001
-        finally:
-            os.close(modules_fd)
+        installed_manifest = _installed_module_manifest(directory_fd)
         return evidence, installed_manifest
 
     def _validate_local_initrd(self, plan: ExternalBootPlan, directory_fd: int) -> None:
@@ -1102,6 +1101,10 @@ def _stream_exact_version(
         descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
     except FileExistsError:
         descriptor = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=directory_fd)
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_mode & 0o077:
+            os.close(descriptor)
+            raise ValueError("interrupted artifact is not a private regular file") from None
         digest, _ = _open_descriptor_digest(descriptor)
         if digest != source.sha256:
             os.close(descriptor)
@@ -1109,9 +1112,14 @@ def _stream_exact_version(
         return descriptor
     primary: BaseException | None = None
     digest = hashlib.sha256()
+    limit = _source_byte_limit(source)
+    size = 0
     try:
         with store.get_artifact_stream(source.key, None, version_id=source.version) as streamed:
             while chunk := streamed.reader.read(1024 * 1024):
+                size += len(chunk)
+                if size > limit:
+                    raise ValueError("exact object version exceeds its materialization byte bound")
                 digest.update(chunk)
                 view = memoryview(chunk)
                 while view:
@@ -1121,6 +1129,8 @@ def _stream_exact_version(
                     view = view[written:]
         if "sha256:" + digest.hexdigest() != source.sha256:
             raise ValueError("exact object version digest does not match external-boot plan")
+        if isinstance(source, InitrdSource) and size != source.size_bytes:
+            raise ValueError("exact initrd version size does not match external-boot plan")
         os.fsync(descriptor)
         os.lseek(descriptor, 0, os.SEEK_SET)
         return descriptor
@@ -1133,6 +1143,21 @@ def _stream_exact_version(
                 os.close(descriptor)
             except OSError as close_error:
                 primary.add_note(f"artifact descriptor cleanup failed: {close_error!r}")
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError as unlink_error:
+                primary.add_note(f"partial artifact cleanup failed: {unlink_error!r}")
+
+
+def _source_byte_limit(source: ArtifactSource) -> int:
+    if isinstance(source, InitrdSource):
+        return source.size_bytes
+    if isinstance(source, BundleSource):
+        return build_validation._EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES  # noqa: SLF001
+    raise TypeError("unsupported external-boot artifact source")
 
 
 def _commit_private_artifact(directory_fd: int, temporary: str, final: str) -> None:
@@ -1182,6 +1207,16 @@ def _descriptor_digest(directory_fd: int, name: str) -> tuple[str, int]:
         return _open_descriptor_digest(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _installed_module_manifest(directory_fd: int) -> str:
+    modules_fd = os.open("modules", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        with os.fdopen(os.dup(modules_fd), "rb") as modules:
+            entries = recovery_validation._validate_archive(modules)  # noqa: SLF001
+        return recovery_validation._manifest(entries)[1]  # noqa: SLF001
+    finally:
+        os.close(modules_fd)
 
 
 type ResolveOperationLease = Callable[[OpaqueProviderRef], LocalExternalBootOperationLease]
