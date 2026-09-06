@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-09-03)
+Superseded for artifact layout by 0602 (2026-09-06); other decisions remain accepted.
+
+> **Superseded by [0602](0602-local-external-boot-storage-is-reclaimed-by-owned-identities.md)** (2026-09-06)
 
 ## Context
 

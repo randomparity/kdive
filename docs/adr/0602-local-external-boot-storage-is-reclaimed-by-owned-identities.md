@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-09-06)
 
 ## Context
 
@@ -42,6 +42,13 @@ directory. After it removes the partial, or when a retry proves it already absen
 records a bounded pending-absence handoff containing the exact admitted request. The same adapter
 accepts that handoff only for a byte-for-byte equal request and returns the stable terminal
 `absent` observation without entering recovery-point-dependent categorization.
+
+Before removing the last partial ownership record, cleanup publishes and fsyncs a bounded,
+canonical abort receipt outside the partial directory. It binds the activation, plan, and
+authority, survives interruption between the final unlink and directory removal, and is removed
+last. A fresh process validates that receipt before continuing exact-owner cleanup; malformed or
+foreign receipts fail closed. Both cached handoffs and recovery observations recheck all durable
+absence evidence, including this receipt and activation artifacts, before reporting terminal absence.
 
 The shared authority adapter contract has a separate typed recovery-observation call. The service
 invokes it only while recovering an exact authenticated `mutation-started` or `provider-returned`
