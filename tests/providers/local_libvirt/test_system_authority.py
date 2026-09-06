@@ -11,18 +11,19 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.providers.local_libvirt.lifecycle.boot.session import owned_system_semantic_identity
 from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemError,
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
     _Intent,
-    _xml_identity,
 )
 from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,
     AuthoritySystemMutationRequestV1,
     AuthoritySystemOperation,
 )
+from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -75,6 +76,7 @@ def _provider(tmp_path: Path) -> LocalAuthoritySystemProvider:
         ),
         readiness_probe=lambda _system_id: False,
         open_teardown=lambda *_args: _AbsentTeardown(),
+        assert_no_sibling_attachment=lambda _system_id, _overlay: None,
         allocate_port=lambda: 2200,
         now=lambda: datetime(2026, 9, 6, tzinfo=UTC),
     )
@@ -169,9 +171,12 @@ def test_retry_rejects_divergent_live_xml_before_provisioner_mutation(tmp_path: 
     Path(intent.overlay).parent.mkdir()
     Path(intent.overlay).write_bytes(b"qcow2")
     Path(intent.baseline).mkdir(parents=True)
-    expected = "<domain><name>expected</name></domain>"
-    divergent = "<domain><name>different</name></domain>"
-    intent = replace(intent, xml_digest=_xml_identity(expected))
+    expected = _xml(overlay=intent.overlay, system_id=intent.system_id)
+    divergent = expected.replace("<kernel>/old</kernel>", "<kernel>/different</kernel>")
+    intent = replace(
+        intent,
+        xml_digest=owned_system_semantic_identity(expected, intent.system_id, intent.overlay),
+    )
 
     class Inspection:
         domain_absent = False
@@ -210,11 +215,103 @@ def test_retry_rejects_divergent_live_xml_before_provisioner_mutation(tmp_path: 
         ),
         readiness_probe=lambda _system_id: False,
         open_teardown=lambda *_args: Teardown(),
+        assert_no_sibling_attachment=lambda _system_id, _overlay: None,
         allocate_port=lambda: 2200,
     )
 
     with pytest.raises(LocalAuthoritySystemError, match="does not match"):
         provider._verify_retained_provision_identity(intent)
+
+
+def test_teardown_checks_retained_identity_and_siblings_before_destroy(tmp_path: Path) -> None:
+    intent = _intent(tmp_path)
+    Path(intent.overlay).parent.mkdir()
+    Path(intent.overlay).write_bytes(b"qcow2")
+    Path(intent.baseline).mkdir(parents=True)
+    xml = _xml(overlay=intent.overlay, system_id=intent.system_id)
+    intent = replace(
+        intent,
+        xml_digest=owned_system_semantic_identity(xml, intent.system_id, intent.overlay),
+    )
+    events: list[str] = []
+
+    class Inspection:
+        domain_absent = False
+        domain_validated = True
+        overlay_absent = False
+        baseline_absent = False
+
+    class Teardown:
+        def inspect(self) -> Inspection:
+            return Inspection()
+
+        def owned_xml(self) -> tuple[str, str]:
+            events.append("xml")
+            return xml, xml
+
+        def destroy(self) -> None:
+            events.append("destroy")
+
+        def undefine(self) -> None:
+            events.append("undefine")
+
+        def remove_overlay(self) -> None:
+            events.append("overlay")
+
+        def remove_baseline(self) -> None:
+            events.append("baseline")
+
+        def close(self) -> None:
+            events.append("close")
+
+    def reject_sibling(_system_id: object, _overlay: object) -> None:
+        events.append("siblings")
+        raise LocalAuthoritySystemError("foreign overlay attachment")
+
+    base = tmp_path / "base.qcow2"
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_Provisioner(),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: base},
+        ),
+        readiness_probe=lambda _system_id: False,
+        open_teardown=lambda *_args: Teardown(),
+        assert_no_sibling_attachment=reject_sibling,
+        allocate_port=lambda: 2200,
+    )
+    provider._store_intent(intent)
+    request = AuthoritySystemMutationRequestV1(
+        system_id=intent.system_id,
+        allocation_id=intent.allocation_id,
+        resource_id=intent.resource_id,
+        provider_kind="local-libvirt",
+        resource_name="local-a",
+        authority_instance=intent.authority_instance,
+        profile_identity=_DIGEST,
+        root_identity=intent.root_identity,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        operation_identity="teardown-a",
+        authority_id=uuid4(),
+        generation=1,
+        attempt_id=uuid4(),
+        operation_digest=_DIGEST,
+        bootstrap_identity=intent.bootstrap_identity,
+    )
+    context = AuthoritySystemCommitContextV1(
+        attempt_id=request.attempt_id,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        journal_sequence=1,
+        journal_digest=_DIGEST,
+    )
+
+    with pytest.raises(LocalAuthoritySystemError, match="foreign overlay"):
+        asyncio.run(provider.execute_preactivation_teardown(request, context))
+
+    assert events == ["xml", "close", "siblings"]
+    assert (tmp_path / "intents" / f"{intent.system_id}.json").exists()
 
 
 def test_cancellation_drains_the_completion_owned_host_operation(tmp_path: Path) -> None:
@@ -284,6 +381,7 @@ def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: 
         ),
         readiness_probe=lambda _system_id: False,
         open_teardown=lambda *_args: Teardown(),
+        assert_no_sibling_attachment=lambda _system_id, _overlay: None,
         allocate_port=lambda: 2200,
     )
     request = AuthoritySystemMutationRequestV1(

@@ -14,7 +14,6 @@ import json
 import os
 import stat
 import threading
-import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -23,9 +22,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import UUID
 
-from defusedxml.common import DefusedXmlException
-from defusedxml.ElementTree import fromstring as _safe_fromstring
-
+from kdive.providers.local_libvirt.lifecycle.boot.session import owned_system_semantic_identity
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     authorized_key_customizer,
@@ -75,6 +72,7 @@ class _SystemTeardown(Protocol):
 type OpenTeardown = Callable[[UUID, str, str], _SystemTeardown]
 type ReadinessProbe = Callable[[UUID], bool]
 type PortAllocator = Callable[[], int]
+type AssertNoSiblingAttachment = Callable[[UUID, str], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +220,7 @@ class LocalAuthoritySystemProvider:
         topology: LocalAuthoritySystemTopology,
         readiness_probe: ReadinessProbe,
         open_teardown: OpenTeardown,
+        assert_no_sibling_attachment: AssertNoSiblingAttachment,
         allocate_port: PortAllocator,
         owner_uid: int | None = None,
         owner_gid: int | None = None,
@@ -234,6 +233,7 @@ class LocalAuthoritySystemProvider:
         self._topology = topology
         self._readiness_probe = readiness_probe
         self._open_teardown = open_teardown
+        self._assert_no_sibling_attachment = assert_no_sibling_attachment
         self._allocate_port = allocate_port
         self._owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self._owner_gid = os.getegid() if owner_gid is None else owner_gid
@@ -330,7 +330,7 @@ class LocalAuthoritySystemProvider:
                 "local authority provision failed to persist its intent"
             )
         intent = persisted
-        return self._provision_facts(intent, ready=self._readiness_probe(request.system_id))
+        return self._provision_facts(intent)
 
     def _observe_system_provision(
         self,
@@ -350,7 +350,7 @@ class LocalAuthoritySystemProvider:
                 completed_at=None,
             )
         self._require_matching_intent(intent, request, snapshot)
-        return self._provision_facts(intent, ready=self._readiness_probe(request.system_id))
+        return self._provision_facts(intent)
 
     def _execute_teardown(
         self, request: AuthoritySystemMutationRequestV1, _context: AuthoritySystemCommitContextV1
@@ -365,6 +365,8 @@ class LocalAuthoritySystemProvider:
                 intent_absent=True,
             )
         self._require_teardown_intent(intent, request)
+        self._verify_retained_provision_identity(intent)
+        self._assert_no_sibling_attachment(intent.system_id, intent.overlay)
         session = self._open_teardown(request.system_id, intent.overlay, intent.baseline)
         try:
             session.destroy()
@@ -494,7 +496,7 @@ class LocalAuthoritySystemProvider:
         )
         return replace(
             intent,
-            xml_digest=_xml_identity(xml),
+            xml_digest=owned_system_semantic_identity(xml, intent.system_id, intent.overlay),
         )
 
     def _verify_retained_provision_identity(self, intent: _Intent) -> None:
@@ -512,8 +514,10 @@ class LocalAuthoritySystemProvider:
             self._require_owned_storage(intent)
             inactive, live = session.owned_xml()
             if (
-                _xml_identity(inactive) != intent.xml_digest
-                or _xml_identity(live) != intent.xml_digest
+                owned_system_semantic_identity(inactive, intent.system_id, intent.overlay)
+                != intent.xml_digest
+                or owned_system_semantic_identity(live, intent.system_id, intent.overlay)
+                != intent.xml_digest
             ):
                 raise LocalAuthoritySystemError(
                     "retained local authority domain does not match intent"
@@ -521,7 +525,7 @@ class LocalAuthoritySystemProvider:
         finally:
             session.close()
 
-    def _provision_facts(self, intent: _Intent, *, ready: bool) -> AuthoritySystemProvisionFacts:
+    def _provision_facts(self, intent: _Intent) -> AuthoritySystemProvisionFacts:
         domain_owned = False
         try:
             teardown = self._open_teardown(intent.system_id, intent.overlay, intent.baseline)
@@ -530,13 +534,18 @@ class LocalAuthoritySystemProvider:
                 domain_owned = (
                     inspected.domain_validated
                     and intent.xml_digest is not None
-                    and all(_xml_identity(xml) == intent.xml_digest for xml in teardown.owned_xml())
+                    and all(
+                        owned_system_semantic_identity(xml, intent.system_id, intent.overlay)
+                        == intent.xml_digest
+                        for xml in teardown.owned_xml()
+                    )
                 )
             finally:
                 teardown.close()
         except Exception:
             domain_owned = False
         root_owned = self._storage_is_owned(intent)
+        ready = self._readiness_probe(intent.system_id) if domain_owned and root_owned else False
         complete = domain_owned and root_owned and ready
         return AuthoritySystemProvisionFacts(
             intent_identity=intent.identity,
@@ -889,20 +898,6 @@ def _require_optional_owned_tree(path: Path, uid: int, gid: int) -> None:
     except FileNotFoundError:
         return
     _require_owned_tree(path, uid, gid)
-
-
-def _xml_identity(xml: str) -> str:
-    try:
-        root = _safe_fromstring(xml)
-    except (ET.ParseError, DefusedXmlException) as error:
-        raise LocalAuthoritySystemError("local authority domain XML is malformed") from error
-    canonical = ET.canonicalize(
-        ET.tostring(root, encoding="unicode"),
-        with_comments=False,
-        strip_text=False,
-        rewrite_prefixes=True,
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
 def _require_private_file(info: os.stat_result, uid: int, gid: int) -> None:

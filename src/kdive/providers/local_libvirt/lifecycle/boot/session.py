@@ -34,7 +34,11 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RunningKernelObservation,
 )
-from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
+from kdive.providers.shared.libvirt_xml import (
+    KDIVE_METADATA_NS,
+    recorded_gdb_port_from_root,
+    recorded_ssh_port_from_root,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 if TYPE_CHECKING:
@@ -1535,6 +1539,40 @@ def open_authority_system_teardown(
     )
 
 
+def prove_no_foreign_overlay_attachment(
+    connect: Connect, system_id: UUID, expected_overlay: str
+) -> None:
+    """Fail closed if another defined domain refers to this System's private overlay.
+
+    Libvirt's domain list is the ownership boundary here: an overlay cannot be unlinked until
+    every defined domain has been read and its bounded disk list proves it does not refer to the
+    exact path.  The caller supplies the same fixed private connection used for teardown.
+    """
+    connection = connect()
+    try:
+        list_domains = getattr(connection, "listAllDomains", None)
+        if not callable(list_domains):
+            raise ValueError("local System teardown connection cannot enumerate domains")
+        domains = list_domains(0)
+        if len(domains) > 4096:
+            raise ValueError("local System teardown domain list exceeds its bound")
+        for domain in domains:
+            try:
+                xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+                root = _safe_domain_xml(xml)
+                if _is_exact_owned_domain(root, system_id):
+                    continue
+                disks = root.findall("devices/disk")
+                if len(disks) > 4096:
+                    raise ValueError("foreign domain XML exceeds the owned-storage device bound")
+                if any(_disk_source_is(disk, expected_overlay) for disk in disks):
+                    raise ValueError("foreign domain refers to the local System overlay")
+            finally:
+                domain.free()
+    finally:
+        connection.close()
+
+
 def _require_expected_ownership(
     facts: OperationOwnership, expected: ExpectedOperationOwnership
 ) -> None:
@@ -1633,12 +1671,7 @@ def _require_guest_agent_channel(root: ET.Element, system_id: UUID) -> None:
 
 
 def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Element:
-    if unicodedata.normalize("NFC", xml) != xml:
-        raise ValueError("domain XML must be NFC")
-    try:
-        root = _safe_fromstring(xml)
-    except (ET.ParseError, DefusedXmlException) as exc:
-        raise ValueError("domain XML is malformed or forbidden") from exc
+    root = _safe_domain_xml(xml)
     if root.tag != "domain" or root.findtext("name") != domain_name_for(system_id):
         raise ValueError("domain ownership does not match the operation lease")
     if root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system") != str(system_id):
@@ -1670,6 +1703,115 @@ def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Ele
     if len(disks) != 1 or overlay_references != 1:
         raise ValueError("domain overlay ownership is absent or ambiguous")
     return root
+
+
+def _safe_domain_xml(xml: str) -> ET.Element:
+    if unicodedata.normalize("NFC", xml) != xml:
+        raise ValueError("domain XML must be NFC")
+    try:
+        return _safe_fromstring(xml)
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise ValueError("domain XML is malformed or forbidden") from exc
+
+
+def _is_exact_owned_domain(root: ET.Element, system_id: UUID) -> bool:
+    return (
+        root.tag == "domain"
+        and root.findtext("name") == domain_name_for(system_id)
+        and root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system") == str(system_id)
+    )
+
+
+def _disk_source_is(disk: ET.Element, expected_overlay: str) -> bool:
+    source = disk.find("source")
+    return source is not None and source.get("file") == expected_overlay
+
+
+def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: str) -> str:
+    """Return the local authority's libvirt-normalization-tolerant System definition identity.
+
+    This intentionally projects only KDIVE-rendered semantics.  Libvirt-generated ids, aliases,
+    addresses, controllers, and default devices are excluded; all root, boot, resource, network,
+    guest-agent, metadata, and QEMU-argument fields KDIVE controls remain in the digest.
+    """
+    root = _parse_owned_xml(xml, system_id, expected_overlay)
+    os_element = root.find("os")
+    matching_disks = [
+        disk for disk in root.findall("devices/disk") if _disk_source_is(disk, expected_overlay)
+    ]
+    disk = matching_disks[0]
+    source = disk.find("source")
+    driver = disk.find("driver")
+    target = disk.find("target")
+    assert source is not None and driver is not None and target is not None
+    qemu_args = tuple(
+        argument.get("value")
+        for argument in root.findall(
+            "./{http://libvirt.org/schemas/domain/qemu/1.0}commandline/"
+            "{http://libvirt.org/schemas/domain/qemu/1.0}arg"
+        )
+    )
+    channels = tuple(
+        (channel.get("type"), channel_target.get("type"), channel_target.get("name"))
+        for channel in root.findall("devices/channel")
+        if (channel_target := channel.find("target")) is not None
+    )
+    serial_log = root.find("devices/serial/log")
+    cpu = root.find("cpu")
+    features = root.find("features")
+    memory = root.find("memory")
+    os_type = os_element.find("type") if os_element is not None else None
+    interfaces = tuple(
+        {
+            "type": interface.get("type"),
+            "source": None
+            if (interface_source := interface.find("source")) is None
+            else interface_source.attrib,
+            "model": None
+            if (interface_model := interface.find("model")) is None
+            else interface_model.get("type"),
+        }
+        for interface in root.findall("devices/interface")
+    )
+    value = {
+        "schema": "kdive-local-authority-domain-semantics-v1",
+        "domain_type": root.get("type"),
+        "name": root.findtext("name"),
+        "uuid": root.findtext("uuid"),
+        "memory": (root.findtext("memory"), {} if memory is None else memory.attrib),
+        "vcpu": root.findtext("vcpu"),
+        "cpu": None if cpu is None else (cpu.attrib, cpu.findtext("model")),
+        "os": None
+        if os_element is None
+        else {
+            "type": None if os_type is None else (os_type.text, os_type.attrib),
+            "kernel": os_element.findtext("kernel"),
+            "initrd": os_element.findtext("initrd"),
+            "cmdline": os_element.findtext("cmdline"),
+        },
+        "features": ()
+        if features is None
+        else tuple(
+            (tag, feature.attrib)
+            for tag in ("acpi", "vmcoreinfo")
+            if (feature := features.find(tag)) is not None
+        ),
+        "root_disk": {
+            "source": source.attrib,
+            "driver": driver.attrib,
+            "target": target.attrib,
+            "readonly": disk.find("readonly") is not None,
+        },
+        "gdb_port": recorded_gdb_port_from_root(root),
+        "ssh_port": recorded_ssh_port_from_root(root),
+        "qemu_args": qemu_args,
+        "interfaces": interfaces,
+        "guest_channels": channels,
+        "serial_log": None if serial_log is None else serial_log.attrib,
+        "system_metadata": root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system"),
+    }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return _digest(b"kdive-local-authority-domain-semantics-v1", payload)
 
 
 def _digest(prefix: bytes, payload: bytes) -> str:
