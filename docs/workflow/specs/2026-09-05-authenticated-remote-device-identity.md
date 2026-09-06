@@ -24,10 +24,20 @@ The provider-host service delegates only to `HostStatDeviceIdentity`. Its respon
 value: `absent`, `inode` with unsigned 64-bit `st_dev` and `st_ino`, or `block` with unsigned
 64-bit `st_rdev`. It emits no path or host detail. The existing authority listener remains the
 single server endpoint, and the two existing operation schemas and dispatch paths do not change.
-The dispatcher offloads the following `stat(2)` lookup from the event loop, and the existing
-bounded server session owns the await. A stalled host filesystem can outlive the abandoned worker
-thread, but it cannot retain the network session, delay other authority requests, or produce a late
-response.
+The identity service offloads following `stat(2)` from the event loop to its own fixed four-worker
+executor. A nonblocking four-slot admission gate precedes submission; exhaustion returns the same
+bounded redacted `provider-failure` response immediately. The slot belongs to the underlying
+concurrent future and is released only by its completion callback, never by cancellation of the
+async waiter. The waiter shields that future and the existing bounded server session owns only the
+await. A stalled host filesystem can therefore outlive its abandoned network session, but at most
+four calls remain live, no unbounded queue forms, default-executor readiness work remains isolated,
+and no late response can be published. When an underlying call eventually completes, its slot is
+released and later requests recover.
+
+The identity service is an explicit async context owned once by `run_authority_host` and shared by
+the AF_UNIX and network listeners. Shutdown first closes admission, cancels queued work that has not
+started, and calls executor shutdown without waiting; it does not wait for or claim to terminate a
+kernel-blocked syscall. Both listeners close through their existing bounded cleanup independently.
 
 `RemoteAuthorityDeviceIdentity` is synchronous because ADR-0603's inspection port and libvirt
 preparation path are synchronous. It receives only the Resource-bound `AuthorityRequestSender` and
@@ -100,9 +110,10 @@ allowed after the budget expires.
   client-certificate authentication, request credential authentication, frame bound, session
   timeout, and socket ownership/ACL checks remain unchanged.
 - Existing widened: a provider-host path reaches following `stat(2)`. Closed path validation occurs
-  before dispatch; the lookup is offloaded from the authority event loop and its response await is
-  bounded by the existing session timeout. The abandoned thread may remain kernel-blocked, but it
-  owns no socket writer or request credential and cannot publish after timeout.
+  before dispatch; the lookup is admitted without waiting to the dedicated four-worker executor,
+  and its response await is bounded by the existing session timeout. An abandoned thread retains
+  its admission slot until actual completion, owns no socket writer or request credential, cannot
+  publish after timeout, and cannot consume readiness's default executor.
 - Existing used: ADR-0606's Resource-bound sender supplies fixed destination selection, call-local
   TLS material, and active-incarnation credential borrowing. #2170 preparation composition supplies
   only that sender and the enclosing deadline; no request or path can select another destination or
@@ -132,6 +143,10 @@ selection. External-boot mutation authorization remains governed by ADR-0584 and
 - Transport tests prove unauthenticated and unconfigured requests never call `stat`, operational
   lookup failures are redacted, a blocked host lookup cannot block the event loop or publish after
   session timeout, and stalled connect/read/close stages cannot exceed one absolute deadline.
+- Executor tests prove four blocked calls consume exactly four slots, a fifth fails immediately,
+  repeated waiter cancellation cannot exceed four underlying calls, actual completion releases one
+  slot and permits recovery, shutdown returns without waiting and rejects new work, and readiness
+  work on the default executor remains runnable while identity capacity is exhausted.
 - Adapter tests prove an active event loop in the calling thread fails closed without starting a
   nested loop or sending a request.
 - Composition tests prove a missing Resource-bound sender returns no port and configured

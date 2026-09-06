@@ -24,6 +24,9 @@ dispatch, composition seam, and focused trust-boundary and real-host alias tests
 - Request paths are normalized absolute UTF-8, NUL-free, and at most 4,096 encoded bytes.
 - Identity components are strict non-boolean unsigned 64-bit integers; block secondary is zero.
 - Every potentially blocking client stage consumes the same positive monotonic absolute deadline.
+- Provider-host identity lookup uses one service-owned four-worker executor; nonblocking admission
+  stays consumed until the underlying future actually completes, and shutdown never waits for a
+  blocked filesystem call.
 - Errors and durable state contain no path, host, URI, credential, TLS path, or provider output.
 - Native ppc64le live tests are excluded by campaign `00bf6369`.
 - Guardrails: focused pytest; `just lint`; `just type`; `just ci > <private-file> 2>&1 < /dev/null`.
@@ -72,18 +75,26 @@ Interfaces:
   method; `_dispatch` authenticates before either service.
 - `resolve_device_identity(peer, request) -> DeviceIdentityResponseV1` delegates only to
   `HostStatDeviceIdentity.identity` in an offloaded thread and returns redacted closed categories.
+- `RemoteDeviceIdentityService` owns a four-worker executor, four completion-owned admission slots,
+  `resolve(request)`, and non-waiting `close()`; AF_UNIX and network listeners share that one service.
 
 Steps:
 
 1. Add compatibility tests for the exact existing operations and tests proving authentication and
    service configuration precede identity lookup; run the two focused files and expect failures.
 2. Add the operation decoder/encoder and separately typed identity-service dispatch while leaving
-   both existing branches unchanged; offload the following host `stat(2)` and bound its await by the
-   existing server session.
-3. Add real-host symlink/hard-link and available bind/block alias tests around the host service,
+   both existing branches unchanged.
+3. Implement the dedicated four-worker executor and acquire its four-slot gate without waiting
+   before submission. Attach release to the concurrent future's actual completion, shield it from
+   waiter cancellation, and return `provider-failure` immediately on exhaustion.
+4. Own one service across both listeners in `run_authority_host`; close admission, cancel only
+   queued work, and invoke executor shutdown without waiting during host cleanup.
+5. Add real-host symlink/hard-link and available bind/block alias tests around the host service,
    plus a blocked-lookup regression proving the event loop stays responsive and no late response is
    published after session timeout.
-4. Rerun focused tests, lint, and type; expect exit 0, then commit.
+6. Add repeated-cancellation, exact-cap exhaustion, actual-completion recovery, non-waiting
+   shutdown, new-work rejection, and default-executor readiness-isolation regressions.
+7. Rerun focused tests, lint, and type; expect exit 0, then commit.
 
 Acceptance: the third operation is authenticated, bounded, redacted, and cannot affect either
 existing mutation operation.

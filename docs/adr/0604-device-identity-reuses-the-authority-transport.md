@@ -30,6 +30,16 @@ single-deadline TCP/TLS framing and cleanup. Repeated lookups consume the same c
 deadline rather than resetting a duration. Both ends strictly validate closed shapes and bounds;
 the caller receives only redacted conflict or infrastructure errors.
 
+The host identity service owns a dedicated four-worker executor and four admission slots. It
+acquires a slot without waiting before submitting following `stat(2)`, rejects exhaustion with the
+closed `provider-failure` category, and releases the slot only from the underlying concurrent
+future's completion callback. Canceling or timing out the async await therefore cannot admit
+replacement work while the filesystem operation is still running. The await is shielded from
+canceling the underlying future, so completion can release capacity and later requests recover.
+Service shutdown rejects new submissions, cancels only work that has not started, and invokes
+executor shutdown without waiting for kernel-blocked calls. The dedicated capacity prevents those
+calls and their queue from consuming the event loop's default executor used by authority readiness.
+
 ## Consequences
 
 Remote preparation gains one authenticated device-identity path without a second host agent,
@@ -37,7 +47,9 @@ second connection configuration, or generic execution surface. The shared transp
 additive operation
 that must remain compatible with
 external-boot consumers, including #2200. #2170 supplies the later preparation orchestration that
-calls this adapter.
+calls this adapter. At most four host identity syscalls can remain live after their network sessions
+end; while all four are blocked, new identity requests fail immediately and other authority work
+keeps its executor capacity.
 
 ## Considered & rejected
 
@@ -46,6 +58,11 @@ calls this adapter.
 - **Create a second client or provider-host listener.** judgment: duplicating Resource selection,
   credential borrowing, authentication, TLS, framing, and deployment readiness adds more surface
   than one closed additive operation on ADR-0606's sender.
+- **Use the event loop's default executor.** verified: authority readiness already uses
+  `asyncio.to_thread` in `host.py`; canceled thread work can continue after session timeout and
+  consume the shared executor, so it does not isolate lookup stalls.
+- **Release admission when the awaiting task is canceled.** verified: cancellation does not stop a
+  running filesystem syscall; early release would admit replacement work and defeat the fixed cap.
 - **Perform the lookup on the worker filesystem.** verified: ADR-0603 requires the identity from
   the remote provider host because aliases and device nodes are host-local facts.
 - **Expose identity through the generic provider runtime contract.** verified: ADR-0603 explicitly
