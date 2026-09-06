@@ -808,7 +808,7 @@ def test_real_ext4_writer_has_closed_layout_and_appliance_manifest_parity(tmp_pa
         ModuleTreeEntry("alias", 0o120777, link_target="kernel/a.ko"),
     )
     writer = Ext4SourceFilesystemWriter(tmp_path)
-    operation = b'{"protocol":"remote-module-operation-v1"}'
+    operation = OPERATION.to_wire_bytes()
     image = writer.build(operation, entries)
     evidence = writer.inspect(image.path)
 
@@ -823,6 +823,9 @@ def test_real_ext4_writer_has_closed_layout_and_appliance_manifest_parity(tmp_pa
     appliance = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(appliance)
     extracted = writer.extract(image.path, tmp_path / "readback")
+    assert appliance._read_operation(extracted / "operation-v1.json") == OPERATION.model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
     assert appliance._tree_manifest(extracted / "modules") == (
         evidence.manifest,
         evidence.entry_count,
