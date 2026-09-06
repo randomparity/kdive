@@ -1,14 +1,100 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
+    BaselineKernel,
+    _real_extract_baseline_kernel,
     baseline_kernel_names,
     select_kernel_and_initrd,
 )
 
 _V = "6.19.10-300.fc44.x86_64"
+
+
+class _Guest:
+    def __init__(self, entries: list[str]) -> None:
+        self.entries = entries
+        self.downloads: list[tuple[str, str]] = []
+
+    def add_drive_opts(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+    def launch(self) -> None:
+        pass
+
+    def inspect_os(self) -> list[str]:
+        return ["/dev/sda1"]
+
+    def mount_ro(self, *_args: object) -> None:
+        pass
+
+    def glob_expand(self, _pattern: str) -> list[str]:
+        return self.entries
+
+    def download(self, source: str, destination: str) -> None:
+        self.downloads.append((source, destination))
+        Path(destination).write_bytes(b"kernel")
+
+    def shutdown(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _install_guest(monkeypatch: pytest.MonkeyPatch, guest: _Guest) -> None:
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kw: guest))
+
+
+@pytest.mark.parametrize("with_initrd", [False, True])
+def test_extraction_callback_sees_selected_target_before_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, with_initrd: bool
+) -> None:
+    entries = [f"/boot/vmlinuz-{_V}"]
+    if with_initrd:
+        entries.append(f"/boot/initramfs-{_V}.img")
+    guest = _Guest(entries)
+    _install_guest(monkeypatch, guest)
+    destination = tmp_path / "baseline"
+    observed: list[BaselineKernel] = []
+
+    result = _real_extract_baseline_kernel(
+        tmp_path / "base.qcow2", destination, before_extract=observed.append
+    )
+
+    assert observed == [result]
+    assert result.kernel == destination / "kernel"
+    assert result.initrd == (destination / "initrd" if with_initrd else None)
+    assert guest.downloads
+
+
+def test_extraction_callback_failure_precedes_all_staging_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    guest = _Guest([f"/boot/vmlinuz-{_V}"])
+    _install_guest(monkeypatch, guest)
+    destination = tmp_path / "baseline"
+    staging = tmp_path / "baseline.part"
+    staging.mkdir()
+    sentinel = staging / "sentinel"
+    sentinel.write_text("retained", encoding="utf-8")
+
+    def refuse(_selection: BaselineKernel) -> None:
+        raise RuntimeError("intent persistence failed")
+
+    with pytest.raises(CategorizedError) as exc:
+        _real_extract_baseline_kernel(tmp_path / "base.qcow2", destination, before_extract=refuse)
+
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert sentinel.read_text(encoding="utf-8") == "retained"
+    assert guest.downloads == []
+    assert not destination.exists()
 
 
 def test_fedora_kernel_pairs_with_initramfs() -> None:
