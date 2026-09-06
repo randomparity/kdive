@@ -601,9 +601,16 @@ BEGIN
     IF (v_phase='terminal')<>(p_receipt_bytes IS NOT NULL) THEN
         RAISE EXCEPTION 'authority System terminal receipt shape is invalid' USING ERRCODE='22023';
     END IF;
+    IF jsonb_typeof(p_record->'canonical_record') IS DISTINCT FROM 'string'
+       OR octet_length(p_record->>'canonical_record') NOT BETWEEN 2 AND 1048576
+       OR (p_record->>'canonical_record')::jsonb IS DISTINCT FROM
+          (p_record-'canonical_record') THEN
+        RAISE EXCEPTION 'authority System canonical journal record is invalid'
+        USING ERRCODE='22023';
+    END IF;
     v_digest := 'sha256:' || encode(sha256(
         convert_to('kdive-authority-system-journal-v1','UTF8') || decode('00','hex') ||
-        convert_to(p_record::text,'UTF8')),'hex');
+        convert_to(p_record->>'canonical_record','UTF8')),'hex');
     IF v_phase='terminal' THEN
         IF octet_length(p_receipt_bytes) NOT BETWEEN 1 AND 131072 THEN
             RAISE EXCEPTION 'authority System receipt size is invalid' USING ERRCODE='22023';

@@ -16,7 +16,9 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemProvisionSnapshot,
     AuthoritySystemRetainedQuarantineV1,
     AuthoritySystemTakeoverRequestV1,
+    authority_system_record_digest,
     canonical_system_authority_bytes,
+    canonical_system_record_payload,
     system_authority_digest,
 )
 
@@ -36,6 +38,8 @@ __all__ = [
     "AuthoritySystemProvider",
     "AuthoritySystemTakeoverRequestV1",
     "AuthoritySystemRetainedQuarantineV1",
+    "authority_system_record_digest",
     "canonical_system_authority_bytes",
+    "canonical_system_record_payload",
     "system_authority_digest",
 ]

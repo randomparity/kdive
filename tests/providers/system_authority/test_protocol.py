@@ -19,6 +19,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemProvisionReadyV1,
     AuthoritySystemTakeoverRequestV1,
     canonical_system_authority_bytes,
+    canonical_system_record_payload,
 )
 
 _DIGEST = "sha256:" + "a" * 64
@@ -74,18 +75,22 @@ def test_terminal_never_began_is_valid_for_both_operations(
     operation: AuthoritySystemOperation,
 ) -> None:
     marker = _marker().model_copy(update={"operation": operation})
-    record = AuthoritySystemJournalRecordV1(
-        **marker.model_dump(exclude={"schema_"}),
-        authority_id=uuid4(),
-        generation=1,
-        attempt_id=uuid4(),
-        operation_digest=_DIGEST,
-        bootstrap_identity=_DIGEST,
-        sequence=1,
-        previous_digest=_DIGEST,
-        phase=AuthoritySystemJournalPhase.TERMINAL,
-        outcome="never-began",
-        canonical_record=_DIGEST,
+    fields = {
+        **marker.model_dump(mode="python", exclude={"schema_"}),
+        "schema": "authority-system-journal-v1",
+        "authority_id": uuid4(),
+        "generation": 1,
+        "attempt_id": uuid4(),
+        "operation_digest": _DIGEST,
+        "bootstrap_identity": _DIGEST,
+        "sequence": 1,
+        "previous_digest": _DIGEST,
+        "phase": AuthoritySystemJournalPhase.TERMINAL,
+        "observation": None,
+        "outcome": "never-began",
+    }
+    record = AuthoritySystemJournalRecordV1.model_validate(
+        {**fields, "canonical_record": canonical_system_record_payload(fields)}
     )
     assert record.observation is None
 

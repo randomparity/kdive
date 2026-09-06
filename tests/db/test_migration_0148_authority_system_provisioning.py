@@ -352,6 +352,7 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
             "operation_digest": operation_digest,
             "phase": "mutation-started",
         }
+        started["canonical_record"] = json.dumps(started, sort_keys=True, separators=(",", ":"))
         advanced = authority.execute(
             "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,0,%s,%s,NULL)",
             (worker, authority_id, generation, genesis, Jsonb(started)),
@@ -362,12 +363,13 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
             "sha256:" + hashlib.sha256(b"kdive-authority-system-proof-v1\0" + receipt).hexdigest()
         )
         terminal = {
-            **started,
+            **{key: value for key, value in started.items() if key != "canonical_record"},
             "sequence": 2,
             "previous_digest": advanced[2],
             "phase": "terminal",
             "observation": {"composite_state": receipt_digest},
         }
+        terminal["canonical_record"] = json.dumps(terminal, sort_keys=True, separators=(",", ":"))
         completed = authority.execute(
             "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,1,%s,%s,%s)",
             (worker, authority_id, generation, advanced[2], Jsonb(terminal), receipt),

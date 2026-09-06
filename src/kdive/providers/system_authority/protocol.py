@@ -22,6 +22,7 @@ MAX_MESSAGE_BYTES = 1_048_576
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
 GENESIS_DIGEST = "sha256:" + "0" * 64
 _PROOF_PREFIX = b"kdive-authority-system-proof-v1\0"
+_RECORD_PREFIX = b"kdive-authority-system-journal-v1\0"
 
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PositiveBigInt = Annotated[int, Field(ge=1, le=MAX_SIGNED_BIGINT)]
@@ -52,6 +53,26 @@ def system_authority_digest(value: BaseModel) -> str:
     return (
         "sha256:"
         + hashlib.sha256(_PROOF_PREFIX + canonical_system_authority_bytes(value)).hexdigest()
+    )
+
+
+def canonical_system_record_payload(fields: dict[str, object]) -> str:
+    """Encode every journal field except ``canonical_record`` exactly once."""
+    if "canonical_record" in fields:
+        raise ValueError("canonical record payload must exclude canonical_record")
+    encoded = json.dumps(
+        fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    )
+    if len(encoded.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        raise ValueError("authority System journal record exceeds 1048576 bytes")
+    return encoded
+
+
+def authority_system_record_digest(record: AuthoritySystemJournalRecordV1) -> str:
+    """Hash the exact canonical payload stored inside a journal member."""
+    return (
+        "sha256:"
+        + hashlib.sha256(_RECORD_PREFIX + record.canonical_record.encode("utf-8")).hexdigest()
     )
 
 
@@ -161,10 +182,13 @@ class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptBinding):
         ]
         | None
     ) = None
-    canonical_record: Digest
+    canonical_record: Annotated[str, Field(min_length=2, max_length=MAX_MESSAGE_BYTES)]
 
     @model_validator(mode="after")
     def _phase_shape_is_closed(self) -> Self:
+        fields = self.model_dump(mode="json", by_alias=True, exclude={"canonical_record"})
+        if self.canonical_record != canonical_system_record_payload(fields):
+            raise ValueError("journal canonical_record does not match its fields")
         if self.phase in {
             AuthoritySystemJournalPhase.WATERMARK_INSTALLED,
             AuthoritySystemJournalPhase.TAKEOVER_SUPERSEDED,
