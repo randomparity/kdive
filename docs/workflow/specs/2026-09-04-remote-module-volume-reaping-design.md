@@ -102,13 +102,35 @@ only the aggregate removed count and returns no tenant-visible result.
 enqueue/recycle returns one and an already in-flight job returns zero. Queue or validation failure
 uses the repair catalog's existing failure isolation and later lanes continue.
 
+The ownership interfaces are explicit:
+
+```python
+async def enqueue_remote_module_volume_reap(conn: AsyncConnection) -> bool: ...
+
+async def remote_module_volume_reap_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    reaper: ModuleVolumeReaper,
+) -> None: ...
+```
+
+`WorkerHandlerAssembly` carries `module_volume_reaper: ModuleVolumeReaper` and registers that exact
+handler for `JobKind.REMOTE_MODULE_VOLUME_REAP`. `build_worker_handler_assembly` passes its
+active-incarnation sender factory to `ProviderComposition.build_worker_module_volume_reaper`.
+That method replaces and removes `build_reconciler_module_volume_reaper`. No reconciler
+configuration, process assembly, or repair-catalog entry receives a reaper or authority sender.
+
 ## Failure handling and observability
 
 The low-level provider operation is fail-closed. Pool lookup, refresh, enumeration, domain XML,
-volume-path lookup, and deletion errors raise a categorized error, so the reconciler records
-`reaped_module_volumes` in `failures` and continues later lanes. No partial count is reported after
-an error, although deletions completed before a later delete failure remain effective and the next
-pass re-derives state.
+volume-path lookup, and deletion errors raise a categorized error. They remain worker-job failures:
+the ordinary worker contract retries or terminalizes the durable row and records its redacted job
+telemetry. They cannot retroactively enter the completed reconciler tick's report. The reconciler
+records only enqueue/recycle failure under `module_volume_reap_jobs_enqueued` and continues later
+lanes. No partial removed count is returned after an error, although completed deletions remain
+effective and a retry re-derives state. Success emits the aggregate removed count only through
+bounded worker-job telemetry, not `ReconcileReport` or a tenant-visible result.
 
 The reference set is built completely before any candidate is deleted. A referenced candidate is
 then skipped with one warning carrying only pool and volume; an independent orphan remains
@@ -184,5 +206,8 @@ disabled composition. Queue tests prove the closed bounded payload, stable-key i
 deduplication, terminal recycling, concurrent admission, retry after failure, and restart reclaim.
 Handler tests prove retention reads occur only after provider enumeration, the active
 worker-incarnation sender is used with fixed Resource bindings, and payload values cannot select a
-destination. Focused lint and whole-tree typing cover the protocol boundary; `just ci` is the
-pre-push gate.
+destination. Composition assertions prove worker assembly owns the reaper, reconciler configuration
+owns no reaper or sender, and the removed `build_reconciler_module_volume_reaper` name is absent.
+Failure-path assertions distinguish reconciler enqueue failure from later worker retry, terminal
+failure, and removed-count telemetry. Focused lint and whole-tree typing cover the protocol
+boundary; `just ci` is the pre-push gate.

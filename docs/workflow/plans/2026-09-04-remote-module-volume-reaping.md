@@ -39,9 +39,12 @@ composition/report wiring, and provider, fleet, lane, and loop tests.
   and `src/kdive/db/schema/0131_remote_module_volume_reap_job_kind.sql`: closed job contract,
   persisted enum, and worker registration.
 - `src/kdive/providers/remote_libvirt/composition.py` and
-  `src/kdive/providers/assembly/composition.py`: concrete port construction and enablement.
-- `src/kdive/reconciler/loop.py` and `src/kdive/processes/reconciler.py`: repair registration,
-  configuration, result count, and production binding.
+  `src/kdive/providers/assembly/composition.py`: worker-only concrete port construction through
+  `build_worker_module_volume_reaper`; remove the reconciler-named builder.
+- `src/kdive/jobs/handlers/module_volume_reaping.py` and `src/kdive/jobs/assembly.py`: worker handler
+  and `WorkerHandlerAssembly.module_volume_reaper` registration.
+- `src/kdive/reconciler/loop.py`: enqueue-lane registration and enqueue-count reporting; reconciler
+  process/configuration receives no provider reaper or authority sender.
 - Mirrored files under `tests/providers/`, `tests/reconciler/`, and `tests/processes/`: behavior,
   composition, and report coverage.
 
@@ -182,9 +185,9 @@ asyncio loop. One bounded deadline covers each host sweep.
 4. Pass the per-host identity port explicitly into `reap_orphaned_module_volumes`; add a composition
    assertion that the port built from that host's fixed binding is the one observed by candidate and
    reference lookups.
-5. Add the remote factory to the provider descriptor and expose
-   `ProviderComposition.build_reconciler_module_volume_reaper`, returning the null port when remote
-   libvirt is disabled.
+5. Add the remote factory to the provider descriptor and expose the worker-owned
+   `ProviderComposition.build_worker_module_volume_reaper`, returning the null port when remote
+   libvirt is disabled. Task 3 binds it only from worker assembly.
 6. Run the focused command and expect all selected tests to pass. Commit the task.
 
 Acceptance: provider construction opens no connection or authority credential; one unreachable host
@@ -215,6 +218,31 @@ job's database connection. The callback expands mutation retention to `source.ex
 `scratch.ext4`, and reap retention to `reaping.journal` and `reaped.journal`, rendering UUIDs
 canonically.
 
+Exact ownership surfaces:
+
+```python
+async def enqueue_remote_module_volume_reap(conn: AsyncConnection) -> bool: ...
+
+async def remote_module_volume_reap_handler(
+    conn: AsyncConnection, job: Job, *, reaper: ModuleVolumeReaper
+) -> None: ...
+
+class WorkerHandlerAssembly:
+    module_volume_reaper: ModuleVolumeReaper
+
+def ProviderComposition.build_worker_module_volume_reaper(
+    self,
+    *,
+    enable_remote_libvirt: bool | None = None,
+    authority_sender_factory: AuthoritySenderFactory | None = None,
+) -> ModuleVolumeReaper: ...
+```
+
+The worker builder replaces `build_reconciler_module_volume_reaper`; delete the old method and its
+reconciler-oriented tests. `build_worker_handler_assembly` constructs the reaper with its existing
+active-incarnation sender factory. Neither `ReconcileConfig` nor `build_reconcile_config` gains a
+reaper or sender parameter.
+
 ### Verification
 
 - Mode: focused-test. Contract: kind-specific expansion happens only when the provider invokes the
@@ -234,16 +262,23 @@ canonically.
 2. Add queue admission tests for one stable key: queued/running rows deduplicate, terminal rows
    recycle, concurrent admissions yield one active row, failed work retries within the bounded
    worker attempt contract, and an expired lease is reclaimed after worker restart.
-3. Convert the reconciler lane to enqueue the constant payload. Register
+3. Convert the reconciler lane to
+   `enqueue_remote_module_volume_reap(conn: AsyncConnection) -> bool`, enqueueing the constant
+   payload. Register
    `module_volume_reap_jobs_enqueued` in the catalog/report and return one only for insertion or
-   terminal recycling; queue failure is isolated like other repairs.
-4. Implement the worker handler. Validate the payload, build the reaper from worker assembly, and
+   terminal recycling; queue failure is isolated like other repairs. Assert the report never
+   claims a removed count or a later provider failure.
+4. Implement `remote_module_volume_reap_handler(conn, job, *, reaper) -> None`. Validate the
+   payload, use the reaper supplied by worker assembly, and
    give it the deferred repository callback. Prove mutation/reap expansion, post-enumeration read,
    aggregate fleet isolation, null composition, and that no payload field can select Resource,
-   endpoint, or credential.
-5. Register the handler and construct the remote adapter only in worker assembly, borrowing the
-   active incarnation credential through the landed typed sender factory. Do not construct an
-   authority sender in the reconciler process.
+   endpoint, or credential. A provider error remains a worker-job retry or terminal failure; a
+   success emits the aggregate removed count only through bounded worker telemetry.
+5. Add `module_volume_reaper` to `WorkerHandlerAssembly`, register the handler, rename composition
+   to `build_worker_module_volume_reaper`, and delete `build_reconciler_module_volume_reaper`.
+   Construct the remote adapter only in `build_worker_handler_assembly`, borrowing the active
+   incarnation credential through the landed typed sender factory. Assert worker assembly receives
+   the reaper and reconciler assembly exposes no reaper or sender construction.
 6. Run focused job, handler, reconciler, payload, migration, and assembly tests, then `just lint`,
    `just type`, and `just test-changed`; expect clean. Commit the task.
 
