@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
+import libvirt
 import pytest
 from pydantic import ValidationError
 
@@ -25,6 +26,7 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
+    RecoveryObjectBinding,
     RecoveryPoint,
     RunningKernelObservation,
 )
@@ -41,6 +43,9 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationStore,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    AttachmentInspection,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
@@ -55,6 +60,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedVolume,
     render_module_volume_name,
 )
+from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as module_operation,
 )
@@ -762,4 +768,97 @@ def test_running_observation_rejects_changed_request_before_provider(tmp_path: P
     with pytest.raises(ValueError, match="identities differ"):
         asyncio.run(adapter.observe_running(request))
     executor.shutdown()
+    store.close()
+
+
+def test_remote_recovery_object_reopens_geometry_and_deletes_exact_volume(tmp_path: Path) -> None:
+    authority = OpaqueProviderRef(ref="authority/remote-a")
+    record = _record()
+    source_name = render_module_volume_name(
+        record.binding.system_id,
+        record.binding.run_id,
+        record.module_recovery.operation_nonce,
+        "source.ext4",
+    )
+    scratch_name = render_module_volume_name(
+        record.binding.system_id,
+        record.binding.run_id,
+        record.module_recovery.operation_nonce,
+        "scratch.ext4",
+    )
+    module = record.module_recovery.model_copy(
+        update={
+            "authority_identity": RemoteModuleRecoveryRefV2.identity_for_authority(authority),
+            "source_volume": OpaqueProviderRef(ref=source_name),
+            "scratch_volume": OpaqueProviderRef(ref=scratch_name),
+        }
+    )
+    record = record.model_copy(
+        update={
+            "module_recovery": module,
+            "recovery_objects": tuple(
+                sorted(
+                    (module.source_volume, module.scratch_volume),
+                    key=lambda value: value.to_canonical_json(),
+                )
+            ),
+        }
+    )
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.publish_recovery(record)
+
+    class Volume:
+        def name(self) -> str:
+            return module.source_volume.ref
+
+        def info(self) -> list[int]:
+            return [0, module.source_capacity_bytes]
+
+        def delete(self, flags: int = 0) -> int:
+            del flags
+            volumes.clear()
+            return 0
+
+    volumes: dict[str, Volume] = {}
+    volumes[module.source_volume.ref] = Volume()
+
+    class Pool:
+        def storageVolLookupByName(self, name: str) -> Volume:  # noqa: N802
+            if name in volumes:
+                return volumes[name]
+            error = libvirt.libvirtError("absent")
+            error.err = (libvirt.VIR_ERR_NO_STORAGE_VOL,) + (0,) * 8
+            raise error
+
+    class Connection:
+        def storagePoolLookupByName(self, name: str) -> Pool:  # noqa: N802
+            assert name == module.pool.ref
+            return Pool()
+
+    port = RemoteExternalBootRecoveryObjects(
+        store=store,
+        connection=Connection(),
+        boot_artifact_pool="boot",
+        inspect_attachments=lambda: AttachmentInspection(
+            system_shut_off=True,
+            exclusive=True,
+            appliance_present=False,
+            detached_volumes=frozenset({(module.pool.ref, module.source_volume.ref)}),
+        ),
+    )
+    binding = RecoveryObjectBinding(
+        record_id=str(uuid4()),
+        binding=record.binding,
+        kind="modules",
+        reference=module.source_volume,
+        ownership_digest="sha256:" + "e" * 64,
+        operation_identity="cleanup-a",
+        attempt_id=str(uuid4()),
+        mutation_journal_sequence=7,
+        mutation_journal_digest="sha256:" + "f" * 64,
+    )
+    observed = port.observe_object(binding, authority)
+    assert observed.present and not observed.managed
+    deleted = port.delete_object(binding, authority, observed.observed_digest)
+    assert not deleted.present
     store.close()

@@ -503,7 +503,34 @@ class RemoteModuleVolumePreparationStore:
             f"{self._recovery_key(recovery.binding, recovery.plan_identity)}.recovery-index",
             identity.encode("ascii"),
         )
+        for reference in recovery.recovery_objects:
+            object_key = hashlib.sha256(
+                b"kdive-remote-recovery-object-v1\0" + reference.to_canonical_json()
+            ).hexdigest()
+            self._publish(f"{object_key}.object-index", identity.encode("ascii"))
         return OpaqueProviderRef(ref=f"remote-external-boot/{identity}")
+
+    def recovery_for_object(self, reference: OpaqueProviderRef) -> RemoteExternalBootRecoveryRecord:
+        object_key = hashlib.sha256(
+            b"kdive-remote-recovery-object-v1\0" + reference.to_canonical_json()
+        ).hexdigest()
+        index = self._read(f"{object_key}.object-index")
+        if index is None:
+            raise FileNotFoundError("remote recovery object index is absent")
+        try:
+            identity = index.decode("ascii")
+        except UnicodeDecodeError:
+            raise ValueError("remote recovery object index is malformed") from None
+        data = self._read(f"{identity}.recovery")
+        if (
+            data is None
+            or hashlib.sha256(b"kdive-remote-recovery-v1\0" + data).hexdigest() != identity
+        ):
+            raise ValueError("remote recovery object index is unauthenticated")
+        recovery = RemoteExternalBootRecoveryRecord.from_canonical_json(data)
+        if reference not in recovery.recovery_objects:
+            raise ValueError("remote recovery object differs from durable record")
+        return recovery
 
     @staticmethod
     def _recovery_key(binding: ExternalBootActivationBinding, plan_identity: str) -> str:
