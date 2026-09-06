@@ -1,0 +1,12 @@
+KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE={{ provider_authority_host_instance }}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES={{ provider_authority_host_denied_identities | join(',') }}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_UID={{ provider_authority_host_uid }}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_GID={{ provider_authority_host_gid }}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID={{ provider_authority_host_client_gid }}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR=/var/lib/kdive/provider-authority/journal
+KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock
+KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock
+{% if provider_authority_host_network_address %}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS={{ provider_authority_host_network_address }}
+KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT={{ provider_authority_host_network_port }}
+{% endif %}

@@ -19,9 +19,16 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import SecretStr
 
+from kdive.providers.external_boot_authority.device_identity import (
+    DeviceIdentityRequestV1,
+    DeviceIdentityResponseV1,
+    decode_device_identity_request,
+)
 from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
     AuthorityAcknowledgementV1,
+    AuthorityHealthAcknowledgementV1,
+    AuthorityHealthRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
@@ -43,7 +50,9 @@ _TLS_TIMEOUT_SECONDS = 5.0
 _MAX_JSON_NESTING = 64
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
-type Operation = Literal["acknowledge-takeover", "execute-mutation"]
+type Operation = Literal[
+    "acknowledge-takeover", "execute-mutation", "health", "resolve-device-identity"
+]
 type AuthenticatePeer = Callable[[SecretStr], Awaitable[AuthenticatedPeer]]
 
 
@@ -55,6 +64,10 @@ class AuthorityService(Protocol):
     async def execute_mutation(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1: ...
+
+
+class DeviceIdentityService(Protocol):
+    async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityResponseV1: ...
 
 
 class _TransportError(RuntimeError):
@@ -89,10 +102,18 @@ def encode_request_envelope(
     if not credential_bytes or len(credential_bytes) > MAX_CREDENTIAL_BYTES:
         raise ValueError("credential must contain 1 through 4096 UTF-8 bytes")
     request_bytes = _canonical_json(request)
-    decoded = decode_authority_request(request_bytes)
+    decoded = (
+        decode_device_identity_request(request_bytes)
+        if operation == "resolve-device-identity"
+        else decode_authority_request(request_bytes)
+    )
     if operation == "acknowledge-takeover" and not isinstance(decoded, AuthorityTakeoverRequestV1):
         raise ValueError("invalid-request")
     if operation == "execute-mutation" and not isinstance(decoded, AuthorityMutationRequestV1):
+        raise ValueError("invalid-request")
+    if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
+        raise ValueError("invalid-request")
+    if operation == "resolve-device-identity" and not isinstance(decoded, DeviceIdentityRequestV1):
         raise ValueError("invalid-request")
     return _canonical_json({"credential": credential, "operation": operation, "request": request})
 
@@ -146,26 +167,47 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
         operation = value["operation"]
         credential = value["credential"]
         request_value = value["request"]
-        if operation not in {"acknowledge-takeover", "execute-mutation"}:
+        if operation not in {
+            "acknowledge-takeover",
+            "execute-mutation",
+            "health",
+            "resolve-device-identity",
+        }:
             raise ValueError
         if not isinstance(credential, str) or not isinstance(request_value, dict):
             raise ValueError
         credential_bytes = credential.encode("utf-8")
         if not credential_bytes or len(credential_bytes) > MAX_CREDENTIAL_BYTES:
             raise ValueError
-        request = decode_authority_request(_canonical_json(request_value))
+        request_bytes = _canonical_json(request_value)
+        request = (
+            decode_device_identity_request(request_bytes)
+            if operation == "resolve-device-identity"
+            else decode_authority_request(request_bytes)
+        )
         if operation == "acknowledge-takeover" and not isinstance(
             request, AuthorityTakeoverRequestV1
         ):
             raise ValueError
         if operation == "execute-mutation" and not isinstance(request, AuthorityMutationRequestV1):
             raise ValueError
+        if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
+            raise ValueError
+        if operation == "resolve-device-identity" and not isinstance(
+            request, DeviceIdentityRequestV1
+        ):
+            raise ValueError
     except RecursionError, TypeError, UnicodeError, ValueError, json.JSONDecodeError:
         raise _TransportError("invalid-request") from None
     return operation, request, SecretStr(credential)
 
 
-def _success(value: AuthorityAcknowledgementV1 | AuthorityObservationV1) -> bytes:
+def _success(
+    value: AuthorityAcknowledgementV1
+    | AuthorityObservationV1
+    | AuthorityHealthAcknowledgementV1
+    | DeviceIdentityResponseV1,
+) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
 
 
@@ -183,12 +225,24 @@ async def _dispatch(
     payload: bytes,
     authenticate_peer: AuthenticatePeer,
     service: AuthorityService | None,
+    identity_service: DeviceIdentityService | None = None,
 ) -> bytes:
     operation, request, credential = _decode_envelope(payload)
     try:
         peer = await authenticate_peer(credential)
     except Exception:  # noqa: BLE001 -- authentication details never cross the boundary
         return _error("unauthenticated")
+    if operation == "health":
+        return _success(AuthorityHealthAcknowledgementV1())
+    if operation == "resolve-device-identity":
+        if identity_service is None:
+            return _error("provider-not-configured")
+        if not isinstance(request, DeviceIdentityRequestV1):
+            raise _TransportError("invalid-request")
+        try:
+            return _success(await identity_service.resolve(request))
+        except Exception:  # noqa: BLE001 -- filesystem details never cross the boundary
+            return _error("provider-failure")
     if service is None:
         return _error("provider-not-configured")
     try:
@@ -210,11 +264,12 @@ async def _handle_session(
     writer: asyncio.StreamWriter,
     authenticate_peer: AuthenticatePeer,
     service: AuthorityService | None,
+    identity_service: DeviceIdentityService | None = None,
 ) -> None:
     try:
         async with asyncio.timeout(_TLS_TIMEOUT_SECONDS):
             payload = await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
-            response = await _dispatch(payload, authenticate_peer, service)
+            response = await _dispatch(payload, authenticate_peer, service, identity_service)
             await _write_frame(writer, response)
     except _TransportError as exc:
         with suppress(ConnectionError, ssl.SSLError):
@@ -426,6 +481,7 @@ async def serve_authority_transport(
     config: AuthorityHostConfig,
     authenticate_peer: AuthenticatePeer,
     service: AuthorityService | None = None,
+    identity_service: DeviceIdentityService | None = None,
 ) -> AuthorityListener:
     """Bind the dormant authenticated boundary without beginning to serve it."""
     validate_socket_parent(
@@ -443,7 +499,7 @@ async def serve_authority_transport(
         raise
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _handle_session(reader, writer, authenticate_peer, service)
+        await _handle_session(reader, writer, authenticate_peer, service, identity_service)
 
     try:
         server = await asyncio.start_unix_server(
@@ -460,17 +516,7 @@ async def serve_authority_transport(
     try:
         os.chmod(config.request_socket, SOCKET_MODE, follow_symlinks=False)
         status = os.stat(config.request_socket, follow_symlinks=False)
-        fingerprints = {
-            path: _fingerprint(path)
-            for path in (
-                config.server_private_key,
-                config.server_certificate,
-                config.server_ca,
-                config.worker_client_ca,
-                config.health_client_certificate,
-                config.health_client_key,
-            )
-        }
+        fingerprints = _tls_fingerprints(config)
         return AuthorityListener(
             server,
             config.request_socket,
@@ -487,3 +533,94 @@ async def serve_authority_transport(
         await server.wait_closed()
         os.close(lock_descriptor)
         raise
+
+
+@dataclass(slots=True)
+class AuthorityNetworkListener:
+    """Exact IPv4 bind and TLS evidence for the optional listener (ADR-0606)."""
+
+    server: asyncio.Server
+    address: tuple[str, int]
+    server_name: str
+    tls_context: ssl.SSLContext
+    fingerprints: dict[Path, tuple[int, int, int, int, str]]
+    socket_descriptor: int
+    started: bool = False
+
+    async def start_serving(self) -> None:
+        await self.server.start_serving()
+        self.started = True
+
+    def validate(self) -> None:
+        sockets = self.server.sockets or ()
+        if (
+            len(sockets) != 1
+            or sockets[0].family != socket.AF_INET
+            or sockets[0].getsockname() != self.address
+            or sockets[0].fileno() != self.socket_descriptor
+            or self.server.is_serving() != self.started
+            or self.tls_context.minimum_version is not ssl.TLSVersion.TLSv1_3
+            or self.tls_context.maximum_version is not ssl.TLSVersion.TLSv1_3
+            or self.tls_context.verify_mode is not ssl.CERT_REQUIRED
+        ):
+            raise OSError("listener evidence invalid")
+        if any(_fingerprint(path) != expected for path, expected in self.fingerprints.items()):
+            raise OSError("listener TLS evidence changed")
+
+    async def close(self) -> None:
+        self.server.close()
+        await self.server.wait_closed()
+
+
+async def serve_authority_network_transport(
+    config: AuthorityHostConfig,
+    authenticate_peer: AuthenticatePeer,
+    service: AuthorityService | None = None,
+    identity_service: DeviceIdentityService | None = None,
+) -> AuthorityNetworkListener:
+    """Bind one configured IPv4 mutual-TLS listener without beginning to serve it."""
+    if config.network_address is None or config.network_port is None:
+        raise ValueError("network listener is not configured")
+    context = server_tls_context(config)
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _handle_session(reader, writer, authenticate_peer, service, identity_service)
+
+    server = await asyncio.start_server(
+        handle,
+        host=config.network_address,
+        port=config.network_port,
+        family=socket.AF_INET,
+        ssl=context,
+        ssl_handshake_timeout=_TLS_TIMEOUT_SECONDS,
+        ssl_shutdown_timeout=_TLS_TIMEOUT_SECONDS,
+        start_serving=False,
+    )
+    try:
+        fingerprints = _tls_fingerprints(config)
+        return AuthorityNetworkListener(
+            server,
+            (config.network_address, config.network_port),
+            authority_server_name(config.authority_instance),
+            context,
+            fingerprints,
+            server.sockets[0].fileno(),
+        )
+    except BaseException:
+        server.close()
+        await server.wait_closed()
+        raise
+
+
+def _tls_fingerprints(config: AuthorityHostConfig) -> dict[Path, tuple[int, int, int, int, str]]:
+    return {
+        path: _fingerprint(path)
+        for path in (
+            config.server_private_key,
+            config.server_certificate,
+            config.server_ca,
+            config.worker_client_ca,
+            config.health_client_certificate,
+            config.health_client_key,
+        )
+    }

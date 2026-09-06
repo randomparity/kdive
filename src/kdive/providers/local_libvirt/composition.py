@@ -45,6 +45,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    LocalExternalBootReadiness,
+    prepare_console_readiness_window,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     Connect,
@@ -52,6 +56,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     OpenArtifactRoot,
     OpenGuest,
     PinOperationLease,
+    PrepareConsole,
     ReadinessProbe,
     RunningObserver,
 )
@@ -192,6 +197,7 @@ def build_external_boot_session_factory(
     pin_lease: PinOperationLease,
     open_artifact_root: OpenArtifactRoot,
     open_guest: OpenGuest,
+    prepare_console: PrepareConsole | None,
     # Both widened to `| None` and deliberately left REQUIRED, with no default. The factory's own
     # `or _unconfigured_*` fallbacks then select the fail-closed defaults. Giving either a
     # default would make every mechanism omittable, so a caller that forgot `open_guest` or
@@ -207,6 +213,7 @@ def build_external_boot_session_factory(
         connect=cast(Connect, lambda: libvirt.open(uri)),
         open_artifact_root=open_artifact_root,
         open_guest=open_guest,
+        prepare_console=prepare_console,
         readiness=readiness,
         observe_running=observe_running,
         cleanup_payloads=cleanup_payloads,
@@ -239,16 +246,8 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
         pin_lease=LocalOperationLane().pin,
         open_artifact_root=LocalArtifactRoot(root).open,
         open_guest=open_libguestfs_guest,
-        # `readiness` (amendment 7): `_real_readiness` reads a console log whose only
-        # truncation happens in `LocalLibvirtInstall`'s prepare, and `_ConcreteSession.start()`
-        # truncates nothing. On the `prior_power == "running"` arm that reaches it, the source
-        # boot's `kdive-ready` marker is still in the file, and `classify_console` scans only
-        # the bytes *before* the marker — so a target-boot panic is invisible and the gate
-        # reports success. A correct probe must anchor its window at `start()`, which is in
-        # `session.py`. Owner #2212, which cannot ship a live port without one because
-        # `_unconfigured_readiness` raises on first call.
-        #
-        readiness=None,
+        prepare_console=prepare_console_readiness_window,
+        readiness=LocalExternalBootReadiness(),
         observe_running=LocalRunningObserver(),
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
     )
