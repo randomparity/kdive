@@ -30,6 +30,7 @@ from kdive.db.external_boot_authority_journal import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.device_identity import RemoteDeviceIdentityService
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.proof_barrier import AuthorityProofBarrier
 from kdive.providers.external_boot_authority.protocol import record_digest
 from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_CLIENT_GID,
@@ -39,6 +40,7 @@ from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_JOURNAL_DIR,
     AUTHORITY_NETWORK_ADDRESS,
     AUTHORITY_NETWORK_PORT,
+    AUTHORITY_PROOF_SOCKET,
     AUTHORITY_PROVIDER_SOCKET,
     AUTHORITY_REMOTE_MODULE_ARCHITECTURES,
     AUTHORITY_REMOTE_MODULE_ENABLED,
@@ -123,6 +125,7 @@ class AuthorityHostConfig:
     worker_client_ca: Path
     health_client_certificate: Path
     health_client_key: Path
+    proof_socket: Path | None = None
     remote_module_enabled: bool = False
     remote_module_architectures: tuple[str, ...] = ()
     remote_libvirt_storage_pool: str = "default"
@@ -183,6 +186,7 @@ class AuthorityHostConfig:
             journal_dir = config_registry.require(AUTHORITY_JOURNAL_DIR)
             request_socket = config_registry.require(AUTHORITY_REQUEST_SOCKET)
             provider_socket = config_registry.require(AUTHORITY_PROVIDER_SOCKET)
+            proof_socket = config_registry.get(AUTHORITY_PROOF_SOCKET)
             denied_identities = config_registry.require(AUTHORITY_DENIED_IDENTITIES)
             network_address = config_registry.get(AUTHORITY_NETWORK_ADDRESS)
             network_port = config_registry.get(AUTHORITY_NETWORK_PORT)
@@ -203,6 +207,7 @@ class AuthorityHostConfig:
             journal_dir=journal_dir,
             request_socket=request_socket,
             provider_socket=provider_socket,
+            proof_socket=proof_socket,
             database_dsn=credentials / "database-dsn",
             server_private_key=credentials / "service-credential",
             server_certificate=credentials / "server-certificate",
@@ -281,6 +286,11 @@ def _validate_access_boundary(config: AuthorityHostConfig) -> None:
         (runtime_dir, config.authority_uid, config.authority_client_gid, 0o710),
         (config.request_socket.parent, config.authority_uid, config.authority_client_gid, 0o2750),
         (config.provider_socket.parent, config.authority_uid, config.authority_gid, 0o700),
+        *(
+            ((config.proof_socket.parent, config.authority_uid, config.authority_gid, 0o700),)
+            if config.proof_socket is not None
+            else ()
+        ),
     ]
     if config.remote_module_enabled:
         protected_directories.extend(
@@ -1208,7 +1218,9 @@ def _open_remote_module_connection(config: AuthorityHostConfig) -> Any:
     return connection
 
 
-def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
+def _build_mutation_service(
+    config: AuthorityHostConfig, proof_checkpoint: AuthorityProofBarrier | None = None
+) -> ExternalBootAuthorityService | None:
     """Build mutation support only on a host with an explicitly provisioned local root."""
     from kdive import config as runtime_config
     from kdive.providers.assembly.composition import (
@@ -1257,6 +1269,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
             journal_factory=journal_factory,
             adapter=binding.adapter,
             recovery_orphans=recovery_orphans,
+            proof_checkpoint=proof_checkpoint,
         )
 
     from kdive.providers.remote_libvirt.external_boot_authority import (
@@ -1357,6 +1370,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
         adapter=adapter,
         remote_module_host=remote_module_host,
         recovery_orphans=recovery_orphans,
+        proof_checkpoint=proof_checkpoint,
     )
 
 
@@ -1373,6 +1387,7 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
     listener: AuthorityListener | None = None
     network_listener: AuthorityNetworkListener | None = None
     mutation_service: ExternalBootAuthorityService | None = None
+    proof_barrier: AuthorityProofBarrier | None = None
     journal_validator = JournalInventoryValidator()
     identity_service = RemoteDeviceIdentityService()
 
@@ -1381,7 +1396,17 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
 
     try:
         await _bounded_readiness_check(_check_static_authority_host(config, journal_validator))
-        mutation_service = _build_mutation_service(config)
+        if config.proof_socket is not None:
+            try:
+                proof_barrier = AuthorityProofBarrier(config.proof_socket)
+                await proof_barrier.start()
+            except OSError:
+                raise HostReadinessError("proof", "bind-failed") from None
+        mutation_service = (
+            _build_mutation_service(config, proof_barrier)
+            if proof_barrier is not None
+            else _build_mutation_service(config)
+        )
         try:
             listener = await serve_authority_transport(
                 config,
@@ -1438,10 +1463,14 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                         await _close_listener(listener)
                 finally:
                     try:
-                        if mutation_service is not None:
-                            await mutation_service.close()
+                        if proof_barrier is not None:
+                            await proof_barrier.close()
                     finally:
-                        identity_service.close()
+                        try:
+                            if mutation_service is not None:
+                                await mutation_service.close()
+                        finally:
+                            identity_service.close()
 
 
 async def check_authority_host_once(config: AuthorityHostConfig) -> None:

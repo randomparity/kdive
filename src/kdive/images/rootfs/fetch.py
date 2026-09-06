@@ -194,10 +194,11 @@ def fetch_public_provisioning_rootfs(
 
     - a **staged-path** row resolves to its ``path`` validated against ``allowed_roots``
       (``validate_local_component_path`` re-checks absolute-ness, existence, containment incl.
-      symlink escape, regular-file, and readability) — **no object store, no cache, no digest**;
-      ``store_factory`` is never called, because staged-path resolves from a host-local file and
-      never touches the object store — a cost optimization that avoids round-tripping a multi-GB
-      rootfs through S3 (S3 is a required backend, ADR-0337).
+      symlink escape, regular-file, readability, and its optional mechanically-derived catalog
+      digest) — **no object store or cache**; ``store_factory`` is never called, because
+      staged-path resolves from a host-local file and never touches the object store — a cost
+      optimization that avoids round-tripping a multi-GB rootfs through S3 (S3 is a required
+      backend, ADR-0337; digest binding is ADR-0624).
     - an **s3** row builds the store via ``store_factory``, downloads ``object_key``, verifies its
       sha256 against ``digest``, and caches it under a digest-keyed file in ``cache_dir``.
 
@@ -214,7 +215,9 @@ def fetch_public_provisioning_rootfs(
             details={"provider": provider, "name": name, "arch": arch},
         )
     if row.path is not None:
-        return validate_local_component_path(row.path, allowed_roots=allowed_roots)
+        return validate_local_component_path(
+            row.path, allowed_roots=allowed_roots, sha256=row.digest
+        )
     object_key, digest = _required_object_ref(
         row.object_key, row.digest, provider=provider, name=name
     )
