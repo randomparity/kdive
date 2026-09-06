@@ -2148,6 +2148,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify canonical materialized modules
 - Confine module conversion scratch files
 - Bound materializer validation storage
+- Fence provision during system teardown
+- Cite teardown race ordering
 
 ### Security
 
