@@ -95,8 +95,7 @@ CREATE TABLE public.authority_system_attempts (
         OR (octet_length(receipt_bytes) BETWEEN 1 AND 131072
             AND receipt_digest ~ '^sha256:[0-9a-f]{64}$'
             AND receipt_disposition IN (
-                'provision-ready', 'provision-failed',
-                'preactivation-absent', 'retained-quarantine'
+                'provision-ready', 'preactivation-absent', 'retained-quarantine'
             )
             AND receipt_at IS NOT NULL AND terminal_head_sequence > 0
             AND terminal_head_digest ~ '^sha256:[0-9a-f]{64}$')
@@ -445,7 +444,11 @@ BEGIN
     IF v_attempt.state <> 'allocating' OR v_attempt.worker_incarnation <> v_worker
        OR v_attempt.job_id <> p_job_id OR v_attempt.job_attempt <> p_job_attempt
        OR v_attempt.request_attempt_id <> p_request_attempt_id
-       OR p_ack_sequence <> v_owner.journal_sequence + 1
+       OR p_ack_sequence <> v_owner.journal_sequence
+       OR p_ack_digest <> v_owner.journal_digest
+       OR v_owner.journal_phase <> 'takeover-acknowledged'
+       OR (v_owner.journal_record->>'authority_id')::uuid <> v_attempt.id
+       OR (v_owner.journal_record->>'generation')::bigint <> v_attempt.generation
        OR NOT EXISTS (
            SELECT 1 FROM public.jobs WHERE id=p_job_id AND
            state = 'running' AND worker_id = v_worker AND attempt = p_job_attempt
@@ -455,7 +458,7 @@ BEGIN
     WHERE id=v_owner.current_attempt_id AND state='current';
     UPDATE public.authority_system_attempts SET state='current',ack_sequence=p_ack_sequence,
         ack_digest=p_ack_digest,quiescence_digest=p_quiescence_digest,acknowledged_at=v_now,
-        ack_head_sequence=v_owner.journal_sequence,ack_head_digest=v_owner.journal_digest
+        ack_head_sequence=p_ack_sequence,ack_head_digest=p_ack_digest
     WHERE id=v_attempt.id;
     UPDATE public.authority_system_ownership SET current_attempt_id=v_attempt.id
     WHERE system_id=v_attempt.system_id;
@@ -471,19 +474,26 @@ CREATE FUNCTION public.resolve_allocating_authority_system_attempt(
     profile_identity text, root_identity text, bootstrap_identity text,
     operation text, operation_identity text, operation_digest text, state text,
     journal_sequence bigint, journal_digest text, journal_phase text,
-    journal_record jsonb
+    journal_record jsonb, project text, provisioning_profile jsonb,
+    source_image_id uuid, root_architecture text, root_spec jsonb,
+    bootstrap_public_key text, receipt_bytes bytea
 )
 LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
     SELECT attempt.id,attempt.generation,owner.system_id,owner.allocation_id,owner.resource_id,
            owner.provider_kind,owner.resource_name,owner.authority_instance,
            owner.profile_identity,owner.root_identity,owner.bootstrap_identity,
            attempt.operation,attempt.operation_identity,attempt.operation_digest,attempt.state,
-           owner.journal_sequence,owner.journal_digest,owner.journal_phase,owner.journal_record
+           owner.journal_sequence,owner.journal_digest,owner.journal_phase,owner.journal_record,
+           system.project,system.provisioning_profile,root.source_image_id,root.architecture,
+           root.root_spec,bootstrap.public_key,attempt.receipt_bytes
     FROM public.authority_system_attempts AS attempt
     JOIN public.authority_system_ownership AS owner ON owner.system_id=attempt.system_id
     JOIN public.worker_incarnations AS worker
       ON worker.incarnation=attempt.worker_incarnation
     JOIN public.jobs AS job ON job.id=attempt.job_id
+    JOIN public.systems AS system ON system.id=owner.system_id
+    JOIN public.system_root_provenance AS root ON root.system_id=owner.system_id
+    JOIN public.system_bootstrap_keys AS bootstrap ON bootstrap.system_id=owner.system_id
     WHERE pg_has_role(session_user,'kdive_provider_authority','member')
       AND attempt.id=p_authority_id AND attempt.generation=p_generation
       AND attempt.worker_incarnation=p_peer_incarnation AND attempt.state='allocating'
@@ -503,7 +513,7 @@ CREATE FUNCTION public.resolve_current_authority_system_attempt(
     state text, journal_sequence bigint, journal_digest text, journal_phase text,
     journal_record jsonb, project text, provisioning_profile jsonb,
     source_image_id uuid, root_architecture text, root_spec jsonb,
-    bootstrap_public_key text
+    bootstrap_public_key text, receipt_bytes bytea
 ) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
     SELECT attempt.id,attempt.generation,owner.system_id,owner.allocation_id,owner.resource_id,
            owner.provider_kind,owner.resource_name,owner.authority_instance,
@@ -512,7 +522,7 @@ CREATE FUNCTION public.resolve_current_authority_system_attempt(
            attempt.state,owner.journal_sequence,owner.journal_digest,
            owner.journal_phase,owner.journal_record,
            system.project,system.provisioning_profile,root.source_image_id,root.architecture,
-           root.root_spec,bootstrap.public_key
+           root.root_spec,bootstrap.public_key,attempt.receipt_bytes
     FROM public.authority_system_attempts AS attempt
     JOIN public.authority_system_ownership AS owner
       ON owner.current_attempt_id=attempt.id
@@ -565,13 +575,21 @@ BEGIN
     END IF;
     IF p_expected_sequence < 0 OR p_expected_digest !~ '^sha256:[0-9a-f]{64}$'
        OR jsonb_typeof(p_record) IS DISTINCT FROM 'object'
-       OR pg_column_size(p_record)>1048576 THEN
+       OR pg_column_size(p_record)>1048576
+       OR (SELECT count(*) FROM jsonb_object_keys(p_record))<>22
+       OR NOT p_record ?& ARRAY[
+           'schema','authority_id','generation','system_id','allocation_id','resource_id',
+           'provider_kind','resource_name','authority_instance','profile_identity',
+           'root_identity','bootstrap_identity','operation','operation_identity',
+           'operation_digest','attempt_id','sequence','previous_digest','phase',
+           'observation','outcome','canonical_record'
+       ] THEN
         RAISE EXCEPTION 'authority System journal record is invalid' USING ERRCODE='22023';
     END IF;
     SELECT * INTO v_attempt FROM public.authority_system_attempts
     WHERE id=p_authority_id AND generation=p_generation FOR UPDATE;
     IF v_attempt.id IS NULL OR v_attempt.worker_incarnation<>p_peer_incarnation
-       OR v_attempt.state NOT IN ('current','terminal') OR NOT EXISTS (
+       OR v_attempt.state NOT IN ('allocating','current') OR NOT EXISTS (
            SELECT 1 FROM public.worker_incarnations WHERE incarnation=p_peer_incarnation
            AND state='active' AND fence_protocol=4
        ) THEN RETURN QUERY SELECT 'superseded'::text,NULL::bigint,NULL::text; RETURN; END IF;
@@ -579,27 +597,75 @@ BEGIN
         'kdive:system:' || v_attempt.system_id::text,2125));
     SELECT * INTO v_owner FROM public.authority_system_ownership
     WHERE system_id=v_attempt.system_id FOR UPDATE;
-    IF v_owner.current_attempt_id<>v_attempt.id THEN
-        RETURN QUERY SELECT 'superseded'::text,NULL::bigint,NULL::text; RETURN;
-    END IF;
     IF v_owner.journal_sequence<>p_expected_sequence
        OR v_owner.journal_digest<>p_expected_digest THEN
         RETURN QUERY SELECT 'conflict'::text,v_owner.journal_sequence,v_owner.journal_digest; RETURN;
     END IF;
     v_phase := p_record->>'phase';
     v_sequence := p_expected_sequence+1;
+    IF (v_attempt.state='allocating' AND v_phase NOT IN
+          ('watermark-installed','takeover-superseded','takeover-acknowledged'))
+       OR (v_attempt.state='current' AND
+          (v_owner.current_attempt_id<>v_attempt.id OR v_phase IN
+             ('watermark-installed','takeover-superseded','takeover-acknowledged'))) THEN
+        RETURN QUERY SELECT 'superseded'::text,NULL::bigint,NULL::text; RETURN;
+    END IF;
+    IF NOT (
+        (v_phase='watermark-installed' AND v_attempt.state='allocating')
+        OR (v_phase='takeover-superseded' AND v_owner.journal_phase='watermark-installed')
+        OR (v_phase='takeover-acknowledged' AND
+            v_owner.journal_phase IN ('watermark-installed','takeover-superseded'))
+        OR (v_phase='admitted' AND v_owner.journal_phase IN
+            ('takeover-acknowledged','terminal'))
+        OR (v_phase='mutation-started' AND v_owner.journal_phase='admitted')
+        OR (v_phase='provider-returned' AND v_owner.journal_phase='mutation-started')
+        OR (v_phase='observed' AND v_owner.journal_phase='provider-returned')
+        OR (v_phase='terminal' AND v_owner.journal_phase IN ('admitted','observed'))
+    ) THEN
+        RAISE EXCEPTION 'authority System journal phase transition is invalid'
+        USING ERRCODE='22023';
+    END IF;
     IF v_phase NOT IN ('watermark-installed','takeover-superseded','takeover-acknowledged',
         'admitted','mutation-started','provider-returned','observed','terminal')
+       OR p_record->>'schema'<>'authority-system-journal-v1'
        OR (p_record->>'authority_id')::uuid<>p_authority_id
        OR (p_record->>'generation')::bigint<>p_generation
        OR (p_record->>'system_id')::uuid<>v_attempt.system_id
+       OR (p_record->>'allocation_id')::uuid<>v_owner.allocation_id
+       OR (p_record->>'resource_id')::uuid<>v_owner.resource_id
+       OR p_record->>'provider_kind'<>v_owner.provider_kind
+       OR p_record->>'resource_name'<>v_owner.resource_name
+       OR p_record->>'authority_instance'<>v_owner.authority_instance
+       OR p_record->>'profile_identity'<>v_owner.profile_identity
+       OR p_record->>'root_identity'<>v_owner.root_identity
+       OR p_record->>'bootstrap_identity'<>v_owner.bootstrap_identity
+       OR p_record->>'operation'<>v_attempt.operation
+       OR p_record->>'operation_identity'<>v_attempt.operation_identity
+       OR (p_record->>'attempt_id')::uuid<>v_attempt.request_attempt_id
        OR (p_record->>'sequence')::bigint<>v_sequence
        OR p_record->>'previous_digest'<>p_expected_digest
        OR p_record->>'operation_digest'<>v_attempt.operation_digest THEN
         RAISE EXCEPTION 'authority System journal binding is invalid' USING ERRCODE='22023';
     END IF;
+    IF v_phase<>'watermark-installed' AND (
+        (v_owner.journal_record->>'authority_id')::uuid<>v_attempt.id
+        OR (v_owner.journal_record->>'generation')::bigint<>v_attempt.generation
+    ) THEN
+        RAISE EXCEPTION 'authority System journal predecessor binding is invalid'
+        USING ERRCODE='22023';
+    END IF;
     IF (v_phase='terminal')<>(p_receipt_bytes IS NOT NULL) THEN
         RAISE EXCEPTION 'authority System terminal receipt shape is invalid' USING ERRCODE='22023';
+    END IF;
+    IF (v_phase IN ('watermark-installed','takeover-superseded',
+                    'takeover-acknowledged','admitted','mutation-started','provider-returned')
+        AND (p_record->'observation'<>'null'::jsonb OR p_record->'outcome'<>'null'::jsonb))
+       OR (v_phase='observed' AND
+           (jsonb_typeof(p_record->'observation') IS DISTINCT FROM 'object'
+            OR p_record->'outcome'<>'null'::jsonb))
+       OR (v_phase='terminal' AND jsonb_typeof(p_record->'outcome')<>'string') THEN
+        RAISE EXCEPTION 'authority System journal evidence shape is invalid'
+        USING ERRCODE='22023';
     END IF;
     IF jsonb_typeof(p_record->'canonical_record') IS DISTINCT FROM 'string'
        OR octet_length(p_record->>'canonical_record') NOT BETWEEN 2 AND 1048576
@@ -616,8 +682,8 @@ BEGIN
             RAISE EXCEPTION 'authority System receipt size is invalid' USING ERRCODE='22023';
         END IF;
         v_disposition := convert_from(p_receipt_bytes,'UTF8')::jsonb->>'disposition';
-        IF v_disposition NOT IN ('provision-ready','provision-failed',
-            'preactivation-absent','retained-quarantine') THEN
+        IF v_disposition NOT IN
+           ('provision-ready','preactivation-absent','retained-quarantine') THEN
             RAISE EXCEPTION 'authority System receipt disposition is invalid' USING ERRCODE='22023';
         END IF;
         IF p_record #>> '{observation,composite_state}' IS DISTINCT FROM
@@ -709,14 +775,6 @@ BEGIN
         UPDATE public.systems SET state='ready' WHERE id=v_owner.system_id AND state='provisioning';
         UPDATE public.jobs SET state='succeeded',result_ref=v_attempt.receipt_digest
         WHERE id=p_job_id AND state='running';
-    ELSIF v_attempt.receipt_disposition='provision-failed'
-          AND v_owner.state IN ('provisioning','teardown-requested') THEN
-        UPDATE public.authority_system_ownership SET state='repair-required'
-        WHERE system_id=v_owner.system_id;
-        UPDATE public.systems SET state='failed',failure_category='provisioning_failure'
-        WHERE id=v_owner.system_id AND state='provisioning';
-        UPDATE public.jobs SET state='failed',error_category='provisioning_failure'
-        WHERE id=p_job_id AND state='running';
     ELSIF v_attempt.receipt_disposition='preactivation-absent'
           AND v_owner.state IN ('teardown-requested','repair-required') THEN
         UPDATE public.authority_system_ownership SET state='torn-down'
@@ -782,14 +840,6 @@ BEGIN
         ELSIF v_attempt.receipt_disposition='provision-ready'
               AND v_owner.state='teardown-requested' THEN
             NULL; -- Consume the physical fact without reopening a canceled System.
-        ELSIF v_attempt.receipt_disposition='provision-failed'
-              AND v_owner.state IN ('provisioning','teardown-requested') THEN
-            UPDATE public.authority_system_ownership SET state='repair-required'
-            WHERE system_id=v_attempt.system_id;
-            UPDATE public.systems SET state='failed',failure_category='provisioning_failure'
-            WHERE id=v_attempt.system_id AND state='provisioning';
-            UPDATE public.jobs SET state='failed',error_category='provisioning_failure'
-            WHERE id=v_attempt.job_id AND state='running';
         ELSIF v_attempt.receipt_disposition='preactivation-absent'
               AND v_owner.state IN ('teardown-requested','repair-required') THEN
             UPDATE public.authority_system_ownership SET state='torn-down'

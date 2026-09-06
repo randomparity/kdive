@@ -49,9 +49,26 @@ _NEXT_PHASES = {
         {AuthoritySystemJournalPhase.WATERMARK_INSTALLED, AuthoritySystemJournalPhase.ADMITTED}
     ),
 }
+for _phase, _successors in tuple(_NEXT_PHASES.items()):
+    if _phase is not AuthoritySystemJournalPhase.TERMINAL:
+        _NEXT_PHASES[_phase] = _successors | {AuthoritySystemJournalPhase.WATERMARK_INSTALLED}
 _INITIAL_PHASES = frozenset(
     {AuthoritySystemJournalPhase.WATERMARK_INSTALLED, AuthoritySystemJournalPhase.ADMITTED}
 )
+
+
+def _ownership_binding(record: AuthoritySystemJournalRecordV1) -> tuple[object, ...]:
+    return (
+        record.system_id,
+        record.allocation_id,
+        record.resource_id,
+        record.provider_kind,
+        record.resource_name,
+        record.authority_instance,
+        record.profile_identity,
+        record.root_identity,
+        record.bootstrap_identity,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +177,7 @@ class FileAuthoritySystemJournal:
         prior_phase: AuthoritySystemJournalPhase | None = None
         prior_generation = 0
         operation_binding: tuple[object, ...] | None = None
+        ownership_binding: tuple[object, ...] | None = None
         for sequence, line in enumerate(lines, start=1):
             if not line or len(line) > MAX_MESSAGE_BYTES:
                 raise ValueError("authority System journal record size is invalid")
@@ -175,6 +193,10 @@ class FileAuthoritySystemJournal:
                 raise ValueError("authority System journal phase transition is invalid")
             if record.generation < prior_generation:
                 raise ValueError("authority System journal generation moved backward")
+            if ownership_binding is None:
+                ownership_binding = _ownership_binding(record)
+            elif _ownership_binding(record) != ownership_binding:
+                raise ValueError("authority System journal ownership binding changed")
             binding = (
                 record.authority_id,
                 record.generation,
@@ -185,9 +207,17 @@ class FileAuthoritySystemJournal:
                 record.bootstrap_identity,
             )
             begins_operation = (
-                prior_phase is None or prior_phase is AuthoritySystemJournalPhase.TERMINAL
+                prior_phase is None
+                or prior_phase is AuthoritySystemJournalPhase.TERMINAL
+                or record.phase is AuthoritySystemJournalPhase.WATERMARK_INSTALLED
             )
             if begins_operation:
+                if (
+                    prior_phase is not None
+                    and prior_phase is not AuthoritySystemJournalPhase.TERMINAL
+                    and record.generation <= prior_generation
+                ):
+                    raise ValueError("authority System takeover generation did not advance")
                 operation_binding = binding
             elif binding != operation_binding:
                 raise ValueError("authority System journal operation binding changed")
@@ -226,10 +256,16 @@ class FileAuthoritySystemJournal:
             raise ValueError("authority System journal append sequence is invalid")
         if record.previous_digest != head.digest:
             raise ValueError("authority System journal append previous digest is invalid")
+        if last is not None and _ownership_binding(record) != _ownership_binding(last):
+            raise ValueError("authority System journal append ownership binding changed")
         legal = _INITIAL_PHASES if head.phase is None else _NEXT_PHASES[head.phase]
         if record.phase not in legal:
             raise ValueError("authority System journal append phase is invalid")
-        if last is not None and last.phase is not AuthoritySystemJournalPhase.TERMINAL:
+        if (
+            last is not None
+            and last.phase is not AuthoritySystemJournalPhase.TERMINAL
+            and record.phase is not AuthoritySystemJournalPhase.WATERMARK_INSTALLED
+        ):
             prior_binding = (
                 last.authority_id,
                 last.generation,
@@ -250,6 +286,13 @@ class FileAuthoritySystemJournal:
             )
             if new_binding != prior_binding:
                 raise ValueError("authority System journal append binding changed")
+        if (
+            last is not None
+            and last.phase is not AuthoritySystemJournalPhase.TERMINAL
+            and record.phase is AuthoritySystemJournalPhase.WATERMARK_INSTALLED
+            and record.generation <= last.generation
+        ):
+            raise ValueError("authority System takeover generation did not advance")
         encoded = canonical_system_authority_bytes(record) + b"\n"
         descriptor = self._open(create=True)
         assert descriptor is not None

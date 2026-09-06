@@ -20,6 +20,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemProofV1,
     AuthoritySystemProvisionSnapshot,
     AuthoritySystemTakeoverRequestV1,
+    authority_system_record_digest,
     canonical_system_authority_bytes,
 )
 
@@ -69,6 +70,7 @@ class ResolvedAuthoritySystemOperation:
     binding: AuthoritySystemBinding
     head: AuthoritySystemJournalHead
     snapshot: AuthoritySystemProvisionSnapshot
+    receipt_bytes: bytes | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,10 +142,19 @@ def _head(row: dict[str, Any]) -> AuthoritySystemJournalHead:
     )
     if (sequence == 0) != (phase is None and record is None):
         raise ValueError("authority System journal genesis shape is invalid")
+    system_id = _uuid(row["system_id"])
+    digest = _bounded(row["journal_digest"])
+    if record is not None and (
+        record.system_id != system_id
+        or record.sequence != sequence
+        or record.phase is not phase
+        or authority_system_record_digest(record) != digest
+    ):
+        raise ValueError("authority System journal head does not match its record")
     return AuthoritySystemJournalHead(
-        system_id=_uuid(row["system_id"]),
+        system_id=system_id,
         sequence=sequence,
-        digest=_bounded(row["journal_digest"]),
+        digest=digest,
         phase=phase,
         record=record,
     )
@@ -204,7 +215,7 @@ class DatabaseAuthoritySystemRepository:
 
     async def resolve_allocating(
         self, peer_incarnation: str, request: AuthoritySystemTakeoverRequestV1
-    ) -> tuple[AuthoritySystemBinding, AuthoritySystemJournalHead] | None:
+    ) -> ResolvedAuthoritySystemOperation | None:
         request = AuthoritySystemTakeoverRequestV1.model_validate(
             request.model_dump(mode="python", by_alias=True)
         )
@@ -223,7 +234,9 @@ class DatabaseAuthoritySystemRepository:
         binding = _binding(row)
         if binding.state != "allocating" or not _request_matches(binding, request):
             return None
-        return binding, _head(row)
+        return ResolvedAuthoritySystemOperation(
+            binding, _head(row), _snapshot(row, binding), row["receipt_bytes"]
+        )
 
     async def resolve_current(
         self,
@@ -256,21 +269,28 @@ class DatabaseAuthoritySystemRepository:
         binding = _binding(row)
         if not _request_matches(binding, request):
             return None
-        return ResolvedAuthoritySystemOperation(binding, _head(row), _snapshot(row, binding))
+        return ResolvedAuthoritySystemOperation(
+            binding, _head(row), _snapshot(row, binding), row["receipt_bytes"]
+        )
 
     async def advance_head(
         self,
         peer_incarnation: str,
-        request: AuthoritySystemMutationRequestV1,
+        request: AuthoritySystemTakeoverRequestV1 | AuthoritySystemMutationRequestV1,
         *,
         expected_sequence: int,
         expected_digest: str,
         record: AuthoritySystemJournalRecordV1,
         receipt: AuthoritySystemProofV1 | None = None,
     ) -> AuthoritySystemAdvanceResult:
-        request = AuthoritySystemMutationRequestV1.model_validate(
-            request.model_dump(mode="python", by_alias=True)
-        )
+        if isinstance(request, AuthoritySystemTakeoverRequestV1):
+            request = AuthoritySystemTakeoverRequestV1.model_validate(
+                request.model_dump(mode="python", by_alias=True)
+            )
+        else:
+            request = AuthoritySystemMutationRequestV1.model_validate(
+                request.model_dump(mode="python", by_alias=True)
+            )
         record = AuthoritySystemJournalRecordV1.model_validate(
             record.model_dump(mode="python", by_alias=True)
         )

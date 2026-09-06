@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import psycopg
@@ -11,6 +12,18 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.providers.system_authority.protocol import (
+    GENESIS_DIGEST,
+    AuthoritySystemJournalPhase,
+    AuthoritySystemMutationRequestV1,
+    AuthoritySystemObservationV1,
+    AuthoritySystemOperation,
+    AuthoritySystemProvisionReadyV1,
+    AuthoritySystemTakeoverRequestV1,
+    canonical_system_authority_bytes,
+    make_authority_system_record,
+    system_authority_digest,
+)
 from tests.db.external_boot_authority_support import (
     _RoleDsns,
     authority_role_dsns,  # noqa: F401
@@ -320,71 +333,203 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
         ).fetchone()
         assert allocated is not None and allocated[0] == "allocated"
         authority_id, generation, operation_digest = allocated[1:]
+        worker_conn.commit()
+
+    takeover = AuthoritySystemTakeoverRequestV1(
+        system_id=system_id,
+        allocation_id=allocation_id,
+        resource_id=resource_id,
+        provider_kind="local-libvirt",
+        resource_name="host-flow",
+        authority_instance="auth-flow",
+        profile_identity=profile_digest,
+        root_identity=root_digest,
+        operation=AuthoritySystemOperation.PROVISION,
+        operation_identity="provision-flow",
+        authority_id=authority_id,
+        generation=generation,
+        attempt_id=request_attempt_id,
+        operation_digest=operation_digest,
+        bootstrap_identity=bootstrap_digest,
+    )
+    with psycopg.connect(role_dsns("kdive_provider_authority")) as authority:
+        allocating = authority.execute(
+            "SELECT authority_id,bootstrap_identity FROM "
+            "resolve_allocating_authority_system_attempt(%s,%s,%s)",
+            (worker, authority_id, generation),
+        ).fetchone()
+        assert allocating == (authority_id, bootstrap_digest)
+        watermark = make_authority_system_record(
+            takeover,
+            sequence=1,
+            previous_digest=GENESIS_DIGEST,
+            phase=AuthoritySystemJournalPhase.WATERMARK_INSTALLED,
+        )
+        first = authority.execute(
+            "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,0,%s,%s,NULL)",
+            (
+                worker,
+                authority_id,
+                generation,
+                GENESIS_DIGEST,
+                Jsonb(watermark.model_dump(mode="json", by_alias=True)),
+            ),
+        ).fetchone()
+        assert first is not None and first[0] == "advanced"
+        takeover_ack = make_authority_system_record(
+            takeover,
+            sequence=2,
+            previous_digest=first[2],
+            phase=AuthoritySystemJournalPhase.TAKEOVER_ACKNOWLEDGED,
+        )
+        second = authority.execute(
+            "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,1,%s,%s,NULL)",
+            (
+                worker,
+                authority_id,
+                generation,
+                first[2],
+                Jsonb(takeover_ack.model_dump(mode="json", by_alias=True)),
+            ),
+        ).fetchone()
+        assert second is not None and second[0] == "advanced"
+        authority.commit()
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT attempt.state,ownership.current_attempt_id FROM authority_system_attempts "
+            "AS attempt JOIN authority_system_ownership AS ownership USING (system_id) "
+            "WHERE attempt.id=%s",
+            (authority_id,),
+        ).fetchone() == ("allocating", None)
+
+    quiescence = "sha256:" + "d" * 64
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
         ack = worker_conn.execute(
-            "SELECT * FROM acknowledge_authority_system_attempt(%s,%s,1,%s,%s,%s,1,%s,%s)",
+            "SELECT * FROM acknowledge_authority_system_attempt(%s,%s,1,%s,%s,%s,2,%s,%s)",
             (
                 credential,
                 job_id,
                 authority_id,
                 generation,
                 request_attempt_id,
-                "sha256:" + "c" * 64,
-                "sha256:" + "d" * 64,
+                second[2],
+                quiescence,
             ),
         ).fetchone()
         assert ack is not None and ack[0] == "acknowledged"
         worker_conn.commit()
 
-    genesis = "sha256:" + "0" * 64
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT attempt.state,ownership.current_attempt_id FROM authority_system_attempts "
+            "AS attempt JOIN authority_system_ownership AS ownership USING (system_id) "
+            "WHERE attempt.id=%s",
+            (authority_id,),
+        ).fetchone() == ("current", authority_id)
+
+    mutation = AuthoritySystemMutationRequestV1.model_validate(
+        takeover.model_dump(mode="python", by_alias=True)
+    )
     with psycopg.connect(role_dsns("kdive_provider_authority")) as authority:
         current = authority.execute(
             "SELECT authority_id,bootstrap_identity FROM "
-            "resolve_current_authority_system_attempt(%s,%s,%s,1,%s)",
-            (worker, authority_id, generation, "sha256:" + "c" * 64),
+            "resolve_current_authority_system_attempt(%s,%s,%s,2,%s)",
+            (worker, authority_id, generation, second[2]),
         ).fetchone()
         assert current == (authority_id, bootstrap_digest)
-        started = {
-            "authority_id": str(authority_id),
-            "generation": generation,
-            "system_id": str(system_id),
-            "sequence": 1,
-            "previous_digest": genesis,
-            "operation_digest": operation_digest,
-            "phase": "mutation-started",
-        }
-        started["canonical_record"] = json.dumps(started, sort_keys=True, separators=(",", ":"))
+        sequence, digest = 2, second[2]
+        for phase in (
+            AuthoritySystemJournalPhase.ADMITTED,
+            AuthoritySystemJournalPhase.MUTATION_STARTED,
+            AuthoritySystemJournalPhase.PROVIDER_RETURNED,
+        ):
+            record = make_authority_system_record(
+                mutation, sequence=sequence + 1, previous_digest=digest, phase=phase
+            )
+            advanced = authority.execute(
+                "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,%s,%s,%s,NULL)",
+                (
+                    worker,
+                    authority_id,
+                    generation,
+                    sequence,
+                    digest,
+                    Jsonb(record.model_dump(mode="json", by_alias=True)),
+                ),
+            ).fetchone()
+            assert advanced is not None and advanced[0] == "advanced"
+            sequence, digest = advanced[1], advanced[2]
+        facts_digest = "sha256:" + "e" * 64
+        observed = make_authority_system_record(
+            mutation,
+            sequence=sequence + 1,
+            previous_digest=digest,
+            phase=AuthoritySystemJournalPhase.OBSERVED,
+            observation=AuthoritySystemObservationV1(
+                category="owned", composite_state=facts_digest
+            ),
+        )
         advanced = authority.execute(
-            "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,0,%s,%s,NULL)",
-            (worker, authority_id, generation, genesis, Jsonb(started)),
+            "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,%s,%s,%s,NULL)",
+            (
+                worker,
+                authority_id,
+                generation,
+                sequence,
+                digest,
+                Jsonb(observed.model_dump(mode="json", by_alias=True)),
+            ),
         ).fetchone()
         assert advanced is not None and advanced[0] == "advanced"
-        receipt = b'{"disposition":"provision-ready"}'
-        receipt_digest = (
-            "sha256:" + hashlib.sha256(b"kdive-authority-system-proof-v1\0" + receipt).hexdigest()
+        proof = AuthoritySystemProvisionReadyV1.model_validate(
+            {
+                **mutation.model_dump(mode="python", by_alias=True, exclude={"schema_"}),
+                "disposition": "provision-ready",
+                "intent_identity": "sha256:" + "f" * 64,
+                "domain_owned": True,
+                "root_storage_owned": True,
+                "boot_ready": True,
+                "bootstrap_ready": True,
+                "quarantine_retained": False,
+                "completed_at": datetime(2026, 9, 6, tzinfo=UTC),
+            }
         )
-        terminal = {
-            **{key: value for key, value in started.items() if key != "canonical_record"},
-            "sequence": 2,
-            "previous_digest": advanced[2],
-            "phase": "terminal",
-            "observation": {"composite_state": receipt_digest},
-        }
-        terminal["canonical_record"] = json.dumps(terminal, sort_keys=True, separators=(",", ":"))
+        receipt = canonical_system_authority_bytes(proof)
+        sequence, digest = advanced[1], advanced[2]
+        terminal = make_authority_system_record(
+            mutation,
+            sequence=sequence + 1,
+            previous_digest=digest,
+            phase=AuthoritySystemJournalPhase.TERMINAL,
+            observation=AuthoritySystemObservationV1(
+                category="owned", composite_state=system_authority_digest(proof)
+            ),
+            outcome="provision-ready",
+        )
         completed = authority.execute(
-            "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,1,%s,%s,%s)",
-            (worker, authority_id, generation, advanced[2], Jsonb(terminal), receipt),
+            "SELECT * FROM advance_authority_system_journal_head(%s,%s,%s,%s,%s,%s,%s)",
+            (
+                worker,
+                authority_id,
+                generation,
+                sequence,
+                digest,
+                Jsonb(terminal.model_dump(mode="json", by_alias=True)),
+                receipt,
+            ),
         ).fetchone()
         assert completed is not None and completed[0] == "advanced"
         authority.commit()
 
     with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
         finalized = worker_conn.execute(
-            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,%s,2,%s,%s)",
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,%s,7,%s,%s)",
             (credential, job_id, authority_id, generation, completed[2], receipt),
         ).fetchone()
         assert finalized == ("applied", "succeeded", "ready")
         replay = worker_conn.execute(
-            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,%s,2,%s,%s)",
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,%s,7,%s,%s)",
             (credential, job_id, authority_id, generation, completed[2], receipt),
         ).fetchone()
         assert replay == ("applied", "succeeded", "ready")
@@ -397,5 +542,5 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
             "WHERE authority_system_ownership.system_id=%s",
             (system_id,),
         ).fetchone()
-    assert stored == (2, receipt, True)
-    assert json.loads(receipt) == {"disposition": "provision-ready"}
+    assert stored == (7, receipt, True)
+    assert json.loads(receipt)["disposition"] == "provision-ready"

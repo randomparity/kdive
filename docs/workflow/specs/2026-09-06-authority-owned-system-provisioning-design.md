@@ -89,8 +89,6 @@ Terminal proof dispositions are:
 
 - `provision-ready`: literal domain-owned, root-storage-owned, boot-ready, and
   bootstrap-ready predicates; no quarantine; stable aware-UTC completion time.
-- `provision-failed`: a closed error category, retained-state flag, and stable
-  aware-UTC completion time.
 - `preactivation-absent`: literal domain, root storage, baseline, and private
   intent absence; no quarantine; stable aware-UTC completion time.
 - `retained-quarantine`: an observation digest only; it cannot terminalize the
@@ -181,9 +179,9 @@ It cannot create evidence.
 
 Normal provision changes ownership `provisioning -> ready`, System
 `provisioning -> ready`, succeeds the job, opens billing, and audits in one
-transaction. A provision failure changes ownership to `repair-required` and
-System/job to failed without releasing capacity. A retained proof changes no
-core lifecycle or cleanup state.
+transaction. An operational exception leaves the mutation unresolved for
+read-only recovery. A retained proof changes no core lifecycle or cleanup
+state and cannot release capacity.
 
 `jobs.cancel` on authority provision atomically cancels the job, changes
 ownership to `teardown-requested`, and enqueues or replays the preactivation

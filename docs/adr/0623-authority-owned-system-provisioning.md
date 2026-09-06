@@ -49,10 +49,13 @@ marked operation. A completion-owned authority task may outlive a caller or job
 lease long enough to persist its terminal receipt; a worker or reconciler can
 later consume only those exact authenticated bytes.
 
-An authority provision failure retains capacity and ownership until explicit
-preactivation teardown proves absence. Retained quarantine never performs core
-cleanup or releases capacity. Provider deployment must stage the same
-digest-pinned base directly into the authority store.
+An operational provision exception remains unresolved at the durable mutation
+anchor. Recovery observation either proves readiness or retains quarantine;
+neither path fabricates a failure category or completion timestamp. Capacity
+and ownership remain until explicit preactivation teardown proves absence.
+Retained quarantine never performs core cleanup or releases capacity. Provider
+deployment must stage the same digest-pinned base directly into the authority
+store.
 
 ## Considered & rejected
 

@@ -10,9 +10,8 @@ from enum import StrEnum
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
-from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_activation import UtcDateTime
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSpecV1
@@ -154,6 +153,17 @@ class AuthoritySystemCommitContextV1(_ClosedValue):
     journal_sequence: PositiveBigInt
     journal_digest: Digest
 
+    @classmethod
+    def for_record(cls, record: AuthoritySystemJournalRecordV1) -> AuthoritySystemCommitContextV1:
+        if record.phase is not AuthoritySystemJournalPhase.MUTATION_STARTED:
+            raise ValueError("commit context requires mutation-started record")
+        return cls(
+            attempt_id=record.attempt_id,
+            operation=record.operation,
+            journal_sequence=record.sequence,
+            journal_digest=authority_system_record_digest(record),
+        )
+
 
 class AuthoritySystemObservationV1(_ClosedValue):
     """Path-free identity of one provider observation."""
@@ -176,7 +186,6 @@ class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptBinding):
         Literal[
             "never-began",
             "provision-ready",
-            "provision-failed",
             "preactivation-absent",
             "retained-quarantine",
         ]
@@ -210,7 +219,6 @@ class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptBinding):
             if self.operation is AuthoritySystemOperation.PROVISION and self.outcome not in {
                 "never-began",
                 "provision-ready",
-                "provision-failed",
                 "retained-quarantine",
             }:
                 raise ValueError("provision terminal outcome is invalid")
@@ -318,20 +326,6 @@ class AuthoritySystemProvisionReadyV1(_AuthoritySystemProofBinding):
         return self
 
 
-class AuthoritySystemProvisionFailedV1(_AuthoritySystemProofBinding):
-    disposition: Literal["provision-failed"]
-    intent_identity: Digest
-    error_category: ErrorCategory
-    quarantine_retained: bool
-    completed_at: UtcDateTime
-
-    @model_validator(mode="after")
-    def _operation_is_provision(self) -> Self:
-        if self.operation is not AuthoritySystemOperation.PROVISION:
-            raise ValueError("provision-failed proof requires provision operation")
-        return self
-
-
 class AuthoritySystemPreactivationAbsentV1(_AuthoritySystemProofBinding):
     disposition: Literal["preactivation-absent"]
     intent_identity: Digest
@@ -356,11 +350,79 @@ class AuthoritySystemRetainedQuarantineV1(_AuthoritySystemProofBinding):
 
 type AuthoritySystemProofV1 = Annotated[
     AuthoritySystemProvisionReadyV1
-    | AuthoritySystemProvisionFailedV1
     | AuthoritySystemPreactivationAbsentV1
     | AuthoritySystemRetainedQuarantineV1,
     Field(discriminator="disposition"),
 ]
+
+
+class AuthoritySystemAcknowledgementV1(_ClosedValue):
+    schema_: Literal["authority-system-acknowledgement-v1"] = Field(
+        "authority-system-acknowledgement-v1", alias="schema"
+    )
+    authority_id: UUID
+    generation: PositiveBigInt
+    attempt_id: UUID
+    journal_sequence: PositiveBigInt
+    journal_digest: Digest
+    quiescence_digest: Digest
+
+
+class AuthoritySystemResponseV1(_ClosedValue):
+    schema_: Literal["authority-system-response-v1"] = Field(
+        "authority-system-response-v1", alias="schema"
+    )
+    proof: AuthoritySystemProofV1
+    journal_sequence: PositiveBigInt
+    journal_digest: Digest
+
+
+_PROOF_ADAPTER = TypeAdapter(AuthoritySystemProofV1)
+
+
+def parse_authority_system_proof(payload: bytes) -> AuthoritySystemProofV1:
+    """Parse an exact canonical terminal receipt and reject alternate encodings."""
+    if not 1 <= len(payload) <= 131072:
+        raise ValueError("authority System proof size is invalid")
+    proof = _PROOF_ADAPTER.validate_json(payload, strict=True)
+    if canonical_system_authority_bytes(proof) != payload:
+        raise ValueError("authority System proof is not canonical")
+    return proof
+
+
+def make_authority_system_record(
+    request: AuthoritySystemTakeoverRequestV1 | AuthoritySystemMutationRequestV1,
+    *,
+    sequence: int,
+    previous_digest: str,
+    phase: AuthoritySystemJournalPhase,
+    observation: AuthoritySystemObservationV1 | None = None,
+    outcome: str | None = None,
+) -> AuthoritySystemJournalRecordV1:
+    """Construct one canonical record from an already validated exact request."""
+    fields = {
+        **request.model_dump(mode="python", by_alias=True, exclude={"schema_"}),
+        "schema": "authority-system-journal-v1",
+        "sequence": sequence,
+        "previous_digest": previous_digest,
+        "phase": phase,
+        "observation": observation,
+        "outcome": outcome,
+    }
+    canonical_fields = {
+        **request.model_dump(mode="json", by_alias=True, exclude={"schema_"}),
+        "schema": "authority-system-journal-v1",
+        "sequence": sequence,
+        "previous_digest": previous_digest,
+        "phase": phase.value,
+        "observation": (
+            observation.model_dump(mode="json", by_alias=True) if observation is not None else None
+        ),
+        "outcome": outcome,
+    }
+    return AuthoritySystemJournalRecordV1.model_validate(
+        {**fields, "canonical_record": canonical_system_record_payload(canonical_fields)}
+    )
 
 
 @dataclass(frozen=True, slots=True)
