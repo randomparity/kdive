@@ -337,3 +337,66 @@ REVOKE ALL ON FUNCTION public.finalize_external_boot_authority_teardown(
 GRANT EXECUTE ON FUNCTION public.finalize_external_boot_authority_teardown(
     bytea,uuid,integer,uuid,bigint,bigint,text,bytea
 ) TO kdive_worker;
+
+-- Full System teardown has no recovery identities.  Preserve the legacy paired-string shape for
+-- every other mutation (including the old teardown records) while admitting the one null pair.
+DO $$
+DECLARE
+    v_definition text;
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,text,jsonb)'::regprocedure
+    ) INTO v_definition;
+    IF v_definition NOT LIKE '%v_bound_operation text;%' THEN
+        RAISE EXCEPTION 'external boot journal shape changed';
+    END IF;
+    v_definition := replace(
+        v_definition,
+        E'    IF v_phase NOT IN (''watermark-installed'', ''takeover-superseded'', ''takeover-acknowledged'')\n' ||
+        E'       AND (jsonb_typeof(p_record->''expected_source_identity'') <> ''string''\n' ||
+        E'            OR jsonb_typeof(p_record->''intended_target_identity'') <> ''string''\n' ||
+        E'            OR jsonb_typeof(p_record->''recovery_objects'') <> ''array'')\n' ||
+        E'    THEN RETURN ''conflict''; END IF;',
+        E'    IF v_phase NOT IN (''watermark-installed'', ''takeover-superseded'', ''takeover-acknowledged'')\n' ||
+        E'       AND NOT (\n' ||
+        E'           (jsonb_typeof(p_record->''expected_source_identity'') = ''string''\n' ||
+        E'            AND jsonb_typeof(p_record->''intended_target_identity'') = ''string''\n' ||
+        E'            AND jsonb_typeof(p_record->''recovery_objects'') = ''array'')\n' ||
+        E'           OR (p_record->>''purpose'' = ''teardown'' AND p_record->>''operation'' = ''teardown''\n' ||
+        E'               AND p_record->''expected_source_identity'' = ''null''::jsonb\n' ||
+        E'               AND p_record->''intended_target_identity'' = ''null''::jsonb\n' ||
+        E'               AND p_record->''recovery_objects'' = ''[]''::jsonb)\n' ||
+        E'       )\n' ||
+        E'    THEN RETURN ''conflict''; END IF;'
+    );
+    v_definition := replace(
+        v_definition,
+        E'       OR (v_phase NOT IN (''watermark-installed'', ''takeover-superseded'', ''takeover-acknowledged'')\n' ||
+        E'           AND (octet_length(p_record->>''expected_source_identity'') NOT BETWEEN 1 AND 1024\n' ||
+        E'                OR octet_length(p_record->>''intended_target_identity'') NOT BETWEEN 1 AND 1024))',
+        E'       OR (v_phase NOT IN (''watermark-installed'', ''takeover-superseded'', ''takeover-acknowledged'')\n' ||
+        E'           AND NOT (\n' ||
+        E'               (octet_length(p_record->>''expected_source_identity'') BETWEEN 1 AND 1024\n' ||
+        E'                AND octet_length(p_record->>''intended_target_identity'') BETWEEN 1 AND 1024)\n' ||
+        E'               OR (p_record->>''purpose'' = ''teardown'' AND p_record->>''operation'' = ''teardown''\n' ||
+        E'                   AND p_record->''expected_source_identity'' = ''null''::jsonb\n' ||
+        E'                   AND p_record->''intended_target_identity'' = ''null''::jsonb\n' ||
+        E'                   AND p_record->''recovery_objects'' = ''[]''::jsonb)\n' ||
+        E'           ))'
+    );
+    v_definition := replace(
+        v_definition,
+        E'        AND v_head.suspended_operation->>''source_identity'' = p_record->>''expected_source_identity''\n' ||
+        E'        AND v_head.suspended_operation->>''target_identity'' = p_record->>''intended_target_identity''',
+        E'        AND v_head.suspended_operation->>''source_identity''\n' ||
+        E'            IS NOT DISTINCT FROM p_record->>''expected_source_identity''\n' ||
+        E'        AND v_head.suspended_operation->>''target_identity''\n' ||
+        E'            IS NOT DISTINCT FROM p_record->>''intended_target_identity'''
+    );
+    IF v_definition NOT LIKE '%IS NOT DISTINCT FROM p_record->>''expected_source_identity''%'
+       OR v_definition NOT LIKE '%p_record->''expected_source_identity'' = ''null''::jsonb%' THEN
+        RAISE EXCEPTION 'external boot full teardown journal gate was not installed';
+    END IF;
+    EXECUTE v_definition;
+END
+$$;
