@@ -79,7 +79,11 @@ idempotently enqueues one platform-internal `remote_module_volume_reap` job with
 `remote-module-volume-reap:v1`. The payload carries no host, endpoint, credential, path, owner, or
 caller-selected destination. Migration `0131` adds the persisted job-kind enum value. The
 synthetic authorizing principal and project are both `remote-libvirt`, matching the existing
-platform-internal worker-check convention and keeping the row outside tenant project views.
+platform-internal worker-check convention. Project naming is not an isolation boundary: a tenant
+may legitimately have the same project name. `REMOTE_MODULE_VOLUME_REAP` is therefore classified
+by kind as platform-internal. Tenant `jobs.list`, point read/wait, and cancel surfaces exclude it
+before project-role evaluation even when the caller is a member of a colliding `remote-libvirt`
+project. The existing platform-operator `ops.jobs_list` surface remains able to observe the row.
 
 Queue uniqueness admits at most one row for the stable key. Each reconciler pass uses terminal
 recycling: an existing queued or running job remains unchanged, while a succeeded, failed, or
@@ -154,6 +158,9 @@ reconciler pass recycles the stable row and re-derives all state.
 - New boundary: a platform-internal durable queue row crosses from reconciler to worker. Its closed,
   constant-size payload selects neither a Resource nor an authority destination. Only worker
   assembly may borrow the active incarnation credential and bind it to configured Resources.
+- Existing boundary narrowed: tenant job APIs authorize ordinary rows by project name. The reap
+  kind is denied independently of that name, preventing a tenant-created project collision from
+  exposing or canceling platform maintenance. Platform-admin queue visibility remains unchanged.
 
 ### Controls
 
@@ -173,6 +180,9 @@ reconciler pass recycles the stable row and re-derives all state.
   distinct-path ceiling fails closed before deletion and reports no path.
 - Public errors expose only configured pool and volume identifiers. Connection credentials,
   domain XML, paths, and host identities do not enter error details.
+- `REMOTE_MODULE_VOLUME_REAP` belongs to a shared platform-internal job-kind set consumed by every
+  tenant list/read/wait/cancel path. Denials retain the ordinary not-found-shaped response, while
+  the existing platform-operator queue view continues to include the kind.
 - The stable queue key admits one in-flight sweep; terminal recycling, worker leases, and
   idempotent missing-volume deletion make retries and process restart convergent. Queue payload
   validation rejects extra or alternate fields before provider work.

@@ -211,7 +211,12 @@ class RemoteModuleVolumeReapPayload(_PayloadBase):
 
 The reconciler enqueues it under stable key `remote-module-volume-reap:v1`, with synthetic
 principal/project `remote-libvirt`, terminal recycling, and the ordinary bounded worker-attempt
-contract. No Resource, endpoint, credential, path, or owner enters the payload. The worker handler
+contract. Because tenant project names are not reserved, classify the job kind in a shared
+platform-internal set rather than relying on that synthetic project for isolation. Every tenant
+`jobs.list`, point read/wait, and cancel path denies the kind before project-role evaluation,
+including a caller with a colliding `remote-libvirt` project; the existing platform-operator
+`ops.jobs_list` path remains unchanged and can observe it. No Resource, endpoint, credential,
+path, or owner enters the payload. The worker handler
 constructs the concrete reaper from `WorkerHandlerAssembly`, whose active incarnation credential
 is borrowed only by the typed sender, and calls it with a retained-owner callback over the claimed
 job's database connection. The callback expands mutation retention to `source.ext4` and
@@ -263,24 +268,29 @@ reaper or sender parameter.
 2. Add queue admission tests for one stable key: queued/running rows deduplicate, terminal rows
    recycle, concurrent admissions yield one active row, failed work retries within the bounded
    worker attempt contract, and an expired lease is reclaimed after worker restart.
-3. Convert the reconciler lane to
+3. Classify `REMOTE_MODULE_VOLUME_REAP` as platform-internal in the job domain and consume that
+   classification in all tenant list/read/wait/cancel paths before project authorization. Prove a
+   tenant whose project is literally `remote-libvirt` cannot list, read, wait for, or cancel the
+   maintenance job; prove an ordinary job in that same project remains accessible; and prove the
+   existing platform-admin queue view still lists the internal job.
+4. Convert the reconciler lane to
    `enqueue_remote_module_volume_reap(conn: AsyncConnection) -> bool`, enqueueing the constant
    payload. Register
    `module_volume_reap_jobs_enqueued` in the catalog/report and return one only for insertion or
    terminal recycling; queue failure is isolated like other repairs. Assert the report never
    claims a removed count or a later provider failure.
-4. Implement `remote_module_volume_reap_handler(conn, job, *, reaper) -> None`. Validate the
+5. Implement `remote_module_volume_reap_handler(conn, job, *, reaper) -> None`. Validate the
    payload, use the reaper supplied by worker assembly, and
    give it the deferred repository callback. Prove mutation/reap expansion, post-enumeration read,
    aggregate fleet isolation, null composition, and that no payload field can select Resource,
    endpoint, or credential. A provider error remains a worker-job retry or terminal failure; a
    success emits the aggregate removed count only through bounded worker telemetry.
-5. Add `module_volume_reaper` to `WorkerHandlerAssembly`, register the handler, rename composition
+6. Add `module_volume_reaper` to `WorkerHandlerAssembly`, register the handler, rename composition
    to `build_worker_module_volume_reaper`, and delete `build_reconciler_module_volume_reaper`.
    Construct the remote adapter only in `build_worker_handler_assembly`, borrowing the active
    incarnation credential through the landed typed sender factory. Assert worker assembly receives
    the reaper and reconciler assembly exposes no reaper or sender construction.
-6. Run focused job, handler, reconciler, payload, migration, and assembly tests, then `just lint`,
+7. Run focused job, handler, reconciler, payload, migration, and assembly tests, then `just lint`,
    `just type`, and `just test-changed`; expect clean. Commit the task.
 
 Acceptance: the retention query occurs only when the worker's provider calls it after host
