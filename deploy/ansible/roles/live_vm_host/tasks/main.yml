@@ -503,6 +503,7 @@
       - --output=avail
       - "{{ live_vm_host_worker_recovery_root }}/{{ item }}"
   changed_when: false
+  check_mode: false
   loop: "{{ live_vm_host_worker_accounts }}"
   register: live_vm_host_external_boot_free_bytes
   tags: [external_boot_recovery_capacity]

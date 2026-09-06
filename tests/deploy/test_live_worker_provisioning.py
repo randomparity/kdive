@@ -1680,6 +1680,15 @@ def test_external_boot_capacity_is_checked_before_worker_release() -> None:
     assert "ansible.builtin.command:\n    argv:" in tasks
     assert "live_vm_host_external_boot_capacity_bytes | int" in tasks
     assert "live_vm_host_external_boot_concurrent_activations | int" in tasks
+    role_tasks = yaml.safe_load(_text(MAIN_TASKS))
+    assert isinstance(role_tasks, list)
+    capacity_probe = next(
+        task
+        for task in role_tasks
+        if task.get("name") == "Measure per-slot external-boot recovery free bytes"
+    )
+    assert capacity_probe["check_mode"] is False
+    assert capacity_probe["changed_when"] is False
 
 
 def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
