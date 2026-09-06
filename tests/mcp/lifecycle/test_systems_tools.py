@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1446,13 +1447,13 @@ def test_teardown_provider_failure_leaves_mutation_obligation_open(migrated_url:
                     )
             async with pool.connection() as conn:
                 system = await SYSTEMS.get(conn, UUID(system_id))
-                assert system is not None and system.state is SystemState.READY
+                assert system is not None and system.state is SystemState.TORN_DOWN
                 assert await repository.mutation_obligation_is_open(conn, attempt) is True
 
     asyncio.run(_run())
 
 
-def test_teardown_rolls_back_terminal_state_and_obligation(
+def test_teardown_discharge_rollback_keeps_mutation_obligation_open(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original = RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations
@@ -1485,7 +1486,54 @@ def test_teardown_rolls_back_terminal_state_and_obligation(
                     )
             async with pool.connection() as conn:
                 system = await SYSTEMS.get(conn, UUID(system_id))
-                assert system is not None and system.state is SystemState.READY
+                assert system is not None and system.state is SystemState.TORN_DOWN
+                assert await repository.mutation_obligation_is_open(conn, attempt) is True
+
+    asyncio.run(_run())
+
+
+def test_teardown_cancellation_keeps_mutation_obligation_open(migrated_url: str) -> None:
+    class BlockingProvisioning(FakeProvisioning):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+
+        def teardown(self, domain_name: str) -> None:
+            self.torn_down.append(domain_name)
+            self.started.set()
+            assert self.release.wait(timeout=2), "test did not release provider teardown"
+            self.finished.set()
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, alloc_id, SystemState.READY)
+            repository, attempt = await _open_teardown_obligation(pool, system_id)
+            job = await _enqueue_teardown(pool, system_id)
+            provisioner = BlockingProvisioning()
+
+            async def invoke() -> None:
+                async with pool.connection() as conn:
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=provisioner),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+
+            task = asyncio.create_task(invoke())
+            assert await asyncio.wait_for(asyncio.to_thread(provisioner.started.wait), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            provisioner.release.set()
+            assert await asyncio.wait_for(asyncio.to_thread(provisioner.finished.wait), timeout=2)
+
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, UUID(system_id))
+                assert system is not None and system.state is SystemState.TORN_DOWN
                 assert await repository.mutation_obligation_is_open(conn, attempt) is True
 
     asyncio.run(_run())
