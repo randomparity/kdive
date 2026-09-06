@@ -8,6 +8,7 @@ from kdive.providers.external_boot_authority.device_identity import (
 )
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityHealthAcknowledgementV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
@@ -30,4 +31,8 @@ class AuthorityRequestSender(Protocol):
 
     async def execute_mutation(
         self, request: AuthorityMutationRequestV1, *, deadline: float
+    ) -> AuthorityObservationV1: ...
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1, *, deadline: float
     ) -> AuthorityObservationV1: ...

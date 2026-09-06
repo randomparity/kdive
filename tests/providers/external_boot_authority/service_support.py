@@ -321,6 +321,9 @@ class _Adapter:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.release.set()
+        self.observe_entered = asyncio.Event()
+        self.observe_release = asyncio.Event()
+        self.observe_release.set()
         self.fail_commit = False
         self.fail_observe = False
         # An already-bounded failure the adapter is entitled to reach on its own.
@@ -345,6 +348,8 @@ class _Adapter:
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         self.calls.append("observe")
         self.operations.append(request.operation)
+        self.observe_entered.set()
+        await self.observe_release.wait()
         if self.fail_observe:
             raise RuntimeError(self.provider_output)
         return self._observation("target")

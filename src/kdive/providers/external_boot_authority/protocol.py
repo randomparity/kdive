@@ -209,6 +209,21 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
         return self
 
 
+class AuthorityConflictResolutionRequestV1(AuthorityMutationRequestV1):
+    """Closed conflict mutation carrying the caller observation the authority must recheck."""
+
+    expected_observed_composite: Digest
+
+    @model_validator(mode="after")
+    def _is_only_the_conflict_resolution_commit(self) -> Self:
+        if (
+            self.purpose != "resolve-conflict"
+            or self.operation is not AuthorityOperation.RESOLVE_CONFLICT
+        ):
+            raise ValueError("expected observed composite requires resolve-conflict")
+        return self
+
+
 class AuthorityPreparationMutationRequestV1(_AuthorityBinding):
     """A materialize or prepare mutation carrying its trusted durable plan projection."""
 
@@ -263,6 +278,7 @@ class AuthorityHealthAcknowledgementV1(_ClosedValue):
 
 type AuthorityRequestV1 = (
     AuthorityTakeoverRequestV1
+    | AuthorityConflictResolutionRequestV1
     | AuthorityMutationRequestV1
     | AuthorityPreparationMutationRequestV1
     | AuthorityHealthRequestV1

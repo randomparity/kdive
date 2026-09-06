@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -113,6 +114,24 @@ class _TrackingProvisioner:
         self.reprovisioned.append(system_id)
         self.live.add(name)
         return name
+
+
+class _TeardownBeforeProvisionCommitProvisioner(_TrackingProvisioner):
+    """Hold the first provider reap while a concurrent provision attempts admission."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.teardown_started = threading.Event()
+        self.allow_teardown_commit = threading.Event()
+        self._teardown_calls = 0
+
+    def teardown(self, domain_name: str) -> None:
+        self.torn_down.append(domain_name)
+        self.live.discard(domain_name)
+        self._teardown_calls += 1
+        if self._teardown_calls == 1:
+            self.teardown_started.set()
+            assert self.allow_teardown_commit.wait(timeout=2), "test did not release teardown"
 
 
 class _RecordingController:
@@ -282,6 +301,47 @@ def test_concurrent_provision_teardown_never_leaks_a_domain(migrated_url: str) -
                     f"iteration {i}: System ended {state!r}, want torn_down"
                 )
                 assert live == set(), f"iteration {i}: leaked domain(s): {live}"
+
+    asyncio.run(_run())
+
+
+def test_teardown_terminal_admission_fences_concurrent_provision(
+    migrated_url: str,
+) -> None:
+    """The terminal state fences a provision that starts during provider teardown."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.PROVISIONING)
+            prov = _TeardownBeforeProvisionCommitProvisioner()
+            resolver = provider_resolver(provisioner=prov)
+            pjob = await _enqueue(pool, JobKind.PROVISION, system_id, f"{system_id}:provision")
+            tjob = await _enqueue(pool, JobKind.TEARDOWN, system_id, f"{system_id}:teardown")
+
+            async def run_provision() -> None:
+                async with pool.connection() as conn:
+                    await conn.set_autocommit(True)
+                    await systems_handlers.provision_handler(conn, pjob, resolver=resolver)
+
+            async def run_teardown() -> None:
+                async with pool.connection() as conn:
+                    await conn.set_autocommit(True)
+                    await systems_handlers.teardown_handler(
+                        conn, tjob, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                    )
+
+            teardown = asyncio.create_task(run_teardown())
+            started = await asyncio.wait_for(
+                asyncio.to_thread(prov.teardown_started.wait), timeout=2
+            )
+            assert started
+            await run_provision()
+            prov.allow_teardown_commit.set()
+            await teardown
+
+            assert await _system_state(pool, system_id) == SystemState.TORN_DOWN.value
+            assert prov.provisioned == []
+            assert prov.live == set()
 
     asyncio.run(_run())
 

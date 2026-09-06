@@ -144,6 +144,37 @@ def test_identity_is_sourced_from_the_activation_row(migrated_url: str) -> None:
     _drive(migrated_url, body)
 
 
+def test_conflict_payload_binds_the_exact_observed_composite(migrated_url: str) -> None:
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="resolve-conflict",
+            activation_state="recovery_conflict",
+            attempt_state="conflict",
+        )
+        expected = "sha256:" + "d" * 64
+
+        kind, payload = await build_external_boot_payload(
+            conn,
+            activation_id=vehicle.activation_id,
+            purpose="resolve-conflict",
+            operation="resolve-conflict",
+            provider_kind="local-libvirt",
+            authority_instance=AUTHORITY_INSTANCE,
+            operation_identity="resolve-conflict-1",
+            resolver=resolver_for(vehicle),
+            expected_observed_composite=expected,
+        )
+
+        assert kind is JobKind.BOOT
+        assert isinstance(payload, BootPayload)
+        assert payload.external_boot_authority_v1 is not None
+        assert payload.external_boot_authority_v1.expected_observed_composite == expected
+
+    _drive(migrated_url, body)
+
+
 def test_a_mismatched_provider_kind_is_refused_and_allocates_nothing(migrated_url: str) -> None:
     async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
         await seed_case(conn, vehicle, purpose="activate")

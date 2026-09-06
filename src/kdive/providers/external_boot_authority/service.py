@@ -18,6 +18,7 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -484,6 +485,31 @@ class ExternalBootAuthorityService:
         ):
             raise AuthorityServiceError("journal_conflict")
         return records
+
+    async def _observation_head_is_current(
+        self, binding: AuthorityBinding, records: list[JournalRecordV1]
+    ) -> None:
+        """Refuse an observation unless its local journal ends at the trusted exact head.
+
+        Unlike mutation recovery, this only compares durable facts.  An observation must not
+        repair, append, or truncate local history merely to make a provider read admissible.
+        """
+        if not records:
+            raise AuthorityServiceError("journal_conflict")
+        head = await self._repository.read_head(binding)
+        last = records[-1]
+        if (
+            head is None
+            or head.authority_instance != binding.authority_instance
+            or head.system_id != binding.system_id
+            or head.sequence != last.sequence
+            or head.digest != record_digest(last)
+            or head.phase is not last.phase
+            or head.authority_id != last.authority_id
+            or head.generation != last.generation
+            or head.operation_identity != last.operation_identity
+        ):
+            raise AuthorityServiceError("journal_conflict")
 
     async def _anchor(
         self,
@@ -1171,6 +1197,13 @@ class ExternalBootAuthorityService:
                 # cannot reconcile, not a state it should paper over.
                 if not await self._head_still_anchors(binding, context):
                     raise AuthorityServiceError("journal_conflict")
+                if isinstance(request, AuthorityConflictResolutionRequestV1):
+                    observed = await self._adapter.observe(request)
+                    if (
+                        observed.category == "unreadable"
+                        or observed.composite_state != request.expected_observed_composite
+                    ):
+                        raise AuthorityServiceError("superseded")
                 try:
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
@@ -1238,6 +1271,73 @@ class ExternalBootAuthorityService:
                 active.done.set()
                 if lane.active is active:
                     lane.active = None
+                self._release_lane(trusted.system_id, lane)
+
+        task = asyncio.create_task(run())
+        try:
+            return await asyncio.shield(task)
+        except AuthorityServiceError as error:
+            self._ensure_rejection(request, error)
+            raise
+
+    async def execute_conflict_resolution(
+        self, peer: AuthenticatedPeer | None, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        """Mutate only after the authority re-observes the caller-bound conflict identity."""
+        return await self.execute_mutation(peer, request)
+
+    async def observe_authority(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        """Read one current authority-bound provider state without changing its journal or provider.
+
+        The acknowledgement and current authority are checked both before and after the provider
+        read.  A concurrent takeover therefore cannot turn an observation made under a stale
+        generation into an admission fact for a later mutation.
+        """
+        authenticated = self._require_peer(peer, request)
+        trusted = await self._repository.resolve_current_candidate(authenticated, request)
+        if trusted is None or not self._binding_matches(trusted, request):
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
+
+        async def run() -> AuthorityObservationV1:
+            try:
+                async with lane.lock:
+                    if lane.failed:
+                        raise AuthorityServiceError("journal_conflict")
+                    if lane.active is not None:
+                        raise AuthorityServiceError("superseded")
+                    _journal, records = self._lane_journal(request.system_id, lane)
+                    await self._observation_head_is_current(trusted, records)
+                    acknowledgements = [
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.generation == request.generation
+                    ]
+                    if not acknowledgements:
+                        raise AuthorityServiceError("superseded")
+                    acknowledgement = acknowledgements[-1]
+                    confirmed = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if confirmed is None or not self._binding_matches(confirmed, request):
+                        raise AuthorityServiceError("superseded")
+                    try:
+                        observation = await self._adapter.observe(request)
+                    except AuthorityServiceError:
+                        raise
+                    except Exception:
+                        raise self._provider_error(request) from None
+                    rechecked = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if rechecked is None or not self._binding_matches(rechecked, request):
+                        raise AuthorityServiceError("superseded")
+                    await self._observation_head_is_current(rechecked, records)
+                    return observation
+            finally:
                 self._release_lane(trusted.system_id, lane)
 
         task = asyncio.create_task(run())

@@ -72,11 +72,13 @@ def test_register_publishes_control_tool_contracts() -> None:
     assert list(tools["control.force_crash"].parameters["properties"]) == [
         "system_id",
         "idempotency_key",
+        "run_id",
     ]
     assert tools["control.force_crash"].parameters["required"] == ["system_id"]
     assert (
         tools["control.force_crash"].parameters["properties"]["idempotency_key"]["default"] is None
     )
+    assert tools["control.force_crash"].parameters["properties"]["run_id"]["default"] is None
 
     assert list(tools["control.diagnostic_sysrq"].parameters["properties"]) == [
         "system_id",
@@ -93,6 +95,7 @@ def test_register_publishes_control_tool_contracts() -> None:
         "system_id",
         "deadline_s",
         "idempotency_key",
+        "run_id",
     ]
     assert tools["control.watch_for_crash"].parameters["required"] == ["system_id"]
     assert (
@@ -102,6 +105,7 @@ def test_register_publishes_control_tool_contracts() -> None:
         tools["control.watch_for_crash"].parameters["properties"]["idempotency_key"]["default"]
         is None
     )
+    assert tools["control.watch_for_crash"].parameters["properties"]["run_id"]["default"] is None
 
     capture = tools["control.capture_traffic"].parameters
     assert list(capture["properties"]) == [
@@ -184,7 +188,7 @@ def test_registered_wrappers_delegate_to_control_handlers(
             is sentinels["power"]
         )
         assert (
-            await tools["control.force_crash"].fn("crash-system", "crash-idem")
+            await tools["control.force_crash"].fn("crash-system", "crash-idem", "crash-run")
             is sentinels["force_crash"]
         )
         assert (
@@ -192,7 +196,9 @@ def test_registered_wrappers_delegate_to_control_handlers(
             is sentinels["sysrq"]
         )
         assert (
-            await tools["control.watch_for_crash"].fn("watch-system", 17.5, "watch-idem")
+            await tools["control.watch_for_crash"].fn(
+                "watch-system", 17.5, "watch-idem", "watch-run"
+            )
             is sentinels["watch"]
         )
         assert (
@@ -217,7 +223,7 @@ def test_registered_wrappers_delegate_to_control_handlers(
             pool,
             ctx,
             resolver,
-            {"system_id": "crash-system", "idempotency_key": "crash-idem"},
+            {"system_id": "crash-system", "idempotency_key": "crash-idem", "run_id": "crash-run"},
         ),
         (
             "sysrq",
@@ -235,7 +241,12 @@ def test_registered_wrappers_delegate_to_control_handlers(
             pool,
             ctx,
             resolver,
-            {"system_id": "watch-system", "deadline_s": 17.5, "idempotency_key": "watch-idem"},
+            {
+                "system_id": "watch-system",
+                "deadline_s": 17.5,
+                "idempotency_key": "watch-idem",
+                "run_id": "watch-run",
+            },
         ),
         (
             "capture",
