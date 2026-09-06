@@ -895,13 +895,20 @@ class RealLocalExternalBootMaterializer:
             try:
                 reopened = TargetProjectionStore.reopen_at(directory_fd, projection)
             except FileNotFoundError:
-                self._fetch_and_validate(plan, directory_fd)
+                try:
+                    self._fetch_and_validate(plan, directory_fd)
+                    evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
+                    self._validate_local_initrd(plan, directory_fd)
+                except BaseException as primary:
+                    _cleanup_uncommitted_payloads(directory_fd, primary)
+                    raise
                 TargetProjectionStore.publish_at(directory_fd, projection)
                 reopened = TargetProjectionStore.reopen_at(directory_fd, projection)
+            else:
+                evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
+                self._validate_local_initrd(plan, directory_fd)
             if reopened != projection:
                 raise ValueError("materialized target projection changed on exact reopen")
-            evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
-            self._validate_local_initrd(plan, directory_fd)
         return ExternalBootMaterialization(
             architecture=plan.architecture,
             provider_kind="local-libvirt",
@@ -1217,6 +1224,49 @@ def _installed_module_manifest(directory_fd: int) -> str:
         return recovery_validation._manifest(entries)[1]  # noqa: SLF001
     finally:
         os.close(modules_fd)
+
+
+def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> None:
+    """Remove only exact private payload names while no projection commit exists."""
+    try:
+        _read_private_file(directory_fd, _PROJECTION_NAME)
+    except FileNotFoundError:
+        pass
+    except BaseException as cleanup:
+        primary.add_note(f"uncommitted payload cleanup refused: {cleanup!r}")
+        return
+    else:
+        primary.add_note("uncommitted payload cleanup refused: projection is committed")
+        return
+    entries = set(os.listdir(directory_fd))
+    allowed = {"kernel", "modules", "initrd", ".bundle.next", ".bundle.verify", ".initrd.verify"}
+    if not entries <= allowed:
+        primary.add_note("uncommitted payload cleanup refused: projection has unknown entries")
+        return
+    for name in sorted(entries):
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            try:
+                status = os.fstat(descriptor)
+                if not stat.S_ISREG(status.st_mode) or status.st_mode & 0o077:
+                    raise ValueError(f"uncommitted payload {name!r} is not a private regular file")
+            finally:
+                os.close(descriptor)
+        except BaseException as cleanup:
+            primary.add_note(f"uncommitted payload cleanup refused: {cleanup!r}")
+            return
+    for name in sorted(entries):
+        try:
+            os.unlink(name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            continue
+        except OSError as cleanup:
+            primary.add_note(f"uncommitted payload cleanup failed: {cleanup!r}")
+            return
+    try:
+        os.fsync(directory_fd)
+    except OSError as cleanup:
+        primary.add_note(f"uncommitted payload cleanup fsync failed: {cleanup!r}")
 
 
 type ResolveOperationLease = Callable[[OpaqueProviderRef], LocalExternalBootOperationLease]

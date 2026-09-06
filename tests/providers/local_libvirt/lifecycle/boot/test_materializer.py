@@ -338,3 +338,37 @@ def test_materialize_rejects_changed_manifest_before_projection_commit(tmp_path:
 
     assert not list(session.root.rglob("target-projection.json"))
     assert all(body.closed_by_store for body in client.bodies)
+
+
+def test_corrupt_final_payload_publishes_no_sidecar_and_clean_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle()
+    plan = _plan(bundle)
+    client = _Client({("build/kernel", "kernel-v1"): bundle})
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+    original = materializer._validate_local_bundle  # noqa: SLF001
+    corrupted = False
+
+    def corrupt_then_validate(value: ExternalBootPlan, directory_fd: int):
+        nonlocal corrupted
+        if not corrupted:
+            corrupted = True
+            descriptor = os.open("modules", os.O_WRONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            try:
+                os.ftruncate(descriptor, 1)
+            finally:
+                os.close(descriptor)
+        return original(value, directory_fd)
+
+    monkeypatch.setattr(materializer, "_validate_local_bundle", corrupt_then_validate)
+    with pytest.raises(tarfile.ReadError):
+        materializer.materialize(plan, cast(LocalExternalBootSession, session))
+
+    assert not list(session.root.rglob("target-projection.json"))
+    assert not list(session.root.rglob("kernel"))
+    assert not list(session.root.rglob("modules"))
+    monkeypatch.setattr(materializer, "_validate_local_bundle", original)
+    result = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
+    assert result.plan_identity == plan.identity
