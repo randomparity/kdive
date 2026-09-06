@@ -562,6 +562,8 @@ def test_database_rejects_v2_recovery_reference_without_valid_geometry(
             await repo.open_mutation_obligation(conn, attempt)
             reference = _recovery_reference(attempt) | {
                 "protocol": "remote-module-recovery-ref-v2",
+                "operation_identity": _BASELINE_OPERATION_IDENTITY,
+                "result_identity": _BASELINE_RESULT_IDENTITY,
             }
             if capacity is not None:
                 reference["source_capacity_bytes"] = capacity
@@ -583,6 +585,8 @@ def test_database_round_trips_v2_recovery_geometry(migrated_url: str) -> None:
             reference = _recovery_reference(attempt) | {
                 "protocol": "remote-module-recovery-ref-v2",
                 "source_capacity_bytes": 64 * 1024**2,
+                "operation_identity": _BASELINE_OPERATION_IDENTITY,
+                "result_identity": _BASELINE_RESULT_IDENTITY,
             }
             await repo.record_terminal_evidence(
                 conn, attempt, replace(_evidence(attempt), recovery_reference=reference)
