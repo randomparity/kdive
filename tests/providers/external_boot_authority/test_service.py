@@ -69,14 +69,16 @@ class _PreparationAdapter:
 class _RecordingProofCheckpoint:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
+        self.identities: list[tuple[UUID, UUID, AuthorityOperation]] = []
 
     async def checkpoint(
         self,
         system_id: UUID,
+        run_id: UUID,
         operation: AuthorityOperation,
         checkpoint: Literal["before-provider", "after-provider"],
     ) -> None:
-        del system_id, operation
+        self.identities.append((system_id, run_id, operation))
         self.calls.append(checkpoint)
 
 
@@ -96,9 +98,14 @@ async def test_proof_checkpoints_wrap_provider_commit_before_provider_returned(
     await service.acknowledge_takeover(peer, takeover)
     repository.current = True
 
-    await service.execute_mutation(peer, _mutation(takeover))
+    request = _mutation(takeover)
+    await service.execute_mutation(peer, request)
 
     assert checkpoint_calls == ["before-provider", "commit:activate", "after-provider", "observe"]
+    assert proof.identities == [
+        (request.system_id, request.run_id, request.operation),
+        (request.system_id, request.run_id, request.operation),
+    ]
     assert [record.phase for record in repository.records][-3:] == [
         JournalPhase.PROVIDER_RETURNED,
         JournalPhase.OBSERVED,

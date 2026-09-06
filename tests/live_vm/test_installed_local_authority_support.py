@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -164,13 +165,15 @@ def test_fault_barrier_client_arms_and_releases_only_the_configured_system(
 
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(carrier, "require_fault_barrier", lambda _config: socket_path)
-    arm_fault_barrier(config, "activate", "after-provider")
+    run_id = str(uuid4())
+    arm_fault_barrier(config, run_id, "activate", "after-provider")
     release_fault_barrier(config)
 
     assert requests == [
         {
             "action": "arm",
             "system_id": str(config.system_id),
+            "run_id": run_id,
             "operation": "activate",
             "checkpoint": "after-provider",
         },
@@ -513,6 +516,117 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
 
     with pytest.raises(RuntimeError, match="stop before public MCP mutation"):
         carrier.run_installed_local_authority_normal_operations()
+
+
+@pytest.mark.parametrize("restart_recovery", [False, True])
+def test_native_carriers_supply_the_required_cleanup_summary(
+    monkeypatch: pytest.MonkeyPatch, restart_recovery: bool
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    investigation_id = f"{config.ownership_prefix}-investigation"
+    run_id = str(uuid4())
+    cleanup_calls: list[tuple[str, dict[str, object]]] = []
+    armed: list[tuple[NativeAuthorityConfig, str, str, str]] = []
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def call_tool(self, name: str, **kwargs: object) -> ToolResponse:
+            cleanup_calls.append((name, kwargs))
+            return ToolResponse.success(investigation_id, "closed")
+
+    class ClientFactory:
+        @staticmethod
+        def over_http(_base_url: str, _token: str) -> Client:
+            return Client()
+
+    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+        return None
+
+    async def completed(_db_url: str, _operations: NormalOperationJobs) -> None:
+        return None
+
+    async def normal(
+        _client: object, _config: NativeAuthorityConfig, ledger: ResourceLedger
+    ) -> NormalOperationJobs:
+        ledger.record(OwnedResource(kind="investigation", identity=investigation_id))
+        return NormalOperationJobs(investigation_id, run_id, str(uuid4()), str(uuid4()))
+
+    async def activation(
+        _client: object,
+        _config: NativeAuthorityConfig,
+        ledger: ResourceLedger,
+        **_kwargs: object,
+    ) -> carrier.ActivationJob:
+        ledger.record(OwnedResource(kind="investigation", identity=investigation_id))
+        before_activate = cast(Callable[[str], None], _kwargs["before_activate"])
+        before_activate(run_id)
+        return carrier.ActivationJob(investigation_id, run_id, str(uuid4()))
+
+    async def success(*_args: object, **_kwargs: object) -> ToolResponse:
+        return ToolResponse.success(str(uuid4()), "succeeded")
+
+    monkeypatch.setattr(carrier, "load_config", lambda: config)
+    monkeypatch.setattr(
+        carrier,
+        "_output",
+        lambda *argv: (
+            config.installed_revision
+            if argv[:3] == ("sudo", "-n", "cat")
+            else (
+                "active"
+                if argv[:2] == ("systemctl", "is-active")
+                else "kdive-live-worker@1.service loaded active running KDIVE slot 1"
+            )
+        ),
+    )
+    monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
+    monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
+    monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "mint_role_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
+    monkeypatch.setattr(carrier, "require_authority_artifact_confinement", lambda *_args: None)
+    monkeypatch.setattr(carrier, "LiveStackClient", ClientFactory)
+    monkeypatch.setattr(carrier, "assert_root_release_completion", completed)
+    monkeypatch.setattr(carrier, "drive_normal_operations", normal)
+    monkeypatch.setattr(carrier, "require_fault_barrier", lambda *_args: None)
+    monkeypatch.setattr(
+        carrier,
+        "arm_fault_barrier",
+        lambda *args: armed.append(cast(tuple[NativeAuthorityConfig, str, str, str], args)),
+    )
+    monkeypatch.setattr(carrier, "start_external_boot_activation", activation)
+    monkeypatch.setattr(carrier, "wait_for_fault_barrier", lambda *_args: None)
+    monkeypatch.setattr(carrier, "restart_authority_after_fault", lambda *_args: None)
+    monkeypatch.setattr(carrier, "drain_job", success)
+    monkeypatch.setattr(carrier, "scalar", success)
+    monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
+
+    if restart_recovery:
+        carrier.run_installed_local_authority_restart_recovery()
+    else:
+        carrier.run_installed_local_authority_normal_operations()
+
+    assert cleanup_calls == [
+        (
+            "investigations.close",
+            {
+                "investigation_id": investigation_id,
+                "summary": "Native authority proof cleanup",
+            },
+        )
+    ]
+    assert armed == ([(config, run_id, "activate", "after-provider")] if restart_recovery else [])
 
 
 async def _completed_root_release(migrated_url: str) -> NormalOperationJobs:

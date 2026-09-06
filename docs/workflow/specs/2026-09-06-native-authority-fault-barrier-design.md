@@ -15,16 +15,16 @@ the transient client-proof directory, which has a distinct unprivileged owner an
 
 The peer kernel credential must have uid zero. Each bounded JSON request is exactly one of:
 
-- `arm` with an existing System UUID, an `AuthorityOperation`, and `before-provider` or
-  `after-provider`;
+- `arm` with an existing System UUID, its exact Run UUID, an `AuthorityOperation`, and
+  `before-provider` or `after-provider`;
 - `release` for the one armed checkpoint; or
 - `status`.
 
 Malformed, oversized, non-root, and concurrent arm requests are rejected. A mismatched service
-checkpoint does not pause. An arm can block only its exact `(System, operation, checkpoint)` at
-the two service checkpoints. It neither creates a provider call nor alters a request. Authority
-shutdown aborts the checkpoint and leaves the ordinary recovery path to establish what, if
-anything, completed.
+checkpoint does not pause. An arm can block only its exact
+`(System, Run, operation, checkpoint)` at the two service checkpoints. It neither creates a
+provider call nor alters a request. Authority shutdown aborts the checkpoint and leaves the
+ordinary recovery path to establish what, if anything, completed.
 
 ## Verification
 

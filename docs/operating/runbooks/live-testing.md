@@ -170,7 +170,7 @@ Set `live_vm_host_authority_fault_proof_enabled: true` only for a disposable nat
 install the disabled-by-default authority-owned socket at
 `/run/kdive/provider-authority/proof-control/control.sock`. Put that exact absolute path in the
 carrier's optional `barrier_socket`. Root may then send only bounded `arm`, `status`, and `release`
-requests. An arm binds the configured System, one existing operation, and the fixed
+requests. An arm binds the configured System and exact Run, one existing operation, and the fixed
 `before-provider` or `after-provider` checkpoint. It is root-only by `SO_PEERCRED`, permits one
 arm, and never selects or executes a provider action. Shutdown aborts a wait rather than releasing
 it. The fault carrier uses `after-provider` to restart the authority before it can record

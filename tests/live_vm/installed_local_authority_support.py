@@ -254,7 +254,9 @@ def run_installed_local_authority_normal_operations() -> None:
             for resource in reversed(investigations):
                 try:
                     closed = await client.call_tool(
-                        "investigations.close", investigation_id=resource.identity
+                        "investigations.close",
+                        investigation_id=resource.identity,
+                        summary="Native authority proof cleanup",
                     )
                     assert not isinstance(closed, list)
                     assert closed.status not in {"error", "failed"}
@@ -314,7 +316,9 @@ def run_installed_local_authority_restart_recovery() -> None:
                     client,
                     config,
                     ledger,
-                    before_activate=lambda: arm_fault_barrier(config, "activate", "after-provider"),
+                    before_activate=lambda run_id: arm_fault_barrier(
+                        config, run_id, "activate", "after-provider"
+                    ),
                 )
                 wait_for_fault_barrier(config)
                 restart_authority_after_fault(config)
@@ -342,7 +346,9 @@ def run_installed_local_authority_restart_recovery() -> None:
             for resource in reversed(investigations):
                 try:
                     closed = await client.call_tool(
-                        "investigations.close", investigation_id=resource.identity
+                        "investigations.close",
+                        investigation_id=resource.identity,
+                        summary="Native authority proof cleanup",
                     )
                     assert not isinstance(closed, list)
                     assert closed.status not in {"error", "failed"}
@@ -591,6 +597,7 @@ def fault_barrier_request(config: NativeAuthorityConfig, request: dict[str, str]
 
 def arm_fault_barrier(
     config: NativeAuthorityConfig,
+    run_id: str,
     operation: Literal["activate", "recover", "cleanup"],
     checkpoint: Literal["before-provider", "after-provider"],
 ) -> None:
@@ -600,6 +607,7 @@ def arm_fault_barrier(
         {
             "action": "arm",
             "system_id": str(config.system_id),
+            "run_id": run_id,
             "operation": operation,
             "checkpoint": checkpoint,
         },
@@ -792,7 +800,7 @@ async def start_external_boot_activation(
     config: NativeAuthorityConfig,
     ledger: ResourceLedger,
     *,
-    before_activate: Callable[[], None] | None = None,
+    before_activate: Callable[[str], None] | None = None,
 ) -> ActivationJob:
     """Create, install, and publicly admit one activation without polling its job."""
     opened = ok(
@@ -823,7 +831,7 @@ async def start_external_boot_activation(
     install = ok(await scalar(client, "runs.install", run_id=run_id), "install")
     await drain_job(client, "install", install.object_id)
     if before_activate is not None:
-        before_activate()
+        before_activate(run_id)
     activate = ok(await scalar(client, "runs.boot", run_id=run_id), "activate")
     return ActivationJob(
         investigation_id=investigation_id,

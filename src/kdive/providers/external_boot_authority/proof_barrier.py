@@ -29,6 +29,7 @@ class ProofBarrierShutdown(RuntimeError):
 @dataclass(slots=True)
 class _Arm:
     system_id: UUID
+    run_id: UUID
     operation: AuthorityOperation
     checkpoint: ProofCheckpoint
     release: asyncio.Future[None]
@@ -101,24 +102,42 @@ class AuthorityProofBarrier:
             return {"state": await self.status()}
         if action == "release" and set(data) == {"action"}:
             return {"state": await self.release()}
-        if action != "arm" or set(data) != {"action", "system_id", "operation", "checkpoint"}:
+        if action != "arm" or set(data) != {
+            "action",
+            "system_id",
+            "run_id",
+            "operation",
+            "checkpoint",
+        }:
             return {"error": "invalid-request"}
         try:
             system_raw = data["system_id"]
+            run_raw = data["run_id"]
             operation_raw = data["operation"]
             checkpoint = data["checkpoint"]
-            if not isinstance(system_raw, str) or not isinstance(operation_raw, str):
+            if (
+                not isinstance(system_raw, str)
+                or not isinstance(run_raw, str)
+                or not isinstance(operation_raw, str)
+            ):
                 raise ValueError
             system_id = UUID(system_raw)
+            run_id = UUID(run_raw)
             operation = AuthorityOperation(operation_raw)
             if checkpoint not in {"before-provider", "after-provider"}:
                 raise ValueError
         except AttributeError, TypeError, ValueError:
             return {"error": "invalid-request"}
-        return {"state": await self.arm(system_id, operation, cast(ProofCheckpoint, checkpoint))}
+        return {
+            "state": await self.arm(system_id, run_id, operation, cast(ProofCheckpoint, checkpoint))
+        }
 
     async def arm(
-        self, system_id: UUID, operation: AuthorityOperation, checkpoint: ProofCheckpoint
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        operation: AuthorityOperation,
+        checkpoint: ProofCheckpoint,
     ) -> Literal["armed", "busy"]:
         """Reserve the only pause point for one exact existing mutation."""
         async with self._lock:
@@ -129,6 +148,7 @@ class AuthorityProofBarrier:
             self.reached = asyncio.Event()
             self._armed = _Arm(
                 system_id=system_id,
+                run_id=run_id,
                 operation=operation,
                 checkpoint=checkpoint,
                 release=asyncio.get_running_loop().create_future(),
@@ -156,16 +176,21 @@ class AuthorityProofBarrier:
             return "released"
 
     async def checkpoint(
-        self, system_id: UUID, operation: AuthorityOperation, checkpoint: ProofCheckpoint
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        operation: AuthorityOperation,
+        checkpoint: ProofCheckpoint,
     ) -> None:
         """Pause only the armed exact mutation at the requested fixed checkpoint."""
         async with self._lock:
             armed = self._armed
             if armed is None or (
                 armed.system_id,
+                armed.run_id,
                 armed.operation,
                 armed.checkpoint,
-            ) != (system_id, operation, checkpoint):
+            ) != (system_id, run_id, operation, checkpoint):
                 return
             armed.reached = True
             self.reached.set()
@@ -184,6 +209,9 @@ class AuthorityProofBarrier:
                 armed.release.set_exception(
                     ProofBarrierShutdown("proof checkpoint aborted by shutdown")
                 )
+                # Retrieval suppresses an unwaited-Future loop warning without changing the
+                # exception a checkpoint already awaiting this Future receives.
+                armed.release.exception()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()

@@ -61,6 +61,7 @@ class AuthorityProofCheckpoint(Protocol):
     async def checkpoint(
         self,
         system_id: UUID,
+        run_id: UUID,
         operation: AuthorityOperation,
         checkpoint: Literal["before-provider", "after-provider"],
     ) -> None: ...
@@ -1478,7 +1479,10 @@ class ExternalBootAuthorityService:
                 try:
                     if self._proof_checkpoint is not None and adopted_release_phase is None:
                         await self._proof_checkpoint.checkpoint(
-                            request.system_id, request.operation, "before-provider"
+                            request.system_id,
+                            request.run_id,
+                            request.operation,
+                            "before-provider",
                         )
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
@@ -1493,7 +1497,10 @@ class ExternalBootAuthorityService:
                         await self._adapter.commit(request, context)
                     if self._proof_checkpoint is not None and adopted_release_phase is None:
                         await self._proof_checkpoint.checkpoint(
-                            request.system_id, request.operation, "after-provider"
+                            request.system_id,
+                            request.run_id,
+                            request.operation,
+                            "after-provider",
                         )
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would

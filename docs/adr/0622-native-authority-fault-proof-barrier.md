@@ -15,9 +15,9 @@ The installed authority must not gain a general operator command or a new provid
 When the explicit live-VM fault-proof option is enabled, the authority binds one fixed mode-`0600`
 AF_UNIX socket at `/run/kdive/provider-authority/proof-control/control.sock` in its owner-only
 proof runtime directory. Linux `SO_PEERCRED` admits only uid 0. Its bounded closed JSON protocol
-has only `arm`, `release`, and `status`: an arm names one existing System UUID, one existing
-authority operation, and either `before-provider` or `after-provider`. Only one arm exists at a
-time. The sibling directory deliberately does not overlap the transient unprivileged
+has only `arm`, `release`, and `status`: an arm names one existing System UUID, its exact Run UUID,
+one existing authority operation, and either `before-provider` or `after-provider`. Only one arm
+exists at a time. The sibling directory deliberately does not overlap the transient unprivileged
 client-proof material.
 
 The authority service awaits a matching arm immediately before the adapter commit and immediately
