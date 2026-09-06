@@ -10,13 +10,14 @@ import struct
 import tarfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 import pytest
 from botocore.exceptions import ReadTimeoutError
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.build_artifacts import validation
+from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RealLocalExternalBootMaterializer,
     TargetProjectionStore,
@@ -266,6 +267,35 @@ def test_interrupted_fetch_closes_stream_and_retry_commits_cleanly(tmp_path: Pat
         plan, cast(LocalExternalBootSession, _Session(session.root))
     )
     assert result.verified_bundle_sha256 == plan.bundle.sha256
+
+
+def test_interrupted_module_conversion_cleans_temporaries_for_new_session_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle()
+    plan = _plan(bundle)
+    client = _Client({("build/kernel", "kernel-v1"): bundle})
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+    original = external_boot_module.convert_kernel_bundle_modules
+
+    def interrupt_conversion(
+        source: BinaryIO, destination: BinaryIO, *, release: str
+    ) -> tuple[str, int]:
+        del source, release
+        destination.write(b"partial")
+        raise OSError("injected module conversion interruption")
+
+    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", interrupt_conversion)
+    with pytest.raises(OSError, match="conversion interruption"):
+        materializer.materialize(plan, cast(LocalExternalBootSession, session))
+
+    digest_dirs = [path for path in session.root.iterdir() if path.is_dir()]
+    assert len(digest_dirs) == 1
+    assert list(digest_dirs[0].iterdir()) == []
+    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", original)
+    result = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
+    assert result.plan_identity == plan.identity
 
 
 def test_inspect_prepare_uses_reopened_bytes_and_preserves_source(tmp_path: Path) -> None:

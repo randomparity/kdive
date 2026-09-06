@@ -1005,6 +1005,7 @@ class RealLocalExternalBootMaterializer:
             with os.fdopen(os.dup(bundle_fd), "rb") as source:
                 base = Path(f"/proc/self/fd/{directory_fd}")
                 extract_kernel_bundle(source, base / ".kernel.next", None)
+            _make_private_temporary(directory_fd, ".kernel.next")
             modules_fd = os.open(
                 ".modules.next",
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -1169,12 +1170,20 @@ def _source_byte_limit(source: ArtifactSource) -> int:
 
 def _commit_private_artifact(directory_fd: int, temporary: str, final: str) -> None:
     """Link an immutable artifact into place without replacing an existing result."""
+    _make_private_temporary(directory_fd, temporary)
+    _commit_private_artifact_link(directory_fd, temporary, final)
+
+
+def _make_private_temporary(directory_fd: int, temporary: str) -> None:
     temporary_fd = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
     try:
         os.fchmod(temporary_fd, 0o600)
         os.fsync(temporary_fd)
     finally:
         os.close(temporary_fd)
+
+
+def _commit_private_artifact_link(directory_fd: int, temporary: str, final: str) -> None:
     try:
         os.link(
             temporary,
@@ -1239,7 +1248,17 @@ def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> 
         primary.add_note("uncommitted payload cleanup refused: projection is committed")
         return
     entries = set(os.listdir(directory_fd))
-    allowed = {"kernel", "modules", "initrd", ".bundle.next", ".bundle.verify", ".initrd.verify"}
+    allowed = {
+        "kernel",
+        "modules",
+        "initrd",
+        ".bundle.next",
+        ".bundle.verify",
+        ".kernel.next",
+        ".modules.next",
+        ".initrd.next",
+        ".initrd.verify",
+    }
     if not entries <= allowed:
         primary.add_note("uncommitted payload cleanup refused: projection has unknown entries")
         return
