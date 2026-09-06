@@ -795,9 +795,17 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    "cleanup_fault",
-    ["reaping-marker", "source-delete", "scratch-delete", "reaped-marker", "discharge"],
-    ids=str,
+    ("cleanup_fault", "preparation_fault"),
+    [
+        ("reaping-marker", "before-upload"),
+        ("reaping-marker", "before-scratch"),
+        ("reaping-marker", "before-appliance"),
+        ("source-delete", None),
+        ("scratch-delete", None),
+        ("reaped-marker", None),
+        ("discharge", None),
+    ],
+    ids=lambda value: str(value),
 )
 def test_real_runtime_and_database_resume_at_cleanup_boundaries(
     migrated_url: str,
@@ -805,6 +813,7 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cleanup_fault: str,
+    preparation_fault: str | None,
 ) -> None:
     class Writer:
         operation = b""
@@ -899,7 +908,9 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
         installed = RemoteModuleResultV1.from_wire_bytes(success_result()).model_copy(
             update={"system_id": operation.system_id, "run_id": operation.run_id}
         )
-        scratch_result = [installed.to_wire_bytes()]
+        scratch_result: list[bytes | None] = [
+            None if preparation_fault == "before-appliance" else installed.to_wire_bytes()
+        ]
         storage = Conn()
         clock = ApplianceClock()
         appliance = PersistentAppliance([], clock)
@@ -982,7 +993,9 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
             receipt = await open_module_attempt_preparation(server, repository, attempt)
 
             def preparation_runtime() -> RemoteModuleOperationRuntime:
-                async def read(_recovery: RemoteModuleRecoveryRefV2, _deadline: float) -> bytes:
+                async def read(
+                    _recovery: RemoteModuleRecoveryRefV2, _deadline: float
+                ) -> bytes | None:
                     return scratch_result[0]
 
                 return RemoteModuleOperationRuntime(
@@ -1023,7 +1036,7 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
                 cast(Any, object()),
                 authority_reference,
             )
-            if cleanup_fault == "reaping-marker":
+            if preparation_fault == "before-upload":
                 create_xml = storage.pool.createXML
                 interrupted_source: list[Any] = []
 
@@ -1053,15 +1066,78 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
                 assert set(storage.pool.volumes) == {source_name}
                 assert bytes(source.payload) == b""
 
+            elif preparation_fault == "before-scratch":
+                create_xml = storage.pool.createXML
+                upload_calls = 0
+
+                def create_then_die_before_scratch(xml: str, flags: int = 0):
+                    nonlocal upload_calls
+                    if "scratch.ext4" in xml:
+                        raise SystemExit("worker died before scratch create")
+                    created = create_xml(xml, flags)
+                    original_upload = created.upload
+
+                    def count_upload(
+                        stream: object, offset: int, length: int, flags: int = 0
+                    ) -> int:
+                        nonlocal upload_calls
+                        upload_calls += 1
+                        return original_upload(stream, offset, length, flags)
+
+                    cast(Any, created).upload = count_upload
+                    return created
+
+                cast(Any, storage.pool).createXML = create_then_die_before_scratch
+                with pytest.raises(SystemExit, match="before scratch create"):
+                    await capture_install_modules(
+                        request,
+                        runtime=preparation_runtime(),
+                        executor=executor,
+                        deadline=10**12,
+                    )
+                cast(Any, storage.pool).createXML = create_xml
+                assert set(storage.pool.volumes) == {source_name}
+                assert upload_calls == 1
+
+            elif preparation_fault == "before-appliance":
+                create_appliance = appliance.createXML
+
+                def die_before_appliance(*_args: object, **_kwargs: object):
+                    raise SystemExit("worker died before appliance result")
+
+                cast(Any, appliance).createXML = die_before_appliance
+                with pytest.raises(SystemExit, match="before appliance result"):
+                    await capture_install_modules(
+                        request,
+                        runtime=preparation_runtime(),
+                        executor=executor,
+                        deadline=10**12,
+                    )
+
+                def create_appliance_and_publish(xml: str, flags: int = 0):
+                    created = create_appliance(xml, flags)
+                    scratch_result[0] = installed.to_wire_bytes()
+                    return created
+
+                cast(Any, appliance).createXML = create_appliance_and_publish
+                existing_volumes = dict(storage.pool.volumes)
+                assert set(existing_volumes) == {source_name, scratch_name}
+
             with pytest.raises(RuntimeError, match="worker loss during teardown"):
                 await capture_install_modules(
                     request, runtime=preparation_runtime(), executor=executor, deadline=10**12
                 )
-            assert appliance.creates == 1
             restarted = preparation_runtime()
             recovery = await capture_install_modules(
                 request, runtime=restarted, executor=executor, deadline=10**12
             )
+            if preparation_fault == "before-appliance":
+                assert all(
+                    storage.pool.volumes[name] is volume
+                    for name, volume in existing_volumes.items()
+                )
+            if preparation_fault == "before-scratch":
+                assert upload_calls == 1
             assert appliance.creates == 1
             assert recovery.source_capacity_bytes == 4096
             async with server.connection() as conn:
