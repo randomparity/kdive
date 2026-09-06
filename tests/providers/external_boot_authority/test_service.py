@@ -250,7 +250,7 @@ async def test_teardown_recovery_keeps_ordinary_observe_adapter_compatible(
     )
     record = service._record(request, [], JournalPhase.MUTATION_STARTED)
 
-    observation = await service._recovery_observation(request, record)
+    observation = await service._recovery_observation(request, record, [record])
 
     assert observation.category == "target"
     assert adapter.calls == ["observe"]
