@@ -304,8 +304,24 @@ def test_debugfs_rejects_a_malformed_filesystem(tmp_path: Path) -> None:
     assert exc_info.value.category is ErrorCategory.CONFLICT
 
 
-def test_invalid_utf8_debugfs_diagnostics_are_not_success() -> None:
-    assert remote_module_result_reader._debugfs_diagnostics(b"\xff") is None
+def test_invalid_utf8_debugfs_stderr_with_exit_zero_is_not_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_popen = subprocess.Popen
+
+    def invalid_stderr_process(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        return original_popen(
+            ["sh", "-c", "printf '\\377' >&2"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    monkeypatch.setattr(remote_module_result_reader.subprocess, "Popen", invalid_stderr_process)
+
+    with pytest.raises(CategorizedError) as exc_info:
+        remote_module_result_reader._read_debugfs(tmp_path / "unused", 10.0, lambda: 0.0)
+
+    assert exc_info.value.category is ErrorCategory.CONFLICT
 
 
 def test_new_stream_failure_closes_mkstemp_descriptor(
