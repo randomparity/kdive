@@ -22,6 +22,7 @@ from kdive.db.external_boot_authority_journal import (
 )
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
@@ -186,6 +187,80 @@ class DatabaseAuthorityRepository:
                 operation_nonce=operation_nonce,
                 cleanup_state=found[0],
                 recovery_reference_json=json.dumps(found[1], sort_keys=True, separators=(",", ":")),
+            )
+
+    async def acknowledge(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityTakeoverRequestV1,
+        acknowledgement: AuthorityAcknowledgementV1,
+    ) -> AuthorityAcknowledgementV1 | None:
+        """Project an exact journal acknowledgement into the trusted core transaction."""
+        if (
+            binding.peer_incarnation_id != str(peer.incarnation_id)
+            or binding.authority_id != request.authority_id
+            or binding.generation != request.generation
+            or binding.system_id != request.system_id
+            or binding.activation_id != request.activation_id
+            or binding.run_id != request.run_id
+            or binding.plan_identity != request.plan_identity
+            or binding.purpose != request.purpose
+            or binding.operation != request.operation
+            or binding.provider_kind != request.provider_kind
+            or binding.authority_instance != request.authority_instance
+            or binding.operation_identity != request.operation_identity
+            or binding.operation_digest != request.operation_digest
+            or acknowledgement.authority_id != request.authority_id
+            or acknowledgement.generation != request.generation
+            or acknowledgement.system_id != request.system_id
+        ):
+            return None
+        async with self._connections() as conn, conn.transaction():
+            cursor = await conn.execute(
+                "SELECT allocation_id, job_id, job_attempt, worker_incarnation "
+                "FROM external_boot_authorities WHERE id = %s",
+                (binding.authority_id,),
+            )
+            authority = await cursor.fetchone()
+            if authority is None or str(authority[3]) != str(peer.incarnation_id):
+                return None
+            cursor = await conn.execute(
+                "SELECT status, journal_sequence, journal_digest, "
+                "positive_quiescence_digest FROM acknowledge_external_boot_authority("
+                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    request.authority_id,
+                    request.generation,
+                    authority[0],
+                    request.activation_id,
+                    request.run_id,
+                    request.system_id,
+                    request.plan_identity,
+                    authority[1],
+                    authority[2],
+                    request.purpose,
+                    request.provider_kind,
+                    request.authority_instance,
+                    str(peer.incarnation_id),
+                    request.operation.value,
+                    request.operation_identity,
+                    request.operation_digest,
+                    acknowledgement.journal_sequence,
+                    acknowledgement.journal_digest,
+                    acknowledgement.positive_quiescence_digest,
+                ),
+            )
+            result = await cursor.fetchone()
+            if result is None or result[0] != "applied":
+                return None
+            return AuthorityAcknowledgementV1(
+                authority_id=request.authority_id,
+                generation=request.generation,
+                system_id=request.system_id,
+                journal_sequence=result[1],
+                journal_digest=result[2],
+                positive_quiescence_digest=result[3],
             )
 
     async def advance(

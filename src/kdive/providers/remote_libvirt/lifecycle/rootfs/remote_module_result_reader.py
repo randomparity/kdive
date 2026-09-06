@@ -250,6 +250,7 @@ class SparseRemoteModuleResultReader:
             )
             image = Path(raw_path)
             logical = 0
+            zero_filled = True
             with os.fdopen(descriptor, "wb") as handle:
 
                 def open_stream() -> object:
@@ -261,10 +262,12 @@ class SparseRemoteModuleResultReader:
                 assert stream is not None
 
                 def data(_stream: object, chunk: bytes, _opaque: object) -> int:
-                    nonlocal logical
+                    nonlocal logical, zero_filled
                     if not isinstance(chunk, bytes) or logical + len(chunk) > capacity:
                         raise ValueError("sparse download exceeds scratch capacity")
                     logical += len(chunk)
+                    if zero_filled and any(chunk):
+                        zero_filled = False
                     return handle.write(chunk)
 
                 def hole(_stream: object, length: int, _opaque: object) -> None:
@@ -286,6 +289,8 @@ class SparseRemoteModuleResultReader:
                 self._call(cast(Any, stream).finish, limit)
                 finished = True
                 handle.truncate(capacity)
+            if zero_filled and logical == capacity:
+                return None
             return _read_debugfs(image, limit, self.monotonic)
         except CategorizedError:
             raise

@@ -260,17 +260,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enqueue remote module volume reaping
 - Complete module reap runtime
 - Persist recovery volume geometry
+- Classify resumable module phases
 - Isolate activation cleanup artifacts
 - Pass external boot storage bounds
 - Bind teardown recovery observations
 - Reclaim interrupted preparation
 - Gate external boot recovery capacity
+- Inspect durable module attempts
+- Resume module capture phases
+- Resume module restore cleanup
+- Bound provider call completion
+- Bound provider call completion
+- Classify module volume inventory
+- Resume module attempt reaping
 - Discharge open mutations by system
 - Discharge module obligations on teardown
 - Discharge terminal module obligations
 - Discharge terminal module mutations
+- Add sparse module result reader
+- Bound provider call completion
+- Fence remote module worker evidence
 - Materialize local external boot artifacts
 - Fence crashes to active owning runs
+- Add worker local authority client
 
 ### Changed
 
@@ -1334,6 +1346,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ratify local storage reclamation
 - Align storage records with gate format
 - Record remote recovery geometry
+- Clarify partial preparation recovery
 
 ### Fixed
 
@@ -2142,6 +2155,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind v2 recovery baseline identity
 - Preserve partial abort authority
 - Run capacity probe in check mode
+- Inherit module read deadlines
+- Retain phase mutation deadlines
+- Persist install before source cleanup
+- Retain source through capture handoff
+- Harden sparse result reader
+- Close sparse reader timeout gaps
 - Harden external boot materialization retry
 - Narrow projection reopen authority
 - Validate payloads before projection commit
@@ -2149,9 +2168,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify canonical materialized modules
 - Confine module conversion scratch files
 - Bound materializer validation storage
+- Preserve remote module recovery deadlines
+- Inherit module scratch read deadlines
+- Order remote module evidence locks
+- Resume partial remote module preparation
+- Reject unsafe partial volume repair
+- Type partial attachment inspection
 - Fence provision during system teardown
 - Cite teardown race ordering
+- Recognize empty raw module scratch
+- Preserve short sparse module reads
 - Regenerate owning-run crash options
+- Redact malformed local authority binding
 
 ### Security
 

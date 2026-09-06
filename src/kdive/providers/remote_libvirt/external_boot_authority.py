@@ -432,7 +432,11 @@ class RemoteModuleVolumePreparationStore:
 
     def _read(self, name: str) -> bytes | None:
         try:
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._root_fd)
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=self._root_fd,
+            )
         except FileNotFoundError:
             return None
         try:
@@ -462,21 +466,23 @@ class RemoteModuleVolumePreparationStore:
                 raise ValueError("remote preparation evidence conflicts with durable bytes")
             return
         temporary = f".{name}.{uuid4().hex}.tmp"
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=self._root_fd,
-        )
         try:
-            view = memoryview(data)
-            while view:
-                written = os.write(descriptor, view)
-                view = view[written:]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=self._root_fd,
+            )
+            try:
+                view = memoryview(data)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("remote preparation evidence write made no progress")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
             try:
                 os.link(
                     temporary,
@@ -492,10 +498,9 @@ class RemoteModuleVolumePreparationStore:
                     ) from None
             os.unlink(temporary, dir_fd=self._root_fd)
             os.fsync(self._root_fd)
-        except BaseException:
+        finally:
             with suppress(FileNotFoundError):
                 os.unlink(temporary, dir_fd=self._root_fd)
-            raise
 
     def stage(self, request: RemoteModuleVolumePreparationRequestV1, local_deadline: float) -> None:
         name = f"{self._key(request)}.request"
@@ -618,19 +623,37 @@ class RemoteModuleVolumePreparationStore:
             b"kdive-remote-external-boot-preparation-v1\0" + request.to_canonical_json()
         ).hexdigest()
 
+    @staticmethod
+    def _validate_preparation(
+        request: ExternalBootPreparationRequest,
+        receipt: ExternalBootPreparationObservation,
+    ) -> None:
+        ExternalBootPreparationObservation.model_validate(
+            receipt.model_dump(mode="python", by_alias=True)
+        )
+        expected_state = "materialized" if request.phase == "materialize" else "prepared"
+        if (
+            receipt.state == "absent"
+            or receipt.state != expected_state
+            or receipt.binding != request.binding
+            or receipt.plan_identity != request.plan.identity
+            or receipt.authority != request.authority
+            or receipt.operation_identity != request.operation_identity
+        ):
+            detail = (
+                "phase and state differ"
+                if receipt.state != expected_state
+                else "receipt differs from request"
+            )
+            raise ValueError(f"remote preparation {detail}")
+
     def observe_preparation(
         self, request: ExternalBootPreparationRequest
     ) -> ExternalBootPreparationObservation:
         data = self._read(f"{self._preparation_key(request)}.preparation")
         if data is not None:
             receipt = ExternalBootPreparationObservation.from_canonical_json(data)
-            if (
-                receipt.binding != request.binding
-                or receipt.plan_identity != request.plan.identity
-                or receipt.authority != request.authority
-                or receipt.operation_identity != request.operation_identity
-            ):
-                raise ValueError("remote preparation receipt differs from request")
+            self._validate_preparation(request, receipt)
             return receipt
         return ExternalBootPreparationObservation(
             state="absent",
@@ -643,13 +666,17 @@ class RemoteModuleVolumePreparationStore:
     def publish_preparation(
         self, request: ExternalBootPreparationRequest, receipt: ExternalBootPreparationObservation
     ) -> ExternalBootPreparationObservation:
-        if self.observe_preparation(request).state != "absent":
-            existing = self.observe_preparation(request)
+        self._validate_preparation(request, receipt)
+        existing = self.observe_preparation(request)
+        if existing.state != "absent":
             if existing != receipt:
                 raise ValueError("remote preparation receipt conflicts with durable bytes")
             return existing
         self._publish(f"{self._preparation_key(request)}.preparation", receipt.to_canonical_json())
-        return self.observe_preparation(request)
+        reopened = self.observe_preparation(request)
+        if reopened != receipt:
+            raise ValueError("published remote preparation receipt failed exact reopen")
+        return reopened
 
     def publish_materialization(
         self, plan: ExternalBootPlan, materialization: ExternalBootMaterialization
@@ -668,11 +695,20 @@ class RemoteModuleVolumePreparationStore:
         index = self._read(f"{plan.identity.removeprefix('sha256:')}.materialization-index")
         if index is None:
             raise FileNotFoundError("remote materialization plan index is absent")
-        data = self._read(f"{index.decode('ascii')}.materialization")
+        try:
+            identity = index.decode("ascii")
+        except UnicodeDecodeError:
+            raise ValueError("remote materialization plan index is malformed") from None
+        if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
+            raise ValueError("remote materialization plan index is malformed")
+        data = self._read(f"{identity}.materialization")
         if data is None:
             raise ValueError("remote materialization plan index is incomplete")
         record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
-        if record.plan != plan:
+        if (
+            record.plan != plan
+            or record.materialization.identity.removeprefix("sha256:") != identity
+        ):
             raise ValueError("remote materialization plan index differs")
         return record
 
@@ -1061,15 +1097,11 @@ class RemoteExternalBootCoordinator:
     def materialize(
         self,
         plan: ExternalBootPlan,
+        binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
-        binding: ExternalBootActivationBinding | None = None,
     ) -> ExternalBootMaterialization:
-        if binding is None:
-            binding = ExternalBootActivationBinding(
-                system_id=plan.ownership.system_id,
-                run_id=plan.ownership.run_id,
-                activation_id=str(UUID(int=0)),
-            )
+        if binding.system_id != plan.ownership.system_id or binding.run_id != plan.ownership.run_id:
+            raise ValueError("remote materialization binding differs from the requested plan")
         materialization = self._operations.materialize(plan, binding, authority, self._deadline())
         if (
             materialization.plan_identity != plan.identity
@@ -1087,20 +1119,22 @@ class RemoteExternalBootCoordinator:
         if observed.state != "absent":
             return observed
         if request.phase == "materialize":
-            materialization = self.materialize(request.plan, request.authority, request.binding)
+            materialization = self.materialize(request.plan, request.binding, request.authority)
             receipt = observed.model_copy(
                 update={"state": "materialized", "materialization": materialization}
             )
         else:
-            record = self._store.reopen_materialization_for_plan(request.plan)
-            recovery = self.prepare(record.materialization, request.binding, request.authority)
+            materialization = self._store.reopen_materialization_for_plan(
+                request.plan
+            ).materialization
+            recovery = self.prepare(materialization, request.binding, request.authority)
             receipt = ExternalBootPreparationObservation(
                 state="prepared",
                 binding=request.binding,
                 plan_identity=request.plan.identity,
                 authority=request.authority,
                 operation_identity=request.operation_identity,
-                materialization=record.materialization,
+                materialization=materialization,
                 recovery_point=recovery,
             )
         return self._store.publish_preparation(request, receipt)
@@ -1109,6 +1143,29 @@ class RemoteExternalBootCoordinator:
         self, request: ExternalBootPreparationRequest
     ) -> ExternalBootPreparationObservation:
         return self._store.observe_preparation(request)
+
+    def adopt_preparation(
+        self,
+        request: ExternalBootPreparationRequest,
+        predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
+    ) -> ExternalBootPreparationObservation:
+        receipt = self._store.observe_preparation(predecessor)
+        if (
+            receipt.state == "absent"
+            or receipt.identity != predecessor_receipt_identity
+            or request.phase != predecessor.phase
+            or request.binding != predecessor.binding
+            or request.plan.identity != predecessor.plan.identity
+        ):
+            raise ValueError("preparation predecessor cannot be adopted")
+        adopted = receipt.model_copy(
+            update={
+                "authority": request.authority,
+                "operation_identity": request.operation_identity,
+            }
+        )
+        return self._store.publish_preparation(request, adopted)
 
     def prepare(
         self,

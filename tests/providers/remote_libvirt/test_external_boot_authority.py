@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import libvirt
@@ -26,6 +29,8 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -845,6 +850,22 @@ def _publish_terminal(
     store.publish_result(request, _terminal_response(request))
 
 
+def _preparation_request(
+    record: RemoteExternalBootRecoveryRecord,
+    phase: Literal["materialize", "prepare"],
+    *,
+    authority: str = "authority/remote-a",
+    operation_identity: str | None = None,
+) -> ExternalBootPreparationRequest:
+    return ExternalBootPreparationRequest(
+        phase=phase,
+        plan=_plan_for_record(record),
+        binding=record.binding,
+        authority=OpaqueProviderRef(ref=authority),
+        operation_identity=operation_identity or f"{phase}-operation",
+    )
+
+
 def test_recovery_record_round_trips_only_canonical_closed_bytes() -> None:
     record = _record()
     encoded = record.to_canonical_json()
@@ -1177,6 +1198,302 @@ def test_durable_remote_preparation_rejects_same_authority_with_changed_operatio
     store.close()
 
 
+@pytest.mark.parametrize("failure", ["write", "fsync", "link"])
+def test_preparation_store_removes_its_exact_temporary_after_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise OSError(f"controlled {failure} failure")
+
+    monkeypatch.setattr(
+        f"kdive.providers.remote_libvirt.external_boot_authority.os.{failure}", fail
+    )
+    with pytest.raises(OSError, match=f"controlled {failure} failure"):
+        store.stage(_remote_preparation_request(), 999.0)
+    store.close()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preparation_store_rejects_zero_progress_write_without_retrying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    calls = 0
+
+    def zero_once(_descriptor: int, _data: object) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0
+        raise AssertionError("write retried after reporting zero progress")
+
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.external_boot_authority.os.write", zero_once
+    )
+    with pytest.raises(OSError, match="made no progress"):
+        store.stage(_remote_preparation_request(), 999.0)
+    store.close()
+
+    assert calls == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preparation_store_refuses_fifo_without_blocking_before_metadata_check(
+    tmp_path: Path,
+) -> None:
+    fifo = tmp_path / "foreign-fifo"
+    os.mkfifo(fifo, 0o600)
+    repository = Path(__file__).resolve().parents[3]
+    program = """
+from pathlib import Path
+import sys
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleVolumePreparationStore,
+)
+
+store = RemoteModuleVolumePreparationStore(Path(sys.argv[1]))
+try:
+    store._read('foreign-fifo')
+except PermissionError:
+    pass
+else:
+    raise SystemExit('FIFO was accepted as evidence')
+finally:
+    store.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=repository,
+        timeout=2,
+    )
+
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("phase", ["materialize", "prepare"])
+def test_preparation_receipt_survives_core_commit_loss_without_repeating_provider(
+    tmp_path: Path, phase: Literal["materialize", "prepare"]
+) -> None:
+    record = _record()
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(
+            self, plan: object, binding: object, owner: object, deadline: float
+        ) -> object:
+            assert plan == _plan_for_record(record)
+            assert binding == record.binding
+            assert owner == OpaqueProviderRef(ref="authority/remote-a")
+            assert deadline in {123.0, 456.0}
+            calls.append("materialize")
+            return record.materialization
+
+        def prepare(
+            self,
+            plan: object,
+            materialization: object,
+            binding: object,
+            modules: object,
+            owner: object,
+            deadline: float,
+        ) -> RemoteExternalBootRecoveryRecord:
+            assert plan == _plan_for_record(record)
+            assert materialization == record.materialization
+            assert binding == record.binding
+            assert modules is not None
+            assert owner == OpaqueProviderRef(ref="authority/remote-a")
+            assert deadline in {123.0, 456.0}
+            calls.append("prepare")
+            return record
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
+    )
+    if phase == "prepare":
+        coordinator.execute_preparation(_preparation_request(record, "materialize"))
+        _publish_terminal(store, record)
+        calls.clear()
+    request = _preparation_request(record, phase)
+
+    expected = coordinator.execute_preparation(request)
+    store.close()  # Simulate loss before core commits the returned receipt.
+
+    reopened_store = RemoteModuleVolumePreparationStore(tmp_path)
+    reopened = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), reopened_store, lambda: 456.0
+    )
+    assert reopened.observe_preparation(request) == expected
+    assert reopened.execute_preparation(request) == expected
+    assert calls == [phase]
+    reopened_store.close()
+
+
+def test_materialization_requires_explicit_matching_activation_binding(tmp_path: Path) -> None:
+    record = _record()
+
+    class Operations:
+        def materialize(self, *args: object) -> object:
+            raise AssertionError("provider reached without an activation binding")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+    )
+    assert list(inspect.signature(RemoteExternalBootCoordinator.materialize).parameters) == [
+        "self",
+        "plan",
+        "binding",
+        "authority",
+    ]
+    changed_binding = record.binding.model_copy(
+        update={"system_id": "00000000-0000-4000-8000-000000000099"}
+    )
+    with pytest.raises(ValueError, match="binding differs"):
+        coordinator.materialize(
+            _plan_for_record(record),
+            changed_binding,
+            OpaqueProviderRef(ref="authority/remote-a"),
+        )
+    store.close()
+
+
+def test_preparation_store_refuses_mismatched_or_conflicting_publication(tmp_path: Path) -> None:
+    record = _record()
+    request = _preparation_request(record, "materialize")
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    mismatched = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=OpaqueProviderRef(ref="authority/attacker-selected"),
+        operation_identity=request.operation_identity,
+        materialization=record.materialization,
+    )
+    with pytest.raises(ValueError, match="differs from request"):
+        store.publish_preparation(request, mismatched)
+    assert store.observe_preparation(request).state == "absent"
+
+    receipt = mismatched.model_copy(update={"authority": request.authority})
+    assert store.publish_preparation(request, receipt) == receipt
+    changed = receipt.model_copy(
+        update={
+            "materialization": record.materialization.model_copy(
+                update={"verified_bundle_sha256": "sha256:" + "f" * 64}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="conflicts with durable bytes"):
+        store.publish_preparation(request, changed)
+    store.close()
+
+
+def test_preparation_store_rejects_wrong_phase_and_invalid_closed_shape_before_write(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    request = _preparation_request(record, "materialize")
+    point = RecoveryPoint(
+        binding=record.binding,
+        plan_identity=record.plan_identity,
+        materialization_identity=record.materialization.identity,
+        recovery_ref=OpaqueProviderRef(ref="remote/recovery"),
+        source_state=record.source_state,
+        target_state=record.target_state,
+    )
+    wrong_phase = ExternalBootPreparationObservation(
+        state="prepared",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=record.materialization,
+        recovery_point=point,
+    )
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    with pytest.raises(ValueError, match="phase and state differ"):
+        store.publish_preparation(request, wrong_phase)
+
+    malformed = wrong_phase.model_copy(update={"recovery_point": None})
+    with pytest.raises(ValueError, match="invalid values"):
+        store.publish_preparation(request, malformed)
+    assert not list(tmp_path.glob("*.preparation"))
+    store.close()
+
+
+def test_materialization_index_rejects_path_before_descriptor_relative_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan_for_record(_record())
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    name = f"{plan.identity.removeprefix('sha256:')}.materialization-index"
+    store._publish(name, b"../outside")
+    real_open = os.open
+    escaped: list[str] = []
+
+    def guarded_open(path: str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if dir_fd is not None and "/" in path:
+            escaped.append(path)
+            raise AssertionError("corrupted index escaped the preparation root")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.external_boot_authority.os.open", guarded_open
+    )
+    with pytest.raises(ValueError, match="index is malformed"):
+        store.reopen_materialization_for_plan(plan)
+    assert escaped == []
+    store.close()
+
+
+def test_preparation_takeover_adopts_only_authenticated_same_phase_receipt(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(self, *args: object) -> object:
+            calls.append("materialize")
+            return record.materialization
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+    )
+    predecessor = _preparation_request(record, "materialize")
+    receipt = coordinator.execute_preparation(predecessor)
+    takeover = _preparation_request(
+        record,
+        "materialize",
+        authority="authority/takeover",
+        operation_identity="materialize-takeover",
+    )
+
+    adopted = coordinator.adopt_preparation(takeover, predecessor, receipt.identity)
+    assert adopted.authority == takeover.authority
+    assert adopted.operation_identity == takeover.operation_identity
+    assert adopted.materialization == receipt.materialization
+    assert coordinator.observe_preparation(takeover) == adopted
+    assert coordinator.observe_preparation(predecessor) == receipt
+    assert calls == ["materialize"]
+
+    with pytest.raises(ValueError, match="predecessor cannot be adopted"):
+        coordinator.adopt_preparation(takeover, predecessor, "sha256:" + "0" * 64)
+    wrong_phase = takeover.model_copy(
+        update={"phase": "prepare", "operation_identity": "prepare-takeover"}
+    )
+    with pytest.raises(ValueError, match="predecessor cannot be adopted"):
+        coordinator.adopt_preparation(wrong_phase, predecessor, receipt.identity)
+    store.close()
+
+
 def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path: Path) -> None:
     record = _record()
     authority = OpaqueProviderRef(ref="authority/remote-a")
@@ -1187,7 +1504,8 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
             self, plan: object, binding: object, owner: object, deadline: float
         ) -> object:
             assert owner == authority
-            assert binding is not None
+            assert binding == record.binding
+            assert plan == expected_plan
             calls.append(("materialize", deadline))
             return record.materialization
 
@@ -1236,7 +1554,9 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
     )
     expected_plan = _plan_for_record(record)
-    assert coordinator.materialize(expected_plan, authority) == record.materialization
+    assert (
+        coordinator.materialize(expected_plan, record.binding, authority) == record.materialization
+    )
     _publish_terminal(store, record)
     point = coordinator.prepare(record.materialization, record.binding, authority)
     store.close()

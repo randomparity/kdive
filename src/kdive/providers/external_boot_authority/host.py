@@ -1292,7 +1292,7 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                 finally:
                     try:
                         if mutation_service is not None:
-                            mutation_service.close()
+                            await mutation_service.close()
                     finally:
                         identity_service.close()
 
