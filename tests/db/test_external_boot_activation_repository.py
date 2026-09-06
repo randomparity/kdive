@@ -18,6 +18,10 @@ from kdive.db.external_boot_activations import (
     ExternalBootActivationRepository,
 )
 from kdive.db.locks import LockScope, advisory_xact_lock, try_advisory_xact_lock
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.external_boot_activation import (
     ExternalBootActivation,
     ExternalBootActivationState,
@@ -409,6 +413,9 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
                 objects=(),
                 observed_at=_AT,
             )
+            obligations = RemoteModuleAttemptObligationRepository()
+            attempt = ModuleAttempt(system_id, run_id, "a" * 32)
+            assert await obligations.open_mutation_obligation(conn, attempt) is True
             abandoned = await repo.transition(
                 conn,
                 **_authority(activation),
@@ -417,6 +424,7 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
                 terminal_evidence=terminal,
             )
             assert abandoned.status is CasStatus.APPLIED
+            assert await obligations.mutation_obligation_is_open(conn, attempt) is False
 
             release = ExternalBootReleaseEvidenceV1(
                 activation_id=activation.id,
@@ -968,6 +976,9 @@ def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
                 evidence=conflict,
             )
             if cleanup_state is ExternalBootActivationState.RECOVERY_FAILED:
+                obligations = RemoteModuleAttemptObligationRepository()
+                attempt = ModuleAttempt(system_id, run_id, "b" * 32)
+                assert await obligations.open_mutation_obligation(conn, attempt) is True
                 attempt_id = uuid4()
                 await repo.begin_recovery_attempt(
                     conn,
@@ -995,6 +1006,7 @@ def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
                     new_state=ExternalBootActivationState.RECOVERY_FAILED,
                     terminal_evidence=failure,
                 )
+                assert await obligations.mutation_obligation_is_open(conn, attempt) is False
             await conn.execute("UPDATE systems SET state = 'torn_down' WHERE id = %s", (system_id,))
             refs = tuple(
                 ExternalBootReleaseObject(object=OpaqueProviderRef(ref=value))
