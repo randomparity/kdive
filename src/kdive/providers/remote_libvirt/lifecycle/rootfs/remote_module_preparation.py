@@ -5,28 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
-import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _CAPACITY = 4
-
-
-class CompletionDeadlineExecutor:
-    """Check one absolute deadline without abandoning a live provider binding call."""
-
-    def __init__(self, monotonic: Callable[[], float] = time.monotonic) -> None:
-        self._monotonic = monotonic
-
-    def call[ResultT](self, operation: Callable[[], ResultT], deadline: float) -> ResultT:
-        if self._monotonic() >= deadline:
-            raise TimeoutError("remote module provider deadline expired before start")
-        result = operation()
-        if self._monotonic() >= deadline:
-            raise TimeoutError("remote module provider deadline expired during completion")
-        return result
 
 
 def _unavailable() -> CategorizedError:
