@@ -93,6 +93,30 @@ def test_unmarked_teardown_payload_round_trips_unchanged() -> None:
     assert decoded.external_boot_authority_v1 is None
 
 
+def test_boot_payload_binds_closed_remote_module_attempt_to_run() -> None:
+    run_id, system_id = uuid4(), uuid4()
+    request = {
+        "schema": "module-attempt-preparation-request-v1",
+        "module_attempt_obligation": {
+            "schema": "module-attempt-obligation-receipt-v1",
+            "system_id": str(system_id),
+            "run_id": str(run_id),
+            "operation_nonce": "0" * 32,
+        },
+    }
+
+    dumped = dump_payload(
+        JobKind.BOOT, {"run_id": str(run_id), "remote_module_attempt_v1": request}
+    )
+    assert (
+        dump_payload(JobKind.BOOT, load_payload(_job(JobKind.BOOT, dumped), BootPayload)) == dumped
+    )
+
+    request["module_attempt_obligation"]["run_id"] = str(uuid4())
+    with pytest.raises(PayloadValidationError, match="attempt run_id"):
+        dump_payload(JobKind.BOOT, {"run_id": str(run_id), "remote_module_attempt_v1": request})
+
+
 def test_marked_boot_payload_round_trips_unchanged() -> None:
     run_id = uuid4()
     marker = _marker(run_id=run_id)

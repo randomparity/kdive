@@ -161,6 +161,9 @@ def test_terminal_escape_discharges_only_open_mutations_for_one_system(
             ]
             assert rows[2][2] is not None and rows[2][3] is None
             assert await repo.mutation_obligation_is_open(conn, other) is True
+            assert await repo.attempt_is_preparable(conn, open_attempt) is False
+            assert await repo.attempt_is_preparable(conn, journal_attempt) is False
+            assert await repo.attempt_is_preparable(conn, other) is True
 
     asyncio.run(_run())
 

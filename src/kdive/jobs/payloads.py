@@ -7,6 +7,7 @@ sharing raw dict key conventions across modules.
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import datetime
 from typing import Any, Final, Literal, cast
@@ -25,6 +26,7 @@ from kdive.domain.operations.jobs import (
     PowerAction,
 )
 from kdive.domain.operations.sysrq import SysRqCommand
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
@@ -413,9 +415,22 @@ class BootPayload(RunPayload):
     """
 
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
+    remote_module_attempt_v1: ModuleAttemptPreparationRequestV1 | None = None
+
+    @field_validator("remote_module_attempt_v1", mode="before")
+    @classmethod
+    def _decode_module_attempt(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return ModuleAttemptPreparationRequestV1.model_validate_json(json.dumps(value))
+        return value
 
     @model_validator(mode="after")
     def _marker_agrees_with_the_job(self) -> BootPayload:
+        if (
+            self.remote_module_attempt_v1 is not None
+            and self.remote_module_attempt_v1.module_attempt_obligation.run_id != UUID(self.run_id)
+        ):
+            raise ValueError("remote module attempt run_id must equal the payload run_id")
         marker = self.external_boot_authority_v1
         if marker is None:
             return self
@@ -436,9 +451,23 @@ class TeardownPayload(SystemPayload):
     """
 
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
+    remote_module_attempt_v1: ModuleAttemptPreparationRequestV1 | None = None
+
+    @field_validator("remote_module_attempt_v1", mode="before")
+    @classmethod
+    def _decode_module_attempt(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return ModuleAttemptPreparationRequestV1.model_validate_json(json.dumps(value))
+        return value
 
     @model_validator(mode="after")
     def _marker_agrees_with_the_job(self) -> TeardownPayload:
+        if (
+            self.remote_module_attempt_v1 is not None
+            and self.remote_module_attempt_v1.module_attempt_obligation.system_id
+            != UUID(self.system_id)
+        ):
+            raise ValueError("remote module attempt system_id must equal the payload system_id")
         marker = self.external_boot_authority_v1
         if marker is None:
             return self
