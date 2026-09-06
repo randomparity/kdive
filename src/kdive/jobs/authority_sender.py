@@ -31,6 +31,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
+    AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
 )
 from kdive.providers.external_boot_authority.transport import (
@@ -187,6 +188,14 @@ class AuthorityRequestSender:
             self._encode("observe-authority", request), deadline=deadline
         )
         return _decode_response(response, AuthorityObservationV1)
+
+    async def observe_running(
+        self, request: AuthorityMutationRequestV1, *, deadline: float
+    ) -> AuthorityRunningObservationV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("observe-running", request), deadline=deadline
+        )
+        return _decode_response(response, AuthorityRunningObservationV1)
 
     async def execute_conflict_resolution(
         self, request: AuthorityConflictResolutionRequestV1, *, deadline: float

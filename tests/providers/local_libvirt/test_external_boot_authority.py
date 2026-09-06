@@ -792,6 +792,32 @@ async def test_observe_classifies_every_source_target_category(
     assert "observe-state" in io.actions
 
 
+async def test_running_read_uses_matching_recovery_point_without_mutation() -> None:
+    io = _FakeIO(metadata=_metadata("target-defined"))
+    adapter = _adapter(io)
+    try:
+        observed = await adapter.observe_running(_request())
+        assert observed.cmdline == b"root=UUID=x"
+        assert "observe-running" in io.actions
+        assert all(
+            action in {"observe-running", "reopen"} or action.startswith("open:")
+            for action in io.actions
+        )
+    finally:
+        adapter.close()
+
+
+async def test_running_read_refuses_mismatched_source_before_guest_access() -> None:
+    io = _FakeIO()
+    adapter = _adapter(io)
+    try:
+        with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+            await adapter.observe_running(_request(expected_source="sha256:" + "f" * 64))
+        assert "observe-running" not in io.actions
+    finally:
+        adapter.close()
+
+
 async def test_composite_state_moves_when_either_observed_identity_moves() -> None:
     baseline = await _adapter(_FakeIO(observed=_observed(SOURCE_IDENTITY, SOURCE_MODULES))).observe(
         _request()

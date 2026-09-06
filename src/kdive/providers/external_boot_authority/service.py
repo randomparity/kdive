@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
@@ -25,12 +25,16 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.ports.external_boot import ExternalBootPreparationObservation
+from kdive.providers.ports.external_boot import (
+    ExternalBootPreparationObservation,
+    RunningKernelObservation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +66,13 @@ class AuthorityRecoveryObserver(Protocol):
         request: AuthorityMutationRequestV1,
         context: AuthorityRecoveryObservationContextV1,
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityRunningObserver(Protocol):
+    async def observe_running(
+        self, request: AuthorityMutationRequestV1
+    ) -> RunningKernelObservation: ...
 
 
 @runtime_checkable
@@ -1295,13 +1306,34 @@ class ExternalBootAuthorityService:
         read.  A concurrent takeover therefore cannot turn an observation made under a stale
         generation into an admission fact for a later mutation.
         """
+        return await self._observe_current(peer, request, self._adapter.observe)
+
+    async def observe_running(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityRunningObservationV1:
+        """Read bounded kernel evidence through the same authenticated read-only lane."""
+
+        async def read(request: AuthorityMutationRequestV1) -> AuthorityRunningObservationV1:
+            if not isinstance(self._adapter, AuthorityRunningObserver):
+                raise AuthorityServiceError("provider_conflict")
+            observed = await self._adapter.observe_running(request)
+            return AuthorityRunningObservationV1.from_observation(observed)
+
+        return await self._observe_current(peer, request, read)
+
+    async def _observe_current[T](
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityMutationRequestV1,
+        read: Callable[[AuthorityMutationRequestV1], Awaitable[T]],
+    ) -> T:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
         if trusted is None or not self._binding_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
-        async def run() -> AuthorityObservationV1:
+        async def run() -> T:
             try:
                 async with lane.lock:
                     if lane.failed:
@@ -1325,7 +1357,7 @@ class ExternalBootAuthorityService:
                     if confirmed is None or not self._binding_matches(confirmed, request):
                         raise AuthorityServiceError("superseded")
                     try:
-                        observation = await self._adapter.observe(request)
+                        observation = await read(request)
                     except AuthorityServiceError:
                         raise
                     except Exception:

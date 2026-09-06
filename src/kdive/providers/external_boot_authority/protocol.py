@@ -21,6 +21,8 @@ from pydantic import (
 from kdive.providers.ports.external_boot import (
     ExternalBootPlan,
     ExternalBootPreparationObservation,
+    KernelIdentity,
+    RunningKernelObservation,
 )
 
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
@@ -328,6 +330,32 @@ class AuthorityObservationV1(_ClosedValue):
     observation_id: UUID
     category: ObservationCategory
     composite_state: Digest
+
+
+class AuthorityRunningObservationV1(_ClosedValue):
+    """Read-only kernel evidence; separate from retained version-1 journal observations."""
+
+    schema_: Literal["external-boot-running-observation-v1"] = Field(
+        "external-boot-running-observation-v1", alias="schema"
+    )
+    identity: KernelIdentity
+    cmdline_hex: Annotated[str, Field(max_length=4096, pattern=r"^(?:[0-9a-f]{2})*$")]
+    expected_cmdline_hex: Annotated[str, Field(max_length=4096, pattern=r"^(?:[0-9a-f]{2})*$")]
+
+    @classmethod
+    def from_observation(cls, value: RunningKernelObservation) -> Self:
+        return cls(
+            identity=value.identity,
+            cmdline_hex=value.cmdline.hex(),
+            expected_cmdline_hex=value.expected_cmdline.hex(),
+        )
+
+    def to_observation(self) -> RunningKernelObservation:
+        return RunningKernelObservation(
+            identity=self.identity,
+            cmdline=bytes.fromhex(self.cmdline_hex),
+            expected_cmdline=bytes.fromhex(self.expected_cmdline_hex),
+        )
 
 
 class AuthorityPreparationResponseV1(_ClosedValue):

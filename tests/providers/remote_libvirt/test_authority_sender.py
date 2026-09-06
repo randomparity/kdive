@@ -200,6 +200,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "execute_preparation",
         "execute_conflict_resolution",
         "observe_authority",
+        "observe_running",
         "resolve_device_identity",
     }
     assert all(not isinstance(getattr(sender, slot), SecretStr) for slot in sender.__slots__)

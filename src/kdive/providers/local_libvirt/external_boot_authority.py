@@ -46,6 +46,7 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     ProviderStateIdentity,
     RecoveryPoint,
+    RunningKernelObservation,
 )
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,17 @@ class LocalExternalBootAuthorityAdapter:
             )
             return self._preparation_observation(receipt)
         return await self._offload(request, lambda: self._observe(request))
+
+    async def observe_running(
+        self, request: AuthorityMutationRequestV1
+    ) -> RunningKernelObservation:
+        def read() -> RunningKernelObservation:
+            authority = _authority_ref(request)
+            point = self._ports.recovery_point(_activation_binding(request), authority)
+            matched = self._require_matching_identities(request, point)
+            return self._ports.observe(matched, authority)
+
+        return await self._offload(request, read)
 
     async def observe_recovery(
         self,
