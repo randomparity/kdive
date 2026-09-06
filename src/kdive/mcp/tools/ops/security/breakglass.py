@@ -351,17 +351,20 @@ def register(
             ),
         ] = None,
     ) -> ToolResponse:
-        """Validate a quarantined recovery-object repair, then report the executor is missing.
+        """Queue a durable repair for an exact set of quarantined recovery objects.
 
-        Today this call checks that you hold platform_admin, resolves the System, and validates
-        `object_identities` and `disposition`, and then fails with `configuration_error` and
-        `data.reason` of `recovery_executor_unavailable`: the external-boot recovery executor is
-        not installed, so nothing was deleted or adopted. Once promoted (#2118), the same call
-        permanently deletes the named objects or adopts them back, with no undo.
+        Requires platform_admin, and a denial is audited. `delete` permanently removes every
+        named object; `adopt` brings each object back under its recorded activation. The repair
+        snapshots the selected quarantine rows and provider binding atomically, then returns a
+        job handle in `object_id`; pass it as `job_id` to `jobs.wait` or `jobs.get`.
 
-        Requires platform_admin, and a denial is audited. The repair covers quarantined recovery
-        objects rather than the activation itself, so it needs no admissible activation state
-        and reads none.
+        The response's `data.recovery_readiness_deadline` is an absolute server-clock timestamp,
+        five minutes after this request is admitted. It applies to this repair job and bounds
+        every selected-object mutation; once reached, the worker or authority refuses further
+        mutation and the job fails. Inspect the System and submit a new
+        `ops.resolve_recovery_orphan` request to retry. Exact replays with the same idempotency key
+        return the original job. The repair covers quarantined objects, not the activation state,
+        and an unrelated quarantined sibling is not changed.
         """
         return await _resolve_recovery_orphan(
             pool,

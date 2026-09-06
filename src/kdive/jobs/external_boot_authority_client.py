@@ -94,6 +94,7 @@ class ExternalBootAuthorityClient:
 type ExternalBootClientFactory = Callable[
     [ProviderBinding, ExternalBootAuthorityMarkerV1, float], ExternalBootAuthorityClient
 ]
+type RecoveryOrphanAuthoritySenderFactory = Callable[[], AuthorityRequestSender]
 
 
 def external_boot_client_factory(
@@ -128,5 +129,22 @@ def external_boot_client_factory(
                 raise _refuse("binding-mismatch")
             sender = remote_sender(remote_binding)
         return ExternalBootAuthorityClient(sender, marker, deadline)
+
+    return build
+
+
+def recovery_orphan_authority_sender_factory(
+    secrets: SecretBackend, borrow: Callable[[], SecretStr]
+) -> RecoveryOrphanAuthoritySenderFactory | None:
+    """Build the one fixed local authority route for closed orphan requests."""
+    binding = local_authority_binding()
+    if binding is None:
+        return None
+
+    def build() -> AuthorityRequestSender:
+        sender = local_authority_sender_factory(secrets, borrow, binding=binding)
+        if sender is None:
+            raise _refuse("binding-unavailable")
+        return sender
 
     return build

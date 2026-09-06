@@ -32,6 +32,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
 )
@@ -180,6 +182,14 @@ class AuthorityRequestSender:
             self._encode("execute-preparation", request), deadline=deadline
         )
         return _decode_response(response, AuthorityPreparationResponseV1)
+
+    async def resolve_recovery_orphan(
+        self, request: AuthorityRecoveryOrphanDispositionRequestV1, *, deadline: float
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("resolve-recovery-orphan", request), deadline=deadline
+        )
+        return _decode_response(response, AuthorityRecoveryOrphanDispositionResponseV1)
 
     async def observe_authority(
         self, request: AuthorityMutationRequestV1, *, deadline: float

@@ -1075,12 +1075,13 @@ async def _authenticate(config: AuthorityHostConfig, credential: SecretStr) -> A
 
 def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorityService | None:
     """Build mutation support only on a host with an explicitly provisioned local root."""
-    from kdive.providers.assembly.composition import build_authority_mutation_adapter
+    from kdive.providers.assembly.composition import build_authority_mutation_binding
+    from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
     from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
     from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 
-    adapter = build_authority_mutation_adapter(config.provider_socket)
-    if adapter is None:
+    binding = build_authority_mutation_binding(config.provider_socket)
+    if binding is None:
         return None
 
     @asynccontextmanager
@@ -1094,7 +1095,10 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
         journal_factory=lambda system_id: FileAuthorityJournal(
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         ),
-        adapter=adapter,
+        adapter=binding.adapter,
+        recovery_orphans=RecoveryOrphanAuthorityService(
+            connections, binding.provider, executor=binding.adapter
+        ),
     )
 
 

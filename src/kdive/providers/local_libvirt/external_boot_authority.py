@@ -45,6 +45,8 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPreparationRequest,
     OpaqueProviderRef,
     ProviderStateIdentity,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
     RecoveryPoint,
     RunningKernelObservation,
 )
@@ -178,6 +180,79 @@ class LocalExternalBootAuthorityAdapter:
                 raise RuntimeError("local external-boot provider capacity is unavailable") from None
         future.add_done_callback(lambda _future: self._admission.release())
         return await self._await_completion(future)
+
+    async def _offload_recovery_object[T](
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        operation: Callable[[], T],
+    ) -> T:
+        """Run a private recovery-object operation with the existing bounded lease executor."""
+
+        def scoped() -> T:
+            if self._lease_scope is None:
+                return operation()
+            with self._lease_scope.issue(authority, binding.binding):
+                return operation()
+
+        with self._executor_lock:
+            if self._closed or not self._admission.acquire(blocking=False):
+                raise RuntimeError("local external-boot provider capacity is unavailable")
+            try:
+                future = self._executor.submit(scoped)
+            except RuntimeError:
+                self._admission.release()
+                raise RuntimeError("local external-boot provider capacity is unavailable") from None
+        future.add_done_callback(lambda _future: self._admission.release())
+        return await self._await_completion(future)
+
+    async def observe_recovery_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
+    ) -> RecoveryObjectObservation:
+        return await self._offload_recovery_object(
+            binding, authority, lambda: self._ports.observe_object(binding, authority)
+        )
+
+    async def delete_recovery_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef, digest: str
+    ) -> RecoveryObjectObservation:
+        return await self._offload_recovery_object(
+            binding,
+            authority,
+            lambda: self._ports.delete_object(binding, authority, digest),
+        )
+
+    async def adopt_recovery_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef, digest: str
+    ) -> RecoveryObjectObservation:
+        return await self._offload_recovery_object(
+            binding,
+            authority,
+            lambda: self._ports.adopt_object(binding, authority, digest),
+        )
+
+    async def cleanup_quarantine_inventory(
+        self, request: AuthorityMutationRequestV1
+    ) -> tuple[RecoveryObjectObservation, ...]:
+        """Reopen only the exact unfinalized private cleanup receipt on the bounded lane."""
+        if request.operation not in _DELETING_OPERATIONS:
+            return ()
+        authority = _authority_ref(request)
+        binding = _activation_binding(request)
+        observations = await self._offload(
+            request, lambda: self._ports.quarantined_objects(binding, authority)
+        )
+        for observation in observations:
+            object_binding = observation.binding
+            if (
+                not observation.present
+                or observation.managed
+                or object_binding.binding != binding
+                or object_binding.operation_identity != request.operation_identity
+                or object_binding.attempt_id != str(request.attempt_id)
+            ):
+                raise AuthorityServiceError("provider_conflict")
+        return observations
 
     def close(self) -> None:
         with self._executor_lock:
