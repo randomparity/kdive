@@ -1,5 +1,6 @@
 """Worker handler for the closed remote module-volume maintenance job."""
 
+import logging
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -15,6 +16,7 @@ from kdive.providers.infra.reaping import ModuleVolumeKey, ModuleVolumeReaper
 
 _MUTATION_KINDS = ("source.ext4", "scratch.ext4")
 _REAP_KINDS = ("reaping.journal", "reaped.journal")
+_LOG = logging.getLogger(__name__)
 
 
 class _ObligationReader(Protocol):
@@ -59,4 +61,5 @@ async def remote_module_volume_reap_handler(
     async def retained_owners() -> list[ModuleVolumeKey]:
         return _expand(await repository.retained_owners(conn))
 
-    await reaper.reap_module_volumes(retained_owners)
+    removed = await reaper.reap_module_volumes(retained_owners)
+    _LOG.info("remote module-volume reap completed", extra={"removed": removed})

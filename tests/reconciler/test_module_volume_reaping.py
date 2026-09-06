@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
@@ -107,8 +108,16 @@ def test_repository_read_is_deferred_until_provider_invokes_callback() -> None:
     assert repository.calls == 0
 
 
-def test_provider_count_is_not_returned_to_the_reconciler() -> None:
+def test_provider_count_is_logged_only_in_worker_telemetry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="kdive.jobs.handlers.module_volume_reaping")
     assert _run(Repository(), Reaper(count=23)) is None
+    assert any(
+        record.message == "remote module-volume reap completed"
+        and getattr(record, "removed", None) == 23
+        for record in caplog.records
+    )
 
 
 def test_repository_failure_propagates() -> None:
