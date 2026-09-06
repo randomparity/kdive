@@ -550,6 +550,50 @@ def test_database_rejects_a_recovery_reference_disagreeing_on_the_terminal_diges
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("capacity", [None, True, 0, -4096, 4097, 10_499_657_728])
+def test_database_rejects_v2_recovery_reference_without_valid_geometry(
+    migrated_url: str, capacity: object
+) -> None:
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            reference = _recovery_reference(attempt) | {
+                "protocol": "remote-module-recovery-ref-v2",
+            }
+            if capacity is not None:
+                reference["source_capacity_bytes"] = capacity
+            evidence = replace(_evidence(attempt), recovery_reference=reference)
+            with pytest.raises(psycopg.errors.CheckViolation, match="recovery_geometry"):
+                async with conn.transaction():
+                    await repo.record_terminal_evidence(conn, attempt, evidence)
+
+    asyncio.run(_run())
+
+
+def test_database_round_trips_v2_recovery_geometry(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            reference = _recovery_reference(attempt) | {
+                "protocol": "remote-module-recovery-ref-v2",
+                "source_capacity_bytes": 64 * 1024**2,
+            }
+            await repo.record_terminal_evidence(
+                conn, attempt, replace(_evidence(attempt), recovery_reference=reference)
+            )
+            stored = await repo.read_terminal_evidence(conn, attempt)
+            assert stored is not None
+            assert stored.recovery_reference == reference
+
+    asyncio.run(_run())
+
+
 def test_evidence_columns_cannot_be_written_piecemeal(migrated_url: str) -> None:
     """A reader that finds a terminal operation finds every field beside it, or none at all."""
 
