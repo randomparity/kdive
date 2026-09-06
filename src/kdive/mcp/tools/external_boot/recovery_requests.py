@@ -101,6 +101,9 @@ _ACTIVE_JOB_STATES = [JobState.QUEUED.value, JobState.RUNNING.value]
 # The `run_id` arm uses `jobs_payload_run_id_idx` (migration 0137). It remains a separate arm:
 # combining the two expressions under `OR` made PostgreSQL ignore the `system_id` index, while a
 # global `ORDER BY` prevented either arm's `LIMIT` from stopping after the bounded result page.
+# PostgreSQL 17 remeasurement on 200k jobs/5k Runs (2026-09-06, no matching job): System index
+# 2 shared buffers; Run bitmap index 3, entire Run arm 6; union 8 and 0.055 ms. This synthetic
+# observation resolves debt 0008; no test fixes a planner choice or promises production latency.
 #
 # `UNION` rather than `UNION ALL`: nothing enforces that a payload carries only one of the two
 # keys, and a row matching both arms would otherwise be counted twice against
