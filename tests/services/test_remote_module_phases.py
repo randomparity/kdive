@@ -2,15 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.ports.external_boot import OpaqueProviderRef
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    TeardownObservation,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleOperationV1,
     RemoteModuleResultV1,
 )
-from kdive.services.remote_module_phases import classify_phase
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
+    ModuleAttemptInspection,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+    PreparedModuleVolumes,
+    PreparedVolume,
+)
+from kdive.services.remote_module_phases import (
+    CaptureInstallRequest,
+    capture_install_modules,
+    classify_phase,
+)
 
 
 def _result(phase: str) -> RemoteModuleResultV1:
@@ -65,3 +85,114 @@ def test_classify_phase_rejects_cross_operation_composite() -> None:
 
     assert caught.value.category is ErrorCategory.CONFLICT
     assert caught.value.details == {"operation": "restore", "phase": "captured"}
+
+
+def _operation() -> RemoteModuleOperationV1:
+    return RemoteModuleOperationV1.model_validate(
+        {
+            "operation": "capture_install",
+            "system_id": "12345678-1234-4234-8234-123456789abc",
+            "run_id": "87654321-4321-4321-8321-cba987654321",
+            "plan_identity": "sha256:" + "1" * 64,
+            "operation_nonce": "2" * 32,
+            "release": "6.12.0",
+            "root_volume": {"key": "root", "identity": "sha256:" + "4" * 64},
+            "source_manifest": "sha256:" + "5" * 64,
+            "appliance_image_digest": "sha256:" + "3" * 64,
+        }
+    )
+
+
+def _request(operation: RemoteModuleOperationV1) -> CaptureInstallRequest:
+    preparation = ModuleAttemptPreparationRequestV1.model_validate(
+        {
+            "module_attempt_obligation": {
+                "system_id": UUID(operation.system_id),
+                "run_id": UUID(operation.run_id),
+                "operation_nonce": operation.operation_nonce,
+            }
+        }
+    )
+    return CaptureInstallRequest(
+        preparation,
+        operation,
+        cast(AuthorityRequestSender, object()),
+        OpaqueProviderRef(ref="authority/fixed"),
+    )
+
+
+class Runtime:
+    def __init__(self, result: RemoteModuleResultV1) -> None:
+        self.result = result
+        self.calls: list[str] = []
+        self.volumes = PreparedModuleVolumes(
+            PreparedVolume(
+                "pool",
+                "source",
+                result.system_id or "",
+                result.run_id or "",
+                result.operation_nonce or "",
+                "source",
+                result.source_manifest or "",
+                4096,
+            ),
+            PreparedVolume(
+                "pool",
+                "scratch",
+                result.system_id or "",
+                result.run_id or "",
+                result.operation_nonce or "",
+                "scratch",
+                "sha256:" + "0" * 64,
+                10 * 1024**3,
+            ),
+        )
+
+    async def inspect_attempt(self, *_args: object) -> ModuleAttemptInspection:
+        self.calls.append("inspect")
+        return ModuleAttemptInspection(self.volumes, self.result)
+
+    async def run(self, *_args: object) -> RemoteModuleResultV1:
+        self.calls.append("run")
+        self.result = _result("installed")
+        return self.result
+
+    async def teardown(self, *_args: object) -> TeardownObservation:
+        self.calls.append("teardown")
+        return TeardownObservation(True, True, True, True)
+
+    async def delete_source(self, *_args: object) -> None:
+        self.calls.append("delete-source")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["captured", "staging-intent", "replacement-ready"])
+async def test_capture_install_resumes_phase_and_returns_after_safe_teardown(phase: str) -> None:
+    operation = _operation()
+    runtime = Runtime(_result(phase))
+
+    recovery = await capture_install_modules(
+        _request(operation),
+        runtime=cast(Any, runtime),
+        executor=cast(Any, SimpleNamespace()),
+        deadline=100.0,
+    )
+
+    assert runtime.calls == ["inspect", "run", "teardown", "delete-source"]
+    assert recovery.source_capacity_bytes == 4096
+    assert recovery.installed_entry_count == 1
+
+
+@pytest.mark.anyio
+async def test_capture_install_does_not_repeat_completed_install() -> None:
+    operation = _operation()
+    runtime = Runtime(_result("installed"))
+
+    await capture_install_modules(
+        _request(operation),
+        runtime=cast(Any, runtime),
+        executor=cast(Any, SimpleNamespace()),
+        deadline=100.0,
+    )
+
+    assert runtime.calls == ["inspect", "teardown", "delete-source"]

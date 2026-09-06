@@ -124,10 +124,19 @@ class RemoteModuleOperationRuntime:
     ) -> PreparedModuleVolumes:
         """Consume the caller's committed receipt while the verifier owns its System lock."""
         configured = self.volume_preparation
+        appliance = self.appliance_execution
         if configured is None:
             raise CategorizedError(
                 "remote module volume preparation is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        if (
+            appliance is not None
+            and operation.appliance_image_digest != appliance.appliance_image_digest
+        ):
+            raise CategorizedError(
+                "remote module appliance image differs from operation",
+                category=ErrorCategory.CONFLICT,
             )
         attempt = ModuleAttempt(
             UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
