@@ -32,11 +32,15 @@ from kdive.providers.external_boot_authority.protocol import (
     operation_is_permitted,
 )
 from kdive.providers.external_boot_authority.service import AuthorityServiceError
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
     LocalObservedState,
-    LocalSystemTeardownFacts,
+    LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
@@ -194,32 +198,63 @@ class LocalExternalBootAuthorityAdapter:
         self,
         request: AuthorityTeardownMutationRequestV1,
         context: AuthorityCommitContextV1,
-        intent: LocalSystemTeardownIntentV1,
-    ) -> LocalSystemTeardownFacts:
+        reservation: AuthorityTeardownReservationV1,
+    ) -> AuthoritySystemTeardownFacts:
         """Destroy one local System under an anchored authority commit and fixed host binding."""
-        self._require_system_teardown_intent(request, context, intent)
+        anchor = self._system_teardown_anchor(request, context)
+        try:
+            retained_reservation = AuthorityTeardownReservationV1.model_validate(
+                reservation.model_dump(mode="json")
+            )
+            intent = LocalSystemTeardownIntentV1.model_validate(
+                anchor.model_dump(exclude={"schema_"}) | {"reservation": retained_reservation}
+            )
+        except (AttributeError, ValueError) as error:
+            raise AuthorityServiceError("provider_conflict") from error
         self._require_admissible_generation(request)
 
-        def execute() -> LocalSystemTeardownFacts:
+        def execute() -> AuthoritySystemTeardownFacts:
             authority = _authority_ref(request)
-            begun = self._ports.begin_system_teardown(intent, authority)
+            begun = self._validated_system_teardown_facts(
+                self._ports.begin_system_teardown(intent, authority), intent
+            )
             if not self._prepare_system_teardown_recovery(intent, authority, context):
                 return begun
-            return self._ports.teardown_system(intent, authority)
+            return self._validated_system_teardown_facts(
+                self._ports.teardown_system(intent, authority), intent
+            )
 
         return await self._offload(request, execute)
 
     async def observe_system_teardown(
         self,
         request: AuthorityTeardownMutationRequestV1,
-        intent: LocalSystemTeardownIntentV1,
-    ) -> LocalSystemTeardownFacts:
+        context: AuthorityCommitContextV1,
+    ) -> AuthoritySystemTeardownFacts:
         """Read local teardown facts without creating, deleting, or resuming provider state."""
-        self._require_system_teardown_intent(request, None, intent)
+        anchor = self._system_teardown_anchor(request, context)
         return await self._offload(
             request,
-            lambda: self._ports.observe_system_teardown(intent, _authority_ref(request)),
+            lambda: self._validated_system_teardown_facts(
+                self._ports.observe_system_teardown(anchor, _authority_ref(request))
+            ),
         )
+
+    @staticmethod
+    def _validated_system_teardown_facts(
+        facts: AuthoritySystemTeardownFacts,
+        intent: LocalSystemTeardownIntentV1 | None = None,
+    ) -> AuthoritySystemTeardownFacts:
+        try:
+            validated = AuthoritySystemTeardownFacts.model_validate(facts.model_dump(mode="python"))
+        except (AttributeError, ValueError) as error:
+            raise AuthorityServiceError("provider_conflict") from error
+        if intent is not None and (
+            validated.intent_identity != intent.identity
+            or validated.reservation != intent.reservation
+        ):
+            raise AuthorityServiceError("provider_conflict")
+        return validated
 
     async def _offload_recovery_object[T](
         self,
@@ -463,33 +498,31 @@ class LocalExternalBootAuthorityAdapter:
         self._admitted[lane] = max(admitted or 0, request.generation)
 
     @staticmethod
-    def _require_system_teardown_intent(
+    def _system_teardown_anchor(
         request: AuthorityTeardownMutationRequestV1,
-        context: AuthorityCommitContextV1 | None,
-        intent: LocalSystemTeardownIntentV1,
-    ) -> None:
+        context: AuthorityCommitContextV1,
+    ) -> LocalSystemTeardownAnchorV1:
         if (
             request.operation is not AuthorityOperation.TEARDOWN
             or request.purpose != "teardown"
-            or intent.authority_id != request.authority_id
-            or intent.generation != request.generation
-            or intent.binding != _activation_binding(request)
-            or intent.plan_identity != request.plan_identity
-            or intent.provider_kind != request.provider_kind
-            or intent.authority_instance != request.authority_instance
-            or intent.operation_identity != request.operation_identity
-            or intent.operation_digest != request.operation_digest
-            or intent.attempt_id != request.attempt_id
-        ):
-            raise AuthorityServiceError("provider_conflict")
-        if context is not None and (
-            context.commit_point is not AuthorityOperation.TEARDOWN
+            or context.commit_point is not AuthorityOperation.TEARDOWN
             or context.operation_identity != request.operation_identity
             or context.attempt_id != request.attempt_id
-            or intent.journal_sequence != context.journal_sequence
-            or intent.journal_digest != context.journal_digest
         ):
             raise AuthorityServiceError("provider_conflict")
+        return LocalSystemTeardownAnchorV1(
+            authority_id=request.authority_id,
+            generation=request.generation,
+            binding=_activation_binding(request),
+            plan_identity=request.plan_identity,
+            provider_kind=request.provider_kind,
+            authority_instance=request.authority_instance,
+            operation_identity=request.operation_identity,
+            operation_digest=request.operation_digest,
+            attempt_id=request.attempt_id,
+            journal_sequence=context.journal_sequence,
+            journal_digest=context.journal_digest,
+        )
 
     def _prepare_system_teardown_recovery(
         self,
@@ -498,18 +531,11 @@ class LocalExternalBootAuthorityAdapter:
         context: AuthorityCommitContextV1,
     ) -> bool:
         binding = intent.binding
-        point = self._resolve_point(binding, authority, allow_cleanup_receipt=True)
-        expected_reference = f"local-recovery-v1/{binding.system_id}/{binding.activation_id}"
-        if any(reference != expected_reference for reference in intent.recovery_references):
-            raise AuthorityServiceError("provider_conflict")
+        if self._ports.system_teardown_recovery_is_absent(intent, authority):
+            return True
+        point = self._ports.system_teardown_recovery_point(intent, authority)
         if point is not None:
-            if (
-                point.binding != binding
-                or point.plan_identity != intent.plan_identity
-                or point.source_state.definition != intent.expected_source_identity
-                or point.target_state.definition != intent.intended_target_identity
-                or expected_reference not in intent.recovery_references
-            ):
+            if point.binding != binding or point.plan_identity != intent.plan_identity:
                 raise AuthorityServiceError("provider_conflict")
             self._ports.recover(point, authority)
             if not self._ports.cleanup_is_accounted(point, authority):
@@ -519,16 +545,12 @@ class LocalExternalBootAuthorityAdapter:
                 )
             self._ports.finalize_cleanup_tombstone(point, _cleanup_proof(context, point), authority)
         else:
-            result = self._ports.abort_preparation(
-                binding,
-                authority,
-                plan_identity=intent.plan_identity,
-                source_identity=intent.expected_source_identity,
-                target_identity=intent.intended_target_identity,
-            )
-            if result == "not-partial" and not self._ports.recovery_is_absent(binding, authority):
+            result = self._ports.abort_system_teardown_preparation(intent, authority)
+            if result == "not-partial" and not self._ports.system_teardown_recovery_is_absent(
+                intent, authority
+            ):
                 return False
-        return self._ports.recovery_is_absent(binding, authority)
+        return self._ports.system_teardown_recovery_is_absent(intent, authority)
 
     def _commit(
         self,

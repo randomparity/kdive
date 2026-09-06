@@ -36,7 +36,10 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
-from kdive.providers.external_boot_authority.teardown import AuthorityTeardownSnapshot
+from kdive.providers.external_boot_authority.teardown import (
+    AuthorityTeardownReservationV1,
+    AuthorityTeardownSnapshot,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootPlan,
     OpaqueProviderRef,
@@ -394,10 +397,12 @@ def _teardown_snapshot(
     release = row["release_evidence"]
     return AuthorityTeardownSnapshot(
         binding=binding,
-        reservation_disposition=disposition,
-        store_identity=OpaqueProviderRef(ref=str(row["store_identity"])),
-        owner_key=OpaqueProviderRef(ref=str(row["owner_key"])),
-        reserved_bytes=int(row["reserved_bytes"]),
+        reservation=AuthorityTeardownReservationV1(
+            disposition=disposition,
+            store_identity=OpaqueProviderRef(ref=str(row["store_identity"])),
+            owner_key=OpaqueProviderRef(ref=str(row["owner_key"])),
+            reserved_bytes=int(row["reserved_bytes"]),
+        ),
         release_identity=(
             str(row["release_identity"]) if row["release_identity"] is not None else None
         ),
