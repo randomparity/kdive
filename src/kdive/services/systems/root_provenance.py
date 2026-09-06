@@ -10,6 +10,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
+from kdive.components.references import CatalogComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports.external_boot import RootSpecV1
@@ -33,16 +34,30 @@ async def resolve_root_provenance(
     authority is rejected when ambiguous or internally inconsistent.
     """
     remote = profile.provider.remote_libvirt_section
-    source = remote.base_image_source if remote is not None else None
-    if source is None or source.sha256 is None:
+    local = profile.provider.local_libvirt_section
+    source = remote.base_image_source if remote is not None else local.rootfs if local else None
+    provider = "remote-libvirt" if remote is not None else "local-libvirt"
+    if isinstance(source, LocalComponentRef) and source.sha256 is not None:
+        predicate = "provider = %s AND digest = %s"
+        identity = source.sha256
+    elif isinstance(source, CatalogComponentRef) and source.provider == provider:
+        predicate = "provider = %s AND name = %s AND arch = %s"
+        identity = None
+    else:
         return None
     async with conn.cursor(row_factory=dict_row) as cur:
+        params = (
+            (provider, source.name, profile.arch, project)
+            if isinstance(source, CatalogComponentRef)
+            else (provider, identity, project)
+        )
         await cur.execute(
-            "SELECT id, arch, digest, provenance FROM image_catalog "
-            "WHERE provider = 'remote-libvirt' AND state = 'registered' AND digest = %s "
+            "SELECT id, arch, digest, provenance FROM image_catalog WHERE "
+            + predicate
+            + " AND state = 'registered' "
             "AND (visibility = 'public' OR (visibility = 'private' AND owner = %s)) "
             "ORDER BY id FOR SHARE",
-            (source.sha256, project),
+            params,
         )
         rows = await cur.fetchall()
     if not rows:
