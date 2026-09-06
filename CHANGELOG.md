@@ -2309,6 +2309,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accept bzImage gzip trailers
 - Allow active authority fixtures
 - Use local worker authority binding
+- Close authority install root provenance payload
 
 ### Security
 
