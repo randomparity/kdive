@@ -10,9 +10,10 @@ from tests.db.external_boot_authority_support import (
     _RoleDsns,
     _seed_case,
 )
+from tests.db.external_boot_authority_support import (
+    authority_role_dsns as authority_role_dsns,  # noqa: F401
+)
 from tests.support.external_boot_plan import external_boot_plan
-
-pytest_plugins = ("tests.db.external_boot_authority_support",)
 
 
 def test_preparing_allocation_and_phase_resolution_are_exact(
