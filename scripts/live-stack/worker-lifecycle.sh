@@ -236,6 +236,21 @@ try:
                     "build_user": os.environ.get("KDIVE_BUILD_USER", os.environ["USER"]),
                     "log_level": os.environ["KDIVE_LOG_LEVEL"],
                     "health_binds": binds,
+                    "authority_instance": os.environ.get(
+                        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE"
+                    ),
+                    "authority_request_socket": os.environ.get(
+                        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET"
+                    ),
+                    "authority_server_ca_ref": os.environ.get(
+                        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF"
+                    ),
+                    "authority_client_certificate_ref": os.environ.get(
+                        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF"
+                    ),
+                    "authority_client_key_ref": os.environ.get(
+                        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF"
+                    ),
                 },
             }
         )

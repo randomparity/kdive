@@ -419,10 +419,6 @@ class SlotStore:
             "KDIVE_INSTALL_STAGING": settings.install_staging,
             "KDIVE_KERNEL_SRC": settings.source_root,
             "KDIVE_LIBVIRT_URI": settings.libvirt_uri,
-            "KDIVE_LIBVIRT_RECOVERY_ROOT": settings.libvirt_recovery_root,
-            "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": str(
-                settings.external_boot_capacity_bytes
-            ),
             "KDIVE_LOG_LEVEL": settings.log_level,
             "KDIVE_ROOTFS_DIR": settings.rootfs_dir,
             "KDIVE_S3_BUCKET": settings.s3_bucket,
