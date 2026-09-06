@@ -44,7 +44,7 @@ _CONTRACTS = (_RELEASE, _RESOLVE, _ORPHAN)
 # The two that decide against the activation matrix. The orphan repair is not one of them: it
 # reads no activation state, so activation-state guidance in its docstring would be noise.
 _ADMISSION_CONTRACTS = (_RELEASE, _RESOLVE)
-_UNAVAILABLE = "recovery_executor_unavailable"
+_UNAVAILABLE = "recovery_provider_not_configured"
 _RESOLUTION = "restore-recorded-source"
 _DIGEST = "sha256:" + "b" * 64
 

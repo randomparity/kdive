@@ -1,19 +1,9 @@
 """The three external-boot recovery contracts (ADR-0583, #2117).
 
-Each service resolves its object, authorizes the caller, decides admission against the
-System-wide matrix, and then reports that the external-boot recovery executor is not
-installed. None of them writes, so every response is a failure envelope.
-
-Why none of them writes: no production caller drives ``ExternalBootActivationRepository``'s
-transition methods on this branch, ``allocate_external_boot_authority`` (migration 0122) is
-gated on ``kdive_worker`` membership and revoked from the ``kdive_server`` role the MCP
-server runs as, and ``ExternalBootAuthorityMarkerV1`` requires a ``provider_kind`` and
-``authority_instance`` that neither an activation nor a reservation row carries. A tool that
-began a recovery attempt here could not finish it, so these report the missing executor
-instead and #2118 promotes them with it.
-
-Ordering is resolve, authorize, admit, report. Authorization runs before the admission read
-so an unauthorized caller learns nothing about whether the System carries an activation.
+Each service authorizes the caller, validates its exact durable selection and provider binding,
+then enqueues an idempotent worker job. The worker executes through the authenticated authority;
+server admission never grants direct provider access. Missing provider configuration fails before
+enqueue. Authorization precedes admission reads so a denied caller learns no activation state.
 """
 
 from __future__ import annotations
@@ -43,7 +33,6 @@ from kdive.jobs.payloads import ResolveRecoveryOrphanPayload
 from kdive.log import bind_context
 from kdive.mcp.platform_auth import audit_platform_denial
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
@@ -69,8 +58,6 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-
-_UNAVAILABLE_REASON = "recovery_executor_unavailable"
 
 RELEASE_TOOL = "runs.release_external_boot"
 RESOLVE_CONFLICT_TOOL = "systems.resolve_external_boot_conflict"
@@ -166,58 +153,18 @@ _RELEASE_AUTHORITY_SQL: LiteralString = (
     "FROM resolve_external_boot_release_dispatch_binding(%s, %s, %s, %s)"
 )
 
-_PROMOTION = (
-    "Promoted when the external-boot recovery job handler and worker claim path land (#2118)."
-)
 
-#: The `maturity_detail` text the two admission contracts register with.
-ADMISSION_STUB_DETAIL = (
-    "Validates the caller's identity, role, and the System-wide external-boot admission "
-    "matrix, then reports configuration_error with reason=recovery_executor_unavailable. No "
-    "activation transition is committed and no recovery job is enqueued, because the "
-    "external-boot recovery executor is not installed."
-)
-
-#: The `maturity_detail` text the quarantined-object repair registers with.
-ORPHAN_STUB_DETAIL = (
-    "Validates the caller's platform role and the bounded repair reference, then reports "
-    "configuration_error with reason=recovery_executor_unavailable. No quarantined object is "
-    "deleted or adopted and no recovery job is enqueued, because the external-boot recovery "
-    "executor is not installed."
-)
-
-
-def degraded_stub_meta(detail: str) -> dict[str, object]:
-    """Build the `partial` tool metadata a contract registers with.
-
-    Built here rather than at each registrar so the reason a tool reports and the reason its
-    schema advertises cannot drift apart, and so all three promote on one issue reference.
-    """
-    return _docmeta.maturity_meta("partial") | {
-        "maturity_detail": {
-            "reason": "degraded_stub",
-            "detail": detail,
-            "promotion": _PROMOTION,
-        }
-    }
-
-
-def _executor_unavailable(object_id: str, tool: str) -> ToolResponse:
-    """The one terminal response all three contracts share.
-
-    One reason string for all three because one thing is missing: the external-boot recovery
-    executor #2118 owns. Built here rather than at each call site so the reason and the
-    disclosure cannot drift apart.
-    """
+def _provider_unconfigured(object_id: str, tool: str) -> ToolResponse:
+    """Refuse before enqueue when this System has no configured recovery provider."""
     return ToolResponse.failure(
         object_id,
         ErrorCategory.CONFIGURATION_ERROR,
         detail=(
-            f"{tool} accepted this request but cannot serve it: the external-boot recovery "
-            "executor is not installed, so nothing was changed"
+            f"{tool} requires a configured authority-backed recovery provider for this System; "
+            "inspect the System's provider configuration before retrying. No job was enqueued"
         ),
         suggested_next_actions=["systems.get"],
-        data={"reason": _UNAVAILABLE_REASON},
+        data={"reason": "recovery_provider_not_configured"},
     )
 
 
@@ -463,7 +410,7 @@ async def _release_locked(
                 data=_bounded_ids("session_ids", session_ids),
             )
         if resolver is None:
-            return _executor_unavailable(object_id, RELEASE_TOOL)
+            return _provider_unconfigured(object_id, RELEASE_TOOL)
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 _RELEASE_AUTHORITY_SQL,
@@ -792,15 +739,7 @@ async def resolve_recovery_orphan(
             if replay is not None:
                 return replay
             if resolver is None:
-                return _config_error(
-                    system_id,
-                    reason="recovery_executor_unavailable",
-                    detail=(
-                        "ops.resolve_recovery_orphan cannot run because the external-boot "
-                        "recovery executor is not installed"
-                    ),
-                    next_action="systems.get",
-                )
+                return _provider_unconfigured(system_id, ORPHAN_TOOL)
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(_QUARANTINE_SQL, (uid, object_identities))
                 rows = await cur.fetchall()
@@ -823,7 +762,7 @@ async def resolve_recovery_orphan(
                 any(row["provider_kind"] != binding.kind.value for row in rows)
                 or binding.runtime.external_boot_recovery_objects is None
             ):
-                return _executor_unavailable(system_id, ORPHAN_TOOL)
+                return _provider_unconfigured(system_id, ORPHAN_TOOL)
             binding_digest = _quarantine_binding_digest(rows)
             binding_snapshot = _quarantine_binding_snapshot(rows)
             request_id = uuid5(NAMESPACE_URL, f"kdive:{dedup_key}")
@@ -864,17 +803,14 @@ async def resolve_recovery_orphan(
 
 
 __all__ = [
-    "ADMISSION_STUB_DETAIL",
     "MAX_OBJECT_IDENTITIES",
     "MAX_OBJECT_IDENTITY_LENGTH",
     "MAX_OBSERVED_IDENTITY_LENGTH",
-    "ORPHAN_STUB_DETAIL",
     "ORPHAN_TOOL",
     "RELEASE_TOOL",
     "RESOLVE_CONFLICT_TOOL",
     "SUPPORTED_DISPOSITIONS",
     "SUPPORTED_RESOLUTION_OPERATION",
-    "degraded_stub_meta",
     "request_release",
     "resolve_conflict",
     "resolve_recovery_orphan",

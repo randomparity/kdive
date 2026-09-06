@@ -1,9 +1,8 @@
 """The three external-boot recovery contract services (ADR-0583, #2117).
 
-Each service resolves its object, authorizes the caller, decides admission against the
-System-wide matrix, and then reports that the recovery executor is not installed. None of
-them writes: ``test_no_service_changes_any_durable_row`` proves that against the database
-rather than against the source.
+Admission rejects invalid inputs and missing provider configuration without changing activation
+state. Configured paths enqueue durable recovery jobs; connected worker/authority execution is
+covered in the sibling release, conflict, and orphan suites.
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ from tests.services.external_boot.conftest import seed_activation
 _STATE = ExternalBootActivationState
 _DIGEST = "sha256:" + "b" * 64
 _RESOLUTION = "restore-recorded-source"
-_UNAVAILABLE = "recovery_executor_unavailable"
+_UNAVAILABLE = "recovery_provider_not_configured"
 _ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot", "systems.teardown"]
 _CONFLICT_ACTIONS = ["runs.get", "systems.teardown"]
 _AUTHORIZING = {"principal": "alice", "agent_session": None, "project": "proj"}
@@ -718,7 +717,7 @@ def test_orphan_repair_rejects_out_of_bound_object_identities(
 # --- the terminal report --------------------------------------------------------------------
 
 
-def test_release_reports_the_executor_is_unavailable(migrated_url: str) -> None:
+def test_release_refuses_without_a_configured_provider(migrated_url: str) -> None:
     async def _body(fixture: _Fixture) -> tuple[ToolResponse, str]:
         seeded = await _seed(fixture.conn)
         response = await request_release(fixture.pool, _ctx(), run_id=str(seeded.run_id))
@@ -748,7 +747,7 @@ def test_conflict_resolution_without_durable_authority_fails_closed(migrated_url
 
 
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])
-def test_orphan_repair_reports_the_executor_is_unavailable(
+def test_orphan_repair_refuses_without_a_configured_provider(
     migrated_url: str, disposition: str
 ) -> None:
     async def _body(fixture: _Fixture) -> tuple[ToolResponse, str]:
@@ -863,7 +862,6 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.log:bind_context",
         "kdive.mcp.platform_auth:audit_platform_denial",
         "kdive.mcp.responses:ToolResponse",
-        "kdive.mcp.tools:_docmeta",
         "kdive.mcp.tools._common:as_uuid",
         "kdive.mcp.tools._common:authorizing",
         "kdive.mcp.tools._common:external_boot_denial",
