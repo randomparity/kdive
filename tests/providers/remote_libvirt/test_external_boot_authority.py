@@ -51,6 +51,9 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
 )
+from kdive.providers.remote_libvirt.external_boot_operations import (
+    ConcreteRemoteExternalBootOperations,
+)
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     MaterializedBootArtifacts,
@@ -187,6 +190,76 @@ def test_concrete_remote_materializer_rejects_capacity_and_foreign_binding() -> 
     foreign = binding.model_copy(update={"run_id": str(uuid4())})
     with pytest.raises(ValueError, match="binding"):
         materializer.materialize(plan, foreign, OpaqueProviderRef(ref="authority/current"), 2.0)
+
+
+def test_concrete_remote_prepare_captures_source_before_deriving_durable_recovery(
+    tmp_path: Path,
+) -> None:
+    expected = _record()
+    plan = _plan_for_record(expected)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, expected)
+    modules = store.reopen_terminal(expected.binding, plan.identity)
+    actions: list[str] = []
+
+    class Volume:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def path(self) -> str:
+            actions.append(f"path:{self._name}")
+            if self._name == "root":
+                return "/pool/overlay.qcow2"
+            return f"/var/lib/libvirt/images/{self._name}"
+
+    class Pool:
+        def storageVolLookupByName(self, name: str) -> Volume:
+            return Volume(name)
+
+    class Domain:
+        def XMLDesc(self, flags: int = 0) -> str:
+            assert flags == libvirt.VIR_DOMAIN_XML_INACTIVE
+            actions.append("source")
+            return _source_xml(system_id=UUID(expected.binding.system_id), pool="modules")
+
+        def isActive(self) -> int:
+            actions.append("power")
+            return 1
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def lookupByName(self, name: str) -> Domain:
+            actions.append(f"domain:{name}")
+            return Domain()
+
+        def storagePoolLookupByName(self, name: str) -> Pool:
+            assert name == "modules"
+            actions.append("pool")
+            return Pool()
+
+    operations = ConcreteRemoteExternalBootOperations(
+        cast(Any, object()), cast(Any, Connection), "modules", lambda: 1.0
+    )
+    recovery = operations.prepare(
+        plan,
+        expected.materialization.model_copy(update={"plan_identity": plan.identity}),
+        expected.binding,
+        modules,
+        OpaqueProviderRef(ref="authority/current"),
+        2.0,
+    )
+
+    assert actions.index("source") < actions.index("pool")
+    assert recovery.prior_power == "running"
+    assert recovery.module_recovery == modules.response.recovery
+    assert recovery.materialization.artifacts.kernel in recovery.recovery_objects
+    assert recovery.module_recovery.source_volume in recovery.recovery_objects
+    store.close()
 
 
 def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
