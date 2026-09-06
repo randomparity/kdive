@@ -8,8 +8,10 @@ doubled.
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import inspect
+import threading
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID, uuid4
@@ -50,6 +52,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalRecoveryMetadataV1,
     RecoveryPhase,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalOperationLeaseScope
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
@@ -325,6 +328,34 @@ class _FakeContext:
 def _adapter(io: _FakeIO) -> LocalExternalBootAuthorityAdapter:
     ports = LocalLibvirtExternalBoot(cast(LocalExternalBootIO, io))
     return LocalExternalBootAuthorityAdapter(ports)
+
+
+@pytest.mark.anyio
+async def test_cancellation_waits_for_scoped_provider_completion() -> None:
+    scope = LocalOperationLeaseScope()
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(cast(LocalExternalBootIO, _FakeIO())), scope
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    request = _request()
+    authority = adapter_module._authority_ref(request)
+
+    def operation() -> None:
+        assert scope.resolve(authority).binding == _BINDING
+        entered.set()
+        release.wait()
+
+    task = asyncio.create_task(adapter._offload(request, operation))
+    await asyncio.to_thread(entered.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
 
 
 def _request(
