@@ -6,6 +6,7 @@ import asyncio
 import errno
 import os
 import subprocess
+import tempfile
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -55,6 +56,7 @@ class _Stream:
         self.dense_called = False
         self.finished = False
         self.aborted = False
+        self.finish_error: BaseException | None = None
 
     def sparseRecvAll(self, data, hole, opaque) -> None:  # noqa: N802, ANN001
         self.sparse_called = True
@@ -71,6 +73,8 @@ class _Stream:
 
     def finish(self) -> int:
         self.finished = True
+        if self.finish_error is not None:
+            raise self.finish_error
         return 0
 
     def abort(self) -> int:
@@ -108,12 +112,15 @@ class _Storage:
     def __init__(self, stream: _Stream) -> None:
         self.stream = stream
         self.pool = _Pool(_Volume(stream))
+        self.fail_new_stream = False
 
     def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
         assert name == "pool"
         return self.pool
 
     def newStream(self, _flags: int = 0) -> _Stream:  # noqa: N802
+        if self.fail_new_stream:
+            raise OSError("stream unavailable")
         return self.stream
 
 
@@ -130,7 +137,9 @@ def _scratch() -> PreparedVolume:
     )
 
 
-def test_sparse_reader_requests_sparse_stream_and_preserves_holes(tmp_path: Path) -> None:
+def test_sparse_reader_requests_sparse_stream_and_preserves_holes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     stream = _Stream([b"x" * 4096, SCRATCH_CAPACITY_BYTES - 4096])
     storage = _Storage(stream)
     clock = Clock()
@@ -140,6 +149,7 @@ def test_sparse_reader_requests_sparse_stream_and_preserves_holes(tmp_path: Path
         executor=DeadlineAwareExecutor(clock),
         monotonic=clock,
     )
+    monkeypatch.setattr(remote_module_result_reader, "_read_debugfs", lambda *_args: b"")
 
     assert reader.read_volume(_scratch()) == b""
 
@@ -269,6 +279,52 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
     assert observed["allocation"] <= source_allocation + 4 * 1024 * 1024
 
 
+def test_debugfs_returns_none_only_for_a_real_absent_result(tmp_path: Path) -> None:
+    image = tmp_path / "empty-scratch.ext4"
+    with image.open("wb") as handle:
+        handle.truncate(SCRATCH_CAPACITY_BYTES)
+    subprocess.run(
+        ["mkfs.ext4", "-q", "-F", str(image)], check=True, capture_output=True, timeout=120
+    )
+
+    assert remote_module_result_reader._read_debugfs(image, 10.0, lambda: 0.0) is None
+
+
+def test_debugfs_rejects_a_malformed_filesystem(tmp_path: Path) -> None:
+    image = tmp_path / "malformed.ext4"
+    image.write_bytes(b"not an ext4 filesystem")
+
+    with pytest.raises(CategorizedError) as exc_info:
+        remote_module_result_reader._read_debugfs(image, 10.0, lambda: 0.0)
+
+    assert exc_info.value.category is ErrorCategory.CONFLICT
+
+
+def test_new_stream_failure_closes_mkstemp_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    descriptor, raw_path = tempfile.mkstemp(dir=tmp_path)
+    storage = _Storage(_Stream([]))
+    storage.fail_new_stream = True
+    monkeypatch.setattr(
+        remote_module_result_reader.tempfile,
+        "mkstemp",
+        lambda **_kwargs: (descriptor, raw_path),
+    )
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=DeadlineAwareExecutor(Clock()),
+    )
+
+    with pytest.raises(CategorizedError):
+        reader.read_volume(_scratch())
+
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    assert not Path(raw_path).exists()
+
+
 def test_sparse_reader_does_not_start_receive_after_deadline(tmp_path: Path) -> None:
     stream = _Stream([])
     storage = _Storage(stream)
@@ -284,9 +340,27 @@ def test_sparse_reader_does_not_start_receive_after_deadline(tmp_path: Path) -> 
     with pytest.raises(CategorizedError) as exc_info:
         reader.read_volume(_scratch(), deadline=1.0)
 
-    assert exc_info.value.category is ErrorCategory.CONFLICT
+    assert exc_info.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not stream.sparse_called
     assert not stream.finished
+    assert stream.aborted
+
+
+def test_sparse_reader_aborts_after_deadline_during_finish(tmp_path: Path) -> None:
+    stream = _Stream([SCRATCH_CAPACITY_BYTES])
+    stream.finish_error = TimeoutError()
+    storage = _Storage(stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=DeadlineAwareExecutor(Clock()),
+    )
+
+    with pytest.raises(CategorizedError) as exc_info:
+        reader.read_volume(_scratch())
+
+    assert exc_info.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert stream.aborted
 
 
 def test_sparse_reader_refuses_foreign_closed_scratch_identity(tmp_path: Path) -> None:

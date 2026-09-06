@@ -46,6 +46,10 @@ def _conflict(message: str) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.CONFLICT)
 
 
+def _operational(message: str) -> CategorizedError:
+    return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
 def _pool_name(reference: str) -> str:
     name = reference.rsplit("/", 1)[-1]
     if not name or name in {".", ".."}:
@@ -79,14 +83,25 @@ def _result_volume(recovery: RemoteModuleRecoveryRefV1) -> PreparedVolume:
     )
 
 
-def _absent_debugfs_error(error: bytes) -> bool:
+def _debugfs_diagnostics(error: bytes) -> list[str] | None:
     try:
         lines = [line for line in error.decode("utf-8", "strict").splitlines() if line]
     except UnicodeDecodeError:
-        return False
+        return None
     banner = re.compile(r"debugfs \d+\.\d+(?:\.\d+)? \([^)]+\)\Z")
-    diagnostics = [line.removeprefix("debugfs: ") for line in lines if not banner.fullmatch(line)]
-    return diagnostics == [f"{_RESULT_PATH}: File not found by ext2_lookup"]
+    diagnostics = []
+    for line in lines:
+        if banner.fullmatch(line):
+            continue
+        normalized = line.removeprefix("debugfs:").strip()
+        if normalized == f"cat {_RESULT_PATH}":
+            continue
+        diagnostics.append(normalized)
+    return diagnostics
+
+
+def _absent_debugfs_error(error: bytes) -> bool:
+    return _debugfs_diagnostics(error) == [f"{_RESULT_PATH}: File not found by ext2_lookup"]
 
 
 def _read_debugfs(image: Path, deadline: float, monotonic: Callable[[], float]) -> bytes | None:
@@ -137,9 +152,9 @@ def _read_debugfs(image: Path, deadline: float, monotonic: Callable[[], float]) 
         selector.close()
         for pipe in (process.stdout, process.stderr):
             pipe.close()
-    if code != 0:
-        if _absent_debugfs_error(bytes(error)):
-            return None
+    if _absent_debugfs_error(bytes(error)):
+        return None
+    if code != 0 or _debugfs_diagnostics(bytes(error)):
         raise _conflict("remote module durable filesystem is unreadable")
     return bytes(output)
 
@@ -154,12 +169,14 @@ class SparseRemoteModuleResultReader:
     monotonic: Callable[[], float] = time.monotonic
     preparation_executor: RemoteModulePreparationExecutor | None = None
 
-    def _call(self, operation: Callable[[], Any], deadline: float) -> Any:
+    def _call(
+        self, operation: Callable[[], Any], deadline: float, *, require_admission: bool = True
+    ) -> Any:
         completed = threading.Event()
 
         def admitted() -> Any:
             try:
-                if self.monotonic() >= deadline:
+                if require_admission and self.monotonic() >= deadline:
                     raise TimeoutError("remote module result deadline expired")
                 return operation()
             finally:
@@ -173,16 +190,30 @@ class SparseRemoteModuleResultReader:
             completed.wait()
             raise
 
-    def read_recovery(self, recovery: RemoteModuleRecoveryRefV1) -> bytes | None:
-        return self.read_volume(_result_volume(recovery))
+    def _abort(self, stream: object, deadline: float) -> None:
+        with contextlib.suppress(Exception):
+            self._call(
+                cast(Any, stream).abort,
+                max(deadline, self.monotonic() + 1),
+                require_admission=False,
+            )
 
-    async def read_recovery_async(self, recovery: RemoteModuleRecoveryRefV1) -> bytes | None:
+    def read_recovery(
+        self, recovery: RemoteModuleRecoveryRefV1, *, deadline: float | None = None
+    ) -> bytes | None:
+        return self.read_volume(_result_volume(recovery), deadline=deadline)
+
+    async def read_recovery_async(
+        self, recovery: RemoteModuleRecoveryRefV1, *, deadline: float | None = None
+    ) -> bytes | None:
         if self.preparation_executor is None:
             raise CategorizedError(
                 "remote module result reader is not configured for async recovery reads",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        return await self.preparation_executor.run(lambda: self.read_recovery(recovery))
+        return await self.preparation_executor.run(
+            lambda: self.read_recovery(recovery, deadline=deadline)
+        )
 
     def read_volume(
         self, scratch: PreparedVolume, *, deadline: float | None = None
@@ -201,6 +232,7 @@ class SparseRemoteModuleResultReader:
         limit = deadline if deadline is not None else self.monotonic() + _INVOCATION_TIMEOUT_SECONDS
         stream: object | None = None
         image: Path | None = None
+        finished = False
         try:
             pool = self._call(lambda: self.storage.storagePoolLookupByName(scratch.pool), limit)
             try:
@@ -217,9 +249,9 @@ class SparseRemoteModuleResultReader:
                 prefix="kdive-module-result-", suffix=".ext4", dir=self.work_dir
             )
             image = Path(raw_path)
-            stream = self._call(lambda: self.storage.newStream(0), limit)
             logical = 0
             with os.fdopen(descriptor, "wb") as handle:
+                stream = self._call(lambda: self.storage.newStream(0), limit)
 
                 def data(_stream: object, chunk: bytes, _opaque: object) -> int:
                     nonlocal logical
@@ -245,10 +277,15 @@ class SparseRemoteModuleResultReader:
                 )
                 self._call(lambda: stream.sparseRecvAll(data, hole, None), limit)
                 self._call(stream.finish, limit)
+                finished = True
                 handle.truncate(capacity)
             return _read_debugfs(image, limit, self.monotonic)
         except CategorizedError:
             raise
+        except TimeoutError as exc:
+            if stream is not None and not finished:
+                self._abort(stream, limit)
+            raise _operational("remote module durable result read timed out") from exc
         except (
             AttributeError,
             OSError,
@@ -256,11 +293,9 @@ class SparseRemoteModuleResultReader:
             ValueError,
             subprocess.SubprocessError,
             libvirt.libvirtError,
-            TimeoutError,
         ) as exc:
-            if stream is not None and not isinstance(exc, TimeoutError):
-                with contextlib.suppress(Exception):
-                    self._call(cast(Any, stream).abort, limit)
+            if stream is not None and not finished:
+                self._abort(stream, limit)
             raise _conflict("remote module durable result read failed") from exc
         finally:
             if image is not None:
