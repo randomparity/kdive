@@ -63,7 +63,7 @@ def _boot_elf() -> bytes:
     return bytes(body + note_header + load_header) + note + banner
 
 
-def _bundle() -> bytes:
+def _bundle(*, module_data: bytes = b"\x7fELFmod") -> bytes:
     header = bytearray(0x400)
     header[0x202:0x206] = b"HdrS"
     struct.pack_into("<H", header, 0x20E, 0x100)
@@ -74,7 +74,7 @@ def _bundle() -> bytes:
         for name, data in (
             ("boot/vmlinuz", boot),
             ("lib/modules/6.9.0/modules.dep", b""),
-            ("lib/modules/6.9.0/kernel/foo.ko", b"\x7fELFmod"),
+            ("lib/modules/6.9.0/kernel/foo.ko", module_data),
         ):
             member = tarfile.TarInfo(name)
             member.size = len(data)
@@ -202,6 +202,17 @@ def _plan(bundle: bytes) -> ExternalBootPlan:
     )
 
 
+def _projection_for(plan: ExternalBootPlan) -> TargetProjectionV1:
+    return TargetProjectionV1(
+        ownership={"system_id": _SYSTEM, "run_id": _RUN},
+        activation_id=_ACTIVATION,
+        plan_identity=plan.identity,
+        architecture=plan.architecture,
+        cmdline=plan.cmdline,
+        initrd_filename=None,
+    )
+
+
 def test_materialize_streams_exact_version_publishes_last_and_retries(tmp_path: Path) -> None:
     bundle = _bundle()
     plan = _plan(bundle)
@@ -298,6 +309,55 @@ def test_interrupted_module_conversion_cleans_temporaries_for_new_session_retry(
     assert result.plan_identity == plan.identity
 
 
+def test_prior_process_modules_temporary_retries_without_touching_unknown_entry(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle()
+    plan = _plan(bundle)
+    session = _Session(tmp_path / "activation")
+    projection = _projection_for(plan)
+    digest_dir = session.root / projection.digest.removeprefix("sha256:")
+    digest_dir.mkdir(mode=0o700)
+    (digest_dir / ".modules.next").write_bytes(b"prior-process-partial")
+    (digest_dir / ".modules.next").chmod(0o600)
+    (digest_dir / "unknown").write_bytes(b"preserve")
+    (digest_dir / "unknown").chmod(0o600)
+    client = _Client({("build/kernel", "kernel-v1"): bundle})
+
+    result = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket")).materialize(
+        plan, cast(LocalExternalBootSession, _Session(session.root))
+    )
+
+    assert result.plan_identity == plan.identity
+    assert (digest_dir / "unknown").read_bytes() == b"preserve"
+    assert not (digest_dir / ".modules.next").exists()
+
+
+def test_committed_partial_verify_retry_preserves_payloads_and_unknown_entry(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle()
+    plan = _plan(bundle)
+    client = _Client({("build/kernel", "kernel-v1"): bundle})
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+    first = materializer.materialize(plan, cast(LocalExternalBootSession, session))
+    projection = session.reopen_projection(first.artifacts.kernel)
+    digest_dir = session.root / projection.digest.removeprefix("sha256:")
+    before = {name: (digest_dir / name).read_bytes() for name in ("kernel", "modules")}
+    (digest_dir / ".bundle.verify").write_bytes(bundle[:17])
+    (digest_dir / ".bundle.verify").chmod(0o600)
+    (digest_dir / "unknown").write_bytes(b"preserve")
+    (digest_dir / "unknown").chmod(0o600)
+
+    second = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
+
+    assert second == first
+    assert {name: (digest_dir / name).read_bytes() for name in before} == before
+    assert (digest_dir / "unknown").read_bytes() == b"preserve"
+    assert not (digest_dir / ".bundle.verify").exists()
+
+
 def test_inspect_prepare_uses_reopened_bytes_and_preserves_source(tmp_path: Path) -> None:
     bundle = _bundle()
     plan = _plan(bundle)
@@ -349,6 +409,33 @@ def test_exact_retry_rejects_changed_source_digest_without_replacing(tmp_path: P
     assert kernel.read_bytes() == b"changed"
 
 
+def test_exact_retry_rejects_different_valid_canonical_module_archive(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle()
+    plan = _plan(bundle)
+    client = _Client({("build/kernel", "kernel-v1"): bundle})
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+    result = materializer.materialize(plan, cast(LocalExternalBootSession, session))
+    projection = session.reopen_projection(result.artifacts.kernel)
+    modules = Path(session.projection_artifact_path(projection, "modules"))
+    replacement = io.BytesIO()
+    external_boot_module.convert_kernel_bundle_modules(
+        io.BytesIO(_bundle(module_data=b"\x7fELFdifferent")),
+        replacement,
+        release="6.9.0",
+    )
+    replacement_bytes = replacement.getvalue()
+    modules.write_bytes(replacement_bytes)
+    modules.chmod(0o600)
+
+    with pytest.raises(ValueError, match="canonical module archive"):
+        materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
+
+    assert modules.read_bytes() == replacement_bytes
+
+
 def test_materialize_rejects_changed_manifest_before_projection_commit(tmp_path: Path) -> None:
     bundle = _bundle()
     plan = _plan(bundle)
@@ -393,7 +480,7 @@ def test_corrupt_final_payload_publishes_no_sidecar_and_clean_retry_succeeds(
         return original(value, directory_fd)
 
     monkeypatch.setattr(materializer, "_validate_local_bundle", corrupt_then_validate)
-    with pytest.raises(tarfile.ReadError):
+    with pytest.raises(ValueError, match="canonical module archive"):
         materializer.materialize(plan, cast(LocalExternalBootSession, session))
 
     assert not list(session.root.rglob("target-projection.json"))

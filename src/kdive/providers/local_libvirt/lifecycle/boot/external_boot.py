@@ -1006,6 +1006,7 @@ class RealLocalExternalBootMaterializer:
                 base = Path(f"/proc/self/fd/{directory_fd}")
                 extract_kernel_bundle(source, base / ".kernel.next", None)
             _make_private_temporary(directory_fd, ".kernel.next")
+            _remove_private_temporary(directory_fd, ".modules.next")
             modules_fd = os.open(
                 ".modules.next",
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -1073,6 +1074,16 @@ class RealLocalExternalBootMaterializer:
         )
         try:
             evidence = self._validate_bundle_evidence(plan, bundle_fd)
+            os.lseek(bundle_fd, 0, os.SEEK_SET)
+            with (
+                tempfile.TemporaryFile() as expected_modules,
+                os.fdopen(os.dup(bundle_fd), "rb") as source,
+            ):
+                expected_modules_digest, expected_modules_size = convert_kernel_bundle_modules(
+                    source,
+                    expected_modules,
+                    release=plan.module_obligation.release,
+                )
         finally:
             os.close(bundle_fd)
             with suppress(FileNotFoundError):
@@ -1083,6 +1094,9 @@ class RealLocalExternalBootMaterializer:
             or kernel_size != plan.bundle.vmlinuz_size_bytes
         ):
             raise ValueError("materialized kernel bytes do not match external-boot plan")
+        modules_digest, modules_size = _descriptor_digest(directory_fd, "modules")
+        if (modules_digest, modules_size) != (expected_modules_digest, expected_modules_size):
+            raise ValueError("materialized canonical module archive does not match exact bundle")
         installed_manifest = _installed_module_manifest(directory_fd)
         return evidence, installed_manifest
 
@@ -1116,8 +1130,11 @@ def _stream_exact_version(
         digest, _ = _open_descriptor_digest(descriptor)
         if digest != source.sha256:
             os.close(descriptor)
-            raise ValueError("interrupted artifact bytes do not match the exact source") from None
-        return descriptor
+            os.unlink(name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        else:
+            return descriptor
     primary: BaseException | None = None
     digest = hashlib.sha256()
     limit = _source_byte_limit(source)
@@ -1181,6 +1198,21 @@ def _make_private_temporary(directory_fd: int, temporary: str) -> None:
         os.fsync(temporary_fd)
     finally:
         os.close(temporary_fd)
+
+
+def _remove_private_temporary(directory_fd: int, temporary: str) -> None:
+    try:
+        descriptor = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_mode & 0o077:
+            raise ValueError("interrupted derived artifact is not a private regular file")
+    finally:
+        os.close(descriptor)
+    os.unlink(temporary, dir_fd=directory_fd)
+    os.fsync(directory_fd)
 
 
 def _commit_private_artifact_link(directory_fd: int, temporary: str, final: str) -> None:
