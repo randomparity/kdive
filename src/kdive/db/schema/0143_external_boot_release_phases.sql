@@ -281,6 +281,23 @@ BEGIN
     END IF;
     v_definition := replace(
         v_definition,
+        E'WHEN ''release'' THEN (p_record->>''operation'') = ' ||
+        E'ANY (ARRAY[''release'', ''cleanup'', ''fail''])',
+        E'WHEN ''release'' THEN (p_record->>''operation'') = ' ||
+        E'ANY (ARRAY[''recover'', ''release'', ''cleanup'', ''fail''])'
+    );
+    v_definition := replace(
+        v_definition,
+        E'NOT IN (''source'', ''target'', ''mixed'', ''unreadable'', ''conflict'')',
+        E'NOT IN (''source'', ''target'', ''mixed'', ''unreadable'', ''conflict'', ''absent'')'
+    );
+    v_definition := replace(
+        v_definition,
+        E'NOT IN (''never-began'', ''source'', ''target'', ''conflict'')',
+        E'NOT IN (''never-began'', ''source'', ''target'', ''conflict'', ''absent'')'
+    );
+    v_definition := replace(
+        v_definition,
         E'    IF p_record->>''operation'' IN (''materialize'', ''prepare'')\n' ||
         E'       AND v_authority.purpose = ''activate'' AND v_authority.operation = ''activate'' THEN',
         E'    IF p_record->>''operation'' IN (''recover'', ''cleanup'')\n' ||
