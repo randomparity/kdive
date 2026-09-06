@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -16,6 +17,10 @@ from kdive.db.remote_module_attempt_obligations import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    AttachmentInspection,
+    RemoteDeviceIdentityPort,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV1,
@@ -25,8 +30,15 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+    FilesystemImageWriter,
+    ModuleTreeEntry,
+    PreparedModuleVolumes,
+    StorageConn,
+    VolumeRequest,
+    prepare_attempt_volumes,
+)
 from kdive.services.remote_module_volume_preparation import (
-    SynchronousPreparation,
     prepare_verified_remote_module_attempt,
 )
 
@@ -44,15 +56,24 @@ class ModuleOperationRuntime(Protocol):
     async def reopen_installed_result(
         self, recovery: RemoteModuleRecoveryRefV1
     ) -> RemoteModuleResultV1: ...
-    async def prepare[ResultT](
+    async def prepare(
         self,
         request: ModuleAttemptPreparationRequestV1,
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
         authority: AuthorityRequestSender | None,
         deadline: float,
-        provider_operation: SynchronousPreparation[ResultT],
-    ) -> ResultT: ...
+    ) -> PreparedModuleVolumes: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteModuleVolumePreparation:
+    storage: StorageConn
+    pool_name: str
+    entries: tuple[ModuleTreeEntry, ...]
+    writer: FilesystemImageWriter
+    inspect_attachments: Callable[[], AttachmentInspection]
+    work_dir: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +83,7 @@ class RemoteModuleOperationRuntime:
     pool: AsyncConnectionPool
     repository: RemoteModuleAttemptObligationRepository
     read_scratch_result: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]]
+    volume_preparation: RemoteModuleVolumePreparation | None = None
 
     @staticmethod
     def _attempt(recovery: RemoteModuleRecoveryRefV1) -> ModuleAttempt:
@@ -69,19 +91,53 @@ class RemoteModuleOperationRuntime:
             UUID(recovery.system_id), UUID(recovery.run_id), recovery.operation_nonce
         )
 
-    async def prepare[ResultT](
+    async def prepare(
         self,
         request: ModuleAttemptPreparationRequestV1,
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
         authority: AuthorityRequestSender | None,
         deadline: float,
-        provider_operation: SynchronousPreparation[ResultT],
-    ) -> ResultT:
+    ) -> PreparedModuleVolumes:
         """Consume the caller's committed receipt while the verifier owns its System lock."""
+        configured = self.volume_preparation
+        if configured is None:
+            raise CategorizedError(
+                "remote module volume preparation is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         attempt = ModuleAttempt(
             UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
         )
+        expected_attempt = attempt
+
+        def prepare_volumes(
+            attempt: ModuleAttempt,
+            identity: RemoteDeviceIdentityPort,
+            check_deadline: Callable[[], None],
+        ) -> PreparedModuleVolumes:
+            del identity
+            if attempt != expected_attempt:
+                raise CategorizedError(
+                    "remote module verified attempt differs from operation",
+                    category=ErrorCategory.CONFLICT,
+                )
+            volume_request = VolumeRequest(
+                pool=configured.pool_name,
+                system_id=operation.system_id,
+                run_id=operation.run_id,
+                operation_nonce=operation.operation_nonce,
+                operation=operation,
+                source_manifest=operation.source_manifest,
+                entries=configured.entries,
+                writer=configured.writer,
+                inspect_attachments=configured.inspect_attachments,
+                work_dir=configured.work_dir,
+            )
+            return prepare_attempt_volumes(
+                configured.storage, volume_request, admit_mutation=check_deadline
+            )
+
         return await prepare_verified_remote_module_attempt(
             self.pool,
             self.repository,
@@ -90,7 +146,7 @@ class RemoteModuleOperationRuntime:
             executor,
             authority,
             deadline,
-            provider_operation,
+            prepare_volumes,
         )
 
     async def _evidence(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -28,6 +29,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
     RemoteModuleOperationRuntime,
+    RemoteModuleVolumePreparation,
 )
 from tests.db.test_remote_module_attempt_obligations import _seed
 from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_documents import _result
@@ -248,28 +250,54 @@ async def test_prepare_passes_exact_attempt_and_caller_receipt_to_verifier(
     )
     observed: list[object] = []
 
-    async def verified(*args: object, **kwargs: object) -> str:
+    prepared = cast(Any, SimpleNamespace())
+
+    async def verified(*args: object, **kwargs: object) -> object:
         del kwargs
         observed.extend(args)
-        return "prepared"
+        consumer = cast(Any, args[7])
+        return consumer(args[3], SimpleNamespace(), lambda: None)
+
+    volume_requests: list[object] = []
+
+    def prepare_volumes(_storage: object, volume_request: object, **_kwargs: object) -> object:
+        volume_requests.append(volume_request)
+        return prepared
 
     monkeypatch.setattr(
         "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation."
         "prepare_verified_remote_module_attempt",
         verified,
     )
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation."
+        "prepare_attempt_volumes",
+        prepare_volumes,
+    )
     runtime = _runtime(lambda _recovery: asyncio.sleep(0, result=None))
+    object.__setattr__(
+        runtime,
+        "volume_preparation",
+        RemoteModuleVolumePreparation(
+            storage=cast(Any, SimpleNamespace()),
+            pool_name="modules",
+            entries=(),
+            writer=cast(Any, SimpleNamespace()),
+            inspect_attachments=cast(Any, lambda: None),
+            work_dir=Path("/tmp"),
+        ),
+    )
     answer = await runtime.prepare(
         receipt,
         operation,
         cast(Any, SimpleNamespace()),
         cast(Any, SimpleNamespace()),
         10.0,
-        cast(Any, lambda: None),
     )
 
-    assert answer == "prepared"
+    assert answer is prepared
     assert observed[2] is receipt
     assert observed[3] == ModuleAttempt(
         UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
     )
+    assert len(volume_requests) == 1
