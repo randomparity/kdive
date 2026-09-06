@@ -316,6 +316,7 @@ def main():
             {"provider_authority_host_network_port": 0},
             {"provider_authority_host_network_port": 65536},
             {"provider_authority_host_network_port": 16514},
+            {"provider_authority_host_fault_proof_enabled": "true"},
             {"worker_cidr": "::/0"},
             {"worker_cidr": "0.0.0.0/0"},
         ):

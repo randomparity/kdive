@@ -139,6 +139,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "while unsafe configuration or mismatched running builds fails before fixture mutation.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG",
+        "test",
+        None,
+        "Path to the owner-only closed JSON configuration for the installed remote-authority "
+        "proof support (#2151); unset leaves the support dormant, while an unsafe configuration "
+        "fails before any remote control.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_SYSTEM_ID",
         "test",
         None,

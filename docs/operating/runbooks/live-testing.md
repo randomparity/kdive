@@ -191,6 +191,34 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
+### Installed remote authority proof prerequisite
+
+The production `provider_authority_host` role keeps the ADR-0622 proof socket absent by default.
+On a disposable remote-authority proof host, add this explicit role input before running
+`deploy/ansible/site.yml`:
+
+```yaml
+provider_authority_host_fault_proof_enabled: true
+```
+
+The role then projects only the fixed
+`KDIVE_EXTERNAL_BOOT_AUTHORITY_PROOF_SOCKET=/run/kdive/provider-authority/proof-control/control.sock`
+setting, installs that owner-only runtime directory through tmpfiles, and adds the directory to the
+authority unit's writable paths. It does not grant a worker or operator identity access to the
+private provider daemon or artifacts. The general provider-authority, private session-libvirt,
+fixed-pool, selected-architecture appliance, and credential inputs remain required independently;
+this option does not stage a base image or provision a System.
+
+Test control configuration uses `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG` to name an owner-owned
+mode-`0400` or mode-`0600` JSON file. Its closed fields are `installed_revision`, `project`, the
+single `resource_name`, matching `authority_instance`, `ownership_prefix`, one atomic `ssh_target`,
+the literal `kdive-external-boot-authority.service`, and optional fixed `barrier_socket` above. It
+contains no URI, pool, filesystem path, credential, base-image, or manifest selector. SSH relies on
+the operator's preconfigured authentication and permits only batch-mode, fixed remote controls.
+
+This installs and configures the proof prerequisite only. A collected remote six-operation carrier
+is not implemented by this phase; do not report these helper-level checks as remote acceptance.
+
 ### `live_stack` — drive the running stack over HTTP
 
 ```

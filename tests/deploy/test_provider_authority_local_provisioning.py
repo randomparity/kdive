@@ -39,6 +39,7 @@ def test_local_mutation_is_disabled_by_default() -> None:
     assert defaults["provider_authority_host_remote_module_enabled"] is False
     assert defaults["provider_authority_host_remote_module_architectures"] == []
     assert defaults["provider_authority_host_remote_libvirt_storage_pool"] == "default"
+    assert defaults["provider_authority_host_fault_proof_enabled"] is False
 
 
 def test_enabled_environment_contains_complete_mutation_configuration() -> None:
@@ -64,6 +65,7 @@ def test_enabled_environment_contains_complete_mutation_configuration() -> None:
         provider_authority_host_remote_module_enabled=True,
         provider_authority_host_remote_module_architectures=["x86_64"],
         provider_authority_host_remote_libvirt_storage_pool="authority-systems",
+        provider_authority_host_fault_proof_enabled=False,
     )
     assert (
         "KDIVE_LIBVIRT_RECOVERY_ROOT=" + "/var/lib/kdive/provider-authority/recovery\n" in rendered
@@ -90,6 +92,7 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
     assert "bucket" in script
     assert "region" in script
     assert "s3_credentials" in script
+    assert "fault_proof" in script
     assert "urlsplit" in script
     assert validation["no_log"] is True
     source_check = next(
@@ -135,6 +138,8 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
         ({"remote_module": True, "architectures": []}, False),
         ({"remote_module": True, "architectures": ["aarch64"]}, False),
         ({"remote_module": True, "pool": "bad/name"}, False),
+        ({"fault_proof": True}, True),
+        ({"fault_proof": "true"}, False),
         (
             {
                 "local_mutation": False,
@@ -187,6 +192,7 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
         "remote_module": False,
         "architectures": [],
         "pool": "default",
+        "fault_proof": False,
     }
     values.update(override)
     result = subprocess.run(
@@ -238,6 +244,7 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
     identity_only = template.render(
         provider_authority_host_local_mutation_enabled=False,
         provider_authority_host_remote_module_enabled=False,
+        provider_authority_host_fault_proof_enabled=False,
     )
     assert "PrivateDevices=yes" in identity_only
     assert "DeviceAllow=" not in identity_only
@@ -249,6 +256,7 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
         provider_authority_host_rootfs_root="/var/lib/kdive/provider-authority/rootfs",
         provider_authority_host_console_root="/var/lib/kdive/provider-authority/console",
         provider_authority_host_remote_module_enabled=True,
+        provider_authority_host_fault_proof_enabled=True,
     )
     assert "PrivateDevices=no" in mutation
     assert "DevicePolicy=closed" in mutation
@@ -263,6 +271,43 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
         in mutation
     )
     assert "remote-module-preparations" not in identity_only
+    assert "ReadWritePaths=/run/kdive/provider-authority/proof-control" in mutation
+
+
+def test_fault_proof_projects_only_the_fixed_private_socket_runtime() -> None:
+    environment = Environment(undefined=StrictUndefined).from_string(
+        (ROLE / "templates" / "environment.j2").read_text(encoding="utf-8")
+    )
+    values = {
+        "provider_authority_host_instance": "authority-test",
+        "provider_authority_host_uid": 991,
+        "provider_authority_host_gid": 992,
+        "provider_authority_host_client_gid": 993,
+        "provider_authority_host_network_address": "",
+        "provider_authority_host_network_port": None,
+        "provider_authority_host_denied_identities": ["operator"],
+        "provider_authority_host_local_mutation_enabled": False,
+        "provider_authority_host_remote_module_enabled": False,
+        "provider_authority_host_fault_proof_enabled": False,
+    }
+    dormant = environment.render(**values)
+    enabled = environment.render(**(values | {"provider_authority_host_fault_proof_enabled": True}))
+    setting = (
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_PROOF_SOCKET="
+        "/run/kdive/provider-authority/proof-control/control.sock"
+    )
+    assert setting not in dormant
+    assert setting in enabled
+
+    install = (ROLE / "tasks" / "install.yml").read_text(encoding="utf-8")
+    assert (
+        "d /run/kdive/provider-authority/proof-control 0700 "
+        "kdive-provider-authority kdive-provider-authority -"
+    ) in install
+    assert "{% if provider_authority_host_fault_proof_enabled | bool %}" in install
+    assert install.count("/run/kdive/provider-authority/proof-control") == 3
+    assert "Refuse a substituted fault-proof runtime" in install
+    assert "Create the owner-only fault-proof runtime" in install
 
 
 def test_remote_module_private_pool_uses_the_authority_session_daemon() -> None:
