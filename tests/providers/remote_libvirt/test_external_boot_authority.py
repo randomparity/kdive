@@ -12,7 +12,12 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-from kdive.providers.external_boot_authority.protocol import AuthorityPreparationMutationRequestV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+    AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
+)
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -25,6 +30,7 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
+    RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
@@ -647,4 +653,113 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
     )
     with pytest.raises(ValueError, match="differs from durable record"):
         coordinator.activate(changed, OpaqueProviderRef(ref="authority/remote-a"))
+    store.close()
+
+
+def test_running_observation_reopens_exact_recovery_after_restart(tmp_path: Path) -> None:
+    record = _record()
+    authority_id = uuid4()
+    attempt_id = uuid4()
+    request = AuthorityMutationRequestV1(
+        authority_id=authority_id,
+        generation=4,
+        system_id=UUID(record.binding.system_id),
+        activation_id=UUID(record.binding.activation_id),
+        run_id=UUID(record.binding.run_id),
+        plan_identity=record.plan_identity,
+        purpose="activate",
+        operation=AuthorityOperation.ACTIVATE,
+        provider_kind="remote-libvirt",
+        authority_instance="remote-a",
+        operation_identity="observe-running",
+        operation_digest="sha256:" + "d" * 64,
+        attempt_id=attempt_id,
+        expected_source_identity=record.source_state.definition,
+        intended_target_identity=record.target_state.definition,
+        recovery_objects=(),
+    )
+    first = RemoteModuleVolumePreparationStore(tmp_path)
+    first.publish_recovery(record)
+    first.close()
+    observed = RunningKernelObservation(
+        identity=record.materialization.kernel_observation,
+        cmdline=b"root=/dev/vda",
+        expected_cmdline=b"root=/dev/vda",
+    )
+    calls: list[tuple[object, object]] = []
+
+    class Operations:
+        def observe(self, recovery: object, authority: object, deadline: float) -> object:
+            calls.append((recovery, authority))
+            return observed
+
+    class Delegate:
+        async def observe(self, request: object) -> AuthorityObservationV1:
+            raise AssertionError("ordinary observation used")
+
+        async def commit(self, request: object, context: object) -> AuthorityObservationV1:
+            raise AssertionError("mutation used")
+
+    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), restarted, lambda: 123.0
+    )
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(Delegate(), coordinator, executor)  # type: ignore[arg-type]
+    assert asyncio.run(adapter.observe_running(request)) == observed
+    assert calls == [
+        (
+            record,
+            OpaqueProviderRef(ref=f"authority/{authority_id}/4/{attempt_id}"),
+        )
+    ]
+    executor.shutdown()
+    restarted.close()
+
+
+def test_running_observation_rejects_changed_request_before_provider(tmp_path: Path) -> None:
+    record = _record()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.publish_recovery(record)
+
+    class Operations:
+        def observe(self, *args: object) -> RunningKernelObservation:
+            raise AssertionError("provider touched")
+
+    class Delegate:
+        async def observe(self, request: object) -> AuthorityObservationV1:
+            raise AssertionError
+
+        async def commit(self, request: object, context: object) -> AuthorityObservationV1:
+            raise AssertionError
+
+    request = AuthorityMutationRequestV1(
+        authority_id=uuid4(),
+        generation=1,
+        system_id=UUID(record.binding.system_id),
+        activation_id=UUID(record.binding.activation_id),
+        run_id=UUID(record.binding.run_id),
+        plan_identity=record.plan_identity,
+        purpose="activate",
+        operation=AuthorityOperation.ACTIVATE,
+        provider_kind="remote-libvirt",
+        authority_instance="remote-a",
+        operation_identity="observe-running",
+        operation_digest="sha256:" + "d" * 64,
+        attempt_id=uuid4(),
+        expected_source_identity="foreign-source",
+        intended_target_identity=record.target_state.definition,
+        recovery_objects=(),
+    )
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(
+        Delegate(),
+        RemoteExternalBootCoordinator(
+            cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+        ),
+        executor,
+    )  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="identities differ"):
+        asyncio.run(adapter.observe_running(request))
+    executor.shutdown()
     store.close()

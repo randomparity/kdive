@@ -16,6 +16,9 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
 )
@@ -496,7 +499,45 @@ class RemoteModuleVolumePreparationStore:
         encoded = recovery.to_canonical_json()
         identity = hashlib.sha256(b"kdive-remote-recovery-v1\0" + encoded).hexdigest()
         self._publish(f"{identity}.recovery", encoded)
+        self._publish(
+            f"{self._recovery_key(recovery.binding, recovery.plan_identity)}.recovery-index",
+            identity.encode("ascii"),
+        )
         return OpaqueProviderRef(ref=f"remote-external-boot/{identity}")
+
+    @staticmethod
+    def _recovery_key(binding: ExternalBootActivationBinding, plan_identity: str) -> str:
+        bound = "\0".join(
+            (binding.system_id, binding.activation_id, binding.run_id, plan_identity)
+        ).encode()
+        return hashlib.sha256(b"kdive-remote-recovery-index-v1\0" + bound).hexdigest()
+
+    def recovery_point(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RecoveryPoint:
+        index = self._read(f"{self._recovery_key(binding, plan_identity)}.recovery-index")
+        if index is None:
+            raise FileNotFoundError("remote recovery index is absent")
+        try:
+            identity = index.decode("ascii")
+        except UnicodeDecodeError:
+            raise ValueError("remote recovery index is malformed") from None
+        data = self._read(f"{identity}.recovery")
+        if data is None:
+            raise FileNotFoundError("remote recovery record is absent")
+        if hashlib.sha256(b"kdive-remote-recovery-v1\0" + data).hexdigest() != identity:
+            raise ValueError("remote recovery record identity mismatched")
+        recovery = RemoteExternalBootRecoveryRecord.from_canonical_json(data)
+        if recovery.binding != binding or recovery.plan_identity != plan_identity:
+            raise ValueError("remote recovery index differs from durable record")
+        return RecoveryPoint(
+            binding=binding,
+            plan_identity=plan_identity,
+            materialization_identity=recovery.materialization.identity,
+            recovery_ref=OpaqueProviderRef(ref=f"remote-external-boot/{identity}"),
+            source_state=recovery.source_state,
+            target_state=recovery.target_state,
+        )
 
     def reopen_recovery(self, point: RecoveryPoint) -> RemoteExternalBootRecoveryRecord:
         prefix = "remote-external-boot/"
@@ -526,6 +567,16 @@ class RemoteModulePreparationOperation(Protocol):
     async def execute(
         self, request: RemoteModuleVolumePreparationRequestV1
     ) -> RemoteModulePreparationResponse: ...
+
+
+class RemoteAuthorityMutationDelegate(Protocol):
+    """Remote mutation implementation decorated with durable running reads."""
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
+
+    async def commit(
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> AuthorityObservationV1: ...
 
 
 class DurableRemoteModuleVolumePreparationHost:
@@ -783,8 +834,59 @@ class RemoteExternalBootCoordinator:
             self._store.reopen_recovery(recovery), authority, self._deadline()
         )
 
+    def recovery_point(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RecoveryPoint:
+        """Reopen the exact provider-private recovery point after process restart."""
+        return self._store.recovery_point(binding, plan_identity)
+
     def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         self._operations.recover(self._store.reopen_recovery(recovery), authority, self._deadline())
 
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         self._operations.cleanup(self._store.reopen_recovery(recovery), authority, self._deadline())
+
+
+class RemoteExternalBootAuthorityAdapter:
+    """Decorate remote mutations with completion-owned durable kernel observation."""
+
+    def __init__(
+        self,
+        delegate: RemoteAuthorityMutationDelegate,
+        coordinator: RemoteExternalBootCoordinator,
+        executor: RemoteModulePreparationExecutor,
+    ) -> None:
+        self._delegate = delegate
+        self._coordinator = coordinator
+        self._executor = executor
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._delegate.observe(request)
+
+    async def commit(
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> AuthorityObservationV1:
+        return await self._delegate.commit(request, context)
+
+    async def observe_running(
+        self, request: AuthorityMutationRequestV1
+    ) -> RunningKernelObservation:
+        binding = ExternalBootActivationBinding(
+            system_id=str(request.system_id),
+            run_id=str(request.run_id),
+            activation_id=str(request.activation_id),
+        )
+        authority = OpaqueProviderRef(
+            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+        )
+
+        def read() -> RunningKernelObservation:
+            point = self._coordinator.recovery_point(binding, request.plan_identity)
+            if (
+                point.source_state.definition != request.expected_source_identity
+                or point.target_state.definition != request.intended_target_identity
+            ):
+                raise ValueError("remote running observation identities differ from request")
+            return self._coordinator.observe(point, authority)
+
+        return await self._executor.run(read)
