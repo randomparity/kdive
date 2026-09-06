@@ -7,7 +7,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 from kdive.db.external_boot_authority_journal import (
@@ -22,6 +22,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -67,7 +68,9 @@ def _mutation(request: AuthorityTakeoverRequestV1) -> AuthorityMutationRequestV1
 
 def _binding(
     peer: AuthenticatedPeer,
-    request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
+    request: AuthorityTakeoverRequestV1
+    | AuthorityMutationRequestV1
+    | AuthorityPreparationMutationRequestV1,
     state: Literal["allocating", "current"],
 ) -> AuthorityBinding:
     return AuthorityBinding(
@@ -138,7 +141,11 @@ class _Repository:
             or request.authority_instance != self.request.authority_instance
         ):
             return None
-        binding = _binding(peer, request, "current")
+        binding = _binding(
+            peer,
+            self.request if isinstance(request, AuthorityPreparationMutationRequestV1) else request,
+            "current",
+        )
         return (
             replace(binding, operation=self.operation_override)
             if self.operation_override
@@ -192,6 +199,21 @@ class _Repository:
         ):
             return None
         return _binding(peer, request, "current")
+
+    async def resolve_current_preparation(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None:
+        resolved = await self.resolve_current(
+            peer,
+            cast(AuthorityMutationRequestV1, request),
+            acknowledgement_sequence,
+            acknowledgement_digest,
+        )
+        return replace(resolved, preparation_plan=request.plan) if resolved is not None else None
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None:
         if self.head is None or not self._head_override_armed:

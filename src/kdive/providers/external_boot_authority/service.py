@@ -98,6 +98,17 @@ class AuthorityRepository(Protocol):
     ) -> Literal["advanced", "superseded", "conflict"]: ...
 
 
+@runtime_checkable
+class AuthorityPreparationRepository(Protocol):
+    async def resolve_current_preparation(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None: ...
+
+
 class AuthorityServiceError(RuntimeError):
     """Bounded failure safe to expose across the authority boundary."""
 
@@ -338,6 +349,45 @@ class ExternalBootAuthorityService:
             and binding.authority_instance == request.authority_instance
             and binding.operation_identity == request.operation_identity
             and binding.operation_digest == request.operation_digest
+        )
+
+    @staticmethod
+    def _root_candidate_matches_preparation(
+        binding: AuthorityBinding, request: AuthorityPreparationMutationRequestV1
+    ) -> bool:
+        return (
+            binding.authority_id == request.authority_id
+            and binding.generation == request.generation
+            and binding.system_id == request.system_id
+            and binding.activation_id == request.activation_id
+            and binding.run_id == request.run_id
+            and binding.plan_identity == request.plan_identity
+            and binding.purpose == request.purpose == "activate"
+            and binding.operation is AuthorityOperation.ACTIVATE
+            and binding.provider_kind == request.provider_kind
+            and binding.authority_instance == request.authority_instance
+        )
+
+    async def _resolve_confirmed(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement: JournalRecordV1,
+    ) -> AuthorityBinding | None:
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            if not isinstance(self._repository, AuthorityPreparationRepository):
+                return None
+            return await self._repository.resolve_current_preparation(
+                peer,
+                request,
+                acknowledgement.sequence,
+                record_digest(acknowledgement),
+            )
+        return await self._repository.resolve_current(
+            peer,
+            request,
+            acknowledgement.sequence,
+            record_digest(acknowledgement),
         )
 
     @staticmethod
@@ -886,7 +936,12 @@ class ExternalBootAuthorityService:
     ) -> AuthorityObservationV1:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        candidate_matches = trusted is not None and (
+            self._root_candidate_matches_preparation(trusted, request)
+            if isinstance(request, AuthorityPreparationMutationRequestV1)
+            else self._binding_matches(trusted, request)
+        )
+        if not candidate_matches:
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -908,15 +963,12 @@ class ExternalBootAuthorityService:
                     if not acknowledgements:
                         raise AuthorityServiceError("superseded")
                     acknowledgement = acknowledgements[-1]
-                    confirmed = await self._repository.resolve_current(
-                        authenticated,
-                        request,
-                        acknowledgement.sequence,
-                        record_digest(acknowledgement),
+                    confirmed = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
                     )
-                    if confirmed is None or confirmed != trusted:
+                    if confirmed is None or not self._binding_matches(confirmed, request):
                         raise AuthorityServiceError("superseded")
-                    binding = trusted
+                    binding = confirmed
                     records = await self._recover(binding, journal, records)
                     phases_by_operation: dict[str, JournalRecordV1] = {}
                     for record in reversed(records):
@@ -999,12 +1051,7 @@ class ExternalBootAuthorityService:
                     )
                     active.phase = JournalPhase.MUTATION_STARTED
                     context = AuthorityCommitContextV1.for_record(records[-1])
-                rechecked = await self._repository.resolve_current(
-                    authenticated,
-                    request,
-                    acknowledgement.sequence,
-                    record_digest(acknowledgement),
-                )
+                rechecked = await self._resolve_confirmed(authenticated, request, acknowledgement)
                 if rechecked is None or not self._binding_matches(rechecked, request):
                     raise AuthorityServiceError("superseded")
                 # Both refusals here leave the operation unresolved at `mutation-started`,
