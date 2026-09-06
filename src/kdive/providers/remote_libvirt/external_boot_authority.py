@@ -35,6 +35,8 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
+    RemoteModuleResultV1,
+    identity_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -79,13 +81,16 @@ class RemotePreparedVolumeV1(BaseModel):
 class RemoteModuleVolumePreparationRequestV1(BaseModel):
     """One exact remote volume creation nested under an authorized PREPARE phase."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, validate_by_alias=True, allow_inf_nan=False
+    )
 
     schema_: Literal["remote-module-volume-preparation-v1"] = Field(
         "remote-module-volume-preparation-v1", alias="schema"
     )
     authority: AuthorityPreparationMutationRequestV1
     operation: RemoteModuleOperationV1
+    deadline: Annotated[float, Field(gt=0)]
 
     @model_validator(mode="after")
     def _operation_matches_authority(self) -> Self:
@@ -190,6 +195,79 @@ class RemoteModuleVolumePreparationResponseV1(BaseModel):
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
             raise ValueError("remote module preparation response is not canonical JSON")
+        return value
+
+
+class RemoteModuleTerminalPreparationResponseV1(RemoteModuleVolumePreparationResponseV1):
+    """Durable terminal appliance result and recovery alongside exact volume identities."""
+
+    schema_: Literal["remote-module-terminal-preparation-response-v1"] = Field(
+        "remote-module-terminal-preparation-response-v1", alias="schema"
+    )
+    result: RemoteModuleResultV1
+    recovery: RemoteModuleRecoveryRefV2
+
+    def validate_terminal_for(
+        self,
+        operation: RemoteModuleOperationV1,
+        authority: AuthorityPreparationMutationRequestV1,
+    ) -> None:
+        super().validate_for(operation)
+        self.result.validate_for(operation)
+        exact_authority = OpaqueProviderRef(
+            ref=f"authority/{authority.authority_id}/{authority.generation}/{authority.attempt_id}"
+        )
+        recovery = self.recovery
+        if (
+            recovery.system_id != operation.system_id
+            or recovery.run_id != operation.run_id
+            or recovery.plan_identity != operation.plan_identity
+            or recovery.operation_nonce != operation.operation_nonce
+            or recovery.pool.ref != self.source.pool
+            or recovery.root_volume.ref != operation.root_volume.key
+            or recovery.source_volume.ref != self.source.name
+            or recovery.scratch_volume.ref != self.scratch.name
+            or recovery.source_capacity_bytes != self.source.capacity_bytes
+            or recovery.operation_identity != identity_for(operation)
+            or recovery.result_identity != identity_for(self.result)
+            or recovery.appliance_image_digest != operation.appliance_image_digest
+            or recovery.authority_identity
+            != RemoteModuleRecoveryRefV2.identity_for_authority(exact_authority)
+        ):
+            raise ValueError("remote module terminal recovery differs from exact operation")
+
+
+type RemoteModulePreparationResponse = (
+    RemoteModuleVolumePreparationResponseV1 | RemoteModuleTerminalPreparationResponseV1
+)
+
+
+class RemoteModuleTerminalRecord(BaseModel):
+    """Exact authenticated request and terminal provider-host response."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request: RemoteModuleVolumePreparationRequestV1
+    response: RemoteModuleTerminalPreparationResponseV1
+
+    @model_validator(mode="after")
+    def _terminal_matches_request(self) -> Self:
+        self.response.validate_terminal_for(self.request.operation, self.request.authority)
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        encoded = _canonical_model_bytes(self)
+        if len(encoded) > _MAX_PREPARATION_BYTES:
+            raise ValueError("remote module terminal record exceeds 1048576 bytes")
+        return encoded
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        if len(data) > _MAX_PREPARATION_BYTES:
+            raise ValueError("remote module terminal record exceeds 1048576 bytes")
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote module terminal record is not canonical JSON")
         return value
 
 
@@ -328,21 +406,72 @@ class RemoteModuleVolumePreparationStore:
     def publish_result(
         self,
         request: RemoteModuleVolumePreparationRequestV1,
-        response: RemoteModuleVolumePreparationResponseV1,
+        response: RemoteModulePreparationResponse,
     ) -> None:
         self.reopen_request(request)
         self._publish(f"{self._key(request)}.result", response.to_canonical_json())
+        if isinstance(response, RemoteModuleTerminalPreparationResponseV1):
+            terminal = RemoteModuleTerminalRecord(request=request, response=response)
+            authority = request.authority
+            key = self._terminal_key(
+                authority.system_id,
+                authority.activation_id,
+                authority.run_id,
+                authority.plan_identity,
+            )
+            self._publish(
+                f"{key}.terminal",
+                terminal.to_canonical_json(),
+            )
 
     def reopen_result(
         self, request: RemoteModuleVolumePreparationRequestV1
-    ) -> RemoteModuleVolumePreparationResponseV1 | None:
+    ) -> RemoteModulePreparationResponse | None:
         self.reopen_request(request)
         data = self._read(f"{self._key(request)}.result")
-        return (
-            None
-            if data is None
-            else RemoteModuleVolumePreparationResponseV1.from_canonical_json(data)
+        if data is None:
+            return None
+        raw = json.loads(data)
+        model = (
+            RemoteModuleTerminalPreparationResponseV1
+            if isinstance(raw, dict)
+            and raw.get("schema") == "remote-module-terminal-preparation-response-v1"
+            else RemoteModuleVolumePreparationResponseV1
         )
+        return model.from_canonical_json(data)
+
+    @staticmethod
+    def _terminal_key(
+        system_id: object, activation_id: object, run_id: object, plan_identity: str
+    ) -> str:
+        bound = "\0".join(
+            (
+                str(system_id),
+                str(activation_id),
+                str(run_id),
+                plan_identity,
+            )
+        ).encode()
+        return hashlib.sha256(b"kdive-remote-terminal-index-v1\0" + bound).hexdigest()
+
+    def reopen_terminal(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteModuleTerminalRecord:
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        data = self._read(f"{key}.terminal")
+        if data is None:
+            raise FileNotFoundError("remote module terminal preparation is absent")
+        record = RemoteModuleTerminalRecord.from_canonical_json(data)
+        if (
+            str(record.request.authority.system_id) != binding.system_id
+            or str(record.request.authority.activation_id) != binding.activation_id
+            or str(record.request.authority.run_id) != binding.run_id
+            or record.request.authority.plan_identity != plan_identity
+        ):
+            raise ValueError("remote module terminal preparation binding differs")
+        return record
 
     def publish_materialization(
         self, plan: ExternalBootPlan, materialization: ExternalBootMaterialization
@@ -393,20 +522,26 @@ class RemoteModuleVolumePreparationStore:
         return recovery
 
 
+class RemoteModulePreparationOperation(Protocol):
+    async def execute(
+        self, request: RemoteModuleVolumePreparationRequestV1
+    ) -> RemoteModulePreparationResponse: ...
+
+
 class DurableRemoteModuleVolumePreparationHost:
     """Resume idempotent preparation from exact provider-private durable evidence."""
 
     def __init__(
         self,
         store: RemoteModuleVolumePreparationStore,
-        host: RemoteModuleVolumePreparationHost,
+        host: RemoteModulePreparationOperation,
     ) -> None:
         self._store = store
         self._host = host
 
     async def execute(
         self, request: RemoteModuleVolumePreparationRequestV1
-    ) -> RemoteModuleVolumePreparationResponseV1:
+    ) -> RemoteModulePreparationResponse:
         self._store.stage(request)
         if result := self._store.reopen_result(request):
             result.validate_for(request.operation)
@@ -553,6 +688,7 @@ class RemoteExternalBootOperations(Protocol):
         plan: ExternalBootPlan,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
+        modules: RemoteModuleTerminalRecord,
         authority: OpaqueProviderRef,
         deadline: float,
     ) -> RemoteExternalBootRecoveryRecord: ...
@@ -619,8 +755,9 @@ class RemoteExternalBootCoordinator:
         authority: OpaqueProviderRef,
     ) -> RecoveryPoint:
         durable = self._store.reopen_materialization(materialization)
+        modules = self._store.reopen_terminal(binding, materialization.plan_identity)
         recovery = self._operations.prepare(
-            durable.plan, materialization, binding, authority, self._deadline()
+            durable.plan, materialization, binding, modules, authority, self._deadline()
         )
         if recovery.binding != binding or recovery.materialization != materialization:
             raise ValueError("remote preparation returned a different activation")

@@ -28,6 +28,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
+    RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationHost,
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationResponseV1,
@@ -37,6 +38,8 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_targe
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
+    RemoteModuleResultV1,
+    identity_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -82,7 +85,9 @@ def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
         recovery_objects=(),
         plan=plan,
     )
-    return RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
+    return RemoteModuleVolumePreparationRequestV1(
+        authority=authority, operation=operation, deadline=999.0
+    )
 
 
 def _prepared_volumes(request: RemoteModuleVolumePreparationRequestV1) -> PreparedModuleVolumes:
@@ -214,6 +219,78 @@ def _plan_for_record(record: RemoteExternalBootRecoveryRecord) -> ExternalBootPl
     )
 
 
+def _publish_terminal(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> None:
+    plan = _plan_for_record(record)
+    base = _remote_preparation_request()
+    authority = base.authority.model_copy(
+        update={
+            "system_id": UUID(record.binding.system_id),
+            "activation_id": UUID(record.binding.activation_id),
+            "run_id": UUID(record.binding.run_id),
+            "plan_identity": plan.identity,
+            "plan": plan,
+        }
+    )
+    operation = base.operation.model_copy(
+        update={
+            "system_id": record.binding.system_id,
+            "run_id": record.binding.run_id,
+            "plan_identity": plan.identity,
+        }
+    )
+    request = RemoteModuleVolumePreparationRequestV1(
+        authority=authority, operation=operation, deadline=base.deadline
+    )
+    volumes = _prepared_volumes(request)
+    result = RemoteModuleResultV1(
+        status="success",
+        phase="installed",
+        system_id=operation.system_id,
+        run_id=operation.run_id,
+        plan_identity=operation.plan_identity,
+        operation_nonce=operation.operation_nonce,
+        appliance_image_digest=operation.appliance_image_digest,
+        release=operation.release,
+        root_volume_key=operation.root_volume.key,
+        root_volume_identity=operation.root_volume.identity,
+        source_manifest=operation.source_manifest,
+        installed_manifest=operation.source_manifest,
+        capture_absent=True,
+        entry_count=1,
+        content_bytes=3,
+    )
+    authority_ref = OpaqueProviderRef(
+        ref=f"authority/{authority.authority_id}/{authority.generation}/{authority.attempt_id}"
+    )
+    base_response = RemoteModuleVolumePreparationResponseV1.from_prepared(volumes)
+    response = RemoteModuleTerminalPreparationResponseV1(
+        source=base_response.source,
+        scratch=base_response.scratch,
+        result=result,
+        recovery=RemoteModuleRecoveryRefV2(
+            system_id=operation.system_id,
+            run_id=operation.run_id,
+            plan_identity=operation.plan_identity,
+            operation_nonce=operation.operation_nonce,
+            pool=OpaqueProviderRef(ref=volumes.source.pool),
+            root_volume=OpaqueProviderRef(ref=operation.root_volume.key),
+            source_volume=OpaqueProviderRef(ref=volumes.source.name),
+            scratch_volume=OpaqueProviderRef(ref=volumes.scratch.name),
+            source_capacity_bytes=volumes.source.capacity_bytes,
+            operation_identity=identity_for(operation),
+            result_identity=identity_for(result),
+            installed_entry_count=1,
+            installed_content_bytes=3,
+            appliance_image_digest=operation.appliance_image_digest,
+            authority_identity=RemoteModuleRecoveryRefV2.identity_for_authority(authority_ref),
+        ),
+    )
+    store.stage(request)
+    store.publish_result(request, response)
+
+
 def test_recovery_record_round_trips_only_canonical_closed_bytes() -> None:
     record = _record()
     encoded = record.to_canonical_json()
@@ -295,6 +372,7 @@ def test_remote_volume_request_binds_exact_prepare_phase_and_operation() -> None
                 }
             ),
             operation=request.operation,
+            deadline=request.deadline,
         )
     with pytest.raises(ValidationError, match="differs from authority"):
         RemoteModuleVolumePreparationRequestV1(
@@ -302,6 +380,7 @@ def test_remote_volume_request_binds_exact_prepare_phase_and_operation() -> None
             operation=request.operation.model_copy(
                 update={"run_id": "00000000-0000-4000-8000-000000000099"}
             ),
+            deadline=request.deadline,
         )
 
 
@@ -475,12 +554,14 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
             plan: object,
             materialization: object,
             binding: object,
+            modules: object,
             owner: object,
             deadline: float,
         ) -> RemoteExternalBootRecoveryRecord:
             assert plan == expected_plan
             assert materialization == record.materialization
             assert binding == record.binding
+            assert modules is not None
             assert owner == authority
             calls.append(("prepare", deadline))
             return record
@@ -514,6 +595,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     )
     expected_plan = _plan_for_record(record)
     assert coordinator.materialize(expected_plan, authority) == record.materialization
+    _publish_terminal(store, record)
     point = coordinator.prepare(record.materialization, record.binding, authority)
     store.close()
 
@@ -550,6 +632,7 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
     store.publish_materialization(_plan_for_record(record), record.materialization)
+    _publish_terminal(store, record)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
     )

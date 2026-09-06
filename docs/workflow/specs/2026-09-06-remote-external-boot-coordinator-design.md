@@ -31,3 +31,8 @@ receives a worker database pool, obligation receipt, reusable assertion, caller-
 generic execution payload. The worker-side verifier retains its transaction and System advisory
 lock while awaiting this request. Provider-host blocking work uses the completion-owned remote
 module executor, so cancellation is not reported until the underlying mutation has resolved.
+The same completion-owned host call runs or adopts the fixed appliance, reopens its newline-framed
+scratch result, proves teardown, and durably records a typed terminal result and V2 recovery
+geometry before returning. A restarted host replays that exact result without a second provider
+mutation. Materialization also retains the exact plan alongside its receipt so later PREPARE can
+derive the target definition without caller reconstruction.
