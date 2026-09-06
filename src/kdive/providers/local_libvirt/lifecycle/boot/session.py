@@ -30,13 +30,17 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
+    OpaqueProviderRef,
     RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 if TYPE_CHECKING:
-    from kdive.providers.local_libvirt.lifecycle.boot.external_boot import LocalRecoveryMetadataV1
+    from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+        LocalRecoveryMetadataV1,
+        TargetProjectionV1,
+    )
 
 
 @dataclass(frozen=True)
@@ -179,6 +183,14 @@ class TreeCursor(AbstractContextManager[Iterator[InactiveGuestDirectoryEntry]], 
 
 
 class LocalExternalBootSession(Protocol):
+    @property
+    def binding(self) -> ExternalBootActivationBinding: ...
+    def projection_directory(
+        self, projection: TargetProjectionV1
+    ) -> AbstractContextManager[int]: ...
+    def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1: ...
+    def projection_artifact_path(self, projection: TargetProjectionV1, name: str) -> str: ...
+    def boot_identity(self, xml: str) -> str: ...
     def inspect_closed(self) -> ClosedDomainInspection: ...
     def require_inactive(self) -> None: ...
     def stop_and_require_inactive(self) -> None: ...
@@ -791,9 +803,104 @@ class _ConcreteSession:
         # Nested session/guest/cursor closes keep ownership until producer joins complete.
         self._lifecycle_lock = threading.RLock()
         self._guests: set[_GuestContext] = set()
+        self._projection_fds: set[int] = set()
         self._closed = False
         self._readiness_window: ConsoleReadinessWindow | None = None
         self._readiness_result: ReadinessResult | None = None
+
+    @property
+    def binding(self) -> ExternalBootActivationBinding:
+        self._require_open_domain()
+        return self._binding
+
+    @contextmanager
+    def projection_directory(self, projection: TargetProjectionV1) -> Iterator[int]:
+        """Open the exact activation-owned digest directory for one closed projection."""
+        self._require_open_domain()
+        if (
+            projection.ownership.system_id != self._binding.system_id
+            or projection.ownership.run_id != self._binding.run_id
+            or projection.activation_id != self._binding.activation_id
+        ):
+            raise ValueError("target projection does not match session ownership")
+        assert self._artifact_fd is not None
+        digest_name = projection.digest.removeprefix("sha256:")
+        entries = os.listdir(self._artifact_fd)
+        if any(entry != digest_name for entry in entries):
+            raise ValueError("activation already contains a different target projection")
+        try:
+            os.mkdir(digest_name, mode=0o700, dir_fd=self._artifact_fd)
+            self._fsync_descriptor(self._artifact_fd)
+        except FileExistsError:
+            pass
+        descriptor = self._open_relative(
+            self._artifact_fd,
+            digest_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            0,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened.st_mode) or opened.st_mode & 0o077:
+                raise ValueError("target projection directory is not private")
+            self._projection_fds.add(descriptor)
+            yield descriptor
+        finally:
+            if descriptor in self._projection_fds:
+                self._projection_fds.remove(descriptor)
+                self._close_descriptor(descriptor)
+
+    def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
+        """Read an exact projection selected by an owner-checked local artifact reference."""
+        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
+            TargetProjectionStore,
+            _artifact_ref_parts,
+        )
+        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
+
+        self._require_open_domain()
+        reference = artifact
+        owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
+        parts = _artifact_ref_parts(reference, owner, self._binding.activation_id)
+        assert self._artifact_fd is not None
+        descriptor = self._open_relative(
+            self._artifact_fd,
+            parts[4],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            0,
+        )
+        try:
+            projection_file = self._open_relative(
+                descriptor, "target-projection.json", os.O_RDONLY | os.O_NOFOLLOW, 0
+            )
+            try:
+                data = os.read(projection_file, 16_385)
+            finally:
+                self._close_descriptor(projection_file)
+            projection = TargetProjectionV1.model_validate_json(data)
+            return TargetProjectionStore.reopen_at(descriptor, projection)
+        finally:
+            self._close_descriptor(descriptor)
+
+    def projection_artifact_path(self, projection: TargetProjectionV1, name: str) -> str:
+        """Resolve one fixed boot payload path from the authenticated activation descriptor."""
+        if name not in {"kernel", "modules", "initrd"}:
+            raise ValueError("target projection artifact name is not allowed")
+        if (
+            projection.ownership.system_id != self._binding.system_id
+            or projection.ownership.run_id != self._binding.run_id
+            or projection.activation_id != self._binding.activation_id
+        ):
+            raise ValueError("target projection does not match session ownership")
+        self._require_open_domain()
+        assert self._artifact_fd is not None
+        activation = os.readlink(f"/proc/self/fd/{self._artifact_fd}")
+        return os.path.join(activation, projection.digest.removeprefix("sha256:"), name)
+
+    def boot_identity(self, xml: str) -> str:
+        """Measure only the boot projection of an owned candidate definition."""
+        root = _parse_owned_xml(xml, self._system_id, self._overlay.path)
+        return _boot_identity(root)
 
     def inspect_closed(self) -> ClosedDomainInspection:
         domain = self._require_open_domain()
@@ -906,6 +1013,8 @@ class _ConcreteSession:
             guests = list(self._guests)
             errors = [error for guest in guests for error in guest._poison()]
             self._guests.clear()
+            projection_fds = list(self._projection_fds)
+            self._projection_fds.clear()
             artifact_fd, self._artifact_fd = self._artifact_fd, None
             readiness_window, self._readiness_window = self._readiness_window, None
             overlay_fd = self._overlay.descriptor
@@ -914,6 +1023,7 @@ class _ConcreteSession:
             pin, self._pin = self._pin, None
             for closer in (
                 readiness_window.close if readiness_window is not None else None,
+                *(lambda fd=fd: self._close_descriptor(fd) for fd in projection_fds),
                 (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
                 lambda: self._close_overlay_descriptor(overlay_fd),
                 domain.free if domain is not None else None,

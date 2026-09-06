@@ -19,6 +19,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
+    TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
@@ -106,6 +107,43 @@ def _expected(*, activation_id: UUID | None = ACTIVATION_ID) -> ExpectedOperatio
         run_id=UUID(BINDING.run_id),
         activation_id=activation_id,
     )
+
+
+def test_projection_directory_is_binding_confined_and_closes_descriptor(tmp_path: Path) -> None:
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: os.open(activation, os.O_RDONLY | os.O_DIRECTORY),
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: os.open(overlay, os.O_RDONLY),
+    )
+    session = factory.open(_lease(), _expected())
+    projection = TargetProjectionV1(
+        ownership={"system_id": BINDING.system_id, "run_id": BINDING.run_id},
+        activation_id=BINDING.activation_id,
+        plan_identity="sha256:" + "a" * 64,
+        architecture="x86_64",
+        cmdline="root=UUID=x",
+        initrd_filename=None,
+    )
+
+    with session.projection_directory(projection) as descriptor:
+        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+    foreign = projection.model_copy(update={"activation_id": str(UUID(int=9))})
+    with pytest.raises(ValueError, match="session ownership"):
+        session.projection_directory(foreign).__enter__()
+    changed = projection.model_copy(update={"plan_identity": "sha256:" + "b" * 64})
+    with pytest.raises(ValueError, match="different target projection"):
+        session.projection_directory(changed).__enter__()
+    session.close()
 
 
 @pytest.mark.parametrize(
