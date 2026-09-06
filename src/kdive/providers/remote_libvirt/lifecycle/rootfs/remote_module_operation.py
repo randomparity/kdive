@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.infra.reaping import ModuleVolumeKey
@@ -46,6 +46,12 @@ class ModuleOperationRuntime(Protocol):
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
     ) -> ModuleAttemptInspection | None: ...
+    async def reap_state(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> Literal["absent", "reaping", "reaped"]: ...
+    def recovery_volumes(
+        self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
+    ) -> PreparedModuleVolumes: ...
     async def reopen_operation(
         self, recovery: RemoteModuleRecoveryRefV1
     ) -> RemoteModuleOperationV1: ...

@@ -30,6 +30,7 @@ from kdive.services.remote_module_phases import (
     CaptureInstallRequest,
     capture_install_modules,
     classify_phase,
+    restore_modules,
 )
 
 
@@ -124,6 +125,9 @@ def _request(operation: RemoteModuleOperationV1) -> CaptureInstallRequest:
 class Runtime:
     def __init__(self, result: RemoteModuleResultV1) -> None:
         self.result = result
+        self.capture = _operation()
+        self.current_operation = self.capture
+        self.reap = "absent"
         self.calls: list[str] = []
         self.volumes = PreparedModuleVolumes(
             PreparedVolume(
@@ -152,9 +156,12 @@ class Runtime:
         self.calls.append("inspect")
         return ModuleAttemptInspection(self.volumes, self.result)
 
-    async def run(self, *_args: object) -> RemoteModuleResultV1:
+    async def run(self, operation: RemoteModuleOperationV1, *_args: object) -> RemoteModuleResultV1:
         self.calls.append("run")
-        self.result = _result("installed")
+        self.current_operation = operation
+        self.result = _result(
+            "installed" if operation.operation == "capture_install" else "restored"
+        )
         return self.result
 
     async def teardown(self, *_args: object) -> TeardownObservation:
@@ -163,6 +170,45 @@ class Runtime:
 
     async def delete_source(self, *_args: object) -> None:
         self.calls.append("delete-source")
+
+    async def delete_scratch(self, *_args: object) -> None:
+        self.calls.append("delete-scratch")
+
+    async def reap_state(self, *_args: object) -> str:
+        self.calls.append("reap-state")
+        return self.reap
+
+    async def reopen_capture_operation(self, *_args: object) -> RemoteModuleOperationV1:
+        self.calls.append("reopen-capture")
+        return self.capture
+
+    async def reopen_installed_result(self, *_args: object) -> RemoteModuleResultV1:
+        self.calls.append("reopen-installed")
+        return _result("installed")
+
+    async def reopen_operation(self, *_args: object) -> RemoteModuleOperationV1:
+        self.calls.append("reopen-operation")
+        return self.current_operation
+
+    async def reopen_result(self, *_args: object) -> RemoteModuleResultV1:
+        self.calls.append("reopen-result")
+        return self.result
+
+    def recovery_volumes(self, *_args: object) -> PreparedModuleVolumes:
+        self.calls.append("recovery-volumes")
+        return self.volumes
+
+    async def record_reaping(self, *_args: object) -> None:
+        self.calls.append("record-reaping")
+        self.reap = "reaping"
+
+    async def record_reaped(self, *_args: object) -> None:
+        self.calls.append("record-reaped")
+        self.reap = "reaped"
+
+    async def resume_reap(self, *_args: object) -> TeardownObservation:
+        self.calls.append("resume-reap")
+        return TeardownObservation(True, True, True, True)
 
 
 @pytest.mark.anyio
@@ -196,3 +242,40 @@ async def test_capture_install_does_not_repeat_completed_install() -> None:
     )
 
     assert runtime.calls == ["inspect", "teardown", "delete-source"]
+
+
+@pytest.mark.anyio
+async def test_restore_resumes_from_installed_and_commits_reap_before_deletion() -> None:
+    operation = _operation()
+    runtime = Runtime(_result("installed"))
+    recovery = await capture_install_modules(
+        _request(operation),
+        runtime=cast(Any, runtime),
+        executor=cast(Any, SimpleNamespace()),
+        deadline=100.0,
+    )
+    runtime.calls.clear()
+
+    result = await restore_modules(
+        recovery,
+        OpaqueProviderRef(ref="authority/fixed"),
+        runtime=cast(Any, runtime),
+        executor=cast(Any, SimpleNamespace()),
+        deadline=100.0,
+    )
+
+    assert result.phase == "restored"
+    assert runtime.calls == [
+        "reap-state",
+        "reopen-capture",
+        "reopen-installed",
+        "reopen-operation",
+        "reopen-result",
+        "recovery-volumes",
+        "run",
+        "teardown",
+        "record-reaping",
+        "delete-source",
+        "delete-scratch",
+        "record-reaped",
+    ]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 import libvirt
@@ -368,7 +368,7 @@ class RemoteModuleOperationRuntime:
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
 
-    def _recovery_volumes(
+    def recovery_volumes(
         self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
     ) -> PreparedModuleVolumes:
         configured = self._volume_binding()
@@ -385,6 +385,11 @@ class RemoteModuleOperationRuntime:
                 category=ErrorCategory.CONFLICT,
             )
         return volumes
+
+    def _recovery_volumes(
+        self, operation: RemoteModuleOperationV1, recovery: RemoteModuleRecoveryRefV1
+    ) -> PreparedModuleVolumes:
+        return self.recovery_volumes(operation, recovery)
 
     def _appliance_request(
         self,
@@ -426,7 +431,7 @@ class RemoteModuleOperationRuntime:
         deadline: float,
     ) -> TeardownObservation:
         operation = await self.reopen_operation(recovery)
-        volumes = self._recovery_volumes(operation, recovery)
+        volumes = self.recovery_volumes(operation, recovery)
         request = self._appliance_request(operation, volumes, deadline)
         configured = self.appliance_execution
         assert configured is not None
@@ -466,7 +471,7 @@ class RemoteModuleOperationRuntime:
         if purpose == "scratch":
             await self._open_reap_evidence(recovery)
         operation = await self.reopen_operation(recovery)
-        volumes = self._recovery_volumes(operation, recovery)
+        volumes = self.recovery_volumes(operation, recovery)
         selected = volumes.source if purpose == "source" else volumes.scratch
         configured = self._volume_binding()
 
@@ -520,6 +525,28 @@ class RemoteModuleOperationRuntime:
 
         await executor.run(create)
 
+    async def reap_state(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> Literal["absent", "reaping", "reaped"]:
+        """Read only exact whole-name journal markers backed by matching durable evidence."""
+        configured = self._volume_binding()
+
+        def present(state: str) -> bool:
+            pool = configured.storage.storagePoolLookupByName(configured.pool_name)
+            try:
+                pool.storageVolLookupByName(self._marker_name(recovery, state))
+                return True
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    return False
+                raise
+
+        reaping, reaped = await executor.run(lambda: (present("reaping"), present("reaped")))
+        if not reaping and not reaped:
+            return "absent"
+        await self._evidence(recovery)
+        return "reaped" if reaped else "reaping"
+
     async def record_reaping(
         self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
     ) -> None:
@@ -540,7 +567,7 @@ class RemoteModuleOperationRuntime:
         deadline: float,
     ) -> TeardownObservation:
         operation, _result = await self._evidence(recovery)
-        volumes = self._recovery_volumes(operation, recovery)
+        volumes = self.recovery_volumes(operation, recovery)
         configured = self.appliance_execution
         assert configured is not None
         request = self._appliance_request(operation, volumes, deadline)

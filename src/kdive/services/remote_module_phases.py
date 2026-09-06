@@ -144,3 +144,102 @@ async def capture_install_modules(
         )
     await runtime.delete_source(recovery, executor)
     return recovery
+
+
+def _restore_operation(
+    capture: RemoteModuleOperationV1, installed: RemoteModuleResultV1
+) -> RemoteModuleOperationV1:
+    if installed.phase != "installed" or installed.capture_state is None:
+        raise CategorizedError(
+            "remote module restore baseline is incomplete",
+            category=ErrorCategory.CONFLICT,
+        )
+    return RemoteModuleOperationV1(
+        operation="restore",
+        system_id=capture.system_id,
+        run_id=capture.run_id,
+        plan_identity=capture.plan_identity,
+        operation_nonce=capture.operation_nonce,
+        release=capture.release,
+        root_volume=capture.root_volume,
+        source_manifest=capture.source_manifest,
+        capture_manifest=installed.capture_manifest,
+        capture_absent=installed.capture_absent,
+        installed_manifest=installed.installed_manifest,
+        appliance_image_digest=capture.appliance_image_digest,
+    )
+
+
+async def restore_modules(
+    recovery: RemoteModuleRecoveryRefV2,
+    authority_reference: OpaqueProviderRef,
+    *,
+    runtime: ModuleOperationRuntime,
+    executor: RemoteModulePreparationExecutor,
+    deadline: float,
+) -> RemoteModuleResultV1:
+    """Resume restoration and retain reap evidence before deleting either volume."""
+    try:
+        recovery.validate_authority(authority_reference)
+    except ValueError as exc:
+        raise CategorizedError(
+            "remote module recovery authority differs",
+            category=ErrorCategory.CONFLICT,
+        ) from exc
+    reap_state = await runtime.reap_state(recovery, executor)
+    if reap_state != "absent":
+        result = await runtime.reopen_result(recovery)
+        if reap_state == "reaped":
+            return result
+        observation = await runtime.resume_reap(recovery, executor, deadline)
+        if not observation.complete:
+            raise CategorizedError(
+                "remote module restore cleanup incomplete",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        await runtime.delete_source(recovery, executor)
+        await runtime.delete_scratch(recovery, executor)
+        await runtime.record_reaped(recovery, executor)
+        return result
+
+    capture = await runtime.reopen_capture_operation(recovery)
+    installed = await runtime.reopen_installed_result(recovery)
+    _validate_result(capture, installed)
+    if (
+        identity_for(capture) != recovery.operation_identity
+        or identity_for(installed) != recovery.result_identity
+    ):
+        raise CategorizedError(
+            "remote module restore baseline identity differs",
+            category=ErrorCategory.CONFLICT,
+        )
+    restore = _restore_operation(capture, installed)
+    current_operation = await runtime.reopen_operation(recovery)
+    result = await runtime.reopen_result(recovery)
+    if current_operation not in {capture, restore}:
+        raise CategorizedError(
+            "remote module current operation differs from restore baseline",
+            category=ErrorCategory.CONFLICT,
+        )
+    _validate_result(current_operation, result)
+    if classify_phase("restore", result) == "restore":
+        result = await runtime.run(
+            restore, runtime.recovery_volumes(restore, recovery), executor, deadline
+        )
+        _validate_result(restore, result)
+    if classify_phase("restore", result) != "finish-restore":
+        raise CategorizedError(
+            "remote module restore did not reach durable restored phase",
+            category=ErrorCategory.CONFLICT,
+        )
+    observation = await runtime.teardown(recovery, executor, deadline)
+    if not observation.complete:
+        raise CategorizedError(
+            "remote module restore teardown incomplete",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    await runtime.record_reaping(recovery, executor)
+    await runtime.delete_source(recovery, executor)
+    await runtime.delete_scratch(recovery, executor)
+    await runtime.record_reaped(recovery, executor)
+    return result
