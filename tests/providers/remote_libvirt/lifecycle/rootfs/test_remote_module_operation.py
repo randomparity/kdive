@@ -769,6 +769,21 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
     executor = RemoteModulePreparationExecutor()
     asyncio.run(runtime.delete_scratch(recovery, executor))
     asyncio.run(runtime.delete_scratch(recovery, executor))
+    create_xml = storage.pool.createXML
+    failed_once = False
+
+    def fail_first_marker(xml: str, flags: int = 0):
+        nonlocal failed_once
+        if not failed_once and "reaping.journal" in xml:
+            failed_once = True
+            raise RuntimeError("marker create failed")
+        return create_xml(xml, flags)
+
+    cast(Any, storage.pool).createXML = fail_first_marker
+    with pytest.raises(RuntimeError, match="marker create failed"):
+        asyncio.run(runtime.record_reaping(recovery, executor))
+    assert "reap-open" in events
+    assert not any("reaping.journal" in name for name in storage.pool.volumes)
     asyncio.run(runtime.record_reaping(recovery, executor))
     restarted = replace(runtime)
     asyncio.run(restarted.record_reaping(recovery, executor))
