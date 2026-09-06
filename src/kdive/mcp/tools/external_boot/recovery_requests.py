@@ -356,16 +356,19 @@ async def _release_locked(
     """
     object_id = str(run.id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        dedup_key, metadata, replay = await recovery_request(
-            conn,
-            tool=RELEASE_TOOL,
-            object_key="run_id",
-            object_id=object_id,
-            arguments=(),
-            idempotency_key=idempotency_key,
-        )
-        if replay is not None:
-            return replay
+        dedup_key = ""
+        metadata = None
+        if idempotency_key is not None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RELEASE_TOOL,
+                object_key="run_id",
+                object_id=object_id,
+                arguments=(),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
         activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
         if activation is None:
             return _conflict(
@@ -374,6 +377,18 @@ async def _release_locked(
                 detail="no external-boot activation restricts this Run's System",
                 next_actions=["runs.get"],
             )
+        if idempotency_key is None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RELEASE_TOOL,
+                object_key="run_id",
+                object_id=object_id,
+                arguments=(),
+                idempotency_key=None,
+                scope_identity=str(activation.id),
+            )
+            if replay is not None:
+                return replay
         try:
             await check_external_boot_admission(
                 conn,
@@ -387,7 +402,7 @@ async def _release_locked(
         operation_identity = (
             "sha256:"
             + hashlib.sha256(
-                f"{activation.id}\0release\0{activation.plan_identity}".encode()
+                f"{activation.id}\0release\0{activation.plan_identity}\0{dedup_key}".encode()
             ).hexdigest()
         )
         job_ids = await _active_job_ids_for_system(conn, system_id)
@@ -549,16 +564,19 @@ async def _resolve_conflict_locked(
     """
     object_id = str(system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        dedup_key, metadata, replay = await recovery_request(
-            conn,
-            tool=RESOLVE_CONFLICT_TOOL,
-            object_key="system_id",
-            object_id=object_id,
-            arguments=(SUPPORTED_RESOLUTION_OPERATION, observed_identity),
-            idempotency_key=idempotency_key,
-        )
-        if replay is not None:
-            return replay
+        dedup_key = ""
+        metadata = None
+        if idempotency_key is not None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RESOLVE_CONFLICT_TOOL,
+                object_key="system_id",
+                object_id=object_id,
+                arguments=(SUPPORTED_RESOLUTION_OPERATION, observed_identity),
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
         activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
         if activation is None:
             return _conflict(
@@ -567,6 +585,18 @@ async def _resolve_conflict_locked(
                 detail="no external-boot activation restricts this System, so none is conflicted",
                 next_actions=["runs.get"],
             )
+        if idempotency_key is None:
+            dedup_key, metadata, replay = await recovery_request(
+                conn,
+                tool=RESOLVE_CONFLICT_TOOL,
+                object_key="system_id",
+                object_id=object_id,
+                arguments=(SUPPORTED_RESOLUTION_OPERATION, observed_identity),
+                idempotency_key=None,
+                scope_identity=str(activation.id),
+            )
+            if replay is not None:
+                return replay
         try:
             await check_external_boot_admission(
                 conn,
@@ -603,7 +633,10 @@ async def _resolve_conflict_locked(
         operation_identity = (
             "sha256:"
             + hashlib.sha256(
-                (f"{activation.id}\0{SUPPORTED_RESOLUTION_OPERATION}\0{observed_identity}").encode()
+                (
+                    f"{activation.id}\0{SUPPORTED_RESOLUTION_OPERATION}\0{observed_identity}"
+                    f"\0{dedup_key}"
+                ).encode()
             ).hexdigest()
         )
         try:

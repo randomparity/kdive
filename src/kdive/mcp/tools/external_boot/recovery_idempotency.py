@@ -33,6 +33,7 @@ async def recovery_request(
     object_id: str,
     arguments: tuple[str, ...],
     idempotency_key: str | None,
+    scope_identity: str | None = None,
 ) -> tuple[str, RecoveryRequestV1 | None, ToolResponse | None]:
     """Call after authorization, under the System lock, before state-dependent admission."""
     if idempotency_key is not None and (not idempotency_key or len(idempotency_key.encode()) > 255):
@@ -47,7 +48,10 @@ async def recovery_request(
                 suggested_next_actions=[tool],
             ),
         )
-    encoded = json.dumps([tool, object_id, *arguments], separators=(",", ":")).encode()
+    encoded = json.dumps(
+        [tool, object_id, *arguments, *([scope_identity] if scope_identity is not None else [])],
+        separators=(",", ":"),
+    ).encode()
     identity = "sha256:" + hashlib.sha256(encoded).hexdigest()
     key_bytes = json.dumps([tool, object_id, idempotency_key or identity]).encode()
     dedup_key = "external-boot-request:" + hashlib.sha256(key_bytes).hexdigest()

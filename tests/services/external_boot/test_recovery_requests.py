@@ -26,6 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import DebugSessionState, ExternalBootActivationState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.external_boot import recovery_requests
+from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_request
 from kdive.mcp.tools.external_boot.recovery_requests import (
     request_release,
     resolve_conflict,
@@ -1035,6 +1036,66 @@ def test_release_key_replays_after_activation_state_changes(migrated_url: str) -
             )
         ).fetchone()
         assert row is not None and row[0]["readiness_deadline"] == deadline
+
+    _drive(migrated_url, _body)
+
+
+def test_release_distinct_keys_bind_distinct_authority_operations(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        seeded = await _seed(fixture.conn, state=_STATE.ACTIVE)
+        await _seed_retired_conflict_authority(fixture.conn, seeded)
+        await fixture.conn.execute("UPDATE jobs SET state = 'succeeded'")
+        first = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="release-first",
+        )
+        await fixture.conn.execute(
+            "UPDATE jobs SET state = 'succeeded' WHERE id = %s", (first.object_id,)
+        )
+        second = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="release-second",
+        )
+        rows = await (
+            await fixture.conn.execute(
+                "SELECT payload->'external_boot_authority_v1'->>'operation_identity' "
+                "FROM jobs WHERE id = ANY(%s)",
+                ([first.object_id, second.object_id],),
+            )
+        ).fetchall()
+        assert first.object_id != second.object_id
+        assert len({row[0] for row in rows}) == 2
+
+    _drive(migrated_url, _body)
+
+
+def test_omitted_key_is_scoped_to_the_selected_activation(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        first, _, _ = await recovery_request(
+            fixture.conn,
+            tool="runs.release_external_boot",
+            object_key="run_id",
+            object_id="run",
+            arguments=(),
+            idempotency_key=None,
+            scope_identity="activation-a",
+        )
+        second, _, _ = await recovery_request(
+            fixture.conn,
+            tool="runs.release_external_boot",
+            object_key="run_id",
+            object_id="run",
+            arguments=(),
+            idempotency_key=None,
+            scope_identity="activation-b",
+        )
+        assert first != second
 
     _drive(migrated_url, _body)
 
