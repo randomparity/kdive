@@ -113,6 +113,60 @@ BEGIN
 END
 $$;
 
+-- A repeat delivery of the same claimed job attempt resumes its already-current authority.
+DO $$
+DECLARE
+    v_definition text;
+    v_anchor text := E'    INSERT INTO public.external_boot_authority_counters ' ||
+        E'(system_id, last_generation)\n';
+    v_resume text :=
+        E'    SELECT a.id, a.generation, a.operation_digest\n' ||
+        E'    INTO v_authority_id, v_generation, v_operation_digest\n' ||
+        E'    FROM public.external_boot_authorities AS a\n' ||
+        E'    WHERE a.system_id = p_system_id AND a.state = ''current''\n' ||
+        E'      AND a.activation_id = p_activation_id AND a.run_id = p_run_id\n' ||
+        E'      AND a.plan_identity = p_plan_identity AND a.job_id = p_job_id\n' ||
+        E'      AND a.job_attempt = p_attempt AND a.purpose = p_purpose\n' ||
+        E'      AND a.provider_kind = p_provider_kind\n' ||
+        E'      AND a.authority_instance = p_authority_instance\n' ||
+        E'      AND a.worker_incarnation = v_incarnation AND a.operation = v_operation\n' ||
+        E'      AND a.operation_identity = p_operation_identity;\n' ||
+        E'    IF FOUND THEN\n' ||
+        E'        RETURN QUERY SELECT ''allocated''::text, v_authority_id, v_generation, ' ||
+        E'v_operation_digest;\n' ||
+        E'        RETURN;\n' ||
+        E'    END IF;\n' ||
+        E'    v_authority_id := gen_random_uuid();\n\n';
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.allocate_external_boot_authority(bytea,uuid,integer,uuid,uuid,uuid,text,text,text,text,text)'::regprocedure
+    ) INTO v_definition;
+    IF v_definition NOT LIKE '%' || v_anchor || '%' THEN
+        RAISE EXCEPTION 'external boot allocation counter shape changed';
+    END IF;
+    EXECUTE replace(v_definition, v_anchor, v_resume || v_anchor);
+END
+$$;
+
+-- The same exact current binding remains resolvable only so its anchored takeover ack can replay.
+DO $$
+DECLARE
+    v_definition text;
+    v_old text := E'AND a.id = p_authority_id AND a.generation = p_generation ' ||
+        E'AND a.state = ''allocating''';
+    v_new text := E'AND a.id = p_authority_id AND a.generation = p_generation ' ||
+        E'AND a.state IN (''allocating'', ''current'')';
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.resolve_allocating_external_boot_authority(text,uuid,bigint)'::regprocedure
+    ) INTO v_definition;
+    IF v_definition NOT LIKE '%' || v_old || '%' THEN
+        RAISE EXCEPTION 'external boot allocating resolver shape changed';
+    END IF;
+    EXECUTE replace(v_definition, v_old, v_new);
+END
+$$;
+
 CREATE FUNCTION public.commit_external_boot_preparation_result(
     p_credential_hash bytea, p_job_id uuid, p_attempt integer,
     p_authority_id uuid, p_generation bigint, p_operation text,

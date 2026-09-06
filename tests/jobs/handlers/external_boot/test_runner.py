@@ -38,10 +38,12 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.authority import allocate_authority
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.runner import (
     COMMITTABLE_ERROR_CATEGORIES,
     OperationContext,
+    _acknowledge,
     _render_cmdline,
     authority_ref,
     run_operation,
@@ -387,6 +389,7 @@ def test_real_authority_service_and_worker_sql_prepare_both_phases(
             adapter=LocalExternalBootAuthorityAdapter(cast(Any, provider)),
         )
         peer = AuthenticatedPeer(case.worker_incarnation)
+        interrupt_after_terminal = True
 
         class Authority:
             async def acknowledge(self, request: Any) -> Any:
@@ -430,13 +433,27 @@ def test_real_authority_service_and_worker_sql_prepare_both_phases(
             async def execute_preparation(
                 self, request: AuthorityPreparationMutationRequestV1
             ) -> AuthorityPreparationResponseV1:
-                return await service.execute_preparation(peer, request)
+                nonlocal interrupt_after_terminal
+                response = await service.execute_preparation(peer, request)
+                if interrupt_after_terminal:
+                    interrupt_after_terminal = False
+                    raise RuntimeError("worker stopped before preparation commit")
+                return response
 
         authority = Authority()
         ports = replace(
             _ports(case, resolver=resolver_for(vehicle), acknowledger=authority),
             preparation_executor=authority,
         )
+        with pytest.raises(RuntimeError, match="worker stopped before preparation commit"):
+            await _run(
+                worker,
+                case,
+                ports=ports,
+                require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+                call_port=lambda _context: None,
+            )
+        assert provider.preparation_mutations == {"materialize": 1, "prepare": 0}
         await _run(
             worker,
             case,
@@ -450,6 +467,19 @@ def test_real_authority_service_and_worker_sql_prepare_both_phases(
             (vehicle.activation_id,),
         )
         assert await row.fetchone() == ("prepared", True, True)
+        assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
+
+        await seed.execute("UPDATE jobs SET attempt=2 WHERE id=%s", (case.job_id,))
+        restarted_case = replace(case, attempt=2)
+        successor = await allocate_authority(
+            worker,
+            _job(restarted_case),
+            _marker(restarted_case),
+            incarnation_credential=ports.incarnation_credential,
+        )
+        assert successor is not None and successor.generation == 2
+        successor_ack = await _acknowledge(ports, _marker(restarted_case), successor)
+        assert successor_ack.generation == 2
         assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))

@@ -99,6 +99,26 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
             (authority_id,),
         )
 
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        resumed = worker.execute(
+            "SELECT status, authority_id, generation, operation_digest "
+            "FROM allocate_external_boot_authority(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                case.activation_id,
+                case.run_id,
+                case.system_id,
+                plan.identity,
+                case.purpose,
+                case.provider_kind,
+                case.authority_instance,
+                case.operation_identity,
+            ),
+        ).fetchone()
+    assert resumed == ("allocated", authority_id, generation, root_digest)
+
     with psycopg.connect(
         authority_role_dsns("kdive_provider_authority"), autocommit=True
     ) as provider:
