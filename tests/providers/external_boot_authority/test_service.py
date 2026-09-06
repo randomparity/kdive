@@ -84,6 +84,39 @@ async def test_takeover_anchors_without_provider_access(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_read_only_observation_requires_current_acknowledged_authority(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    records = list(repository.records)
+
+    observation = await service.observe_authority(peer, _mutation(takeover))
+
+    assert observation.category == "target"
+    assert adapter.calls == ["observe"]
+    assert repository.records == records
+
+
+@pytest.mark.anyio
+async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    repository.reject_resolution = 2
+
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.observe_authority(peer, _mutation(takeover))
+
+    assert adapter.calls == ["observe"]
+    assert [record.phase for record in repository.records] == [
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    ]
+
+
+@pytest.mark.anyio
 async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: Path) -> None:
     service, repository, _adapter, peer, takeover = _service(tmp_path)
     plan = external_boot_plan(takeover.system_id, takeover.run_id)

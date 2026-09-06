@@ -159,6 +159,15 @@ class AuthorityRequestSender:
         )
         return _decode_response(response, AuthorityObservationV1)
 
+    async def observe_authority(
+        self, request: AuthorityMutationRequestV1, *, deadline: float
+    ) -> AuthorityObservationV1:
+        """Read the current bound provider state without admitting a mutation."""
+        response = await self._transport_factory()._request_frame(
+            self._encode("observe-authority", request), deadline=deadline
+        )
+        return _decode_response(response, AuthorityObservationV1)
+
 
 def authority_sender_factory(
     secret_backend: SecretBackend, borrow: Callable[[], SecretStr]

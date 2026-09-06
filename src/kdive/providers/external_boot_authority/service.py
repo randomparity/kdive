@@ -1137,6 +1137,55 @@ class ExternalBootAuthorityService:
             self._ensure_rejection(request, error)
             raise
 
+    async def observe_authority(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        """Read one current authority-bound provider state without changing its journal or provider.
+
+        The acknowledgement and current authority are checked both before and after the provider
+        read.  A concurrent takeover therefore cannot turn an observation made under a stale
+        generation into an admission fact for a later mutation.
+        """
+        authenticated = self._require_peer(peer, request)
+        trusted = await self._repository.resolve_current_candidate(authenticated, request)
+        if trusted is None or not self._binding_matches(trusted, request):
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
+        try:
+            async with lane.lock:
+                if lane.failed:
+                    raise AuthorityServiceError("journal_conflict")
+                if lane.active is not None:
+                    raise AuthorityServiceError("superseded")
+                journal, records = self._lane_journal(request.system_id, lane)
+                acknowledgements = [
+                    record
+                    for record in records
+                    if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                    and record.generation == request.generation
+                ]
+                if not acknowledgements:
+                    raise AuthorityServiceError("superseded")
+                acknowledgement = acknowledgements[-1]
+                confirmed = await self._resolve_confirmed(authenticated, request, acknowledgement)
+                if confirmed is None or not self._binding_matches(confirmed, request):
+                    raise AuthorityServiceError("superseded")
+                try:
+                    observation = await self._adapter.observe(request)
+                except AuthorityServiceError:
+                    raise
+                except Exception:
+                    raise self._provider_error(request) from None
+                rechecked = await self._resolve_confirmed(authenticated, request, acknowledgement)
+                if rechecked is None or not self._binding_matches(rechecked, request):
+                    raise AuthorityServiceError("superseded")
+                return observation
+        except AuthorityServiceError as error:
+            self._ensure_rejection(request, error)
+            raise
+        finally:
+            self._release_lane(trusted.system_id, lane)
+
     async def execute_preparation(
         self,
         peer: AuthenticatedPeer | None,

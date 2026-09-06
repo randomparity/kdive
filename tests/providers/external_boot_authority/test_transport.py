@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from pydantic import SecretStr
 
-from kdive.providers.external_boot_authority import host, transport
+from kdive.providers.external_boot_authority import host, protocol, transport
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
     DeviceIdentityRequestV1,
@@ -104,6 +104,70 @@ def test_identity_dispatch_is_independent_of_mutation_service() -> None:
                 "version": "device-identity-v1",
             },
         }
+
+    asyncio.run(exercise())
+
+
+def test_observation_dispatches_to_the_read_only_service_method() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class ObservationService:
+        def __init__(self) -> None:
+            self.observations = 0
+
+        async def acknowledge_takeover(
+            self,
+            peer: AuthenticatedPeer,
+            request: protocol.AuthorityTakeoverRequestV1,
+        ) -> protocol.AuthorityAcknowledgementV1:
+            del peer, request
+            pytest.fail("an observation must not acknowledge a takeover")
+
+        async def observe_authority(
+            self,
+            peer: AuthenticatedPeer,
+            request: protocol.AuthorityMutationRequestV1,
+        ) -> protocol.AuthorityObservationV1:
+            assert peer.incarnation_id == "worker"
+            assert request.attempt_id
+            self.observations += 1
+            return protocol.AuthorityObservationV1(
+                observation_id=uuid4(),
+                category="target",
+                composite_state="sha256:" + "3" * 64,
+            )
+
+        async def execute_mutation(
+            self,
+            peer: AuthenticatedPeer,
+            request: protocol.AuthorityMutationRequestV1,
+        ) -> protocol.AuthorityObservationV1:
+            del peer, request
+            pytest.fail("an observation must not dispatch as a mutation")
+
+    async def exercise() -> None:
+        service = ObservationService()
+        request = _request() | {
+            "attempt_id": str(uuid4()),
+            "expected_source_identity": "source",
+            "intended_target_identity": "target",
+            "recovery_objects": [],
+        }
+        response = await transport._dispatch(
+            encode_request_envelope("observe-authority", request, "credential"),
+            authenticate,
+            service,
+        )
+        decoded = json.loads(response)
+        assert decoded["status"] == "ok"
+        assert decoded["value"] == {
+            "category": "target",
+            "composite_state": "sha256:" + "3" * 64,
+            "observation_id": decoded["value"]["observation_id"],
+            "schema": "external-boot-authority-v1",
+        }
+        assert service.observations == 1
 
     asyncio.run(exercise())
 

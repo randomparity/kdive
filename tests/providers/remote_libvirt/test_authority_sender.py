@@ -107,6 +107,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "health",
         "acknowledge_takeover",
         "execute_mutation",
+        "observe_authority",
         "resolve_device_identity",
     }
     assert all(not isinstance(getattr(sender, slot), SecretStr) for slot in sender.__slots__)
@@ -379,6 +380,52 @@ async def test_existing_operations_preserve_envelopes_and_typed_responses(mutati
     method = sender.execute_mutation if mutation else sender.acknowledge_takeover
     assert set(inspect.signature(method).parameters) == {"request", "deadline"}
     assert await method(request, deadline=321.0) == expected
+
+
+async def test_sender_encodes_read_only_observation_as_its_own_operation() -> None:
+    request = protocol.AuthorityMutationRequestV1.model_validate(
+        {
+            "authority_id": uuid4(),
+            "generation": 1,
+            "system_id": uuid4(),
+            "activation_id": uuid4(),
+            "run_id": uuid4(),
+            "plan_identity": "sha256:" + "a" * 64,
+            "purpose": "recover",
+            "operation": "recover",
+            "provider_kind": "remote-libvirt",
+            "authority_instance": "authority-a",
+            "operation_identity": "operation-a",
+            "operation_digest": "sha256:" + "b" * 64,
+            "attempt_id": uuid4(),
+            "expected_source_identity": "source",
+            "intended_target_identity": "target",
+            "recovery_objects": [],
+        }
+    )
+    expected = protocol.AuthorityObservationV1(
+        observation_id=uuid4(),
+        category="target",
+        composite_state="sha256:" + "c" * 64,
+    )
+
+    class Backend:
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            assert envelope == transport.encode_request_envelope(
+                "observe-authority",
+                request.model_dump(mode="json", by_alias=True),
+                "operation-test-incarnation",
+            )
+            assert deadline == 321.0
+            return json.dumps(
+                {"status": "ok", "value": expected.model_dump(mode="json", by_alias=True)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+
+    sender = _sender(Backend(), lambda: SecretStr("operation-test-incarnation"))
+    assert set(inspect.signature(sender.observe_authority).parameters) == {"request", "deadline"}
+    assert await sender.observe_authority(request, deadline=321.0) == expected
 
 
 @pytest.mark.parametrize("credential", ["", "a" * 4097])
