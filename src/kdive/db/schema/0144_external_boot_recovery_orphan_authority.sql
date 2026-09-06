@@ -318,7 +318,7 @@ BEGIN
     FROM public.systems AS system
     JOIN public.allocations AS allocation ON allocation.id = system.allocation_id
     JOIN public.resources AS resource ON resource.id = allocation.resource_id
-    WHERE system.id = v_authority.system_id;
+    WHERE system.id = v_authority.system_id AND resource.kind = v_authority.provider_kind;
     IF v_resource_id IS NULL THEN
         RAISE EXCEPTION 'cleanup quarantine resource is absent' USING ERRCODE = 'P0001';
     END IF;
