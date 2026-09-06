@@ -1,17 +1,25 @@
 """Installed local external-boot authority native carrier (#2151).
 
-This module intentionally stops before provider mutation until the installed runtime supplies the
-deterministic provider-effect barrier required by the takeover, restart, and journal-loss arms.
-Unit tests of its helpers are orchestration evidence only, never native acceptance.
+The normal arm uses only public MCP tools and real worker job polling. Deterministic interruption
+is a separate fault arm and does not gate this proof.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 import subprocess
 
 import pytest
 
-from tests.live_vm.installed_local_authority_support import load_config, require_fault_barrier
+from tests.integration.live_stack.conftest import require_issuer, require_stack
+from tests.integration.live_stack.spine import LiveStackClient, mint_role_token
+from tests.live_vm.installed_local_authority_support import (
+    ResourceLedger,
+    await_completed_operations,
+    drive_normal_operations,
+    load_config,
+)
 
 
 def _output(*argv: str) -> str:
@@ -20,8 +28,8 @@ def _output(*argv: str) -> str:
 
 
 @pytest.mark.live_vm
-def test_installed_local_authority_native_operations() -> None:
-    """Gate the real six-operation carrier on coherent install and deterministic fault control."""
+def test_installed_local_authority_normal_operations() -> None:
+    """Prove installed activate, release, and cleanup through MCP and the fixed worker."""
     config = load_config()
     if config is None:
         pytest.skip("installed local-authority carrier is not configured")
@@ -40,11 +48,45 @@ def test_installed_local_authority_native_operations() -> None:
     )
     assert running_workers, "native authority carrier requires an active fixed worker incarnation"
 
-    # This is a hard prerequisite, not a placeholder pass. Once the assembled runtime exposes the
-    # barrier, the carrier can deterministically drive and interrupt the six job operations without
-    # turning timing luck or a fake provider into acceptance evidence.
-    require_fault_barrier(config)
-    pytest.fail(
-        "installed provider-effect barrier exists but six-operation orchestration is not bound; "
-        "complete the public worker/MCP driver before scheduling native mutation"
+    issuer = require_issuer()
+    base_url = require_stack()
+    db_url = os.environ.get("KDIVE_DATABASE_URL")
+    assert db_url, "native authority carrier requires KDIVE_DATABASE_URL"
+    token = mint_role_token(
+        issuer,
+        project=config.project,
+        agent_session=config.ownership_prefix,
+        role="admin",
     )
+    ledger = ResourceLedger(config.ownership_prefix)
+
+    async def run() -> None:
+        client = LiveStackClient.over_http(base_url, token)
+        async with client:
+            primary: Exception | None = None
+            try:
+                _investigation_id, run_id = await drive_normal_operations(client, config, ledger)
+                await await_completed_operations(
+                    db_url, run_id, frozenset({"activate", "release", "cleanup"})
+                )
+            except Exception as exc:  # preserve the native failure while still attempting cleanup
+                primary = exc
+            cleanup_failures: list[Exception] = []
+            investigations = [r for r in ledger.resources if r.kind == "investigation"]
+            for resource in reversed(investigations):
+                try:
+                    closed = await client.call_tool(
+                        "investigations.close", investigation_id=resource.identity
+                    )
+                    assert not isinstance(closed, list)
+                    assert closed.status not in {"error", "failed"}
+                except Exception as exc:
+                    cleanup_failures.append(exc)
+            if primary is not None:
+                cleanup_failures.insert(0, primary)
+            if len(cleanup_failures) == 1:
+                raise cleanup_failures[0]
+            if cleanup_failures:
+                raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
+
+    asyncio.run(run())

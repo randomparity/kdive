@@ -8,7 +8,7 @@ reboots, or performs host-wide cleanup. Remote-libvirt and native ppc64le remain
 
 - Unset carrier configuration skips. Once its trigger is set, a missing companion, revision skew,
   inactive worker incarnation, unsafe proof file, or unavailable authority fails before mutation.
-- A mode-`0600` operator file supplies only references and IDs: expected installed SHA, MCP endpoint,
+- A mode-`0600` operator file supplies only references and IDs: expected installed SHA, project,
   authority service name, one pre-provisioned disposable System, and a unique ownership prefix.
   Credential contents are never accepted by the pytest process.
 - The carrier records every System, Run, activation, domain, volume, object key, journal lane, and
@@ -17,7 +17,8 @@ reboots, or performs host-wide cleanup. Remote-libvirt and native ppc64le remain
 - The six job operations are activate, recover, resolve-conflict, release, cleanup, and teardown.
   They travel through the running MCP/worker route and poll durable jobs; direct provider calls and
   fake ports do not count as native evidence.
-- Restart, journal-loss, unresolved-takeover, and stale-write arms require named deterministic
+- The ordinary activate then release/cleanup chain is independent of the fault arms. Restart,
+  journal-loss, unresolved-takeover, and stale-write arms require named deterministic
   barriers after the real provider effect and before terminal persistence. The assembled runtime
   currently exposes no such carrier control. Those arms must fail as unavailable when the native
   trigger is set; unit tests must not mock them green.
@@ -36,10 +37,11 @@ out of scope; the carrier detects their observable contract failures but cannot 
 1. Add a local-authority live configuration gate and immutable owned-resource ledger helper.
    Red: imports or validation tests fail because neither exists. Green:
    `uv run python -m pytest tests/live_vm/test_installed_local_authority_support.py -q`.
-2. Add the marked native carrier. It skips only when the trigger is absent, proves installed SHA,
-   empty ownership scope, active authority/worker health, then drives the six operations through the
-   public job path. Every created resource is recorded and exact cleanup runs in `finally`.
-   Deterministic fault arms remain a fail-loud prerequisite until the assembled runtime supplies
+2. Add the marked native carrier. It skips only when the trigger is absent, proves installed SHA
+   and active authority/worker health, then drives install, activate, and release through the public
+   job path. The Investigation and Run created by the carrier are recorded immediately; the exact
+   Investigation is closed after release. Recover, resolve-conflict, and teardown are separate
+   state/fault arms. Deterministic fault arms remain fail-loud until the assembled runtime supplies
    barriers; they are never represented by fake helper tests. Green (collection/non-live gate):
    `uv run python -m pytest tests/live_vm/test_installed_local_authority.py -q`.
 3. Update the live-testing runbook with the protected config shape, exact focused command, resource
