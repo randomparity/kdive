@@ -55,11 +55,13 @@ unknown/destructive `command` or a non-ready System is also a `configuration_err
 
 Inject an NMI to crash a ready System; drives ready->crashing->crashed.
 
-Requires admin + gate.
+Requires admin + gate. While an active external boot restricts the System, provide its
+owning `run_id`; another Run or no Run is refused.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `run_id` | string (nullable) | no | Optional Run bound to this System. Required while an active external boot is owned by a Run; it must name that owner. |
 | `system_id` | string | yes | The ready System to force-crash via NMI. |
 
 ## `control.power`
@@ -87,7 +89,9 @@ Watch a ready guest's serial console out-of-band for a kernel-crash signature
 (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on the first
 hit. The bound provider must support out-of-band crash-watch (today local-libvirt and
 remote-libvirt); a provider that does not is refused with a `capability_unsupported`
-`configuration_error`. Use this to catch a crash your own reproducer provokes: drive the
+`configuration_error`. While an active external boot restricts the System, provide its
+owning `run_id`; another Run or no Run is refused. Use this to catch a crash your own
+reproducer provokes: drive the
 repeat-until-crash loop over your root SSH, and this watches the console — which survives
 the panic that drops SSH. Requires contributor; enqueues a job and returns
 `{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
@@ -103,4 +107,5 @@ the `artifacts` tools. A non-ready System or a non-positive `deadline_s` is a
 |---|---|---|---|
 | `deadline_s` | number | no | Seconds to watch the guest's serial console before returning a 'not fired' verdict; defaults to 60 and is clamped to 300. Size it to the reproducer batch you are about to run; re-issue the watch for a longer campaign. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `run_id` | string (nullable) | no | Optional Run bound to this System. Required while an active external boot is owned by a Run; it must name that owner. |
 | `system_id` | string | yes | The ready System whose console to watch. The bound provider must support out-of-band crash-watch. |

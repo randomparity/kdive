@@ -1138,6 +1138,11 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF",
     }
+    assert all(
+        setting.processes == frozenset({"worker"})
+        for setting in authority_settings.SETTINGS
+        if setting.name.startswith("KDIVE_WORKER_")
+    )
 
 
 @pytest.mark.parametrize(

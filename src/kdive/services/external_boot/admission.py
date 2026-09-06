@@ -103,13 +103,12 @@ _ADMITTED: Mapping[ExternalBootActivationState, frozenset[ExternalBootOperation]
 }
 
 # Admitted only for the Run that owns the activation. Teardown and conflict resolution are
-# System-scoped by ADR-0583. `SYSTEM_WATCH_CRASH` and `FORCE_CRASH` are absent because their
-# handlers carry no caller Run to fence against — ADR-0583 asks for that modifier and this
-# matrix does not enforce it; the open deferral is
-# docs/debt/0004-force-crash-owning-run-modifier-unenforced.md, owned by #2118.
+# System-scoped by ADR-0583.
 _OWNING_RUN_SCOPED = frozenset(
     {
         ExternalBootOperation.EXTERNAL_BOOT_RELEASE,
+        ExternalBootOperation.FORCE_CRASH,
+        ExternalBootOperation.SYSTEM_WATCH_CRASH,
         ExternalBootOperation.CAPTURE_VMCORE,
         ExternalBootOperation.CAPTURE_TRAFFIC,
         ExternalBootOperation.DEBUG_ATTACH,
