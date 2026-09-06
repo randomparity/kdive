@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -172,6 +171,18 @@ async def prepare_remote_module_on_authority_host(
             raise ValueError("remote module verified attempt changed")
         check_deadline()
         indeterminate = False
+
+        async def wait_before_retry() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(0.1)
+                    return
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+                    continue
+
         while True:
             try:
                 transport_deadline = max(deadline, asyncio.get_running_loop().time() + 5.0)
@@ -190,14 +201,20 @@ async def prepare_remote_module_on_authority_host(
                 ):
                     raise
                 indeterminate = True
-                await asyncio.sleep(0.1)
+                await wait_before_retry()
             except TimeoutError:
                 indeterminate = True
-                await asyncio.sleep(0.1)
+                await wait_before_retry()
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                indeterminate = True
+                await wait_before_retry()
             except Exception:  # noqa: BLE001 - no later error proves an ambiguous dispatch stopped
                 if not indeterminate:
                     raise
-                await asyncio.sleep(0.1)
+                await wait_before_retry()
 
     async def commit_result(
         connection: AsyncConnection,
@@ -284,6 +301,18 @@ async def execute_remote_module_lifecycle_on_authority_host(
 
     async def observe_completion() -> RemoteModuleLifecycleResponseV1:
         indeterminate = False
+
+        async def wait_before_retry() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(0.1)
+                    return
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+                    continue
+
         while True:
             try:
                 transport_deadline = max(deadline, asyncio.get_running_loop().time() + 5.0)
@@ -301,25 +330,40 @@ async def execute_remote_module_lifecycle_on_authority_host(
                 ):
                     raise
                 indeterminate = True
-                await asyncio.sleep(0.1)
+                await wait_before_retry()
             except TimeoutError:
                 indeterminate = True
-                await asyncio.sleep(0.1)
+                await wait_before_retry()
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                indeterminate = True
+                await wait_before_retry()
             except Exception:  # noqa: BLE001 - no later error proves an ambiguous dispatch stopped
                 if not indeterminate:
                     raise
-                await asyncio.sleep(0.1)
+                await wait_before_retry()
 
     completion = asyncio.create_task(observe_completion())
-    try:
-        response = await asyncio.shield(completion)
-    except asyncio.CancelledError as cancelled:
-        while not completion.done():
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(completion)
+    caller = asyncio.current_task()
+    assert caller is not None
+    completed = asyncio.Event()
+    completion.add_done_callback(lambda _task: completed.set())
+    cancelled: asyncio.CancelledError | None = None
+    while not completed.is_set():
+        try:
+            await completed.wait()
+        except asyncio.CancelledError as error:
+            cancelled = cancelled or error
+            caller.uncancel()
+    if cancelled is not None or caller.cancelling() != 0:
         if not completion.cancelled():
             completion.exception()
-        raise cancelled from None
+        if cancelled is not None:
+            raise cancelled from None
+        raise asyncio.CancelledError from None
+    response = completion.result()
     if (
         response.action != action
         or response.recovery.system_id != str(receipt.system_id)

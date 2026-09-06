@@ -880,14 +880,9 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
             )
         )
         host_release = asyncio.Event()
-        host_completed = asyncio.Event()
         retry_refused = asyncio.Event()
-        host_task: asyncio.Task[None] | None = None
+        observer_task: asyncio.Task[object] | None = None
         calls = 0
-
-        async def run_host() -> None:
-            await host_release.wait()
-            host_completed.set()
 
         class Sender:
             async def open_remote_module_attempt(
@@ -901,14 +896,14 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
             async def execute_remote_module_preparation(
                 self, candidate: RemoteModuleVolumePreparationRequestV1, *, deadline: float
             ) -> RemoteModuleTerminalPreparationResponseV1:
-                nonlocal calls, host_task
+                nonlocal calls, observer_task
                 assert candidate == request
                 assert deadline > asyncio.get_running_loop().time()
+                observer_task = cast(asyncio.Task[object], asyncio.current_task())
                 calls += 1
                 if calls == 1:
-                    host_task = asyncio.create_task(run_host())
                     raise TimeoutError
-                if not host_completed.is_set():
+                if not host_release.is_set():
                     retry_refused.set()
                     raise CategorizedError(
                         "authority: provider-conflict", category=ErrorCategory.CONFLICT
@@ -936,6 +931,11 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
             )
             await asyncio.wait_for(retry_refused.wait(), 1)
             assert not task.done()
+            assert observer_task is not None
+            task.cancel()
+            observer_task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
             async with await psycopg.AsyncConnection.connect(migrated_url) as contender:
                 with pytest.raises(psycopg.errors.LockNotAvailable):
                     async with contender.transaction():
@@ -944,17 +944,14 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
                             contender, attempt, reason="restored"
                         )
             host_release.set()
-            assert await asyncio.wait_for(task, 2) == response
-            assert host_task is not None
-            await host_task
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
             async with await psycopg.AsyncConnection.connect(migrated_url) as contender:
                 assert await backing.discharge_mutation_obligation(
                     contender, attempt, reason="restored"
                 )
         finally:
             host_release.set()
-            if host_task is not None:
-                await host_task
             await worker.close()
             executor.shutdown()
 
@@ -1592,9 +1589,10 @@ async def test_worker_lifecycle_keeps_later_denial_indeterminate_until_matching_
 
 
 @pytest.mark.anyio
-async def test_worker_lifecycle_accepts_only_authenticated_terminal_failure_after_lost_reply() -> (
-    None
-):
+@pytest.mark.parametrize("cancelled", [False, True], ids=["active", "cancelled"])
+async def test_worker_lifecycle_accepts_only_authenticated_terminal_failure_after_lost_reply(
+    cancelled: bool,
+) -> None:
     preparation_request = _remote_preparation_request()
     preparation = ModuleAttemptPreparationRequestV1(
         module_attempt_obligation=ModuleAttemptObligationReceiptV1(
@@ -1603,40 +1601,65 @@ async def test_worker_lifecycle_accepts_only_authenticated_terminal_failure_afte
             operation_nonce=preparation_request.operation.operation_nonce,
         )
     )
+    retrying = asyncio.Event()
+    terminal_release = asyncio.Event()
+    observer_task: asyncio.Task[object] | None = None
     calls = 0
 
     class Sender:
         async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> None:
-            nonlocal calls
+            nonlocal calls, observer_task
+            observer_task = cast(asyncio.Task[object], asyncio.current_task())
             calls += 1
             if calls == 1:
                 raise TimeoutError
+            if cancelled and calls == 2:
+                retrying.set()
+                raise CategorizedError(
+                    "authority: superseded", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                )
+            if cancelled:
+                await terminal_release.wait()
             raise CategorizedError(
                 "authority: remote-module-failed",
                 category=ErrorCategory.CONFLICT,
                 details={"completion": "failed-after-mutation"},
             )
 
-    with pytest.raises(CategorizedError, match="remote-module-failed"):
-        await asyncio.wait_for(
-            execute_remote_module_lifecycle_on_authority_host(
-                connection=cast(Any, object()),
-                repository=cast(Any, object()),
-                sender=cast(Any, Sender()),
-                authority=_module_lifecycle_request(preparation_request).authority,
-                preparation=preparation,
-                worker_context=ModuleAttemptWorkerWriteContext(
-                    job_id=uuid4(),
-                    job_attempt=1,
-                    incarnation_credential=SecretStr("worker-credential"),
-                    preparation=preparation,
-                ),
-                action="restore",
-                deadline=asyncio.get_running_loop().time() + 10,
-            ),
-            timeout=1,
-        )
-    assert calls == 2
+    operation = execute_remote_module_lifecycle_on_authority_host(
+        connection=cast(Any, object()),
+        repository=cast(Any, object()),
+        sender=cast(Any, Sender()),
+        authority=_module_lifecycle_request(preparation_request).authority,
+        preparation=preparation,
+        worker_context=ModuleAttemptWorkerWriteContext(
+            job_id=uuid4(),
+            job_attempt=1,
+            incarnation_credential=SecretStr("worker-credential"),
+            preparation=preparation,
+        ),
+        action="restore",
+        deadline=asyncio.get_running_loop().time() + 10,
+    )
+    if not cancelled:
+        with pytest.raises(CategorizedError, match="remote-module-failed"):
+            await asyncio.wait_for(operation, timeout=1)
+        assert calls == 2
+        return
+
+    task = asyncio.create_task(operation)
+    await asyncio.wait_for(retrying.wait(), 1)
+    assert task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert observer_task is not None
+    observer_task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    terminal_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 1)
+    assert calls == 3
 
 
 @pytest.mark.anyio
@@ -1652,6 +1675,7 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
     response = _restored_response(preparation_request)
     second = asyncio.Event()
     release = asyncio.Event()
+    observer_task: asyncio.Task[object] | None = None
     calls = 0
 
     class Repository:
@@ -1665,7 +1689,8 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
         async def execute_remote_module_lifecycle(
             self, *_args: object, **_kwargs: object
         ) -> RemoteModuleLifecycleResponseV1:
-            nonlocal calls
+            nonlocal calls, observer_task
+            observer_task = cast(asyncio.Task[object], asyncio.current_task())
             calls += 1
             if calls == 1:
                 raise TimeoutError
@@ -1697,6 +1722,8 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
     await asyncio.sleep(0)
     assert not task.done()
     task.cancel()
+    assert observer_task is not None
+    observer_task.cancel()
     await asyncio.sleep(0)
     assert not task.done()
     release.set()

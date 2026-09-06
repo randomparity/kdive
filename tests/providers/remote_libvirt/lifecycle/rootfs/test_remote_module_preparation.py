@@ -232,6 +232,7 @@ async def test_verified_consumer_runs_inline_with_identity(
         _request: object,
         attempt: object,
         consumer: Any,
+        **_kwargs: object,
     ) -> object:
         assert attempt is expected_attempt
         return await consumer(attempt)
@@ -276,6 +277,7 @@ async def test_awaited_consumer_cancellation_retains_verifier_until_terminal(
         _request: object,
         attempt: object,
         consumer: Any,
+        **_kwargs: object,
     ) -> object:
         try:
             return await consumer(attempt)
@@ -333,6 +335,7 @@ async def test_cancellation_retains_verified_consumer_until_completion(
         _request: object,
         attempt: object,
         consumer: Any,
+        **_kwargs: object,
     ) -> object:
         nonlocal verifier_active
         verifier_active = True
@@ -389,6 +392,7 @@ async def test_expired_deadline_reaches_no_provider_operation(
         _request: object,
         attempt: object,
         consumer: Any,
+        **_kwargs: object,
     ) -> object:
         return await consumer(attempt)
 

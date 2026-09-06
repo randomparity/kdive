@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from typing import Protocol
@@ -84,15 +83,24 @@ async def prepare_verified_remote_module_attempt[ResultT](
     async def consume(attempt: ModuleAttempt) -> ResultT:
         if awaited_operation is not None:
             task = asyncio.create_task(awaited_operation(attempt, identity, check_deadline))
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError as cancelled:
-                while not task.done():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(task)
+            caller = asyncio.current_task()
+            assert caller is not None
+            completed = asyncio.Event()
+            task.add_done_callback(lambda _task: completed.set())
+            cancelled: asyncio.CancelledError | None = None
+            while not completed.is_set():
+                try:
+                    await completed.wait()
+                except asyncio.CancelledError as error:
+                    cancelled = cancelled or error
+                    caller.uncancel()
+            if cancelled is not None or caller.cancelling() != 0:
                 if not task.cancelled():
                     task.exception()
-                raise cancelled from None
+                if cancelled is not None:
+                    raise cancelled from None
+                raise asyncio.CancelledError from None
+            return task.result()
         assert operation is not None
         return await executor.run(lambda: operation(attempt, identity, check_deadline))
 
