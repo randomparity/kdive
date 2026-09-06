@@ -278,29 +278,24 @@ leaves `ready`, naming both; keep the section the System was provisioned with.
 
 ## `systems.resolve_external_boot_conflict`
 
-`partial`
+`implemented`
 
-**Maturity:** degraded_stub — Validates the caller's identity, role, and the System-wide external-boot admission matrix, then reports configuration_error with reason=recovery_executor_unavailable. No activation transition is committed and no recovery job is enqueued, because the external-boot recovery executor is not installed.
+Enqueue an idempotent recovery-conflict resolution job.
 
-**Promotion:** Promoted when the external-boot recovery job handler and worker claim path land (#2118).
-
-Validate a recovery-conflict resolution, then report the executor is missing.
-
-Today this call checks your role, the `operation` and `observed_identity` you passed,
-and the System-wide external-boot admission matrix, and then fails with
-`configuration_error` and `data.reason` of `recovery_executor_unavailable`: the
-external-boot recovery executor is not installed, so the conflict is untouched. Once
-promoted (#2118), the same call puts the recorded source state back and clears the
-conflict.
+This call checks your role, the `operation` and `observed_identity` you passed, the
+System-wide external-boot admission matrix, and the System's durable provider-authority
+binding. It returns a queued job. Repeating the exact System, operation, and observed
+identity returns that same job. The worker freshly observes provider state and changes
+the activation only when the identity still matches; otherwise the job fails and leaves
+the conflict and its evidence intact. Poll with `jobs.get` or `jobs.wait`.
 
 Requires admin on the System's project. Only an activation in `recovery_conflict` is
-admissible. While the executor is absent, a System stuck in `recovery_conflict` or
-`recovery_failed` is recovered with `systems.teardown`; `runs.get` reports the owning
-Run's current state.
+admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
+the recovery action when the conflict cannot be resolved.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `observed_identity` | string | yes | The composite state identity from your most recent systems.get, as 'sha256:<64 lowercase hex>'; validated for shape only today, because the compare-and-set that consumes it lands with the recovery executor. |
+| `observed_identity` | string | yes | The composite state identity from your most recent systems.get, as 'sha256:<64 lowercase hex>'. It is durably bound to the request; the worker must freshly observe and match this exact identity before changing state. |
 | `operation` | string | yes | The resolution to apply; the only accepted value is 'restore-recorded-source', which puts the recorded source state back. |
 | `system_id` | string | yes | The System whose external-boot recovery conflict to resolve. |
 
