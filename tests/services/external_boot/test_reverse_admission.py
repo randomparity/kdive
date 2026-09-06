@@ -158,6 +158,7 @@ async def _insert_run(
     investigation_id: UUID,
     system_id: str | None,
     state: RunState,
+    project: str = "proj",
 ) -> str:
     async with pool.connection() as conn:
         run = await RUNS.insert(
@@ -167,7 +168,7 @@ async def _insert_run(
                 created_at=_DT,
                 updated_at=_DT,
                 principal="user-1",
-                project="proj",
+                project=project,
                 investigation_id=investigation_id,
                 system_id=None if system_id is None else UUID(system_id),
                 target_kind=ResourceKind.LOCAL_LIBVIRT,
@@ -636,6 +637,51 @@ def test_crash_operations_deny_missing_or_nonowning_run_while_active(
     _assert_denied(nonowning, _ACTIVE_ACTIONS)
 
 
+@pytest.mark.parametrize("operation", ("force_crash", "watch_for_crash"))
+@pytest.mark.parametrize("reference", ("missing", "wrong_system", "foreign_project"))
+def test_supplied_crash_run_is_nonleaking_and_never_enqueues(
+    migrated_url: str, operation: str, reference: str
+) -> None:
+    async def invoke(pool: AsyncConnectionPool, system_id: str, run_id: str) -> ToolResponse:
+        if operation == "force_crash":
+            return await force_crash_system(
+                pool, _ctx(), system_id=system_id, run_id=run_id, resolver=_resolver()
+            )
+        return await watch_for_crash_system(
+            pool,
+            _ctx(),
+            system_id=system_id,
+            run_id=run_id,
+            deadline_s=5.0,
+            resolver=_resolver(),
+        )
+
+    async def _run() -> tuple[ToolResponse, int, int]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, _ = await _ready_system_with_run(conn_pool)
+            if reference == "missing":
+                run_id = str(uuid4())
+            elif reference == "wrong_system":
+                _, run_id = await _ready_system_with_run(conn_pool)
+            else:
+                investigation_id = await runs_support.seed_investigation(conn_pool, project="other")
+                run_id = await _insert_run(
+                    conn_pool,
+                    investigation_id=UUID(investigation_id),
+                    system_id=system_id,
+                    state=RunState.SUCCEEDED,
+                    project="other",
+                )
+            before = await _job_count(conn_pool)
+            response = await invoke(conn_pool, system_id, run_id)
+            return response, before, await _job_count(conn_pool)
+
+    response, before, after = asyncio.run(_run())
+    assert response.status == "error"
+    assert response.error_category == "configuration_error"
+    assert after == before
+
+
 def test_teardown_is_admitted_in_every_restricted_state(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
@@ -902,6 +948,55 @@ def test_a_boot_does_not_cross_a_restriction_committed_mid_flight(
     response, enqueued = asyncio.run(_run())
     _assert_denied(response, _ACTIVE_ACTIONS)
     assert enqueued == 0
+
+
+@pytest.mark.parametrize("operation", ("force_crash", "watch_for_crash"))
+def test_missing_crash_run_does_not_cross_active_activation_committed_mid_flight(
+    migrated_url: str, seeded_activation: SeedActivation, operation: str
+) -> None:
+    """The System lock makes a just-committed active owner visible before fresh enqueue."""
+    race_key = 0x2206_0583
+
+    async def invoke(pool: AsyncConnectionPool, system_id: str) -> ToolResponse:
+        if operation == "force_crash":
+            return await force_crash_system(pool, _ctx(), system_id=system_id, resolver=_resolver())
+        return await watch_for_crash_system(
+            pool,
+            _ctx(),
+            system_id=system_id,
+            deadline_s=5.0,
+            resolver=_resolver(),
+        )
+
+    async def _run() -> tuple[ToolResponse, int]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, owning_run_id = await _ready_system_with_run(conn_pool)
+            barrier_taken = asyncio.Event()
+
+            async def commit_active() -> None:
+                writer = await psycopg.AsyncConnection.connect(migrated_url)
+                async with writer, writer.transaction():
+                    await writer.execute("SELECT pg_advisory_xact_lock(%s)", (race_key,))
+                    barrier_taken.set()
+                    await seeded_activation(
+                        writer,
+                        state=_STATE.ACTIVE,
+                        system_id=UUID(system_id),
+                        run_id=UUID(owning_run_id),
+                    )
+
+            async def invoke_after_commit() -> ToolResponse:
+                await barrier_taken.wait()
+                async with conn_pool.connection() as conn:
+                    await conn.execute("SELECT pg_advisory_xact_lock(%s)", (race_key,))
+                return await invoke(conn_pool, system_id)
+
+            _, response = await asyncio.gather(commit_active(), invoke_after_commit())
+            return response, await _job_count(conn_pool)
+
+    response, jobs = asyncio.run(_run())
+    _assert_denied(response, _ACTIVE_ACTIONS)
+    assert jobs == 0
 
 
 _REPLAY_SNAP = "replay-snap"
