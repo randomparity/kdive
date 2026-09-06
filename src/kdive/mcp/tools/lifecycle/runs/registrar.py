@@ -19,12 +19,6 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
-from kdive.mcp.tools.external_boot.recovery_requests import (
-    ADMISSION_STUB_DETAIL as _ADMISSION_STUB_DETAIL,
-)
-from kdive.mcp.tools.external_boot.recovery_requests import (
-    degraded_stub_meta as _degraded_stub_meta,
-)
 from kdive.mcp.tools.external_boot.recovery_requests import request_release as _request_release
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
@@ -99,7 +93,7 @@ def register(
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool, resolver)
     _register_runs_boot(app, pool)
-    _register_runs_release_external_boot(app, pool)
+    _register_runs_release_external_boot(app, pool, resolver)
 
 
 def _complete_build_handlers() -> _CompleteBuildHandlers:
@@ -675,28 +669,27 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
         )
 
 
-def _register_runs_release_external_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _register_runs_release_external_boot(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="runs.release_external_boot",
         annotations=_docmeta.mutating(),
-        meta=_degraded_stub_meta(_ADMISSION_STUB_DETAIL),
+        meta={"maturity": "implemented"},
     )
     async def runs_release_external_boot(
         run_id: Annotated[
             str, Field(description="The Run whose external-boot activation to release.")
         ],
     ) -> ToolResponse:
-        """Validate a release of this Run's external boot, then report the executor is missing.
+        """Enqueue release of this Run's external boot and return a durable `job_id`.
 
-        Today this call checks your role and the System-wide external-boot admission matrix and
-        then fails with `configuration_error` and `data.reason` of
-        `recovery_executor_unavailable`: the external-boot recovery executor is not installed,
-        so no activation changed and the external boot is still in place. Once promoted
-        (#2118), the same call releases the activation and returns the System to ordinary use.
+        Repeating the exact request returns the same job. Poll it with `jobs.wait`; successful
+        release returns the System to ordinary use through the worker-owned recovery path.
 
         Requires contributor on the Run's project. Only an `active` activation owned by this
         Run is admissible, and a release is refused while a job or a debug session still holds
         the System. A System stuck in `recovery_conflict` or `recovery_failed` is recovered
         with `systems.teardown` instead; `runs.get` reports the current state either way.
         """
-        return await _request_release(pool, current_context(), run_id=run_id)
+        return await _request_release(pool, current_context(), run_id=run_id, resolver=resolver)
