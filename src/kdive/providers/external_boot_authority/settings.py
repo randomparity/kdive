@@ -37,9 +37,18 @@ def _positive_unix_id(raw: str) -> int:
 
 
 def _absolute_path(raw: str) -> Path:
+    if "\0" in raw:
+        raise ValueError("must not contain a NUL byte")
     value = Path(raw)
     if not value.is_absolute():
         raise ValueError("must be an absolute path")
+    return value
+
+
+def _authority_socket_path(raw: str) -> Path:
+    value = _absolute_path(raw)
+    if len(raw.encode()) > 107:
+        raise ValueError("must fit in a 107-byte AF_UNIX pathname")
     return value
 
 
@@ -136,6 +145,49 @@ AUTHORITY_NETWORK_PORT = Setting(
     help="Optional mutual-TLS TCP listener port; requires the network address setting.",
 )
 
+_WORKER = frozenset({"worker"})
+WORKER_AUTHORITY_INSTANCE = Setting(
+    name="KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
+    parse=_nonempty,
+    processes=_WORKER,
+    group="worker-authority-client",
+    help="Optional local authority instance for the worker-only AF_UNIX client route.",
+    suggest="set all worker authority client settings or leave all unset to disable the route",
+)
+WORKER_AUTHORITY_REQUEST_SOCKET = Setting(
+    name="KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
+    parse=_authority_socket_path,
+    processes=_WORKER,
+    group="worker-authority-client",
+    help="Optional fixed absolute AF_UNIX authority request socket for worker client calls.",
+    suggest="set all worker authority client settings or leave all unset to disable the route",
+)
+WORKER_AUTHORITY_SERVER_CA_REF = Setting(
+    name="KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF",
+    parse=_nonempty,
+    processes=_WORKER,
+    group="worker-authority-client",
+    help="Optional secret reference for the local authority server CA.",
+    suggest="set all worker authority client settings or leave all unset to disable the route",
+)
+WORKER_AUTHORITY_CLIENT_CERT_REF = Setting(
+    name="KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF",
+    parse=_nonempty,
+    processes=_WORKER,
+    group="worker-authority-client",
+    help="Optional secret reference for the worker local-authority TLS certificate.",
+    suggest="set all worker authority client settings or leave all unset to disable the route",
+)
+WORKER_AUTHORITY_CLIENT_KEY_REF = Setting(
+    name="KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF",
+    parse=_nonempty,
+    secret=True,
+    processes=_WORKER,
+    group="worker-authority-client",
+    help="Optional secret reference for the worker local-authority TLS private key.",
+    suggest="set all worker authority client settings or leave all unset to disable the route",
+)
+
 SETTINGS = [
     AUTHORITY_INSTANCE,
     AUTHORITY_DENIED_IDENTITIES,
@@ -147,4 +199,9 @@ SETTINGS = [
     AUTHORITY_PROVIDER_SOCKET,
     AUTHORITY_NETWORK_ADDRESS,
     AUTHORITY_NETWORK_PORT,
+    WORKER_AUTHORITY_INSTANCE,
+    WORKER_AUTHORITY_REQUEST_SOCKET,
+    WORKER_AUTHORITY_SERVER_CA_REF,
+    WORKER_AUTHORITY_CLIENT_CERT_REF,
+    WORKER_AUTHORITY_CLIENT_KEY_REF,
 ]

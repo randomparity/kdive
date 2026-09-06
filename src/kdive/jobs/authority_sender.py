@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 from pydantic import BaseModel, SecretStr
 
@@ -12,6 +13,10 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
     decode_device_identity_response,
+)
+from kdive.providers.external_boot_authority.local_client import (
+    _AuthorityUnixTransport,
+    local_authority_binding,
 )
 from kdive.providers.external_boot_authority.network_client import (
     _AuthorityNetworkTransport,
@@ -44,6 +49,10 @@ _PEER_REASONS = frozenset(
         "provider-failure",
     }
 )
+
+
+class _AuthorityTransport(Protocol):
+    def _request_frame(self, envelope: bytes, *, deadline: float) -> Awaitable[bytes]: ...
 
 
 def _failure(reason: str) -> CategorizedError:
@@ -83,7 +92,7 @@ class AuthorityRequestSender:
 
     def __init__(
         self,
-        transport_factory: Callable[[], _AuthorityNetworkTransport],
+        transport_factory: Callable[[], _AuthorityTransport],
         borrow: Callable[[], SecretStr],
     ) -> None:
         self._transport_factory = transport_factory
@@ -174,3 +183,16 @@ def authority_sender_factory(
         )
 
     return build
+
+
+def local_authority_sender_factory(
+    secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
+) -> AuthorityRequestSender | None:
+    """Build the configured worker-local sender without accepting a caller route."""
+    binding = local_authority_binding()
+    if binding is None:
+        return None
+    return AuthorityRequestSender(
+        lambda: _AuthorityUnixTransport(binding, _resolve_tls_material(binding, secret_backend)),
+        borrow,
+    )
