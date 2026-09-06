@@ -30,7 +30,6 @@ from kdive.mcp.tools.ops.security import breakglass
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
-from scripts.generate.gen_tool_reference import _maturity_detail
 from tests.mcp._seed import seed_run_on_system
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import provider_resolver
@@ -48,8 +47,6 @@ _ADMISSION_CONTRACTS = (_RELEASE, _RESOLVE)
 _UNAVAILABLE = "recovery_executor_unavailable"
 _RESOLUTION = "restore-recorded-source"
 _DIGEST = "sha256:" + "b" * 64
-# The first sentence has to say what the tool does today. These are the words that say it.
-_MISSING_EXECUTOR_WORDS = ("missing", "unavailable", "not installed")
 
 TOOLS = {tool.name: tool for tool in build_registered_tools()}
 
@@ -80,21 +77,10 @@ def test_only_the_orphan_repair_is_destructive() -> None:
     assert _ORPHAN in _docmeta.DESTRUCTIVE_TOOLS
 
 
-@pytest.mark.parametrize("name", (_ORPHAN,))
-def test_each_contract_declares_a_partial_maturity_the_generator_accepts(name: str) -> None:
-    """`just docs-check` fails on a malformed detail, so the generator's own check runs here."""
-    meta = TOOLS[name].meta or {}
-    assert meta.get("maturity") == "partial"
-    detail = _maturity_detail(name, "partial", dict(meta))
-    assert detail is not None
-    assert detail.reason == "degraded_stub"
-    assert _UNAVAILABLE in detail.detail
-    assert "#2118" in detail.promotion
-
-
-@pytest.mark.parametrize("name", (_RELEASE, _RESOLVE))
+@pytest.mark.parametrize("name", _CONTRACTS)
 def test_enqueued_recovery_contract_is_implemented(name: str) -> None:
     assert (TOOLS[name].meta or {}).get("maturity") == "implemented"
+    assert "maturity_detail" not in (TOOLS[name].meta or {})
 
 
 @pytest.mark.parametrize("name", _CONTRACTS)
@@ -113,17 +99,30 @@ def test_each_docstring_opens_on_what_the_tool_does_today(name: str) -> None:
     """An agent that reads only the first sentence must not believe the operation happened."""
     description = TOOLS[name].description or ""
     opening = description.split(".")[0].lower()
-    assert "validate" in opening, opening
-    assert "report" in opening, opening
-    assert any(word in opening for word in _MISSING_EXECUTOR_WORDS), opening
+    assert "queue" in opening, opening
+    assert "durable repair" in opening, opening
 
 
 @pytest.mark.parametrize("name", (_ORPHAN,))
-def test_each_docstring_discloses_the_refusal_and_names_the_promotion(name: str) -> None:
+def test_orphan_docstring_discloses_job_polling_deadline_and_retry(name: str) -> None:
     description = TOOLS[name].description or ""
-    assert _UNAVAILABLE in description
-    assert "configuration_error" in description
-    assert "#2118" in description
+    for contract in (
+        "object_id",
+        "job_id",
+        "jobs.wait",
+        "recovery_readiness_deadline",
+        "server-clock",
+        "five minutes",
+        "repair job",
+        "selected-object mutation",
+        "job fails",
+        "ops.resolve_recovery_orphan",
+        "retry",
+        "idempotency key",
+        "sibling",
+    ):
+        assert contract in description
+    assert _UNAVAILABLE not in description
 
 
 @pytest.mark.parametrize(

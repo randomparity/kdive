@@ -998,6 +998,7 @@ _JOB_HANDLE_TOOLS = frozenset(
         "control.capture_traffic",
         "control.diagnostic_sysrq",
         "control.watch_for_crash",
+        "ops.resolve_recovery_orphan",
         "runs.release_external_boot",
         "systems.resolve_external_boot_conflict",
         "systems.authorize_ssh_key",

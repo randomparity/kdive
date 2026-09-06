@@ -75,7 +75,7 @@
 | [`ops.diagnostics`](ops.md#opsdiagnostics) | `implemented` |
 | [`ops.export_cost_classes`](ops.md#opsexport_cost_classes) | `implemented` |
 | [`ops.export_systems_toml`](ops.md#opsexport_systems_toml) | `implemented` |
-| [`ops.force_release`](ops.md#opsforce_release) | `partial` |
+| [`ops.force_release`](ops.md#opsforce_release) | `implemented` |
 | [`ops.force_teardown`](ops.md#opsforce_teardown) | `implemented` |
 | [`ops.jobs_list`](ops.md#opsjobs_list) | `implemented` |
 | [`ops.reconcile_now`](ops.md#opsreconcile_now) | `implemented` |

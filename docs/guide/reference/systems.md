@@ -295,7 +295,7 @@ the recovery action when the conflict cannot be resolved.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `idempotency_key` | string (nullable) | no | Optional replay key, bounded to 255 UTF-8 bytes. |
+| `idempotency_key` | string (nullable) | no | Optional replay key, bounded to 255 bytes encoded as UTF-8. |
 | `observed_identity` | string | yes | The composite state identity from your most recent systems.get, as 'sha256:<64 lowercase hex>'. It is durably bound to the request; the worker must freshly observe and match this exact identity before changing state. |
 | `operation` | string | yes | The resolution to apply; the only accepted value is 'restore-recorded-source', which puts the recorded source state back. |
 | `system_id` | string | yes | The System whose external-boot recovery conflict to resolve. |
