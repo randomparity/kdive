@@ -45,6 +45,14 @@ from kdive.providers.external_boot_authority.transport import (
     encode_request_envelope,
 )
 from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.security.secrets.secrets import SecretBackend
 
 _PEER_REASONS = frozenset(
@@ -56,6 +64,8 @@ _PEER_REASONS = frozenset(
         "provider-conflict",
         "provider-not-configured",
         "provider-failure",
+        "remote-module-failed",
+        "remote-module-refused",
     }
 )
 
@@ -65,7 +75,16 @@ class _AuthorityTransport(Protocol):
 
 
 def _failure(reason: str) -> CategorizedError:
-    return CategorizedError(f"authority: {reason}", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+    category = {
+        "remote-module-failed": ErrorCategory.CONFLICT,
+        "remote-module-refused": ErrorCategory.CONFIGURATION_ERROR,
+    }.get(reason, ErrorCategory.INFRASTRUCTURE_FAILURE)
+    details: dict[str, object] | None = None
+    if reason == "remote-module-failed":
+        details = {"completion": "failed-after-mutation"}
+    elif reason == "remote-module-refused":
+        details = {"completion": "refused-before-mutation"}
+    return CategorizedError(f"authority: {reason}", category=category, details=details)
 
 
 def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Value:
@@ -192,6 +211,32 @@ class AuthorityRequestSender:
             self._encode("execute-teardown", request), deadline=deadline
         )
         return _decode_response(response, AuthorityTeardownResponseV1)
+
+    async def execute_remote_module_preparation(
+        self, request: RemoteModuleVolumePreparationRequestV1, *, deadline: float
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        """Run one closed remote-module preparation on the Resource-bound authority host."""
+        response = await self._transport_factory()._request_frame(
+            self._encode("execute-remote-module-preparation", request), deadline=deadline
+        )
+        return _decode_response(response, RemoteModuleTerminalPreparationResponseV1)
+
+    async def execute_remote_module_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1, *, deadline: float
+    ) -> RemoteModuleLifecycleResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("execute-remote-module-lifecycle", request), deadline=deadline
+        )
+        return _decode_response(response, RemoteModuleLifecycleResponseV1)
+
+    async def open_remote_module_attempt(
+        self, request: RemoteModulePreparationBeginRequestV1, *, deadline: float
+    ) -> RemoteModulePreparationBeginResponseV1:
+        """Anchor one PREPARE phase and return its authority-opened module-attempt receipt."""
+        response = await self._transport_factory()._request_frame(
+            self._encode("begin-remote-module-preparation", request), deadline=deadline
+        )
+        return _decode_response(response, RemoteModulePreparationBeginResponseV1)
 
     async def resolve_recovery_orphan(
         self, request: AuthorityRecoveryOrphanDispositionRequestV1, *, deadline: float

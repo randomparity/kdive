@@ -67,8 +67,10 @@ The runtime root must supply Python and appliance-owned `depmod`; the builder re
 includes no shell or socket module. Python runs with site initialization disabled, and the builder
 rejects `.pth`, `sitecustomize`, and `usercustomize` startup hooks. Every archive member has fixed
 ownership, modes, order, and
-timestamp, so identical inputs produce identical bytes. The output SHA-256 is the appliance image
-identity stored in operation and result documents.
+timestamp, so identical inputs produce identical bytes. The authority verifies both installed
+direct-kernel files against the canonical installed manifest. The installed manifest SHA-256 is
+the appliance identity stored in operation and result documents; the outer bundle SHA-256 remains
+the acquisition identity used by Ansible.
 
 The `remote_libvirt_module_appliance` Ansible role is wired into `deploy/ansible/site.yml` behind
 `remote_libvirt_module_appliance_enabled`. Enabling it requires an immutable URL and a lowercase

@@ -161,6 +161,18 @@
         {{ live_vm_host_bundle_clone is changed or live_vm_host_bundle_checkout is changed }}
   when: live_vm_repo_url.endswith('.bundle')
 
+- name: Stamp the exact checkout build identity
+  ansible.builtin.command:
+    argv:
+      - "{{ live_vm_venv }}/scripts/stamp-buildinfo.sh"
+      - "false"
+  environment:
+    KDIVE_BUILDINFO_COMMIT: "{{ live_vm_host_checkout.after[0:12] }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_buildinfo
+  changed_when: live_vm_host_checkout is changed
+
 - name: Build the venv against the SYSTEM interpreter (ABI-match python3-guestfs)  # noqa: no-handler
   # noqa no-handler: not a handler on purpose — the venv must exist before the libguestfs
   # symlink task later in THIS play, but handlers run post-play (too late on first provision).
@@ -1105,7 +1117,9 @@
     cmd: >-
       {{ live_vm_host_uv_bin }} pip install --python
       /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
-  when: live_vm_host_checkout is changed or live_vm_host_worker_witness_venv is changed
+  when: >-
+    live_vm_host_checkout is changed or live_vm_host_buildinfo is changed
+    or live_vm_host_worker_witness_venv is changed
   changed_when: true
 
 - name: Symlink the libguestfs binding into the lifecycle worker venv
@@ -1127,6 +1141,87 @@
     recurse: true
     owner: root
     group: root
+
+- name: Locate the lifecycle witness venv site-packages
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+      - -c
+      - "import sysconfig; print(sysconfig.get_path('purelib'))"
+  register: live_vm_host_worker_site_packages
+  changed_when: false
+
+- name: Allocate the fixed-worker capture manifest staging file
+  ansible.builtin.tempfile:
+    path: /var/tmp
+    prefix: .kdive-fixed-worker-capture-bootstrap-manifest.
+    state: file
+  register: live_vm_host_capture_manifest_staged
+  changed_when: false
+
+- name: Install the fixed-worker capture bootstrap attestation
+  block:
+    - name: Build the fixed-worker capture bootstrap manifest
+      ansible.builtin.command:
+        argv:
+          - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+          - "{{ live_vm_venv }}/scripts/generate/build-capture-bootstrap-manifest.py"
+          - build
+          - --interpreter
+          - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+          - --source-root
+          - "{{ live_vm_host_worker_site_packages.stdout }}"
+          - --output
+          - "{{ live_vm_host_capture_manifest_staged.path }}"
+      register: live_vm_host_capture_manifest_build
+      # The private staging file is deliberately fresh on every run; only installation below
+      # represents durable host drift.
+      changed_when: false
+
+    - name: Install the root-owned fixed-worker capture bootstrap manifest
+      ansible.builtin.command:
+        argv:
+          - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+          - "{{ live_vm_venv }}/scripts/generate/build-capture-bootstrap-manifest.py"
+          - install
+          - --staged
+          - "{{ live_vm_host_capture_manifest_staged.path }}"
+          - --destination
+          - /usr/share/kdive/capture-bootstrap-manifest.json
+      register: live_vm_host_capture_manifest_install
+      changed_when: live_vm_host_capture_manifest_install.stdout == 'changed'
+
+    - name: Verify the installed fixed-worker capture bootstrap manifest
+      ansible.builtin.command:
+        argv:
+          - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+          - "{{ live_vm_venv }}/scripts/generate/build-capture-bootstrap-manifest.py"
+          - verify
+          - --interpreter
+          - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+          - --source-root
+          - "{{ live_vm_host_worker_site_packages.stdout }}"
+          - --manifest
+          - /usr/share/kdive/capture-bootstrap-manifest.json
+      changed_when: false
+
+    - name: Verify capture readiness as the fixed worker identity
+      ansible.builtin.command:
+        argv:
+          - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+          - -c
+          - >-
+            from kdive.jobs.capture_operations.launcher import
+            verify_capture_bootstrap_manifest; verify_capture_bootstrap_manifest()
+      become: true
+      become_user: kdive-worker-1
+      changed_when: false
+  always:
+    - name: Remove the staged fixed-worker capture bootstrap manifest
+      ansible.builtin.file:
+        path: "{{ live_vm_host_capture_manifest_staged.path }}"
+        state: absent
+      changed_when: false
 
 - name: Install the lifecycle witness source revision
   ansible.builtin.copy:

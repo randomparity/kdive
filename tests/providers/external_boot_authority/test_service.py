@@ -10,11 +10,19 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.domain.remote_module_attempt_preparation import (
+    ModuleAttemptObligationReceiptV1,
+    ModuleAttemptPreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCleanupEvidenceContextV1,
+    AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
@@ -29,6 +37,17 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
     OpaqueProviderRef,
+)
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleOperationV1,
 )
 from tests.providers.external_boot_authority.service_support import (
     _DIGEST_B,
@@ -108,12 +127,70 @@ async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) 
 
     with pytest.raises(AuthorityServiceError, match="superseded"):
         await service.observe_authority(peer, _mutation(takeover))
-
     assert adapter.calls == ["observe"]
     assert [record.phase for record in repository.records] == [
         JournalPhase.WATERMARK_INSTALLED,
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("evidence_present", [True, False])
+async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
+    tmp_path: Path, evidence_present: bool
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(
+        update={
+            "purpose": "recover",
+            "operation": AuthorityOperation.RECOVER,
+            "provider_kind": "remote-libvirt",
+        }
+    )
+    repository = _Repository(peer, takeover)
+
+    class CleanupAdapter(_Adapter):
+        async def cleanup_subject(self, request: object) -> str:
+            self.calls.append("cleanup-subject")
+            return "0" * 32
+
+        async def commit_cleanup(
+            self, request: object, context: object, evidence: object
+        ) -> object:
+            self.calls.append("commit-cleanup")
+            assert evidence is repository.cleanup_evidence
+            return self._observation("target")
+
+    adapter = CleanupAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    request = _mutation(takeover)
+    if evidence_present:
+        repository.cleanup_evidence = AuthorityCleanupEvidenceContextV1(
+            operation_identity=request.operation_identity,
+            attempt_id=request.attempt_id,
+            operation_nonce="0" * 32,
+            cleanup_state="open",
+            recovery_reference_json="{}",
+        )
+
+    if evidence_present:
+        await service.execute_mutation(peer, request)
+    else:
+        with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+            await service.execute_mutation(peer, request)
+
+    assert repository.cleanup_nonces == ["0" * 32]
+    assert adapter.calls == (
+        ["cleanup-subject", "commit-cleanup", "observe"]
+        if evidence_present
+        else ["cleanup-subject"]
+    )
 
 
 @pytest.mark.anyio
@@ -237,6 +314,353 @@ async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: P
     assert response.journal_digest == record_digest(terminal)
     assert adapter.calls == ["commit:materialize", "observe"]
     assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt(
+    tmp_path: Path,
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(update={"provider_kind": "remote-libvirt"})
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+
+    class PreparationRepository(_Repository):
+        async def resolve_allocating(
+            self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
+        ) -> AuthorityBinding | None:
+            binding = await super().resolve_allocating(peer, request)
+            return replace(binding, preparation_plan=plan) if binding is not None else None
+
+    repository = PreparationRepository(peer, takeover)
+    repository.remote_attempt = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=takeover.system_id,
+            run_id=takeover.run_id,
+            operation_nonce="a" * 32,
+        )
+    )
+
+    class Host:
+        async def begin(
+            self,
+            authority: AuthorityPreparationMutationRequestV1,
+            preparation: ModuleAttemptPreparationRequestV1,
+            budget_seconds: int,
+        ) -> RemoteModulePreparationBeginResponseV1:
+            assert budget_seconds == 30
+            obligation = preparation.module_attempt_obligation
+            return RemoteModulePreparationBeginResponseV1(
+                preparation=preparation,
+                operation=RemoteModuleOperationV1(
+                    operation="capture_install",
+                    system_id=str(obligation.system_id),
+                    run_id=str(obligation.run_id),
+                    plan_identity=authority.plan_identity,
+                    operation_nonce=obligation.operation_nonce,
+                    release=authority.plan.module_obligation.release,
+                    root_volume={"key": "root", "identity": "sha256:" + "d" * 64},
+                    source_manifest=authority.plan.module_obligation.source_manifest,
+                    appliance_image_digest="sha256:" + "e" * 64,
+                ),
+            )
+
+        async def execute(self, request: object) -> object:
+            raise AssertionError(f"begin must not execute the provider host: {request!r}")
+
+    materialize = AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="materialize",
+        operation_identity="materialize-op",
+        operation_digest="sha256:" + "b" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+    materialization = external_boot_materialization(plan)
+    adapter = _PreparationAdapter(
+        ExternalBootPreparationObservation(
+            state="materialized",
+            binding=ExternalBootActivationBinding(
+                system_id=str(takeover.system_id),
+                run_id=str(takeover.run_id),
+                activation_id=str(takeover.activation_id),
+            ),
+            plan_identity=plan.identity,
+            authority=OpaqueProviderRef(ref="authority/materialize"),
+            operation_identity=materialize.operation_identity,
+            materialization=materialization,
+        )
+    )
+
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=cast(Any, adapter),
+        remote_module_host=cast(Any, Host()),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    await service.execute_preparation(peer, materialize)
+    request = AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="prepare",
+        operation_identity="prepare-op",
+        operation_digest="sha256:" + "c" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+
+    begin = RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
+    response = await service.open_remote_module_attempt(peer, begin)
+
+    assert response.preparation == repository.remote_attempt
+    assert [record.phase for record in repository.records][-2:] == [
+        JournalPhase.ADMITTED,
+        JournalPhase.MUTATION_STARTED,
+    ]
+    acknowledgement = repository.records[1]
+    assert repository.remote_attempt_calls == [
+        (acknowledgement.sequence, record_digest(acknowledgement), request.attempt_id.hex)
+    ]
+    assert await service.open_remote_module_attempt(peer, begin) == response
+    assert len(repository.remote_attempt_calls) == 2
+
+    successor = takeover.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=cast(Any, adapter),
+        remote_module_host=cast(Any, Host()),
+    )
+
+    acknowledgement = await asyncio.wait_for(
+        restarted.acknowledge_takeover(peer, successor), timeout=0.1
+    )
+
+    assert acknowledgement.generation == successor.generation
+
+
+@pytest.mark.anyio
+async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_path: Path) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(update={"provider_kind": "remote-libvirt"})
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository = _Repository(peer, takeover)
+    nonce = "a" * 32
+    repository.remote_attempt = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=takeover.system_id, run_id=takeover.run_id, operation_nonce=nonce
+        )
+    )
+    completed: list[RemoteModuleVolumePreparationRequestV1] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class Result:
+        def validate_terminal_for(self, operation: object, authority: object) -> None:
+            assert operation is remote.operation
+            assert authority is remote.authority
+
+    class Host:
+        async def begin(
+            self,
+            authority: AuthorityPreparationMutationRequestV1,
+            preparation: ModuleAttemptPreparationRequestV1,
+            budget_seconds: int,
+        ) -> RemoteModulePreparationBeginResponseV1:
+            assert authority == request
+            assert budget_seconds == 30
+            return RemoteModulePreparationBeginResponseV1(
+                preparation=preparation,
+                operation=remote.operation,
+            )
+
+        async def execute(
+            self, request: RemoteModuleVolumePreparationRequestV1
+        ) -> RemoteModuleTerminalPreparationResponseV1:
+            completed.append(request)
+            entered.set()
+            await release.wait()
+            return cast(RemoteModuleTerminalPreparationResponseV1, Result())
+
+        async def observe_lifecycle(
+            self, request: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1 | None:
+            raise AssertionError(f"unexpected lifecycle observation: {request!r}")
+
+        async def execute_lifecycle(
+            self, request: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1:
+            raise AssertionError(f"unexpected lifecycle request: {request!r}")
+
+    adapter = _Adapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        remote_module_host=Host(),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    request = AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="prepare",
+        operation_identity="prepare-op",
+        operation_digest="sha256:" + "c" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+    remote = RemoteModuleVolumePreparationRequestV1(
+        authority=request,
+        operation=RemoteModuleOperationV1(
+            operation="capture_install",
+            system_id=str(request.system_id),
+            run_id=str(request.run_id),
+            plan_identity=request.plan_identity,
+            operation_nonce=nonce,
+            release=request.plan.module_obligation.release,
+            root_volume={"key": "root", "identity": "sha256:" + "d" * 64},
+            source_manifest=request.plan.module_obligation.source_manifest,
+            appliance_image_digest="sha256:" + "e" * 64,
+        ),
+    )
+    await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
+    )
+
+    first = asyncio.create_task(service.execute_remote_module_preparation(peer, remote))
+    await entered.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_remote_module_preparation(peer, remote)
+    assert completed == [remote]
+    release.set()
+    for _ in range(20):
+        if repository.records[-1].phase is JournalPhase.TERMINAL:
+            break
+        await asyncio.sleep(0)
+    assert completed == [remote]
+    assert [record.phase for record in repository.records][-3:] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    assert adapter.calls == ["commit:prepare", "observe"]
+
+
+@pytest.mark.anyio
+async def test_remote_lifecycle_reopens_completion_only_for_current_authenticated_binding(
+    tmp_path: Path,
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(
+        update={
+            "provider_kind": "remote-libvirt",
+            "purpose": "recover",
+            "operation": AuthorityOperation.RECOVER,
+        }
+    )
+    repository = _Repository(peer, takeover)
+    request = AuthorityMutationRequestV1.model_validate(
+        _mutation(takeover).model_dump(mode="python", by_alias=True)
+        | {"purpose": "recover", "operation": "recover"}
+    )
+    remote = RemoteModuleLifecycleRequestV1(
+        authority=request,
+        action="restore",
+        budget_seconds=30,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    completed: RemoteModuleLifecycleResponseV1 | None = None
+
+    class Host:
+        async def begin(self, *_args: object) -> object:
+            raise AssertionError("unexpected begin")
+
+        async def execute(self, *_args: object) -> object:
+            raise AssertionError("unexpected preparation")
+
+        async def observe_lifecycle(
+            self, candidate: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1 | None:
+            assert candidate == remote
+            return completed
+
+        async def execute_lifecycle(
+            self, candidate: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1:
+            nonlocal calls, completed
+            assert candidate == remote
+            assert candidate.budget_seconds == 30
+            calls += 1
+            entered.set()
+            await release.wait()
+            completed = cast(RemoteModuleLifecycleResponseV1, object())
+            return completed
+
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_Adapter(),
+        remote_module_host=cast(Any, Host()),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    trusted = await repository.resolve_current_candidate(peer, request)
+    assert trusted is not None
+    assert service._binding_matches(trusted, request)
+    first = asyncio.create_task(service.execute_remote_module_lifecycle(peer, remote))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+    except TimeoutError:
+        await first
+        raise
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    second = asyncio.create_task(service.execute_remote_module_lifecycle(peer, remote))
+    await asyncio.sleep(0)
+    assert calls == 1
+    release.set()
+    assert await second is completed
+    assert calls == 1
+
+    repository.current = False
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_remote_module_lifecycle(peer, remote)
+    assert calls == 1
 
 
 @pytest.mark.anyio

@@ -23,10 +23,16 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     PresentComponentState,
 )
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MODULE_ARCHIVE_BYTES as MAX_ARCHIVE_BYTES,
+)
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MODULE_ENTRIES as MAX_ENTRIES,
+)
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MODULE_REGULAR_BYTES as MAX_REGULAR_BYTES,
+)
 
-MAX_ENTRIES = 200_000
-MAX_REGULAR_BYTES = 8_589_934_592
-MAX_ARCHIVE_BYTES = MAX_REGULAR_BYTES + MAX_ENTRIES * 4096
 MAX_OWNER_ID = 2_147_483_647
 _ARCHIVE_NAME = "modules.tar"
 _DOMAIN = b"kdive-recovery-module-tree-v1\0"

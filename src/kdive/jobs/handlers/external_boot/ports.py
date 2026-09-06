@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
+from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
@@ -100,6 +101,7 @@ class ExternalBootHandlerPorts:
     preparation_executor: ExternalBootAuthorityPreparationExecutor | None = None
     teardown_executor: ExternalBootAuthorityTeardownExecutor | None = None
     artifact_store: RetiredKeyBatchDeleter | None = None
+    pool: AsyncConnectionPool | None = None
     authority_client_factory: ExternalBootClientFactory | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     activation_readiness_timeout: timedelta = timedelta(minutes=5)

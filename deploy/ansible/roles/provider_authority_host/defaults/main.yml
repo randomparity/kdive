@@ -34,8 +34,8 @@ provider_authority_host_s3_region: us-east-1
 # when AWS_PROFILE is unset). Credential contents never enter Ansible facts or environment files.
 provider_authority_host_s3_credentials_source: ""
 provider_authority_host_packages:
-  Debian: [acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev, libkdumpfile-dev]
-  RedHat: [acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel, elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel]
+  Debian: [acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev, libkdumpfile-dev, e2fsprogs]
+  RedHat: [acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel, elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel, e2fsprogs]
 provider_authority_host_local_packages:
   Debian: [libguestfs-tools, python3-guestfs]
   RedHat: [libguestfs-tools-c, python3-libguestfs]

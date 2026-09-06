@@ -45,3 +45,20 @@ receives a worker database pool, obligation receipt, reusable assertion, caller-
 generic execution payload. The worker-side verifier retains its transaction and System advisory
 lock while awaiting this request. Provider-host blocking work uses the completion-owned remote
 module executor, so cancellation is not reported until the underlying mutation has resolved.
+The same completion-owned host call runs or adopts the fixed appliance, reopens its newline-framed
+scratch result, proves teardown, and durably records a typed terminal result and V2 recovery
+geometry before returning. A restarted host replays that exact result without a second provider
+mutation. Materialization also retains the exact plan alongside its receipt so later PREPARE can
+derive the target definition without caller reconstruction.
+
+Remote PREPARE is split into two closed authenticated authority operations. `begin` admits the
+exact current PREPARE request, anchors its `mutation-started` journal record, and then opens the
+0146 attempt obligation using that record's exact acknowledgement, attempt, identity, and digest.
+It returns the resulting receipt but performs no provider mutation. The worker uses the receipt
+nonce to form the fixed remote-module request and retains the ADR-0605 read-only verifier
+transaction and System lock while it awaits `execute`. `execute` accepts only the immutable
+begin-bound request, runs the configured provider-host operation, and finalizes that same PREPARE
+phase from its durable terminal response. Begin replay is exact-request idempotent; stale,
+malformed, receipt-mismatched, or nonce-mismatched calls do not start a mutation. A lost execute
+response or worker cancellation does not release verification before the host operation's durable
+completion, and replay returns that completion rather than repeating it.

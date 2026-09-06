@@ -26,6 +26,7 @@ from kdive.providers.external_boot_authority.device_identity import (
 from kdive.providers.external_boot_authority.network_client import _AuthorityNetworkTransport
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
+    AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
 )
@@ -40,6 +41,14 @@ from kdive.providers.remote_libvirt.config import (
     RemoteAuthorityBinding,
     RemoteLibvirtConfig,
     TlsCertRefs,
+)
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
@@ -166,6 +175,139 @@ async def test_sender_encodes_preparation_request_and_requires_closed_response()
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation() -> None:
+    authority = _preparation_request().model_copy(update={"operation": AuthorityOperation.PREPARE})
+    operation = {
+        "operation": "capture_install",
+        "system_id": str(authority.system_id),
+        "run_id": str(authority.run_id),
+        "plan_identity": authority.plan_identity,
+        "operation_nonce": authority.attempt_id.hex,
+        "release": authority.plan.module_obligation.release,
+        "root_volume": {"key": "root-volume", "identity": "sha256:" + "1" * 64},
+        "source_manifest": authority.plan.module_obligation.source_manifest,
+        "appliance_image_digest": "sha256:" + "2" * 64,
+    }
+    remote_request = RemoteModuleVolumePreparationRequestV1(
+        authority=authority, operation=operation
+    )
+    response = RemoteModuleTerminalPreparationResponseV1.model_validate(
+        {
+            "source": {
+                "pool": "pool",
+                "name": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
+                f"{authority.attempt_id.hex}-source.ext4",
+                "system_id": str(authority.system_id),
+                "run_id": str(authority.run_id),
+                "operation_nonce": authority.attempt_id.hex,
+                "purpose": "source",
+                "digest": authority.plan.module_obligation.source_manifest,
+                "capacity_bytes": 4096,
+            },
+            "scratch": {
+                "pool": "pool",
+                "name": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
+                f"{authority.attempt_id.hex}-scratch.ext4",
+                "system_id": str(authority.system_id),
+                "run_id": str(authority.run_id),
+                "operation_nonce": authority.attempt_id.hex,
+                "purpose": "scratch",
+                "digest": "sha256:" + "0" * 64,
+                "capacity_bytes": 4096,
+            },
+            "result": {
+                "status": "success",
+                "phase": "installed",
+                "system_id": str(authority.system_id),
+                "run_id": str(authority.run_id),
+                "plan_identity": authority.plan_identity,
+                "operation_nonce": authority.attempt_id.hex,
+                "appliance_image_digest": "sha256:" + "2" * 64,
+                "release": authority.plan.module_obligation.release,
+                "root_volume_key": "root-volume",
+                "root_volume_identity": "sha256:" + "1" * 64,
+                "source_manifest": authority.plan.module_obligation.source_manifest,
+                "installed_manifest": authority.plan.module_obligation.source_manifest,
+                "capture_absent": True,
+                "entry_count": 1,
+                "content_bytes": 1,
+            },
+            "recovery": {
+                "system_id": str(authority.system_id),
+                "run_id": str(authority.run_id),
+                "plan_identity": authority.plan_identity,
+                "operation_nonce": authority.attempt_id.hex,
+                "pool": {"ref": "pool"},
+                "root_volume": {"ref": "root-volume"},
+                "source_volume": {
+                    "ref": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
+                    f"{authority.attempt_id.hex}-source.ext4"
+                },
+                "scratch_volume": {
+                    "ref": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
+                    f"{authority.attempt_id.hex}-scratch.ext4"
+                },
+                "source_capacity_bytes": 4096,
+                "operation_identity": "sha256:" + "3" * 64,
+                "result_identity": "sha256:" + "4" * 64,
+                "installed_entry_count": 1,
+                "installed_content_bytes": 1,
+                "appliance_image_digest": "sha256:" + "2" * 64,
+                "authority_identity": "sha256:" + "5" * 64,
+            },
+        }
+    )
+
+    class ModuleService:
+        failed = False
+
+        async def open_remote_module_attempt(
+            self,
+            peer: AuthenticatedPeer,
+            begin: RemoteModulePreparationBeginRequestV1,
+        ) -> RemoteModulePreparationBeginResponseV1:
+            raise AssertionError(f"unexpected begin request from {peer}: {begin!r}")
+
+        async def execute_remote_module_preparation(
+            self, peer: AuthenticatedPeer, remote: RemoteModuleVolumePreparationRequestV1
+        ) -> RemoteModuleTerminalPreparationResponseV1:
+            assert peer == AuthenticatedPeer("worker")
+            assert remote == remote_request
+            if self.failed:
+                raise CategorizedError(
+                    "private provider failure",
+                    category=ErrorCategory.CONFLICT,
+                    details={"completion": "failed-after-mutation"},
+                )
+            return response
+
+        async def execute_remote_module_lifecycle(
+            self, peer: AuthenticatedPeer, remote: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1:
+            raise AssertionError(f"unexpected lifecycle request from {peer}: {remote!r}")
+
+    class Backend:
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            assert deadline == 123.0
+
+            async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+                return AuthenticatedPeer("worker")
+
+            return await transport._dispatch(
+                envelope, authenticate, None, remote_module_service=ModuleService()
+            )
+
+    sender = _sender(Backend(), lambda: SecretStr("remote-module-incarnation"))
+    assert (
+        await sender.execute_remote_module_preparation(remote_request, deadline=123.0) == response
+    )
+    ModuleService.failed = True
+    with pytest.raises(CategorizedError, match="remote-module-failed") as failed:
+        await sender.execute_remote_module_preparation(remote_request, deadline=123.0)
+    assert failed.value.category is ErrorCategory.CONFLICT
+    assert failed.value.details == {"completion": "failed-after-mutation"}
+
+
 async def test_sender_borrows_only_while_encoding_and_authenticates_active_incarnation() -> None:
     owner = SimpleNamespace(incarnation_credential=SecretStr("active-test-incarnation"))
     borrowed: list[SecretStr] = []
@@ -199,6 +341,9 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "execute_mutation",
         "execute_preparation",
         "execute_teardown",
+        "execute_remote_module_preparation",
+        "execute_remote_module_lifecycle",
+        "open_remote_module_attempt",
         "execute_conflict_resolution",
         "observe_authority",
         "observe_running",

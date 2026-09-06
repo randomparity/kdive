@@ -46,6 +46,7 @@ from kdive.providers.infra.reaping import (
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
 from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.ports.traffic import (
     CaptureExecutionRequest,
     LocalCaptureConfiguration,
@@ -70,18 +71,26 @@ _log = logging.getLogger(__name__)
 
 def build_authority_mutation_binding(
     provider_socket: Path,
+    object_store: ObjectStore | None = None,
 ) -> local_composition.LocalExternalBootAuthorityBinding | None:
     """Select the local provider and adapter sharing one authority lease scope."""
     if config.get(LIBVIRT_RECOVERY_ROOT) is None:
         return None
     return local_composition.build_local_external_boot_authority(
-        object_store_from_env(), provider_socket
+        object_store if object_store is not None else object_store_from_env(), provider_socket
     )
 
 
-def build_authority_mutation_adapter(provider_socket: Path) -> AuthorityMutationAdapter | None:
+def build_authority_artifact_stager(object_store: ObjectStore) -> ExternalBootArtifactStager:
+    """Build authority-host staging without exposing local provider implementation imports."""
+    return local_composition.build_external_boot_artifact_stager(object_store)
+
+
+def build_authority_mutation_adapter(
+    provider_socket: Path, object_store: ObjectStore | None = None
+) -> AuthorityMutationAdapter | None:
     """Build only the mutation adapter for callers that do not need private recovery objects."""
-    binding = build_authority_mutation_binding(provider_socket)
+    binding = build_authority_mutation_binding(provider_socket, object_store)
     return None if binding is None else binding.adapter
 
 

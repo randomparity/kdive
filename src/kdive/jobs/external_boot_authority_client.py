@@ -27,6 +27,14 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.ports.external_boot import RunningKernelObservation
 from kdive.providers.remote_libvirt.config import remote_config_for_resource
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.security.secrets.secrets import SecretBackend
 
 
@@ -82,6 +90,27 @@ class ExternalBootAuthorityClient:
     ) -> AuthorityTeardownResponseV1:
         self._validate(request)
         return await self.sender.execute_teardown(request, deadline=self.deadline)
+
+    async def open_remote_module_attempt(
+        self, request: RemoteModulePreparationBeginRequestV1, *, deadline: float
+    ) -> RemoteModulePreparationBeginResponseV1:
+        del deadline
+        self._validate(request.authority)
+        return await self.sender.open_remote_module_attempt(request, deadline=self.deadline)
+
+    async def execute_remote_module_preparation(
+        self, request: RemoteModuleVolumePreparationRequestV1, *, deadline: float
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        del deadline
+        self._validate(request.authority)
+        return await self.sender.execute_remote_module_preparation(request, deadline=self.deadline)
+
+    async def execute_remote_module_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1, *, deadline: float
+    ) -> RemoteModuleLifecycleResponseV1:
+        del deadline
+        self._validate(request.authority)
+        return await self.sender.execute_remote_module_lifecycle(request, deadline=self.deadline)
 
     async def execute_conflict_resolution(
         self, request: AuthorityConflictResolutionRequestV1

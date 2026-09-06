@@ -86,6 +86,9 @@
     - /var/lib/kdive/provider-authority/.ansible
     - /var/lib/kdive/provider-authority/.ansible/tmp
     - /var/lib/kdive/provider-authority/journal
+    - /var/lib/kdive/provider-authority/remote-module-preparations
+    - /var/lib/kdive/provider-authority/remote-module-preparations/evidence
+    - /var/lib/kdive/provider-authority/remote-module-preparations/work
     - /run/kdive/provider-authority
     - /run/kdive/provider-authority/request
     - /run/kdive/provider-authority/libvirt
@@ -112,6 +115,9 @@
     - {path: /var/lib/kdive/provider-authority/.ansible}
     - {path: /var/lib/kdive/provider-authority/.ansible/tmp}
     - {path: /var/lib/kdive/provider-authority/journal}
+    - {path: /var/lib/kdive/provider-authority/remote-module-preparations}
+    - {path: /var/lib/kdive/provider-authority/remote-module-preparations/evidence}
+    - {path: /var/lib/kdive/provider-authority/remote-module-preparations/work}
     - {path: /run/kdive/provider-authority, mode: "0710", group: kdive-provider-authority-client}
     - {path: /run/kdive/provider-authority/request, mode: "2750", group: kdive-provider-authority-client}
     - {path: /run/kdive/provider-authority/libvirt}
