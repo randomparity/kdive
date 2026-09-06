@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
+import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
@@ -31,8 +33,25 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation imp
     RemoteModuleOperationRuntime,
     RemoteModuleVolumePreparation,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+    BuiltSourceImage,
+    ModuleTreeEntry,
+    SourceFilesystemEvidence,
+)
+from kdive.services.remote_module_attempt_preparation import (
+    ModuleAttemptObligationVerificationError,
+    open_module_attempt_preparation,
+)
+from tests.db.external_boot_authority_support import _RoleDsns
+from tests.db.external_boot_authority_support import (
+    authority_role_dsns as authority_role_dsns,  # noqa: F401
+)
 from tests.db.test_remote_module_attempt_obligations import _seed
 from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_documents import _result
+from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_volumes import Conn
 
 
 def _recovery(result: RemoteModuleResultV1) -> RemoteModuleRecoveryRefV1:
@@ -301,3 +320,123 @@ async def test_prepare_passes_exact_attempt_and_caller_receipt_to_verifier(
         UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
     )
     assert len(volume_requests) == 1
+
+
+def test_real_receipt_guards_two_real_volume_creates(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Writer:
+        operation = b""
+
+        def build(self, operation: bytes, entries: tuple[ModuleTreeEntry, ...]) -> BuiltSourceImage:
+            self.operation = operation
+            path = tmp_path / "source.ext4"
+            path.write_bytes(b"image")
+            evidence = SourceFilesystemEvidence(operation, "sha256:" + "d" * 64, 1, 3)
+            return BuiltSourceImage(path, 5, evidence)
+
+        def inspect(self, path: Path) -> SourceFilesystemEvidence:
+            assert path.read_bytes() == b"image"
+            return SourceFilesystemEvidence(self.operation, "sha256:" + "d" * 64, 1, 3)
+
+    async def run() -> None:
+        repository = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            system_id, run_id = await _seed(admin)
+        operation = RemoteModuleOperationRuntime._operation_from_result(
+            RemoteModuleResultV1.model_validate(_result()).model_copy(
+                update={"system_id": str(system_id), "run_id": str(run_id)}
+            )
+        )
+        attempt = ModuleAttempt(system_id, run_id, operation.operation_nonce)
+        storage, executor = Conn(), RemoteModulePreparationExecutor()
+        started, release = threading.Event(), threading.Event()
+        create_xml = storage.pool.createXML
+
+        def blocking_create(xml: str, flags: int = 0):
+            volume = create_xml(xml, flags)
+            if len(storage.pool.volumes) == 1:
+                started.set()
+                release.wait()
+            return volume
+
+        cast(Any, storage.pool).createXML = blocking_create
+        monkeypatch.setattr(
+            "kdive.services.remote_module_volume_preparation.build_remote_device_identity_port",
+            lambda authority, _deadline: authority,
+        )
+        async with (
+            AsyncConnectionPool(
+                authority_role_dsns("kdive_server"), min_size=1, max_size=1
+            ) as server,
+            AsyncConnectionPool(
+                authority_role_dsns("kdive_worker"), min_size=1, max_size=1
+            ) as worker,
+        ):
+            receipt = await open_module_attempt_preparation(server, repository, attempt)
+            runtime = RemoteModuleOperationRuntime(
+                worker,
+                repository,
+                lambda _recovery: asyncio.sleep(0, result=None),
+                RemoteModuleVolumePreparation(
+                    storage,
+                    "systems",
+                    (ModuleTreeEntry("kernel.ko", 0o100644, content=b"abc"),),
+                    Writer(),
+                    lambda: cast(Any, SimpleNamespace()),
+                    tmp_path,
+                ),
+            )
+            foreign = receipt.model_copy(
+                update={
+                    "module_attempt_obligation": receipt.module_attempt_obligation.model_copy(
+                        update={"operation_nonce": "a" * 32}
+                    )
+                }
+            )
+            with pytest.raises(ModuleAttemptObligationVerificationError):
+                await runtime.prepare(foreign, operation, executor, cast(Any, object()), 10**12)
+            assert not storage.pool.volumes
+            absent_operation = operation.model_copy(update={"operation_nonce": "c" * 32})
+            absent_receipt = receipt.model_copy(
+                update={
+                    "module_attempt_obligation": receipt.module_attempt_obligation.model_copy(
+                        update={"operation_nonce": "c" * 32}
+                    )
+                }
+            )
+            with pytest.raises(ModuleAttemptObligationVerificationError):
+                await runtime.prepare(
+                    absent_receipt,
+                    absent_operation,
+                    executor,
+                    cast(Any, object()),
+                    10**12,
+                )
+            assert not storage.pool.volumes
+            task = asyncio.create_task(
+                runtime.prepare(receipt, operation, executor, cast(Any, object()), 10**12)
+            )
+            assert await asyncio.to_thread(started.wait, 3)
+            async with server.connection() as conn:
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '100ms'")
+                        await repository.discharge_mutation_obligation(
+                            conn, attempt, reason="restored"
+                        )
+            release.set()
+            await task
+            assert len(storage.pool.volumes) == 2
+            async with server.connection() as conn, conn.transaction():
+                await repository.discharge_mutation_obligation(conn, attempt, reason="restored")
+            before = len(storage.pool.volumes)
+            with pytest.raises(ModuleAttemptObligationVerificationError):
+                await runtime.prepare(receipt, operation, executor, cast(Any, object()), 10**12)
+            assert len(storage.pool.volumes) == before
+        executor.shutdown()
+
+    asyncio.run(run())
