@@ -165,17 +165,71 @@ def test_preparing_capacity_exhaustion_precedes_materialize_and_retries_after_re
             (blocker_vehicle.activation_id,),
         )
         repository = ExternalBootActivationRepository()
-        for _ in range(2):
-            status = await repository.mark_reservation_ready_for_job(
+        activation = await repository.get(worker, target.vehicle.activation_id)
+        assert activation is not None
+        await seed.execute(
+            "UPDATE jobs SET lease_expires_at=clock_timestamp() - interval '1 second' WHERE id=%s",
+            (target.job_id,),
+        )
+        async with worker.transaction():
+            stale = await repository.mark_reservation_ready_for_job(
                 worker,
                 credential_hash=hashlib.sha256(target.credential.encode()).digest(),
                 job_id=target.job_id,
                 job_attempt=target.attempt,
                 activation_id=target.vehicle.activation_id,
+                system_id=target.vehicle.system_id,
+                operation_owner_id=activation.operation_owner_id,
+                authority_generation=activation.authority_generation,
                 store_identity=target_store,
                 reserve_bytes=RESERVED_BYTES,
                 recovery_max_bytes=RESERVED_BYTES,
             )
+        assert stale.value == "superseded"
+        await seed.execute(
+            "UPDATE jobs SET lease_expires_at=clock_timestamp() + interval '5 minutes' WHERE id=%s",
+            (target.job_id,),
+        )
+        await seed.execute(
+            "UPDATE worker_incarnations SET state='terminated', "
+            "terminated_at=clock_timestamp(), outcome='killed' WHERE incarnation=%s",
+            (target.worker_incarnation,),
+        )
+        async with worker.transaction():
+            inactive = await repository.mark_reservation_ready_for_job(
+                worker,
+                credential_hash=hashlib.sha256(target.credential.encode()).digest(),
+                job_id=target.job_id,
+                job_attempt=target.attempt,
+                activation_id=target.vehicle.activation_id,
+                system_id=target.vehicle.system_id,
+                operation_owner_id=activation.operation_owner_id,
+                authority_generation=activation.authority_generation,
+                store_identity=target_store,
+                reserve_bytes=RESERVED_BYTES,
+                recovery_max_bytes=RESERVED_BYTES,
+            )
+        assert inactive.value == "superseded"
+        await seed.execute(
+            "UPDATE worker_incarnations SET state='active', terminated_at=NULL, outcome=NULL "
+            "WHERE incarnation=%s",
+            (target.worker_incarnation,),
+        )
+        for _ in range(2):
+            async with worker.transaction():
+                status = await repository.mark_reservation_ready_for_job(
+                    worker,
+                    credential_hash=hashlib.sha256(target.credential.encode()).digest(),
+                    job_id=target.job_id,
+                    job_attempt=target.attempt,
+                    activation_id=target.vehicle.activation_id,
+                    system_id=target.vehicle.system_id,
+                    operation_owner_id=activation.operation_owner_id,
+                    authority_generation=activation.authority_generation,
+                    store_identity=target_store,
+                    reserve_bytes=RESERVED_BYTES,
+                    recovery_max_bytes=RESERVED_BYTES,
+                )
             assert status.value == "applied"
         used = await (
             await seed.execute(

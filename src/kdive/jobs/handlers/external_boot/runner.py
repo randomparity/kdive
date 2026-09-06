@@ -261,18 +261,22 @@ async def _debit_preparing(
         or reservation.reserved_bytes != geometry.reserve_bytes
     ):
         raise _refuse("pending reservation does not match configured recovery geometry")
-    status = await _ACTIVATIONS.mark_reservation_ready_for_job(
-        conn,
-        credential_hash=hashlib.sha256(
-            ports.incarnation_credential.get_secret_value().encode()
-        ).digest(),
-        job_id=context.job.id,
-        job_attempt=context.job.attempt,
-        activation_id=context.activation.id,
-        store_identity=geometry.store_identity,
-        reserve_bytes=geometry.reserve_bytes,
-        recovery_max_bytes=geometry.max_bytes,
-    )
+    async with conn.transaction():
+        status = await _ACTIVATIONS.mark_reservation_ready_for_job(
+            conn,
+            credential_hash=hashlib.sha256(
+                ports.incarnation_credential.get_secret_value().encode()
+            ).digest(),
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            activation_id=context.activation.id,
+            system_id=context.activation.system_id,
+            operation_owner_id=context.activation.operation_owner_id,
+            authority_generation=context.activation.authority_generation,
+            store_identity=geometry.store_identity,
+            reserve_bytes=geometry.reserve_bytes,
+            recovery_max_bytes=geometry.max_bytes,
+        )
     if status.value == "capacity_exhausted":
         raise CategorizedError(
             "external-boot recovery capacity is exhausted",
