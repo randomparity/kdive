@@ -1,4 +1,4 @@
-"""Remote-libvirt provisioning XML rendering and tolerant host-XML parsing."""
+"""Remote-libvirt provisioning XML rendering and tolerant host-XML parsing (ADR-0598)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from kdive.providers.shared.libvirt_xml import (
     recorded_gdb_port_from_root,
     register_kdive_namespace,
     register_qemu_namespace,
+    remote_metadata_storage_identity,
 )
 from kdive.providers.shared.libvirt_xml import (
     recorded_gdb_port as recorded_gdb_port,  # re-exported facade for remote provisioning + tests
@@ -52,17 +53,51 @@ def supplied_base_volume_name(system_id: UUID | str) -> str:
     return f"kdive-{system_id}-base.qcow2"
 
 
-def render_volume_xml(name: str, *, capacity_bytes: int, backing_path: str) -> str:
+def render_volume_xml(
+    name: str, *, capacity_bytes: int, backing_path: str, owner_id: int, group_id: int
+) -> str:
     """Render the overlay volume XML: qcow2, backed by the base image volume."""
     volume = ET.Element("volume")
     ET.SubElement(volume, "name").text = name
     ET.SubElement(volume, "capacity").text = str(capacity_bytes)
     target = ET.SubElement(volume, "target")
     ET.SubElement(target, "format", type="qcow2")
+    permissions = ET.SubElement(target, "permissions")
+    ET.SubElement(permissions, "owner").text = str(owner_id)
+    ET.SubElement(permissions, "group").text = str(group_id)
+    ET.SubElement(permissions, "mode").text = "0600"
     backing = ET.SubElement(volume, "backingStore")
     ET.SubElement(backing, "path").text = backing_path
     ET.SubElement(backing, "format", type="qcow2")
     return ET.tostring(volume, encoding="unicode")
+
+
+def volume_backing_path(volume_xml: str) -> str | None:
+    """Return a volume's immediate backing path; reject malformed or nested metadata."""
+    try:
+        root = _safe_fromstring(volume_xml)
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise ValueError("malformed storage volume XML") from exc
+    backing = root.find("./backingStore")
+    if backing is None:
+        return None
+    path = backing.findtext("./path")
+    if not path or backing.find("./backingStore") is not None:
+        raise ValueError("unsupported storage volume backing metadata")
+    return path
+
+
+def volume_target_identity(volume_xml: str) -> tuple[int, int]:
+    """Return the numeric owner/group recorded for a storage volume target."""
+    try:
+        root = _safe_fromstring(volume_xml)
+        owner = int(root.findtext("./target/permissions/owner", ""))
+        group = int(root.findtext("./target/permissions/group", ""))
+    except (ET.ParseError, DefusedXmlException, ValueError) as exc:
+        raise ValueError("invalid storage volume target identity") from exc
+    if owner < 0 or group < 0:
+        raise ValueError("invalid storage volume target identity")
+    return owner, group
 
 
 def render_domain_xml(
@@ -71,6 +106,8 @@ def render_domain_xml(
     *,
     pool: str,
     volume: str,
+    overlay_path: str,
+    backing_path: str,
     gdb_addr: str,
     gdb_port: int,
     network: str = _DEFAULT_NETWORK,
@@ -111,9 +148,13 @@ def render_domain_xml(
     ET.SubElement(features, "acpi")
     ET.SubElement(features, "vmcoreinfo", state="on")
     devices = ET.SubElement(domain, "devices")
-    disk = ET.SubElement(devices, "disk", type="volume", device="disk")
+    disk = ET.SubElement(devices, "disk", type="file", device="disk")
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")
-    ET.SubElement(disk, "source", pool=pool, volume=volume)
+    ET.SubElement(disk, "source", file=overlay_path)
+    backing = ET.SubElement(disk, "backingStore", type="file")
+    ET.SubElement(backing, "format", type="qcow2")
+    ET.SubElement(backing, "source", file=backing_path)
+    ET.SubElement(backing, "backingStore")
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
     interface = ET.SubElement(devices, "interface", type="network")
     ET.SubElement(interface, "source", network=network)
@@ -125,7 +166,9 @@ def render_domain_xml(
     channel = ET.SubElement(devices, "channel", type="unix")
     ET.SubElement(channel, "target", type="virtio", name=_GUEST_AGENT_CHANNEL)
     metadata = ET.SubElement(domain, "metadata")
-    ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
+    ownership = ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}domain")
+    ET.SubElement(ownership, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
+    ET.SubElement(ownership, f"{{{KDIVE_METADATA_NS}}}storage", pool=pool, volume=volume)
     commandline = ET.SubElement(domain, f"{{{QEMU_NS}}}commandline")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-gdb")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=f"tcp:{gdb_addr}:{gdb_port}")
@@ -210,7 +253,8 @@ def disk_pool_strict(domain_xml: str, *, operation: str, domain: str) -> str | N
 
 
 def _disk_pool(root: ET.Element) -> str | None:
+    storage = remote_metadata_storage_identity(root)
+    if storage is not None:
+        return storage[0]
     source = root.find("./devices/disk/source")
-    if source is None:
-        return None
-    return source.get("pool")
+    return None if source is None else source.get("pool")

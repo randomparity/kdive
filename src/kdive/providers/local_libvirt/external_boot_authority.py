@@ -1,4 +1,4 @@
-"""Local-libvirt binding of the provider-host external-boot authority (ADR-0584).
+"""Local-libvirt binding of the provider-host external-boot authority (ADRs 0584, 0601).
 
 Maps the authority's ``observe``/``commit`` lanes onto the local six-port coordinator
 ``LocalLibvirtExternalBoot`` and, through it, onto the named local external-boot commit
@@ -129,18 +129,27 @@ class LocalExternalBootAuthorityAdapter:
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> None:
         """Remove a cleanup tombstone only after the authority anchored its terminal receipt."""
-        if request.operation is not AuthorityOperation.CLEANUP:
+        if request.operation not in _DELETING_OPERATIONS:
             return
         authority = _authority_ref(request)
         point = self._pending_cleanup_finalization.pop(request.operation_identity, None)
         if point is None:
-            # A restarted authority keeps the durable tombstone as its accounted-absence
-            # receipt. Core convergence does not depend on deleting that receipt.
+            point = await asyncio.to_thread(
+                self._ports.cleanup_receipt,
+                _activation_binding(request),
+                authority,
+            )
+        if point is None:
+            # A terminal replay after exact finalization has no durable point left to
+            # reconstruct and no provider state left to mutate.
             return
+        matched = self._require_matching_identities(request, point)
+        if not _ownership_is_proven(request, matched, require_named=True):
+            raise AuthorityServiceError("provider_conflict")
         await asyncio.to_thread(
             self._ports.finalize_cleanup_tombstone,
-            point,
-            _cleanup_proof(context, point),
+            matched,
+            _cleanup_proof(context, matched),
             authority,
         )
 
@@ -183,9 +192,9 @@ class LocalExternalBootAuthorityAdapter:
         binding = _activation_binding(request)
         authority = _authority_ref(request)
         point = self._resolve_point(
-            binding, authority, allow_cleanup_receipt=operation is AuthorityOperation.CLEANUP
+            binding, authority, allow_cleanup_receipt=operation in _DELETING_OPERATIONS
         )
-        if point is None and request.operation is AuthorityOperation.CLEANUP:
+        if point is None and request.operation in _DELETING_OPERATIONS:
             point = self._pending_cleanup_finalization.get(request.operation_identity)
         matched = self._require_matching_identities(request, point)
         if not _ownership_is_proven(
@@ -220,14 +229,9 @@ class LocalExternalBootAuthorityAdapter:
                 AuthorityOperation.RECOVERY_ATTEMPT,
             }:
                 self._ports.recover(point, authority)
-            elif operation is AuthorityOperation.CLEANUP:
+            elif operation in _DELETING_OPERATIONS:
                 if not self._ports.cleanup_is_accounted(point, authority):
                     self._pending_cleanup_finalization[context.operation_identity] = point
-                self._ports.cleanup(point, authority)
-            elif operation is AuthorityOperation.TEARDOWN:
-                # Teardown publishes a tombstone through the same primitive and still has no
-                # finalizer. That gap is recorded in ADR-0592 and routed to #2212; it is not
-                # this seam's to close.
                 self._ports.cleanup(point, authority)
             else:
                 # An operation added to _MUTATING_OPERATIONS without a mapping here must
@@ -245,12 +249,12 @@ class LocalExternalBootAuthorityAdapter:
         point = self._resolve_point(
             binding,
             authority,
-            allow_cleanup_receipt=request.operation is AuthorityOperation.CLEANUP,
+            allow_cleanup_receipt=request.operation in _DELETING_OPERATIONS,
         )
-        if point is None and request.operation is AuthorityOperation.CLEANUP:
+        if point is None and request.operation in _DELETING_OPERATIONS:
             point = self._pending_cleanup_finalization.get(request.operation_identity)
         if (
-            request.operation is AuthorityOperation.CLEANUP
+            request.operation in _DELETING_OPERATIONS
             and point is not None
             and self._ports.cleanup_is_accounted(point, authority)
         ):

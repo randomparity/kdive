@@ -66,6 +66,7 @@ _NEVER_ADMITTED = frozenset(
         _OP.SYSTEM_SNAPSHOT,
         _OP.SYSTEM_SYSRQ,
         _OP.SYSTEM_AUTHORIZE_SSH_KEY,
+        _OP.ALLOCATION_RELEASE,
     }
 )
 

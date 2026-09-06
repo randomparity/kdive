@@ -262,6 +262,29 @@ def _open_failure_reason(exc: OSError) -> str:
     return type(exc).__name__
 
 
+def _open_validated_console_log(path: Path, flags: int) -> int:
+    """Open the worker-owned console inode after applying the ADR-0576 identity guards."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW, _SHARED_LIBVIRT_FILE_MODE)
+    except OSError as open_err:
+        raise _console_identity_failure(path, _open_failure_reason(open_err)) from open_err
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _console_identity_failure(path, "not a regular file")
+        euid = os.geteuid()
+        if st.st_uid != euid:
+            raise _console_identity_failure(path, f"owned by uid {st.st_uid}, not {euid}")
+        if st.st_nlink != 1:
+            raise _console_identity_failure(path, f"carries {st.st_nlink} links")
+        os.fchmod(fd, _SHARED_LIBVIRT_FILE_MODE)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _prepare_console_log(path: Path) -> None:
     """Ensure ``path`` is a worker-owned regular file holding only the next boot's bytes.
 
@@ -283,21 +306,8 @@ def _prepare_console_log(path: Path) -> None:
         CategorizedError: ``PROVISIONING_FAILURE`` naming the path when the directory cannot
             be created, the file cannot be opened by this worker, or its identity fails.
     """
+    fd = _open_validated_console_log(path, os.O_WRONLY)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, _SHARED_LIBVIRT_FILE_MODE)
-    except OSError as open_err:
-        raise _console_identity_failure(path, _open_failure_reason(open_err)) from open_err
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise _console_identity_failure(path, "not a regular file")
-        euid = os.geteuid()
-        if st.st_uid != euid:
-            raise _console_identity_failure(path, f"owned by uid {st.st_uid}, not {euid}")
-        if st.st_nlink != 1:
-            raise _console_identity_failure(path, f"carries {st.st_nlink} links")
-        os.fchmod(fd, _SHARED_LIBVIRT_FILE_MODE)
         os.ftruncate(fd, 0)
     except OSError as io_err:
         raise _console_identity_failure(path, type(io_err).__name__) from io_err

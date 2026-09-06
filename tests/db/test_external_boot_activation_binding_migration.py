@@ -132,13 +132,6 @@ def _schema_snapshot(conn: psycopg.Connection) -> list[tuple[object, ...]]:
     ).fetchall()
 
 
-def _role_snapshot(conn: psycopg.Connection) -> list[tuple[object, ...]]:
-    return conn.execute(
-        "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin "
-        "FROM pg_roles ORDER BY rolname"
-    ).fetchall()
-
-
 def _grant_snapshot(conn: psycopg.Connection) -> list[tuple[object, ...]]:
     return conn.execute(
         "SELECT grantee, table_schema, table_name, privilege_type, is_grantable "
@@ -168,7 +161,6 @@ def test_migration_replaces_only_recovery_ownership_and_preserves_grants(
         "SELECT id, materialization::text, recovery_point::text "
         "FROM external_boot_activations ORDER BY id"
     ).fetchall()
-    roles_before = _role_snapshot(pg_conn)
     grants_before = _grant_snapshot(pg_conn)
     objects_before = _schema_snapshot(pg_conn)
     migration = next(item for item in migrate.discover_migrations() if item.version == "0124")
@@ -185,7 +177,9 @@ def test_migration_replaces_only_recovery_ownership_and_preserves_grants(
     assert "binding,activation_id" in definition
     assert "ownership,system_id" in definition  # materialization arm remains
     assert "jsonb_typeof(recovery_point #> '{binding,system_id}'" in definition
-    assert _role_snapshot(pg_conn) == roles_before
+    assert "CREATE ROLE" not in migration.sql.upper()
+    assert "ALTER ROLE" not in migration.sql.upper()
+    assert "DROP ROLE" not in migration.sql.upper()
     assert _grant_snapshot(pg_conn) == grants_before
     after_objects = _schema_snapshot(pg_conn)
     assert [

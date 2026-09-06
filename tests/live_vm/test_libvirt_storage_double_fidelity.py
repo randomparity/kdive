@@ -13,8 +13,8 @@ the real entry point. A later contributor reaching for a hand-built string reint
 the defect this file exists to catch.
 
 **The base document submits a non-default value for every platform-determined field compared.**
-The overlay comes from ``render_volume_xml``, which submits no ``type``, no ``unit``, and no
-``permissions``, so without the base document each compared field would carry libvirt's default
+The overlay comes from ``render_volume_xml``, which submits no ``type`` or ``unit``; without the
+base document each compared platform field would carry libvirt's default
 on both sides and a double that echoed its input would agree by accident. That accidental
 agreement is the exact failure class this issue exists to eliminate, so a comparison that cannot
 fail is not a proof.
@@ -22,6 +22,7 @@ fail is not a proof.
 
 from __future__ import annotations
 
+import os
 import xml.etree.ElementTree as ET
 from contextlib import suppress
 from pathlib import Path
@@ -149,7 +150,11 @@ def test_double_and_libvirt_agree_on_the_dir_pool_volume_readback(tmp_path: Path
         # Built by the production renderer, then given the noise libvirt discards.
         overlay_document = add_unmodelled_noise(
             render_volume_xml(
-                "overlay.qcow2", capacity_bytes=1048576, backing_path=real_base.path()
+                "overlay.qcow2",
+                capacity_bytes=1048576,
+                backing_path=real_base.path(),
+                owner_id=os.getuid(),
+                group_id=os.getgid(),
             )
         )
         real_overlay_desc = pool.createXML(overlay_document, 0).XMLDesc(0)

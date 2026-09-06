@@ -24,6 +24,7 @@ GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
     "control.force_crash": _OP.FORCE_CRASH,
     "control.power": _OP.SYSTEM_POWER,
     "control.watch_for_crash": _OP.SYSTEM_WATCH_CRASH,
+    "allocations.release": _OP.ALLOCATION_RELEASE,
     "debug.end_session": _OP.DEBUG_DETACH,
     "debug.start_session": _OP.DEBUG_ATTACH,
     "runs.bind": _OP.RUN_BIND,
@@ -47,11 +48,6 @@ GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
 UNGUARDED_TOOLS: dict[str, str] = {
     "accounting.set_budget": "accounting state; touches no System",
     "accounting.set_quota": "accounting state; touches no System",
-    "allocations.release": (
-        "unguarded: the release path reads no System and takes no teardown precondition, so "
-        "the matrix is not consulted on the Allocation wind-down; the gap is recorded in "
-        "docs/debt/0007-allocation-release-bypasses-the-external-boot-matrix.md"
-    ),
     "allocations.renew": "extends a lease; changes nothing about the guest",
     "allocations.request": "grants capacity before any System exists",
     "artifacts.create_investigation_upload": "mints an upload slot; touches no System",

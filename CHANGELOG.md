@@ -227,14 +227,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Confine the external-boot artifact root
 - Remove the activation recovery archive on cleanup
 - Build the external-boot session mechanisms
-- Compare external boot command lines
-- Return exact guest command line bytes
 - Define durable reentry receipts
 - Resume server preparation from receipts
 - Route lifecycle through authority
 - Persist retry deadlines
 - Terminalize expired retries
 - Persist external boot operation receipts
+- Recover stranded external boots
+- Compare external boot command lines
+- Return exact guest command line bytes
+- Inspect module attachments
+- Anchor external boot readiness
+- Verify committed module attempt intent
+- Bind authority routes to resources
+- Add an authenticated network listener
+- Add a resource-bound network client
+- Compose worker authority routes
+- Deploy authority network routes
+- Add device identity wire values
+- Serve bounded device identity lookups
+- Add authenticated identity port
+- Prepare attempt volumes
+- Retain preparation completion
 
 ### Changed
 
@@ -400,6 +414,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the lock-queue report once
 - Trim the docstring AGENTS.md already carries
 - Move shared boot doubles into support modules
+- Clarify discharge SQL inventory
 
 ### Documentation
 
@@ -1207,13 +1222,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record that readiness is not bound here
 - Say the recovery root stages boot payloads
 - State the recovery root's operator preconditions
-- Design command-line readiness proof
-- Ground readiness comparison in materialization
-- Resolve readiness design findings
-- Design authority failure diagnostics
-- Harden command-line diagnostic encoding
-- Order readiness redaction before encoding
-- Record overlapping secret redaction debt
 - Design idempotent re-entry
 - Record design blockers
 - Authorize provider receipts
@@ -1221,8 +1229,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve external boot CAS classification
 - Reconcile cleanup receipt decision
 - Satisfy decision record schema
+- Design reconciler recovery lanes
+- Close design review gaps
+- Design command-line readiness proof
+- Ground readiness comparison in materialization
+- Resolve readiness design findings
+- Design authority failure diagnostics
+- Harden command-line diagnostic encoding
+- Order readiness redaction before encoding
+- Record overlapping secret redaction debt
 - Correct release evidence commentary
 - Remove stale refusal wording
+- State job lookup budget
+- Design exact AppArmor backing grant
+- Close AppArmor design gaps
+- Close supplied retry bypass
+- Inspect refreshed remote backing
+- Require native refresh rejection proof
+- Bind live proof control channel
+- Register remote live SSH control
+- Design grouped ownership metadata
+- Close metadata design gaps
+- Fix metadata plan reference
+- Correct metadata test evidence
+- Design boot artifact name ownership
+- Correct artifact name bound
+- Register remote boot test inputs
+- Refresh configuration reference
+- Design restart-finalizable cleanup
+- Keep observations read-only
+- Correct cleanup finalization contract
+- Conform cleanup decision record
+- Define device identity port
+- Conform device identity record
+- Design external boot readiness window
+- Plan readiness window implementation
+- Correct readiness window design
+- Define readiness descriptor ownership
+- Define remote identity transport
+- Capture preparation identity deadline
+- Design module attempt obligation receipt
+- Define obligation receipt verification evidence
+- Fence module attempt authorization lifetime
+- Fence module obligation discharge
+- Bind verification to consumer lifetime
+- Accept module attempt receipt decision
+- Define resource-bound authority routes
+- Correct authority route ownership
+- Close authority route interfaces
+- Align authority credential ownership
+- Align authority host configuration errors
+- Configure denied authority identities
+- Defer route materialization to typed use
+- Consume resource-bound authority route
+- Bind identity transport to authority route
+- Bound identity lookup executor
+- Align module volumes with prerequisites
+- Bound module volume offload
+- Name verified preparation seam
 
 ### Fixed
 
@@ -1966,16 +2030,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the mechanism count and the lane's claim
 - Refuse an absent or symlinked recovery root
 - Set the artifact directory mode after creating it
-- Retain fault injection command line
-- Preserve notes bounds and diagnostic persistence
 - Classify losing authority commits
 - Close reviewed reentry gaps
 - Replay terminal authority receipts
 - Retain cleanup receipt through authority
 - Renew recovery deadline after timeout
 - Reconstruct cleanup tombstones
-- Recover from command line mismatch
+- Bound and validate repair sources
+- Validate successor suppression
 - Handle group-writable trees during setup manifest build
+- Retain fault injection command line
+- Preserve notes bounds and diagnostic persistence
+- Recover from command line mismatch
+- Close recovery review gaps
+- Bound authority job discovery
+- Isolate repair transactions
+- Count committed repair jobs
+- Make guest restorecon optional
+- Bind overlay backing chain
+- Build valid remote live profile
+- Scope AppArmor wildcard assertion
+- Close overlay review findings
+- Preserve overlay DAC identity
+- Render exact overlay file chain
+- Bind external boot overlay path
+- Group ownership metadata
+- Bind every disk identity
+- Prefer recorded cleanup pool
+- Encode boot artifact ownership
+- Preserve mismatched partials
+- Finalize durable cleanup receipts
+- Resolve attachment backing paths
+- Inspect nested storage sources
+- Bind owning root source
+- Retain owning domain activity
+- Normalize attachment paths
+- Compare physical attachment identity
+- Validate attachment identities
+- Identify block device aliases
+- Bound identity inspection
+- Gate legacy external boot domains
+- Detect console replacement races
+- Redact module obligation failures
+- Own authority Ansible temporary state
+- Consume canonical authority host facts
+- Verify installed authority source revisions
+- Retain interrupted authority firewall intent
+- Defer TLS resolution to typed calls
+- Preserve provider import boundary
+- Guarantee identity service cleanup
+- Keep preparation verification in services
+- Preserve preparation boundaries
+- Drain provider work through shutdown
+- Preserve queued cancellation
 
 ### Security
 

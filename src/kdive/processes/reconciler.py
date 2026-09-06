@@ -20,6 +20,7 @@ from kdive.config.core_settings import (
 )
 from kdive.db.pool import create_pool
 from kdive.processes.runtime import cancel, install_stop, run_process_runtime
+from kdive.providers.external_boot_authority.settings import AUTHORITY_INSTANCE
 from kdive.providers.infra.console_hosting import start_console_hosting
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ async def run_reconciler_body(
             telemetry,
             provider_composition,
             upload_store,
+            provider_resolver,
         )
     finally:
         await cancel(discovery_task)
@@ -100,6 +102,7 @@ async def run_reconciler_with_composition(
     telemetry: Telemetry,
     provider_composition: ProviderComposition,
     upload_store: ObjectStore,
+    provider_resolver: ProviderResolver,
 ) -> None:
     from kdive.observability.console_telemetry import ConsoleTelemetry
     from kdive.reconciler.loop import Reconciler
@@ -115,6 +118,7 @@ async def run_reconciler_with_composition(
         config=build_reconcile_config(
             provider_composition,
             upload_store=upload_store,
+            provider_resolver=provider_resolver,
             system_object_hosting_gate=console_hosting,
             heartbeat=heartbeat,
             telemetry=telemetry,
@@ -134,6 +138,7 @@ def build_reconcile_config(
     provider_composition: ProviderComposition,
     *,
     upload_store: ObjectStore,
+    provider_resolver: ProviderResolver,
     system_object_hosting_gate: ConsoleHosting | None,
     heartbeat: Heartbeat,
     telemetry: Telemetry,
@@ -148,6 +153,8 @@ def build_reconcile_config(
     return ReconcileConfig(
         upload_store=upload_store,
         image_store=upload_store,
+        provider_resolver=provider_resolver,
+        external_boot_authority_instance=config.get(AUTHORITY_INSTANCE),
         report_artifact_retention=timedelta(days=config.require(REPORT_ARTIFACT_RETENTION_DAYS)),
         investigation_cleanup_grace=timedelta(
             days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)

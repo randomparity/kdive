@@ -206,7 +206,12 @@ def test_parse_guest_arches_first_occurrence_of_a_duplicate_arch_wins() -> None:
 
 def test_parse_metadata_system_id_trims_text_and_rejects_empty_or_malformed() -> None:
     assert parse_metadata_system_id(f"<system xmlns='{KDIVE_METADATA_NS}'> sid </system>") == "sid"
+    assert parse_metadata_system_id("<domain><system> grouped </system><storage /></domain>") == (
+        "grouped"
+    )
     assert parse_metadata_system_id(f"<system xmlns='{KDIVE_METADATA_NS}' />") is None
+    assert parse_metadata_system_id("<domain><storage /></domain>") is None
+    assert parse_metadata_system_id("<foreign><system>not-metadata</system></foreign>") is None
     assert parse_metadata_system_id("<system") is None
 
 

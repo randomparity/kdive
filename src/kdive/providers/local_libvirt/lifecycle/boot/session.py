@@ -1,4 +1,4 @@
-"""Operation-scoped local-libvirt external-boot host capability (ADR-0587)."""
+"""Operation-scoped local-libvirt external-boot host capability (ADRs 0587, 0600)."""
 
 from __future__ import annotations
 
@@ -18,10 +18,15 @@ from dataclasses import dataclass
 from typing import BinaryIO, Literal, Protocol
 from uuid import UUID, uuid4
 
+import libvirt
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    ConsoleReadinessWindow,
+    ReadinessResult,
+)
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -151,7 +156,8 @@ class _Guest(Protocol):
 
 
 type OpenGuest = Callable[[], _Guest]
-type ReadinessProbe = Callable[[UUID], ReadinessResult]
+type ReadinessProbe = Callable[[UUID, ConsoleReadinessWindow], ReadinessResult]
+type PrepareConsole = Callable[[UUID], ConsoleReadinessWindow]
 type RunningObserver = Callable[[UUID, RunningDomain], RunningKernelObservation]
 type CleanupPayloads = Callable[[int, ExternalBootActivationBinding], None]
 
@@ -752,6 +758,7 @@ class _ConcreteSession:
         fsync_descriptor: Callable[[int], None],
         temporary_artifact_name: Callable[[str], str],
         worker_pid: int,
+        prepare_console: PrepareConsole,
         readiness: ReadinessProbe,
         observe_running: RunningObserver,
         cleanup_payloads: CleanupPayloads,
@@ -774,6 +781,7 @@ class _ConcreteSession:
         self._fsync_descriptor = fsync_descriptor
         self._temporary_artifact_name = temporary_artifact_name
         self._worker_pid = worker_pid
+        self._prepare_console = prepare_console
         self._readiness = readiness
         self._observe_running = observe_running
         self._cleanup_payloads = cleanup_payloads
@@ -781,6 +789,8 @@ class _ConcreteSession:
         self._lifecycle_lock = threading.RLock()
         self._guests: set[_GuestContext] = set()
         self._closed = False
+        self._readiness_window: ConsoleReadinessWindow | None = None
+        self._readiness_result: ReadinessResult | None = None
 
     def inspect_closed(self) -> ClosedDomainInspection:
         domain = self._require_open_domain()
@@ -833,11 +843,23 @@ class _ConcreteSession:
 
     def start(self) -> None:
         self._require_no_guest_context()
-        self._require_open_domain().create()
+        self.require_inactive()
+        self._start_domain()
 
     def readiness(self) -> ReadinessResult:
         self._require_open_domain()
-        return self._readiness(self._system_id)
+        if self._readiness_result is not None:
+            return self._readiness_result
+        window = self._readiness_window
+        if window is None:
+            raise RuntimeError("readiness requires a successful start")
+        try:
+            result = self._readiness(self._system_id, window)
+        finally:
+            window.close()
+            self._readiness_window = None
+        self._readiness_result = result
+        return result
 
     def observe_running(self) -> RunningKernelObservation:
         domain = self._require_open_domain()
@@ -849,7 +871,7 @@ class _ConcreteSession:
             self._require_no_guest_context()
         active = _active(domain)
         if prior == "running" and not active:
-            domain.create()
+            self._start_domain()
         elif prior == "inactive" and active:
             domain.destroy()
 
@@ -857,6 +879,19 @@ class _ConcreteSession:
         self.require_inactive()
         assert self._artifact_fd is not None
         self._cleanup_payloads(self._artifact_fd, self._binding)
+
+    def _start_domain(self) -> None:
+        prior, self._readiness_window = self._readiness_window, None
+        self._readiness_result = None
+        if prior is not None:
+            prior.close()
+        window = self._prepare_console(self._system_id)
+        try:
+            self._require_open_domain().create()
+        except BaseException:
+            window.close()
+            raise
+        self._readiness_window = window
 
     def close(self) -> None:
         with self._lifecycle_lock:
@@ -867,11 +902,13 @@ class _ConcreteSession:
             errors = [error for guest in guests for error in guest._poison()]
             self._guests.clear()
             artifact_fd, self._artifact_fd = self._artifact_fd, None
+            readiness_window, self._readiness_window = self._readiness_window, None
             overlay_fd = self._overlay.descriptor
             domain, self._domain = self._domain, None
             connection, self._connection = self._connection, None
             pin, self._pin = self._pin, None
             for closer in (
+                readiness_window.close if readiness_window is not None else None,
                 (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
                 lambda: self._close_overlay_descriptor(overlay_fd),
                 domain.free if domain is not None else None,
@@ -1059,6 +1096,7 @@ class LocalExternalBootSessionFactory:
         fsync_descriptor: Callable[[int], None] = os.fsync,
         temporary_artifact_name: Callable[[str], str] | None = None,
         worker_pid: int | None = None,
+        prepare_console: PrepareConsole | None = None,
         readiness: ReadinessProbe | None = None,
         observe_running: RunningObserver | None = None,
         cleanup_payloads: CleanupPayloads | None = None,
@@ -1078,6 +1116,7 @@ class LocalExternalBootSessionFactory:
         self._fsync_descriptor = fsync_descriptor
         self._temporary_artifact_name = temporary_artifact_name or _temporary_artifact_name
         self._worker_pid = worker_pid if worker_pid is not None else os.getpid()
+        self._prepare_console = prepare_console or _unconfigured_prepare_console
         self._readiness = readiness or _unconfigured_readiness
         self._observe_running = observe_running or _unconfigured_observation
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
@@ -1117,6 +1156,16 @@ class LocalExternalBootSessionFactory:
             expected_name = domain_name_for(system_id)
             domain = connection.lookupByName(expected_name)
             expected_overlay = overlay_path(system_id)
+            try:
+                inactive_xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+            except libvirt.libvirtError as exc:
+                raise CategorizedError(
+                    "local-libvirt external-boot inactive definition could not be read",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"system_id": str(system_id)},
+                ) from exc
+            inactive_root = _parse_owned_xml(inactive_xml, system_id, expected_overlay)
+            _require_guest_agent_channel(inactive_root, system_id)
             xml = domain.XMLDesc(0)
             _parse_owned_xml(xml, system_id, expected_overlay)
             overlay_fd = self._open_overlay(expected_overlay)
@@ -1144,6 +1193,7 @@ class LocalExternalBootSessionFactory:
                 fsync_descriptor=self._fsync_descriptor,
                 temporary_artifact_name=self._temporary_artifact_name,
                 worker_pid=self._worker_pid,
+                prepare_console=self._prepare_console,
                 readiness=self._readiness,
                 observe_running=self._observe_running,
                 cleanup_payloads=self._cleanup_payloads,
@@ -1211,7 +1261,11 @@ def _temporary_artifact_name(name: str) -> str:
     return f".{name}.kdive-{uuid4().hex}.tmp"
 
 
-def _unconfigured_readiness(_system_id: UUID) -> ReadinessResult:
+def _unconfigured_prepare_console(_system_id: UUID) -> ConsoleReadinessWindow:
+    raise RuntimeError("local external-boot console preparation is not configured")
+
+
+def _unconfigured_readiness(_system_id: UUID, _window: ConsoleReadinessWindow) -> ReadinessResult:
     raise RuntimeError("local external-boot readiness is not configured")
 
 
@@ -1221,6 +1275,18 @@ def _unconfigured_observation(_system_id: UUID, _domain: RunningDomain) -> Runni
 
 def _unconfigured_cleanup(_root_fd: int, _binding: ExternalBootActivationBinding) -> None:
     raise RuntimeError("local external-boot payload cleanup is not configured")
+
+
+def _require_guest_agent_channel(root: ET.Element, system_id: UUID) -> None:
+    targets = root.findall("./devices/channel/target[@name='org.qemu.guest_agent.0']")
+    if len(targets) != 1 or targets[0].get("type") != "virtio":
+        raise CategorizedError(
+            "local-libvirt external-boot requires reprovisioning: "
+            "the qemu-guest-agent channel is absent or malformed",
+            category=ErrorCategory.READINESS_FAILURE,
+            details={"system_id": str(system_id)},
+            terminal=True,
+        )
 
 
 def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Element:

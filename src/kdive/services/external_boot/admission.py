@@ -41,6 +41,7 @@ class ExternalBootOperation(StrEnum):
     DEBUG_DETACH = "debug_detach"
     EXTERNAL_BOOT_RELEASE = "external_boot_release"
     EXTERNAL_BOOT_RESOLVE_CONFLICT = "external_boot_resolve_conflict"
+    ALLOCATION_RELEASE = "allocation_release"
 
 
 class ExternalBootDenied(CategorizedError):

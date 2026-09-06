@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import Enum
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -55,6 +56,11 @@ LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
 LIVE_VM_REMOTE_URI_ENV = "KDIVE_LIVE_VM_REMOTE_URI"
 LIVE_VM_REMOTE_BASE_IMAGE_ENV = "KDIVE_LIVE_VM_REMOTE_BASE_IMAGE"
 LIVE_VM_REMOTE_RECONCILER_ENV = "KDIVE_LIVE_VM_REMOTE_RECONCILER"
+LIVE_VM_REMOTE_SSH_ENV = "KDIVE_LIVE_VM_REMOTE_SSH"
+LIVE_VM_REMOTE_KERNEL_ENV = "KDIVE_LIVE_VM_REMOTE_KERNEL"
+LIVE_VM_REMOTE_INITRD_ENV = "KDIVE_LIVE_VM_REMOTE_INITRD"
+LIVE_VM_REMOTE_ROOT_DEVICE_ENV = "KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE"
+LIVE_VM_REMOTE_GDB_ADDR_ENV = "KDIVE_LIVE_VM_REMOTE_GDB_ADDR"
 _REMOTE_TLS_SCHEME = "qemu+tls://"
 
 # The object-store env a provisioned-System live run needs. Verified against
@@ -128,6 +134,10 @@ class RemoteContract:
     s3_endpoint_url: str
     s3_bucket: str
     reconciler: str
+    kernel: Path
+    initrd: Path
+    root_device: str
+    gdb_addr: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +311,10 @@ def resolve_remote_contract() -> EnvResolution[RemoteContract]:
         LIVE_VM_REMOTE_BASE_IMAGE_ENV: base_image,
         LIVE_VM_REMOTE_RECONCILER_ENV: reconciler,
         **{name: os.environ.get(name) for name in _S3_REQUIRED_ENV},
+        LIVE_VM_REMOTE_KERNEL_ENV: os.environ.get(LIVE_VM_REMOTE_KERNEL_ENV),
+        LIVE_VM_REMOTE_INITRD_ENV: os.environ.get(LIVE_VM_REMOTE_INITRD_ENV),
+        LIVE_VM_REMOTE_ROOT_DEVICE_ENV: os.environ.get(LIVE_VM_REMOTE_ROOT_DEVICE_ENV),
+        LIVE_VM_REMOTE_GDB_ADDR_ENV: os.environ.get(LIVE_VM_REMOTE_GDB_ADDR_ENV),
     }
     missing = [name for name, value in companions.items() if not value]
     if missing:
@@ -315,6 +329,38 @@ def resolve_remote_contract() -> EnvResolution[RemoteContract]:
         )
     assert base_image is not None
     assert reconciler is not None
+    kernel = Path(companions[LIVE_VM_REMOTE_KERNEL_ENV] or "")
+    initrd = Path(companions[LIVE_VM_REMOTE_INITRD_ENV] or "")
+    for name, path in (
+        (LIVE_VM_REMOTE_KERNEL_ENV, kernel),
+        (LIVE_VM_REMOTE_INITRD_ENV, initrd),
+    ):
+        if not path.is_file():
+            return EnvResolution(
+                LiveVmEnvState.MISCONFIGURED,
+                reason=f"{name}={path} does not point at a readable file",
+            )
+    root_device = companions[LIVE_VM_REMOTE_ROOT_DEVICE_ENV] or ""
+    if (
+        not root_device.startswith("/dev/")
+        or root_device == "/dev/"
+        or any(character.isspace() for character in root_device)
+    ):
+        return EnvResolution(
+            LiveVmEnvState.MISCONFIGURED,
+            reason=(
+                f"{LIVE_VM_REMOTE_ROOT_DEVICE_ENV} must be an absolute /dev/ path "
+                "without whitespace"
+            ),
+        )
+    gdb_addr = companions[LIVE_VM_REMOTE_GDB_ADDR_ENV] or ""
+    try:
+        ip_address(gdb_addr)
+    except ValueError:
+        return EnvResolution(
+            LiveVmEnvState.MISCONFIGURED,
+            reason=f"{LIVE_VM_REMOTE_GDB_ADDR_ENV} must be an IP address literal",
+        )
     return EnvResolution(
         LiveVmEnvState.AVAILABLE,
         RemoteContract(
@@ -323,6 +369,10 @@ def resolve_remote_contract() -> EnvResolution[RemoteContract]:
             s3_endpoint_url=companions["KDIVE_S3_ENDPOINT_URL"] or "",
             s3_bucket=companions["KDIVE_S3_BUCKET"] or "",
             reconciler=reconciler,
+            kernel=kernel,
+            initrd=initrd,
+            root_device=root_device,
+            gdb_addr=gdb_addr,
         ),
     )
 
