@@ -124,6 +124,63 @@ def test_discharging_the_mutation_obligation_leaves_an_open_reap_obligation(
     asyncio.run(_run())
 
 
+def test_terminal_escape_discharges_only_open_mutations_for_one_system(
+    migrated_url: str,
+) -> None:
+    """Terminal escape preserves first reasons and independent journal retention."""
+
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            other_system_id, other_run_id = await _seed(conn)
+            first = _attempt(system_id, run_id, "1" * 32)
+            open_attempt = _attempt(system_id, run_id, "2" * 32)
+            journal_attempt = _attempt(system_id, run_id, "3" * 32)
+            other = _attempt(other_system_id, other_run_id)
+            for attempt in (first, open_attempt, journal_attempt, other):
+                await repo.open_mutation_obligation(conn, attempt)
+            await repo.discharge_mutation_obligation(conn, first, reason="restored")
+            await repo.record_terminal_evidence(conn, journal_attempt, _evidence(journal_attempt))
+            assert await repo.open_reap_obligation(conn, journal_attempt) is True
+
+            assert await repo.discharge_system_mutation_obligations(conn, system_id) == 2
+
+            rows = await (
+                await conn.execute(
+                    "SELECT operation_nonce, mutation_discharge_reason, reap_opened_at, "
+                    "reap_discharged_at FROM remote_module_attempt_obligations "
+                    "WHERE system_id = %s ORDER BY operation_nonce",
+                    (system_id,),
+                )
+            ).fetchall()
+            assert [(row[0], row[1]) for row in rows] == [
+                ("1" * 32, "restored"),
+                ("2" * 32, "terminal_escape"),
+                ("3" * 32, "terminal_escape"),
+            ]
+            assert rows[2][2] is not None and rows[2][3] is None
+            assert await repo.mutation_obligation_is_open(conn, other) is True
+
+    asyncio.run(_run())
+
+
+def test_terminal_escape_rolls_back_with_its_caller_transaction(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            with pytest.raises(RuntimeError, match="rollback"):
+                async with conn.transaction():
+                    assert await repo.discharge_system_mutation_obligations(conn, system_id) == 1
+                    raise RuntimeError("rollback")
+            assert await repo.mutation_obligation_is_open(conn, attempt) is True
+
+    asyncio.run(_run())
+
+
 def test_retained_read_excludes_discharged_attempts_and_keeps_the_others(
     migrated_url: str,
 ) -> None:

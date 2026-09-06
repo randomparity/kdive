@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 
 from kdive.artifacts.console.sidecar import sidecar_object_name
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import (
     SNAPSHOTS,
     SYSTEMS,
@@ -772,6 +773,15 @@ async def teardown_handler(
         if system is None:
             return None
         domain_name = system.domain_name or domain_name_for(system_id)
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    provisioner = binding.runtime.provisioner
+    await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
+    await asyncio.to_thread(provisioner.teardown, domain_name)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        if system is None:
+            return None
         if system.state is not SystemState.TORN_DOWN:
             old = system.state
             # The console_rotate teardown-race guard (console_rotate.py) relies on this terminal
@@ -786,11 +796,9 @@ async def teardown_handler(
                 transition=f"{old.value}->torn_down",
                 tool="systems.teardown",
             )
-    binding = await resolver.binding_for_system(conn, system_id)
-    set_provider_kind(binding.kind.value)
-    provisioner = binding.runtime.provisioner
-    await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
-    await asyncio.to_thread(provisioner.teardown, domain_name)
+        await RemoteModuleAttemptObligationRepository().discharge_system_mutation_obligations(
+            conn, system_id
+        )
     # The bootstrap key (ADR-0289, #963) is System-owned like the console/sysrq artifacts, but its
     # deletion is not best-effort: a stale row after teardown wrongly reports a System as
     # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.

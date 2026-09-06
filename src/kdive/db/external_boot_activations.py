@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.domain.capacity.state import ExternalBootActivationState, ensure_transition
 from kdive.domain.external_boot_activation import (
     ExternalBootActivation,
@@ -501,6 +502,9 @@ class ExternalBootActivationRepository:
                     ),
                 )
                 row = await cur.fetchone()
+            if row is not None and new_state is ExternalBootActivationState.ABANDONED:
+                obligations = RemoteModuleAttemptObligationRepository()
+                await obligations.discharge_system_mutation_obligations(conn, system_id)
         if row is None:
             return await self._miss(conn, activation_id)
         return CasResult(CasStatus.APPLIED, _activation(row))
@@ -832,6 +836,9 @@ class ExternalBootActivationRepository:
                     ),
                 )
                 updated = await cur.fetchone()
+            if updated is not None and new_state is ExternalBootActivationState.RECOVERY_FAILED:
+                obligations = RemoteModuleAttemptObligationRepository()
+                await obligations.discharge_system_mutation_obligations(conn, system_id)
         if updated is None:
             return CasResult(CasStatus.SUPERSEDED)
         return CasResult(CasStatus.APPLIED, _activation(updated))
