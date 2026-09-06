@@ -166,13 +166,22 @@ carrier requires their terminal journal/receipt evidence, receipt consumption, a
 credit before it closes that exact Investigation. The provider and database retain their ordinary
 audit/history records; do not run a prefix-wide or host-wide reaper.
 
-The current installed authority has no deterministic provider-effect barrier for suspending a real
-operation after its host effect but before journal/core terminal persistence. Consequently the
-fault arms fail loud rather than claiming unresolved-takeover, restart, journal-loss, or
-stale-write acceptance from timing luck or fake ports. They do not gate the ordinary
-activate/release/cleanup path. Helper tests under
-`test_installed_local_authority_support.py` prove only input and cleanup orchestration; they are not
-native acceptance. Recover, resolve-conflict, and teardown remain separate state/fault arms.
+Set `live_vm_host_authority_fault_proof_enabled: true` only for a disposable native proof host to
+install the disabled-by-default authority-owned socket at
+`/run/kdive/provider-authority/proof-control/control.sock`. Put that exact absolute path in the
+carrier's optional `barrier_socket`. Root may then send only bounded `arm`, `status`, and `release`
+requests. An arm binds the configured System and exact Run, one existing operation, and the fixed
+`before-provider` or `after-provider` checkpoint. It is root-only by `SO_PEERCRED`, permits one
+arm, and never selects or executes a provider action. Shutdown aborts a wait rather than releasing
+it. The fault carrier uses `after-provider` to restart the authority before it can record
+`provider-returned`, then requires the real job's ordinary recovery path to finish.
+
+The barrier does not support journal deletion or synthetic stale database writes. Those #2151
+arms remain unavailable and fail loud until a separately authorized, deterministic mechanism can
+exercise their existing fences; the carrier must not represent them as acceptance from timing luck
+or fake ports. Helper tests under `test_installed_local_authority_support.py` prove only input and
+cleanup orchestration; they are not native acceptance. Recover, resolve-conflict, and teardown
+remain separate state/fault arms.
 
 Before opening the carrier Run, the native test re-provisions only the configured disposable
 System on the fixed private authority daemon. The setup reads that exact System's durable

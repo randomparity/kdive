@@ -310,6 +310,45 @@ def test_sync_fetch_staged_path_returns_validated_path_without_store(
         assert out == f.resolve()
 
 
+def test_sync_fetch_staged_path_enforces_catalog_digest_without_store(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    image = tmp_path / "x.img"
+    image.write_bytes(_QCOW2)
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        _insert_registered_sync(conn, path=str(image), digest=_DIGEST)
+        out = fetch_public_provisioning_rootfs(
+            conn,
+            _exploding_factory(),
+            allowed_roots=[tmp_path],
+            provider="local-libvirt",
+            name="fed",
+            arch="x86_64",
+            cache_dir=tmp_path / ".cache",
+        )
+        assert out == image.resolve()
+
+
+def test_sync_fetch_staged_path_rejects_catalog_digest_mismatch_before_provision(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    image = tmp_path / "x.img"
+    image.write_bytes(b"changed-after-inspection")
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        _insert_registered_sync(conn, path=str(image), digest=_DIGEST)
+        with pytest.raises(CategorizedError, match="sha256 does not match") as caught:
+            fetch_public_provisioning_rootfs(
+                conn,
+                _exploding_factory(),
+                allowed_roots=[tmp_path],
+                provider="local-libvirt",
+                name="fed",
+                arch="x86_64",
+                cache_dir=tmp_path / ".cache",
+            )
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_sync_fetch_staged_path_outside_roots_rejected(migrated_url: str, tmp_path: Path) -> None:
     outside = tmp_path / "x.img"
     outside.write_bytes(b"d")

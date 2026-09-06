@@ -392,18 +392,32 @@ async def _read_activation(
             f"activation {marker.activation_id} is {activation.state.value!r}, which "
             f"{marker.operation!r} does not admit"
         )
+    # PREPARING is the one deliberate exception: ADR-0608 puts materialize and prepare under the
+    # activate job's authority, so their receipts cannot exist until after allocation.  The same
+    # columns are checked again below after `_materialize_preparing` refreshes the row to PREPARED.
+    if activation.state is ExternalBootActivationState.PREPARING:
+        return activation
+    _require_evidence(activation, marker, require_activation_evidence)
+    return activation
+
+
+def _require_evidence(
+    activation: ExternalBootActivation,
+    marker: ExternalBootAuthorityMarkerV1,
+    columns: frozenset[str],
+) -> None:
+    """Require every evidence column an operation consumes to be present."""
     # A positive check on the column the operation will read, never an inference from the state.
     # external_boot_activation_state_evidence admits `abandoned` on terminal_evidence alone, and
     # admits the recovery states with a NULL recovery_point whenever pre_recovery_evidence is
     # present — so state does not imply the evidence is there. A missing recovery point and a
     # completed operation are different propositions and only the column distinguishes them.
-    for column in sorted(require_activation_evidence):
+    for column in sorted(columns):
         if getattr(activation, column) is None:
             raise _refuse(
                 f"activation {marker.activation_id} has no {column}, which {marker.operation!r} "
                 "reads"
             )
-    return activation
 
 
 async def _acknowledge(
@@ -657,6 +671,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     )
     context = replace(context, activation=await _debit_preparing(conn, context, ports))
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))
+    _require_evidence(context.activation, marker, require_activation_evidence)
     try:
         intermediate = before_port(context) if before_port is not None else None
         if inspect.isawaitable(intermediate):
