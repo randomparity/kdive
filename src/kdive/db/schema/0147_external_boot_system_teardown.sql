@@ -40,8 +40,14 @@ ALTER TABLE public.external_boot_activations
                  AND cleanup_evidence ->> 'mode' IS NOT DISTINCT FROM 'ordinary'
                  AND teardown_evidence IS NULL)
                 OR
-                (state IN ('recovery_conflict', 'recovery_failed', 'torn_down')
+                (state IN ('recovery_conflict', 'recovery_failed')
                  AND cleanup_evidence ->> 'mode' IN ('system_teardown', 'pending_system_teardown')
+                 AND teardown_evidence IS NOT NULL)
+                OR
+                (state = 'torn_down'
+                 AND cleanup_evidence ->> 'mode' IN (
+                     'ordinary', 'system_teardown', 'pending_system_teardown'
+                 )
                  AND teardown_evidence IS NOT NULL)
             )
         )
