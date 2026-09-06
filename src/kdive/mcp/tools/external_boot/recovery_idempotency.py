@@ -12,6 +12,8 @@ from kdive.jobs import queue
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.mcp.responses import ToolResponse
 
+MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES = 255
+
 
 def recovery_response(job: Job, object_key: str, object_id: str) -> ToolResponse:
     response = ToolResponse.from_job(job)
@@ -36,14 +38,19 @@ async def recovery_request(
     scope_identity: str | None = None,
 ) -> tuple[str, RecoveryRequestV1 | None, ToolResponse | None]:
     """Call after authorization, under the System lock, before state-dependent admission."""
-    if idempotency_key is not None and (not idempotency_key or len(idempotency_key.encode()) > 255):
+    if idempotency_key is not None and (
+        not idempotency_key or len(idempotency_key.encode()) > MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES
+    ):
         return (
             "",
             None,
             ToolResponse.failure(
                 object_id,
                 ErrorCategory.CONFIGURATION_ERROR,
-                detail="idempotency_key must contain 1 through 255 UTF-8 bytes",
+                detail=(
+                    "idempotency_key must contain 1 through "
+                    f"{MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES} bytes encoded as UTF-8"
+                ),
                 data={"reason": "invalid_idempotency_key"},
                 suggested_next_actions=[tool],
             ),

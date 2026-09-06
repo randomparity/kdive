@@ -45,17 +45,12 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools.external_boot.recovery_idempotency import MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES
 from kdive.mcp.tools.external_boot.recovery_requests import (
     MAX_OBJECT_IDENTITIES as _MAX_OBJECT_IDENTITIES,
 )
 from kdive.mcp.tools.external_boot.recovery_requests import (
     MAX_OBJECT_IDENTITY_LENGTH as _MAX_OBJECT_IDENTITY_LENGTH,
-)
-from kdive.mcp.tools.external_boot.recovery_requests import (
-    ORPHAN_STUB_DETAIL as _ORPHAN_STUB_DETAIL,
-)
-from kdive.mcp.tools.external_boot.recovery_requests import (
-    degraded_stub_meta as _degraded_stub_meta,
 )
 from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_recovery_orphan as _resolve_recovery_orphan,
@@ -287,7 +282,7 @@ def register(
     @app.tool(
         name="ops.force_release",
         annotations=_docmeta.destructive(),
-        meta=_degraded_stub_meta(_ORPHAN_STUB_DETAIL),
+        meta={"maturity": "implemented"},
     )
     async def ops_force_release(
         allocation_id: Annotated[
@@ -347,7 +342,13 @@ def register(
         ],
         idempotency_key: Annotated[
             str | None,
-            Field(max_length=255, description="Optional replay key, bounded to 255 UTF-8 bytes."),
+            Field(
+                max_length=MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES,
+                description=(
+                    f"Optional replay key, bounded to {MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES} "
+                    "bytes encoded as UTF-8."
+                ),
+            ),
         ] = None,
     ) -> ToolResponse:
         """Validate a quarantined recovery-object repair, then report the executor is missing.

@@ -19,6 +19,7 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
+from kdive.mcp.tools.external_boot.recovery_idempotency import MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES
 from kdive.mcp.tools.external_boot.recovery_requests import request_release as _request_release
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
@@ -690,7 +691,13 @@ def _register_runs_release_external_boot(
         ],
         idempotency_key: Annotated[
             str | None,
-            Field(max_length=255, description="Optional replay key, bounded to 255 UTF-8 bytes."),
+            Field(
+                max_length=MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES,
+                description=(
+                    f"Optional replay key, bounded to {MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES} "
+                    "bytes encoded as UTF-8."
+                ),
+            ),
         ] = None,
     ) -> ToolResponse:
         """Enqueue release of this Run's external boot and return a durable `job_id`.

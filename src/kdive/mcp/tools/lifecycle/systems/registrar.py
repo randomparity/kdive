@@ -18,6 +18,7 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
+from kdive.mcp.tools.external_boot.recovery_idempotency import MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES
 from kdive.mcp.tools.external_boot.recovery_requests import (
     MAX_OBSERVED_IDENTITY_LENGTH as _MAX_OBSERVED_IDENTITY_LENGTH,
 )
@@ -663,7 +664,13 @@ def _register_systems_resolve_external_boot_conflict(
         ],
         idempotency_key: Annotated[
             str | None,
-            Field(max_length=255, description="Optional replay key, bounded to 255 UTF-8 bytes."),
+            Field(
+                max_length=MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES,
+                description=(
+                    f"Optional replay key, bounded to {MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES} "
+                    "bytes encoded as UTF-8."
+                ),
+            ),
         ] = None,
     ) -> ToolResponse:
         """Enqueue an idempotent recovery-conflict resolution job.
