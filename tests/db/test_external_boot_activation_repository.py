@@ -416,6 +416,18 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
             obligations = RemoteModuleAttemptObligationRepository()
             attempt = ModuleAttempt(system_id, run_id, "a" * 32)
             assert await obligations.open_mutation_obligation(conn, attempt) is True
+            stale = _authority(activation)
+            stale["authority_generation"] = activation.authority_generation + 1
+            assert (
+                await repo.transition(
+                    conn,
+                    **stale,
+                    expected_state=ExternalBootActivationState.PREPARING,
+                    new_state=ExternalBootActivationState.ABANDONED,
+                    terminal_evidence=terminal,
+                )
+            ).status is CasStatus.SUPERSEDED
+            assert await obligations.mutation_obligation_is_open(conn, attempt) is True
             abandoned = await repo.transition(
                 conn,
                 **_authority(activation),
@@ -998,6 +1010,19 @@ def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
                     objects=(),
                     observed_at=_AT,
                 )
+                stale = _authority(activation)
+                stale["authority_generation"] = activation.authority_generation + 1
+                assert (
+                    await repo.finish_recovery_attempt(
+                        conn,
+                        **stale,
+                        expected_state=ExternalBootActivationState.RECOVERING,
+                        attempt_id=attempt_id,
+                        new_state=ExternalBootActivationState.RECOVERY_FAILED,
+                        terminal_evidence=failure,
+                    )
+                ).status is CasStatus.SUPERSEDED
+                assert await obligations.mutation_obligation_is_open(conn, attempt) is True
                 await repo.finish_recovery_attempt(
                     conn,
                     **_authority(activation),
