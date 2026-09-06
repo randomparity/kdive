@@ -20,6 +20,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -53,11 +54,19 @@ from kdive.jobs.models import (
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
 )
+from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    ExternalBootAuthorityService,
+)
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
+from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
@@ -333,6 +342,115 @@ def test_preparing_executes_and_commits_exact_materialization(
         assert [request.operation.value for request in executed] == ["materialize", "prepare"]
         assert executed[0].operation_identity != executed[1].operation_identity
         assert executed[0].attempt_id != executed[1].attempt_id
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_real_authority_service_and_worker_sql_prepare_both_phases(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+) -> None:
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        await seed.execute(
+            "UPDATE jobs SET payload = payload || %s WHERE id=%s",
+            (
+                Jsonb(
+                    {"external_boot_plan_v1": vehicle.plan.model_dump(mode="json", by_alias=True)}
+                ),
+                case.job_id,
+            ),
+        )
+
+        @asynccontextmanager
+        async def authority_connection() -> Any:
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_provider_authority"), autocommit=True
+            ) as connection:
+                yield connection
+
+        provider = FaultInjectExternalBoot()
+        service = ExternalBootAuthorityService(
+            repository=DatabaseAuthorityRepository(authority_connection),
+            journal_factory=lambda system_id: FileAuthorityJournal(
+                tmp_path, f"{system_id}.journal"
+            ),
+            adapter=LocalExternalBootAuthorityAdapter(cast(Any, provider)),
+        )
+        peer = AuthenticatedPeer(case.worker_incarnation)
+
+        class Authority:
+            async def acknowledge(self, request: Any) -> Any:
+                answer = await service.acknowledge_takeover(peer, request)
+                row = await seed.execute(
+                    "SELECT allocation_id, job_id, job_attempt, worker_incarnation "
+                    "FROM external_boot_authorities WHERE id=%s",
+                    (request.authority_id,),
+                )
+                authority = await row.fetchone()
+                assert authority is not None
+                async with authority_connection() as connection:
+                    committed = await connection.execute(
+                        "SELECT status FROM acknowledge_external_boot_authority("
+                        "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            request.authority_id,
+                            request.generation,
+                            authority[0],
+                            request.activation_id,
+                            request.run_id,
+                            request.system_id,
+                            request.plan_identity,
+                            authority[1],
+                            authority[2],
+                            request.purpose,
+                            request.provider_kind,
+                            request.authority_instance,
+                            authority[3],
+                            request.operation.value,
+                            request.operation_identity,
+                            request.operation_digest,
+                            answer.journal_sequence,
+                            answer.journal_digest,
+                            answer.positive_quiescence_digest,
+                        ),
+                    )
+                    assert await committed.fetchone() == ("applied",)
+                return answer
+
+            async def execute_preparation(
+                self, request: AuthorityPreparationMutationRequestV1
+            ) -> AuthorityPreparationResponseV1:
+                return await service.execute_preparation(peer, request)
+
+        authority = Authority()
+        ports = replace(
+            _ports(case, resolver=resolver_for(vehicle), acknowledger=authority),
+            preparation_executor=authority,
+        )
+        await _run(
+            worker,
+            case,
+            ports=ports,
+            require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+            call_port=lambda _context: None,
+        )
+        row = await seed.execute(
+            "SELECT state, materialization IS NOT NULL, recovery_point IS NOT NULL "
+            "FROM external_boot_activations WHERE id=%s",
+            (vehicle.activation_id,),
+        )
+        assert await row.fetchone() == ("prepared", True, True)
+        assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
