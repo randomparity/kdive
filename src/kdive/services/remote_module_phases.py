@@ -141,11 +141,7 @@ async def capture_install_modules(
         )
         result = await runtime.run(operation, volumes, executor, deadline)
     else:
-        result = inspected.result
-        if inspected.recovery is not None:
-            return inspected.recovery
-        volumes = inspected.volumes
-        assert volumes is not None
+        volumes, result = inspected.volumes, inspected.result
         _validate_result(operation, result)
         if classify_phase(operation.operation, result) == "install":
             result = await runtime.run(operation, volumes, executor, deadline)
@@ -179,7 +175,6 @@ async def capture_install_modules(
             request.authority_reference
         ),
     )
-    await runtime.record_installed(recovery, executor, deadline)
     teardown = await runtime.teardown(recovery, executor, deadline)
     if not teardown.complete:
         raise CategorizedError(

@@ -103,12 +103,6 @@ class ModuleOperationRuntime(Protocol):
         executor: RemoteModulePreparationExecutor,
         deadline: float | None = None,
     ) -> None: ...
-    async def record_installed(
-        self,
-        recovery: RemoteModuleRecoveryRefV1,
-        executor: RemoteModulePreparationExecutor,
-        deadline: float | None = None,
-    ) -> None: ...
     async def record_reaped(
         self,
         recovery: RemoteModuleRecoveryRefV1,
@@ -131,9 +125,8 @@ class ModuleOperationRuntime(Protocol):
 class ModuleAttemptInspection:
     """Validated current-attempt volumes and their exact durable scratch result."""
 
-    volumes: PreparedModuleVolumes | None
+    volumes: PreparedModuleVolumes
     result: RemoteModuleResultV1
-    recovery: RemoteModuleRecoveryRefV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)

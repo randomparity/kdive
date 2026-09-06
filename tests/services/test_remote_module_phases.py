@@ -205,9 +205,6 @@ class Runtime:
         self.calls.append("record-reaping")
         self.reap = "reaping"
 
-    async def record_installed(self, *_args: object) -> None:
-        self.calls.append("record-installed")
-
     async def record_reaped(self, *_args: object) -> None:
         self.calls.append("record-reaped")
         self.reap = "reaped"
@@ -230,13 +227,7 @@ async def test_capture_install_resumes_phase_and_returns_after_safe_teardown(pha
         deadline=100.0,
     )
 
-    assert runtime.calls == [
-        "inspect",
-        "run",
-        "record-installed",
-        "teardown",
-        "delete-source",
-    ]
+    assert runtime.calls == ["inspect", "run", "teardown", "delete-source"]
     assert recovery.source_capacity_bytes == 4096
     assert recovery.installed_entry_count == 1
 
@@ -253,7 +244,7 @@ async def test_capture_install_does_not_repeat_completed_install() -> None:
         deadline=100.0,
     )
 
-    assert runtime.calls == ["inspect", "record-installed", "teardown", "delete-source"]
+    assert runtime.calls == ["inspect", "teardown", "delete-source"]
 
 
 @pytest.mark.anyio
