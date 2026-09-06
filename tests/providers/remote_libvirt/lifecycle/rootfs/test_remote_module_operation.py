@@ -765,3 +765,152 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
     assert events.index("evidence") < events.index("reap-open") < events.index("scratch-delete")
     assert storage.pool.volumes[volumes.scratch.name].deleted
     assert not unrelated.deleted
+
+
+def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: Path) -> None:
+    class Transaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class DbConnection:
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+    @asynccontextmanager
+    async def connection() -> AsyncIterator[DbConnection]:
+        yield DbConnection()
+
+    class FailingRepository:
+        async def read_terminal_evidence(self, _conn: object, _attempt: object):
+            return None
+
+        async def record_terminal_evidence(self, *_args: object) -> None:
+            raise RuntimeError("transaction rolled back")
+
+    storage = Conn()
+    wanted = volume_request(tmp_path)
+    volumes = prepare_attempt_volumes(storage, wanted)
+    result = RemoteModuleResultV1.model_validate(_result()).model_copy(
+        update={
+            "system_id": wanted.operation.system_id,
+            "run_id": wanted.operation.run_id,
+            "operation_nonce": wanted.operation.operation_nonce,
+            "release": wanted.operation.release,
+            "root_volume_key": wanted.operation.root_volume.key,
+            "root_volume_identity": wanted.operation.root_volume.identity,
+            "appliance_image_digest": wanted.operation.appliance_image_digest,
+        }
+    )
+    recovery = _recovery(result).model_copy(
+        update={
+            "installed_entry_count": result.entry_count,
+            "installed_content_bytes": result.content_bytes,
+        }
+    )
+
+    async def read_scratch(_recovery: RemoteModuleRecoveryRefV1) -> bytes:
+        return result.to_wire_bytes()
+
+    runtime = RemoteModuleOperationRuntime(
+        cast(Any, SimpleNamespace(connection=connection)),
+        cast(Any, FailingRepository()),
+        read_scratch,
+        RemoteModuleVolumePreparation(
+            storage,
+            wanted.pool,
+            wanted.entries,
+            wanted.writer,
+            lambda _identity: wanted.inspect_attachments(),
+            tmp_path,
+        ),
+    )
+    executor = RemoteModulePreparationExecutor()
+    with pytest.raises(RuntimeError, match="rolled back"):
+        asyncio.run(runtime.delete_scratch(recovery, executor))
+    executor.shutdown()
+
+    assert not storage.pool.volumes[volumes.scratch.name].deleted
+
+
+def test_delete_source_cancellation_waits_for_blocked_provider_delete(tmp_path: Path) -> None:
+    storage = Conn()
+    wanted = volume_request(tmp_path)
+    volumes = prepare_attempt_volumes(storage, wanted)
+    result = RemoteModuleResultV1.model_validate(_result()).model_copy(
+        update={
+            "system_id": wanted.operation.system_id,
+            "run_id": wanted.operation.run_id,
+            "operation_nonce": wanted.operation.operation_nonce,
+            "release": wanted.operation.release,
+            "root_volume_key": wanted.operation.root_volume.key,
+            "root_volume_identity": wanted.operation.root_volume.identity,
+            "appliance_image_digest": wanted.operation.appliance_image_digest,
+        }
+    )
+    recovery = _recovery(result)
+
+    async def read_scratch(_recovery: RemoteModuleRecoveryRefV1) -> bytes:
+        return result.to_wire_bytes()
+
+    runtime = _runtime(read_scratch)
+    object.__setattr__(
+        runtime,
+        "volume_preparation",
+        RemoteModuleVolumePreparation(
+            storage,
+            wanted.pool,
+            wanted.entries,
+            wanted.writer,
+            lambda _identity: wanted.inspect_attachments(),
+            tmp_path,
+        ),
+    )
+    object.__setattr__(
+        runtime,
+        "appliance_execution",
+        cast(
+            Any,
+            SimpleNamespace(
+                inspect_attachments=lambda: AttachmentInspection(
+                    True,
+                    True,
+                    False,
+                    frozenset(
+                        {
+                            (wanted.pool, volumes.source.name),
+                            (wanted.pool, volumes.scratch.name),
+                        }
+                    ),
+                )
+            ),
+        ),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original_delete = storage.pool.volumes[volumes.source.name].delete
+
+    def blocked_delete(flags: int = 0) -> int:
+        entered.set()
+        release.wait(timeout=5)
+        return original_delete(flags)
+
+    cast(Any, storage.pool.volumes[volumes.source.name]).delete = blocked_delete
+
+    async def cancel_during_delete() -> None:
+        executor = RemoteModulePreparationExecutor()
+        task = asyncio.create_task(runtime.delete_source(recovery, executor))
+        while not entered.is_set():
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        executor.shutdown()
+
+    asyncio.run(cancel_during_delete())
+    assert storage.pool.volumes[volumes.source.name].deleted
