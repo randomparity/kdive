@@ -40,13 +40,18 @@ class LocalAuthorityBinding:
 
 def local_authority_binding() -> LocalAuthorityBinding | None:
     """Return the complete configured worker route, or no route when entirely unset."""
-    values = (
-        config_registry.get(WORKER_AUTHORITY_INSTANCE),
-        config_registry.get(WORKER_AUTHORITY_REQUEST_SOCKET),
-        config_registry.get(WORKER_AUTHORITY_SERVER_CA_REF),
-        config_registry.get(WORKER_AUTHORITY_CLIENT_CERT_REF),
-        config_registry.get(WORKER_AUTHORITY_CLIENT_KEY_REF),
-    )
+    try:
+        values = (
+            config_registry.get(WORKER_AUTHORITY_INSTANCE),
+            config_registry.get(WORKER_AUTHORITY_REQUEST_SOCKET),
+            config_registry.get(WORKER_AUTHORITY_SERVER_CA_REF),
+            config_registry.get(WORKER_AUTHORITY_CLIENT_CERT_REF),
+            config_registry.get(WORKER_AUTHORITY_CLIENT_KEY_REF),
+        )
+    except CategorizedError:
+        raise CategorizedError(
+            "authority: invalid-binding", category=ErrorCategory.CONFIGURATION_ERROR
+        ) from None
     if all(value is None for value in values):
         return None
     if any(value is None for value in values):
