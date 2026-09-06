@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,6 +19,8 @@ from kdive.providers.external_boot_authority.protocol import AuthorityPreparatio
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -199,6 +201,36 @@ def _record() -> RemoteExternalBootRecoveryRecord:
                 key=lambda value: value.to_canonical_json(),
             )
         ),
+    )
+
+
+def _plan_for_record(record: RemoteExternalBootRecoveryRecord):
+    plan = _plan()
+    return plan.model_copy(
+        update={
+            "ownership": plan.ownership.model_copy(
+                update={
+                    "system_id": record.binding.system_id,
+                    "run_id": record.binding.run_id,
+                }
+            )
+        }
+    )
+
+
+def _preparation_request(
+    record: RemoteExternalBootRecoveryRecord,
+    phase: Literal["materialize", "prepare"],
+    *,
+    authority: str = "authority/remote-a",
+    operation_identity: str | None = None,
+) -> ExternalBootPreparationRequest:
+    return ExternalBootPreparationRequest(
+        phase=phase,
+        plan=_plan_for_record(record),
+        binding=record.binding,
+        authority=OpaqueProviderRef(ref=authority),
+        operation_identity=operation_identity or f"{phase}-operation",
     )
 
 
@@ -525,6 +557,154 @@ finally:
     assert result.stdout == ""
 
 
+@pytest.mark.parametrize("phase", ["materialize", "prepare"])
+def test_preparation_receipt_survives_core_commit_loss_without_repeating_provider(
+    tmp_path: Path, phase: Literal["materialize", "prepare"]
+) -> None:
+    record = _record()
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(self, plan: object, owner: object, deadline: float) -> object:
+            assert plan == _plan_for_record(record)
+            assert owner == OpaqueProviderRef(ref="authority/remote-a")
+            assert deadline in {123.0, 456.0}
+            calls.append("materialize")
+            return record.materialization
+
+        def prepare(
+            self, materialization: object, binding: object, owner: object, deadline: float
+        ) -> RemoteExternalBootRecoveryRecord:
+            assert materialization == record.materialization
+            assert binding == record.binding
+            assert owner == OpaqueProviderRef(ref="authority/remote-a")
+            assert deadline in {123.0, 456.0}
+            calls.append("prepare")
+            return record
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
+    )
+    if phase == "prepare":
+        coordinator.execute_preparation(_preparation_request(record, "materialize"))
+        calls.clear()
+    request = _preparation_request(record, phase)
+
+    expected = coordinator.execute_preparation(request)
+    store.close()  # Simulate loss before core commits the returned receipt.
+
+    reopened_store = RemoteModuleVolumePreparationStore(tmp_path)
+    reopened = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), reopened_store, lambda: 456.0
+    )
+    assert reopened.observe_preparation(request) == expected
+    assert reopened.execute_preparation(request) == expected
+    assert calls == [phase]
+    reopened_store.close()
+
+
+def test_materialization_requires_explicit_matching_activation_binding(tmp_path: Path) -> None:
+    record = _record()
+
+    class Operations:
+        def materialize(self, *args: object) -> object:
+            raise AssertionError("provider reached without an activation binding")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+    )
+    assert list(inspect.signature(RemoteExternalBootCoordinator.materialize).parameters) == [
+        "self",
+        "plan",
+        "binding",
+        "authority",
+    ]
+    changed_binding = record.binding.model_copy(
+        update={"system_id": "00000000-0000-4000-8000-000000000099"}
+    )
+    with pytest.raises(ValueError, match="binding differs"):
+        coordinator.materialize(
+            _plan_for_record(record),
+            changed_binding,
+            OpaqueProviderRef(ref="authority/remote-a"),
+        )
+    store.close()
+
+
+def test_preparation_store_refuses_mismatched_or_conflicting_publication(tmp_path: Path) -> None:
+    record = _record()
+    request = _preparation_request(record, "materialize")
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    mismatched = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=OpaqueProviderRef(ref="authority/attacker-selected"),
+        operation_identity=request.operation_identity,
+        materialization=record.materialization,
+    )
+    with pytest.raises(ValueError, match="differs from request"):
+        store.publish_preparation(request, mismatched)
+    assert store.observe_preparation(request).state == "absent"
+
+    receipt = mismatched.model_copy(update={"authority": request.authority})
+    assert store.publish_preparation(request, receipt) == receipt
+    changed = receipt.model_copy(
+        update={
+            "materialization": record.materialization.model_copy(
+                update={"verified_bundle_sha256": "sha256:" + "f" * 64}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="conflicts with durable bytes"):
+        store.publish_preparation(request, changed)
+    store.close()
+
+
+def test_preparation_takeover_adopts_only_authenticated_same_phase_receipt(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(self, *args: object) -> object:
+            calls.append("materialize")
+            return record.materialization
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+    )
+    predecessor = _preparation_request(record, "materialize")
+    receipt = coordinator.execute_preparation(predecessor)
+    takeover = _preparation_request(
+        record,
+        "materialize",
+        authority="authority/takeover",
+        operation_identity="materialize-takeover",
+    )
+
+    adopted = coordinator.adopt_preparation(takeover, predecessor, receipt.identity)
+    assert adopted.authority == takeover.authority
+    assert adopted.operation_identity == takeover.operation_identity
+    assert adopted.materialization == receipt.materialization
+    assert coordinator.observe_preparation(takeover) == adopted
+    assert coordinator.observe_preparation(predecessor) == receipt
+    assert calls == ["materialize"]
+
+    with pytest.raises(ValueError, match="predecessor cannot be adopted"):
+        coordinator.adopt_preparation(takeover, predecessor, "sha256:" + "0" * 64)
+    wrong_phase = takeover.model_copy(
+        update={"phase": "prepare", "operation_identity": "prepare-takeover"}
+    )
+    with pytest.raises(ValueError, match="predecessor cannot be adopted"):
+        coordinator.adopt_preparation(wrong_phase, predecessor, receipt.identity)
+    store.close()
+
+
 def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path: Path) -> None:
     record = _record()
     authority = OpaqueProviderRef(ref="authority/remote-a")
@@ -583,7 +763,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
             )
         }
     )
-    assert coordinator.materialize(plan, authority) == record.materialization
+    assert coordinator.materialize(plan, record.binding, authority) == record.materialization
     point = coordinator.prepare(record.materialization, record.binding, authority)
     store.close()
 
@@ -619,6 +799,7 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
             raise AssertionError("provider touched through activate")
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.publish_materialization(_plan_for_record(record), record.materialization)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
     )

@@ -24,6 +24,8 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     OpaqueProviderRef,
     ProviderStateIdentity,
     RecoveryPoint,
@@ -349,6 +351,101 @@ class RemoteModuleVolumePreparationStore:
             else RemoteModuleVolumePreparationResponseV1.from_canonical_json(data)
         )
 
+    @staticmethod
+    def _preparation_key(request: ExternalBootPreparationRequest) -> str:
+        return hashlib.sha256(
+            b"kdive-remote-external-boot-preparation-v1\0" + request.to_canonical_json()
+        ).hexdigest()
+
+    @staticmethod
+    def _validate_preparation(
+        request: ExternalBootPreparationRequest,
+        receipt: ExternalBootPreparationObservation,
+    ) -> None:
+        if (
+            receipt.state == "absent"
+            or receipt.binding != request.binding
+            or receipt.plan_identity != request.plan.identity
+            or receipt.authority != request.authority
+            or receipt.operation_identity != request.operation_identity
+        ):
+            raise ValueError("remote preparation receipt differs from request")
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        data = self._read(f"{self._preparation_key(request)}.preparation")
+        if data is not None:
+            receipt = ExternalBootPreparationObservation.from_canonical_json(data)
+            self._validate_preparation(request, receipt)
+            return receipt
+        return ExternalBootPreparationObservation(
+            state="absent",
+            binding=request.binding,
+            plan_identity=request.plan.identity,
+            authority=request.authority,
+            operation_identity=request.operation_identity,
+        )
+
+    def publish_preparation(
+        self, request: ExternalBootPreparationRequest, receipt: ExternalBootPreparationObservation
+    ) -> ExternalBootPreparationObservation:
+        self._validate_preparation(request, receipt)
+        existing = self.observe_preparation(request)
+        if existing.state != "absent":
+            if existing != receipt:
+                raise ValueError("remote preparation receipt conflicts with durable bytes")
+            return existing
+        self._publish(f"{self._preparation_key(request)}.preparation", receipt.to_canonical_json())
+        reopened = self.observe_preparation(request)
+        if reopened != receipt:
+            raise ValueError("published remote preparation receipt failed exact reopen")
+        return reopened
+
+    def publish_materialization(
+        self, plan: ExternalBootPlan, materialization: ExternalBootMaterialization
+    ) -> None:
+        record = RemoteExternalBootMaterializationRecord(plan=plan, materialization=materialization)
+        identity = materialization.identity.removeprefix("sha256:")
+        self._publish(f"{identity}.materialization", record.to_canonical_json())
+        self._publish(
+            f"{plan.identity.removeprefix('sha256:')}.materialization-index",
+            identity.encode("ascii"),
+        )
+
+    def reopen_materialization_for_plan(
+        self, plan: ExternalBootPlan
+    ) -> RemoteExternalBootMaterializationRecord:
+        index = self._read(f"{plan.identity.removeprefix('sha256:')}.materialization-index")
+        if index is None:
+            raise FileNotFoundError("remote materialization plan index is absent")
+        try:
+            identity = index.decode("ascii")
+        except UnicodeDecodeError:
+            raise ValueError("remote materialization plan index is malformed") from None
+        data = self._read(f"{identity}.materialization")
+        if data is None:
+            raise ValueError("remote materialization plan index is incomplete")
+        record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
+        if (
+            record.plan != plan
+            or record.materialization.identity.removeprefix("sha256:") != identity
+        ):
+            raise ValueError("remote materialization plan index differs")
+        return record
+
+    def reopen_materialization(
+        self, materialization: ExternalBootMaterialization
+    ) -> RemoteExternalBootMaterializationRecord:
+        identity = materialization.identity.removeprefix("sha256:")
+        data = self._read(f"{identity}.materialization")
+        if data is None:
+            raise FileNotFoundError("remote materialization record is absent")
+        record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
+        if record.materialization != materialization:
+            raise ValueError("remote materialization differs from durable record")
+        return record
+
     def publish_recovery(self, recovery: RemoteExternalBootRecoveryRecord) -> OpaqueProviderRef:
         encoded = recovery.to_canonical_json()
         identity = hashlib.sha256(b"kdive-remote-recovery-v1\0" + encoded).hexdigest()
@@ -489,6 +586,44 @@ class RemoteExternalBootRecoveryRecord(BaseModel):
         return value
 
 
+class RemoteExternalBootMaterializationRecord(BaseModel):
+    """Exact plan and materialization retained for provider preparation restart."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
+
+    schema_: Literal["remote-libvirt-external-boot-materialization-v1"] = Field(
+        "remote-libvirt-external-boot-materialization-v1", alias="schema"
+    )
+    plan: ExternalBootPlan
+    materialization: ExternalBootMaterialization
+
+    @model_validator(mode="after")
+    def _materialization_matches_plan(self) -> Self:
+        materialization = self.materialization
+        if (
+            materialization.plan_identity != self.plan.identity
+            or materialization.ownership.system_id != self.plan.ownership.system_id
+            or materialization.ownership.run_id != self.plan.ownership.run_id
+        ):
+            raise ValueError("remote materialization differs from its durable plan")
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        encoded = _canonical_model_bytes(self)
+        if len(encoded) > _MAX_RECORD_BYTES:
+            raise ValueError("remote materialization record exceeds 1048576 bytes")
+        return encoded
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        if len(data) > _MAX_RECORD_BYTES:
+            raise ValueError("remote materialization record exceeds 1048576 bytes")
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote materialization record is not canonical JSON")
+        return value
+
+
 class RemoteExternalBootOperations(Protocol):
     """The six closed operations available to the remote coordinator."""
 
@@ -547,8 +682,13 @@ class RemoteExternalBootCoordinator:
         self._deadline = deadline
 
     def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+        self,
+        plan: ExternalBootPlan,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
     ) -> ExternalBootMaterialization:
+        if binding.system_id != plan.ownership.system_id or binding.run_id != plan.ownership.run_id:
+            raise ValueError("remote materialization binding differs from the requested plan")
         materialization = self._operations.materialize(plan, authority, self._deadline())
         if (
             materialization.plan_identity != plan.identity
@@ -556,7 +696,63 @@ class RemoteExternalBootCoordinator:
             or materialization.ownership.run_id != plan.ownership.run_id
         ):
             raise ValueError("remote materialization differs from the requested plan")
+        self._store.publish_materialization(plan, materialization)
         return materialization
+
+    def execute_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        observed = self._store.observe_preparation(request)
+        if observed.state != "absent":
+            return observed
+        if request.phase == "materialize":
+            materialization = self.materialize(request.plan, request.binding, request.authority)
+            receipt = observed.model_copy(
+                update={"state": "materialized", "materialization": materialization}
+            )
+        else:
+            materialization = self._store.reopen_materialization_for_plan(
+                request.plan
+            ).materialization
+            recovery = self.prepare(materialization, request.binding, request.authority)
+            receipt = ExternalBootPreparationObservation(
+                state="prepared",
+                binding=request.binding,
+                plan_identity=request.plan.identity,
+                authority=request.authority,
+                operation_identity=request.operation_identity,
+                materialization=materialization,
+                recovery_point=recovery,
+            )
+        return self._store.publish_preparation(request, receipt)
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        return self._store.observe_preparation(request)
+
+    def adopt_preparation(
+        self,
+        request: ExternalBootPreparationRequest,
+        predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
+    ) -> ExternalBootPreparationObservation:
+        receipt = self._store.observe_preparation(predecessor)
+        if (
+            receipt.state == "absent"
+            or receipt.identity != predecessor_receipt_identity
+            or request.phase != predecessor.phase
+            or request.binding != predecessor.binding
+            or request.plan.identity != predecessor.plan.identity
+        ):
+            raise ValueError("preparation predecessor cannot be adopted")
+        adopted = receipt.model_copy(
+            update={
+                "authority": request.authority,
+                "operation_identity": request.operation_identity,
+            }
+        )
+        return self._store.publish_preparation(request, adopted)
 
     def prepare(
         self,
@@ -564,6 +760,7 @@ class RemoteExternalBootCoordinator:
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
     ) -> RecoveryPoint:
+        self._store.reopen_materialization(materialization)
         recovery = self._operations.prepare(materialization, binding, authority, self._deadline())
         if recovery.binding != binding or recovery.materialization != materialization:
             raise ValueError("remote preparation returned a different activation")
