@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
@@ -41,7 +41,7 @@ class ModuleOperationRuntime(Protocol):
 class RemoteModuleOperationRuntime:
     """Reopen scratch state first, falling back to durable evidence after scratch deletion."""
 
-    conn: AsyncConnection
+    pool: AsyncConnectionPool
     repository: RemoteModuleAttemptObligationRepository
     read_scratch_result: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]]
 
@@ -54,7 +54,8 @@ class RemoteModuleOperationRuntime:
     async def _evidence(
         self, recovery: RemoteModuleRecoveryRefV1
     ) -> tuple[RemoteModuleOperationV1, RemoteModuleResultV1]:
-        evidence = await self.repository.read_terminal_evidence(self.conn, self._attempt(recovery))
+        async with self.pool.connection() as conn:
+            evidence = await self.repository.read_terminal_evidence(conn, self._attempt(recovery))
         if evidence is None:
             raise CategorizedError(
                 "remote module terminal evidence is absent", category=ErrorCategory.CONFLICT

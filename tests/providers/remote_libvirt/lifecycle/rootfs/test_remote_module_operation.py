@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
     ModuleAttemptTerminalEvidence,
     RemoteModuleAttemptObligationRepository,
 )
@@ -25,6 +27,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
     RemoteModuleOperationRuntime,
 )
+from tests.db.test_remote_module_attempt_obligations import _seed
 from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_documents import _result
 
 
@@ -73,8 +76,13 @@ class Repo:
 def _runtime(
     read: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]], repo: object | None = None
 ) -> RemoteModuleOperationRuntime:
+    @asynccontextmanager
+    async def connection() -> AsyncIterator[object]:
+        yield SimpleNamespace()
+
+    pool = SimpleNamespace(connection=connection)
     return RemoteModuleOperationRuntime(
-        cast("AsyncConnection", SimpleNamespace()),
+        cast("AsyncConnectionPool", pool),
         cast("RemoteModuleAttemptObligationRepository", repo or Repo()),
         read,
     )
@@ -178,3 +186,44 @@ def test_absent_scratch_reopens_valid_terminal_evidence() -> None:
     runtime = _runtime(absent, EvidenceRepo())
     assert asyncio.run(runtime.reopen_operation(recovery)) == operation
     assert asyncio.run(runtime.reopen_result(recovery)) == result
+
+
+def test_absent_scratch_reads_terminal_evidence_through_owned_pool_connection(
+    migrated_url: str,
+) -> None:
+    async def run() -> None:
+        repository = RemoteModuleAttemptObligationRepository()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=1) as pool:
+            async with pool.connection() as conn:
+                system_id, run_id = await _seed(conn)
+                attempt = ModuleAttempt(system_id, run_id, "0" * 32)
+                await repository.open_mutation_obligation(conn, attempt)
+                result = RemoteModuleResultV1.model_validate(_result()).model_copy(
+                    update={
+                        "system_id": str(system_id),
+                        "run_id": str(run_id),
+                        "operation_nonce": attempt.operation_nonce,
+                    }
+                )
+                recovery = _recovery(result)
+                operation = RemoteModuleOperationRuntime._operation_from_result(result)
+                evidence = ModuleAttemptTerminalEvidence(
+                    terminal_operation=operation.model_dump(mode="json"),
+                    terminal_operation_identity=identity_for(operation),
+                    terminal_result=result.model_dump(mode="json"),
+                    terminal_result_identity=identity_for(result),
+                    baseline_operation_identity=recovery.operation_identity,
+                    baseline_result_identity=recovery.result_identity,
+                    installed_entry_count=12,
+                    installed_content_bytes=4096,
+                    recovery_reference=recovery.model_dump(mode="json"),
+                )
+                await repository.record_terminal_evidence(conn, attempt, evidence)
+
+            async def absent(_: RemoteModuleRecoveryRefV1) -> None:
+                return None
+
+            runtime = RemoteModuleOperationRuntime(pool, repository, absent)
+            assert await runtime.reopen_result(recovery) == result
+
+    asyncio.run(run())
