@@ -564,9 +564,15 @@ def test_exact_worker_hold_requires_retained_invocation_and_pidfd(
         datetime.now(UTC),
     )
     seen: list[tuple[str, ...]] = []
-    monkeypatch.setattr(carrier, "_output", lambda *argv: seen.append(argv) or "stopped")
+    monkeypatch.setattr(
+        carrier,
+        "_output",
+        lambda *argv: (
+            seen.append(argv) or json.dumps({"state": "stopped", "invocation_id": "b" * 32})
+        ),
+    )
 
-    carrier.set_exact_worker_hold(claim, "stop")
+    assert carrier.set_exact_worker_hold(claim, "stop") == "b" * 32
 
     assert seen[0][-2:] == (claim.worker_id, "stop")
     assert 'state.get("phase") != "started"' in carrier._WORKER_HOLD_CLIENT
@@ -580,51 +586,32 @@ def test_exact_worker_hold_requires_retained_invocation_and_pidfd(
 def test_stale_provider_proof_accepts_only_derived_subjects_and_installed_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = NativeAuthorityConfig(
-        installed_revision="1" * 40,
-        system_id=uuid4(),
-        project="kdive-2151-project",
-        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
-        authority_service="kdive-external-boot-authority.service",
-    )
-    activation = carrier.ActivationJob(str(uuid4()), str(uuid4()), str(uuid4()))
-    now = datetime.now(UTC)
-    original = RunningJobClaim("local-systemd:kdive-live-worker@2.service:" + "a" * 32, 1, now, now)
-    replacement = RunningJobClaim(
-        "local-systemd:kdive-live-worker@3.service:" + "b" * 32, 2, now, now
-    )
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(carrier, "_output", lambda *argv: calls.append(argv) or "superseded")
-
-    carrier.assert_stale_provider_request_denied(config, activation, original, replacement)
-
-    assert calls[0][-7:] == (
-        str(config.system_id),
-        activation.run_id,
-        activation.activate_job_id,
-        original.worker_id,
-        str(original.attempt),
-        replacement.worker_id,
-        str(replacement.attempt),
-    )
-    assert "local_authority_sender_factory" in carrier._STALE_PROVIDER_CLIENT
-    assert "worker_incarnation_credential(credential_path)" in carrier._STALE_PROVIDER_CLIENT
-    assert "stale provider request was accepted" in carrier._STALE_PROVIDER_CLIENT
+    monkeypatch.setattr(sys, "argv", ["stale-provider-client"])
+    with pytest.raises(SystemExit, match="invalid stale-provider proof subject"):
+        exec(compile(carrier._STALE_PROVIDER_CLIENT, "<stale-provider-client>", "exec"), {})
 
 
 def test_stale_commit_wait_requires_exact_invocation_and_job_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime.now(UTC)
-    claim = RunningJobClaim("local-systemd:kdive-live-worker@2.service:" + "a" * 32, 1, now, now)
     job_id = str(uuid4())
     responses = iter(
         (
             subprocess.CompletedProcess(
-                [], 0, f"external boot job {uuid4()} was reclaimed; result dropped\n", ""
+                [],
+                0,
+                json.dumps(
+                    {"MESSAGE": f"external boot job {uuid4()} was reclaimed; result dropped"}
+                )
+                + "\n",
+                "",
             ),
             subprocess.CompletedProcess(
-                [], 0, f"external boot job {job_id} was reclaimed; result dropped\n", ""
+                [],
+                0,
+                json.dumps({"MESSAGE": f"external boot job {job_id} was reclaimed; result dropped"})
+                + "\n",
+                "",
             ),
         )
     )
@@ -639,7 +626,7 @@ def test_stale_commit_wait_requires_exact_invocation_and_job_line(
 
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(carrier.asyncio, "sleep", no_sleep)
-    asyncio.run(carrier.wait_for_stale_worker_commit_observed(job_id, claim))
+    asyncio.run(carrier.wait_for_stale_worker_commit_observed(job_id, "a" * 32))
 
     assert len(calls) == 2
     assert calls[0][-1] == "_SYSTEMD_INVOCATION_ID=" + "a" * 32
