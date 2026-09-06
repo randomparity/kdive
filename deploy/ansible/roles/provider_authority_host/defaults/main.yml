@@ -20,6 +20,27 @@ provider_authority_host_server_ca_source: ""
 provider_authority_host_worker_client_ca_source: ""
 provider_authority_host_health_client_certificate_source: ""
 provider_authority_host_health_client_key_source: ""
+# Identity-only remains the default. Enabling mutation is a closed contract: every value below
+# must be supplied and validated before the role changes the target host.
+provider_authority_host_local_mutation_enabled: false
+provider_authority_host_recovery_root: /var/lib/kdive/provider-authority/recovery
+provider_authority_host_external_boot_capacity_bytes: null
+provider_authority_host_s3_endpoint_url: ""
+provider_authority_host_s3_bucket: ""
+provider_authority_host_s3_region: us-east-1
+# boto3 shared-credentials file containing the profile selected by AWS_PROFILE (default profile
+# when AWS_PROFILE is unset). Credential contents never enter Ansible facts or environment files.
+provider_authority_host_s3_credentials_source: ""
 provider_authority_host_packages:
   Debian: [acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev, libkdumpfile-dev]
   RedHat: [acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel, elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel]
+provider_authority_host_local_packages:
+  Debian: [libguestfs-tools, python3-guestfs]
+  RedHat: [libguestfs-tools-c, python3-libguestfs]
+provider_authority_host_qemu_packages:
+  Debian:
+    x86_64: qemu-system-x86
+    ppc64le: qemu-system-ppc
+  RedHat:
+    x86_64: qemu-kvm
+    ppc64le: qemu-kvm
