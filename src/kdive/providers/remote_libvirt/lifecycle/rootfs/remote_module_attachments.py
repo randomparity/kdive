@@ -299,9 +299,16 @@ def _protected_volume_identities(
     expected: ExpectedAttachmentState,
     present_attempt_volumes: frozenset[str] | None = None,
 ) -> dict[str, RemoteDeviceIdentity]:
-    attempt_volumes = present_attempt_volumes or frozenset(
-        {expected.source_volume, expected.scratch_volume}
+    attempt_volumes = (
+        frozenset({expected.source_volume, expected.scratch_volume})
+        if present_attempt_volumes is None
+        else present_attempt_volumes
     )
+    if attempt_volumes not in {
+        frozenset({expected.source_volume}),
+        frozenset({expected.source_volume, expected.scratch_volume}),
+    }:
+        raise _conflict("remote module partial volume state is invalid")
     identities = {
         volume: _device_identity(identity_port, _volume_path(conn, expected.pool, volume))
         for volume in (expected.root_volume, *sorted(attempt_volumes))
