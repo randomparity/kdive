@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-from uuid import UUID
+import threading
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
 
+from kdive.providers.external_boot_authority.protocol import AuthorityPreparationMutationRequestV1
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -18,16 +21,59 @@ from kdive.providers.ports.external_boot import (
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
+    RemoteModuleVolumePreparationHost,
+    RemoteModuleVolumePreparationRequestV1,
+    RemoteModuleVolumePreparationResponseV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+    PreparedModuleVolumes,
+    PreparedVolume,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
+    operation as module_operation,
 )
 from tests.providers.remote_libvirt.lifecycle.test_external_boot import (
     _materialization,
     _plan,
     _source_xml,
 )
+from tests.support.external_boot_plan import external_boot_plan
+
+
+def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
+    operation = module_operation()
+    system_id = UUID(operation.system_id)
+    run_id = UUID(operation.run_id)
+    plan = external_boot_plan(system_id, run_id)
+    operation = operation.model_copy(update={"plan_identity": plan.identity})
+    authority = AuthorityPreparationMutationRequestV1(
+        authority_id=uuid4(),
+        generation=1,
+        system_id=system_id,
+        activation_id=uuid4(),
+        run_id=run_id,
+        plan_identity=plan.identity,
+        purpose="activate",
+        operation="prepare",
+        provider_kind="remote-libvirt",
+        authority_instance="remote-a",
+        operation_identity="prepare-op",
+        operation_digest="sha256:" + "c" * 64,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+    return RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
 
 
 def _record() -> RemoteExternalBootRecoveryRecord:
@@ -176,3 +222,113 @@ def test_operations_protocol_has_exact_six_deadline_bearing_methods() -> None:
         parameters = inspect.signature(method).parameters
         assert list(parameters)[-1] == "deadline"
         assert parameters["deadline"].annotation in {"float", float}
+
+
+def test_remote_volume_request_binds_exact_prepare_phase_and_operation() -> None:
+    request = _remote_preparation_request()
+
+    assert request.operation.system_id == str(request.authority.system_id)
+    with pytest.raises(ValidationError, match="PREPARE"):
+        RemoteModuleVolumePreparationRequestV1(
+            authority=AuthorityPreparationMutationRequestV1.model_validate(
+                {
+                    **request.authority.model_dump(mode="python", by_alias=True),
+                    "operation": "materialize",
+                }
+            ),
+            operation=request.operation,
+        )
+    with pytest.raises(ValidationError, match="differs from authority"):
+        RemoteModuleVolumePreparationRequestV1(
+            authority=request.authority,
+            operation=request.operation.model_copy(
+                update={"run_id": "00000000-0000-4000-8000-000000000099"}
+            ),
+        )
+
+
+def test_remote_volume_response_round_trips_exact_attempt_geometry() -> None:
+    request = _remote_preparation_request()
+    operation = request.operation
+    common = {
+        "pool": "modules",
+        "system_id": operation.system_id,
+        "run_id": operation.run_id,
+        "operation_nonce": operation.operation_nonce,
+    }
+    volumes = PreparedModuleVolumes(
+        source=PreparedVolume(
+            **common,
+            name="source.ext4",
+            purpose="source",
+            digest=operation.source_manifest,
+            capacity_bytes=4096,
+        ),
+        scratch=PreparedVolume(
+            **common,
+            name="scratch.ext4",
+            purpose="scratch",
+            digest="sha256:" + "0" * 64,
+            capacity_bytes=8192,
+        ),
+    )
+
+    response = RemoteModuleVolumePreparationResponseV1.from_prepared(volumes)
+
+    assert response.prepared() == volumes
+    with pytest.raises(ValidationError, match="one exact attempt"):
+        RemoteModuleVolumePreparationResponseV1.model_validate(
+            {
+                **response.model_dump(mode="python", by_alias=True),
+                "scratch": response.scratch.model_copy(update={"operation_nonce": "2" * 32}),
+            }
+        )
+
+
+@pytest.mark.anyio
+async def test_remote_volume_host_retains_completion_through_cancellation() -> None:
+    request = _remote_preparation_request()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    executor = RemoteModulePreparationExecutor()
+
+    def prepare(operation: RemoteModuleOperationV1) -> PreparedModuleVolumes:
+        assert operation == request.operation
+        started.set()
+        assert release.wait(timeout=5)
+        finished.set()
+        common = {
+            "pool": "modules",
+            "system_id": request.operation.system_id,
+            "run_id": request.operation.run_id,
+            "operation_nonce": request.operation.operation_nonce,
+        }
+        return PreparedModuleVolumes(
+            source=PreparedVolume(
+                **common,
+                name="source.ext4",
+                purpose="source",
+                digest=request.operation.source_manifest,
+                capacity_bytes=4096,
+            ),
+            scratch=PreparedVolume(
+                **common,
+                name="scratch.ext4",
+                purpose="scratch",
+                digest="sha256:" + "0" * 64,
+                capacity_bytes=8192,
+            ),
+        )
+
+    host = RemoteModuleVolumePreparationHost(prepare, executor)
+    task = asyncio.create_task(host.execute(request))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+    executor.shutdown()

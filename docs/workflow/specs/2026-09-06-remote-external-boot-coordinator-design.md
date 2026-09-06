@@ -22,3 +22,12 @@ or transport escape hatch.
 Focused tests pin the six names and deadline parameters, canonical round trips, exact ownership,
 source/target state relationships, V2-only module geometry, sorted unique recovery objects, and
 the serialized bound.
+
+Remote module volume creation is a closed nested PREPARE operation. Its request contains the exact
+already-authorized preparation binding and `RemoteModuleOperationV1`; validation binds System, Run,
+plan, and phase before provider contact. The provider host supplies storage, appliance, attachment,
+and writer configuration and returns only the two bounded `PreparedVolume` descriptions. It never
+receives a worker database pool, obligation receipt, reusable assertion, caller-selected route, or
+generic execution payload. The worker-side verifier retains its transaction and System advisory
+lock while awaiting this request. Provider-host blocking work uses the completion-owned remote
+module executor, so cancellation is not reported until the underlying mutation has resolved.
