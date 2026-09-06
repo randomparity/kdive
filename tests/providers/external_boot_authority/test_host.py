@@ -754,7 +754,14 @@ def test_host_shares_one_mutation_service_between_listeners(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = replace(_config(tmp_path), network_address="127.0.0.1", network_port=9443)
-    service = object()
+
+    class Service:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    service = Service()
     received: list[object | None] = []
 
     class Listener:
@@ -787,6 +794,7 @@ def test_host_shares_one_mutation_service_between_listeners(
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run_authority_host(config))
     assert received == [service, service]
+    assert service.closed
 
 
 def test_host_keeps_identity_only_mode_without_local_recovery_root(
@@ -800,15 +808,15 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from kdive import config as kdive_config
+    from kdive.providers.assembly import composition as provider_assembly
     from kdive.providers.local_libvirt import composition
-    from kdive.store import objectstore
 
     recovery_root = tmp_path / "recovery"
     recovery_root.mkdir(mode=0o700)
     kdive_config.load({"KDIVE_LIBVIRT_RECOVERY_ROOT": str(recovery_root)})
     store = object()
     captured: list[tuple[object, Path]] = []
-    monkeypatch.setattr(objectstore, "object_store_from_env", lambda: store)
+    monkeypatch.setattr(provider_assembly, "object_store_from_env", lambda: store)
     monkeypatch.setattr(
         composition,
         "build_local_external_boot_authority",
