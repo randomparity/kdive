@@ -73,15 +73,30 @@ def _identity(document: Mapping[str, object]) -> str:
     )
 
 
-@pytest.mark.parametrize("operation", ["recover", "teardown"])
-def test_cleanup_evidence_follows_restored_open_then_discharged_order(
-    migrated_url: str, authority_role_dsns: _RoleDsns, operation: str
+@pytest.mark.parametrize(
+    ("purpose", "operation", "needs_restored"),
+    [
+        ("recover", "recover", False),
+        ("teardown", "teardown", False),
+        ("release", "cleanup", True),
+    ],
+)
+def test_cleanup_evidence_follows_installed_open_then_discharged_order(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    purpose: str,
+    operation: str,
+    needs_restored: bool,
 ) -> None:
     with psycopg.connect(migrated_url) as admin:
         case = _seed_case(
-            admin, purpose=operation, worker_suffix="z", provider_kind="remote-libvirt"
+            admin,
+            purpose=purpose,
+            operation=operation,
+            worker_suffix="z",
+            provider_kind="remote-libvirt",
         )
-        if operation == "recover":
+        if operation == "recover" or purpose == "release":
             admin.execute(
                 "UPDATE external_boot_activations SET state='active', "
                 "terminal_evidence=%s, activation_readiness_deadline=now() WHERE id=%s",
@@ -139,7 +154,7 @@ def test_cleanup_evidence_follows_restored_open_then_discharged_order(
     result = {
         "protocol": "remote-module-result-v1",
         "status": "success",
-        "phase": "restored",
+        "phase": "installed",
         "system_id": str(case.system_id),
         "run_id": str(case.run_id),
         "plan_identity": _PLAN,
@@ -149,16 +164,23 @@ def test_cleanup_evidence_follows_restored_open_then_discharged_order(
         "protocol": "remote-module-operation-v1",
         "system_id": str(case.system_id),
         "run_id": str(case.run_id),
+        "plan_identity": _PLAN,
         "operation_nonce": _NONCE,
     }
+    restored_operation = {
+        **terminal_operation,
+        "operation": "restore",
+    }
+    restored_result = {**result, "phase": "restored"}
     with psycopg.connect(migrated_url) as admin:
         admin.execute(
             "INSERT INTO remote_module_attempt_obligations "
             "(system_id,run_id,operation_nonce,terminal_operation,terminal_operation_identity,"
             "terminal_result,terminal_result_identity,baseline_operation_identity,"
             "baseline_result_identity,installed_entry_count,installed_content_bytes,"
-            "recovery_reference,reap_opened_at) VALUES "
-            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,%s,now())",
+            "recovery_reference,reap_opened_at,restored_operation,"
+            "restored_operation_identity,restored_result,restored_result_identity) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,%s,now(),%s,%s,%s,%s)",
             (
                 case.system_id,
                 case.run_id,
@@ -170,6 +192,10 @@ def test_cleanup_evidence_follows_restored_open_then_discharged_order(
                 _DIGEST,
                 _DIGEST,
                 Jsonb(recovery),
+                Jsonb(restored_operation) if needs_restored else None,
+                _identity(restored_operation) if needs_restored else None,
+                Jsonb(restored_result) if needs_restored else None,
+                _identity(restored_result) if needs_restored else None,
             ),
         )
     with psycopg.connect(authority_role_dsns("kdive_provider_authority")) as provider:

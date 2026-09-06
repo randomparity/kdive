@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import SecretStr
 
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttemptRestoredEvidence,
+    ModuleAttemptTerminalEvidence,
+    ModuleAttemptWorkerWriteContext,
+)
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
@@ -30,6 +41,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleResultV1,
+    identity_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
     RemoteModuleApplianceExecution,
@@ -54,6 +66,9 @@ from kdive.providers.remote_libvirt.remote_module_authority_host import (
     load_installed_remote_module_appliance,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.remote_module_authority_preparation import (
+    execute_remote_module_lifecycle_on_authority_host,
+)
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Clock,
     Executor,
@@ -274,8 +289,33 @@ def _result(operation: RemoteModuleOperationV1) -> RemoteModuleResultV1:
     )
 
 
+def _lifecycle_authority(
+    request: RemoteModuleVolumePreparationRequestV1,
+    *,
+    purpose: str,
+    operation: str,
+) -> AuthorityMutationRequestV1:
+    authority = request.authority
+    return AuthorityMutationRequestV1.model_validate(
+        {
+            **authority.model_dump(
+                mode="python",
+                by_alias=True,
+                exclude={"plan", "purpose", "operation", "operation_identity"},
+            ),
+            "purpose": purpose,
+            "operation": operation,
+            "operation_identity": f"{operation}-op",
+        }
+    )
+
+
 @pytest.mark.anyio
-async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(tmp_path: Path) -> None:
+@pytest.mark.parametrize("restore_first", [True, False])
+async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
+    tmp_path: Path,
+    restore_first: bool,
+) -> None:
     request = _request()
     operation = request.operation
     source_name = render_module_volume_name(
@@ -294,6 +334,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(tmp_pat
     clock = Clock()
     appliance = ApplianceConn([], clock)
     durable_result = _result(operation)
+    current_result = [durable_result]
     volume_config = RemoteModuleVolumePreparation(
         storage=storage,
         pool_name="systems",
@@ -321,7 +362,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(tmp_pat
             operation.root_volume.identity,
             4096,
         ),
-        read_scratch_result=lambda _volume, _deadline: durable_result.to_wire_bytes(),
+        read_scratch_result=lambda _volume, _deadline: current_result[0].to_wire_bytes(),
         inspect_attachments=lambda: detached,
         secret_registry=SecretRegistry(),
         deadline_executor=Executor(),
@@ -347,6 +388,145 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(tmp_pat
     assert response.result == durable_result
     assert response.recovery.source_volume.ref == source_name
     response.validate_terminal_for(operation, request.authority)
+
+    restored_operation = RemoteModuleOperationV1(
+        operation="restore",
+        system_id=operation.system_id,
+        run_id=operation.run_id,
+        plan_identity=operation.plan_identity,
+        operation_nonce=operation.operation_nonce,
+        release=operation.release,
+        root_volume=operation.root_volume,
+        source_manifest=operation.source_manifest,
+        capture_absent=True,
+        installed_manifest=operation.source_manifest,
+        appliance_image_digest=operation.appliance_image_digest,
+    )
+    restored_result = durable_result.model_copy(
+        update={"phase": "restored", "entry_count": None, "content_bytes": None}
+    )
+    restored_result.validate_for(restored_operation)
+    current_result[0] = restored_result
+    restore_request = RemoteModuleLifecycleRequestV1(
+        authority=_lifecycle_authority(request, purpose="recover", operation="recover"),
+        action="restore",
+        budget_seconds=300,
+    )
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=request.authority.system_id,
+            run_id=request.authority.run_id,
+            operation_nonce=operation.operation_nonce,
+        )
+    )
+    worker_context = ModuleAttemptWorkerWriteContext(
+        job_id=uuid4(),
+        job_attempt=1,
+        incarnation_credential=SecretStr("worker-credential"),
+        preparation=preparation,
+    )
+    assert response.recovery.installed_entry_count is not None
+    assert response.recovery.installed_content_bytes is not None
+    terminal_evidence = ModuleAttemptTerminalEvidence(
+        terminal_operation=operation.model_dump(mode="json"),
+        terminal_operation_identity=identity_for(operation),
+        terminal_result=durable_result.model_dump(mode="json"),
+        terminal_result_identity=identity_for(durable_result),
+        baseline_operation_identity=response.recovery.operation_identity,
+        baseline_result_identity=response.recovery.result_identity,
+        installed_entry_count=response.recovery.installed_entry_count,
+        installed_content_bytes=response.recovery.installed_content_bytes,
+        recovery_reference=response.recovery.model_dump(mode="json"),
+    )
+
+    class Repository:
+        evidence: list[object] = []
+        restored_evidence: ModuleAttemptRestoredEvidence | None = None
+        discharged = False
+
+        async def worker_record_restored_evidence(self, *_args: object) -> bool:
+            assert _args[0] is worker_connection
+            assert isinstance(_args[-1], ModuleAttemptRestoredEvidence)
+            self.evidence.append(_args[-1])
+            self.restored_evidence = _args[-1]
+            return True
+
+        async def read_restored_evidence(self, *_args: object) -> object:
+            assert _args[0] is worker_connection
+            return self.restored_evidence
+
+        async def read_terminal_evidence(self, *_args: object) -> object:
+            assert _args[0] is worker_connection
+            return terminal_evidence
+
+        async def worker_discharge_reap_obligation(self, *_args: object) -> bool:
+            assert _args[0] is worker_connection
+            self.discharged = True
+            return True
+
+        async def reap_obligation_is_open(self, *_args: object) -> bool:
+            assert _args[0] is worker_connection
+            return True
+
+    class Sender:
+        async def execute_remote_module_lifecycle(
+            self, candidate: RemoteModuleLifecycleRequestV1, *, deadline: float
+        ) -> RemoteModuleLifecycleResponseV1:
+            assert deadline >= asyncio.get_running_loop().time()
+            return await durable_host.execute_lifecycle(candidate)
+
+    repository = Repository()
+    worker_connection = object()
+    restored = None
+    if restore_first:
+        restored = await execute_remote_module_lifecycle_on_authority_host(
+            connection=cast(Any, worker_connection),
+            repository=cast(Any, repository),
+            sender=cast(Any, Sender()),
+            authority=restore_request.authority,
+            preparation=preparation,
+            worker_context=worker_context,
+            action="restore",
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+        assert restored.operation == restored_operation
+        assert restored.result == restored_result
+        assert not restored.volumes_absent
+    else:
+        current_result[0] = durable_result
+
+    reap_purpose, reap_operation = (
+        ("release", "cleanup") if restore_first else ("teardown", "teardown")
+    )
+    reap_request = RemoteModuleLifecycleRequestV1(
+        authority=_lifecycle_authority(request, purpose=reap_purpose, operation=reap_operation),
+        action="reap",
+        budget_seconds=300,
+    )
+    reaped = await execute_remote_module_lifecycle_on_authority_host(
+        connection=cast(Any, worker_connection),
+        repository=cast(Any, repository),
+        sender=cast(Any, Sender()),
+        authority=reap_request.authority,
+        preparation=preparation,
+        worker_context=worker_context,
+        action="reap",
+        deadline=asyncio.get_running_loop().time() + 10,
+    )
+    assert reaped.volumes_absent
+    assert reaped.operation == (restored_operation if restore_first else operation)
+    assert reaped.result == (restored_result if restore_first else durable_result)
+    assert storage.pool.volumes[source_name].deleted
+    assert storage.pool.volumes[scratch_name].deleted
+    reaping_name = render_module_volume_name(
+        operation.system_id, operation.run_id, operation.operation_nonce, "reaping.journal"
+    )
+    reaped_name = render_module_volume_name(
+        operation.system_id, operation.run_id, operation.operation_nonce, "reaped.journal"
+    )
+    assert {reaping_name, reaped_name} <= set(storage.pool.volumes)
+    assert len(repository.evidence) == (1 if restore_first else 0)
+    assert repository.discharged
     store.close()
 
     restarted_store = RemoteModuleVolumePreparationStore(evidence_root)
@@ -354,5 +534,13 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(tmp_pat
     replay = await DurableRemoteModuleVolumePreparationHost(restarted_store, host).execute(request)
     assert replay == response
     assert appliance.created_flags is None
+    assert (
+        await DurableRemoteModuleVolumePreparationHost(restarted_store, host).execute_lifecycle(
+            reap_request
+        )
+        == reaped
+    )
+    if restored is not None:
+        assert identity_for(restored.operation) == identity_for(reaped.operation)
     restarted_store.close()
     executor.shutdown()

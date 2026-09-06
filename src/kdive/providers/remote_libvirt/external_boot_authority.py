@@ -323,6 +323,126 @@ class RemoteModulePreparationCompletionV1(BaseModel):
         return value
 
 
+class RemoteModuleLifecycleRequestV1(BaseModel):
+    """One lifecycle action bound to the current authority, with no provider selectors."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
+    schema_: Literal["remote-module-lifecycle-request-v1"] = Field(
+        "remote-module-lifecycle-request-v1", alias="schema"
+    )
+    authority: AuthorityMutationRequestV1
+    action: Literal["restore", "reap"]
+    budget_seconds: Annotated[int, Field(ge=1, le=300)]
+
+    @model_validator(mode="after")
+    def _action_matches_authority(self) -> Self:
+        allowed = (
+            {AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
+            if self.action == "restore"
+            else {
+                AuthorityOperation.CLEANUP,
+                AuthorityOperation.TEARDOWN,
+            }
+        )
+        if self.authority.operation not in allowed:
+            raise ValueError("remote module lifecycle action differs from authority operation")
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote module lifecycle request is not canonical JSON")
+        return value
+
+
+class RemoteModuleLifecycleResponseV1(BaseModel):
+    """Authenticated provider completion for restore or exact-volume absence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
+    schema_: Literal["remote-module-lifecycle-response-v1"] = Field(
+        "remote-module-lifecycle-response-v1", alias="schema"
+    )
+    action: Literal["restore", "reap"]
+    recovery: RemoteModuleRecoveryRefV2
+    operation: RemoteModuleOperationV1
+    result: RemoteModuleResultV1
+    volumes_absent: bool
+
+    @model_validator(mode="after")
+    def _terminal_shape(self) -> Self:
+        self.result.validate_for(self.operation)
+        terminal_phase = (
+            self.operation.operation == "restore" and self.result.phase == "restored"
+        ) or (
+            self.action == "reap"
+            and self.operation.operation == "capture_install"
+            and self.result.phase == "installed"
+        )
+        if (
+            not terminal_phase
+            or self.result.status != "success"
+            or self.volumes_absent != (self.action == "reap")
+            or self.operation.system_id != self.recovery.system_id
+            or self.operation.run_id != self.recovery.run_id
+            or self.operation.plan_identity != self.recovery.plan_identity
+            or self.operation.operation_nonce != self.recovery.operation_nonce
+        ):
+            raise ValueError("remote module lifecycle response is not terminal and bound")
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote module lifecycle response is not canonical JSON")
+        return value
+
+
+class _PersistedRemoteModuleLifecycleV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    request: RemoteModuleLifecycleRequestV1
+    local_deadline: Annotated[float, Field(gt=0)]
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("persisted remote module lifecycle request is not canonical JSON")
+        return value
+
+
+class RemoteModuleLifecycleCompletionV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    state: Literal["terminal", "failed-after-mutation"]
+    response: RemoteModuleLifecycleResponseV1 | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> Self:
+        if (self.response is not None) != (self.state == "terminal"):
+            raise ValueError("remote module lifecycle completion differs from response")
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote module lifecycle completion is not canonical JSON")
+        return value
+
+
 class RemoteModuleTerminalRecord(BaseModel):
     """Exact authenticated request and terminal provider-host response."""
 
@@ -376,6 +496,12 @@ class AdmittedRemoteModulePreparation:
     """Process-local view of the persisted request and authority-clock deadline."""
 
     request: RemoteModuleVolumePreparationRequestV1
+    local_deadline: float
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedRemoteModuleLifecycle:
+    request: RemoteModuleLifecycleRequestV1
     local_deadline: float
 
 
@@ -583,6 +709,97 @@ class RemoteModuleVolumePreparationStore:
             else RemoteModuleVolumePreparationResponseV1
         )
         return model.from_canonical_json(data)
+
+    @staticmethod
+    def _lifecycle_key(request: RemoteModuleLifecycleRequestV1) -> str:
+        identity = json.dumps(
+            request.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude={"budget_seconds"},
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        return hashlib.sha256(b"kdive-remote-module-lifecycle-v1\0" + identity).hexdigest()
+
+    @staticmethod
+    def _same_lifecycle(
+        left: RemoteModuleLifecycleRequestV1,
+        right: RemoteModuleLifecycleRequestV1,
+    ) -> bool:
+        return left.authority == right.authority and left.action == right.action
+
+    def stage_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1, local_deadline: float
+    ) -> None:
+        name = f"{self._lifecycle_key(request)}.lifecycle-request"
+        candidate = _PersistedRemoteModuleLifecycleV1(
+            request=request, local_deadline=local_deadline
+        )
+        if data := self._read(name):
+            persisted = _PersistedRemoteModuleLifecycleV1.from_canonical_json(data)
+            if not self._same_lifecycle(persisted.request, request):
+                raise ValueError("remote lifecycle evidence conflicts with durable bytes")
+            return
+        self._publish(name, candidate.to_canonical_json())
+
+    def reopen_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1
+    ) -> AdmittedRemoteModuleLifecycle:
+        data = self._read(f"{self._lifecycle_key(request)}.lifecycle-request")
+        if data is None:
+            raise FileNotFoundError("remote module lifecycle request is absent")
+        persisted = _PersistedRemoteModuleLifecycleV1.from_canonical_json(data)
+        if not self._same_lifecycle(persisted.request, request):
+            raise ValueError("remote lifecycle evidence conflicts with durable bytes")
+        return AdmittedRemoteModuleLifecycle(persisted.request, persisted.local_deadline)
+
+    def publish_lifecycle_completion(
+        self,
+        request: RemoteModuleLifecycleRequestV1,
+        response: RemoteModuleLifecycleResponseV1 | None,
+    ) -> None:
+        self.reopen_lifecycle(request)
+        completion = RemoteModuleLifecycleCompletionV1(
+            state="terminal" if response is not None else "failed-after-mutation",
+            response=response,
+        )
+        self._publish(
+            f"{self._lifecycle_key(request)}.lifecycle-completion",
+            completion.to_canonical_json(),
+        )
+        if response is not None and response.action == "restore":
+            authority = request.authority
+            restored_key = self._terminal_key(
+                authority.system_id,
+                authority.activation_id,
+                authority.run_id,
+                authority.plan_identity,
+            )
+            self._publish(f"{restored_key}.restored", response.to_canonical_json())
+
+    def reopen_lifecycle_completion(
+        self, request: RemoteModuleLifecycleRequestV1
+    ) -> RemoteModuleLifecycleCompletionV1 | None:
+        self.reopen_lifecycle(request)
+        data = self._read(f"{self._lifecycle_key(request)}.lifecycle-completion")
+        return None if data is None else RemoteModuleLifecycleCompletionV1.from_canonical_json(data)
+
+    def reopen_restored(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteModuleLifecycleResponseV1 | None:
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        data = self._read(f"{key}.restored")
+        if data is None:
+            return None
+        response = RemoteModuleLifecycleResponseV1.from_canonical_json(data)
+        if response.action != "restore":
+            raise ValueError("remote module restored evidence has the wrong action")
+        return response
 
     @staticmethod
     def _terminal_key(
@@ -830,6 +1047,14 @@ class RemoteModulePreparationOperation(Protocol):
         self, admitted: AdmittedRemoteModulePreparation
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
 
+    async def execute_lifecycle(
+        self,
+        request: RemoteModuleLifecycleRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1: ...
+
 
 class RemoteAuthorityMutationDelegate(Protocol):
     """Remote mutation implementation decorated with durable running reads."""
@@ -904,6 +1129,70 @@ class DurableRemoteModuleVolumePreparationHost:
             raise
         self._store.publish_result(request, result)
         return result
+
+    async def observe_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1
+    ) -> RemoteModuleLifecycleResponseV1 | None:
+        try:
+            completion = self._store.reopen_lifecycle_completion(request)
+        except FileNotFoundError:
+            return None
+        if completion is None:
+            return None
+        if completion.response is None:
+            raise CategorizedError(
+                "remote module lifecycle requires recovery",
+                category=ErrorCategory.CONFLICT,
+                details={"completion": completion.state},
+            )
+        return completion.response
+
+    async def execute_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1
+    ) -> RemoteModuleLifecycleResponseV1:
+        self._store.stage_lifecycle(request, self._monotonic() + request.budget_seconds)
+        admitted = self._store.reopen_lifecycle(request)
+        request = admitted.request
+        if completion := await self.observe_lifecycle(request):
+            return completion
+        binding = ExternalBootActivationBinding(
+            system_id=str(request.authority.system_id),
+            run_id=str(request.authority.run_id),
+            activation_id=str(request.authority.activation_id),
+        )
+        terminal = self._store.reopen_terminal(binding, request.authority.plan_identity)
+        restored = self._store.reopen_restored(binding, request.authority.plan_identity)
+        if request.action == "restore" and restored is not None:
+            self._store.publish_lifecycle_completion(request, restored)
+            return restored
+        if (
+            request.action == "reap"
+            and restored is None
+            and request.authority.operation is not AuthorityOperation.TEARDOWN
+        ):
+            raise CategorizedError(
+                "ordinary remote module cleanup requires restored evidence",
+                category=ErrorCategory.CONFLICT,
+                details={"completion": "refused-before-mutation"},
+            )
+        task = asyncio.create_task(
+            self._host.execute_lifecycle(request, terminal, restored, admitted.local_deadline)
+        )
+        try:
+            response = await asyncio.shield(task)
+        except asyncio.CancelledError as cancelled:
+            while not task.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(task)
+            self._store.publish_lifecycle_completion(
+                request, None if task.cancelled() or task.exception() is not None else task.result()
+            )
+            raise cancelled from None
+        except BaseException:
+            self._store.publish_lifecycle_completion(request, None)
+            raise
+        self._store.publish_lifecycle_completion(request, response)
+        return response
 
 
 class RemoteExternalBootRecoveryRecord(BaseModel):

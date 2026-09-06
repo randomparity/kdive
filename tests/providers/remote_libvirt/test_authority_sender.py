@@ -43,6 +43,8 @@ from kdive.providers.remote_libvirt.config import (
     TlsCertRefs,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginRequestV1,
     RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
@@ -279,6 +281,11 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
                 )
             return response
 
+        async def execute_remote_module_lifecycle(
+            self, peer: AuthenticatedPeer, remote: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1:
+            raise AssertionError(f"unexpected lifecycle request from {peer}: {remote!r}")
+
     class Backend:
         async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
             assert deadline == 123.0
@@ -333,6 +340,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "execute_mutation",
         "execute_preparation",
         "execute_remote_module_preparation",
+        "execute_remote_module_lifecycle",
         "open_remote_module_attempt",
         "execute_conflict_resolution",
         "observe_authority",

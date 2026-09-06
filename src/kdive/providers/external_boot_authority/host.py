@@ -53,6 +53,7 @@ from kdive.providers.external_boot_authority.transport import (
     validate_protected_parents,
     validate_socket_parent,
 )
+from kdive.providers.remote_libvirt.settings import REMOTE_LIBVIRT_STORAGE_POOL
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.service import (
@@ -116,6 +117,7 @@ class AuthorityHostConfig:
     worker_client_ca: Path
     health_client_certificate: Path
     health_client_key: Path
+    remote_libvirt_storage_pool: str = "default"
     install_dir: Path = _AUTHORITY_INSTALL_DIR
     credentials_source_dir: Path = _AUTHORITY_CREDENTIALS_SOURCE_DIR
     state_dir: Path = _AUTHORITY_STATE_DIR
@@ -163,6 +165,9 @@ class AuthorityHostConfig:
             denied_identities = config_registry.require(AUTHORITY_DENIED_IDENTITIES)
             network_address = config_registry.get(AUTHORITY_NETWORK_ADDRESS)
             network_port = config_registry.get(AUTHORITY_NETWORK_PORT)
+            remote_libvirt_storage_pool = (
+                config_registry.get(REMOTE_LIBVIRT_STORAGE_POOL) or "default"
+            )
         except CategorizedError:
             raise HostReadinessError("configuration", "invalid") from None
         return cls(
@@ -180,6 +185,7 @@ class AuthorityHostConfig:
             worker_client_ca=credentials / "worker-client-ca",
             health_client_certificate=credentials / "health-client-certificate",
             health_client_key=credentials / "health-client-key",
+            remote_libvirt_storage_pool=remote_libvirt_storage_pool,
             network_address=network_address,
             network_port=network_port,
             denied_identities=denied_identities,
@@ -1151,7 +1157,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     artifact_stager = RealLocalExternalBootMaterializer(object_store)
     module_factory = RemoteModuleAuthorityHostFactory(
         connection=connection,
-        pool_name="default",
+        pool_name=config.remote_libvirt_storage_pool,
         work_dir=config.remote_module_work_dir,
         appliance_root=Path("/var/lib/libvirt/kdive/module-appliance/v1"),
         artifact_stager=artifact_stager,
@@ -1167,7 +1173,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     materializer = ConcreteRemoteExternalBootMaterializer(
         object_store=object_store,
         connection=provider_connection,
-        pool_name="default",
+        pool_name=config.remote_libvirt_storage_pool,
         capacity_bytes=10 * 1024**3,
         monotonic=monotonic,
         artifact_stager=artifact_stager,
@@ -1175,7 +1181,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     operations = ConcreteRemoteExternalBootOperations(
         materializer,
         provider_connection,
-        "default",
+        config.remote_libvirt_storage_pool,
         monotonic,
         GuestAgentExec(
             agent_command=qemu_agent_command,

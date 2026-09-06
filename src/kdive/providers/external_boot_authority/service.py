@@ -38,6 +38,8 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginRequestV1,
     RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
@@ -187,6 +189,14 @@ class RemoteModulePreparationHost(Protocol):
     async def execute(
         self, request: RemoteModuleVolumePreparationRequestV1
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
+
+    async def observe_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1
+    ) -> RemoteModuleLifecycleResponseV1 | None: ...
+
+    async def execute_lifecycle(
+        self, request: RemoteModuleLifecycleRequestV1
+    ) -> RemoteModuleLifecycleResponseV1: ...
 
 
 @runtime_checkable
@@ -1717,6 +1727,62 @@ class ExternalBootAuthorityService:
             return await asyncio.shield(task)
         except AuthorityServiceError as error:
             self._ensure_rejection(mutation, error)
+            raise
+
+    async def execute_remote_module_lifecycle(
+        self,
+        peer: AuthenticatedPeer | None,
+        remote: RemoteModuleLifecycleRequestV1,
+    ) -> RemoteModuleLifecycleResponseV1:
+        """Run one fixed lifecycle action only under the exact current acknowledged authority."""
+        host = self._remote_module_host
+        if host is None:
+            raise AuthorityServiceError("provider_conflict")
+        request = remote.authority
+        authenticated = self._require_peer(peer, request)
+        if completed := await host.observe_lifecycle(remote):
+            return completed
+        trusted = await self._repository.resolve_current_candidate(authenticated, request)
+        if trusted is None or not self._binding_matches(trusted, request):
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
+
+        async def run() -> RemoteModuleLifecycleResponseV1:
+            try:
+                async with lane.lock:
+                    if completed := await host.observe_lifecycle(remote):
+                        return completed
+                    if lane.failed:
+                        raise AuthorityServiceError("journal_conflict")
+                    journal, records = self._lane_journal(request.system_id, lane)
+                    records = await self._recover(trusted, journal, records)
+                    acknowledgement = next(
+                        (
+                            record
+                            for record in reversed(records)
+                            if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                            and record.authority_id == request.authority_id
+                            and record.generation == request.generation
+                        ),
+                        None,
+                    )
+                    if acknowledgement is None:
+                        raise AuthorityServiceError("superseded")
+                    confirmed = await self._resolve_confirmed(
+                        authenticated, request, acknowledgement
+                    )
+                    if confirmed is None or not self._binding_matches(confirmed, request):
+                        raise AuthorityServiceError("superseded")
+                    return await host.execute_lifecycle(remote)
+            finally:
+                self._release_lane(trusted.system_id, lane)
+
+        task = asyncio.create_task(run())
+        self._track_completion(task)
+        try:
+            return await asyncio.shield(task)
+        except AuthorityServiceError as error:
+            self._ensure_rejection(request, error)
             raise
 
     async def execute_conflict_resolution(

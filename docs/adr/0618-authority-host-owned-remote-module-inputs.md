@@ -28,6 +28,13 @@ The authority converts the caller's bounded budget to its own monotonic deadline
 reuses that deadline for exact replay. A worker monotonic timestamp is never compared directly to
 the authority host clock.
 
+The worker commits the authenticated PREP terminal operation, result, recovery reference, and
+reap retention while the attempt verifier still holds the System lock. Those PREP fields remain
+immutable provenance. A later successful RESTORE is recorded in a separate immutable evidence
+group bound to that PREP baseline; ordinary CLEANUP requires it, while authenticated TEARDOWN may
+discard an installed-only baseline. Reap retention stays open from PREP until authenticated volume
+absence is committed.
+
 ## Consequences
 
 Provider authority provisioning must supply only fixed appliance assets and the fixed libvirt

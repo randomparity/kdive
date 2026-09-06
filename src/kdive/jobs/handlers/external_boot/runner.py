@@ -13,16 +13,22 @@ from typing import Any, Final, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
+from pydantic import SecretStr
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.external_boot_authority_journal import commit_external_boot_preparation_result
-from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
+from kdive.db.remote_module_attempt_obligations import (
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.authority import AllocatedAuthority, allocate_authority
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.ports import (
+    ExternalBootAuthorityExecutor,
+    ExternalBootHandlerPorts,
+)
 from kdive.jobs.models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
@@ -32,6 +38,9 @@ from kdive.jobs.models import (
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityConflictResolutionRequestV1,
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
@@ -41,16 +50,8 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPorts,
     OpaqueProviderRef,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
-)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.remote_module_authority_preparation import (
-    RemoteModulePreparationAuthority,
-    RemoteModulePreparationInputs,
-    prepare_remote_module_on_authority_host,
-)
 
 __all__ = [
     "COMMITTABLE_ERROR_CATEGORIES",
@@ -74,11 +75,20 @@ _ACTIVATIONS = ExternalBootActivationRepository()
 _MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
 
 
+async def prepare_remote_module_on_authority_host(**values: Any) -> Any:
+    """Load the remote provider only when a remote job actually reaches the boundary."""
+    from kdive.services.remote_module_authority_preparation import (
+        prepare_remote_module_on_authority_host as execute,
+    )
+
+    return await execute(**values)
+
+
 class _BoundAuthorityPreparation:
     """Adapt one Resource-bound sender to the handler's deadline-free ports."""
 
-    def __init__(self, sender: RemoteModulePreparationAuthority) -> None:
-        self._sender = sender
+    def __init__(self, sender: object) -> None:
+        self._sender = cast(Any, sender)
 
     @staticmethod
     def _deadline() -> float:
@@ -91,6 +101,17 @@ class _BoundAuthorityPreparation:
         self, request: AuthorityPreparationMutationRequestV1
     ) -> AuthorityPreparationResponseV1:
         return await self._sender.execute_preparation(request, deadline=self._deadline())
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._sender.execute_mutation(request, deadline=self._deadline())
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._sender.observe_authority(request, deadline=self._deadline())
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        return await self._sender.execute_conflict_resolution(request, deadline=self._deadline())
 
 
 # The phase a raise is attributed to. `_FailureContext.phase` admits a closed Literal and the
@@ -164,6 +185,9 @@ class OperationContext:
     authority: AllocatedAuthority
     acknowledgement: AuthorityAcknowledgementV1
     secret_registry: SecretRegistry
+    authority_executor: ExternalBootAuthorityExecutor | None
+    connection: AsyncConnection
+    incarnation_credential: SecretStr
     prerequisites: Mapping[str, Any] = field(default_factory=dict)
     """Whatever ``require_preconditions`` read, so ``build_result`` need not read it again.
 
@@ -271,6 +295,13 @@ async def _materialize_preparing(
     prepare = phase_request("prepare")
     await execute_phase(materialize)
     if context.marker.provider_kind == "remote-libvirt":
+        from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+            RemoteModulePreparationExecutor,
+        )
+        from kdive.services.remote_module_authority_preparation import (
+            RemoteModulePreparationInputs,
+        )
+
         if context.binding.runtime.authority is None or ports.pool is None:
             raise _refuse("remote module authority preparation is not configured")
         module_executor = RemoteModulePreparationExecutor()
@@ -278,9 +309,12 @@ async def _materialize_preparing(
             await prepare_remote_module_on_authority_host(
                 pool=ports.pool,
                 repository=_MODULE_ATTEMPTS,
-                sender=cast(RemoteModulePreparationAuthority, context.binding.runtime.authority),
+                sender=cast(Any, context.binding.runtime.authority),
                 inputs=RemoteModulePreparationInputs(authority=prepare),
                 executor=module_executor,
+                job_id=context.job.id,
+                job_attempt=context.job.attempt,
+                incarnation_credential=context.incarnation_credential,
                 deadline=asyncio.get_running_loop().time() + 300.0,
             )
         finally:
@@ -545,10 +579,13 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     """
     binding, port = await _resolve_port(conn, marker, ports)
     if binding.runtime.authority is not None:
-        bound = _BoundAuthorityPreparation(
-            cast(RemoteModulePreparationAuthority, binding.runtime.authority)
+        bound = _BoundAuthorityPreparation(binding.runtime.authority)
+        ports = replace(
+            ports,
+            acknowledger=bound,
+            authority_executor=bound,
+            preparation_executor=bound,
         )
-        ports = replace(ports, acknowledger=bound, preparation_executor=bound)
     activation = await _read_activation(
         conn,
         marker,
@@ -585,6 +622,9 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         authority=authority,
         acknowledgement=acknowledgement,
         secret_registry=ports.secret_registry,
+        authority_executor=ports.authority_executor,
+        connection=conn,
+        incarnation_credential=ports.incarnation_credential,
         prerequisites=prerequisites,
     )
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))

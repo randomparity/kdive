@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.remote_module_attempt_obligations import (
@@ -60,6 +61,9 @@ async def prepare_verified_remote_module_attempt[ResultT](
     operation: SynchronousPreparation[ResultT] | None,
     *,
     awaited_operation: AwaitedPreparation[ResultT] | None = None,
+    commit_result: Callable[[AsyncConnection, ModuleAttempt, ResultT], Awaitable[None]]
+    | None = None,
+    allow_terminal_replay: bool = False,
     clock: Callable[[], float] = time.monotonic,
 ) -> ResultT:
     """Verify durable intent and retain its lock through synchronous completion."""
@@ -93,5 +97,11 @@ async def prepare_verified_remote_module_attempt[ResultT](
         return await executor.run(lambda: operation(attempt, identity, check_deadline))
 
     return await run_verified_module_attempt_preparation(
-        pool, repository, request, expected_attempt, consume
+        pool,
+        repository,
+        request,
+        expected_attempt,
+        consume,
+        commit_result=commit_result,
+        allow_terminal_replay=allow_terminal_replay,
     )

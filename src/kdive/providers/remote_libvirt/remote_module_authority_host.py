@@ -7,19 +7,27 @@ import json
 import os
 import stat
 import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+import libvirt
+
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
-from kdive.providers.external_boot_authority.protocol import AuthorityPreparationMutationRequestV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
+)
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
+    RemoteModuleTerminalRecord,
     RemoteModuleVolumePreparationResponseV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
@@ -58,7 +66,9 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedModuleVolumes,
     PreparedVolume,
     VolumeRequest,
+    delete_owned_attempt_volume,
     prepare_attempt_volumes,
+    recovery_attempt_volumes,
     render_module_volume_name,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -222,12 +232,19 @@ class ConcreteRemoteModuleAuthorityHost:
         self,
         operation: RemoteModuleOperationV1,
         present_attempt_volumes: frozenset[str] | None = None,
+        *,
+        cleanup: bool = False,
     ) -> AttachmentInspection:
+        if not self._configuration.fixed_inspection:
+            return self._configuration.volumes.inspect_attachments(
+                self._configuration.identity, present_attempt_volumes
+            )
         return inspect_module_attachments(
             cast(AttachmentConn, self._configuration.volumes.storage),
             self._configuration.identity,
             self._expected_attachments(operation),
             present_attempt_volumes,
+            allow_cleanup_partial=cleanup,
         )
 
     async def derive_operation(
@@ -265,9 +282,11 @@ class ConcreteRemoteModuleAuthorityHost:
         return await self._executor.run(derive)
 
     def _volume_request(
-        self, request: RemoteModuleVolumePreparationRequestV1, archive: Path
+        self,
+        authority: AuthorityPreparationMutationRequestV1,
+        operation: RemoteModuleOperationV1,
+        archive: Path,
     ) -> VolumeRequest:
-        operation = request.operation
         configured = self._configuration.volumes
         return VolumeRequest(
             pool=configured.pool_name,
@@ -291,12 +310,11 @@ class ConcreteRemoteModuleAuthorityHost:
 
     def _appliance_request(
         self,
-        request: RemoteModuleVolumePreparationRequestV1,
+        operation: RemoteModuleOperationV1,
         volumes: PreparedModuleVolumes,
         root: PreparedVolume,
         deadline: float,
     ) -> ApplianceRequest:
-        operation = request.operation
         configured = self._configuration.appliance
         return ApplianceRequest(
             name=f"kdive-module-{operation.system_id}-{operation.run_id}-{operation.operation_nonce}",
@@ -376,10 +394,10 @@ class ConcreteRemoteModuleAuthorityHost:
                 )
             volumes = prepare_attempt_volumes(
                 volumes_config.storage,
-                self._volume_request(request, directory / "modules"),
+                self._volume_request(request.authority, operation, directory / "modules"),
                 admit_mutation=lambda: self._require_deadline(deadline),
             )
-        appliance_request = self._appliance_request(request, volumes, root, deadline)
+        appliance_request = self._appliance_request(operation, volumes, root, deadline)
         outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
         if outcome.result is None:
             raise CategorizedError(
@@ -451,6 +469,250 @@ class ConcreteRemoteModuleAuthorityHost:
         self, admitted: AdmittedRemoteModulePreparation
     ) -> RemoteModuleTerminalPreparationResponseV1:
         return await self._executor.run(lambda: self._execute(admitted))
+
+    @staticmethod
+    def _restore_operation(
+        capture: RemoteModuleOperationV1, installed: RemoteModuleResultV1
+    ) -> RemoteModuleOperationV1:
+        installed.validate_for(capture)
+        if installed.phase != "installed" or installed.capture_state is None:
+            raise ValueError("remote module installed baseline is incomplete")
+        return RemoteModuleOperationV1(
+            operation="restore",
+            system_id=capture.system_id,
+            run_id=capture.run_id,
+            plan_identity=capture.plan_identity,
+            operation_nonce=capture.operation_nonce,
+            release=capture.release,
+            root_volume=capture.root_volume,
+            source_manifest=capture.source_manifest,
+            capture_manifest=installed.capture_manifest,
+            capture_absent=installed.capture_absent,
+            installed_manifest=installed.installed_manifest,
+            appliance_image_digest=capture.appliance_image_digest,
+        )
+
+    def _lifecycle_baseline(
+        self,
+        request: RemoteModuleLifecycleRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+    ) -> tuple[
+        RemoteModuleOperationV1,
+        RemoteModuleOperationV1,
+        RemoteModuleResultV1,
+        RemoteModuleRecoveryRefV2,
+    ]:
+        recovery = terminal.response.recovery
+        authority = request.authority
+        if (
+            recovery.system_id != str(authority.system_id)
+            or recovery.run_id != str(authority.run_id)
+            or recovery.plan_identity != authority.plan_identity
+        ):
+            raise ValueError("remote module lifecycle authority differs from preparation")
+        capture = terminal.request.operation
+        installed = terminal.response.result
+        if (
+            identity_for(capture) != recovery.operation_identity
+            or identity_for(installed) != recovery.result_identity
+        ):
+            raise ValueError("remote module lifecycle baseline identity differs")
+        return capture, self._restore_operation(capture, installed), installed, recovery
+
+    def _restore(
+        self,
+        request: RemoteModuleLifecycleRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1:
+        _capture, restore, _installed, recovery = self._lifecycle_baseline(request, terminal)
+        configured = self._configuration.volumes
+        stager = configured.artifact_stager
+        if stager is None:
+            raise ValueError("remote module artifact staging is not configured")
+        with tempfile.TemporaryDirectory(
+            prefix="kdive-remote-module-restore-", dir=configured.work_dir
+        ) as raw:
+            directory = Path(raw)
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                evidence, _manifest = stager.materialize_artifacts(
+                    terminal.request.authority.plan, descriptor
+                )
+            finally:
+                os.close(descriptor)
+            if evidence.get("module_source_manifest") != restore.source_manifest:
+                raise ValueError("remote module restore source differs from baseline")
+            volumes = prepare_attempt_volumes(
+                configured.storage,
+                self._volume_request(terminal.request.authority, restore, directory / "modules"),
+                admit_mutation=lambda: self._require_deadline(deadline),
+            )
+        root = self._configuration.appliance.root(restore)
+        appliance_request = self._appliance_request(restore, volumes, root, deadline)
+        outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
+        if outcome.result is None:
+            raise RuntimeError("remote module restore did not produce durable terminal evidence")
+        result = outcome.result
+        result.validate_for(restore)
+        if result.status != "success" or result.phase != "restored":
+            raise ValueError("remote module restore did not reach restored success")
+        teardown = teardown_remote_module_appliance(
+            self._configuration.appliance.appliance, appliance_request
+        )
+        if not teardown.complete:
+            raise RuntimeError("remote module restore teardown is incomplete")
+        return RemoteModuleLifecycleResponseV1(
+            action="restore",
+            recovery=recovery,
+            operation=restore,
+            result=result,
+            volumes_absent=False,
+        )
+
+    def _reap(
+        self,
+        request: RemoteModuleLifecycleRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1:
+        capture, restore, installed, recovery = self._lifecycle_baseline(request, terminal)
+        if restored is None and request.authority.operation is not AuthorityOperation.TEARDOWN:
+            raise ValueError("installed-only module reap requires teardown authority")
+        if restored is not None and (
+            restored.operation != restore or restored.recovery != recovery
+        ):
+            raise ValueError("remote module restored evidence differs from preparation")
+        volumes = recovery_attempt_volumes(
+            restore, recovery.pool.ref, recovery.source_capacity_bytes
+        )
+        if (
+            recovery.source_volume.ref != volumes.source.name
+            or recovery.scratch_volume.ref != volumes.scratch.name
+            or recovery.root_volume.ref != restore.root_volume.key
+            or recovery.pool.ref != self._configuration.volumes.pool_name
+        ):
+            raise ValueError("remote module recovery geometry differs from fixed host binding")
+        operation = restore if restored is not None else capture
+        result = restored.result if restored is not None else installed
+        state = self._reap_state(recovery)
+        if state == "reaped":
+            self._require_attempt_volumes_absent(volumes)
+            return RemoteModuleLifecycleResponseV1(
+                action="reap",
+                recovery=recovery,
+                operation=operation,
+                result=result,
+                volumes_absent=True,
+            )
+        if state == "absent":
+            raw = self._configuration.appliance.read_scratch_result(volumes.scratch, deadline)
+            if raw is None or RemoteModuleResultV1.from_wire_bytes(raw) != result:
+                raise ValueError("remote module restored result differs before reap")
+        root = self._configuration.appliance.root(restore)
+        appliance_request = self._appliance_request(restore, volumes, root, deadline)
+        teardown = teardown_remote_module_appliance(
+            self._configuration.appliance.appliance, appliance_request
+        )
+        if not teardown.complete:
+            raise RuntimeError("remote module reap teardown is incomplete")
+        if state == "absent":
+            self._record_reap_marker(recovery, "reaping", deadline)
+        present = self._present_attempt_volumes(volumes)
+        inspection = self._inspect(restore, present, cleanup=True)
+        delete_owned_attempt_volume(
+            self._configuration.volumes.storage,
+            volumes.source,
+            inspection=inspection,
+            admit_mutation=lambda: self._require_deadline(deadline),
+        )
+        present = self._present_attempt_volumes(volumes)
+        inspection = self._inspect(restore, present, cleanup=True)
+        delete_owned_attempt_volume(
+            self._configuration.volumes.storage,
+            volumes.scratch,
+            inspection=inspection,
+            admit_mutation=lambda: self._require_deadline(deadline),
+        )
+        self._record_reap_marker(recovery, "reaped", deadline)
+        return RemoteModuleLifecycleResponseV1(
+            action="reap",
+            recovery=recovery,
+            operation=operation,
+            result=result,
+            volumes_absent=True,
+        )
+
+    def _marker_name(self, recovery: RemoteModuleRecoveryRefV2, state: str) -> str:
+        return render_module_volume_name(
+            recovery.system_id,
+            recovery.run_id,
+            recovery.operation_nonce,
+            f"{state}.journal",
+        )
+
+    def _marker_present(self, recovery: RemoteModuleRecoveryRefV2, state: str) -> bool:
+        pool = self._configuration.volumes.storage.storagePoolLookupByName(recovery.pool.ref)
+        try:
+            pool.storageVolLookupByName(self._marker_name(recovery, state))
+            return True
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return False
+            raise
+
+    def _reap_state(self, recovery: RemoteModuleRecoveryRefV2) -> str:
+        reaping = self._marker_present(recovery, "reaping")
+        reaped = self._marker_present(recovery, "reaped")
+        if reaped and not reaping:
+            raise ValueError("remote module reap markers are out of order")
+        if reaped:
+            return "reaped"
+        return "reaping" if reaping else "absent"
+
+    def _record_reap_marker(
+        self, recovery: RemoteModuleRecoveryRefV2, state: str, deadline: float
+    ) -> None:
+        if self._marker_present(recovery, state):
+            return
+        self._require_deadline(deadline)
+        root = ET.Element("volume")
+        ET.SubElement(root, "name").text = self._marker_name(recovery, state)
+        ET.SubElement(root, "capacity", unit="bytes").text = "1"
+        target = ET.SubElement(root, "target")
+        ET.SubElement(target, "format", type="raw")
+        pool = self._configuration.volumes.storage.storagePoolLookupByName(recovery.pool.ref)
+        pool.createXML(ET.tostring(root, encoding="unicode"), 0)
+        if not self._marker_present(recovery, state):
+            raise RuntimeError("remote module reap marker was not durable after creation")
+
+    def _present_attempt_volumes(self, volumes: PreparedModuleVolumes) -> frozenset[str]:
+        pool = self._configuration.volumes.storage.storagePoolLookupByName(volumes.source.pool)
+        present: set[str] = set()
+        for volume in (volumes.source, volumes.scratch):
+            try:
+                pool.storageVolLookupByName(volume.name)
+                present.add(volume.name)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    raise
+        return frozenset(present)
+
+    def _require_attempt_volumes_absent(self, volumes: PreparedModuleVolumes) -> None:
+        if self._present_attempt_volumes(volumes):
+            raise ValueError("remote module reaped marker conflicts with present attempt volumes")
+
+    async def execute_lifecycle(
+        self,
+        request: RemoteModuleLifecycleRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1:
+        if request.action == "restore":
+            return await self._executor.run(lambda: self._restore(request, terminal, deadline))
+        return await self._executor.run(lambda: self._reap(request, terminal, restored, deadline))
 
 
 class RemoteModuleAuthorityHostFactory:
@@ -599,3 +861,15 @@ class FactoryRemoteModuleAuthorityHost:
     ) -> RemoteModuleTerminalPreparationResponseV1:
         request = admitted.request
         return await self._factory.host(request.authority.plan.architecture).execute(admitted)
+
+    async def execute_lifecycle(
+        self,
+        request: RemoteModuleLifecycleRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1:
+        architecture = terminal.request.authority.plan.architecture
+        return await self._factory.host(architecture).execute_lifecycle(
+            request, terminal, restored, deadline
+        )

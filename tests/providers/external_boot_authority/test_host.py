@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -839,11 +839,18 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
             closed.append(True)
 
     monkeypatch.setattr(libvirt, "open", lambda _uri: Connection())
-    config = _access_boundary_config(tmp_path)
+    config = replace(
+        _access_boundary_config(tmp_path), remote_libvirt_storage_pool="authority-systems"
+    )
 
     service = host._build_mutation_service(config)  # noqa: SLF001
     assert service is not None
     assert captured == [(store, config.provider_socket)]
+    remote_module_host = cast(Any, service._remote_module_host)  # noqa: SLF001
+    assert remote_module_host._host._factory._pool_name == "authority-systems"  # noqa: SLF001
+    operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
+    assert operations._pool_name == "authority-systems"  # noqa: SLF001
+    assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001
     asyncio.run(service.close())
     assert closed == [True]
 
@@ -1129,6 +1136,7 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_UID", str(os.geteuid()))
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_GID", str(os.getegid()))
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID", str(os.getegid()))
+    monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_STORAGE_POOL", "authority-systems")
     monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
     kdive_config.load()
     config = AuthorityHostConfig.from_environment()
@@ -1136,6 +1144,7 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     assert config.authority_uid == os.geteuid()
     assert config.authority_gid == os.getegid()
     assert config.authority_client_gid == os.getegid()
+    assert config.remote_libvirt_storage_pool == "authority-systems"
     assert config.journal_dir == Path("/var/lib/kdive/provider-authority/journal")
     assert config.request_socket == Path("/run/kdive/provider-authority/request/authority.sock")
     assert config.provider_socket == Path("/run/kdive/provider-authority/libvirt/libvirt-sock")

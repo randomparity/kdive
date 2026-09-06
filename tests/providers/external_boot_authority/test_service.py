@@ -18,6 +18,7 @@ from kdive.domain.remote_module_attempt_preparation import (
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
+    AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -38,6 +39,8 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginRequestV1,
     RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
@@ -500,6 +503,16 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
             await release.wait()
             return cast(RemoteModuleTerminalPreparationResponseV1, Result())
 
+        async def observe_lifecycle(
+            self, request: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1 | None:
+            raise AssertionError(f"unexpected lifecycle observation: {request!r}")
+
+        async def execute_lifecycle(
+            self, request: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1:
+            raise AssertionError(f"unexpected lifecycle request: {request!r}")
+
     adapter = _Adapter()
     service = ExternalBootAuthorityService(
         repository=repository,
@@ -545,13 +558,17 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
 
     first = asyncio.create_task(service.execute_remote_module_preparation(peer, remote))
     await entered.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
     with pytest.raises(AuthorityServiceError, match="superseded"):
         await service.execute_remote_module_preparation(peer, remote)
     assert completed == [remote]
     release.set()
-    result = await first
-
-    assert isinstance(result, Result)
+    for _ in range(20):
+        if repository.records[-1].phase is JournalPhase.TERMINAL:
+            break
+        await asyncio.sleep(0)
     assert completed == [remote]
     assert [record.phase for record in repository.records][-3:] == [
         JournalPhase.PROVIDER_RETURNED,
@@ -559,6 +576,90 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
         JournalPhase.TERMINAL,
     ]
     assert adapter.calls == ["commit:prepare", "observe"]
+
+
+@pytest.mark.anyio
+async def test_remote_lifecycle_serializes_and_reopens_exact_completion_after_rebinding(
+    tmp_path: Path,
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(
+        update={
+            "provider_kind": "remote-libvirt",
+            "purpose": "recover",
+            "operation": AuthorityOperation.RECOVER,
+        }
+    )
+    repository = _Repository(peer, takeover)
+    request = AuthorityMutationRequestV1.model_validate(
+        _mutation(takeover).model_dump(mode="python", by_alias=True)
+        | {"purpose": "recover", "operation": "recover"}
+    )
+    remote = RemoteModuleLifecycleRequestV1(
+        authority=request,
+        action="restore",
+        budget_seconds=30,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    completed: RemoteModuleLifecycleResponseV1 | None = None
+
+    class Host:
+        async def begin(self, *_args: object) -> object:
+            raise AssertionError("unexpected begin")
+
+        async def execute(self, *_args: object) -> object:
+            raise AssertionError("unexpected preparation")
+
+        async def observe_lifecycle(
+            self, candidate: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1 | None:
+            assert candidate == remote
+            return completed
+
+        async def execute_lifecycle(
+            self, candidate: RemoteModuleLifecycleRequestV1
+        ) -> RemoteModuleLifecycleResponseV1:
+            nonlocal calls, completed
+            assert candidate == remote
+            assert candidate.budget_seconds == 30
+            calls += 1
+            entered.set()
+            await release.wait()
+            completed = cast(RemoteModuleLifecycleResponseV1, object())
+            return completed
+
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_Adapter(),
+        remote_module_host=cast(Any, Host()),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    trusted = await repository.resolve_current_candidate(peer, request)
+    assert trusted is not None
+    assert service._binding_matches(trusted, request)
+    first = asyncio.create_task(service.execute_remote_module_lifecycle(peer, remote))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+    except TimeoutError:
+        await first
+        raise
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    second = asyncio.create_task(service.execute_remote_module_lifecycle(peer, remote))
+    await asyncio.sleep(0)
+    assert calls == 1
+    release.set()
+    assert await second is completed
+    assert calls == 1
+
+    repository.current = False
+    assert await service.execute_remote_module_lifecycle(peer, remote) is completed
+    assert calls == 1
 
 
 @pytest.mark.anyio

@@ -44,6 +44,8 @@ from kdive.providers.external_boot_authority.service import (
     AuthorityServiceError,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginRequestV1,
     RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
@@ -70,6 +72,7 @@ type Operation = Literal[
     "execute-preparation",
     "begin-remote-module-preparation",
     "execute-remote-module-preparation",
+    "execute-remote-module-lifecycle",
     "health",
     "resolve-device-identity",
 ]
@@ -124,6 +127,12 @@ class RemoteModulePreparationService(Protocol):
         remote: RemoteModuleVolumePreparationRequestV1,
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
 
+    async def execute_remote_module_lifecycle(
+        self,
+        peer: AuthenticatedPeer,
+        remote: RemoteModuleLifecycleRequestV1,
+    ) -> RemoteModuleLifecycleResponseV1: ...
+
 
 class DeviceIdentityService(Protocol):
     async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityResponseV1: ...
@@ -165,12 +174,16 @@ def encode_request_envelope(
         decode_device_identity_request(request_bytes)
         if operation == "resolve-device-identity"
         else (
-            RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
-            if operation == "execute-remote-module-preparation"
+            RemoteModuleLifecycleRequestV1.from_canonical_json(request_bytes)
+            if operation == "execute-remote-module-lifecycle"
             else (
-                RemoteModulePreparationBeginRequestV1.model_validate_json(request_bytes)
-                if operation == "begin-remote-module-preparation"
-                else decode_authority_request(request_bytes)
+                RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
+                if operation == "execute-remote-module-preparation"
+                else (
+                    RemoteModulePreparationBeginRequestV1.model_validate_json(request_bytes)
+                    if operation == "begin-remote-module-preparation"
+                    else decode_authority_request(request_bytes)
+                )
             )
         )
     )
@@ -194,6 +207,10 @@ def encode_request_envelope(
         raise ValueError("invalid-request")
     if operation == "execute-remote-module-preparation" and not isinstance(
         decoded, RemoteModuleVolumePreparationRequestV1
+    ):
+        raise ValueError("invalid-request")
+    if operation == "execute-remote-module-lifecycle" and not isinstance(
+        decoded, RemoteModuleLifecycleRequestV1
     ):
         raise ValueError("invalid-request")
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
@@ -261,6 +278,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "execute-preparation",
             "begin-remote-module-preparation",
             "execute-remote-module-preparation",
+            "execute-remote-module-lifecycle",
             "health",
             "resolve-device-identity",
         }:
@@ -275,12 +293,16 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             decode_device_identity_request(request_bytes)
             if operation == "resolve-device-identity"
             else (
-                RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
-                if operation == "execute-remote-module-preparation"
+                RemoteModuleLifecycleRequestV1.from_canonical_json(request_bytes)
+                if operation == "execute-remote-module-lifecycle"
                 else (
-                    RemoteModulePreparationBeginRequestV1.model_validate_json(request_bytes)
-                    if operation == "begin-remote-module-preparation"
-                    else decode_authority_request(request_bytes)
+                    RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
+                    if operation == "execute-remote-module-preparation"
+                    else (
+                        RemoteModulePreparationBeginRequestV1.model_validate_json(request_bytes)
+                        if operation == "begin-remote-module-preparation"
+                        else decode_authority_request(request_bytes)
+                    )
                 )
             )
         )
@@ -310,6 +332,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, RemoteModuleVolumePreparationRequestV1
         ):
             raise ValueError
+        if operation == "execute-remote-module-lifecycle" and not isinstance(
+            request, RemoteModuleLifecycleRequestV1
+        ):
+            raise ValueError
         if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
             raise ValueError
         if operation == "resolve-device-identity" and not isinstance(
@@ -329,6 +355,7 @@ def _success(
     | AuthorityHealthAcknowledgementV1
     | DeviceIdentityResponseV1
     | RemoteModulePreparationBeginResponseV1
+    | RemoteModuleLifecycleResponseV1
     | RemoteModuleTerminalPreparationResponseV1,
 ) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
@@ -367,6 +394,24 @@ async def _dispatch(
             return _success(await identity_service.resolve(request))
         except Exception:  # noqa: BLE001 -- filesystem details never cross the boundary
             return _error("provider-failure")
+    if operation == "execute-remote-module-lifecycle":
+        if remote_module_service is None:
+            return _error("provider-not-configured")
+        if not isinstance(request, RemoteModuleLifecycleRequestV1):
+            raise _TransportError("invalid-request")
+        try:
+            result = await remote_module_service.execute_remote_module_lifecycle(peer, request)
+            return _success(result)
+        except AuthorityServiceError as exc:
+            return _error(_service_category(exc.category))
+        except CategorizedError as exc:
+            if exc.details.get("completion") == "failed-after-mutation":
+                return _error("remote-module-failed")
+            if exc.details.get("completion") == "refused-before-mutation":
+                return _error("remote-module-refused")
+            return _error("provider-conflict")
+        except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            return _error("provider-conflict")
     if operation == "execute-remote-module-preparation":
         if remote_module_service is None:
             return _error("provider-not-configured")

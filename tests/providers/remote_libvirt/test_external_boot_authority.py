@@ -14,9 +14,17 @@ from uuid import UUID, uuid4
 
 import libvirt
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from kdive.domain.errors import CategorizedError
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
+    ModuleAttemptWorkerWriteContext,
+)
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.remote_module_attempt_preparation import (
+    ModuleAttemptObligationReceiptV1,
+    ModuleAttemptPreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
@@ -46,6 +54,8 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationHost,
     RemoteModuleVolumePreparationRequestV1,
@@ -82,7 +92,10 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
 from kdive.providers.shared.runtime_paths import domain_name_for
-from kdive.services.remote_module_authority_preparation import RemoteModulePreparationInputs
+from kdive.services.remote_module_authority_preparation import (
+    RemoteModulePreparationInputs,
+    execute_remote_module_lifecycle_on_authority_host,
+)
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as module_operation,
 )
@@ -728,6 +741,63 @@ def _terminal_response(
     )
 
 
+def _module_lifecycle_request(
+    request: RemoteModuleVolumePreparationRequestV1,
+    *,
+    purpose: str = "recover",
+    operation: str = "recover",
+    action: Literal["restore", "reap"] = "restore",
+) -> RemoteModuleLifecycleRequestV1:
+    authority = request.authority
+    mutation = AuthorityMutationRequestV1.model_validate(
+        {
+            **authority.model_dump(
+                mode="python",
+                by_alias=True,
+                exclude={"plan", "purpose", "operation", "operation_identity"},
+            ),
+            "purpose": purpose,
+            "operation": operation,
+            "operation_identity": f"{operation}-module-op",
+        }
+    )
+    return RemoteModuleLifecycleRequestV1(
+        authority=mutation,
+        action=action,
+        budget_seconds=30,
+    )
+
+
+def _restored_response(
+    request: RemoteModuleVolumePreparationRequestV1,
+) -> RemoteModuleLifecycleResponseV1:
+    terminal = _terminal_response(request)
+    capture = request.operation
+    operation = RemoteModuleOperationV1(
+        operation="restore",
+        system_id=capture.system_id,
+        run_id=capture.run_id,
+        plan_identity=capture.plan_identity,
+        operation_nonce=capture.operation_nonce,
+        release=capture.release,
+        root_volume=capture.root_volume,
+        source_manifest=capture.source_manifest,
+        capture_absent=True,
+        installed_manifest=capture.source_manifest,
+        appliance_image_digest=capture.appliance_image_digest,
+    )
+    result = terminal.result.model_copy(
+        update={"phase": "restored", "entry_count": None, "content_bytes": None}
+    )
+    return RemoteModuleLifecycleResponseV1(
+        action="restore",
+        recovery=terminal.recovery,
+        operation=operation,
+        result=result,
+        volumes_absent=False,
+    )
+
+
 def _record() -> RemoteExternalBootRecoveryRecord:
     system_id = "00000000-0000-4000-8000-000000000001"
     run_id = "00000000-0000-4000-8000-000000000002"
@@ -1061,6 +1131,332 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
     assert await replay.execute(request) == expected
     assert calls == 1
     third.close()
+
+
+@pytest.mark.anyio
+async def test_durable_remote_lifecycle_waits_through_lost_reply_and_reopens_terminal(
+    tmp_path: Path,
+) -> None:
+    preparation = _remote_preparation_request()
+    lifecycle = _module_lifecycle_request(preparation)
+    expected = _restored_response(preparation)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    class Host:
+        async def execute_lifecycle(
+            self, request: object, terminal: object, restored: object, deadline: float
+        ) -> RemoteModuleLifecycleResponseV1:
+            del terminal
+            nonlocal calls
+            assert request == lifecycle
+            assert restored is None
+            assert deadline == 30.0
+            calls += 1
+            started.set()
+            await release.wait()
+            return expected
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(preparation, 999.0)
+    store.publish_result(preparation, _terminal_response(preparation))
+    durable = DurableRemoteModuleVolumePreparationHost(
+        store, cast(Any, Host()), monotonic=lambda: 0.0
+    )
+    task = asyncio.create_task(durable.execute_lifecycle(lifecycle))
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    store.close()
+
+    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    assert (
+        await DurableRemoteModuleVolumePreparationHost(
+            restarted, cast(Any, Host()), monotonic=lambda: 100.0
+        ).execute_lifecycle(lifecycle)
+        == expected
+    )
+    assert calls == 1
+    retry_with_new_budget = lifecycle.model_copy(update={"budget_seconds": 300})
+    assert (
+        await DurableRemoteModuleVolumePreparationHost(
+            restarted, cast(Any, Host()), monotonic=lambda: 100.0
+        ).execute_lifecycle(retry_with_new_budget)
+        == expected
+    )
+    assert restarted.reopen_lifecycle(retry_with_new_budget).local_deadline == 30.0
+    assert calls == 1
+    successor = RemoteModuleLifecycleRequestV1(
+        authority=lifecycle.authority.model_copy(
+            update={
+                "authority_id": uuid4(),
+                "generation": 2,
+                "operation_identity": "successor-recover-op",
+            }
+        ),
+        action="restore",
+        budget_seconds=30,
+    )
+    assert (
+        await DurableRemoteModuleVolumePreparationHost(
+            restarted, cast(Any, Host()), monotonic=lambda: 100.0
+        ).execute_lifecycle(successor)
+        == expected
+    )
+    assert calls == 1
+    restarted.close()
+
+
+@pytest.mark.anyio
+async def test_remote_reap_requires_restored_cleanup_or_installed_teardown(
+    tmp_path: Path,
+) -> None:
+    preparation = _remote_preparation_request()
+    cleanup = _module_lifecycle_request(
+        preparation, purpose="release", operation="cleanup", action="reap"
+    )
+    with pytest.raises(ValidationError, match="action differs"):
+        _module_lifecycle_request(
+            preparation,
+            purpose="release",
+            operation="release",
+            action="reap",
+        )
+    terminal = _terminal_response(preparation)
+    expected = RemoteModuleLifecycleResponseV1(
+        action="reap",
+        recovery=terminal.recovery,
+        operation=preparation.operation,
+        result=terminal.result,
+        volumes_absent=True,
+    )
+    calls = 0
+
+    class Host:
+        async def execute_lifecycle(
+            self,
+            request: RemoteModuleLifecycleRequestV1,
+            terminal: object,
+            prior_restore: RemoteModuleLifecycleResponseV1 | None,
+            deadline: float,
+        ) -> RemoteModuleLifecycleResponseV1:
+            del terminal
+            nonlocal calls
+            assert request.authority.operation is AuthorityOperation.TEARDOWN
+            assert prior_restore is None
+            assert deadline > 0
+            calls += 1
+            return expected
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(preparation, 999.0)
+    store.publish_result(preparation, _terminal_response(preparation))
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, Host()))
+    with pytest.raises(CategorizedError, match="requires restored evidence"):
+        await durable.execute_lifecycle(cleanup)
+    assert calls == 0
+    wrong_binding = RemoteModuleLifecycleRequestV1(
+        authority=cleanup.authority.model_copy(update={"activation_id": uuid4()}),
+        action="reap",
+        budget_seconds=30,
+    )
+    with pytest.raises(FileNotFoundError, match="terminal preparation"):
+        await durable.execute_lifecycle(wrong_binding)
+    assert calls == 0
+    teardown = _module_lifecycle_request(
+        preparation, purpose="teardown", operation="teardown", action="reap"
+    )
+    assert await durable.execute_lifecycle(teardown) == expected
+    assert calls == 1
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_worker_lifecycle_stops_on_authenticated_predispatch_refusal() -> None:
+    preparation_request = _remote_preparation_request()
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=preparation_request.authority.system_id,
+            run_id=preparation_request.authority.run_id,
+            operation_nonce=preparation_request.operation.operation_nonce,
+        )
+    )
+    calls = 0
+
+    class Sender:
+        async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            raise CategorizedError(
+                "authority: remote-module-refused",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+    with pytest.raises(CategorizedError, match="remote-module-refused"):
+        await asyncio.wait_for(
+            execute_remote_module_lifecycle_on_authority_host(
+                connection=cast(Any, object()),
+                repository=cast(Any, object()),
+                sender=cast(Any, Sender()),
+                authority=_module_lifecycle_request(preparation_request).authority,
+                preparation=preparation,
+                worker_context=ModuleAttemptWorkerWriteContext(
+                    job_id=uuid4(),
+                    job_attempt=1,
+                    incarnation_credential=SecretStr("worker-credential"),
+                    preparation=preparation,
+                ),
+                action="restore",
+                deadline=asyncio.get_running_loop().time() + 10,
+            ),
+            timeout=1,
+        )
+    assert calls == 1
+
+
+@pytest.mark.anyio
+async def test_worker_reap_requires_retained_terminal_evidence_before_dispatch() -> None:
+    preparation_request = _remote_preparation_request()
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=preparation_request.authority.system_id,
+            run_id=preparation_request.authority.run_id,
+            operation_nonce=preparation_request.operation.operation_nonce,
+        )
+    )
+
+    class Repository:
+        async def reap_obligation_is_open(self, connection: object, attempt: ModuleAttempt) -> bool:
+            assert connection is worker_connection
+            assert attempt.operation_nonce == preparation_request.operation.operation_nonce
+            return False
+
+    class Sender:
+        async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("reap reached authority without retained evidence")
+
+    worker_connection = object()
+    with pytest.raises(CategorizedError, match="reap obligation is not retained"):
+        await execute_remote_module_lifecycle_on_authority_host(
+            connection=cast(Any, worker_connection),
+            repository=cast(Any, Repository()),
+            sender=cast(Any, Sender()),
+            authority=_module_lifecycle_request(
+                preparation_request,
+                purpose="teardown",
+                operation="teardown",
+                action="reap",
+            ).authority,
+            preparation=preparation,
+            worker_context=ModuleAttemptWorkerWriteContext(
+                job_id=uuid4(),
+                job_attempt=1,
+                incarnation_credential=SecretStr("worker-credential"),
+                preparation=preparation,
+            ),
+            action="reap",
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+
+
+@pytest.mark.anyio
+async def test_worker_lifecycle_stops_on_authenticated_refusal_after_lost_reply() -> None:
+    preparation_request = _remote_preparation_request()
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=preparation_request.authority.system_id,
+            run_id=preparation_request.authority.run_id,
+            operation_nonce=preparation_request.operation.operation_nonce,
+        )
+    )
+    calls = 0
+
+    class Sender:
+        async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError
+            raise CategorizedError(
+                "authority: remote-module-refused",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+    with pytest.raises(CategorizedError, match="remote-module-refused"):
+        await asyncio.wait_for(
+            execute_remote_module_lifecycle_on_authority_host(
+                connection=cast(Any, object()),
+                repository=cast(Any, object()),
+                sender=cast(Any, Sender()),
+                authority=_module_lifecycle_request(preparation_request).authority,
+                preparation=preparation,
+                worker_context=ModuleAttemptWorkerWriteContext(
+                    job_id=uuid4(),
+                    job_attempt=1,
+                    incarnation_credential=SecretStr("worker-credential"),
+                    preparation=preparation,
+                ),
+                action="restore",
+                deadline=asyncio.get_running_loop().time() + 10,
+            ),
+            timeout=1,
+        )
+    assert calls == 2
+
+
+@pytest.mark.anyio
+async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> None:
+    preparation_request = _remote_preparation_request()
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=preparation_request.authority.system_id,
+            run_id=preparation_request.authority.run_id,
+            operation_nonce=preparation_request.operation.operation_nonce,
+        )
+    )
+    second = asyncio.Event()
+    calls = 0
+
+    class Sender:
+        async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError
+            second.set()
+            raise CategorizedError(
+                "authority: superseded", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+
+    task = asyncio.create_task(
+        execute_remote_module_lifecycle_on_authority_host(
+            connection=cast(Any, object()),
+            repository=cast(Any, object()),
+            sender=cast(Any, Sender()),
+            authority=_module_lifecycle_request(preparation_request).authority,
+            preparation=preparation,
+            worker_context=ModuleAttemptWorkerWriteContext(
+                job_id=uuid4(),
+                job_attempt=1,
+                incarnation_credential=SecretStr("worker-credential"),
+                preparation=preparation,
+            ),
+            action="restore",
+            deadline=asyncio.get_running_loop().time() + 10,
+        )
+    )
+    await asyncio.wait_for(second.wait(), 1)
+    await asyncio.sleep(0)
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 2
 
 
 def test_durable_remote_preparation_preserves_first_authority_clock_deadline(

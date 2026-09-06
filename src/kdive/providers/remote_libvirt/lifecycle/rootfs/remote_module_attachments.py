@@ -165,10 +165,16 @@ def inspect_module_attachments(
     identity_port: RemoteDeviceIdentityPort,
     expected: ExpectedAttachmentState,
     present_attempt_volumes: frozenset[str] | None = None,
+    *,
+    allow_cleanup_partial: bool = False,
 ) -> AttachmentInspection:
     """Prove the System is stopped and all three volumes have exclusive owners."""
     protected_identities = _protected_volume_identities(
-        conn, identity_port, expected, present_attempt_volumes
+        conn,
+        identity_port,
+        expected,
+        present_attempt_volumes,
+        allow_cleanup_partial=allow_cleanup_partial,
     )
     try:
         domains = conn.listAllDomains(0)
@@ -300,16 +306,21 @@ def _protected_volume_identities(
     identity_port: RemoteDeviceIdentityPort,
     expected: ExpectedAttachmentState,
     present_attempt_volumes: frozenset[str] | None = None,
+    *,
+    allow_cleanup_partial: bool = False,
 ) -> dict[str, RemoteDeviceIdentity]:
     attempt_volumes = (
         frozenset({expected.source_volume, expected.scratch_volume})
         if present_attempt_volumes is None
         else present_attempt_volumes
     )
-    if attempt_volumes not in {
+    allowed = {
         frozenset({expected.source_volume}),
         frozenset({expected.source_volume, expected.scratch_volume}),
-    }:
+    }
+    if allow_cleanup_partial:
+        allowed.add(frozenset({expected.scratch_volume}))
+    if attempt_volumes not in allowed:
         raise _conflict("remote module partial volume state is invalid")
     identities = {
         volume: _device_identity(identity_port, _volume_path(conn, expected.pool, volume))
