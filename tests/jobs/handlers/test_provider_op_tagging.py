@@ -113,6 +113,9 @@ def _make_fake_conn() -> MagicMock:
 
     fake_conn = MagicMock()
     fake_conn.execute = AsyncMock()
+    cursor = AsyncMock()
+    cursor.fetchone.return_value = None
+    fake_conn.cursor.return_value.__aenter__.return_value = cursor
     fake_conn.info.transaction_status = TransactionStatus.INTRANS
     fake_cm = AsyncMock()
     fake_cm.__aenter__ = AsyncMock(return_value=None)

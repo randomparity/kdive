@@ -110,9 +110,49 @@ def test_host_rejects_unsafe_credentials(tmp_path: Path) -> None:
         validate_credential_paths(config)
 
 
-def test_access_boundary_rejects_denied_group_membership_and_acl_drift(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("membership", "allowed"),
+    [("client", True), ("authority", False)],
+)
+def test_access_boundary_distinguishes_client_from_authority_group_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    membership: str,
+    allowed: bool,
 ) -> None:
+    config = _access_boundary_config(tmp_path)
+    client_gid = config.authority_gid + 10_000
+    config = replace(config, authority_client_gid=client_gid)
+    denied_uid = config.authority_uid + 10_000
+    denied_gid = client_gid + 10_000
+
+    real_stat = host.os.stat
+    client_group_paths = {config.request_socket.parent.parent, config.request_socket.parent}
+
+    def distinct_group_stat(path: Any, *, follow_symlinks: bool = True) -> os.stat_result:
+        opened = real_stat(path, follow_symlinks=follow_symlinks)
+        if Path(path) not in client_group_paths:
+            return opened
+        fields = list(opened)
+        fields[5] = client_gid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(
+        host.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=denied_uid, pw_gid=denied_gid),
+    )
+    monkeypatch.setattr(host.os, "stat", distinct_group_stat)
+    selected_gid = client_gid if membership == "client" else config.authority_gid
+    monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid, selected_gid])
+    if allowed:
+        host._validate_access_boundary(config)  # noqa: SLF001
+    else:
+        with pytest.raises(HostReadinessError, match="access-boundary: denied-identity"):
+            host._validate_access_boundary(config)  # noqa: SLF001
+
+
+def test_access_boundary_rejects_acl_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _access_boundary_config(tmp_path)
     denied_uid = config.authority_uid + 10_000
     denied_gid = config.authority_gid + 10_000
@@ -122,17 +162,6 @@ def test_access_boundary_rejects_denied_group_membership_and_acl_drift(
         "getpwnam",
         lambda _name: SimpleNamespace(pw_uid=denied_uid, pw_gid=denied_gid),
     )
-    monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid])
-    host._validate_access_boundary(config)  # noqa: SLF001
-
-    monkeypatch.setattr(
-        host.os,
-        "getgrouplist",
-        lambda _name, gid: [gid, config.authority_client_gid],
-    )
-    with pytest.raises(HostReadinessError, match="access-boundary: denied-identity"):
-        host._validate_access_boundary(config)  # noqa: SLF001
-
     monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid])
     real_listxattr = host.os.listxattr
 

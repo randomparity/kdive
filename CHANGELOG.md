@@ -262,22 +262,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discharge module obligations on teardown
 - Discharge terminal module obligations
 - Discharge terminal module mutations
-- Bind preparation requests to plans
-- Persist external boot preparation plans
-- Materialize local external boot artifacts
-- Derive authority preparation bindings
-- Guard preparation receipt commits
-- Expose preparation receipt commit
-- Execute preparation through journal lanes
-- Return anchored preparation receipts
-- Materialize external boot under authority
-- Prepare external boot under authority
 - Add durable module reopen runtime
 - Verify module preparation receipts
 - Prepare verified module volumes
 - Run module appliance
 - Clean up module attempt volumes
 - Complete module reap runtime
+- Materialize local external boot artifacts
 - Persist recovery volume geometry
 - Classify resumable module phases
 - Inspect durable module attempts
@@ -290,13 +281,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add sparse module result reader
 - Bound provider call completion
 - Fence remote module worker evidence
+- Define remote external boot recovery contract
+- Bind preparation requests to plans
+- Persist external boot preparation plans
+- Derive authority preparation bindings
+- Guard preparation receipt commits
+- Expose preparation receipt commit
+- Execute preparation through journal lanes
+- Return anchored preparation receipts
+- Materialize external boot under authority
+- Prepare external boot under authority
 - Adapt authority journal repository
+- Bind authority volume preparation
+- Persist authority recovery evidence
 - Scope local external boot leases
 - Assemble local external boot authority
 - Add worker local authority client
 - Send authority preparation requests
 - Fence crashes to active owning runs
 - Add worker local authority client
+- Persist preparation receipts
 
 ### Changed
 
@@ -1359,9 +1363,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Define recovery observation context
 - Ratify local storage reclamation
 - Align storage records with gate format
-- Place preparation behind authority
 - Record remote recovery geometry
+- Place preparation behind authority
 - Clarify partial preparation recovery
+- Specify remote materialization receipt recovery
 
 ### Fixed
 
@@ -2166,7 +2171,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Snapshot remote fleet configuration
 - Preserve partial abort authority
 - Run capacity probe in check mode
-- Defer preparation until authority
+- Reopen restore phase evidence
+- Own terminal evidence connections
+- Validate module runtime boundaries
 - Harden external boot materialization retry
 - Narrow projection reopen authority
 - Validate payloads before projection commit
@@ -2174,11 +2181,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify canonical materialized modules
 - Confine module conversion scratch files
 - Bound materializer validation storage
-- Bind preparation receipts to journal evidence
-- Refresh prepared activation evidence
-- Reopen restore phase evidence
-- Own terminal evidence connections
-- Validate module runtime boundaries
 - Bind v2 recovery baseline identity
 - Inherit module read deadlines
 - Retain phase mutation deadlines
@@ -2189,6 +2191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve remote module recovery deadlines
 - Inherit module scratch read deadlines
 - Order remote module evidence locks
+- Defer preparation until authority
+- Bind preparation receipts to journal evidence
+- Refresh prepared activation evidence
 - Resume partial remote module preparation
 - Reject unsafe partial volume repair
 - Type partial attachment inspection
@@ -2196,6 +2201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replay exact takeover acknowledgement
 - Resume preparation authority safely
 - Adopt preparation receipts on takeover
+- Validate durable recovery bindings
 - Redact malformed local authority binding
 - Bind preparation adoption receipt
 - Fence provision during system teardown
@@ -2210,6 +2216,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Assemble authority adapters at the provider boundary
 - Drain authority mutations during shutdown
 - Preserve authority shutdown cancellation
+- Harden preparation evidence I/O
+- Validate preparation evidence
+- Pass activation binding to materializer
 
 ### Security
 
@@ -2232,6 +2241,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Merge
 
 - Integrate authority repository adapter
+- Integrate authority preparation contract
 - Integrate authority preparation contract
 
 ### Security

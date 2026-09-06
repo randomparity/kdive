@@ -256,14 +256,15 @@ def _validate_access_boundary(config: AuthorityHostConfig) -> None:
         if attributes & _POSIX_ACL_XATTRS:
             raise HostReadinessError("access-boundary", "unsafe-acl")
 
-    authority_groups = {config.authority_gid, config.authority_client_gid}
     for identity in config.denied_identities:
         try:
             account = pwd.getpwnam(identity)
             identity_groups = set(os.getgrouplist(identity, account.pw_gid))
         except KeyError, OSError:
             raise HostReadinessError("access-boundary", "identity-missing") from None
-        if account.pw_uid in {0, config.authority_uid} or identity_groups & authority_groups:
+        # ADR-0619: the client group grants only request-socket transport; fixed workers are
+        # intended members. The distinct authority owner group remains forbidden.
+        if account.pw_uid in {0, config.authority_uid} or config.authority_gid in identity_groups:
             raise HostReadinessError("access-boundary", "denied-identity")
 
 
