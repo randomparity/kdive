@@ -219,3 +219,76 @@ async def test_local_transport_bounds_a_stalled_response(tmp_path: Path) -> None
                 b'{"request":"bounded"}', deadline=asyncio.get_running_loop().time() + 0.05
             )
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [b"\0\0\0\0", (MAX_ENVELOPE_BYTES + 1).to_bytes(4, "big"), b"\0\0\0\x08x"],
+)
+async def test_local_transport_rejects_malformed_or_truncated_response(
+    tmp_path: Path, frame: bytes
+) -> None:
+    material = _tls_material(tmp_path, "authority-a")
+    socket_path = tmp_path / "authority.sock"
+    binding = _binding(socket_path)
+    transport = _AuthorityUnixTransport(
+        binding, _resolve_tls_material(binding, FileRefBackend(tmp_path, SecretRegistry()))
+    )
+
+    async def malformed(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
+        writer.write(frame)
+        await writer.drain()
+
+    async with _server(socket_path, material, malformed):
+        with pytest.raises(CategorizedError, match="authority: invalid-response") as caught:
+            await transport._request_frame(
+                b'{"request":"fixed"}', deadline=asyncio.get_running_loop().time() + 2
+            )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "invalid-request",
+        "unauthenticated",
+        "superseded",
+        "journal-conflict",
+        "provider-conflict",
+        "provider-not-configured",
+        "provider-failure",
+    ],
+)
+async def test_local_sender_preserves_closed_peer_rejections(tmp_path: Path, reason: str) -> None:
+    from kdive.jobs.authority_sender import local_authority_sender_factory
+
+    material = _tls_material(tmp_path, "authority-a")
+    socket_path = tmp_path / "authority.sock"
+    client_key_ref = "client-key"  # pragma: allowlist secret - fixture reference
+    config_registry.load(
+        {
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": str(socket_path),
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": "server-ca",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": "client-certificate",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": client_key_ref,
+        }
+    )
+    sender = local_authority_sender_factory(
+        FileRefBackend(tmp_path, SecretRegistry()), lambda: SecretStr("active-incarnation")
+    )
+    assert sender is not None
+    response = json.dumps(
+        {"status": "error", "category": reason}, sort_keys=True, separators=(",", ":")
+    ).encode()
+
+    async def rejected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
+        writer.write(len(response).to_bytes(4, "big") + response)
+        await writer.drain()
+
+    async with _server(socket_path, material, rejected):
+        with pytest.raises(CategorizedError, match=f"^authority: {reason}$") as caught:
+            await sender.health(deadline=asyncio.get_running_loop().time() + 2)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
