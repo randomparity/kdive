@@ -754,7 +754,11 @@ def test_real_authority_service_and_worker_sql_prepare_both_phases(
                 self, request: AuthorityPreparationMutationRequestV1
             ) -> AuthorityPreparationResponseV1:
                 nonlocal interrupt_after_terminal
-                response = await service.execute_preparation(self.current_peer, request)
+                async with (
+                    worker.transaction(),
+                    advisory_xact_lock(worker, LockScope.SYSTEM, request.system_id),
+                ):
+                    response = await service.execute_preparation(self.current_peer, request)
                 if interrupt_after_terminal:
                     interrupt_after_terminal = False
                     raise RuntimeError("worker stopped before preparation commit")
