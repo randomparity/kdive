@@ -262,7 +262,11 @@ async def _restage_and_enqueue_install(
         advisory_xact_lock(conn, LockScope.RUN, run.id),
     ):
         locked_run = await RUNS.get(conn, run.id)
-        if locked_run is None or locked_run.investigation_id != run.investigation_id:
+        if (
+            locked_run is None
+            or locked_run.investigation_id != run.investigation_id
+            or locked_run.system_id != system_id
+        ):
             return _config_error(str(run.id))
         requested_cmdline = (
             cmdline.strip()
@@ -303,6 +307,21 @@ async def _restage_and_enqueue_install(
                 )
             except ExternalBootDenied as exc:
                 return _external_boot_denial(str(run.id), exc, ctx)
+        root_spec = None
+        if settled is None and authority_instance is not None:
+            try:
+                root_spec = await read_root_spec(conn, system_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(str(run.id), exc)
+            if root_spec is None:
+                return _config_error(
+                    str(run.id),
+                    detail=(
+                        "external-boot install requires immutable root provenance; re-stage the "
+                        "System root image"
+                    ),
+                    data={"reason": "root_provenance_missing"},
+                )
         if progress.install != RUN_STEP_SUCCEEDED or variant_changed:
             build_error = await _reusable_build_install_error(conn, locked_run)
             if build_error is not None:
@@ -314,7 +333,7 @@ async def _restage_and_enqueue_install(
         job, _ = await _locked_enqueue(
             conn,
             ctx,
-            run,
+            locked_run,
             JobKind.INSTALL,
             "install",
             "runs.install",
@@ -323,6 +342,7 @@ async def _restage_and_enqueue_install(
                 cmdline=cmdline,
                 crashkernel=crashkernel,
                 authority_instance=authority_instance,
+                root_spec=root_spec,
             ),
             audit_args,
         )
