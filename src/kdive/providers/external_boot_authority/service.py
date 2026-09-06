@@ -21,12 +21,14 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
+from kdive.providers.ports.external_boot import ExternalBootPreparationObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +60,13 @@ class AuthorityRecoveryObserver(Protocol):
         request: AuthorityMutationRequestV1,
         context: AuthorityRecoveryObservationContextV1,
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityPreparationAdapter(Protocol):
+    async def preparation_receipt(
+        self, request: AuthorityPreparationMutationRequestV1
+    ) -> ExternalBootPreparationObservation: ...
 
 
 class AuthorityRepository(Protocol):
@@ -429,7 +438,9 @@ class ExternalBootAuthorityService:
         records.append(record)
         return records
 
-    def _provider_error(self, request: AuthorityMutationRequestV1) -> AuthorityServiceError:
+    def _provider_error(
+        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+    ) -> AuthorityServiceError:
         labels = self.metrics.reject_labels(
             (request.provider_kind, request.authority_instance), "provider_conflict"
         )
@@ -520,7 +531,7 @@ class ExternalBootAuthorityService:
             "phase": phase,
             "attempt_id": getattr(request, "attempt_id", request.authority_id),
         }
-        if isinstance(request, AuthorityMutationRequestV1):
+        if not isinstance(request, AuthorityTakeoverRequestV1):
             values |= {
                 "expected_source_identity": request.expected_source_identity,
                 "intended_target_identity": request.intended_target_identity,
@@ -530,8 +541,10 @@ class ExternalBootAuthorityService:
         return JournalRecordV1.model_validate(values)
 
     @staticmethod
-    def _mutation_from_record(record: JournalRecordV1) -> AuthorityMutationRequestV1:
-        return AuthorityMutationRequestV1(
+    def _mutation_from_record(
+        record: JournalRecordV1, binding: AuthorityBinding
+    ) -> AuthorityMutationRequestV1:
+        values: dict[str, object] = dict(
             authority_id=record.authority_id,
             generation=record.generation,
             system_id=record.system_id,
@@ -549,6 +562,15 @@ class ExternalBootAuthorityService:
             intended_target_identity=record.intended_target_identity or "",
             recovery_objects=record.recovery_objects,
         )
+        if record.operation in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
+            if binding.preparation_plan is None:
+                raise AuthorityServiceError("journal_conflict")
+            values["plan"] = binding.preparation_plan
+            return cast(
+                AuthorityMutationRequestV1,
+                AuthorityPreparationMutationRequestV1.model_validate(values),
+            )
+        return AuthorityMutationRequestV1.model_validate(values)
 
     async def _recover_suspended(
         self,
@@ -599,7 +621,7 @@ class ExternalBootAuthorityService:
         records: list[JournalRecordV1],
         prior: JournalRecordV1,
     ) -> list[JournalRecordV1]:
-        request = self._mutation_from_record(prior)
+        request = self._mutation_from_record(prior, binding)
         if prior.phase is JournalPhase.ADMITTED:
             terminal = self._record(request, records, JournalPhase.TERMINAL, outcome="never-began")
             return await self._anchor(binding, journal, records, terminal)
@@ -1065,3 +1087,22 @@ class ExternalBootAuthorityService:
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
             raise
+
+    async def execute_preparation(
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> tuple[AuthorityObservationV1, ExternalBootPreparationObservation]:
+        """Execute through the authenticated lane, then reopen its durable receipt."""
+        observation = await self.execute_mutation(peer, cast(AuthorityMutationRequestV1, request))
+        if not isinstance(self._adapter, AuthorityPreparationAdapter):
+            raise self._provider_error(request)
+        try:
+            receipt = await self._adapter.preparation_receipt(request)
+        except AuthorityServiceError:
+            raise
+        except Exception:
+            raise self._provider_error(request) from None
+        if receipt.identity != observation.composite_state:
+            raise self._provider_error(request)
+        return observation, receipt
