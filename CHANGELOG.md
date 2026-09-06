@@ -2302,6 +2302,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stage private authority fixture input
 - Verify authority kvm membership by mode
 - Keep authority host settings out of worker lifecycle
+- Provision fixed-worker readiness artifacts
+- Connect authority clients to private session daemon
 
 ### Security
 
