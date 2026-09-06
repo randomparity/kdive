@@ -352,12 +352,16 @@ async def test_stale_credential_is_closed_and_redacted(tmp_path: Path) -> None:
     assert "stale-incarnation" not in str(caught.value)
 
 
-def test_local_sender_factory_accepts_no_caller_route() -> None:
+def test_local_sender_factory_accepts_only_validated_binding() -> None:
     from kdive.jobs.authority_sender import local_authority_sender_factory
 
     assert tuple(inspect.signature(local_authority_sender_factory).parameters) == (
         "secret_backend",
         "borrow",
+        "binding",
+    )
+    assert inspect.signature(local_authority_sender_factory).parameters["binding"].kind is (
+        inspect.Parameter.KEYWORD_ONLY
     )
 
 

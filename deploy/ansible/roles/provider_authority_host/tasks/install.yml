@@ -267,6 +267,19 @@
     follow: false
   when: provider_authority_host_local_mutation_enabled | bool
 
+- name: Create owner-only authority runtime roots
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0700"
+    follow: false
+  loop:
+    - "{{ provider_authority_host_rootfs_root }}"
+    - "{{ provider_authority_host_console_root }}"
+  when: provider_authority_host_local_mutation_enabled | bool
+
 - name: Install protected authority S3 credentials
   ansible.builtin.copy:
     src: "{{ provider_authority_host_s3_credentials_source }}"

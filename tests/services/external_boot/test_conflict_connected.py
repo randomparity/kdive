@@ -36,6 +36,8 @@ from kdive.providers.external_boot_authority.service import (
 )
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.ports.external_boot import OpaqueProviderRef
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.db.external_boot_authority_support import authority_role_dsns as _role_dsns_fixture
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
@@ -43,7 +45,12 @@ from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import provider_resolver
-from tests.services.external_boot.test_recovery_requests import _ctx
+
+
+def _ctx() -> RequestContext:
+    return RequestContext(
+        principal="alice", agent_session="s", projects=("proj",), roles={"proj": Role.ADMIN}
+    )
 
 
 class _FaultAuthorityAdapter:

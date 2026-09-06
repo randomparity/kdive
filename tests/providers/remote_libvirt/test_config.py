@@ -120,6 +120,9 @@ authority_port = 47001
 authority_server_ca_ref = "authority-a/server-ca"
 authority_client_cert_ref = "authority-a/client-cert"
 authority_client_key_ref = "authority-a/client-key"  # pragma: allowlist secret
+authority_store_identity = "stores/authority-a"
+authority_recovery_reserve_bytes = 4096
+authority_recovery_max_bytes = 8192
 """
     authority_b = (
         authority_a.replace("authority-a", "authority-b")
@@ -143,6 +146,9 @@ authority_client_key_ref = "authority-a/client-key"  # pragma: allowlist secret
         server_ca_ref="authority-a/server-ca",
         client_cert_ref="authority-a/client-cert",
         client_key_ref="authority-a/client-key",  # pragma: allowlist secret
+        store_identity="stores/authority-a",
+        recovery_reserve_bytes=4096,
+        recovery_max_bytes=8192,
     )
     assert config_b.authority == RemoteAuthorityBinding(
         authority_instance="authority-b",
@@ -151,6 +157,9 @@ authority_client_key_ref = "authority-a/client-key"  # pragma: allowlist secret
         server_ca_ref="authority-b/server-ca",
         client_cert_ref="authority-b/client-cert",
         client_key_ref="authority-b/client-key",  # pragma: allowlist secret
+        store_identity="stores/authority-b",
+        recovery_reserve_bytes=4096,
+        recovery_max_bytes=8192,
     )
     assert config_a.authority != config_b.authority
 

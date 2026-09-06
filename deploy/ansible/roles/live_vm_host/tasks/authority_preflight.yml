@@ -63,6 +63,72 @@
         - "{{ live_vm_host_authority_health_client_key_source }}"
       no_log: true
 
+    - name: Validate the closed local-mutation authority contract
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import json, re, sys
+            from pathlib import PurePosixPath
+            from urllib.parse import urlsplit
+            value = json.load(sys.stdin)
+            enabled = value['enabled']
+            assert type(enabled) is bool
+            mutation = value['mutation']
+            if not enabled:
+                assert mutation is False
+            if mutation:
+                assert type(value['capacity']) is int and value['capacity'] > 0
+                endpoint = urlsplit(value['endpoint'])
+                assert endpoint.scheme in ('http', 'https') and endpoint.netloc
+                assert not endpoint.username and not endpoint.password and not endpoint.fragment
+                assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,254}', value['bucket'])
+                assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,254}', value['region'])
+                assert value['credentials'].startswith('/')
+                for raw in value['paths']:
+                    path = PurePosixPath(raw)
+                    assert path.is_absolute() and '..' not in path.parts
+            else:
+                assert value['capacity'] is None
+                assert value['endpoint'] == '' and value['bucket'] == ''
+                assert value['credentials'] == ''
+        stdin: >-
+          {{ {'enabled': live_vm_host_authority_enabled,
+              'mutation': live_vm_host_authority_local_mutation_enabled,
+              'capacity': live_vm_host_authority_external_boot_capacity_bytes,
+              'endpoint': live_vm_host_authority_s3_endpoint_url,
+              'bucket': live_vm_host_authority_s3_bucket,
+              'region': live_vm_host_authority_s3_region,
+              'credentials': live_vm_host_authority_s3_credentials_source,
+              'paths': [live_vm_host_authority_recovery_root,
+                        live_vm_host_authority_rootfs_root,
+                        live_vm_host_authority_console_root]} | to_json }}
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect the local-mutation S3 credential source
+      ansible.builtin.stat:
+        path: "{{ live_vm_host_authority_s3_credentials_source }}"
+        follow: false
+      delegate_to: localhost
+      become: false
+      register: live_vm_host_authority_s3_source_preflight
+      when: live_vm_host_authority_local_mutation_enabled | bool
+      no_log: true
+
+    - name: Require a protected local-mutation S3 credential source
+      ansible.builtin.assert:
+        that:
+          - live_vm_host_authority_s3_source_preflight.stat.exists
+          - live_vm_host_authority_s3_source_preflight.stat.isreg
+          - not live_vm_host_authority_s3_source_preflight.stat.islnk
+          - live_vm_host_authority_s3_source_preflight.stat.mode in ['0400', '0600']
+          - live_vm_host_authority_s3_source_preflight.stat.size > 0
+        quiet: true
+      when: live_vm_host_authority_local_mutation_enabled | bool
+      no_log: true
+
     - name: Inspect external-boot authority sources on the control host
       ansible.builtin.stat:
         path: "{{ item }}"

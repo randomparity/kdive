@@ -62,6 +62,9 @@ AUTHORITY_BINDING = {
     "authority_server_ca_ref": "authority/server-ca",
     "authority_client_cert_ref": "authority/client-cert",
     "authority_client_key_ref": "authority/client-key",  # pragma: allowlist secret
+    "authority_store_identity": "stores/authority-a",
+    "authority_recovery_reserve_bytes": 4096,
+    "authority_recovery_max_bytes": 8192,
 }
 
 

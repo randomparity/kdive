@@ -26,6 +26,8 @@ AUTHORITY_SERVICE = SYSTEMD / "system" / "kdive-external-boot-authority.service"
 AUTHORITY_TEARDOWN = ROOT / "deploy" / "ansible" / "playbooks" / "authority_host_teardown.yml"
 AUTHORITY_PROOF = ROOT / "scripts" / "operations" / "prove-external-boot-authority-host.sh"
 AUTHORITY_PREFLIGHT = ROLE / "tasks" / "authority_preflight.yml"
+AUTHORITY_ENV_TEMPLATE = ROLE / "templates" / "provider-authority.env.j2"
+AUTHORITY_SERVICE_TEMPLATE = ROLE / "templates" / "external-boot-authority.service.j2"
 RUNNER_PLAY = ROOT / "deploy" / "ansible" / "playbooks" / "runner.yml"
 PROVIDER_AUTHORITY = ROLE.parent / "provider_authority_host"
 
@@ -274,6 +276,7 @@ def test_authority_endpoint_is_a_distinct_session() -> None:
 
     defaults = _yaml(DEFAULTS)
     assert defaults["live_vm_host_authority_enabled"] is False
+    assert defaults["live_vm_host_authority_local_mutation_enabled"] is False
     assert defaults["live_vm_host_authority_account"] == "kdive-provider-authority"
     assert defaults["live_vm_host_authority_client_group"] == ("kdive-provider-authority-client")
     assert defaults["live_vm_host_authority_runtime_root"] == ("/run/kdive/provider-authority")
@@ -350,6 +353,71 @@ def test_authority_endpoint_is_a_distinct_session() -> None:
     assert "cannot read the authority provider config" in verify
     assert "cannot access authority provider objects" in verify
     assert "virsh -c {{ live_vm_host_authority_libvirt_uri }} list" in verify
+
+
+def test_live_authority_local_mutation_is_closed_and_owner_only() -> None:
+    defaults = _yaml(DEFAULTS)
+    assert defaults["live_vm_host_authority_recovery_root"] == (
+        "/var/lib/kdive/provider-authority/recovery"
+    )
+    assert defaults["live_vm_host_authority_rootfs_root"] == (
+        "/var/lib/kdive/provider-authority/rootfs"
+    )
+    assert defaults["live_vm_host_authority_console_root"] == (
+        "/var/lib/kdive/provider-authority/console"
+    )
+    assert defaults["live_vm_host_authority_external_boot_capacity_bytes"] is None
+    assert defaults["live_vm_host_authority_s3_endpoint_url"] == ""
+    assert defaults["live_vm_host_authority_s3_bucket"] == ""
+    assert defaults["live_vm_host_authority_s3_credentials_source"] == ""
+
+    preflight = _text(AUTHORITY_PREFLIGHT)
+    for value in (
+        "live_vm_host_authority_local_mutation_enabled",
+        "live_vm_host_authority_external_boot_capacity_bytes",
+        "live_vm_host_authority_s3_endpoint_url",
+        "live_vm_host_authority_s3_bucket",
+        "live_vm_host_authority_s3_region",
+        "live_vm_host_authority_s3_credentials_source",
+        "live_vm_host_authority_recovery_root",
+        "live_vm_host_authority_rootfs_root",
+        "live_vm_host_authority_console_root",
+    ):
+        assert value in preflight
+    assert "value['capacity'] is None" in preflight
+    assert "endpoint.username" in preflight
+    assert "mode in ['0400', '0600']" in preflight
+
+    tasks = _text(MAIN_TASKS)
+    assert "Create the owner-only authority recovery root" in tasks
+    assert 'mode: "0700"' in tasks
+    assert "Install protected authority S3 credentials" in tasks
+    assert 'mode: "0400"' in tasks
+    assert "Symlink the target-native libguestfs binding into the authority venv" in tasks
+    assert "if live_vm_host_authority_local_mutation_enabled else" in tasks
+    assert "Create owner-only authority runtime roots" in tasks
+    assert "u:{{ live_vm_host_authority_account }}:rwx" not in tasks
+    assert "AWS_SHARED_CREDENTIALS_FILE" in tasks
+
+    environment = _text(AUTHORITY_ENV_TEMPLATE)
+    assert "KDIVE_LIBVIRT_RECOVERY_ROOT={{ live_vm_host_authority_recovery_root }}" in environment
+    assert "KDIVE_LIBVIRT_ROOTFS_ROOT={{ live_vm_host_authority_rootfs_root }}" in environment
+    assert "KDIVE_LIBVIRT_CONSOLE_ROOT={{ live_vm_host_authority_console_root }}" in environment
+    assert "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES=" in environment
+    assert "KDIVE_S3_ENDPOINT_URL={{ live_vm_host_authority_s3_endpoint_url }}" in environment
+
+    service = _text(AUTHORITY_SERVICE_TEMPLATE)
+    assert "ProtectSystem=strict" in service
+    assert "LoadCredential=s3-credentials:" in service
+    assert "Environment=AWS_SHARED_CREDENTIALS_FILE=%d/s3-credentials" in service
+    assert "DeviceAllow=/dev/kvm rw" in service
+    for path in (
+        "live_vm_host_authority_recovery_root",
+        "live_vm_host_authority_rootfs_root",
+        "live_vm_host_authority_console_root",
+    ):
+        assert f"ReadWritePaths={{{{ {path} }}}}" in service
+    assert "ReadWritePaths=/var/lib/kdive\n" not in service
 
 
 def test_existing_worker_provider_contract_is_preserved() -> None:

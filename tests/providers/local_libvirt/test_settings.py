@@ -192,6 +192,8 @@ def test_recovery_root_accepts_a_provisioned_shape_directory(tmp_path: Path) -> 
 def test_settings_list_is_the_declared_settings_in_order() -> None:
     assert settings.SETTINGS == [
         settings.LIBVIRT_URI,
+        settings.LIBVIRT_ROOTFS_ROOT,
+        settings.LIBVIRT_CONSOLE_ROOT,
         settings.LIBVIRT_ALLOCATION_CAP,
         settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER,
         settings.LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,

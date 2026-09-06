@@ -41,6 +41,7 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.routing import authority_reservation_geometry
 
 __all__ = [
     "COMMITTABLE_ERROR_CATEGORIES",
@@ -241,6 +242,57 @@ async def _materialize_preparing(
             category=ErrorCategory.STALE_HANDLE,
             terminal=False,
         )
+    return refreshed
+
+
+async def _debit_preparing(
+    conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
+) -> ExternalBootActivation:
+    if context.activation.state is not ExternalBootActivationState.PREPARING:
+        return context.activation
+    geometry = (
+        ports.reservation_geometry(context.binding)
+        if ports.reservation_geometry is not None
+        else authority_reservation_geometry(context.binding)
+    )
+    reservation = await _ACTIVATIONS.get_reservation(conn, context.activation.id)
+    if (
+        reservation is None
+        or reservation.store_identity != geometry.store_identity
+        or reservation.reserved_bytes != geometry.reserve_bytes
+    ):
+        raise _refuse("pending reservation does not match configured recovery geometry")
+    async with conn.transaction():
+        status = await _ACTIVATIONS.mark_reservation_ready_for_job(
+            conn,
+            credential_hash=hashlib.sha256(
+                ports.incarnation_credential.get_secret_value().encode()
+            ).digest(),
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            activation_id=context.activation.id,
+            system_id=context.activation.system_id,
+            operation_owner_id=context.activation.operation_owner_id,
+            authority_generation=context.activation.authority_generation,
+            store_identity=geometry.store_identity,
+            reserve_bytes=geometry.reserve_bytes,
+            recovery_max_bytes=geometry.max_bytes,
+        )
+    if status.value == "capacity_exhausted":
+        raise CategorizedError(
+            "external-boot recovery capacity is exhausted",
+            category=ErrorCategory.CAPACITY_EXHAUSTED,
+            terminal=False,
+        )
+    if status.value != "applied":
+        raise CategorizedError(
+            "external-boot reservation debit was superseded",
+            category=ErrorCategory.STALE_HANDLE,
+            terminal=False,
+        )
+    refreshed = await _ACTIVATIONS.get(conn, context.activation.id)
+    if refreshed is None:
+        raise _refuse("activation disappeared after reservation debit")
     return refreshed
 
 
@@ -544,6 +596,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         secret_registry=ports.secret_registry,
         prerequisites=prerequisites,
     )
+    context = replace(context, activation=await _debit_preparing(conn, context, ports))
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))
     try:
         intermediate = before_port(context) if before_port is not None else None

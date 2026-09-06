@@ -98,7 +98,12 @@ _PURPOSE_OPERATIONS: dict[str, frozenset[AuthorityOperation]] = {
     ),
     "resolve-conflict": frozenset({AuthorityOperation.RESOLVE_CONFLICT, AuthorityOperation.FAIL}),
     "release": frozenset(
-        {AuthorityOperation.RELEASE, AuthorityOperation.CLEANUP, AuthorityOperation.FAIL}
+        {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.RELEASE,
+            AuthorityOperation.CLEANUP,
+            AuthorityOperation.FAIL,
+        }
     ),
     "teardown": frozenset({AuthorityOperation.TEARDOWN, AuthorityOperation.FAIL}),
 }

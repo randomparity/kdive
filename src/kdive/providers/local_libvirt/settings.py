@@ -64,6 +64,30 @@ def _parse_positive_int(raw: str) -> int:
     return value
 
 
+def _absolute_runtime_root(raw: str) -> str:
+    if "\0" in raw or not Path(raw).is_absolute():
+        raise ValueError("must be an absolute path without NUL bytes")
+    return raw
+
+
+LIBVIRT_ROOTFS_ROOT = Setting(
+    name="KDIVE_LIBVIRT_ROOTFS_ROOT",
+    parse=_absolute_runtime_root,
+    default="/var/lib/kdive/rootfs",
+    group="local-libvirt",
+    processes=frozenset({"worker"}),
+    help="Fixed local root containing per-System overlays for this worker process.",
+)
+LIBVIRT_CONSOLE_ROOT = Setting(
+    name="KDIVE_LIBVIRT_CONSOLE_ROOT",
+    parse=_absolute_runtime_root,
+    default="/var/lib/kdive/console",
+    group="local-libvirt",
+    processes=frozenset({"worker"}),
+    help="Fixed local root containing per-System console logs for this worker process.",
+)
+
+
 LIBVIRT_TCG_DEADLINE_MULTIPLIER = Setting(
     name="KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER",
     parse=_parse_tcg_multiplier,
@@ -216,6 +240,8 @@ LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES = Setting(
 
 SETTINGS = [
     LIBVIRT_URI,
+    LIBVIRT_ROOTFS_ROOT,
+    LIBVIRT_CONSOLE_ROOT,
     LIBVIRT_ALLOCATION_CAP,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
     LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,

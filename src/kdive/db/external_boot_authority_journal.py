@@ -227,6 +227,33 @@ async def resolve_current_preparation_authority_binding(
         return _binding(await cursor.fetchone())
 
 
+async def resolve_current_release_phase_authority_binding(
+    conn: AsyncConnection,
+    *,
+    peer_incarnation_id: str,
+    authority_id: UUID,
+    generation: int,
+    acknowledgement_sequence: int,
+    acknowledgement_digest: str,
+    operation: Literal["recover", "cleanup"],
+) -> AuthorityBinding | None:
+    """Resolve one SQL-derived mutation under an immutable release authority."""
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(
+            "SELECT * FROM resolve_current_external_boot_release_phase_authority"
+            "(%s, %s, %s, %s, %s, %s)",
+            (
+                peer_incarnation_id,
+                authority_id,
+                generation,
+                acknowledgement_sequence,
+                acknowledgement_digest,
+                operation,
+            ),
+        )
+        return _binding(await cursor.fetchone())
+
+
 def _pending(value: dict[str, Any] | None) -> PendingTakeover | None:
     if value is None:
         return None

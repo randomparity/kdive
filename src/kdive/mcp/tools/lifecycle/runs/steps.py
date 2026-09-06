@@ -2,23 +2,32 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.idempotency import delete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.domain.capacity.state import JobState, RunState
+from kdive.domain.capacity.state import (
+    ExternalBootActivationState,
+    ExternalBootReservationState,
+    JobState,
+    RunState,
+)
 from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_activation import ExternalBootActivation, ExternalBootReservation
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import RUN_STEP_RUNNING, RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import BootPayload, InstallPayload, RunPayload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
@@ -29,7 +38,7 @@ from kdive.mcp.tools._common import external_boot_denial as _external_boot_denia
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
 from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
-from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -38,13 +47,21 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.external_boot.plan import construct_external_boot_plan
+from kdive.services.external_boot.routing import (
+    authority_reservation_geometry,
+    server_authority_instance,
+)
 from kdive.services.runs.build_catalog import resolve_build, resolve_build_expiry
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
     install_method_for,
     platform_owned_cmdline_token,
     step_progress,
+    system_arch,
+    system_required_cmdline,
 )
+from kdive.services.systems.root_provenance import read_root_spec
 
 
 def _crashkernel_error(run_id: str, crashkernel: str | None) -> ToolResponse | None:
@@ -112,6 +129,11 @@ async def install_run(
                 return _config_error(run_id, data={"current_status": run.state.value})
             if run.system_id is None:
                 return _not_bound(run_id)
+            try:
+                binding = await resolver.binding_for_system(conn, run.system_id)
+                authority_instance = server_authority_instance(binding)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(run_id, exc)
             # The method gate is on the crashkernel path only: an install without a reservation is
             # byte-unchanged (no System fetch, no binding call, no new failure surface, ADR-0300).
             if crashkernel is not None:
@@ -124,7 +146,9 @@ async def install_run(
                 principal=ctx.principal,
                 project=run.project,
                 kind="runs.install",
-                do_work=lambda: _restage_and_enqueue_install(conn, ctx, run, cmdline, crashkernel),
+                do_work=lambda: _restage_and_enqueue_install(
+                    conn, ctx, run, cmdline, crashkernel, authority_instance
+                ),
             )
 
 
@@ -196,6 +220,7 @@ async def _restage_and_enqueue_install(
     run: Run,
     cmdline: str | None,
     crashkernel: str | None,
+    authority_instance: str | None,
 ) -> ToolResponse:
     """Enqueue install under Investigation→Run locks, re-staging changed variants.
 
@@ -290,7 +315,12 @@ async def _restage_and_enqueue_install(
             JobKind.INSTALL,
             "install",
             "runs.install",
-            InstallPayload(run_id=str(run.id), cmdline=cmdline, crashkernel=crashkernel),
+            InstallPayload(
+                run_id=str(run.id),
+                cmdline=cmdline,
+                crashkernel=crashkernel,
+                authority_instance=authority_instance,
+            ),
             audit_args,
         )
     return run_job_envelope(job, run.id)
@@ -350,6 +380,7 @@ async def boot_run(
     *,
     force: bool = False,
     idempotency_key: str | None = None,
+    resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
     """Admit an idempotent boot for a built, installed Run.
 
@@ -374,6 +405,20 @@ async def boot_run(
                 return _not_bound(run_id)
             if not await _has_succeeded_step(conn, uid, "install"):
                 return _install_first(run_id)
+            if resolver is not None:
+                binding = await resolver.binding_for_system(conn, run.system_id)
+                authority_instance = server_authority_instance(binding)
+                if authority_instance is not None:
+                    return await keyed_mutation(
+                        conn,
+                        idempotency_key=idempotency_key,
+                        principal=ctx.principal,
+                        project=run.project,
+                        kind="runs.boot",
+                        do_work=lambda: _enqueue_external_boot(
+                            conn, ctx, run, authority_instance, resolver, force=force
+                        ),
+                    )
             return await keyed_mutation(
                 conn,
                 idempotency_key=idempotency_key,
@@ -391,6 +436,146 @@ async def boot_run(
                     force=force,
                 ),
             )
+
+
+async def _enqueue_external_boot(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    authority_instance: str,
+    resolver: ProviderResolver,
+    *,
+    force: bool,
+) -> ToolResponse:
+    system_id = run.require_system_id()
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
+        advisory_xact_lock(conn, LockScope.RUN, run.id),
+    ):
+        locked_run = await RUNS.get(conn, run.id)
+        if locked_run is None or locked_run.system_id != system_id:
+            return _config_error(str(run.id), data={"reason": "run_binding_changed"})
+        binding = await resolver.binding_for_system(conn, system_id)
+        if server_authority_instance(binding) != authority_instance:
+            return _config_error(str(run.id), data={"reason": "authority_route_changed"})
+        policy = (
+            queue.JobRecyclePolicy.TERMINAL if force else await _step_recycle(conn, run.id, "boot")
+        )
+        replay = await _settled_replay(conn, run.id, "boot", policy=policy)
+        if replay is not None:
+            return run_job_envelope(replay, run.id, replayed=True)
+        try:
+            await check_external_boot_admission(
+                conn,
+                system_id,
+                ExternalBootOperation.RUN_BOOT,
+                project=run.project,
+                run_id=run.id,
+            )
+        except ExternalBootDenied as exc:
+            return _external_boot_denial(str(run.id), exc, ctx)
+        if force:
+            progress = await step_progress(conn, run.id)
+            if progress.boot == RUN_STEP_RUNNING:
+                return _config_error(str(run.id), data={"reason": "step_in_progress"})
+        return await _enqueue_external_boot_locked(
+            conn, ctx, locked_run, binding, authority_instance, resolver, force=force
+        )
+
+
+async def _enqueue_external_boot_locked(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    binding: ProviderBinding,
+    authority_instance: str,
+    resolver: ProviderResolver,
+    *,
+    force: bool,
+) -> ToolResponse:
+    system_id = run.require_system_id()
+    system = await SYSTEMS.get(conn, system_id)
+    root = await read_root_spec(conn, system_id)
+    build = (
+        None
+        if run.build_ref is None
+        else await resolve_build(conn, run.investigation_id, run.build_ref)
+    )
+    if root is None or build is None or system is None:
+        return _config_error(str(run.id), data={"reason": "external_boot_provenance_missing"})
+    progress = await step_progress(conn, run.id)
+    method = install_method_for(system, binding.runtime.profile_policy)
+    platform = tuple(
+        system_required_cmdline(
+            method,
+            " ".join(root.arguments),
+            arch=system_arch(system),
+            crashkernel=progress.installed_crashkernel,
+        ).split()
+    )
+    plan = construct_external_boot_plan(
+        build=build,
+        system_id=system_id,
+        run_id=run.id,
+        root=root,
+        platform_arguments=platform,
+        debug_cmdline=progress.installed_cmdline,
+    )
+    geometry = authority_reservation_geometry(binding)
+    seed = f"{system_id}/{run.id}/{plan.identity}"
+    activation_id = uuid5(NAMESPACE_URL, f"kdive/external-boot/activation/{seed}")
+    owner_id = uuid5(NAMESPACE_URL, f"kdive/external-boot/owner/{seed}")
+    now = await _database_time(conn)
+    activation = ExternalBootActivation(
+        id=activation_id,
+        system_id=system_id,
+        run_id=run.id,
+        plan_identity=plan.identity,
+        operation_owner_id=owner_id,
+        authority_generation=1,
+        state=ExternalBootActivationState.PREPARING,
+        created_at=now,
+        updated_at=now,
+    )
+    owner_key = "external-boot/" + hashlib.sha256(seed.encode()).hexdigest()
+    reservation = ExternalBootReservation(
+        activation_id=activation_id,
+        store_identity=geometry.store_identity,
+        owner_key=owner_key,
+        reserved_bytes=geometry.reserve_bytes,
+        state=ExternalBootReservationState.PENDING,
+        created_at=now,
+        updated_at=now,
+    )
+    persisted = await ExternalBootActivationRepository().create(conn, activation, reservation)
+    if persisted.state is not ExternalBootActivationState.PREPARING:
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail="the terminal external-boot activation cannot be reused",
+            suggested_next_actions=["runs.create"],
+            data={"reason": "external_boot_activation_not_reusable"},
+        )
+    kind, payload = await build_external_boot_payload(
+        conn,
+        activation_id=activation_id,
+        purpose="activate",
+        operation="activate",
+        provider_kind=binding.kind.value,
+        authority_instance=authority_instance,
+        operation_identity=f"external-boot/{activation_id}/activate",
+        resolver=resolver,
+        preparation_plan=plan,
+    )
+    if not isinstance(payload, BootPayload):
+        raise AssertionError("activate admission must construct a boot payload")
+    if force and progress.boot == RUN_STEP_SUCCEEDED:
+        await delete_run_step(conn, run.id, "boot")
+    job, replayed = await _locked_enqueue(
+        conn, ctx, run, kind, "boot", "runs.boot", payload, {"run_id": str(run.id)}
+    )
+    return run_job_envelope(job, run.id, replayed=replayed)
 
 
 def _not_bound(run_id: str) -> ToolResponse:
