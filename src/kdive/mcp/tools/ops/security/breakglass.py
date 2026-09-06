@@ -60,6 +60,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
 from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_recovery_orphan as _resolve_recovery_orphan,
 )
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
@@ -278,13 +279,15 @@ async def _enqueue_teardown(
     )
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def register(
+    app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver | None = None
+) -> None:
     """Register the break-glass `ops.*` tools on ``app``, bound to ``pool``."""
 
     @app.tool(
         name="ops.force_release",
         annotations=_docmeta.destructive(),
-        meta={"maturity": "implemented"},
+        meta=_degraded_stub_meta(_ORPHAN_STUB_DETAIL),
     )
     async def ops_force_release(
         allocation_id: Annotated[
@@ -316,7 +319,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="ops.resolve_recovery_orphan",
         annotations=_docmeta.destructive(),
-        meta=_degraded_stub_meta(_ORPHAN_STUB_DETAIL),
+        meta={"maturity": "implemented"},
     )
     async def ops_resolve_recovery_orphan(
         system_id: Annotated[
@@ -342,6 +345,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 )
             ),
         ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(max_length=255, description="Optional replay key, bounded to 255 UTF-8 bytes."),
+        ] = None,
     ) -> ToolResponse:
         """Validate a quarantined recovery-object repair, then report the executor is missing.
 
@@ -361,4 +368,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             system_id=system_id,
             object_identities=object_identities,
             disposition=disposition,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
         )

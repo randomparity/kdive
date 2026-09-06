@@ -401,6 +401,64 @@ class ExternalBootPreparationPorts(Protocol):
     ) -> ExternalBootPreparationObservation: ...
 
 
+class RecoveryObjectBinding(_ClosedValue):
+    """Exact server-owned identity of one quarantined recovery object."""
+
+    record_id: CanonicalUuid
+    binding: ExternalBootActivationBinding
+    kind: Literal["kernel", "initrd", "modules", "recovery-record"]
+    reference: OpaqueProviderRef
+    ownership_digest: Digest
+    operation_identity: Annotated[str, Field(min_length=1, max_length=255)]
+    attempt_id: CanonicalUuid
+    mutation_journal_sequence: Annotated[int, Field(ge=1)]
+    mutation_journal_digest: Digest
+    reserved_bytes: Annotated[int, Field(ge=0)]
+
+
+class RecoveryObjectObservation(_ClosedValue):
+    """Fresh provider evidence for one exact quarantined object binding."""
+
+    binding: RecoveryObjectBinding
+    present: bool
+    managed: bool
+    observed_digest: Digest
+
+    @model_validator(mode="after")
+    def _managed_object_is_present(self) -> RecoveryObjectObservation:
+        if self.managed and not self.present:
+            raise ValueError("an absent recovery object cannot be managed")
+        return self
+
+
+class ExternalBootRecoveryObjectPorts(Protocol):
+    """Bounded per-object quarantine observation and disposition."""
+
+    def quarantined_objects(
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> tuple[RecoveryObjectObservation, ...]: ...
+
+    def observe_object(
+        self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
+    ) -> RecoveryObjectObservation: ...
+
+    def delete_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: Digest,
+    ) -> RecoveryObjectObservation: ...
+
+    def adopt_object(
+        self,
+        binding: RecoveryObjectBinding,
+        authority: OpaqueProviderRef,
+        expected_observed_digest: Digest,
+    ) -> RecoveryObjectObservation: ...
+
+
 class ExternalBootPorts(Protocol):
     """Six narrow operations shared by external-boot providers."""
 

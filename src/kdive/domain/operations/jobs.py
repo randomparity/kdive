@@ -50,6 +50,9 @@ class JobKind(StrEnum):
     RECLAIM_INVESTIGATION_ROOTFS = "reclaim_investigation_rootfs"
     # Platform maintenance: the reconciler enqueues a single worker-owned remote storage sweep.
     REMOTE_MODULE_VOLUME_REAP = "remote_module_volume_reap"
+    # Platform-admin recovery-object disposition. Its closed payload names only durable
+    # quarantine records; the worker resolves provider authority from those rows.
+    RESOLVE_RECOVERY_ORPHAN = "resolve_recovery_orphan"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -89,7 +92,9 @@ ACTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
 )
 """Job kinds accepted by current tool affordances and production handler registration."""
 
-PLATFORM_INTERNAL_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.REMOTE_MODULE_VOLUME_REAP})
+PLATFORM_INTERNAL_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.REMOTE_MODULE_VOLUME_REAP, JobKind.RESOLVE_RECOVERY_ORPHAN}
+)
 """Maintenance jobs that tenant-facing job surfaces must never expose or mutate."""
 
 OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.FORCE_CRASH})

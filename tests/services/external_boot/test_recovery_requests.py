@@ -26,6 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import DebugSessionState, ExternalBootActivationState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.external_boot import recovery_requests
+from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_request
 from kdive.mcp.tools.external_boot.recovery_requests import (
     request_release,
     resolve_conflict,
@@ -856,6 +857,8 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.domain.external_boot_activation:Digest",
         "kdive.domain.lifecycle.records:Run",
         "kdive.jobs.handlers.external_boot.admission:build_external_boot_payload",
+        "kdive.jobs.payloads:ResolveRecoveryOrphanPayload",
+        "kdive.domain.operations.jobs:JobKind",
         "kdive.jobs:queue",
         "kdive.log:bind_context",
         "kdive.mcp.platform_auth:audit_platform_denial",
@@ -865,6 +868,8 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.mcp.tools._common:authorizing",
         "kdive.mcp.tools._common:external_boot_denial",
         "kdive.mcp.tools._common:invalid_uuid_error",
+        "kdive.mcp.tools.external_boot.recovery_idempotency:recovery_request",
+        "kdive.mcp.tools.external_boot.recovery_idempotency:recovery_response",
         "kdive.security.authz.context:RequestContext",
         "kdive.security.authz.rbac:AuthorizationError",
         "kdive.security.authz.rbac:PlatformRole",
@@ -992,5 +997,133 @@ def test_release_enqueues_once_from_retired_exact_authority(migrated_url: str) -
         marker = job["payload"]["external_boot_authority_v1"]
         assert marker["purpose"] == marker["operation"] == "release"
         assert marker["activation_id"] == str(seeded.activation_id)
+
+    _drive(migrated_url, _body)
+
+
+def test_release_key_replays_after_activation_state_changes(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        seeded = await _seed(fixture.conn, state=_STATE.ACTIVE)
+        await _seed_retired_conflict_authority(fixture.conn, seeded)
+        await fixture.conn.execute("UPDATE jobs SET state = 'succeeded'")
+        first = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="release-once",
+        )
+        assert first.status == "queued"
+        deadline = first.data["recovery_readiness_deadline"]
+        await fixture.conn.execute(
+            "UPDATE external_boot_activations SET state = 'abandoned', "
+            "terminal_evidence = jsonb_set(terminal_evidence, '{outcome}', '\"abandoned\"') "
+            "WHERE id = %s",
+            (seeded.activation_id,),
+        )
+        second = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="release-once",
+        )
+        assert second.object_id == first.object_id
+        assert second.data["recovery_readiness_deadline"] == deadline
+        row = await (
+            await fixture.conn.execute(
+                "SELECT payload->'recovery_request_v1' FROM jobs WHERE id = %s", (first.object_id,)
+            )
+        ).fetchone()
+        assert row is not None and row[0]["readiness_deadline"] == deadline
+
+    _drive(migrated_url, _body)
+
+
+def test_release_distinct_keys_bind_distinct_authority_operations(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        seeded = await _seed(fixture.conn, state=_STATE.ACTIVE)
+        await _seed_retired_conflict_authority(fixture.conn, seeded)
+        await fixture.conn.execute("UPDATE jobs SET state = 'succeeded'")
+        first = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="release-first",
+        )
+        await fixture.conn.execute(
+            "UPDATE jobs SET state = 'succeeded' WHERE id = %s", (first.object_id,)
+        )
+        second = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="release-second",
+        )
+        rows = await (
+            await fixture.conn.execute(
+                "SELECT payload->'external_boot_authority_v1'->>'operation_identity' "
+                "FROM jobs WHERE id = ANY(%s)",
+                ([first.object_id, second.object_id],),
+            )
+        ).fetchall()
+        assert first.object_id != second.object_id
+        assert len({row[0] for row in rows}) == 2
+
+    _drive(migrated_url, _body)
+
+
+def test_omitted_key_is_scoped_to_the_selected_activation(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        first, _, _ = await recovery_request(
+            fixture.conn,
+            tool="runs.release_external_boot",
+            object_key="run_id",
+            object_id="run",
+            arguments=(),
+            idempotency_key=None,
+            scope_identity="activation-a",
+        )
+        second, _, _ = await recovery_request(
+            fixture.conn,
+            tool="runs.release_external_boot",
+            object_key="run_id",
+            object_id="run",
+            arguments=(),
+            idempotency_key=None,
+            scope_identity="activation-b",
+        )
+        assert first != second
+
+    _drive(migrated_url, _body)
+
+
+def test_conflict_key_refuses_different_observation(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        seeded = await _seed(fixture.conn, state=_STATE.RECOVERY_CONFLICT)
+        await _seed_retired_conflict_authority(fixture.conn, seeded)
+        first = await resolve_conflict(
+            fixture.pool,
+            _ctx(),
+            resolver=_RESOLVER,
+            system_id=str(seeded.system_id),
+            operation=_RESOLUTION,
+            observed_identity=_DIGEST,
+            idempotency_key="resolve-once",
+        )
+        assert first.status == "queued"
+        second = await resolve_conflict(
+            fixture.pool,
+            _ctx(),
+            resolver=_RESOLVER,
+            system_id=str(seeded.system_id),
+            operation=_RESOLUTION,
+            observed_identity="sha256:" + "c" * 64,
+            idempotency_key="resolve-once",
+        )
+        assert second.error_category == "conflict"
+        assert second.data["reason"] == "idempotency_key_conflict"
 
     _drive(migrated_url, _body)

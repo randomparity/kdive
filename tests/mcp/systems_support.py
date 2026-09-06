@@ -176,6 +176,7 @@ def provider_resolver(
     console_reader: object | None = None,
     external_boot: object | None = None,
     external_boot_preparation: object | None = None,
+    external_boot_recovery_objects: object | None = None,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -275,6 +276,11 @@ def provider_resolver(
         external_boot=cast(Any, external_boot) if external_boot is not None else None,
         external_boot_preparation=(
             cast(Any, external_boot_preparation) if external_boot_preparation is not None else None
+        ),
+        external_boot_recovery_objects=(
+            cast(Any, external_boot_recovery_objects)
+            if external_boot_recovery_objects is not None
+            else None
         ),
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})

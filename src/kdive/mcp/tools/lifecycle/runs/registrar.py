@@ -688,6 +688,10 @@ def _register_runs_release_external_boot(
         run_id: Annotated[
             str, Field(description="The Run whose external-boot activation to release.")
         ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(max_length=255, description="Optional replay key, bounded to 255 UTF-8 bytes."),
+        ] = None,
     ) -> ToolResponse:
         """Enqueue release of this Run's external boot and return a durable `job_id`.
 
@@ -699,4 +703,10 @@ def _register_runs_release_external_boot(
         the System. A System stuck in `recovery_conflict` or `recovery_failed` is recovered
         with `systems.teardown` instead; `runs.get` reports the current state either way.
         """
-        return await _request_release(pool, current_context(), run_id=run_id, resolver=resolver)
+        return await _request_release(
+            pool,
+            current_context(),
+            run_id=run_id,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
+        )

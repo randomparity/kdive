@@ -68,7 +68,11 @@ Export the live inventory; optionally persist it to the writeback target. Operat
 
 ## `ops.force_release`
 
-`implemented` · `destructive`
+`partial` · `destructive`
+
+**Maturity:** degraded_stub — Validates the caller's platform role and the bounded repair reference, then reports configuration_error with reason=recovery_executor_unavailable. No quarantined object is deleted or adopted and no recovery job is enqueued, because the external-boot recovery executor is not installed.
+
+**Promotion:** Promoted when the external-boot recovery job handler and worker claim path land (#2118).
 
 Break-glass release of a stuck cross-project Allocation. Requires platform_admin.
 
@@ -179,11 +183,7 @@ reference clock; an empty or oversized field is refused without deletion.
 
 ## `ops.resolve_recovery_orphan`
 
-`partial` · `destructive`
-
-**Maturity:** degraded_stub — Validates the caller's platform role and the bounded repair reference, then reports configuration_error with reason=recovery_executor_unavailable. No quarantined object is deleted or adopted and no recovery job is enqueued, because the external-boot recovery executor is not installed.
-
-**Promotion:** Promoted when the external-boot recovery job handler and worker claim path land (#2118).
+`implemented` · `destructive`
 
 Validate a quarantined recovery-object repair, then report the executor is missing.
 
@@ -200,6 +200,7 @@ and reads none.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `disposition` | string | yes | 'delete' to remove the named objects permanently, or 'adopt' to bring them back under the System's own external-boot activation. |
+| `idempotency_key` | string (nullable) | no | Optional replay key, bounded to 255 UTF-8 bytes. |
 | `object_identities` | array<string> | yes | The bounded list of quarantined recovery-object identities to repair; an out-of-bounds list is refused with reason invalid_object_identities, whose detail names the accepted range. |
 | `system_id` | string | yes | The System whose quarantined recovery objects to repair. |
 

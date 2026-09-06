@@ -124,4 +124,5 @@ def build_runtime(
         ),
         external_boot=external_boot,
         external_boot_preparation=external_boot,
+        external_boot_recovery_objects=external_boot,
     )

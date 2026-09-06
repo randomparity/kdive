@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2027-03-02
+> **Resolved by #2204** (2026-09-06)
 
 ## Concern
 
@@ -89,6 +88,14 @@ clause covers and can exercise the behaviour it describes.
 Done when ADR-0583's restricted-state and owning-Run clauses read the same as
 `src/kdive/services/external_boot/admission.py`, with the reasoning recorded in the ADR rather
 than only here, and this record carries its resolution banner.
+
+## Resolution
+
+[ADR-0617](../adr/0617-external-boot-detach-remains-an-unblocking-operation.md) supersedes the
+two debug-detach restrictions in ADR-0583. Detach remains reachable in every restricting state
+for any Run on the System; attach remains active-only and owning-Run scoped. Release continues
+to refuse every live DebugSession on the System. The existing table and reverse-admission tests
+remain unchanged; this resolution corrects the decision record, not runtime admission behavior.
 
 ## Provenance
 

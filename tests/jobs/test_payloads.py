@@ -23,6 +23,7 @@ from kdive.jobs.payloads import (
     InstallPayload,
     PayloadValidationError,
     PowerPayload,
+    RecoveryRequestV1,
     ReprovisionPayload,
     SysRqPayload,
     SystemPayload,
@@ -32,6 +33,18 @@ from kdive.jobs.payloads import (
     load_payload,
     run_id_from_payload,
 )
+
+
+def test_recovery_request_requires_digest_and_aware_deadline() -> None:
+    valid = {"request_identity": "sha256:" + "a" * 64}
+    with pytest.raises(ValueError, match="timezone"):
+        RecoveryRequestV1(**valid, readiness_deadline=datetime(2026, 9, 6))
+    with pytest.raises(ValueError, match="request_identity"):
+        RecoveryRequestV1(
+            request_identity="not-a-digest",
+            readiness_deadline=datetime(2026, 9, 6, tzinfo=UTC),
+        )
+
 
 WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 

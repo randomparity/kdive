@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    CleanupQuarantineReceiptV1,
     CleanupTombstoneV1,
     FinalizeCleanupProof,
     LibguestfsAuthenticatedGuestTree,
@@ -1504,6 +1505,7 @@ class _ExternalIO:
         self.actions: list[str] = []
         self.tombstone = False
         self.finalized_proof: FinalizeCleanupProof | None = None
+        self.cleanup_quarantine: CleanupQuarantineReceiptV1 | None = None
         self.operation_fault = operation_fault
         self.close_fault = close_fault
         self.opened: list[ExpectedOperationOwnership] = []
@@ -1676,6 +1678,28 @@ class _ExternalIO:
         self.actions.append("finalize")
         self.finalized_proof = proof
         self.tombstone = False
+        self.cleanup_quarantine = None
+
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        self.cleanup_quarantine = CleanupQuarantineReceiptV1(
+            tombstone=CleanupTombstoneV1(
+                binding=recovery.binding,
+                recovery_point=recovery,
+                point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+            ),
+            proof=proof,
+        )
+
+    def read_cleanup_quarantine(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        del binding
+        return self.cleanup_quarantine
+
+    def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
+        self.cleanup_quarantine = receipt.model_copy(update={"managed": True})
 
 
 class _ExternalContext:
@@ -1693,6 +1717,41 @@ class _ExternalContext:
             if exc is None:
                 raise close_error
             exc.add_note(f"cleanup failed: {close_error!r}")
+
+
+def _cleanup_proof_for(point: RecoveryPoint) -> FinalizeCleanupProof:
+    return FinalizeCleanupProof(
+        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        binding=point.binding,
+        operation_id="cleanup-operation",
+        attempt_id="00000000-0000-0000-0000-000000000099",
+        journal_sequence=9,
+        journal_digest="sha256:" + "9" * 64,
+        phase="mutation-started",
+    )
+
+
+def test_local_quarantine_adopt_and_delete_are_exact_and_durable() -> None:
+    authority = OpaqueProviderRef(ref="authority/current")
+    point = _point(_metadata("recovered"))
+
+    adopt_io = _ExternalIO(_metadata("recovered"))
+    adopt_ports = LocalLibvirtExternalBoot(adopt_io)
+    adopt_ports.record_cleanup_quarantine(point, _cleanup_proof_for(point), authority)
+    adopted_binding = adopt_ports.quarantined_objects(point.binding, authority)[0].binding
+    before_adopt = adopt_ports.observe_object(adopted_binding, authority)
+    adopted = adopt_ports.adopt_object(adopted_binding, authority, before_adopt.observed_digest)
+    assert adopted.present and adopted.managed
+    assert adopt_ports.quarantined_objects(point.binding, authority) == ()
+
+    delete_io = _ExternalIO(_metadata("recovered"))
+    delete_ports = LocalLibvirtExternalBoot(delete_io)
+    delete_ports.record_cleanup_quarantine(point, _cleanup_proof_for(point), authority)
+    deleted_binding = delete_ports.quarantined_objects(point.binding, authority)[0].binding
+    before_delete = delete_ports.observe_object(deleted_binding, authority)
+    deleted = delete_ports.delete_object(deleted_binding, authority, before_delete.observed_digest)
+    assert not deleted.present and not deleted.managed
+    assert delete_io.finalized_proof == _cleanup_proof_for(point)
 
 
 def _exercise_port(method: str, ports: LocalLibvirtExternalBoot, io: _ExternalIO) -> None:

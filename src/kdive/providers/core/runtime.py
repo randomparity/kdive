@@ -23,7 +23,11 @@ from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiEngine,
 )
-from kdive.providers.ports.external_boot import ExternalBootPorts, ExternalBootPreparationPorts
+from kdive.providers.ports.external_boot import (
+    ExternalBootPorts,
+    ExternalBootPreparationPorts,
+    ExternalBootRecoveryObjectPorts,
+)
 from kdive.providers.ports.lifecycle import (
     Booter,
     Connector,
@@ -182,6 +186,9 @@ class ProviderRuntime:
     # Server-owned materialize/prepare receipt seam (ADR-0595). Kept separate from worker
     # lifecycle mutation ports so composition can fail closed for providers without receipts.
     external_boot_preparation: ExternalBootPreparationPorts | None = None
+    # Exact quarantine-object observation/disposition. Separate from whole recovery cleanup so
+    # an administrative repair cannot turn an opaque caller reference into arbitrary provider I/O.
+    external_boot_recovery_objects: ExternalBootRecoveryObjectPorts | None = None
     # Internal worker route, not an advertised provider operation (ADR-0606).
     authority: AuthorityRequestSender | None = None
 
