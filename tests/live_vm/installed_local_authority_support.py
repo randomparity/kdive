@@ -9,7 +9,6 @@ import pwd
 import re
 import stat
 import subprocess
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -55,17 +54,21 @@ import stat
 import sys
 from pathlib import Path
 
-if len(sys.argv) < 4:
+if len(sys.argv) < 2:
     raise SystemExit("invalid installed route preflight")
-source_root = Path(sys.argv[1]).resolve(strict=True)
-python = Path(sys.argv[2]).resolve(strict=True)
-slots = [int(slot) for slot in sys.argv[3:]]
+source_root = Path("/opt/kdive")
+python = source_root / ".venv/bin/python"
+slots = [int(slot) for slot in sys.argv[1:]]
 if not slots or sorted(set(slots)) != slots or any(slot not in range(1, 9) for slot in slots):
     raise SystemExit("invalid installed worker slots")
-operator_uid = int(os.environ.get("SUDO_UID", "-1"))
-if (operator_uid < 0 or not (source_root / "pyproject.toml").is_file()
+source = source_root.stat()
+if (not stat.S_ISDIR(source.st_mode) or source.st_uid <= 0 or source.st_mode & 0o022
+        or not (source_root / "pyproject.toml").is_file()
         or not os.access(python, os.X_OK)):
     raise SystemExit("unsafe installed route preflight target")
+source_root = source_root.resolve(strict=True)
+resolved_python = python.resolve(strict=True)
+owner_uid = source.st_uid
 
 def read_regular(path, maximum):
     descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -81,27 +84,35 @@ def read_regular(path, maximum):
         raise SystemExit("oversized installed route input")
     return data
 
-def env_file(path):
+def env_file(path, names):
     values = {}
-    for line in read_regular(path, 32768).decode("utf-8", "strict").splitlines():
-        if not line or line.startswith("#"):
+    expected = {name.encode("ascii") for name in names}
+    for line in read_regular(path, 32768).splitlines():
+        name, separator, raw = line.partition(b"=")
+        if name not in expected:
             continue
-        name, separator, raw = line.partition("=")
-        parsed = shlex.split(raw, posix=True) if separator else []
-        if not name or len(parsed) != 1:
+        parsed = shlex.split(raw.decode("utf-8", "strict"), posix=True) if separator else []
+        decoded = name.decode("ascii")
+        if decoded in values or len(parsed) != 1:
             raise SystemExit("unsafe installed route environment")
-        values[name] = parsed[0]
+        values[decoded] = parsed[0]
     return values
 
-def proc_environment(pid):
+def proc_environment(pid, names):
     values = {}
+    expected = {name.encode("ascii") for name in names}
     for entry in read_regular("/proc/" + pid + "/environ", 131072).split(b"\\0"):
         if not entry:
             continue
         name, separator, value = entry.partition(b"=")
+        if name not in expected:
+            continue
         if not separator:
             raise SystemExit("unsafe server environment")
-        values[name.decode("ascii", "strict")] = value.decode("utf-8", "strict")
+        decoded = name.decode("ascii")
+        if decoded in values:
+            raise SystemExit("unsafe server environment")
+        values[decoded] = value.decode("utf-8", "strict")
     return values
 
 candidates = []
@@ -109,19 +120,18 @@ for entry in Path("/proc").iterdir():
     if not entry.name.isdigit():
         continue
     try:
-        if entry.stat().st_uid != operator_uid:
+        if entry.stat().st_uid != owner_uid:
             continue
         command = read_regular(str(entry / "cmdline"), 4096).split(b"\\0")[:-1]
         if command != [str(python).encode(), b"-m", b"kdive", b"server"]:
             continue
-        if (entry / "cwd").resolve() != source_root or (entry / "exe").resolve() != python:
+        if (entry / "cwd").resolve() != source_root or (entry / "exe").resolve() != resolved_python:
             continue
     except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
         continue
     candidates.append(entry.name)
 if len(candidates) != 1:
     raise SystemExit("installed stack must have one exact server process")
-server = proc_environment(candidates[0])
 required_server = {
     "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
     "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY",
@@ -129,6 +139,7 @@ required_server = {
     "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES",
     "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES",
 }
+server = proc_environment(candidates[0], required_server)
 if any(not server.get(name) for name in required_server):
     raise SystemExit("installed server authority route is incomplete")
 try:
@@ -137,9 +148,17 @@ try:
     server_capacity = int(server["KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"])
 except ValueError as exc:
     raise SystemExit("installed server authority geometry is invalid") from exc
-if min(reserve, maximum, server_capacity) <= 0 or reserve > maximum or maximum > server_capacity:
+if (min(reserve, maximum, server_capacity) <= 0 or reserve > maximum
+        or not all(str(value) == server[name] for value, name in (
+            (reserve, "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES"),
+            (maximum, "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES"),
+            (server_capacity, "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"),
+        ))):
     raise SystemExit("installed server authority geometry is invalid")
-authority = env_file("/etc/kdive/provider-authority.env")
+authority = env_file(
+    "/etc/kdive/provider-authority.env",
+    {"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE", "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"},
+)
 if (authority.get("KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE")
         != server["KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE"]):
     raise SystemExit("installed authority instance does not match server")
@@ -147,7 +166,7 @@ try:
     authority_capacity = int(authority["KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"])
 except (KeyError, ValueError) as exc:
     raise SystemExit("installed authority materialization capacity is invalid") from exc
-if authority_capacity != server_capacity:
+if authority_capacity != server_capacity or reserve != authority_capacity:
     raise SystemExit("installed authority materialization capacity does not match server")
 route_names = (
     "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
@@ -158,7 +177,7 @@ route_names = (
 )
 expected = None
 for slot in slots:
-    worker = env_file(f"/var/lib/kdive/live-workers/slots/{slot}/worker.env")
+    worker = env_file(f"/var/lib/kdive/live-workers/slots/{slot}/worker.env", route_names)
     route = tuple(worker.get(name) for name in route_names)
     if any(not value for value in route):
         raise SystemExit("installed worker authority route is incomplete")
@@ -694,7 +713,6 @@ def require_installed_authority_routes(
     _config: NativeAuthorityConfig, running_workers: str
 ) -> None:
     """Check the exact live server, authority, and active-worker route before mutation."""
-    source_root = Path(__file__).resolve().parents[2]
     slots = _active_worker_slots(running_workers)
     result = _output(
         "sudo",
@@ -702,8 +720,6 @@ def require_installed_authority_routes(
         _IDENTITY_PYTHON,
         "-c",
         _INSTALLED_ROUTE_PREFLIGHT,
-        str(source_root),
-        str(Path(sys.executable).resolve()),
         *(str(slot) for slot in slots),
     )
     if result != "route-ok":

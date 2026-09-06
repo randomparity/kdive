@@ -527,8 +527,10 @@ def test_installed_route_preflight_requires_exact_active_worker_slots(
 
     assert calls[0][:4] == ("sudo", "-n", "/usr/bin/python3", "-c")
     assert calls[0][-1] == "2"
-    assert calls[0][-3] == str(Path(__file__).resolve().parents[2])
-    assert calls[0][-2] == str(Path(sys.executable).resolve())
+    assert 'source_root = Path("/opt/kdive")' in carrier._INSTALLED_ROUTE_PREFLIGHT
+    assert 'python = source_root / ".venv/bin/python"' in carrier._INSTALLED_ROUTE_PREFLIGHT
+    assert "resolved_python = python.resolve(strict=True)" in carrier._INSTALLED_ROUTE_PREFLIGHT
+    assert "entry.stat().st_uid != owner_uid" in carrier._INSTALLED_ROUTE_PREFLIGHT
 
 
 def test_installed_route_preflight_rejects_an_unexpected_root_helper_result(
