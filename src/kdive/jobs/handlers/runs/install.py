@@ -78,22 +78,38 @@ async def install_handler(
     payload = _install_payload_context(job)
     plan = await _resolve_install_plan(conn, payload, resolver)
     job_ctx = job_context_from_job(job, plan.run.project)
-    if plan.staging_only:
-        claimed = (await claim_run_step(conn, payload.run_id, "install")).claimed
-    else:
-        claimed = await _run_install_step(
-            conn,
-            payload.run_id,
-            plan.installer,
-            plan.request,
-            job_id=job.id,
-            attempt=job.attempt,
-            incarnation_credential=incarnation_credential,
-        )
+    claimed = await _execute_install_plan(
+        conn,
+        plan,
+        job_id=job.id,
+        attempt=job.attempt,
+        incarnation_credential=incarnation_credential,
+    )
     if not claimed:
         return str(payload.run_id)
     await _complete_install_step(conn, job_ctx, plan)
     return str(payload.run_id)
+
+
+async def _execute_install_plan(
+    conn: AsyncConnection,
+    plan: _InstallPlan,
+    *,
+    job_id: UUID,
+    attempt: int,
+    incarnation_credential: SecretStr,
+) -> bool:
+    if plan.staging_only:
+        return (await claim_run_step(conn, plan.run.id, "install")).claimed
+    return await _run_install_step(
+        conn,
+        plan.run.id,
+        plan.installer,
+        plan.request,
+        job_id=job_id,
+        attempt=attempt,
+        incarnation_credential=incarnation_credential,
+    )
 
 
 def _install_payload_context(job: Job) -> _InstallPayloadContext:

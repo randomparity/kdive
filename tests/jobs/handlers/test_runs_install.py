@@ -13,9 +13,10 @@ from psycopg import AsyncConnection
 from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.records import Run
 from kdive.jobs.handlers.runs import install as runs_install
 from kdive.jobs.handlers.runs import registrar as runs
-from kdive.providers.ports.lifecycle import InstallRequest
+from kdive.providers.ports.lifecycle import Installer, InstallRequest
 
 
 def test_install_handler_is_exported_through_runs_facade() -> None:
@@ -38,6 +39,39 @@ def test_reusable_install_requires_every_referenced_artifact_version() -> None:
             assert exc.details["reason"] == "reusable_build_versions_incomplete"
         else:
             raise AssertionError(f"incomplete versions unexpectedly accepted: {versions!r}")
+
+
+def test_authority_staging_claims_without_calling_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = uuid4()
+
+    async def claimed(*args: object) -> object:
+        return SimpleNamespace(claimed=True)
+
+    async def provider(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("authority staging must not invoke the privileged installer")
+
+    monkeypatch.setattr(runs_install, "claim_run_step", claimed)
+    monkeypatch.setattr(runs_install, "_run_install_step", provider)
+    plan = runs_install._InstallPlan(
+        run=cast(Run, SimpleNamespace(id=run_id)),
+        installer=cast(Installer, object()),
+        request=cast(InstallRequest, object()),
+        applied_extra=None,
+        crashkernel=None,
+        staging_only=True,
+    )
+
+    assert asyncio.run(
+        runs_install._execute_install_plan(
+            cast(AsyncConnection, object()),
+            plan,
+            job_id=uuid4(),
+            attempt=1,
+            incarnation_credential=SecretStr("test-incarnation"),
+        )
+    )
 
 
 def test_cancelled_install_waits_for_provider_thread_before_abandoning(
