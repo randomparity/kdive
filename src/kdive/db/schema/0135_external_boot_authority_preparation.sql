@@ -158,6 +158,9 @@ BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended('kdive:system:' || v_authority.system_id::text, 2125)
     );
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('kdive:worker-incarnation:' || v_incarnation, 1803)
+    );
     SELECT a.* INTO v_authority FROM public.external_boot_authorities AS a
     WHERE a.id = p_authority_id AND a.generation = p_generation FOR UPDATE;
     SELECT w.incarnation INTO v_incarnation FROM public.worker_incarnations AS w
