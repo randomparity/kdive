@@ -344,8 +344,8 @@ def test_authority_endpoint_is_a_distinct_session() -> None:
         assert path in verify
     assert "Assert the dormant authority endpoint is distinct and reachable" in verify
     assert "Verify the authority session-libvirtd user unit syntax" in verify
-    assert "Prove fixed workers and the reconciler cannot traverse authority paths" in verify
-    assert "(live_vm_host_worker_accounts + ['kdive'])" in verify
+    assert "Prove fixed workers cannot traverse authority provider paths" in verify
+    assert "Prove the reconciler cannot traverse authority paths" in verify
     assert "cannot access the authority mutation socket" in verify
     assert "cannot read the authority provider config" in verify
     assert "cannot access authority provider objects" in verify
@@ -392,12 +392,13 @@ def test_existing_worker_provider_contract_is_preserved() -> None:
 
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)
-    assert 'groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]' in tasks
+    assert "[live_vm_host_worker_libvirt_group, 'kvm']" in tasks
     assert "Start the operator-owned dedicated session libvirtd" in tasks
     assert "Verify existing worker provider path remains usable after authority endpoint" in verify
     assert "Verify every worker can use the KVM device" in verify
     assert "live_vm_host_authority_client_group" in verify
-    assert "or live_vm_host_authority_client_group in" in verify
+    assert "live_vm_host_worker_authority_enabled | bool" in verify
+    assert "live_vm_host_authority_client_group not in" in verify
 
 
 def test_ansible_installs_authority_in_clean_host_order() -> None:
@@ -444,7 +445,8 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     for evidence in (
         "Assert the authority service is ready",
         "Assert the authority database LOGIN is least privilege",
-        "Prove fixed workers and the reconciler cannot traverse authority paths",
+        "Prove fixed workers cannot traverse authority provider paths",
+        "Prove the reconciler cannot traverse authority paths",
         "Verify existing worker provider path remains usable after authority endpoint",
         "Prove authority service restart restores readiness",
         "Prove authority readiness retracts on credential and ACL drift",
@@ -610,7 +612,7 @@ def test_ansible_uses_declarative_account_and_file_modules() -> None:
     ):
         assert module in tasks
     assert "live_vm_host_worker_accounts" in tasks
-    assert 'groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]' in tasks
+    assert "[live_vm_host_worker_libvirt_group, 'kvm']" in tasks
     assert "groups: [sudo" not in tasks
     assert "groups: [docker" not in tasks
 

@@ -158,13 +158,55 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
 
 ### External-boot authority diagnosis
 
-The installed role currently provisions the authority identity, database and TLS credentials,
-journal, request socket, and private libvirt endpoint. It does not yet provision the
-authority-owned recovery root, object-store endpoint and credentials, or the fixed workers' five
-`KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_*` values and referenced client TLS files. Without that
-complete set the host remains identity-only and workers must not route mutations to it. The worker
-gate preserves those five values when they are supplied by the slot environment; provisioning the
-values and files remains required before a connected native proof.
+The production `provider_authority_host` role defaults to identity-only operation. To let that
+authority perform local external-boot mutations, enable its closed local-mutation contract in the
+protected host vars used for the authority play:
+
+```yaml
+provider_authority_host_enabled: true
+provider_authority_host_local_mutation_enabled: true
+provider_authority_host_recovery_root: /var/lib/kdive/provider-authority/recovery
+provider_authority_host_external_boot_capacity_bytes: 34359738368
+provider_authority_host_s3_endpoint_url: https://objects.example.invalid
+provider_authority_host_s3_bucket: kdive-artifacts
+provider_authority_host_s3_region: us-east-1
+provider_authority_host_s3_credentials_source: /protected/provider-authority-s3-credentials
+```
+
+The capacity is bytes per activation. The S3 credential source is a mode-`0400` or mode-`0600`
+boto3 shared-credentials file on the Ansible controller. The role copies it owner-only and projects
+it through systemd credentials; credential values never enter the environment file. The endpoint
+must be an `http` or `https` URL without embedded credentials, and the bucket and region must be
+canonical nonblank names. Any partial local-mutation configuration fails in preflight before host
+mutation. Leaving the opt-in false requires the mutation-only values to remain unset and preserves
+the identity-only account, device isolation, and service writable paths.
+
+The local mode installs the target-native qemu/libguestfs tools, grants only the authority account
+the distro `kvm` group, creates the fixed recovery root as authority-owned mode `0700`, and gives
+the service access only to `/dev/kvm` plus that root. Fixed workers and the control identity retain
+no access to the provider socket or recovery root.
+
+On a `live_vm_host` that runs the eight fixed workers beside the authority, enable the worker
+client route in the same protected vars file. The instance must be the authority's configured
+instance; the default already references `live_vm_host_authority_instance` so the TLS server
+identity and worker expectation cannot drift independently.
+
+```yaml
+live_vm_host_worker_authority_enabled: true
+live_vm_host_worker_authority_instance: "{{ live_vm_host_authority_instance }}"
+live_vm_host_worker_authority_request_socket: /run/kdive/provider-authority/request/authority.sock
+live_vm_host_worker_authority_server_ca_source: /protected/provider-authority-server-ca.pem
+live_vm_host_worker_authority_client_certificate_source: /protected/worker-client.pem
+live_vm_host_worker_authority_client_key_source: /protected/worker-client-key.pem
+```
+
+The three sources must be nonempty mode-`0400` or mode-`0600` regular files on the controller.
+Provisioning copies them under `/var/lib/kdive/secrets/external-boot-authority` as root-owned,
+client-group-readable files and publishes only their root-relative references in worker
+environments. Enabling only part of this contract fails before host mutation. The client group may
+traverse the request directory but still cannot traverse the authority's provider socket, recovery
+root, journal, installation, or credential directories; the control and reconciler identities
+remain outside the client group.
 
 The normal runner play leaves this dormant boundary disabled. To install it, prepare a protected
 mode-`0600` vars file on the control host, set `live_vm_host_authority_enabled: true`, and provide
