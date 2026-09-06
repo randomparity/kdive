@@ -30,6 +30,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
     identity_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
+    RemoteModuleApplianceExecution,
     RemoteModuleOperationRuntime,
     RemoteModuleVolumePreparation,
 )
@@ -50,6 +51,26 @@ from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
 from tests.db.test_remote_module_attempt_obligations import _seed
+from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+    BlockingConsoleConn,
+    success_result,
+    volume,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+    Clock as ApplianceClock,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+    Conn as ApplianceConn,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+    Executor as ApplianceExecutor,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+    operation as appliance_operation,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+    request as appliance_request,
+)
 from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_documents import _result
 from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_volumes import Conn
 
@@ -437,6 +458,111 @@ def test_real_receipt_guards_two_real_volume_creates(
             with pytest.raises(ModuleAttemptObligationVerificationError):
                 await runtime.prepare(receipt, operation, executor, cast(Any, object()), 10**12)
             assert len(storage.pool.volumes) == before
+        executor.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["success", "missing", "changed", "provider-failure"])
+def test_run_returns_only_exact_durable_appliance_result(case: str) -> None:
+    operation = appliance_operation()
+    clock = ApplianceClock()
+    reference = appliance_request(clock, result=success_result())
+    reads = [success_result(), success_result()]
+    if case == "missing":
+        reads = [None]
+    elif case == "changed":
+        changed = RemoteModuleResultV1.from_canonical_json(success_result()).model_copy(
+            update={"installed_manifest": "sha256:" + "f" * 64}
+        )
+        reads = [success_result(), changed.to_canonical_json()]
+    appliance = ApplianceConn([1] if case == "provider-failure" else [], clock)
+
+    def read(_scratch: object) -> bytes | None:
+        return reads.pop(0)
+
+    runtime = _runtime(lambda _recovery: asyncio.sleep(0, result=None))
+    object.__setattr__(runtime, "volume_preparation", cast(Any, SimpleNamespace(pool_name="pool")))
+    object.__setattr__(
+        runtime,
+        "appliance_execution",
+        RemoteModuleApplianceExecution(
+            appliance=appliance,
+            architecture=reference.architecture,
+            emulator_path=reference.emulator_path,
+            memory_kib=reference.memory_kib,
+            vcpus=reference.vcpus,
+            appliance_volume=reference.appliance_volume,
+            appliance_image_digest=reference.appliance_image_digest,
+            root=lambda _operation: volume("root", "root"),
+            read_scratch_result=read,
+            inspect_attachments=reference.inspect_attachments,
+            secret_registry=reference.secret_registry,
+            deadline_executor=ApplianceExecutor(),
+            monotonic=clock,
+        ),
+    )
+    executor = RemoteModulePreparationExecutor()
+    volumes = cast(
+        Any,
+        SimpleNamespace(source=volume("source", "source"), scratch=volume("scratch", "scratch")),
+    )
+    if case == "success":
+        result = asyncio.run(runtime.run(operation, volumes, executor, 300.0))
+        assert result == RemoteModuleResultV1.from_canonical_json(success_result())
+    else:
+        with pytest.raises((CategorizedError, RuntimeError)):
+            asyncio.run(runtime.run(operation, volumes, executor, 300.0))
+    executor.shutdown()
+
+
+def test_run_cancellation_waits_for_provider_cleanup() -> None:
+    async def run() -> None:
+        operation = appliance_operation()
+        clock = ApplianceClock()
+        reference = appliance_request(clock, result=success_result())
+        release = threading.Event()
+        appliance = BlockingConsoleConn(release, clock)
+        runtime = _runtime(lambda _recovery: asyncio.sleep(0, result=None))
+        object.__setattr__(
+            runtime, "volume_preparation", cast(Any, SimpleNamespace(pool_name="pool"))
+        )
+        object.__setattr__(
+            runtime,
+            "appliance_execution",
+            RemoteModuleApplianceExecution(
+                appliance,
+                reference.architecture,
+                reference.emulator_path,
+                reference.memory_kib,
+                reference.vcpus,
+                reference.appliance_volume,
+                reference.appliance_image_digest,
+                lambda _operation: volume("root", "root"),
+                lambda _scratch: success_result(),
+                reference.inspect_attachments,
+                reference.secret_registry,
+                ApplianceExecutor(),
+                clock,
+            ),
+        )
+        executor = RemoteModulePreparationExecutor()
+        volumes = cast(
+            Any,
+            SimpleNamespace(
+                source=volume("source", "source"), scratch=volume("scratch", "scratch")
+            ),
+        )
+        task = asyncio.create_task(runtime.run(operation, volumes, executor, 300.0))
+        while appliance.stream is None:
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert len((volumes.source, volumes.scratch)) == 2
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
         executor.shutdown()
 
     asyncio.run(run())

@@ -17,6 +17,12 @@ from kdive.db.remote_module_attempt_obligations import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    ApplianceConn,
+    ApplianceRequest,
+    DeadlineExecutor,
+    run_or_adopt_appliance,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
     RemoteDeviceIdentityPort,
@@ -34,10 +40,12 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     FilesystemImageWriter,
     ModuleTreeEntry,
     PreparedModuleVolumes,
+    PreparedVolume,
     StorageConn,
     VolumeRequest,
     prepare_attempt_volumes,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.remote_module_volume_preparation import (
     prepare_verified_remote_module_attempt,
 )
@@ -64,6 +72,13 @@ class ModuleOperationRuntime(Protocol):
         authority: AuthorityRequestSender | None,
         deadline: float,
     ) -> PreparedModuleVolumes: ...
+    async def run(
+        self,
+        operation: RemoteModuleOperationV1,
+        volumes: PreparedModuleVolumes,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> RemoteModuleResultV1: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +92,23 @@ class RemoteModuleVolumePreparation:
 
 
 @dataclass(frozen=True, slots=True)
+class RemoteModuleApplianceExecution:
+    appliance: ApplianceConn
+    architecture: str
+    emulator_path: str
+    memory_kib: int
+    vcpus: int
+    appliance_volume: str
+    appliance_image_digest: str
+    root: Callable[[RemoteModuleOperationV1], PreparedVolume]
+    read_scratch_result: Callable[[PreparedVolume], bytes | None]
+    inspect_attachments: Callable[[], AttachmentInspection]
+    secret_registry: SecretRegistry
+    deadline_executor: DeadlineExecutor
+    monotonic: Callable[[], float]
+
+
+@dataclass(frozen=True, slots=True)
 class RemoteModuleOperationRuntime:
     """Reopen scratch state first, falling back to durable evidence after scratch deletion."""
 
@@ -84,6 +116,7 @@ class RemoteModuleOperationRuntime:
     repository: RemoteModuleAttemptObligationRepository
     read_scratch_result: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]]
     volume_preparation: RemoteModuleVolumePreparation | None = None
+    appliance_execution: RemoteModuleApplianceExecution | None = None
 
     @staticmethod
     def _attempt(recovery: RemoteModuleRecoveryRefV1) -> ModuleAttempt:
@@ -182,6 +215,74 @@ class RemoteModuleOperationRuntime:
                 category=ErrorCategory.CONFLICT,
             )
         return operation, result
+
+    async def run(
+        self,
+        operation: RemoteModuleOperationV1,
+        volumes: PreparedModuleVolumes,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> RemoteModuleResultV1:
+        configured = self.appliance_execution
+        prepared = self.volume_preparation
+        if configured is None or prepared is None:
+            raise CategorizedError(
+                "remote module appliance execution is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+        def execute() -> RemoteModuleResultV1:
+            request = ApplianceRequest(
+                name=(
+                    f"kdive-module-{operation.system_id}-{operation.run_id}-"
+                    f"{operation.operation_nonce}"
+                ),
+                architecture=configured.architecture,
+                emulator_path=configured.emulator_path,
+                memory_kib=configured.memory_kib,
+                vcpus=configured.vcpus,
+                pool=prepared.pool_name,
+                appliance_volume=configured.appliance_volume,
+                appliance_image_digest=configured.appliance_image_digest,
+                root=configured.root(operation),
+                source=volumes.source,
+                scratch=volumes.scratch,
+                operation=operation,
+                secret_registry=configured.secret_registry,
+                read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch),
+                inspect_attachments=configured.inspect_attachments,
+                executor=configured.deadline_executor,
+                monotonic=configured.monotonic,
+                invocation_deadline=deadline,
+            )
+            outcome = run_or_adopt_appliance(configured.appliance, request)
+            if outcome.result is None:
+                raise CategorizedError(
+                    "remote module appliance did not produce a durable result",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"timed_out": outcome.timed_out},
+                )
+            raw = configured.read_scratch_result(volumes.scratch)
+            if raw is None:
+                raise CategorizedError(
+                    "remote module result artifact is absent",
+                    category=ErrorCategory.CONFLICT,
+                )
+            try:
+                durable = RemoteModuleResultV1.from_canonical_json(raw)
+            except ValueError:
+                raise CategorizedError(
+                    "remote module result artifact is invalid",
+                    category=ErrorCategory.CONFLICT,
+                ) from None
+            if durable != outcome.result:
+                raise CategorizedError(
+                    "remote module result changed during durable reopen",
+                    category=ErrorCategory.CONFLICT,
+                )
+            return durable
+
+        return await executor.run(execute)
 
     @staticmethod
     def _operation_from_result(result: RemoteModuleResultV1) -> RemoteModuleOperationV1:
