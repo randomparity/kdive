@@ -44,6 +44,7 @@ from kdive.jobs.models import (
 )
 from kdive.jobs.payloads import ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.infra.reaping import NullModuleVolumeReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -66,6 +67,7 @@ def _stub_assembly() -> WorkerHandlerAssembly:
         object_stores=ObjectStoreAssembly(store=INERT_OBJECT_STORE),
         capture_supervisor=cast(CaptureOperationSupervisor, SimpleNamespace(credential=CREDENTIAL)),
         worker_check_builders={},
+        module_volume_reaper=NullModuleVolumeReaper(),
     )
 
 

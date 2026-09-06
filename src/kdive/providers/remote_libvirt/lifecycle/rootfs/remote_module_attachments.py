@@ -217,7 +217,7 @@ def inspect_module_attachments(
     return AttachmentInspection(True, True, appliance_present, detached)
 
 
-def _volume_references(root: ET.Element) -> list[tuple[str, str]]:
+def volume_references(root: ET.Element) -> list[tuple[str, str]]:
     """Return pool/volume pairs from every storage source in each disk graph."""
     references = []
     for disk in root.findall("./devices/disk"):
@@ -239,7 +239,7 @@ def _top_level_volume_references(root: ET.Element) -> list[tuple[str, str]]:
     return references
 
 
-def _path_references(root: ET.Element) -> set[str]:
+def path_references(root: ET.Element) -> set[str]:
     """Return host paths from every source and legacy mirror in each disk graph."""
     paths = set()
     for disk in root.findall("./devices/disk"):
@@ -319,11 +319,11 @@ def _inspect_definition(
     # disk carries no pool or volume attribute, so keying the duplicate guard on
     # every source made two ordinary disks on any unrelated tenant collide and
     # fail every operation on the host closed.
-    sources = _volume_references(root)
+    sources = volume_references(root)
     if len(sources) != len(set(sources)):
         raise _conflict("duplicate volume reference in domain", domain=name)
     referenced = {volume for pool, volume in sources if pool == expected.pool}
-    paths = _path_references(root)
+    paths = path_references(root)
     if len(paths) > _MAX_PATH_IDENTITIES:
         raise _infrastructure("remote device identity lookup budget exceeded")
     direct_identities = {_device_identity(identity_port, path) for path in paths}

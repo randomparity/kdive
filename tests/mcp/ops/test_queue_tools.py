@@ -24,7 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, InstallPayload
+from kdive.jobs.payloads import Authorizing, InstallPayload, RemoteModuleVolumeReapPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import queue as ops_queue
@@ -222,6 +222,30 @@ def test_jobs_list_returns_cross_project_state(migrated_url: str) -> None:
         assert all("payload" not in j for j in jobs)  # untrusted payload not surfaced
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1 and rows[0][3] == "all-projects"
+
+    asyncio.run(_run())
+
+
+def test_jobs_list_shows_internal_module_reap_to_platform_operator(migrated_url: str) -> None:
+    """The platform queue view retains maintenance rows that tenant APIs hide."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                internal = await queue.enqueue(
+                    conn,
+                    JobKind.REMOTE_MODULE_VOLUME_REAP,
+                    RemoteModuleVolumeReapPayload(schema="remote-module-volume-reap-v1"),
+                    _authorizing("remote-libvirt"),
+                    "internal-module-reap",
+                )
+            response = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR))
+
+        assert response.status == "ok"
+        item = {item.object_id: item.data for item in response.items}[str(internal.id)]
+        assert item["kind"] == JobKind.REMOTE_MODULE_VOLUME_REAP.value
+        assert item["project"] == "remote-libvirt"
+        assert await _platform_audit_rows(migrated_url)
 
     asyncio.run(_run())
 

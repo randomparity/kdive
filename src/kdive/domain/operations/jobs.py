@@ -48,6 +48,8 @@ class JobKind(StrEnum):
     # staged base lives in a tree the worker created and may not be writable by the reconciler's
     # user, so the filesystem half of the reclaim runs where the file was made.
     RECLAIM_INVESTIGATION_ROOTFS = "reclaim_investigation_rootfs"
+    # Platform maintenance: the reconciler enqueues a single worker-owned remote storage sweep.
+    REMOTE_MODULE_VOLUME_REAP = "remote_module_volume_reap"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -86,6 +88,9 @@ ACTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
     kind for kind in JobKind if kind not in RETIRED_JOB_KINDS
 )
 """Job kinds accepted by current tool affordances and production handler registration."""
+
+PLATFORM_INTERNAL_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.REMOTE_MODULE_VOLUME_REAP})
+"""Maintenance jobs that tenant-facing job surfaces must never expose or mutate."""
 
 OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.FORCE_CRASH})
 """Destructive ops whose opt-in factor is resolved from a profile's ``destructive_ops`` list.
@@ -198,6 +203,7 @@ __all__ = [
     "CONTRIBUTOR_CANCELABLE_JOB_KINDS",
     "DEFAULT_JOB_DISPATCH_LANE",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
+    "PLATFORM_INTERNAL_JOB_KINDS",
     "RETIRED_JOB_KINDS",
     "STATE_FENCED_JOB_DISPATCH_LANE",
     "STATE_FENCED_JOB_KINDS",

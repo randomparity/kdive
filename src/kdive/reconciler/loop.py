@@ -70,6 +70,9 @@ from kdive.reconciler.cleanup.provider_resources.dump_volume_reaping import (
 from kdive.reconciler.cleanup.provider_resources.dump_volume_reaping import (
     reap_orphaned_dump_volumes as _reap_orphaned_dump_volumes,
 )
+from kdive.reconciler.cleanup.provider_resources.module_volume_reaping import (
+    enqueue_remote_module_volume_reap as _enqueue_remote_module_volume_reap,
+)
 from kdive.reconciler.cleanup.provider_resources.provider_domain_reaping import (
     repair_leaked_domains as _repair_leaked_domains,
 )
@@ -281,6 +284,7 @@ class ReconcileReport:
     external_boot_recoveries_enqueued: int = 0
     external_boot_releases_enqueued: int = 0
     external_boot_cleanups_enqueued: int = 0
+    module_volume_reap_jobs_enqueued: int = 0
     #: The raw per-kind repair counts, keyed by ``_RepairSpec.name`` (ADR-0190 A). The scalar
     #: fields above feed callers that read named categories; this dict feeds the repairs
     #: counter with the exact spec names so ``repair_kind`` == ``ALL_REPAIR_KINDS``. Excluded
@@ -583,6 +587,11 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         "external_boot_cleanups_enqueued",
         _external_boot_repair("cleanup"),
         report_field="external_boot_cleanups_enqueued",
+    ),
+    _RepairCatalogEntry(
+        "module_volume_reap_jobs_enqueued",
+        lambda _r, _c, _g: _enqueue_remote_module_volume_reap,
+        report_field="module_volume_reap_jobs_enqueued",
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted force_crash job.
     _RepairCatalogEntry(
