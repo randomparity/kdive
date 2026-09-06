@@ -58,7 +58,7 @@ type _CanonicalUuid = Annotated[
 ]
 type _OperationNonce = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
 # The character bound mirrors the shipped appliance schemas, where `maxLength` is all JSON Schema
-# can express; the normative bound is _VOLUME_KEY_MAX_BYTES, applied by _volume_name_key below.
+# can express; the normative bound is _VOLUME_KEY_MAX_BYTES, applied by validate_volume_key below.
 type _BoundedVolumeKey = Annotated[str, Field(min_length=1, max_length=255)]
 
 _VOLUME_KEY_MAX_BYTES = 255
@@ -189,7 +189,7 @@ def _closed_volume_key(value: str) -> str:
     return value
 
 
-def _volume_name_key(value: str) -> str:
+def validate_volume_key(value: str) -> str:
     """Refuse a key that could not name a libvirt volume, by bytes rather than by characters.
 
     A dir pool inherits the filesystem `NAME_MAX`, so the bound is 255 UTF-8 bytes (ADR-0585
@@ -214,7 +214,7 @@ class _RootVolumeV1(_ClosedValue):
     key: _BoundedVolumeKey
     identity: Digest
 
-    _key_names_a_volume = field_validator("key")(_volume_name_key)
+    _key_names_a_volume = field_validator("key")(validate_volume_key)
 
 
 class RemoteModuleOperationV1(_RemoteModuleDocument):
@@ -273,7 +273,7 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
     content_bytes: Annotated[int, Field(ge=0, le=8_589_934_592)] | None = None
 
     _root_key_names_a_volume = field_validator("root_volume_key")(
-        lambda value: None if value is None else _volume_name_key(value)
+        lambda value: None if value is None else validate_volume_key(value)
     )
 
     @property

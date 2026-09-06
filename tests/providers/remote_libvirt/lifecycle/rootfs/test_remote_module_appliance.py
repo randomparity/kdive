@@ -396,6 +396,20 @@ def test_console_retains_only_valid_stable_protocol_fields() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "root_volume_key",
+    ["root\\alias", "root//alias", "root/./alias", "é" * 128],
+)
+def test_console_rejects_noncanonical_root_volume_key(root_volume_key: str) -> None:
+    clock = Clock()
+    outcome = run_or_adopt_appliance(
+        Conn([f"root_volume_key={root_volume_key}\n".encode()], clock),
+        request(clock),
+    )
+
+    assert outcome.console_tail == ""
+
+
 def test_console_discards_overlong_numeric_fields() -> None:
     clock = Clock()
     digits = "9" * 10_000

@@ -23,6 +23,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleResultV1,
+    validate_volume_key,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import PreparedVolume
 from kdive.security.secrets.redaction import Redactor
@@ -342,14 +343,7 @@ def _filter_console(text: str) -> str:
         "plan_identity": lambda value: _DIGEST.fullmatch(value) is not None,
         "operation_nonce": lambda value: _NONCE.fullmatch(value) is not None,
         "appliance_image_digest": lambda value: _DIGEST.fullmatch(value) is not None,
-        "root_volume_key": lambda value: (
-            bool(value)
-            and len(value) <= 255
-            and value.isprintable()
-            and not value.startswith(("/", "\\"))
-            and ".." not in value.split("/")
-            and not any(character in value for character in ("\0", ":", "@"))
-        ),
+        "root_volume_key": _is_canonical_volume_key,
         "root_volume_identity": lambda value: _DIGEST.fullmatch(value) is not None,
         "source_manifest": lambda value: _DIGEST.fullmatch(value) is not None,
         "installed_manifest": lambda value: _DIGEST.fullmatch(value) is not None,
@@ -369,6 +363,13 @@ def _filter_console(text: str) -> str:
         if separator and validator is not None and validator(value):
             retained.append(line)
     return "".join(f"{line}\n" for line in retained)
+
+
+def _is_canonical_volume_key(value: str) -> bool:
+    try:
+        return validate_volume_key(value) == value
+    except ValueError:
+        return False
 
 
 def _wait_deadline(request: ApplianceRequest, invocation_deadline: float) -> float:
