@@ -371,6 +371,14 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
         assert committed is not None
         row = await _activation_row(seed, case.vehicle.activation_id)
         assert row["state"] == spec["after"]
+        if operation == "resolve-conflict":
+            observed = await _one(
+                seed,
+                "SELECT observed_composite_state FROM external_boot_recovery_attempts "
+                "WHERE activation_id = %s ORDER BY attempt_number DESC LIMIT 1",
+                (case.vehicle.activation_id,),
+            )
+            assert observed["observed_composite_state"] == "sha256:" + "8" * 64
 
         # 4. criterion 6, applied half
         assert await _job_state(seed, case.job_id) == "succeeded"
