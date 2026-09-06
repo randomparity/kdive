@@ -100,6 +100,14 @@ class AuthorityRepository(Protocol):
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None: ...
 
+    async def acknowledge(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityTakeoverRequestV1,
+        acknowledgement: AuthorityAcknowledgementV1,
+    ) -> AuthorityAcknowledgementV1 | None: ...
+
     async def advance(
         self,
         binding: AuthorityBinding,
@@ -847,9 +855,15 @@ class ExternalBootAuthorityService:
                     )
                     if watermark is None:
                         raise AuthorityServiceError("journal_conflict")
-                    return self._acknowledgement_response(
+                    response = self._acknowledgement_response(
                         request, records[: acknowledgement.sequence], watermark, acknowledgement
                     )
+                    projected = await self._repository.acknowledge(
+                        authenticated, binding, request, response
+                    )
+                    if projected is None or projected != response:
+                        raise AuthorityServiceError("superseded")
+                    return projected
                 trusted = await self._repository.read_head(binding)
                 watermark: JournalRecordV1 | None = None
                 pending = trusted.pending_takeover if trusted is not None else None
@@ -979,7 +993,13 @@ class ExternalBootAuthorityService:
                 lane.failed = True
                 raise
             self.metrics.set_unresolved((request.provider_kind, request.authority_instance), False)
-            return self._acknowledgement_response(request, records, watermark, acknowledgement)
+            response = self._acknowledgement_response(request, records, watermark, acknowledgement)
+            projected = await self._repository.acknowledge(
+                authenticated, binding, request, response
+            )
+            if projected is None or projected != response:
+                raise AuthorityServiceError("superseded")
+            return projected
 
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
