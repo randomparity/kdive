@@ -395,6 +395,53 @@ def test_public_boot_atomically_admits_configured_external_boot(migrated_url: st
     assert response.data["replayed"] is False
 
 
+def test_force_preflight_failure_preserves_settled_boot_evidence(
+    migrated_url: str,
+) -> None:
+    """The connected setup above covers admission; this case guards destructive ordering."""
+
+    async def run() -> tuple[ToolResponse, tuple[int, int], tuple[int, int]]:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 'boot', 'succeeded')",
+                    (run_id,),
+                )
+                before = await (
+                    await conn.execute(
+                        "SELECT (SELECT count(*) FROM run_steps WHERE run_id=%s AND step='boot'), "
+                        "(SELECT count(*) FROM jobs WHERE payload->>'run_id'=%s)",
+                        (run_id, run_id),
+                    )
+                ).fetchone()
+            config_registry.load(
+                {
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": "store-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "4096",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "8192",
+                    "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "4096",
+                }
+            )
+            response = await boot_run(pool, _ctx(), run_id, resolver=_resolver(), force=True)
+            async with pool.connection() as conn:
+                after = await (
+                    await conn.execute(
+                        "SELECT (SELECT count(*) FROM run_steps WHERE run_id=%s AND step='boot'), "
+                        "(SELECT count(*) FROM jobs WHERE payload->>'run_id'=%s)",
+                        (run_id, run_id),
+                    )
+                ).fetchone()
+            assert before is not None and after is not None
+            return response, cast(tuple[int, int], before), cast(tuple[int, int], after)
+
+    response, before, after = asyncio.run(run())
+    assert response.data["reason"] == "external_boot_provenance_missing"
+    assert after == before
+
+
 async def _power(restricted: _Restricted) -> ToolResponse:
     return await power_system(restricted.pool, _ctx(), system_id=restricted.system_id, action="off")
 

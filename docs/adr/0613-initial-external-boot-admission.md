@@ -27,16 +27,19 @@ to ready under the canonical recovery-store lock. Exhaustion is retryable and pe
 mutation. A ready replay does not debit twice; stale jobs, leases, incarnations, generations,
 owners, routes, and missing reservations are superseded.
 
-`force` retains the ordinary boot contract: running work is refused and settled work is recycled
-before a fresh admission. A request cannot select an authority destination. Unconfigured installs
-and boots retain their prior behavior.
+`force` retains the ordinary boot checks: running work is refused, and settled work is recycled
+only after every plan and activation preflight succeeds. The deterministic activation is
+single-use, so a terminal activation cannot be force-rebooted. The public error directs callers to
+create and stage a new Run rather than deleting prior step or job evidence. A request cannot select
+an authority destination. Unconfigured installs and boots retain their prior behavior.
 
 ## Consequences
 
 Local roots without immutable provenance fail with re-stage guidance. A configured route that is
 absent, incomplete, changes while locked, or disagrees with the selected provider fails before a
 new activation or job. A cleaned deterministic activation is not silently replaced with a second
-schema; callers receive the bounded repository conflict until lifecycle recovery permits reuse.
+schema; callers receive the bounded non-reusable error and must use `runs.create` and stage the
+replacement Run.
 
 ## Considered & rejected
 

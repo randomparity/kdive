@@ -416,7 +416,7 @@ async def boot_run(
                         project=run.project,
                         kind="runs.boot",
                         do_work=lambda: _enqueue_external_boot(
-                            conn, ctx, run, binding, authority_instance, resolver, force=force
+                            conn, ctx, run, authority_instance, resolver, force=force
                         ),
                     )
             return await keyed_mutation(
@@ -442,7 +442,6 @@ async def _enqueue_external_boot(
     conn: AsyncConnection,
     ctx: RequestContext,
     run: Run,
-    binding: ProviderBinding,
     authority_instance: str,
     resolver: ProviderResolver,
     *,
@@ -480,10 +479,8 @@ async def _enqueue_external_boot(
             progress = await step_progress(conn, run.id)
             if progress.boot == RUN_STEP_RUNNING:
                 return _config_error(str(run.id), data={"reason": "step_in_progress"})
-            if progress.boot == RUN_STEP_SUCCEEDED:
-                await delete_run_step(conn, run.id, "boot")
         return await _enqueue_external_boot_locked(
-            conn, ctx, locked_run, binding, authority_instance, resolver
+            conn, ctx, locked_run, binding, authority_instance, resolver, force=force
         )
 
 
@@ -494,6 +491,8 @@ async def _enqueue_external_boot_locked(
     binding: ProviderBinding,
     authority_instance: str,
     resolver: ProviderResolver,
+    *,
+    force: bool,
 ) -> ToolResponse:
     system_id = run.require_system_id()
     system = await SYSTEMS.get(conn, system_id)
@@ -551,7 +550,13 @@ async def _enqueue_external_boot_locked(
     )
     persisted = await ExternalBootActivationRepository().create(conn, activation, reservation)
     if persisted.state is not ExternalBootActivationState.PREPARING:
-        return _config_error(str(run.id), data={"reason": "external_boot_activation_not_reusable"})
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail="the terminal external-boot activation cannot be reused",
+            suggested_next_actions=["runs.create"],
+            data={"reason": "external_boot_activation_not_reusable"},
+        )
     kind, payload = await build_external_boot_payload(
         conn,
         activation_id=activation_id,
@@ -565,6 +570,8 @@ async def _enqueue_external_boot_locked(
     )
     if not isinstance(payload, BootPayload):
         raise AssertionError("activate admission must construct a boot payload")
+    if force and progress.boot == RUN_STEP_SUCCEEDED:
+        await delete_run_step(conn, run.id, "boot")
     job, replayed = await _locked_enqueue(
         conn, ctx, run, kind, "boot", "runs.boot", payload, {"run_id": str(run.id)}
     )
