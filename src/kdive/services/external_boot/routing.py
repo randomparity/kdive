@@ -67,16 +67,16 @@ def authority_reservation_geometry(binding: ProviderBinding) -> AuthorityReserva
 
 def require_worker_authority_route(binding: ProviderBinding, expected: str) -> None:
     """Require the worker's complete fixed route to match the admitted identity."""
-    if binding.runtime.authority is None:
-        raise _route_error("authority_route_missing")
     if binding.kind is ResourceKind.LOCAL_LIBVIRT:
         local = local_authority_binding()
         actual = None if local is None else local.authority_instance
     elif binding.kind is ResourceKind.REMOTE_LIBVIRT and binding.resource_name is not None:
+        if binding.runtime.authority is None:
+            raise _route_error("authority_route_missing")
         remote = remote_config_for_resource(binding.resource_name).authority
         actual = None if remote is None else remote.authority_instance
     else:
-        actual = None
+        raise _route_error("authority_route_missing")
     if actual != expected:
         raise _route_error("authority_route_mismatch")
 
