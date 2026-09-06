@@ -34,6 +34,12 @@ BEGIN
     ) THEN
         RETURN 'superseded';
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.external_boot_reservations
+        WHERE activation_id = p_activation_id AND state = 'ready'
+    ) THEN
+        RETURN 'applied';
+    END IF;
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended('recovery-store:' || p_store_identity, 0)
     );

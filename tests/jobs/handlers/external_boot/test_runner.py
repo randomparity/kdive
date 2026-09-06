@@ -17,6 +17,7 @@ the claim about what they mean is corrected.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -33,6 +34,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
@@ -102,6 +104,89 @@ def test_cmdline_rendering_redacts_before_distinct_bounded_escaping() -> None:
     assert "secret" not in rendered
     assert rendered == "[REDACTED] \\\\ literal\\x00\\x01\\xFF"
     assert len(_render_cmdline(b"a" * 9000, Redactor(registry=registry)).encode()) == 8192
+
+
+def test_preparing_capacity_exhaustion_precedes_materialize_and_retries_after_release(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    class NoMutation:
+        async def execute_preparation(self, request: object) -> object:
+            raise AssertionError("capacity exhaustion must precede MATERIALIZE")
+
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        target_vehicle = build_vehicle()
+        target_store = store_identity(target_vehicle)
+        blocker_vehicle = build_vehicle()
+        await seed_case(
+            seed,
+            blocker_vehicle,
+            purpose="release",
+            activation_state="active",
+            with_reservation=True,
+            reservation_store_identity=target_store,
+        )
+        target = await seed_case(
+            seed,
+            target_vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        ports = replace(
+            _ports(
+                target,
+                resolver=resolver_for(target_vehicle),
+                acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+            ),
+            preparation_executor=cast(Any, NoMutation()),
+            reservation_geometry=lambda _binding: AuthorityReservationGeometry(
+                target_store, RESERVED_BYTES, RESERVED_BYTES
+            ),
+        )
+        with pytest.raises(CategorizedError) as raised:
+            await _run(
+                worker,
+                target,
+                ports=ports,
+                require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+                call_port=lambda _context: None,
+            )
+        assert raised.value.category is ErrorCategory.CAPACITY_EXHAUSTED
+        row = await (
+            await seed.execute(
+                "SELECT state FROM external_boot_reservations WHERE activation_id=%s",
+                (target.vehicle.activation_id,),
+            )
+        ).fetchone()
+        assert row == ("pending",)
+        await seed.execute(
+            "DELETE FROM external_boot_reservations WHERE activation_id=%s",
+            (blocker_vehicle.activation_id,),
+        )
+        repository = ExternalBootActivationRepository()
+        for _ in range(2):
+            status = await repository.mark_reservation_ready_for_job(
+                worker,
+                credential_hash=hashlib.sha256(target.credential.encode()).digest(),
+                job_id=target.job_id,
+                job_attempt=target.attempt,
+                activation_id=target.vehicle.activation_id,
+                store_identity=target_store,
+                reserve_bytes=RESERVED_BYTES,
+                recovery_max_bytes=RESERVED_BYTES,
+            )
+            assert status.value == "applied"
+        used = await (
+            await seed.execute(
+                "SELECT sum(reserved_bytes) FROM external_boot_reservations "
+                "WHERE store_identity=%s AND state='ready'",
+                (target_store,),
+            )
+        ).fetchone()
+        assert used == (RESERVED_BYTES,)
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
 async def _no_preconditions(
