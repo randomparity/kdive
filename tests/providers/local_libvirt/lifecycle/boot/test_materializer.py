@@ -138,9 +138,8 @@ class _Session:
         finally:
             os.close(descriptor)
 
-    def reopen_projection(self, artifact: object) -> TargetProjectionV1:
-        reference = OpaqueProviderRef.model_validate(artifact)
-        digest = reference.ref.split("/")[4]
+    def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
+        digest = artifact.ref.split("/")[4]
         descriptor = os.open(self.root / digest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             data = (self.root / digest / "target-projection.json").read_bytes()

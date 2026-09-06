@@ -30,6 +30,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
+    OpaqueProviderRef,
     RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
@@ -187,7 +188,7 @@ class LocalExternalBootSession(Protocol):
     def projection_directory(
         self, projection: TargetProjectionV1
     ) -> AbstractContextManager[int]: ...
-    def reopen_projection(self, artifact: object) -> TargetProjectionV1: ...
+    def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1: ...
     def projection_artifact_path(self, projection: TargetProjectionV1, name: str) -> str: ...
     def boot_identity(self, xml: str) -> str: ...
     def inspect_closed(self) -> ClosedDomainInspection: ...
@@ -849,16 +850,16 @@ class _ConcreteSession:
                 self._projection_fds.remove(descriptor)
                 self._close_descriptor(descriptor)
 
-    def reopen_projection(self, artifact: object) -> TargetProjectionV1:
+    def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
         """Read an exact projection selected by an owner-checked local artifact reference."""
         from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
-            OpaqueProviderRef,
             TargetProjectionStore,
             _artifact_ref_parts,
         )
         from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
 
-        reference = OpaqueProviderRef.model_validate(artifact)
+        self._require_open_domain()
+        reference = artifact
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(reference, owner, self._binding.activation_id)
         assert self._artifact_fd is not None
