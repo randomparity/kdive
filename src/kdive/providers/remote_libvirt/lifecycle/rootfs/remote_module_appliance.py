@@ -434,7 +434,7 @@ def run_or_adopt_appliance(conn: ApplianceConn, request: ApplianceRequest) -> Ap
         )
         result = None
         if raw_result is not None:
-            result = RemoteModuleResultV1.from_canonical_json(raw_result)
+            result = RemoteModuleResultV1.from_wire_bytes(raw_result)
             result.validate_for(request.operation)
             if result.status == "success":
                 teardown = request.executor.call(
