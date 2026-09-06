@@ -35,7 +35,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
     RemoteModuleApplianceExecution,
-    RemoteModuleOperationRuntime,
     RemoteModuleVolumePreparation,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
@@ -52,36 +51,37 @@ from kdive.services.remote_module_attempt_preparation import (
     ModuleAttemptObligationVerificationError,
     open_module_attempt_preparation,
 )
+from kdive.services.remote_module_operation import RemoteModuleOperationRuntime
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
-from tests.db.test_remote_module_attempt_obligations import _seed
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+from tests.db.remote_module_attempt_obligations_support import _seed
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     BlockingConsoleConn,
     success_result,
     volume,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Clock as ApplianceClock,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Conn as ApplianceConn,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Executor as ApplianceExecutor,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as appliance_operation,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_appliance import (
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     request as appliance_request,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_documents import _result
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_volumes import (
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_support import _result
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_support import (
     Conn,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.test_remote_module_volumes import (
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_support import (
     request as volume_request,
 )
 
@@ -318,13 +318,11 @@ async def test_prepare_passes_exact_attempt_and_caller_receipt_to_verifier(
         return prepared
 
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation."
-        "prepare_verified_remote_module_attempt",
+        "kdive.services.remote_module_operation.prepare_verified_remote_module_attempt",
         verified,
     )
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation."
-        "prepare_attempt_volumes",
+        "kdive.services.remote_module_operation.prepare_attempt_volumes",
         prepare_volumes,
     )
     runtime = _runtime(lambda _recovery: asyncio.sleep(0, result=None))
