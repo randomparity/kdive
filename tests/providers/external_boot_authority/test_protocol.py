@@ -16,6 +16,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
@@ -25,6 +26,7 @@ from kdive.providers.external_boot_authority.protocol import (
     decode_authority_request,
     record_digest,
 )
+from kdive.providers.ports.external_boot import ExternalBootPlan
 
 _DIGEST = "sha256:" + "a" * 64
 _OTHER_DIGEST = "sha256:" + "b" * 64
@@ -96,6 +98,66 @@ def _mutation(**changes: object) -> AuthorityMutationRequestV1:
     return AuthorityMutationRequestV1.model_validate(values)
 
 
+def _plan(system_id: object, run_id: object) -> ExternalBootPlan:
+    zero = "sha256:" + "0" * 64
+    return ExternalBootPlan.model_validate(
+        {
+            "architecture": "x86_64",
+            "bundle": {
+                "decoded_kernel_size_bytes": 200,
+                "elf_metadata_bytes": 50,
+                "gnu_build_id_size_bytes": 20,
+                "key": "bundles/kernel.tar",
+                "member_count": 2,
+                "sha256": zero,
+                "uncompressed_bytes": 101,
+                "version": "v1",
+                "vmlinuz_sha256": zero,
+                "vmlinuz_size_bytes": 100,
+            },
+            "cmdline": "root=UUID=x",
+            "debug_cmdline": None,
+            "initrd": None,
+            "module_obligation": {
+                "member_count": 1,
+                "release": "6.12.0",
+                "source_manifest": zero,
+                "uncompressed_bytes": 1,
+            },
+            "ownership": {
+                "build_generation": "00000000-0000-0000-0000-000000000001",
+                "run_id": str(run_id),
+                "system_id": str(system_id),
+            },
+            "platform_arguments": ["root=UUID=x"],
+            "root": {
+                "architecture": "x86_64",
+                "arguments": ["root=UUID=x"],
+                "authority": "stage-inspection",
+                "root": "UUID=x",
+                "source": {"identity": zero, "kind": "staged-image"},
+            },
+        }
+    )
+
+
+def _preparation(**changes: object) -> AuthorityPreparationMutationRequestV1:
+    values = _binding()
+    plan = _plan(values["system_id"], values["run_id"])
+    values.update(
+        operation="materialize",
+        purpose="activate",
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity=_DIGEST,
+        intended_target_identity=_OTHER_DIGEST,
+        recovery_objects=(),
+        plan=plan,
+    )
+    values.update(changes)
+    return AuthorityPreparationMutationRequestV1.model_validate(values)
+
+
 @pytest.mark.parametrize(
     ("purpose", "operation"),
     [
@@ -123,6 +185,30 @@ def test_every_authorized_purpose_operation_pair_is_accepted(purpose: str, opera
 def test_unknown_or_cross_purpose_operation_is_rejected(operation: str) -> None:
     with pytest.raises(ValidationError):
         _takeover(purpose="activate", operation=operation)
+
+
+def test_preparation_operation_requires_the_closed_plan_request() -> None:
+    request = _preparation()
+    assert decode_authority_request(protocol._canonical_bytes(request)) == request  # noqa: SLF001
+    ordinary = request.model_dump(mode="json", by_alias=True)
+    ordinary.pop("plan")
+    with pytest.raises(ValidationError, match="exact plan"):
+        AuthorityMutationRequestV1.model_validate(ordinary)
+
+
+@pytest.mark.parametrize("operation", ["activate", "recover"])
+def test_preparation_request_rejects_an_ordinary_operation(operation: str) -> None:
+    with pytest.raises(ValidationError, match="operation"):
+        _preparation(operation=operation)
+
+
+def test_preparation_request_binds_exact_plan_identity_and_ownership() -> None:
+    request = _preparation()
+    with pytest.raises(ValidationError, match="bound identity"):
+        _preparation(plan_identity=_DIGEST)
+    foreign = _plan(uuid4(), request.run_id)
+    with pytest.raises(ValidationError, match="ownership"):
+        _preparation(plan=foreign, plan_identity=foreign.identity)
 
 
 @pytest.mark.parametrize(
