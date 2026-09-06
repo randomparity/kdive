@@ -101,7 +101,6 @@ class ApplianceRequest:
     memory_kib: int
     vcpus: int
     pool: str
-    appliance_volume: str
     appliance_image_digest: str
     root: PreparedVolume
     source: PreparedVolume
@@ -113,6 +112,9 @@ class ApplianceRequest:
     executor: DeadlineExecutor
     monotonic: Callable[[], float]
     invocation_deadline: float | None = None
+    appliance_volume: str | None = None
+    appliance_kernel: str | None = None
+    appliance_initrd: str | None = None
 
     def __post_init__(self) -> None:
         if self.architecture not in {"x86_64", "ppc64le"}:
@@ -121,6 +123,9 @@ class ApplianceRequest:
             raise ValueError("appliance emulator path must be absolute")
         if self.operation.appliance_image_digest != self.appliance_image_digest:
             raise ValueError("appliance image digest does not match operation")
+        direct_kernel = (self.appliance_kernel, self.appliance_initrd)
+        if (self.appliance_volume is None) != (None not in direct_kernel):
+            raise ValueError("appliance must select exactly one fixed boot form")
         expected = (self.root, self.source, self.scratch)
         if any(volume.pool != self.pool for volume in expected):
             raise ValueError("appliance volumes must share one pool")
@@ -162,6 +167,10 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
     os_node = ET.SubElement(domain, "os")
     machine = "q35" if request.architecture == "x86_64" else "pseries"
     ET.SubElement(os_node, "type", {"arch": request.architecture, "machine": machine}).text = "hvm"
+    if request.appliance_volume is None:
+        assert request.appliance_kernel is not None and request.appliance_initrd is not None
+        ET.SubElement(os_node, "kernel").text = request.appliance_kernel
+        ET.SubElement(os_node, "initrd").text = request.appliance_initrd
     metadata = ET.SubElement(domain, "metadata")
     ET.SubElement(
         metadata,
@@ -173,10 +182,15 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
         },
     )
     devices = ET.SubElement(domain, "devices")
-    _disk(devices, request.pool, request.appliance_volume, "vda", readonly=True)
-    _disk(devices, request.pool, request.root.name, "vdb", readonly=False)
-    _disk(devices, request.pool, request.source.name, "vdc", readonly=True)
-    _disk(devices, request.pool, request.scratch.name, "vdd", readonly=False)
+    if request.appliance_volume is None:
+        _disk(devices, request.pool, request.root.name, "vda", readonly=False)
+        _disk(devices, request.pool, request.source.name, "vdb", readonly=True)
+        _disk(devices, request.pool, request.scratch.name, "vdc", readonly=False)
+    else:
+        _disk(devices, request.pool, request.appliance_volume, "vda", readonly=True)
+        _disk(devices, request.pool, request.root.name, "vdb", readonly=False)
+        _disk(devices, request.pool, request.source.name, "vdc", readonly=True)
+        _disk(devices, request.pool, request.scratch.name, "vdd", readonly=False)
     for tag, attributes in normalized_appliance_devices(request.architecture):
         ET.SubElement(devices, tag, attributes)
     ET.SubElement(devices, "emulator").text = request.emulator_path
@@ -201,6 +215,8 @@ def expected_attachment_state(request: ApplianceRequest) -> ExpectedAttachmentSt
             request.memory_kib,
             request.vcpus,
             request.emulator_path,
+            request.appliance_kernel,
+            request.appliance_initrd,
         ),
     )
 

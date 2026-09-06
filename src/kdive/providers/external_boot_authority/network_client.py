@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.external_boot_authority.transport import (
+from kdive.providers.external_boot_authority.protocol import (
     MAX_ENVELOPE_BYTES,
     authority_server_name,
     read_frame,

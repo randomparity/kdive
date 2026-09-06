@@ -1,16 +1,33 @@
 ---
-- name: Validate the pinned module-appliance image catalog
+- name: Validate the selected module-appliance architectures
   ansible.builtin.assert:
     that:
+      - provider_authority_host_remote_module_architectures is sequence
+      - provider_authority_host_remote_module_architectures is not string
+      - provider_authority_host_remote_module_architectures | length > 0
+      - >-
+        provider_authority_host_remote_module_architectures | unique | list | length ==
+        provider_authority_host_remote_module_architectures | length
+      - >-
+        provider_authority_host_remote_module_architectures |
+        difference(['x86_64', 'ppc64le']) | length == 0
       - remote_libvirt_module_appliance_images.keys() | list == ['x86_64', 'ppc64le']
+    fail_msg: >-
+      provider_authority_host_remote_module_architectures must select unique supported
+      architectures from x86_64 and ppc64le.
+
+- name: Validate the pinned selected module-appliance image catalog
+  ansible.builtin.assert:
+    that:
       - item.value.url is match('^(https|file)://')
       - item.value.sha256 is match('^[0-9a-f]{64}$')
     fail_msg: >-
-      remote_libvirt_module_appliance_images must pin HTTPS or controller-staged file URLs
-      and lowercase SHA-256 digests for exactly x86_64 and ppc64le.
+      Selected remote_libvirt_module_appliance_images entries must pin HTTPS or
+      controller-staged file URLs and lowercase SHA-256 digests.
   loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+  when: item.key in provider_authority_host_remote_module_architectures
 
 - name: Create the read-only module-appliance image directory
   ansible.builtin.file:
@@ -20,7 +37,7 @@
     group: "{{ remote_libvirt_module_appliance_group }}"
     mode: "0755"
 
-- name: Download and digest-verify each module-appliance image
+- name: Download and digest-verify each selected module-appliance image
   ansible.builtin.get_url:
     url: "{{ item.value.url }}"
     dest: "{{ remote_libvirt_module_appliance_install_dir }}/appliance-v1-{{ item.key }}.tar"
@@ -31,8 +48,9 @@
   loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+  when: item.key in provider_authority_host_remote_module_architectures
 
-- name: Create architecture-specific module-appliance directories
+- name: Create selected architecture-specific module-appliance directories
   ansible.builtin.file:
     path: "{{ remote_libvirt_module_appliance_install_dir }}/{{ item.key }}"
     state: directory
@@ -42,8 +60,9 @@
   loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+  when: item.key in provider_authority_host_remote_module_architectures
 
-- name: Extract the verified module-appliance bundles
+- name: Extract the verified selected module-appliance bundles
   ansible.builtin.unarchive:
     src: "{{ remote_libvirt_module_appliance_install_dir }}/appliance-v1-{{ item.key }}.tar"
     dest: "{{ remote_libvirt_module_appliance_install_dir }}/{{ item.key }}"
@@ -54,17 +73,19 @@
   loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+  when: item.key in provider_authority_host_remote_module_architectures
 
-- name: Re-read installed module-appliance image digests
+- name: Re-read installed selected module-appliance image digests
   ansible.builtin.stat:
     path: "{{ remote_libvirt_module_appliance_install_dir }}/appliance-v1-{{ item.key }}.tar"
     checksum_algorithm: sha256
   loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+  when: item.key in provider_authority_host_remote_module_architectures
   register: remote_libvirt_module_appliance_installed
 
-- name: Refuse a changed installed module-appliance image
+- name: Refuse a changed installed selected module-appliance image
   ansible.builtin.assert:
     that:
       - item.stat.isreg
@@ -76,3 +97,4 @@
   loop: "{{ remote_libvirt_module_appliance_installed.results }}"
   loop_control:
     label: "{{ item.item.key }}"
+  when: not (item.skipped | default(false))

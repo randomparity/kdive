@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import json
 from enum import StrEnum
@@ -27,6 +29,7 @@ from kdive.providers.ports.external_boot import (
 
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
 MAX_MESSAGE_BYTES = 1_048_576
+MAX_ENVELOPE_BYTES = MAX_MESSAGE_BYTES
 MAX_RECOVERY_OBJECTS = 1_024
 GENESIS_DIGEST = "sha256:" + "0" * 64
 
@@ -35,6 +38,21 @@ type PositiveBigInt = Annotated[int, Field(ge=1, le=MAX_SIGNED_BIGINT)]
 type Purpose = Literal["activate", "recover", "resolve-conflict", "release", "teardown"]
 type ObservationCategory = Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
 type RecoveryOrphanDisposition = Literal["delete", "adopt"]
+
+
+def authority_server_name(authority_instance: str) -> str:
+    """Derive the stable reserved DNS name bound into an authority server certificate."""
+    digest = hashlib.sha256(authority_instance.encode("utf-8")).digest()
+    encoded = base64.b32encode(digest).decode("ascii").rstrip("=").lower()
+    return f"{encoded}.authority.kdive.invalid"
+
+
+async def read_frame(reader: asyncio.StreamReader, *, maximum: int) -> bytes:
+    """Read one network-order frame after rejecting its bound before allocation."""
+    size = int.from_bytes(await reader.readexactly(4), "big")
+    if size < 1 or size > maximum:
+        raise ValueError("invalid-request")
+    return await reader.readexactly(size)
 
 
 def _bounded_text(value: str, *, maximum: int = 255) -> str:
@@ -572,6 +590,24 @@ class AuthorityCommitContextV1(_ClosedValue):
             journal_sequence=record.sequence,
             journal_digest=record_digest(record),
         )
+
+
+class AuthorityCleanupEvidenceContextV1(_ClosedValue):
+    """Trusted short-transaction result authorizing one exact remote cleanup."""
+
+    schema_: Literal["external-boot-authority-cleanup-evidence-v1"] = Field(
+        "external-boot-authority-cleanup-evidence-v1", alias="schema"
+    )
+    operation_identity: str
+    attempt_id: UUID
+    operation_nonce: Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+    cleanup_state: Literal["open", "discharged"]
+    recovery_reference_json: Annotated[str, Field(min_length=2, max_length=65_536)]
+
+    @field_validator("operation_identity")
+    @classmethod
+    def _operation_is_bounded(cls, value: str) -> str:
+        return _bounded_text(value)
 
 
 class AuthorityRecoveryObservationContextV1(_ClosedValue):

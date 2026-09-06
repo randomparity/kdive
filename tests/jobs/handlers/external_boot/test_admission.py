@@ -20,12 +20,19 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 import kdive.config as config_registry
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.capacity.state import ExternalBootActivationState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import BootPayload, TeardownPayload, dump_payload, load_payload
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
+from tests.db.remote_module_attempt_obligations_support import _evidence
 from tests.jobs.handlers.external_boot.conftest import resolver_for
 from tests.jobs.handlers.external_boot.seeding import AUTHORITY_INSTANCE, seed_case
 from tests.jobs.handlers.external_boot.support import build_job
@@ -216,6 +223,73 @@ def test_identity_is_sourced_from_the_activation_row(migrated_url: str) -> None:
         assert marker.run_id == vehicle.run_id
         assert marker.system_id == vehicle.system_id
         assert marker.plan_identity == vehicle.plan_identity
+
+    _drive(migrated_url, body)
+
+
+@pytest.mark.parametrize("retained", [False, True], ids=["missing", "retained"])
+def test_remote_lifecycle_payload_carries_exact_retained_prep_receipt(
+    migrated_url: str, retained: bool
+) -> None:
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="release",
+            activation_state="recovered",
+            with_reservation=True,
+        )
+        await conn.execute(
+            "UPDATE resources SET kind='remote-libvirt' WHERE id=("
+            "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+            "WHERE s.id=%s)",
+            (vehicle.system_id,),
+        )
+        await conn.execute(
+            "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
+        )
+        attempt = ModuleAttempt(vehicle.system_id, vehicle.run_id, "1" * 32)
+        if retained:
+            repository = RemoteModuleAttemptObligationRepository()
+            await repository.open_mutation_obligation(conn, attempt)
+            await repository.record_terminal_evidence(conn, attempt, _evidence(attempt))
+            await repository.open_reap_obligation(conn, attempt)
+        local = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+        resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local})
+
+        if not retained:
+            with pytest.raises(CategorizedError, match="no retained PREP evidence"):
+                await build_external_boot_payload(
+                    conn,
+                    activation_id=vehicle.activation_id,
+                    purpose="release",
+                    operation="release",
+                    provider_kind="remote-libvirt",
+                    authority_instance=AUTHORITY_INSTANCE,
+                    operation_identity="release-remote",
+                    resolver=resolver,
+                )
+            return
+
+        kind, payload = await build_external_boot_payload(
+            conn,
+            activation_id=vehicle.activation_id,
+            purpose="release",
+            operation="release",
+            provider_kind="remote-libvirt",
+            authority_instance=AUTHORITY_INSTANCE,
+            operation_identity="release-remote",
+            resolver=resolver,
+        )
+        assert kind is JobKind.BOOT
+        assert isinstance(payload, BootPayload)
+        assert payload.remote_module_attempt_v1 is not None
+        assert payload.remote_module_attempt_v1.module_attempt_obligation.model_dump() == {
+            "schema_": "module-attempt-obligation-receipt-v1",
+            "system_id": vehicle.system_id,
+            "run_id": vehicle.run_id,
+            "operation_nonce": "1" * 32,
+        }
 
     _drive(migrated_url, body)
 

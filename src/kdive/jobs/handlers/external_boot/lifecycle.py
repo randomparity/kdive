@@ -8,12 +8,13 @@ handler returns its result and the worker commits it under ``_authority_binding_
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Final, LiteralString, cast
+from typing import Any, Final, Literal, LiteralString, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
@@ -49,6 +50,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityOperation,
     RecoveryObjectBindingV1,
 )
 from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
@@ -79,6 +81,59 @@ _CLEANUP_STATES: Final = frozenset(
 )
 _TEARDOWN_STATES: Final = frozenset({State.RECOVERY_CONFLICT, State.RECOVERY_FAILED})
 _ORDINARY_CLEANUP_STATES: Final = frozenset({State.RECOVERED, State.ABANDONED})
+
+
+async def execute_remote_module_lifecycle_on_authority_host(**values: Any) -> Any:
+    """Load the remote provider only for a remote lifecycle operation."""
+    from kdive.services.remote_module_authority_preparation import (
+        execute_remote_module_lifecycle_on_authority_host as execute,
+    )
+
+    return await execute(**values)
+
+
+async def _execute_remote_module_lifecycle(
+    context: OperationContext,
+    request: AuthorityMutationRequestV1,
+    executor: ExternalBootAuthorityExecutor,
+) -> None:
+    if context.marker.provider_kind != "remote-libvirt" or request.operation not in {
+        AuthorityOperation.RECOVER,
+        AuthorityOperation.RESOLVE_CONFLICT,
+        AuthorityOperation.CLEANUP,
+        AuthorityOperation.TEARDOWN,
+    }:
+        return
+    from kdive.db.remote_module_attempt_obligations import (
+        ModuleAttemptWorkerWriteContext,
+        RemoteModuleAttemptObligationRepository,
+    )
+    from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+
+    raw_preparation = context.job.payload.get("remote_module_attempt_v1")
+    if raw_preparation is None:
+        raise _refuse("remote module lifecycle authority inputs are incomplete")
+    preparation = ModuleAttemptPreparationRequestV1.model_validate(raw_preparation)
+    action: Literal["restore", "reap"] = (
+        "restore"
+        if request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
+        else "reap"
+    )
+    await execute_remote_module_lifecycle_on_authority_host(
+        connection=context.connection,
+        repository=RemoteModuleAttemptObligationRepository(),
+        sender=cast(Any, executor),
+        authority=request,
+        preparation=preparation,
+        worker_context=ModuleAttemptWorkerWriteContext(
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            incarnation_credential=context.incarnation_credential,
+            preparation=preparation,
+        ),
+        action=action,
+        deadline=asyncio.get_running_loop().time() + 300.0,
+    )
 
 
 async def _derived_release_status(
@@ -176,6 +231,9 @@ async def _run_active_release(context: OperationContext) -> ExternalBootDerivedR
             raise CategorizedError(
                 "derived release recovery was superseded", category=ErrorCategory.STALE_HANDLE
             )
+        await _execute_remote_module_lifecycle(
+            context, recover, cast(ExternalBootAuthorityExecutor, executor)
+        )
         observed = await cast(ExternalBootAuthorityExecutor, executor).execute(recover)
         _require_category(context, observed, "source")
         evidence = terminal_evidence(context, "recovered")
@@ -200,6 +258,9 @@ async def _run_active_release(context: OperationContext) -> ExternalBootDerivedR
                 category=ErrorCategory.STALE_HANDLE,
             )
     cleanup = _derived_request(context, "cleanup")
+    await _execute_remote_module_lifecycle(
+        context, cleanup, cast(ExternalBootAuthorityExecutor, executor)
+    )
     observed = await cast(ExternalBootAuthorityExecutor, executor).execute(cleanup)
     _require_category(context, observed, "absent")
     status = await _derived_release_status(
@@ -389,14 +450,15 @@ def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
 async def _execute(
     context: OperationContext,
 ) -> tuple[AuthorityObservationV1, RunningKernelObservation | None]:
-    executor = context.prerequisites.get("authority_executor")
+    executor = context.authority_executor
     if executor is None:
         raise _refuse("no external-boot authority executor is configured")
     request = _mutation_request(context)
+    await _execute_remote_module_lifecycle(context, request, executor)
     if isinstance(request, AuthorityConflictResolutionRequestV1):
         authority_observation = await cast(Any, executor).execute_conflict_resolution(request)
     else:
-        authority_observation = await cast(ExternalBootAuthorityExecutor, executor).execute(request)
+        authority_observation = await executor.execute(request)
     kernel_observation = None
     if authority_observation.category == "target":
         running_reader = getattr(executor, "observe_running", None)
@@ -774,11 +836,13 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
                     terminal=True,
                 )
             return None
-        executor = context.prerequisites["authority_executor"]
+        executor = context.authority_executor
+        if executor is None:
+            raise _refuse("no external-boot authority executor is configured")
         expected = context.marker.expected_observed_composite
         if expected is None:
             raise _refuse("resolve-conflict has no observed composite binding")
-        observation = await executor.observe(_mutation_request(context))
+        observation = await cast(Any, executor).observe(_mutation_request(context))
         if observation.category == "unreadable" or observation.composite_state != expected:
             raise CategorizedError(
                 "authority observation no longer matches the conflict binding",

@@ -116,4 +116,5 @@ def test_external_boot_authority_unit_is_isolated_and_supervised() -> None:
     ):
         assert directive in text
     assert "service-credential:" in text
+    assert "remote-module-preparations" not in text
     assert "sentinel" not in text
