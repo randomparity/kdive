@@ -20,6 +20,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
     ExpectedAttachmentState,
     HostStatDeviceIdentity,
     RemoteDeviceIdentity,
+    prove_no_foreign_storage_references,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     inspect_module_attachments as _inspect_module_attachments,
@@ -434,6 +435,72 @@ def test_lexical_path_alias_of_protected_volume_is_rejected(attribute: str, acti
 
     with pytest.raises(CategorizedError, match="by path"):
         inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
+
+
+def test_teardown_graph_rejects_same_system_tag_on_another_domain() -> None:
+    state = expected()
+    impostor = Domain(
+        system_xml(state.system_id, volume=state.root_volume).replace(
+            f"<name>kdive-{state.system_id}</name>", "<name>impostor</name>"
+        )
+    )
+    with pytest.raises(CategorizedError, match="another domain references"):
+        prove_no_foreign_storage_references(
+            Conn([Domain(system_xml(state.system_id)), impostor]),
+            IdentityPort(),
+            state.system_id,
+            frozenset({(state.pool, state.root_volume)}),
+        )
+
+
+def _alias_path(value: int) -> str:
+    separators = ["//" if value & (1 << bit) else "/" for bit in range(12)]
+    return "".join(
+        part
+        for pair in zip(separators, ("tenant", *(["."] * 10), "disk"), strict=True)
+        for part in pair
+    )
+
+
+def test_teardown_graph_identity_budget_is_host_wide_and_normalized() -> None:
+    state = expected()
+    aliases = [_alias_path(index) for index in range(4096)]
+    midpoint = len(aliases) // 2
+
+    def document(name: str, paths: list[str]) -> Domain:
+        disks = "".join(f"<disk><source file='{path}'/></disk>" for path in paths)
+        return foreign_xml(name, disks)
+
+    identity = IdentityPort()
+    prove_no_foreign_storage_references(
+        Conn(
+            [
+                Domain(system_xml(state.system_id)),
+                document("tenant-a", aliases[:midpoint]),
+                document("tenant-b", aliases[midpoint:]),
+            ]
+        ),
+        identity,
+        state.system_id,
+        frozenset({(state.pool, state.root_volume)}),
+    )
+    assert len(identity.identities) == 2
+
+    unique_a = [f"/tenant/a/{index}" for index in range(2048)]
+    unique_b = [f"/tenant/b/{index}" for index in range(2049)]
+    with pytest.raises(CategorizedError, match="identity lookup budget"):
+        prove_no_foreign_storage_references(
+            Conn(
+                [
+                    Domain(system_xml(state.system_id)),
+                    document("tenant-a", unique_a),
+                    document("tenant-b", unique_b),
+                ]
+            ),
+            IdentityPort(),
+            state.system_id,
+            frozenset({(state.pool, state.root_volume)}),
+        )
 
 
 def test_managed_volume_lookup_error_is_infrastructure_failure() -> None:

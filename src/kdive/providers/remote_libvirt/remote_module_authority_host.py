@@ -26,6 +26,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
+    RemoteModuleSystemTeardownRequestV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleTerminalRecord,
     RemoteModuleVolumePreparationResponseV1,
@@ -494,7 +495,7 @@ class ConcreteRemoteModuleAuthorityHost:
 
     def _lifecycle_baseline(
         self,
-        request: RemoteModuleLifecycleRequestV1,
+        request: RemoteModuleLifecycleRequestV1 | RemoteModuleSystemTeardownRequestV1,
         terminal: RemoteModuleTerminalRecord,
     ) -> tuple[
         RemoteModuleOperationV1,
@@ -572,7 +573,7 @@ class ConcreteRemoteModuleAuthorityHost:
 
     def _reap(
         self,
-        request: RemoteModuleLifecycleRequestV1,
+        request: RemoteModuleLifecycleRequestV1 | RemoteModuleSystemTeardownRequestV1,
         terminal: RemoteModuleTerminalRecord,
         restored: RemoteModuleLifecycleResponseV1 | None,
         deadline: float,
@@ -713,6 +714,14 @@ class ConcreteRemoteModuleAuthorityHost:
         if request.action == "restore":
             return await self._executor.run(lambda: self._restore(request, terminal, deadline))
         return await self._executor.run(lambda: self._reap(request, terminal, restored, deadline))
+
+    async def execute_system_teardown(
+        self,
+        request: RemoteModuleSystemTeardownRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1:
+        return await self._executor.run(lambda: self._reap(request, terminal, None, deadline))
 
 
 class RemoteModuleAuthorityHostFactory:
@@ -872,4 +881,15 @@ class FactoryRemoteModuleAuthorityHost:
         architecture = terminal.request.authority.plan.architecture
         return await self._factory.host(architecture).execute_lifecycle(
             request, terminal, restored, deadline
+        )
+
+    async def execute_system_teardown(
+        self,
+        request: RemoteModuleSystemTeardownRequestV1,
+        terminal: RemoteModuleTerminalRecord,
+        deadline: float,
+    ) -> RemoteModuleLifecycleResponseV1:
+        architecture = terminal.request.authority.plan.architecture
+        return await self._factory.host(architecture).execute_system_teardown(
+            request, terminal, deadline
         )
