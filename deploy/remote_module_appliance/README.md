@@ -63,14 +63,17 @@ repairing the source module tree.
 
 `build_image.py` accepts only an architecture (`x86_64` or `ppc64le`), a kernel, and a prepared
 runtime root. It emits a normalized tar bundle containing the kernel and a bootable newc initramfs.
-The runtime root must supply Python and appliance-owned `depmod`; the builder rejects symlinks and
-includes no shell or socket module. Python runs with site initialization disabled, and the builder
-rejects `.pth`, `sitecustomize`, and `usercustomize` startup hooks. Every archive member has fixed
-ownership, modes, order, and
-timestamp, so identical inputs produce identical bytes. The authority verifies both installed
-direct-kernel files against the canonical installed manifest. The installed manifest SHA-256 is
-the appliance identity stored in operation and result documents; the outer bundle SHA-256 remains
-the acquisition identity used by Ansible.
+The runtime root must supply Python, appliance-owned `depmod`, their closed library set, and the
+architecture's exact glibc program interpreter: `lib64/ld-linux-x86-64.so.2` for x86_64 or
+`lib64/ld64.so.2` for ppc64le. The builder packages regular files only from the fixed executables
+and `lib`, `lib64`, `usr/lib`, and `usr/lib64`; it rejects symlinks and includes no shell or socket
+module. The two executables and selected interpreter are mode `0555`; libraries remain mode `0444`.
+Python runs with site initialization disabled, and the builder rejects `.pth`, `sitecustomize`, and
+`usercustomize` startup hooks. Every archive member has fixed ownership, modes, order, and timestamp,
+so identical inputs produce identical bytes. The authority verifies both installed direct-kernel
+files against the canonical installed manifest. The installed manifest SHA-256 is the appliance
+identity stored in operation and result documents; the outer bundle SHA-256 remains the acquisition
+identity used by Ansible.
 
 The `remote_libvirt_module_appliance` Ansible role is wired into `deploy/ansible/site.yml` behind
 `remote_libvirt_module_appliance_enabled`. Set `provider_authority_host_remote_module_architectures`
