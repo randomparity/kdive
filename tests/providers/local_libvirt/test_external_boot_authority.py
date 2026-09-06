@@ -382,6 +382,34 @@ async def test_repeated_cancellation_waits_for_scoped_provider_completion() -> N
     adapter.close()
 
 
+@pytest.mark.anyio
+async def test_close_does_not_wait_for_running_provider_call() -> None:
+    adapter = _adapter(_FakeIO())
+    entered = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    def close() -> None:
+        adapter.close()
+        closed.set()
+
+    task = asyncio.create_task(
+        adapter._offload(_request(), lambda: entered.set() or release.wait())
+    )
+    await asyncio.to_thread(entered.wait)
+    closer = threading.Thread(target=close)
+    closer.start()
+    try:
+        assert await asyncio.to_thread(closed.wait, 2), "shutdown waited for live provider IO"
+        assert not task.done()
+        with pytest.raises(RuntimeError, match="capacity is unavailable"):
+            await adapter._offload(_request(), lambda: None)
+    finally:
+        release.set()
+        await task
+        await asyncio.to_thread(closer.join)
+
+
 def test_event_loop_shutdown_waits_for_scoped_provider_completion() -> None:
     scope = LocalOperationLeaseScope()
     adapter = LocalExternalBootAuthorityAdapter(
@@ -678,7 +706,12 @@ def test_adapter_module_names_no_generic_power_operation_or_domain_xml() -> None
     source = Path(inspect.getfile(adapter_module)).read_text()
     tree = ast.parse(source)
 
-    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    # Closing the owned ThreadPoolExecutor is not a provider power operation.
+    attributes = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and ast.unparse(node) != "self._executor.shutdown"
+    }
     called = {
         node.func.id
         for node in ast.walk(tree)
