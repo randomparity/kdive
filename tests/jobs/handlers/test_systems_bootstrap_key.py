@@ -24,6 +24,10 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
@@ -32,9 +36,16 @@ from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, TeardownPayload
+from kdive.jobs.handlers.module_volume_reaping import remote_module_volume_reap_handler
+from kdive.jobs.payloads import (
+    RemoteModuleVolumeReapPayload,
+    ReprovisionPayload,
+    SystemPayload,
+    TeardownPayload,
+)
 from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
+from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
@@ -49,8 +60,15 @@ _DT = datetime(2026, 1, 1, tzinfo=UTC)
 class _RecordingProvisioner:
     """Records the id/profile/customizers/pubkey passed to provision + the resolved-cpu read."""
 
-    def __init__(self, *, fail: bool = False, resolved_cpu: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        teardown_fail: bool = False,
+        resolved_cpu: dict[str, Any] | None = None,
+    ) -> None:
         self.fail = fail
+        self.teardown_fail = teardown_fail
         self._resolved_cpu = resolved_cpu
         self.recorded: dict[str, Any] = {}
         self.read_cpu_for: list[UUID] = []
@@ -102,7 +120,10 @@ class _RecordingProvisioner:
         return f"kdive-{system_id}"
 
     def teardown(self, domain_name: str) -> None:
-        pass
+        if self.teardown_fail:
+            raise CategorizedError(
+                "simulated teardown failure", category=ErrorCategory.CONTROL_FAILURE
+            )
 
 
 async def _audit_rows(pool: AsyncConnectionPool, object_id: UUID) -> list[tuple[Any, ...]]:
@@ -187,6 +208,54 @@ async def _seed_system(
             ),
         )
     return system.id
+
+
+async def _open_module_attempt(pool: AsyncConnectionPool, system_id: UUID) -> ModuleAttempt:
+    """Create the run-backed durable intent the worker reaper consults."""
+    investigation_id, run_id = uuid4(), uuid4()
+    attempt = ModuleAttempt(system_id, run_id, uuid4().hex)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO investigations (id, principal, project, title, state) "
+            "VALUES (%s, 'alice', 'proj', 'test', 'open')",
+            (investigation_id,),
+        )
+        await conn.execute(
+            "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, build_profile, "
+            "principal, project) VALUES (%s, %s, %s, 'local-libvirt', 'created', '{}'::jsonb, "
+            "'alice', 'proj')",
+            (run_id, investigation_id, system_id),
+        )
+        repository = RemoteModuleAttemptObligationRepository()
+        assert await repository.open_mutation_obligation(conn, attempt)
+    return attempt
+
+
+class _CapturingModuleReaper:
+    def __init__(self) -> None:
+        self.owners: list[ModuleVolumeKey] | None = None
+
+    async def reap_module_volumes(self, retained_owners: Any) -> int:
+        self.owners = list(await retained_owners())
+        return 0
+
+
+async def _worker_reap_owners(pool: AsyncConnectionPool) -> list[ModuleVolumeKey]:
+    reaper = _CapturingModuleReaper()
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            JobKind.REMOTE_MODULE_VOLUME_REAP,
+            RemoteModuleVolumeReapPayload.model_validate(
+                {"schema": "remote-module-volume-reap-v1"}
+            ),
+            {"principal": "remote-libvirt", "agent_session": None, "project": "remote-libvirt"},
+            "test:remote-module-volume-reap",
+        )
+    async with pool.connection() as conn:
+        await remote_module_volume_reap_handler(conn, job, reaper=reaper)
+    assert reaper.owners is not None
+    return reaper.owners
 
 
 async def _key_row_count(pool: AsyncConnectionPool, system_id: UUID) -> int:
@@ -491,6 +560,111 @@ def test_teardown_handler_deletes_key_row(migrated_url: str) -> None:
     assert object_kind == "systems"
     assert transition == "ready->torn_down"
     assert project == "proj"
+
+
+def test_teardown_discharge_unblocks_worker_module_reap(migrated_url: str) -> None:
+    async def _run() -> list[ModuleVolumeKey]:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(
+                pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
+            )
+            attempt = await _open_module_attempt(pool, system_id)
+            resolver = provider_resolver(provisioner=_RecordingProvisioner())
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.TEARDOWN,
+                    TeardownPayload(system_id=str(system_id)),
+                    {"principal": "alice", "agent_session": "s", "project": "proj"},
+                    f"{system_id}:teardown",
+                )
+            async with pool.connection() as conn:
+                await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+            owners = await _worker_reap_owners(pool)
+            async with pool.connection() as conn:
+                assert (
+                    await RemoteModuleAttemptObligationRepository().mutation_obligation_is_open(
+                        conn, attempt
+                    )
+                    is False
+                )
+            return owners
+
+    assert asyncio.run(_run()) == []
+
+
+def test_failed_teardown_keeps_module_attempt_for_worker_reap(migrated_url: str) -> None:
+    async def _run() -> tuple[ModuleAttempt, list[ModuleVolumeKey]]:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(
+                pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
+            )
+            attempt = await _open_module_attempt(pool, system_id)
+            resolver = provider_resolver(provisioner=_RecordingProvisioner(teardown_fail=True))
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.TEARDOWN,
+                    TeardownPayload(system_id=str(system_id)),
+                    {"principal": "alice", "agent_session": "s", "project": "proj"},
+                    f"{system_id}:teardown",
+                )
+                with pytest.raises(CategorizedError, match="simulated teardown failure"):
+                    await systems_handlers.teardown_handler(
+                        conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                    )
+            return attempt, await _worker_reap_owners(pool)
+
+    attempt, owners = asyncio.run(_run())
+    assert owners == [
+        ModuleVolumeKey(str(attempt.system_id), str(attempt.run_id), attempt.operation_nonce, kind)
+        for kind in ("source.ext4", "scratch.ext4")
+    ]
+
+
+def test_teardown_discharge_rollback_keeps_module_attempt_for_worker_reap(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations
+
+    async def fault(
+        repository: RemoteModuleAttemptObligationRepository, conn: Any, system_id: UUID
+    ) -> int:
+        count = await original(repository, conn, system_id)
+        raise RuntimeError(f"after discharge {count}")
+
+    monkeypatch.setattr(
+        RemoteModuleAttemptObligationRepository, "discharge_system_mutation_obligations", fault
+    )
+
+    async def _run() -> tuple[ModuleAttempt, list[ModuleVolumeKey]]:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(
+                pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
+            )
+            attempt = await _open_module_attempt(pool, system_id)
+            resolver = provider_resolver(provisioner=_RecordingProvisioner())
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.TEARDOWN,
+                    TeardownPayload(system_id=str(system_id)),
+                    {"principal": "alice", "agent_session": "s", "project": "proj"},
+                    f"{system_id}:teardown",
+                )
+                with pytest.raises(RuntimeError, match="after discharge 1"):
+                    await systems_handlers.teardown_handler(
+                        conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                    )
+            return attempt, await _worker_reap_owners(pool)
+
+    attempt, owners = asyncio.run(_run())
+    assert owners == [
+        ModuleVolumeKey(str(attempt.system_id), str(attempt.run_id), attempt.operation_nonce, kind)
+        for kind in ("source.ext4", "scratch.ext4")
+    ]
 
 
 def test_teardown_handler_reclaims_pcap_directory(migrated_url, tmp_path, monkeypatch) -> None:
