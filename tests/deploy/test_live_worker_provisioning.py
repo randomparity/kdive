@@ -391,6 +391,9 @@ def test_live_authority_local_mutation_is_closed_and_owner_only() -> None:
     assert 'mode: "0400"' in tasks
     assert "Symlink the target-native libguestfs binding into the authority venv" in tasks
     assert "if live_vm_host_authority_local_mutation_enabled else" in tasks
+    assert "Grant the opted-in authority access to managed rootfs and console roots" in tasks
+    assert "u:{{ live_vm_host_authority_account }}:rwx" in tasks
+    assert "AWS_SHARED_CREDENTIALS_FILE" in tasks
 
     environment = _text(AUTHORITY_ENV_TEMPLATE)
     assert "KDIVE_LIBVIRT_RECOVERY_ROOT={{ live_vm_host_authority_recovery_root }}" in environment
