@@ -808,8 +808,11 @@ def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile
                 )
             boot.seek(offset)
             try:
-                with opener(boot) as source:
-                    _copy_kernel_bounded(source, decoded, budget)
+                if magic == b"\x1f\x8b\x08":
+                    _copy_gzip_member_bounded(boot, decoded, budget)
+                else:
+                    with opener(boot) as source:
+                        _copy_kernel_bounded(source, decoded, budget)
             except EOFError, OSError, zlib.error, lzma.LZMAError, zstd.ZstdError:
                 decoded.seek(0)
                 decoded.truncate()
@@ -865,6 +868,34 @@ def _copy_kernel_bounded(
                 max_bytes=_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES,
             )
         destination.write(chunk)
+    return total
+
+
+def _copy_gzip_member_bounded(
+    source: _BinaryReader, destination: IO[bytes], budget: _DecodeBudget
+) -> int:
+    """Copy one complete gzip member without interpreting its bzImage trailer."""
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    total = 0
+    while not decompressor.eof:
+        compressed = source.read(_RANGE_CHUNK_BYTES)
+        if not compressed:
+            raise EOFError
+        while compressed:
+            chunk = decompressor.decompress(
+                compressed, min(_RANGE_CHUNK_BYTES, budget.remaining + 1)
+            )
+            total += len(chunk)
+            budget.remaining -= len(chunk)
+            if budget.remaining < 0:
+                raise _build_failure(
+                    "decoded boot/vmlinuz exceeds the aggregate decompression work limit",
+                    max_bytes=_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES,
+                )
+            destination.write(chunk)
+            if decompressor.eof:
+                return total
+            compressed = decompressor.unconsumed_tail
     return total
 
 

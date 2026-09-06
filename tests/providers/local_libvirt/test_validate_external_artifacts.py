@@ -62,6 +62,7 @@ def _bzimage(
     header_release: str = "6.9.0",
     decoded_release: str = "6.9.0",
     build_ids: tuple[bytes, ...] = (_BUILD_ID,),
+    compressed_trailer: bytes = b"",
 ) -> bytes:
     header = bytearray(0x400)
     header[0x202:0x206] = b"HdrS"
@@ -69,7 +70,7 @@ def _bzimage(
     encoded_release = header_release.encode() + b"\x00"
     header[0x300 : 0x300 + len(encoded_release)] = encoded_release
     kernel = _boot_elf(e_machine=_EM_X86_64, release=decoded_release, build_ids=build_ids)
-    return bytes(header) + gzip.compress(kernel)
+    return bytes(header) + gzip.compress(kernel) + compressed_trailer
 
 
 _BZIMAGE_BODY = _bzimage()
@@ -377,6 +378,19 @@ def test_x86_boot_header_rejects_truncated_version_field() -> None:
 
     with pytest.raises(CategorizedError, match="no bounded x86 kernel version string"):
         validation._boot_release(io.BytesIO(header), "x86_64")
+
+
+def test_external_boot_scan_accepts_x86_gzip_member_with_bzimage_trailer() -> None:
+    boot = _bzimage(compressed_trailer=b"x86 setup trailer")
+
+    _validate_kernel_blob(_combined_kernel_tar(boot=boot))
+
+
+def test_external_boot_scan_rejects_truncated_x86_gzip_member() -> None:
+    boot = _bzimage()[:-1]
+
+    with pytest.raises(CategorizedError, match="does not contain a supported"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=boot))
 
 
 def test_external_boot_scan_rejects_decoded_kernel_over_limit(
