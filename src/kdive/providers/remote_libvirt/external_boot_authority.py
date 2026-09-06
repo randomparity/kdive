@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import os
@@ -1066,6 +1065,41 @@ class RemoteAuthorityMutationDelegate(Protocol):
     ) -> AuthorityObservationV1: ...
 
 
+async def _wait_for_owned_child(
+    task: asyncio.Task[object],
+) -> tuple[asyncio.CancelledError | None, int]:
+    """Await one completion-owned child while recording repeated caller cancellation."""
+    caller = asyncio.current_task()
+    assert caller is not None
+    cancelled: asyncio.CancelledError | None = None
+    consumed = 0
+    completed = asyncio.Event()
+    task.add_done_callback(lambda _task: completed.set())
+    while not completed.is_set():
+        try:
+            await completed.wait()
+        except asyncio.CancelledError as error:
+            cancelled = cancelled or error
+            caller.uncancel()
+            consumed += 1
+    if cancelled is None and caller.cancelling() != 0:
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError as error:
+            cancelled = error
+            caller.uncancel()
+            consumed += 1
+    return cancelled, consumed
+
+
+def _restore_cancellation(
+    caller: asyncio.Task[object], cancelled: asyncio.CancelledError, consumed: int
+) -> None:
+    message = cancelled.args[0] if cancelled.args else None
+    for _ in range(consumed):
+        caller.cancel(message)
+
+
 class DurableRemoteModuleVolumePreparationHost:
     """Resume idempotent preparation from exact provider-private durable evidence."""
 
@@ -1112,18 +1146,19 @@ class DurableRemoteModuleVolumePreparationHost:
         if result := self._store.reopen_result(request):
             result.validate_for(request.operation)
         task = asyncio.create_task(self._host.execute(admitted))
-        try:
-            result = await asyncio.shield(task)
-        except asyncio.CancelledError as cancelled:
-            while not task.done():
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(task)
+        cancelled, consumed = await _wait_for_owned_child(task)
+        if cancelled is not None:
             if task.cancelled() or task.exception() is not None:
                 self._store.publish_failed_completion(request)
             else:
                 result = task.result()
                 self._store.publish_result(request, result)
+            caller = asyncio.current_task()
+            assert caller is not None
+            _restore_cancellation(caller, cancelled, consumed)
             raise cancelled from None
+        try:
+            result = task.result()
         except BaseException:
             self._store.publish_failed_completion(request)
             raise
@@ -1178,16 +1213,17 @@ class DurableRemoteModuleVolumePreparationHost:
         task = asyncio.create_task(
             self._host.execute_lifecycle(request, terminal, restored, admitted.local_deadline)
         )
-        try:
-            response = await asyncio.shield(task)
-        except asyncio.CancelledError as cancelled:
-            while not task.done():
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(task)
+        cancelled, consumed = await _wait_for_owned_child(task)
+        if cancelled is not None:
             self._store.publish_lifecycle_completion(
                 request, None if task.cancelled() or task.exception() is not None else task.result()
             )
+            caller = asyncio.current_task()
+            assert caller is not None
+            _restore_cancellation(caller, cancelled, consumed)
             raise cancelled from None
+        try:
+            response = task.result()
         except BaseException:
             self._store.publish_lifecycle_completion(request, None)
             raise

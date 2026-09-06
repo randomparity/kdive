@@ -1932,6 +1932,82 @@ async def test_durable_remote_preparation_cancellation_waits_and_records_termina
 
 
 @pytest.mark.anyio
+async def test_durable_remote_preparation_cancel_persists_exceptional_completion(
+    tmp_path: Path,
+) -> None:
+    request = _remote_preparation_request()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FailingHost:
+        async def execute(self, request: object) -> object:
+            del request
+            started.set()
+            await release.wait()
+            raise RuntimeError("provider failed after cancellation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    task = asyncio.create_task(
+        DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost())).execute(request)
+    )
+    await started.wait()
+    task.cancel("authority shutdown")
+    await asyncio.sleep(0)
+    task.cancel("later cancellation")
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+    assert caught.value.args == ("authority shutdown",)
+    assert task.cancelling() == 2
+    completion = store.reopen_completion(request)
+    assert completion is not None
+    assert completion.state == "failed-after-mutation"
+    assert completion.response is None
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_durable_remote_lifecycle_cancel_persists_exceptional_completion(
+    tmp_path: Path,
+) -> None:
+    preparation = _remote_preparation_request()
+    lifecycle = _module_lifecycle_request(preparation)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FailingHost:
+        async def execute_lifecycle(self, *_args: object) -> object:
+            started.set()
+            await release.wait()
+            raise RuntimeError("provider failed after cancellation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(preparation, 999.0)
+    store.publish_result(preparation, _terminal_response(preparation))
+    durable = DurableRemoteModuleVolumePreparationHost(
+        store, cast(Any, FailingHost()), monotonic=lambda: 0.0
+    )
+    task = asyncio.create_task(durable.execute_lifecycle(lifecycle))
+    await started.wait()
+    task.cancel("authority shutdown")
+    await asyncio.sleep(0)
+    task.cancel("later cancellation")
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+    assert caught.value.args == ("authority shutdown",)
+    assert task.cancelling() == 2
+    completion = store.reopen_lifecycle_completion(lifecycle)
+    assert completion is not None
+    assert completion.state == "failed-after-mutation"
+    assert completion.response is None
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     tmp_path: Path,
 ) -> None:
