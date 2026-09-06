@@ -758,7 +758,7 @@ def test_host_shares_one_mutation_service_between_listeners(
     class Service:
         closed = False
 
-        def close(self) -> None:
+        async def close(self) -> None:
             self.closed = True
 
     service = Service()

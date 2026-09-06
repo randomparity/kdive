@@ -280,11 +280,39 @@ class ExternalBootAuthorityService:
         self._adapter = adapter
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._lanes: dict[UUID, _Lane] = {}
+        self._completion_tasks: set[asyncio.Task[object]] = set()
+        self._accepting = True
+        self._closed = False
         self._logger = logging.getLogger(__name__)
 
-    def close(self) -> None:
-        if isinstance(self._adapter, AuthorityAdapterCloser):
+    async def close(self) -> None:
+        """Stop admission, drain completion-owned mutations, then close the adapter."""
+        self._accepting = False
+        cancelled = False
+        while self._completion_tasks:
+            pending = asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                cancelled = True
+                current = asyncio.current_task()
+                assert current is not None
+                current.uncancel()
+        if not self._closed and isinstance(self._adapter, AuthorityAdapterCloser):
             self._adapter.close()
+        self._closed = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def _track_completion(self, task: asyncio.Task[object]) -> None:
+        self._completion_tasks.add(task)
+
+        def completed(done: asyncio.Task[object]) -> None:
+            self._completion_tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(completed)
 
     def _lane(self, system_id: UUID) -> _Lane:
         lane = self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
@@ -774,6 +802,15 @@ class ExternalBootAuthorityService:
     async def acknowledge_takeover(
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
     ) -> AuthorityAcknowledgementV1:
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        task = asyncio.create_task(self._acknowledge_takeover(peer, request))
+        self._track_completion(task)
+        return await asyncio.shield(task)
+
+    async def _acknowledge_takeover(
+        self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
+    ) -> AuthorityAcknowledgementV1:
         authenticated = self._require_peer(peer, request)
         binding = await self._repository.resolve_allocating(authenticated, request)
         if binding is None or not self._binding_matches(binding, request):
@@ -1013,6 +1050,8 @@ class ExternalBootAuthorityService:
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1:
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
         candidate_matches = trusted is not None and (
@@ -1260,7 +1299,11 @@ class ExternalBootAuthorityService:
                     lane.active = None
                 self._release_lane(trusted.system_id, lane)
 
+        if not self._accepting:
+            self._release_lane(trusted.system_id, lane)
+            raise AuthorityServiceError("superseded")
         task = asyncio.create_task(run())
+        self._track_completion(task)
         try:
             return await asyncio.shield(task)
         except AuthorityServiceError as error:
@@ -1273,6 +1316,21 @@ class ExternalBootAuthorityService:
         request: AuthorityPreparationMutationRequestV1,
     ) -> AuthorityPreparationResponseV1:
         """Execute through the authenticated lane, then reopen its durable receipt."""
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        current = asyncio.current_task()
+        assert current is not None
+        self._track_completion(current)
+        try:
+            return await self._execute_preparation(peer, request)
+        finally:
+            self._completion_tasks.discard(current)
+
+    async def _execute_preparation(
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> AuthorityPreparationResponseV1:
         observation = await self.execute_mutation(peer, cast(AuthorityMutationRequestV1, request))
         if not isinstance(self._adapter, AuthorityPreparationAdapter):
             raise self._provider_error(request)

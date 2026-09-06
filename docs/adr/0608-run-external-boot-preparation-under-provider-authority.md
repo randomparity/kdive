@@ -54,6 +54,12 @@ vectors, and retained journal hashes remain compatible because their wire shapes
 Initial Run plan construction and production provider advertisement remain separate integration
 work.
 
+Graceful shutdown first stops request admission, then drains completion-owned mutations before it
+closes the provider adapter. Caller cancellation, including cancellation of the shutdown waiter,
+does not cancel work that crossed the mutation boundary. The service manager's stop timeout is an
+outer operational bound, not evidence of completion: a hard stop can leave a nonterminal journal,
+which the next authority incarnation must recover before accepting a successor mutation.
+
 ## Considered & rejected
 
 - **Prepare on the server before enqueue.** A database lock does not establish provider-host

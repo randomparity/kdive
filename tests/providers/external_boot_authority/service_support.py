@@ -344,6 +344,10 @@ class _Adapter:
         self.provider_output = "bounded observation failure"
         self.operations: list[str] = []
         self.commit_contexts: list[AuthorityCommitContextV1] = []
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
     async def commit(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
