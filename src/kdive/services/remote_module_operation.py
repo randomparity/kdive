@@ -238,9 +238,7 @@ class RemoteModuleOperationRuntime:
                     category=ErrorCategory.CONFLICT,
                 )
             volumes = validate_attempt_volumes(configured.storage, volume_request)
-            raw = appliance.deadline_executor.call(
-                lambda: appliance.read_scratch_result(volumes.scratch), deadline
-            )
+            raw = appliance.read_scratch_result(volumes.scratch, deadline)
             self._check_deadline(deadline)
             if raw is None:
                 raise CategorizedError(
@@ -334,7 +332,7 @@ class RemoteModuleOperationRuntime:
                     category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                     details={"timed_out": outcome.timed_out},
                 )
-            raw = configured.read_scratch_result(volumes.scratch)
+            raw = configured.read_scratch_result(volumes.scratch, deadline)
             if raw is None:
                 raise CategorizedError(
                     "remote module result artifact is absent",
@@ -426,7 +424,7 @@ class RemoteModuleOperationRuntime:
             scratch=volumes.scratch,
             operation=operation,
             secret_registry=configured.secret_registry,
-            read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch),
+            read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch, deadline),
             inspect_attachments=configured.inspect_attachments,
             executor=configured.deadline_executor,
             monotonic=configured.monotonic,

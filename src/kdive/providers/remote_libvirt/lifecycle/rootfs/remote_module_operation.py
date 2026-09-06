@@ -159,7 +159,7 @@ class RemoteModuleApplianceExecution:
     appliance_volume: str
     appliance_image_digest: str
     root: Callable[[RemoteModuleOperationV1], PreparedVolume]
-    read_scratch_result: Callable[[PreparedVolume], bytes | None]
+    read_scratch_result: Callable[[PreparedVolume, float], bytes | None]
     inspect_attachments: Callable[[], AttachmentInspection]
     secret_registry: SecretRegistry
     deadline_executor: DeadlineExecutor

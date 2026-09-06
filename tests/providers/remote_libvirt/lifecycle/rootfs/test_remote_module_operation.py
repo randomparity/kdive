@@ -437,6 +437,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
             return action()
 
     storage = Conn()
+    inspection_deadlines: list[float] = []
     runtime = _runtime(
         lambda _recovery: asyncio.sleep(0, result=None),
         cast(RemoteModuleAttemptObligationRepository, InspectionRepo()),
@@ -457,7 +458,9 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
         runtime,
         "appliance_execution",
         SimpleNamespace(
-            read_scratch_result=lambda _volume: result.to_wire_bytes(),
+            read_scratch_result=lambda _volume, deadline: (
+                inspection_deadlines.append(deadline) or result.to_wire_bytes()
+            ),
             deadline_executor=CompletionDeadlineExecutor(lambda: 0.0),
             monotonic=lambda: 0.0,
         ),
@@ -484,6 +487,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
     assert inspected is not None
     assert inspected.volumes is volumes
     assert inspected.result == result
+    assert inspection_deadlines == [10**12]
 
     for raw, message in (
         (b"not-json\n", "result is invalid"),
@@ -496,7 +500,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
             runtime,
             "appliance_execution",
             SimpleNamespace(
-                read_scratch_result=lambda _volume, value=raw: value,
+                read_scratch_result=lambda _volume, _deadline, value=raw: value,
                 deadline_executor=CompletionDeadlineExecutor(lambda: 0.0),
                 monotonic=lambda: 0.0,
             ),
@@ -703,7 +707,10 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
         reads = [success_result(), changed.to_wire_bytes()]
     appliance = ApplianceConn([1] if case == "provider-failure" else [], clock)
 
-    def read(_scratch: object) -> bytes | None:
+    observed_deadlines: list[float] = []
+
+    def read(_scratch: object, deadline: float) -> bytes | None:
+        observed_deadlines.append(deadline)
         return reads.pop(0)
 
     manifest = operation.source_manifest
@@ -778,6 +785,8 @@ def test_run_returns_only_exact_durable_appliance_result(case: str, tmp_path: Pa
             asyncio.run(runtime.run(operation, volumes, executor, 300.0))
         if case in {"foreign", "swapped"}:
             assert appliance.domain is None
+    if observed_deadlines:
+        assert set(observed_deadlines) == {300.0}
     executor.shutdown()
 
 
@@ -933,7 +942,7 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
                 value.root_volume.identity,
                 4096,
             ),
-            lambda _scratch: scratch_result[0],
+            lambda _scratch, _deadline: scratch_result[0],
             attachments,
             appliance_request(clock).secret_registry,
             CompletionDeadlineExecutor(clock),
@@ -1143,7 +1152,7 @@ def test_run_cancellation_waits_for_provider_cleanup(tmp_path: Path) -> None:
                 reference.appliance_volume,
                 reference.appliance_image_digest,
                 lambda _operation: volume("root", "root"),
-                lambda _scratch: success_result(),
+                lambda _scratch, _deadline: success_result(),
                 reference.inspect_attachments,
                 reference.secret_registry,
                 ApplianceExecutor(),
@@ -1418,7 +1427,7 @@ def test_runtime_teardown_provider_failure_is_retryable(tmp_path: Path) -> None:
             reference.appliance_volume,
             reference.appliance_image_digest,
             lambda _operation: volume("root", "root"),
-            lambda _scratch: result.to_wire_bytes(),
+            lambda _scratch, _deadline: result.to_wire_bytes(),
             detached,
             reference.secret_registry,
             ApplianceExecutor(),
