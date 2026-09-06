@@ -2344,6 +2344,9 @@ class LocalLibvirtExternalBoot:
             raise ValueError("cleanup quarantine observation changed before delete")
         receipt = self._io.read_cleanup_quarantine(binding.binding)
         if receipt is not None:
+            current = self._quarantine_observation(receipt)
+            if current.observed_digest != expected_observed_digest or current.managed:
+                raise ValueError("cleanup quarantine observation changed before delete")
             self._io.finalize_tombstone(receipt.tombstone.recovery_point, receipt.proof)
         return self.observe_object(binding, authority)
 

@@ -41,12 +41,12 @@ async def record_cleanup_quarantine(
     """Record exact provider inventory using only durable activation/authority ownership."""
     if not 0 < len(observations) <= MAX_QUARANTINE_OBJECTS:
         raise ValueError("cleanup quarantine inventory must contain 1 through 64 objects")
-    owner = await (await conn.execute(_OWNER_SQL, (activation_id,))).fetchone()
-    if owner is None or owner[3] != owner[6]:
-        raise ValueError("cleanup quarantine authority does not match the System Resource")
-    system_id, run_id, _plan, provider_kind, authority_instance, resource_id, _kind = owner
     identities: list[str] = []
     async with conn.transaction():
+        owner = await (await conn.execute(_OWNER_SQL, (activation_id,))).fetchone()
+        if owner is None or owner[3] != owner[6]:
+            raise ValueError("cleanup quarantine authority does not match the System Resource")
+        system_id, run_id, _plan, provider_kind, authority_instance, resource_id, _kind = owner
         for observation in observations:
             binding = observation.binding
             if (
@@ -85,5 +85,35 @@ async def record_cleanup_quarantine(
                     binding.reserved_bytes,
                 ),
             )
+            stored = await (
+                await conn.execute(
+                    "SELECT id, resource_id, system_id, activation_id, provider_kind, "
+                    "authority_instance, object_kind, object_reference, ownership_digest, "
+                    "observed_digest, operation_identity, attempt_id, mutation_journal_sequence, "
+                    "mutation_journal_digest, reserved_bytes, status "
+                    "FROM external_boot_recovery_quarantine WHERE object_identity = %s",
+                    (identity,),
+                )
+            ).fetchone()
+            expected = (
+                UUID(binding.record_id),
+                resource_id,
+                system_id,
+                activation_id,
+                provider_kind,
+                authority_instance,
+                binding.kind,
+                binding.reference.ref,
+                binding.ownership_digest,
+                observation.observed_digest,
+                binding.operation_identity,
+                UUID(binding.attempt_id),
+                binding.mutation_journal_sequence,
+                binding.mutation_journal_digest,
+                binding.reserved_bytes,
+                "quarantined",
+            )
+            if stored != expected:
+                raise ValueError("cleanup quarantine identity conflicts with durable inventory")
             identities.append(identity)
     return tuple(identities)
