@@ -95,12 +95,9 @@ _ACTIVE_JOB_STATES = [JobState.QUEUED.value, JobState.RUNNING.value]
 # `system_id` arm plans as `Index Scan using jobs_payload_system_id_idx` (migration 0082, an
 # expression index on exactly `payload->>'system_id'`) and reads 3 buffers.
 #
-# The `run_id` arm still scans every row: no index covers `payload->>'run_id'`
-# (`jobs_live_install_run_id_idx`, migration 0101, is partial on `kind = 'install'`), so its
-# per-arm `LIMIT` can only stop early when rows actually match — and the ordinary case, where
-# nothing blocks the release, is the one that scans the whole table while this holds the
-# System-wide advisory lock. Closing that needs an index this issue's surface does not cover;
-# the deferral is docs/debt/0008-external-boot-release-job-scan-under-the-system-lock.md.
+# The `run_id` arm uses `jobs_payload_run_id_idx` (migration 0137). It remains a separate arm:
+# combining the two expressions under `OR` made PostgreSQL ignore the `system_id` index, while a
+# global `ORDER BY` prevented either arm's `LIMIT` from stopping after the bounded result page.
 #
 # `UNION` rather than `UNION ALL`: nothing enforces that a payload carries only one of the two
 # keys, and a row matching both arms would otherwise be counted twice against
