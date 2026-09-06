@@ -14,11 +14,20 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV1,
     RemoteModuleResultV1,
     identity_for,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
+from kdive.services.remote_module_volume_preparation import (
+    SynchronousPreparation,
+    prepare_verified_remote_module_attempt,
 )
 
 
@@ -35,6 +44,15 @@ class ModuleOperationRuntime(Protocol):
     async def reopen_installed_result(
         self, recovery: RemoteModuleRecoveryRefV1
     ) -> RemoteModuleResultV1: ...
+    async def prepare[ResultT](
+        self,
+        request: ModuleAttemptPreparationRequestV1,
+        operation: RemoteModuleOperationV1,
+        executor: RemoteModulePreparationExecutor,
+        authority: AuthorityRequestSender | None,
+        deadline: float,
+        provider_operation: SynchronousPreparation[ResultT],
+    ) -> ResultT: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +67,30 @@ class RemoteModuleOperationRuntime:
     def _attempt(recovery: RemoteModuleRecoveryRefV1) -> ModuleAttempt:
         return ModuleAttempt(
             UUID(recovery.system_id), UUID(recovery.run_id), recovery.operation_nonce
+        )
+
+    async def prepare[ResultT](
+        self,
+        request: ModuleAttemptPreparationRequestV1,
+        operation: RemoteModuleOperationV1,
+        executor: RemoteModulePreparationExecutor,
+        authority: AuthorityRequestSender | None,
+        deadline: float,
+        provider_operation: SynchronousPreparation[ResultT],
+    ) -> ResultT:
+        """Consume the caller's committed receipt while the verifier owns its System lock."""
+        attempt = ModuleAttempt(
+            UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
+        )
+        return await prepare_verified_remote_module_attempt(
+            self.pool,
+            self.repository,
+            request,
+            attempt,
+            executor,
+            authority,
+            deadline,
+            provider_operation,
         )
 
     async def _evidence(

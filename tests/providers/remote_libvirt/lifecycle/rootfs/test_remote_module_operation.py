@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from psycopg_pool import AsyncConnectionPool
@@ -17,6 +18,7 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
@@ -227,3 +229,47 @@ def test_absent_scratch_reads_terminal_evidence_through_owned_pool_connection(
             assert await runtime.reopen_result(recovery) == result
 
     asyncio.run(run())
+
+
+@pytest.mark.anyio
+async def test_prepare_passes_exact_attempt_and_caller_receipt_to_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = RemoteModuleResultV1.model_validate(_result())
+    operation = RemoteModuleOperationRuntime._operation_from_result(result)
+    receipt = ModuleAttemptPreparationRequestV1.model_validate(
+        {
+            "module_attempt_obligation": {
+                "system_id": UUID(operation.system_id),
+                "run_id": UUID(operation.run_id),
+                "operation_nonce": operation.operation_nonce,
+            }
+        }
+    )
+    observed: list[object] = []
+
+    async def verified(*args: object, **kwargs: object) -> str:
+        del kwargs
+        observed.extend(args)
+        return "prepared"
+
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation."
+        "prepare_verified_remote_module_attempt",
+        verified,
+    )
+    runtime = _runtime(lambda _recovery: asyncio.sleep(0, result=None))
+    answer = await runtime.prepare(
+        receipt,
+        operation,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        10.0,
+        cast(Any, lambda: None),
+    )
+
+    assert answer == "prepared"
+    assert observed[2] is receipt
+    assert observed[3] == ModuleAttempt(
+        UUID(operation.system_id), UUID(operation.run_id), operation.operation_nonce
+    )
