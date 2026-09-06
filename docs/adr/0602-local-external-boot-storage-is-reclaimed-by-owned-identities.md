@@ -41,10 +41,17 @@ target/mutated state; it restores recorded prior power, then removes only its kn
 directory. After it removes the partial, or when a retry proves it already absent, the adapter
 records a bounded pending-absence handoff containing the exact admitted request. The same adapter
 accepts that handoff only for a byte-for-byte equal request and returns the stable terminal
-`absent` observation without entering recovery-point-dependent categorization. The handoff is
-adapter-local, capacity bounded, and oldest-entry evicted; eviction or process restart causes the
-authenticated retry to re-run the idempotent absence proof and recreate it. Absence without that
-exact request proof does not authorize deletion or a terminal result. A normal prepare retry instead resumes the same matching partial. Any malformed,
+`absent` observation without entering recovery-point-dependent categorization.
+
+The shared authority adapter contract has a separate typed recovery-observation call. The service
+invokes it only while recovering an exact authenticated `mutation-started` or `provider-returned`
+TEARDOWN journal record, passing a closed context containing that phase and the record's identity.
+Ordinary `observe` remains read-only. When adapter restart or oldest-entry eviction loses the
+in-memory handoff, local recovery observation performs only a non-mutating, exact-request check
+that the canonical partial is absent; it never repeats deletion. A present partial falls back to
+the authenticated record-specific cleanup path, while malformed, foreign, or unreadable state
+fails closed. Absence without either the equal in-memory handoff or service-supplied recovery
+context does not authorize a terminal result. A normal prepare retry instead resumes the same matching partial. Any malformed,
 foreign, symlinked, wide-mode, non-directory, or ambiguous partial is retained and reported.
 
 Host-artifact cleanup is separated from guest mutation. Opening or changing the overlay, module

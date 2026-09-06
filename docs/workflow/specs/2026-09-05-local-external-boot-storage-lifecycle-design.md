@@ -74,8 +74,24 @@ the partial or exact absence just proved. The handoff stores the complete valida
 equal request. The adapter then constructs a stable `absent` `AuthorityObservationV1` without
 calling `_resolve_point`, `_require_matching_identities`, or the RecoveryPoint-dependent state
 categorizer. The map is bounded to the existing admitted-lane capacity and evicts its oldest entry;
-an evicted or post-restart retry repeats the idempotent provider absence proof before recreating the
-handoff. A mismatched request cannot consume or replace an entry. A present malformed/foreign partial raises `provider_conflict`; an I/O failure is
+an equal same-process request consumes the handoff. A mismatched request cannot consume or replace
+an entry.
+
+`AuthorityMutationAdapter` adds
+`observe_recovery(request, AuthorityRecoveryObservationContextV1)`. The closed context carries only
+the exact journal phase (`mutation-started` or `provider-returned`), TEARDOWN commit point,
+operation identity, attempt id, journal sequence, and journal digest already verified by the
+service. `_finish_recovery` uses this call for those two phases; every other observation continues
+through read-only `observe(request)`. The service rejects a context/request or record mismatch
+before adapter dispatch, and adapters reject unsupported recovery contexts.
+
+The local recovery call never deletes. If the equal handoff is absent after eviction or adapter
+restart, it derives the canonical partial name from the request and performs the same
+descriptor-relative owner/mode/no-follow validation through a new absence-only store probe. Exact
+absence returns the stable `absent` observation. Presence, malformed state, I/O failure, or any
+context/request mismatch returns `provider_conflict`; only the ordinary authenticated commit arm
+may remove a present partial. This separates non-mutating restart proof from context-authorized
+deletion. A present malformed/foreign partial raises `provider_conflict`; an I/O failure is
 bounded to `provider_conflict` and is never converted to absence. `not-partial` falls through to
 normal complete-recovery teardown. Lost response and already-absent retries return the same
 observation id and category.
@@ -144,7 +160,7 @@ The partial proof drives the real adapter teardown path for three crash windows:
 only, pre-stop intent before stop, and published archive before completion rename. It also proves a
 same-Run/same-digest sibling remains openable after the first activation's terminal cleanup.
 First execution, lost-response retry, already-absent retry, handoff mismatch, bounded eviction,
-adapter restart, malformed partial, and read failure each
+adapter restart through the real service recovery call, malformed partial, and read failure each
 assert the exact terminal/nonterminal authority observation contract.
 
 Capacity tests exercise equality and one-byte-over cases against the real local materializer before

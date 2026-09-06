@@ -92,10 +92,12 @@ Steps:
 
 **Files:** `external_boot.py`, `external_boot_authority.py`, and their focused tests.
 
-**Interfaces:** add provider-local
+**Interfaces:** add the typed shared
+`AuthorityRecoveryObservationContextV1` and
+`AuthorityMutationAdapter.observe_recovery(request, context)` recovery-only call; add provider-local
 `LocalLibvirtExternalBoot.abort_preparation(binding, request identities, authority) -> PartialAbortResult`; add
-store inspection/deletion helpers that accept only canonical matching receipts/intents. No shared
-`ExternalBootPorts` method changes.
+store inspection/deletion helpers that accept only canonical matching receipts/intents or prove
+canonical absence without mutation. No `ExternalBootPorts` method changes.
 
 **Verification:** Mode: focused-test. Drive authority-adapter teardown through receipt-only,
 pre-stop-before-stop, and archive-before-rename partials; assert source power restoration, retry
@@ -112,11 +114,16 @@ Steps:
 5. Record `removed` or `absent` in a bounded adapter-local handoff containing the exact validated
    request; consume it only for the equal request to return stable terminal `absent`. Keep
    `not-partial` on normal RecoveryPoint handling and failures nonterminal.
-6. Add first-call, lost-response, already-absent, mismatched-request, bounded-eviction,
-   adapter-restart, malformed, and I/O-failure observation tests.
-7. Inject interruption at each removal, including activation-directory pruning, and prove request
+6. Add the service-created recovery context and recovery-only adapter call. On handoff eviction or
+   adapter restart, prove canonical partial absence without deletion; reject every request/context
+   mismatch and every present or unreadable state.
+7. Add first-call, lost-response, already-absent, mismatched-request, bounded-eviction,
+   real-service adapter-restart, malformed, and I/O-failure observation tests, plus shared contract
+   tests proving ordinary observation remains read-only and only verified recovery dispatches the
+   new call.
+8. Inject interruption at each removal, including activation-directory pruning, and prove request
    retry converges without changing sibling activation directories.
-8. Run focused tests and commit `feat(local-libvirt): reclaim interrupted preparation`.
+9. Run focused tests and commit `feat(local-libvirt): reclaim interrupted preparation`.
 
 ## Task 5 — propagate the per-slot recovery root
 
