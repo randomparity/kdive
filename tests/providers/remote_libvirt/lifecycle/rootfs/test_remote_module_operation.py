@@ -684,9 +684,17 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
             events.append("reap-open")
             return True
 
+        async def discharge_reap_obligation(self, _conn: object, _attempt: object) -> bool:
+            events.append("reap-discharge")
+            return True
+
     storage = Conn()
     wanted = volume_request(tmp_path)
     volumes = prepare_attempt_volumes(storage, wanted)
+    cast(Any, storage.pool).refresh = lambda _flags=0: 0
+    cast(Any, storage.pool).listAllVolumes = lambda _flags=0: [
+        item for item in storage.pool.volumes.values() if not item.deleted
+    ]
     unrelated = storage.pool.createXML(
         "<volume><name>operator-volume</name><capacity>1</capacity>"
         "<target><format type='raw'/></target></volume>"
@@ -760,11 +768,46 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
     executor = RemoteModulePreparationExecutor()
     asyncio.run(runtime.delete_scratch(recovery, executor))
     asyncio.run(runtime.delete_scratch(recovery, executor))
+    asyncio.run(runtime.record_reaping(recovery, executor))
+    restarted = replace(runtime)
+    asyncio.run(restarted.record_reaping(recovery, executor))
+    asyncio.run(restarted.record_reaped(recovery, executor))
+    for name, stored_volume in storage.pool.volumes.items():
+        cast(Any, stored_volume).name = lambda name=name: name
+    inventory = asyncio.run(runtime.inventory(executor))
     executor.shutdown()
 
     assert events.index("evidence") < events.index("reap-open") < events.index("scratch-delete")
     assert storage.pool.volumes[volumes.scratch.name].deleted
     assert not unrelated.deleted
+    assert [item.kind for item in inventory] == [
+        "source.ext4",
+        "reaping.journal",
+        "reaped.journal",
+    ]
+    assert events.index("reap-open") < events.index("reap-discharge")
+
+
+def test_runtime_reap_uses_landed_reaper_with_live_retention_callback() -> None:
+    events: list[str] = []
+
+    class Reaper:
+        async def reap_module_volumes(self, retained: Callable[[], Awaitable[object]]) -> int:
+            events.append("enumerated")
+            assert await retained() == ()
+            return 3
+
+    runtime = replace(
+        _runtime(lambda _recovery: asyncio.sleep(0)),
+        module_volume_reaper=cast(Any, Reaper()),
+    )
+
+    async def retained() -> tuple[()]:
+        events.append("retained")
+        return ()
+
+    assert asyncio.run(runtime.reap(retained)) == 3
+    assert events == ["enumerated", "retained"]
 
 
 def test_delete_scratch_does_not_delete_when_reap_evidence_rolls_back(tmp_path: Path) -> None:

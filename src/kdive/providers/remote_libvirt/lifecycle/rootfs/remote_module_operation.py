@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import xml.etree.ElementTree as ET
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
+import libvirt
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.remote_module_attempt_obligations import (
@@ -17,6 +19,7 @@ from kdive.db.remote_module_attempt_obligations import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.providers.infra.reaping import ModuleVolumeKey, ModuleVolumeReaper
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
     ApplianceConn,
@@ -39,6 +42,9 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+    render_module_volume_name,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
     FilesystemImageWriter,
     ModuleTreeEntry,
@@ -50,6 +56,10 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     expected_attempt_volumes,
     prepare_attempt_volumes,
     validate_attempt_volumes,
+)
+from kdive.providers.remote_libvirt.reaping.module_volumes import (
+    ModuleVolumeReaperConn,
+    list_owned_module_volumes,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.remote_module_volume_preparation import (
@@ -97,6 +107,22 @@ class ModuleOperationRuntime(Protocol):
     async def delete_scratch(
         self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
     ) -> None: ...
+    async def record_reaping(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None: ...
+    async def record_reaped(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None: ...
+    async def resume_reap(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> TeardownObservation: ...
+    async def inventory(
+        self, executor: RemoteModulePreparationExecutor
+    ) -> tuple[ModuleVolumeKey, ...]: ...
+    async def reap(self, retained: Callable[[], Awaitable[Collection[ModuleVolumeKey]]]) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +161,7 @@ class RemoteModuleOperationRuntime:
     read_scratch_result: Callable[[RemoteModuleRecoveryRefV1], Awaitable[bytes | None]]
     volume_preparation: RemoteModuleVolumePreparation | None = None
     appliance_execution: RemoteModuleApplianceExecution | None = None
+    module_volume_reaper: ModuleVolumeReaper | None = None
 
     @staticmethod
     def _attempt(recovery: RemoteModuleRecoveryRefV1) -> ModuleAttempt:
@@ -414,6 +441,101 @@ class RemoteModuleOperationRuntime:
         self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
     ) -> None:
         await self._delete(recovery, executor, "scratch")
+
+    def _marker_name(self, recovery: RemoteModuleRecoveryRefV1, state: str) -> str:
+        return render_module_volume_name(
+            recovery.system_id, recovery.run_id, recovery.operation_nonce, f"{state}.journal"
+        )
+
+    async def _record_marker(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        state: str,
+    ) -> None:
+        # Durable database evidence is the marker's content; the closed whole name is its
+        # storage ownership proof.  Storage-volume metadata is intentionally not used.
+        await self._evidence(recovery)
+        configured = self.volume_preparation
+        if configured is None:
+            raise CategorizedError(
+                "remote module volume preparation is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        name = self._marker_name(recovery, state)
+
+        def create() -> None:
+            pool = configured.storage.storagePoolLookupByName(configured.pool_name)
+            try:
+                pool.storageVolLookupByName(name)
+                return
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    raise
+            root = ET.Element("volume")
+            ET.SubElement(root, "name").text = name
+            ET.SubElement(root, "capacity", unit="bytes").text = "1"
+            target = ET.SubElement(root, "target")
+            ET.SubElement(target, "format", type="raw")
+            pool.createXML(ET.tostring(root, encoding="unicode"), 0)
+
+        await executor.run(create)
+
+    async def record_reaping(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None:
+        await self._open_reap_evidence(recovery)
+        await self._record_marker(recovery, executor, "reaping")
+
+    async def record_reaped(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None:
+        await self._record_marker(recovery, executor, "reaped")
+        async with self.pool.connection() as conn, conn.transaction():
+            await self.repository.discharge_reap_obligation(conn, self._attempt(recovery))
+
+    async def resume_reap(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> TeardownObservation:
+        operation, _result = await self._evidence(recovery)
+        volumes = expected_attempt_volumes(self._volume_request(operation))
+        configured = self.appliance_execution
+        assert configured is not None
+        request = self._appliance_request(operation, volumes, deadline)
+        return await executor.run(
+            lambda: teardown_remote_module_appliance(configured.appliance, request)
+        )
+
+    async def inventory(
+        self, executor: RemoteModulePreparationExecutor
+    ) -> tuple[ModuleVolumeKey, ...]:
+        configured = self.volume_preparation
+        if configured is None:
+            raise CategorizedError(
+                "remote module volume preparation is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+        def observe() -> tuple[ModuleVolumeKey, ...]:
+            return tuple(
+                ModuleVolumeKey(owner.system_id, owner.run_id, owner.operation_nonce, owner.kind)
+                for _name, owner in list_owned_module_volumes(
+                    cast(ModuleVolumeReaperConn, configured.storage), configured.pool_name
+                )
+            )
+
+        return await executor.run(observe)
+
+    async def reap(self, retained: Callable[[], Awaitable[Collection[ModuleVolumeKey]]]) -> int:
+        if self.module_volume_reaper is None:
+            raise CategorizedError(
+                "remote module volume reaper is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        return await self.module_volume_reaper.reap_module_volumes(retained)
 
     @staticmethod
     def _operation_from_result(result: RemoteModuleResultV1) -> RemoteModuleOperationV1:
