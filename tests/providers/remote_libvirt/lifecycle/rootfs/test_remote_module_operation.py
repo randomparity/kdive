@@ -780,6 +780,12 @@ def test_delete_scratch_commits_reap_evidence_before_exact_owned_delete(
 
     cast(Any, storage.pool.volumes[volumes.scratch.name]).delete = delete
     executor = RemoteModulePreparationExecutor()
+    altered = recovery.model_copy(
+        update={"source_capacity_bytes": recovery.source_capacity_bytes + 4096}
+    )
+    with pytest.raises(CategorizedError):
+        asyncio.run(runtime.delete_source(altered, executor))
+    assert not storage.pool.volumes[volumes.source.name].deleted
     asyncio.run(runtime.delete_scratch(recovery, executor))
     asyncio.run(runtime.delete_scratch(recovery, executor))
     create_xml = storage.pool.createXML
