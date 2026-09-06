@@ -12,7 +12,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -84,18 +84,36 @@ for slot in range(1, 9):
     if not isinstance(state, dict) or state.get("incarnation") != incarnation:
         continue
     unit = f"kdive-live-worker@{slot}.service"
-    if state.get("unit") != unit:
-        raise SystemExit("native worker state does not bind its slot")
-    matches.append(unit)
+    if (state.get("unit") != unit or state.get("phase") != "started"
+            or not isinstance(state.get("invocation_id"), str)
+            or not isinstance(state.get("boot_id"), str)):
+        raise SystemExit("native worker state does not bind its live slot")
+    matches.append((unit, state))
 if len(matches) != 1:
     raise SystemExit("native worker incarnation is not uniquely retained")
-unit = matches[0]
-pid = subprocess.run(["systemctl", "show", unit, "--value", "--property=MainPID"],
-                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=10)
-if pid.returncode != 0 or not pid.stdout.strip().isdigit() or int(pid.stdout) <= 1:
+unit, state = matches[0]
+status = subprocess.run(
+    ["systemctl", "show", unit, "--property=MainPID", "--property=InvocationID"],
+    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=10,
+)
+fields = {}
+for line in status.stdout.decode("ascii", "strict").splitlines():
+    name, separator, value = line.partition("=")
+    if not separator or name in fields:
+        raise SystemExit("native worker unit status is malformed")
+    fields[name] = value
+boot_id = open("/proc/sys/kernel/random/boot_id", encoding="ascii").read().strip()
+if (status.returncode != 0 or set(fields) != {"MainPID", "InvocationID"}
+        or not fields["MainPID"].isdigit() or int(fields["MainPID"]) <= 1
+        or fields["InvocationID"] != state["invocation_id"] or boot_id != state["boot_id"]):
+    raise SystemExit("native worker is no longer the retained invocation")
+pidfd = os.pidfd_open(int(fields["MainPID"]), 0)
+try:
+    signal.pidfd_send_signal(pidfd, signal.SIGSTOP if action == "stop" else signal.SIGCONT)
+finally:
+    os.close(pidfd)
+if not os.path.exists("/proc/" + fields["MainPID"]):
     raise SystemExit("native worker has no main process")
-subprocess.run(["systemctl", "kill", "--kill-who=main", "--signal=" +
-                ("STOP" if action == "stop" else "CONT"), unit], check=True, timeout=10)
 print(action + "ped")
 """
 
@@ -546,6 +564,7 @@ class RunningJobClaim:
     worker_id: str
     attempt: int
     lease_expires_at: datetime
+    server_time: datetime
 
 
 def _output(*argv: str) -> str:
@@ -766,6 +785,32 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
                 held = None
                 if replacement.attempt < 2:
                     raise AssertionError("native takeover did not charge a reclaimed attempt")
+                await asyncio.sleep(2.0)
+                async with (
+                    await psycopg.AsyncConnection.connect(db_url) as conn,
+                    conn.cursor() as cur,
+                ):
+                    await cur.execute(
+                        "SELECT state, attempt, worker_id FROM jobs WHERE id = %s",
+                        (activation.activate_job_id,),
+                    )
+                    row = await cur.fetchone()
+                if row != ("succeeded", replacement.attempt, replacement.worker_id):
+                    raise AssertionError("stale paused worker completion changed the reclaimed job")
+                release = ok(
+                    await scalar(client, "runs.release_external_boot", run_id=activation.run_id),
+                    "release",
+                )
+                await drain_job(client, "release-takeover", release.object_id)
+                await assert_root_release_completion(
+                    db_url,
+                    NormalOperationJobs(
+                        activation.investigation_id,
+                        activation.run_id,
+                        activation.activate_job_id,
+                        release.object_id,
+                    ),
+                )
             finally:
                 if held is not None:
                     set_exact_worker_hold(held, "continue")
@@ -1139,7 +1184,7 @@ async def running_job_claim(db_url: str, job_id: str) -> RunningJobClaim:
     """Read the actual leased job holder; no caller-crafted worker identity is accepted."""
     async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
         await cur.execute(
-            "SELECT worker_id, attempt, lease_expires_at FROM jobs "
+            "SELECT worker_id, attempt, lease_expires_at, clock_timestamp() FROM jobs "
             "WHERE id = %s AND state = 'running' AND worker_id IS NOT NULL "
             "AND lease_expires_at IS NOT NULL",
             (job_id,),
@@ -1147,9 +1192,9 @@ async def running_job_claim(db_url: str, job_id: str) -> RunningJobClaim:
         row = await cur.fetchone()
     if row is None or not isinstance(row[0], str) or not isinstance(row[1], int):
         raise AssertionError("fault barrier has no durable running job claim")
-    if not isinstance(row[2], datetime):
+    if not isinstance(row[2], datetime) or not isinstance(row[3], datetime):
         raise AssertionError("fault barrier running job has no lease deadline")
-    return RunningJobClaim(row[0], row[1], row[2])
+    return RunningJobClaim(row[0], row[1], row[2], row[3])
 
 
 async def wait_for_reclaimed_job(
@@ -1159,12 +1204,16 @@ async def wait_for_reclaimed_job(
     started = time.monotonic()
     deadline = min(
         started + _TAKEOVER_WAIT_SECONDS,
-        started + max(0.0, (original.lease_expires_at - datetime.now(UTC)).total_seconds()) + 120.0,
+        started
+        + max(0.0, (original.lease_expires_at - original.server_time).total_seconds())
+        + 120.0,
     )
     while time.monotonic() < deadline:
         async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT worker_id, attempt, lease_expires_at FROM jobs WHERE id = %s", (job_id,)
+                "SELECT worker_id, attempt, lease_expires_at, clock_timestamp() "
+                "FROM jobs WHERE id = %s",
+                (job_id,),
             )
             row = await cur.fetchone()
         if (
@@ -1172,10 +1221,11 @@ async def wait_for_reclaimed_job(
             and isinstance(row[0], str)
             and isinstance(row[1], int)
             and isinstance(row[2], datetime)
+            and isinstance(row[3], datetime)
             and row[1] > original.attempt
             and row[0] != original.worker_id
         ):
-            return RunningJobClaim(row[0], row[1], row[2])
+            return RunningJobClaim(row[0], row[1], row[2], row[3])
         await asyncio.sleep(1.0)
     raise TimeoutError(
         "native takeover did not reclaim the paused worker lease before its deadline"

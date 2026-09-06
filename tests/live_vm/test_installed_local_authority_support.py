@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -26,6 +27,7 @@ from tests.live_vm.installed_local_authority_support import (
     NormalOperationJobs,
     OwnedResource,
     ResourceLedger,
+    RunningJobClaim,
     arm_fault_barrier,
     assert_root_release_completion,
     drive_normal_operations,
@@ -550,6 +552,26 @@ def test_installed_route_preflight_rejects_an_unexpected_root_helper_result(
             config,
             "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1",
         )
+
+
+def test_exact_worker_hold_requires_retained_invocation_and_pidfd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = RunningJobClaim(
+        "local-systemd:kdive-live-worker@2.service:" + "a" * 32,
+        1,
+        datetime.now(UTC),
+        datetime.now(UTC),
+    )
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(carrier, "_output", lambda *argv: seen.append(argv) or "stopped")
+
+    carrier.set_exact_worker_hold(claim, "stop")
+
+    assert seen[0][-2:] == (claim.worker_id, "stop")
+    assert 'state.get("phase") != "started"' in carrier._WORKER_HOLD_CLIENT
+    assert 'fields["InvocationID"] != state["invocation_id"]' in carrier._WORKER_HOLD_CLIENT
+    assert "signal.pidfd_send_signal" in carrier._WORKER_HOLD_CLIENT
 
 
 def test_identity_probe_limits_mutation_to_exact_authority_sentinels(
