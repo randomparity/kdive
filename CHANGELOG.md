@@ -239,6 +239,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inspect module attachments
 - Anchor external boot readiness
 - Verify committed module attempt intent
+- Bind authority routes to resources
+- Add an authenticated network listener
+- Add a resource-bound network client
+- Compose worker authority routes
+- Deploy authority network routes
 
 ### Changed
 
@@ -1262,6 +1267,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence module obligation discharge
 - Bind verification to consumer lifetime
 - Accept module attempt receipt decision
+- Define resource-bound authority routes
+- Correct authority route ownership
+- Close authority route interfaces
+- Align authority credential ownership
+- Align authority host configuration errors
+- Configure denied authority identities
+- Defer route materialization to typed use
 
 ### Fixed
 
@@ -2047,6 +2059,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gate legacy external boot domains
 - Detect console replacement races
 - Redact module obligation failures
+- Own authority Ansible temporary state
+- Consume canonical authority host facts
+- Verify installed authority source revisions
+- Retain interrupted authority firewall intent
+- Defer TLS resolution to typed calls
 
 ### Security
 
