@@ -594,6 +594,15 @@ async def check_database_role(connection: Any) -> None:
                 'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,'
                     'text,jsonb)'::regprocedure,
                 'public.list_external_boot_authority_journal_heads(text)'::regprocedure,
+                'public.resolve_allocating_authority_system_attempt(text,uuid,bigint)'
+                    ::regprocedure,
+                'public.resolve_current_authority_system_attempt(text,uuid,bigint,bigint,text)'
+                    ::regprocedure,
+                'public.read_authority_system_journal_head(text,uuid,bigint,text)'
+                    ::regprocedure,
+                'public.advance_authority_system_journal_head(text,uuid,bigint,bigint,text,jsonb,'
+                    'bytea)'::regprocedure,
+                'public.list_authority_system_journal_heads(text)'::regprocedure,
                 'public.authenticate_external_boot_authority_peer(bytea)'::regprocedure
             ])::oid AS oid
         ), accepted_public_function AS (
