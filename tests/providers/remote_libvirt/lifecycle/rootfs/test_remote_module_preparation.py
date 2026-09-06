@@ -69,6 +69,58 @@ async def test_repeated_cancellation_drains_completion_and_restores_state() -> N
 
 
 @pytest.mark.anyio
+async def test_cancellation_wins_when_underlying_operation_fails() -> None:
+    executor = RemoteModulePreparationExecutor()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_failure() -> None:
+        started.set()
+        release.wait()
+        raise TimeoutError("provider deadline")
+
+    task = asyncio.create_task(executor.run(blocked_failure))
+    await asyncio.to_thread(started.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelling() == 2
+    assert task.cancelled()
+    executor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_cancellation_does_not_interrupt_callers_async_cleanup() -> None:
+    executor = RemoteModulePreparationExecutor()
+    started = threading.Event()
+    release = threading.Event()
+    cleanup_finished = False
+
+    async def caller() -> None:
+        nonlocal cleanup_finished
+        try:
+            await executor.run(lambda: (started.set(), release.wait()))
+        finally:
+            await asyncio.sleep(0)
+            cleanup_finished = True
+
+    task = asyncio.create_task(caller())
+    await asyncio.to_thread(started.wait)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_finished
+    executor.shutdown()
+
+
+@pytest.mark.anyio
 async def test_shutdown_is_nonwaiting_and_rejects_new_work() -> None:
     executor = RemoteModulePreparationExecutor()
     started = threading.Event()

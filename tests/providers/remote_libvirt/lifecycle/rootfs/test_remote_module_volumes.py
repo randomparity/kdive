@@ -1,5 +1,6 @@
 """Attempt-scoped remote module volume ownership."""
 
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -556,6 +557,36 @@ def test_validation_maps_unreadable_downloaded_filesystem_to_conflict(tmp_path: 
     assert caught.value.category is ErrorCategory.CONFLICT
 
 
+def test_initial_local_readback_failure_preserves_primary_error(tmp_path: Path) -> None:
+    conn = Conn()
+    wanted = request(tmp_path)
+    assert isinstance(wanted.writer, Writer)
+    wanted.writer.fail_inspect = True
+
+    with pytest.raises(CategorizedError, match="unreadable ext4"):
+        prepare_attempt_volumes(conn, wanted)
+    assert conn.pool.volumes == {}
+
+
+def test_readback_stream_creation_failure_closes_local_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = Conn()
+    wanted = request(tmp_path)
+    prepared = prepare_attempt_volumes(conn, wanted)
+    descriptor = os.open("/dev/null", os.O_WRONLY)
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes.tempfile.mkstemp",
+        lambda **_kwargs: (descriptor, str(tmp_path / "readback.ext4")),
+    )
+    conn.fail_new_stream = True
+
+    with pytest.raises(CategorizedError):
+        validate_attempt_volumes(conn, wanted, source=prepared.source, scratch=prepared.scratch)
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
 def _duplicate_name(volume: Volume) -> None:
     import xml.etree.ElementTree as ET
 
@@ -692,14 +723,14 @@ def test_source_readback_failure_uses_bounded_abort(tmp_path: Path, cleanup: str
             raise TimeoutError
         return operation()
 
-    with pytest.raises(CategorizedError) as raised:
-        validate_attempt_volumes(conn, wanted, call_stream=bounded)
-    assert raised.value.category is (
-        ErrorCategory.CONFLICT if cleanup == "unresolved" else ErrorCategory.INFRASTRUCTURE_FAILURE
-    )
     if cleanup == "unresolved":
+        with pytest.raises(TimeoutError):
+            validate_attempt_volumes(conn, wanted, call_stream=bounded)
         assert "abort" not in effects
     else:
+        with pytest.raises(CategorizedError) as raised:
+            validate_attempt_volumes(conn, wanted, call_stream=bounded)
+        assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
         assert effects.count("abort") == 1
         if cleanup in {"failure", "expired"}:
             cause = raised.value.__cause__

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -52,19 +53,16 @@ class RemoteModulePreparationExecutor:
     @staticmethod
     async def _await_completion[ResultT](future: Future[ResultT]) -> ResultT:
         wrapped = asyncio.wrap_future(future)
+        completed = asyncio.Event()
+        wrapped.add_done_callback(lambda _future: completed.set())
+        completion_waiter = asyncio.create_task(completed.wait())
         try:
-            return await asyncio.shield(wrapped)
-        except asyncio.CancelledError:
-            task = asyncio.current_task()
-            assert task is not None
-            cancellations = 1
-            task.uncancel()
-            while not wrapped.done():
-                try:
-                    await asyncio.shield(wrapped)
-                except asyncio.CancelledError:
-                    cancellations += 1
-                    task.uncancel()
-            for _ in range(cancellations):
-                task.cancel()
-            raise
+            await asyncio.shield(completion_waiter)
+        except asyncio.CancelledError as cancelled:
+            while not completion_waiter.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(completion_waiter)
+            if not wrapped.cancelled():
+                wrapped.exception()
+            raise cancelled from None
+        return wrapped.result()

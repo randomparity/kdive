@@ -465,11 +465,14 @@ def _call_stream[T](
 
 
 def _abort_stream(
+    admission: Callable[[], None] | None,
     call: Callable[[Callable[[], object]], object] | None,
     stream: UploadStream,
     primary: BaseException,
 ) -> None:
     try:
+        if call is None:
+            _admit(admission)
         _call_stream(call, stream.abort)
     except Exception as cleanup:
         primary.add_note(f"stream abort cleanup unresolved: {cleanup!r}")
@@ -501,7 +504,7 @@ def _upload(
         raise
     except (OSError, libvirt.libvirtError) as exc:
         if stream is not None:
-            _abort_stream(call_stream, stream, exc)
+            _abort_stream(admission, call_stream, stream, exc)
         raise CategorizedError(
             "failed to upload remote module source volume",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -518,8 +521,8 @@ def _source_repair(
     """Finish an upload a dead worker left partial, for an already-owned volume.
 
     A source volume's existence does not prove its upload completed: a worker
-    that died between the create and the end of the upload leaves correct owner
-    metadata over empty or partial content. Without repair the same-nonce retry
+    that died between the create and the end of the upload leaves a deterministic
+    name over empty or partial content. Without repair the same-nonce retry
     skips the upload forever and fails the readback on every attempt, and the
     attempt cannot be reaped either, because reaping needs a durable result the
     appliance never wrote.
@@ -530,6 +533,7 @@ def _source_repair(
     """
 
     def repair(volume: Volume) -> bool:
+        _admit(admission)
         if not request.inspect_attachments().proves_detached(request.pool, _names(request)[0]):
             return False
         _admit(admission)
@@ -544,6 +548,7 @@ def _inspect_remote_source(
     volume: Volume,
     request: VolumeRequest,
     expected: BuiltSourceImage,
+    admission: Callable[[], None] | None = None,
     call_stream: Callable[[Callable[[], object]], object] | None = None,
 ) -> None:
     stream: UploadStream | None = None
@@ -552,9 +557,15 @@ def _inspect_remote_source(
     )
     path = Path(raw_path)
     received = 0
+
+    def bounded[T](operation: Callable[[], T]) -> T:
+        if call_stream is None:
+            _admit(admission)
+        return _call_stream(call_stream, operation)
+
     try:
-        stream = conn.newStream(0)
         with os.fdopen(descriptor, "wb") as handle:
+            stream = bounded(lambda: conn.newStream(0))
 
             def receive(_stream: object, chunk: bytes, _opaque: object) -> None:
                 nonlocal received
@@ -563,12 +574,11 @@ def _inspect_remote_source(
                     raise ValueError("download exceeded expected source capacity")
                 handle.write(chunk)
 
-            _call_stream(
-                call_stream,
+            bounded(
                 lambda: volume.download(stream, 0, expected.capacity_bytes, 0),
             )
-            _call_stream(call_stream, lambda: stream.recvAll(receive, None))
-            _call_stream(call_stream, stream.finish)
+            bounded(lambda: stream.recvAll(receive, None))
+            bounded(stream.finish)
         if received != expected.capacity_bytes:
             raise _conflict("remote module source readback is truncated")
         try:
@@ -579,16 +589,18 @@ def _inspect_remote_source(
             raise _conflict("remote module source filesystem readback mismatched")
     except CategorizedError:
         raise
+    except TimeoutError:
+        raise
     except libvirt.libvirtError as exc:
         if stream is not None:
-            _abort_stream(call_stream, stream, exc)
+            _abort_stream(admission, call_stream, stream, exc)
         raise CategorizedError(
             "failed to download remote module source volume",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         ) from exc
     except (OSError, RuntimeError, ValueError) as exc:
         if stream is not None and not isinstance(exc, TimeoutError):
-            _abort_stream(call_stream, stream, exc)
+            _abort_stream(admission, call_stream, stream, exc)
         raise _conflict("remote module source readback failed") from exc
     finally:
         path.unlink(missing_ok=True)
@@ -628,6 +640,7 @@ def prepare_attempt_volumes(
     existing_scratch = _lookup(pool, scratch_name)
     operation = request.operation.to_wire_bytes()
     image = request.writer.build(operation, request.entries)
+    created: list[PreparedVolume] = []
     try:
         observed = request.writer.inspect(image.path)
         expected_content_bytes = sum(len(entry.content or b"") for entry in request.entries)
@@ -648,7 +661,6 @@ def prepare_attempt_volumes(
             "sha256:" + "0" * 64,
             SCRATCH_CAPACITY_BYTES,
         )
-        created: list[PreparedVolume] = []
         reused_source = existing_source is not None
         if existing_source is None:
             _admit(admit_mutation)
@@ -674,6 +686,7 @@ def prepare_attempt_volumes(
             request,
             source=source,
             scratch=scratch,
+            admit_mutation=admit_mutation,
             call_stream=call_stream,
             repair_source=(
                 _source_repair(conn, request, image, admit_mutation, call_stream)
@@ -707,6 +720,7 @@ def validate_attempt_volumes(
     *,
     source: PreparedVolume | None = None,
     scratch: PreparedVolume | None = None,
+    admit_mutation: Callable[[], None] | None = None,
     call_stream: Callable[[Callable[[], object]], object] | None = None,
     repair_source: Callable[[Volume], bool] | None = None,
 ) -> PreparedModuleVolumes:
@@ -760,7 +774,9 @@ def validate_attempt_volumes(
         source_volume = _lookup(pool, source_name)
         assert source_volume is not None
         try:
-            _inspect_remote_source(conn, source_volume, request, expected_image, call_stream)
+            _inspect_remote_source(
+                conn, source_volume, request, expected_image, admit_mutation, call_stream
+            )
         except CategorizedError as unusable:
             # Only a content failure is repairable, and only once ownership,
             # identity and capacity above have proved the volume is ours.
@@ -768,7 +784,9 @@ def validate_attempt_volumes(
                 raise
             if not repair_source(source_volume):
                 raise
-            _inspect_remote_source(conn, source_volume, request, expected_image, call_stream)
+            _inspect_remote_source(
+                conn, source_volume, request, expected_image, admit_mutation, call_stream
+            )
         return prepared
     finally:
         expected_image.path.unlink(missing_ok=True)
