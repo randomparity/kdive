@@ -228,6 +228,16 @@
 | `KDIVE_UPLOAD_TTL_SECONDS` | reconciler, server | `86400` | no | Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455). |
 | `KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE` | server | `3` | no | Cap on how long one minted upload window may live, as a multiple of KDIVE_UPLOAD_TTL_SECONDS measured from the mint (ADR-0511). The chunked runs.complete_build extends its window by a full TTL before server-side reassembly, and that extension commits even when the finalize then fails, so repeated failing retries would otherwise roll the window forward without bound. An extension is clamped to this multiple and never shortens an open window; 1 forbids extension entirely. Re-minting via artifacts.create_run_upload starts a new window and a fresh budget, so this bounds silent drift, not the agent's reach. |
 
+## worker-authority-client
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF` | worker | — | no | Optional secret reference for the worker local-authority TLS certificate. |
+| `KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF` | worker | — | no | secret (ref only) |
+| `KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE` | worker | — | no | Optional local authority instance for the worker-only AF_UNIX client route. |
+| `KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET` | worker | — | no | Optional fixed absolute AF_UNIX authority request socket for worker client calls. |
+| `KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF` | worker | — | no | Optional secret reference for the local authority server CA. |
+
 ## worker-death
 
 | Variable | Processes | Default | Required | Value |
