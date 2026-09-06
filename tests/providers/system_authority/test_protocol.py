@@ -14,7 +14,9 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemJournalRecordV1,
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,
+    AuthoritySystemPreactivationAbsentV1,
     AuthoritySystemProvisionFacts,
+    AuthoritySystemProvisionReadyV1,
     AuthoritySystemTakeoverRequestV1,
     canonical_system_authority_bytes,
 )
@@ -133,3 +135,30 @@ def test_provider_facts_reject_naive_completion_time() -> None:
             quarantine_retained=False,
             completed_at=datetime(2026, 9, 6),
         )
+
+
+def test_terminal_proof_disposition_is_bound_to_operation() -> None:
+    marker = _marker()
+    binding = {
+        **marker.model_dump(exclude={"schema_"}),
+        "authority_id": uuid4(),
+        "generation": 1,
+        "attempt_id": uuid4(),
+        "operation_digest": _DIGEST,
+        "bootstrap_identity": _DIGEST,
+        "intent_identity": _DIGEST,
+        "domain_owned": True,
+        "root_storage_owned": True,
+        "boot_ready": True,
+        "bootstrap_ready": True,
+        "quarantine_retained": False,
+        "completed_at": datetime(2026, 9, 6, tzinfo=UTC),
+        "disposition": "provision-ready",
+    }
+    assert AuthoritySystemProvisionReadyV1.model_validate(binding)
+    with pytest.raises(ValidationError):
+        AuthoritySystemProvisionReadyV1.model_validate(
+            {**binding, "operation": "preactivation-teardown"}
+        )
+    with pytest.raises(ValidationError):
+        AuthoritySystemPreactivationAbsentV1.model_validate(binding)

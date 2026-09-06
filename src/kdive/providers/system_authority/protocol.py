@@ -12,6 +12,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_activation import UtcDateTime
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSpecV1
@@ -268,6 +269,74 @@ class AuthoritySystemAbsenceFacts(_ClosedValue):
         if self.quarantine_retained is terminal_absence:
             raise ValueError("absence quarantine must be the inverse of completion")
         return self
+
+
+class _AuthoritySystemProofBinding(_AuthoritySystemAttemptBinding):
+    schema_: Literal["authority-system-proof-v1"] = Field(
+        "authority-system-proof-v1", alias="schema"
+    )
+
+
+class AuthoritySystemProvisionReadyV1(_AuthoritySystemProofBinding):
+    disposition: Literal["provision-ready"]
+    intent_identity: Digest
+    domain_owned: Literal[True]
+    root_storage_owned: Literal[True]
+    boot_ready: Literal[True]
+    bootstrap_ready: Literal[True]
+    quarantine_retained: Literal[False]
+    completed_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def _operation_is_provision(self) -> Self:
+        if self.operation is not AuthoritySystemOperation.PROVISION:
+            raise ValueError("provision-ready proof requires provision operation")
+        return self
+
+
+class AuthoritySystemProvisionFailedV1(_AuthoritySystemProofBinding):
+    disposition: Literal["provision-failed"]
+    intent_identity: Digest
+    error_category: ErrorCategory
+    quarantine_retained: bool
+    completed_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def _operation_is_provision(self) -> Self:
+        if self.operation is not AuthoritySystemOperation.PROVISION:
+            raise ValueError("provision-failed proof requires provision operation")
+        return self
+
+
+class AuthoritySystemPreactivationAbsentV1(_AuthoritySystemProofBinding):
+    disposition: Literal["preactivation-absent"]
+    intent_identity: Digest
+    domain_absent: Literal[True]
+    root_storage_absent: Literal[True]
+    baseline_absent: Literal[True]
+    private_intent_absent: Literal[True]
+    quarantine_retained: Literal[False]
+    completed_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def _operation_is_teardown(self) -> Self:
+        if self.operation is not AuthoritySystemOperation.PREACTIVATION_TEARDOWN:
+            raise ValueError("preactivation-absent proof requires teardown operation")
+        return self
+
+
+class AuthoritySystemRetainedQuarantineV1(_AuthoritySystemProofBinding):
+    disposition: Literal["retained-quarantine"]
+    observation_digest: Digest
+
+
+type AuthoritySystemProofV1 = Annotated[
+    AuthoritySystemProvisionReadyV1
+    | AuthoritySystemProvisionFailedV1
+    | AuthoritySystemPreactivationAbsentV1
+    | AuthoritySystemRetainedQuarantineV1,
+    Field(discriminator="disposition"),
+]
 
 
 @dataclass(frozen=True, slots=True)
