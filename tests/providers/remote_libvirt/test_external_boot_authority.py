@@ -50,13 +50,13 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedVolume,
     render_module_volume_name,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
-    operation as module_operation,
-)
-from tests.providers.remote_libvirt.lifecycle.test_external_boot import (
+from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
     _materialization,
     _plan,
     _source_xml,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
+    operation as module_operation,
 )
 from tests.support.external_boot_plan import external_boot_plan
 

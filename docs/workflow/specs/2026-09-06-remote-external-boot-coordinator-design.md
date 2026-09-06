@@ -1,7 +1,7 @@
 # Remote external-boot coordinator contract
 
 Issue: #2200
-Status: Implementing
+Status: Implemented coordinator contract; host integration remains in #2216
 
 This slice defines the closed durable recovery record, preparation receipts, and six-operation
 boundary consumed by the remote coordinator. Construction, host service wiring, job handling,
@@ -15,8 +15,8 @@ validated closed definition value. Rehydration recomputes ownership and identity
 rejects unknown fields or records larger than 1 MiB.
 
 `RemoteExternalBootOperations` exposes exactly materialize, prepare, activate, observe, recover,
-and cleanup. Every method receives one caller-established absolute monotonic deadline. Later
-coordinator work may sequence these methods but may not add a general filesystem, libvirt, command,
+and cleanup. Every method receives one caller-established absolute monotonic deadline. The
+coordinator sequences these methods without a general filesystem, libvirt, command,
 or transport escape hatch. Materialize additionally requires the exact activation binding and
 passes it unchanged to the provider operation.
 
