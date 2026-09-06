@@ -50,7 +50,12 @@ from kdive.providers.infra.console_hosting import (
     RunningSystems,
 )
 from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
-from kdive.providers.infra.reaping import CaptureReaper, DumpVolumeReaper, InfraReaper
+from kdive.providers.infra.reaping import (
+    CaptureReaper,
+    DumpVolumeReaper,
+    InfraReaper,
+    ModuleVolumeReaper,
+)
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
@@ -93,6 +98,9 @@ from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePo
 from kdive.providers.remote_libvirt.reaping.capture import RemoteLibvirtCaptureReaper
 from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraReaper
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
+from kdive.providers.remote_libvirt.reaping.module_volumes import (
+    RemoteLibvirtModuleVolumeReaper,
+)
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
 from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
@@ -218,6 +226,17 @@ def build_transport_resetter(*, secret_registry: SecretRegistry) -> TransportRes
 
 def build_dump_volume_reaper(*, secret_registry: SecretRegistry) -> DumpVolumeReaper:
     return RemoteLibvirtDumpVolumeReaper.from_env(secret_registry=secret_registry)
+
+
+def build_module_volume_reaper(
+    *,
+    secret_registry: SecretRegistry,
+    authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
+) -> ModuleVolumeReaper:
+    return RemoteLibvirtModuleVolumeReaper.from_env(
+        secret_registry=secret_registry,
+        authority_sender_factory=authority_sender_factory,
+    )
 
 
 def build_infra_reaper(*, secret_registry: SecretRegistry) -> InfraReaper:

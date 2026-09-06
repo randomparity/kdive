@@ -12,10 +12,17 @@ from pydantic import SecretStr
 import kdive.config as config
 from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.authority_sender import authority_sender_factory
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
-from kdive.jobs.handlers import diagnostics, external_boot, image_build, systems
+from kdive.jobs.handlers import (
+    diagnostics,
+    external_boot,
+    image_build,
+    module_volume_reaping,
+    systems,
+)
 from kdive.jobs.handlers.artifacts import rootfs_reclaim, vmcore
 from kdive.jobs.handlers.console import console_rotate
 from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
@@ -24,6 +31,7 @@ from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.infra.reaping import ModuleVolumeReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import secret_backend_from_env
 from kdive.store.assembly import ObjectStoreAssembly
@@ -39,6 +47,7 @@ class WorkerHandlerAssembly:
     object_stores: ObjectStoreAssembly
     capture_supervisor: CaptureOperationSupervisor
     worker_check_builders: diagnostics.WorkerCheckBuilders
+    module_volume_reaper: ModuleVolumeReaper
 
 
 def build_worker_handler_assembly(
@@ -74,6 +83,9 @@ def build_worker_handler_assembly(
             for contribution in diagnostic_provider_contributions(sender_factory)
             if contribution.enabled()
         },
+        module_volume_reaper=composition.build_worker_module_volume_reaper(
+            authority_sender_factory=sender_factory
+        ),
     )
     return assembly
 
@@ -186,4 +198,10 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
     diagnostics.register_handlers(
         registry,
         worker_check_builders=assembly.worker_check_builders,
+    )
+    registry.register(
+        JobKind.REMOTE_MODULE_VOLUME_REAP,
+        lambda conn, job: module_volume_reaping.remote_module_volume_reap_handler(
+            conn, job, reaper=assembly.module_volume_reaper
+        ),
     )

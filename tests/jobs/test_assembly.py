@@ -16,6 +16,7 @@ from kdive.jobs.assembly import WorkerHandlerAssembly, register_all_handlers
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.infra.reaping import NullModuleVolumeReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -28,6 +29,7 @@ async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_emp
     from kdive.jobs import authority_sender
     from kdive.jobs.assembly import build_worker_handler_assembly
     from kdive.providers.assembly import composition as providers
+    from kdive.providers.infra.reaping import NullModuleVolumeReaper
     from kdive.providers.remote_libvirt import composition as remote
     from kdive.providers.remote_libvirt.config import (
         RemoteAuthorityBinding,
@@ -50,6 +52,14 @@ async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_emp
         return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
     monkeypatch.setattr(authority_sender, "_resolve_tls_material", tls)
+    reaper_factories = []
+
+    def build_module_reaper(*, secret_registry, authority_sender_factory):
+        del secret_registry
+        reaper_factories.append(authority_sender_factory)
+        return NullModuleVolumeReaper()
+
+    monkeypatch.setattr(remote, "build_module_volume_reaper", build_module_reaper)
     owner = providers.ProviderComposition(
         secret_registry=SecretRegistry(), object_store=INERT_OBJECT_STORE
     )
@@ -85,8 +95,14 @@ async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_emp
         assert isinstance(sender, authority_sender.AuthorityRequestSender)
         await sender.health(deadline=asyncio.get_running_loop().time() + 1)
         assert all(callable(getattr(sender, slot)) for slot in sender.__slots__)
-    assert resolved == [config.authority, config.authority]
-    assert seen == [worker.incarnation_credential.get_secret_value() for worker in workers]
+    reaper_senders = [factory(config.authority) for factory in reaper_factories]
+    for sender in reaper_senders:
+        await sender.health(deadline=asyncio.get_running_loop().time() + 1)
+    assert resolved == [config.authority, config.authority, config.authority, config.authority]
+    assert seen == [
+        *(worker.incarnation_credential.get_secret_value() for worker in workers),
+        *(worker.incarnation_credential.get_secret_value() for worker in workers),
+    ]
     assert (
         owner.build_provider_resolver()
         .resolve(ResourceKind.REMOTE_LIBVIRT)
@@ -109,6 +125,7 @@ def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> No
             SimpleNamespace(credential=credential),
         ),
         worker_check_builders={},
+        module_volume_reaper=NullModuleVolumeReaper(),
     )
 
     register_all_handlers(registry, assembly)

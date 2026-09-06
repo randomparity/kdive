@@ -344,6 +344,8 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # investigation so the worker that created the staging tree performs the reclaim's
         # filesystem half, which the reconciler's user may not be able to (ADR-0442, #1522).
         "reclaim_investigation_rootfs",
+        # Platform-internal fleet maintenance, enqueued by the reconciler rather than a tenant.
+        "remote_module_volume_reap",
     }
 
 

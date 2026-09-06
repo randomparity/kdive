@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from typing import NamedTuple, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -37,6 +37,36 @@ class NullReaper:
 
     async def destroy(self, name: str) -> None:
         return None
+
+
+class ModuleVolumeKey(NamedTuple):
+    """Provider-neutral durable owner key for one remote module volume."""
+
+    system_id: str
+    run_id: str
+    operation_nonce: str
+    kind: str
+
+
+@runtime_checkable
+class ModuleVolumeReaper(Protocol):
+    """Reap module volumes whose durable attempt obligations have discharged."""
+
+    async def reap_module_volumes(
+        self,
+        retained_owners: Callable[[], Awaitable[Collection[ModuleVolumeKey]]],
+    ) -> int: ...
+
+
+class NullModuleVolumeReaper:
+    """Disabled module-volume reaper; it neither reads retention nor mutates storage."""
+
+    async def reap_module_volumes(
+        self,
+        retained_owners: Callable[[], Awaitable[Collection[ModuleVolumeKey]]],
+    ) -> int:
+        del retained_owners
+        return 0
 
 
 class DumpVolume(NamedTuple):
