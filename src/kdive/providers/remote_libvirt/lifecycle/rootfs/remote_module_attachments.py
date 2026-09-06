@@ -162,9 +162,12 @@ def inspect_module_attachments(
     conn: AttachmentConn,
     identity_port: RemoteDeviceIdentityPort,
     expected: ExpectedAttachmentState,
+    present_attempt_volumes: frozenset[str] | None = None,
 ) -> AttachmentInspection:
     """Prove the System is stopped and all three volumes have exclusive owners."""
-    protected_identities = _protected_volume_identities(conn, identity_port, expected)
+    protected_identities = _protected_volume_identities(
+        conn, identity_port, expected, present_attempt_volumes
+    )
     try:
         domains = conn.listAllDomains(0)
     except libvirt.libvirtError as exc:
@@ -294,10 +297,21 @@ def _protected_volume_identities(
     conn: AttachmentConn,
     identity_port: RemoteDeviceIdentityPort,
     expected: ExpectedAttachmentState,
+    present_attempt_volumes: frozenset[str] | None = None,
 ) -> dict[str, RemoteDeviceIdentity]:
+    attempt_volumes = (
+        frozenset({expected.source_volume, expected.scratch_volume})
+        if present_attempt_volumes is None
+        else present_attempt_volumes
+    )
+    if attempt_volumes not in {
+        frozenset({expected.source_volume}),
+        frozenset({expected.source_volume, expected.scratch_volume}),
+    }:
+        raise _conflict("remote module partial volume state is invalid")
     identities = {
         volume: _device_identity(identity_port, _volume_path(conn, expected.pool, volume))
-        for volume in (expected.root_volume, expected.source_volume, expected.scratch_volume)
+        for volume in (expected.root_volume, *sorted(attempt_volumes))
     }
     if len(set(identities.values())) != len(identities):
         raise _conflict("protected remote module identities are not distinct")
@@ -345,8 +359,9 @@ def _inspect_definition(
         if _top_level_volume_references(root).count(owning_root) != 1:
             raise _conflict("owning System definition has a different root volume", domain=name)
         attempt_identities = {
-            protected_identities[expected.source_volume],
-            protected_identities[expected.scratch_volume],
+            identity
+            for volume, identity in protected_identities.items()
+            if volume != expected.root_volume
         }
         if referenced & {expected.source_volume, expected.scratch_volume} or (
             protected_references & attempt_identities

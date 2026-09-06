@@ -448,3 +448,13 @@ class RemoteModuleRecoveryRefV1(_RemoteModuleDocument):
         """Reject a recovery reference presented with different mutation authority."""
         if self.identity_for_authority(authority) != self.authority_identity:
             raise ValueError("recovery authority does not match reference")
+
+
+class RemoteModuleRecoveryRefV2(RemoteModuleRecoveryRefV1):
+    """Recovery reference carrying authenticated source-volume geometry."""
+
+    protocol: Literal["remote-module-recovery-ref-v2"] = "remote-module-recovery-ref-v2"
+    source_capacity_bytes: Annotated[
+        int,
+        Field(strict=True, ge=4096, le=10_499_653_632, multiple_of=4096),
+    ]

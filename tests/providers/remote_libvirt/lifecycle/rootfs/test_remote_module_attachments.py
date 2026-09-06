@@ -91,8 +91,11 @@ def inspect_module_attachments(
     conn: Conn,
     state: ExpectedAttachmentState,
     identity_port: IdentityPort | HostStatDeviceIdentity | None = None,
+    present_attempt_volumes: frozenset[str] | None = None,
 ):
-    return _inspect_module_attachments(conn, identity_port or IdentityPort(), state)
+    return _inspect_module_attachments(
+        conn, identity_port or IdentityPort(), state, present_attempt_volumes
+    )
 
 
 def storage_pool(*, name: str = "systems", target_path: str = "/pool") -> FakeStoragePool:
@@ -168,6 +171,20 @@ def test_stopped_exclusive_owner_is_safe(arch: str) -> None:
     assert not result.appliance_present
     assert (state.pool, state.source_volume) in result.detached_volumes
     assert (state.pool, state.scratch_volume) in result.detached_volumes
+
+
+def test_source_only_partial_state_traverses_actual_domain_graph() -> None:
+    state = expected()
+    pool = storage_pool()
+    pool._volumes.pop(state.scratch_volume)
+    conn = Conn([Domain(system_xml(state.system_id))], {state.pool: pool})
+
+    result = inspect_module_attachments(
+        conn, state, present_attempt_volumes=frozenset({state.source_volume})
+    )
+
+    assert not result.appliance_present
+    assert result.proves_detached(state.pool, state.source_volume)
 
 
 @pytest.mark.parametrize(
