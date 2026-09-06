@@ -19,6 +19,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+import kdive.config as config_registry
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
@@ -112,6 +113,81 @@ def test_preparing_activation_persists_plan_without_provider_mutation(
             preparation_plan=vehicle.plan,
         )
         assert provider.preparation_mutations == {"materialize": 0, "prepare": 0}
+
+    _drive(migrated_url, body)
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        {},
+        {"KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": AUTHORITY_INSTANCE},
+        {"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "different-authority"},
+    ],
+    ids=["absent", "partial-worker-route", "mismatch"],
+)
+def test_preparing_without_direct_ports_requires_exact_fixed_server_route(
+    migrated_url: str, configured: dict[str, str]
+) -> None:
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+            with_reservation=True,
+        )
+        config_registry.load(configured)
+        with pytest.raises(CategorizedError, match="fixed server route"):
+            await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose="activate",
+                operation="activate",
+                provider_kind="local-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity="activate-with-fixed-route",
+                resolver=provider_resolver(
+                    external_boot=None,
+                    external_boot_preparation=None,
+                ),
+                preparation_plan=vehicle.plan,
+            )
+        assert await _authority_count(conn) == 0
+
+    _drive(migrated_url, body)
+
+
+def test_preparing_with_fixed_server_route_needs_no_direct_provider_ports(
+    migrated_url: str,
+) -> None:
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+            with_reservation=True,
+        )
+        config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": AUTHORITY_INSTANCE})
+        kind, payload = await build_external_boot_payload(
+            conn,
+            activation_id=vehicle.activation_id,
+            purpose="activate",
+            operation="activate",
+            provider_kind="local-libvirt",
+            authority_instance=AUTHORITY_INSTANCE,
+            operation_identity="activate-with-fixed-route",
+            resolver=provider_resolver(external_boot=None, external_boot_preparation=None),
+            preparation_plan=vehicle.plan,
+        )
+        assert kind is JobKind.BOOT
+        assert payload.external_boot_authority_v1 is not None
+        assert payload.external_boot_authority_v1.authority_instance == AUTHORITY_INSTANCE
 
     _drive(migrated_url, body)
 
