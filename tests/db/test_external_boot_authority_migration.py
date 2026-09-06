@@ -215,6 +215,49 @@ def _seed_release(conn: psycopg.Connection, case: _AuthorityCase) -> None:
     )
 
 
+def _open_mutation_obligation(conn: psycopg.Connection, case: _AuthorityCase) -> str:
+    """Open one real module mutation obligation owned by the authority's System."""
+    nonce = uuid4().hex
+    conn.execute(
+        "INSERT INTO remote_module_attempt_obligations (system_id, run_id, operation_nonce) "
+        "VALUES (%s, %s, %s)",
+        (case.system_id, case.run_id, nonce),
+    )
+    return nonce
+
+
+def _mutation_discharge(
+    conn: psycopg.Connection, case: _AuthorityCase, nonce: str
+) -> tuple[object, ...]:
+    row = conn.execute(
+        "SELECT mutation_discharged_at, mutation_discharge_reason, reap_discharged_at "
+        "FROM remote_module_attempt_obligations "
+        "WHERE system_id=%s AND run_id=%s AND operation_nonce=%s",
+        (case.system_id, case.run_id, nonce),
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+def _begin_recovery_attempt(
+    conn: psycopg.Connection, case: _AuthorityCase, authority: _Allocated
+) -> UUID:
+    attempt_id = uuid4()
+    conn.execute(
+        "INSERT INTO external_boot_recovery_attempts "
+        "(activation_id, attempt_number, attempt_id, authority_generation, recovery_basis, "
+        "recovery_readiness_deadline, state) "
+        "VALUES (%s, 1, %s, %s, 'recovery_point', now(), 'recovering')",
+        (case.activation_id, attempt_id, authority.generation),
+    )
+    conn.execute(
+        "UPDATE external_boot_activations SET state='recovering', current_attempt_id=%s "
+        "WHERE id=%s",
+        (attempt_id, case.activation_id),
+    )
+    return attempt_id
+
+
 def _result_state_snapshot(
     conn: psycopg.Connection, case: _AuthorityCase, authority: _Allocated
 ) -> tuple[object, ...]:
@@ -2494,6 +2537,179 @@ def test_teardown_is_terminal_only_inside_current_authority_commit(
             "SELECT cleanup_complete, teardown_evidence FROM external_boot_activations WHERE id=%s",
             (case.activation_id,),
         ).fetchone() == (True, teardown)
+
+
+def test_worker_authority_teardown_discharges_mutation_obligations(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """The SECURITY DEFINER terminal commit writes despite worker table privileges."""
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="teardown", worker_suffix="d")
+        _seed_release(conn, case)
+        nonce = _open_mutation_obligation(conn, case)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    result = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "teardown",
+        "result_ref": _EVIDENCE_DIGEST,
+        "teardown_evidence": {
+            "schema": "external-boot-teardown-evidence-v1",
+            "system_id": str(case.system_id),
+            "system_state": "torn_down",
+            "observed_at": _OBSERVED_AT,
+        },
+        "cleanup_evidence": {
+            "schema": "external-boot-cleanup-evidence-v1",
+            "activation_id": str(case.activation_id),
+            "system_id": str(case.system_id),
+            "release_identity": _EVIDENCE_DIGEST,
+            "mode": "system_teardown",
+            "teardown_identity": _EVIDENCE_DIGEST,
+            "completed_at": _OBSERVED_AT,
+        },
+    }
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(worker, case, authority, result) == ("applied", "succeeded")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            worker.execute(
+                "UPDATE remote_module_attempt_obligations SET mutation_discharged_at=now() "
+                "WHERE system_id=%s",
+                (case.system_id,),
+            )
+    with psycopg.connect(migrated_url) as conn:
+        discharged_at, reason, reap_discharged_at = _mutation_discharge(conn, case, nonce)
+        assert discharged_at is not None
+        assert reason == "terminal_escape"
+        assert reap_discharged_at is None
+
+
+def test_worker_authority_terminal_recovery_failure_discharges_mutations(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="recover", operation="fail", worker_suffix="f")
+        _prepare_purpose_state(conn, case, "recover")
+        nonce = _open_mutation_obligation(conn, case)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        _begin_recovery_attempt(conn, case, authority)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            case,
+            authority,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "fail",
+                "error_category": "readiness_failure",
+                "failure_context": {"phase": "observation"},
+                "terminal": True,
+            },
+        ) == ("applied", "failed")
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT state FROM external_boot_activations WHERE id=%s", (case.activation_id,)
+        ).fetchone() == ("recovery_failed",)
+        discharged_at, reason, reap_discharged_at = _mutation_discharge(conn, case, nonce)
+        assert discharged_at is not None
+        assert reason == "terminal_escape"
+        assert reap_discharged_at is None
+
+
+def test_worker_authority_successful_recovery_retains_mutation_obligation(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """A recover result is restoration, not a terminal escape."""
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="recover", worker_suffix="r")
+        _prepare_purpose_state(conn, case, "recover")
+        nonce = _open_mutation_obligation(conn, case)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        _begin_recovery_attempt(conn, case, authority)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            case,
+            authority,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "recover",
+                "result_ref": _EVIDENCE_DIGEST,
+                "evidence": _terminal_evidence(case, "recovered"),
+            },
+        ) == ("applied", "succeeded")
+    with psycopg.connect(migrated_url) as conn:
+        assert _mutation_discharge(conn, case, nonce) == (None, None, None)
+
+
+def test_authority_teardown_rolls_back_discharge_with_terminal_transition(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """A post-discharge database fault cannot leave a torn-down System half committed."""
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="teardown", worker_suffix="e")
+        _seed_release(conn, case)
+        nonce = _open_mutation_obligation(conn, case)
+        conn.execute(
+            "CREATE FUNCTION test_terminal_discharge_fault() RETURNS trigger LANGUAGE plpgsql AS "
+            "$$ BEGIN RAISE EXCEPTION 'test terminal discharge fault'; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER test_terminal_discharge_fault BEFORE UPDATE "
+            "ON remote_module_attempt_obligations FOR EACH ROW "
+            "EXECUTE FUNCTION test_terminal_discharge_fault()"
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    result = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "teardown",
+        "result_ref": _EVIDENCE_DIGEST,
+        "teardown_evidence": {
+            "schema": "external-boot-teardown-evidence-v1",
+            "system_id": str(case.system_id),
+            "system_state": "torn_down",
+            "observed_at": _OBSERVED_AT,
+        },
+        "cleanup_evidence": {
+            "schema": "external-boot-cleanup-evidence-v1",
+            "activation_id": str(case.activation_id),
+            "system_id": str(case.system_id),
+            "release_identity": _EVIDENCE_DIGEST,
+            "mode": "system_teardown",
+            "teardown_identity": _EVIDENCE_DIGEST,
+            "completed_at": _OBSERVED_AT,
+        },
+    }
+    with (
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.RaiseException, match="test terminal discharge fault"),
+    ):
+        _commit(worker, case, authority, result)
+    with psycopg.connect(migrated_url) as conn:
+        state = conn.execute("SELECT state FROM systems WHERE id=%s", (case.system_id,)).fetchone()
+        assert state == ("failed",)
+        assert conn.execute(
+            "SELECT cleanup_complete FROM external_boot_activations WHERE id=%s",
+            (case.activation_id,),
+        ).fetchone() == (False,)
+        assert _mutation_discharge(conn, case, nonce) == (None, None, None)
+        conn.execute(
+            "DROP TRIGGER test_terminal_discharge_fault ON remote_module_attempt_obligations"
+        )
+        conn.execute("DROP FUNCTION test_terminal_discharge_fault()")
 
 
 def test_protocol_three_and_generic_external_job_paths_remain_denied(
