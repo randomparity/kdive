@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 
-def test_only_composition_imports_local_libvirt_provider_details() -> None:
+def test_only_composition_imports_local_libvirt_provider_implementation() -> None:
     src_root = Path("src/kdive")
     allowed = {
         Path("src/kdive/providers/assembly/composition.py"),
@@ -19,10 +19,14 @@ def test_only_composition_imports_local_libvirt_provider_details() -> None:
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module == "kdive.providers.local_libvirt.settings":
+                    continue  # ADR-0087 declarations contain no provider implementation.
                 if node.module.startswith("kdive.providers.local_libvirt"):
                     offenders.append(f"{path}:{node.lineno}: from {node.module} import ...")
             elif isinstance(node, ast.Import):
                 for alias in node.names:
+                    if alias.name == "kdive.providers.local_libvirt.settings":
+                        continue
                     if alias.name.startswith("kdive.providers.local_libvirt"):
                         offenders.append(f"{path}:{node.lineno}: import {alias.name}")
 

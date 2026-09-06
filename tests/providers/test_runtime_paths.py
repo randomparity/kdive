@@ -76,6 +76,25 @@ def test_runtime_roots_reject_relative_process_path() -> None:
     assert "must be an absolute path" in result.stderr
 
 
+def test_runtime_roots_use_the_validated_config_snapshot() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import kdive.config as config; "
+            "config.load({'KDIVE_LIBVIRT_ROOTFS_ROOT': '/snapshot/rootfs', "
+            "'KDIVE_LIBVIRT_CONSOLE_ROOT': '/snapshot/console'}); "
+            "from kdive.providers.shared.runtime_paths import ROOTFS_DIR, console_log_path; "
+            "from uuid import UUID; print(ROOTFS_DIR); print(console_log_path(UUID(int=0)).parent)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["/snapshot/rootfs", "/snapshot/console"]
+
+
 def test_domain_name_for_uses_kdive_prefix() -> None:
     assert domain_name_for(_SYSTEM_ID) == "kdive-11111111-1111-1111-1111-111111111111"
 

@@ -10,23 +10,18 @@ import re
 from pathlib import Path
 from uuid import UUID
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.settings import LIBVIRT_CONSOLE_ROOT, LIBVIRT_ROOTFS_ROOT
 
 _log = logging.getLogger(__name__)
 
 
-def _fixed_runtime_root(name: str, default: str) -> str:
-    value = os.environ.get(name, default)
-    if "\0" in value or not Path(value).is_absolute():
-        raise RuntimeError(f"{name} must be an absolute path without NUL bytes")
-    return value
-
-
-_CONSOLE_DIR = _fixed_runtime_root("KDIVE_LIBVIRT_CONSOLE_ROOT", "/var/lib/kdive/console")
+_CONSOLE_DIR = config.require(LIBVIRT_CONSOLE_ROOT)
 _PCAP_DIR = "/var/lib/kdive/pcap"
 
 #: The host directory holding per-System rootfs overlays and extracted baselines.
-ROOTFS_DIR = _fixed_runtime_root("KDIVE_LIBVIRT_ROOTFS_ROOT", "/var/lib/kdive/rootfs")
+ROOTFS_DIR = config.require(LIBVIRT_ROOTFS_ROOT)
 #: The host directory an investigation-scoped uploaded rootfs base is staged under, OUTSIDE the
 #: provider ``allowed_roots`` (ADR-0434 §3 / ADR-0441 §5 no-escape). A staged SENSITIVE image is
 #: never reachable as another System's ``local`` staged-path candidate.

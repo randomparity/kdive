@@ -266,6 +266,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0138",
         "0140",
         "0142",
+        "0143",
     ]
     assert second == []
 
@@ -276,7 +277,7 @@ def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
     versions = [migration.version for migration in migrations]
 
     assert len(versions) == len(set(versions))
-    assert [(migration.version, migration.filename) for migration in migrations[-41:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-42:]] == [
         ("0099", "0099_investigation_build_use_recovery.sql"),
         ("0100", "0100_build_use_recovery_bounds.sql"),
         ("0101", "0101_investigation_build_gc_indexes.sql"),
@@ -318,6 +319,7 @@ def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
         ("0138", "0138_external_boot_recovery_quarantine.sql"),
         ("0140", "0140_external_boot_release_dispatch.sql"),
         ("0142", "0142_external_boot_reservation_worker_debit.sql"),
+        ("0143", "0143_external_boot_release_phases.sql"),
     ]
 
 
@@ -1044,6 +1046,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0138",
         "0140",
         "0142",
+        "0143",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1460,6 +1463,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0138",
         "0140",
         "0142",
+        "0143",
     ]
 
 
