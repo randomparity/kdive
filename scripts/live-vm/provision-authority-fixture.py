@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+# ruff: noqa: E402, I001 -- provider imports must follow the authority config snapshot below.
+
 import json
 import os
 import pwd
@@ -12,10 +14,19 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
-# This script is the one explicitly selected disposable authority fixture. Set its fixed
-# authority-owned roots before importing provider modules, which bind runtime paths at import.
-os.environ["KDIVE_LIBVIRT_ROOTFS_ROOT"] = "/var/lib/kdive/provider-authority/rootfs"
-os.environ["KDIVE_LIBVIRT_CONSOLE_ROOT"] = "/var/lib/kdive/provider-authority/console"
+# This script is the one explicitly selected disposable authority fixture. Configuration takes a
+# process-local snapshot as provider runtime paths import, so all fixed authority settings must
+# precede every provider import.
+_AUTHORITY = "kdive-provider-authority"
+_WORKER_URI = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+_AUTHORITY_URI = "qemu+unix:///system?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
+os.environ.update(
+    {
+        "KDIVE_LIBVIRT_URI": _AUTHORITY_URI,
+        "KDIVE_LIBVIRT_ROOTFS_ROOT": "/var/lib/kdive/provider-authority/rootfs",
+        "KDIVE_LIBVIRT_CONSOLE_ROOT": "/var/lib/kdive/provider-authority/console",
+    }
+)
 
 import libvirt
 
@@ -23,10 +34,6 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, overlay_name
-
-_AUTHORITY = "kdive-provider-authority"
-_WORKER_URI = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
-_AUTHORITY_URI = "qemu+unix:///system?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
 
 
 def _remove_regular(path: Path) -> None:
@@ -108,7 +115,6 @@ def main() -> None:
     os.initgroups(_AUTHORITY, identity.pw_gid)
     os.setgid(identity.pw_gid)
     os.setuid(identity.pw_uid)
-    os.environ["KDIVE_LIBVIRT_URI"] = _AUTHORITY_URI
     result = LocalLibvirtProvisioning.from_env().provision(system_id, profile)
     if result != domain_name_for(system_id):
         raise RuntimeError("authority fixture provision returned a different domain")

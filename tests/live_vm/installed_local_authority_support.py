@@ -2,27 +2,94 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
-import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kdive.mcp.dev_harness import LiveStackClient
+from tests.integration.live_stack.skew import _fetch_version, _resolve, readyz_urls
 from tests.integration.live_stack.spine import build_and_upload_kernel, drain_job, ok, scalar
 
 CONFIG_ENV = "KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG"
 OPERATIONS = ("activate", "recover", "resolve-conflict", "release", "cleanup", "teardown")
 _PREFIX = re.compile(r"kdive-2151-[0-9a-f]{12}-[0-9a-f]{8}")
+_FIXED_WORKER_UNIT = re.compile(r"kdive-live-worker@([1-8])\.service")
+_AUTHORITY_ACCOUNT = "kdive-provider-authority"
+_AUTHORITY_ARTIFACT_ROOTS = (
+    Path("/var/lib/kdive/provider-authority/rootfs"),
+    Path("/var/lib/kdive/provider-authority/console"),
+)
+_IDENTITY_PYTHON = "/usr/bin/python3"
+
+_CREATE_SENTINELS = """
+import json
+import os
+import stat
+import sys
+
+for entry in json.load(sys.stdin):
+    metadata = os.stat(entry["artifact"], follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(f"authority fixture artifact is not a regular file: {entry['artifact']}")
+    for name in (entry["sentinel"], entry["replacement"]):
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+        os.close(descriptor)
+"""
+
+_REMOVE_SENTINELS = """
+import json
+import os
+import sys
+
+for entry in json.load(sys.stdin):
+    for name in (entry["sentinel"], entry["replacement"]):
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+"""
+
+_IDENTITY_BYPASS_PROBE = """
+import json
+import os
+import sys
+
+failures = []
+for entry in json.load(sys.stdin):
+    try:
+        descriptor = os.open(entry["artifact"], os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        pass
+    else:
+        os.close(descriptor)
+        failures.append(f"opened private artifact {entry['artifact']}")
+    try:
+        os.unlink(entry["sentinel"])
+    except OSError:
+        pass
+    else:
+        failures.append(f"unlinked authority sentinel {entry['sentinel']}")
+    try:
+        os.replace(entry["replacement"], entry["sentinel"])
+    except OSError:
+        pass
+    else:
+        failures.append(f"replaced authority sentinel {entry['sentinel']}")
+if failures:
+    raise SystemExit("; ".join(failures))
+"""
 
 
 class NativeAuthorityConfig(BaseModel):
@@ -52,6 +119,132 @@ class NativeAuthorityConfig(BaseModel):
         if not value.is_absolute():
             raise ValueError("barrier socket must be absolute")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class NormalOperationJobs:
+    """The public operations whose exact durable completion the carrier verifies."""
+
+    investigation_id: str
+    run_id: str
+    activate_job_id: str
+    release_job_id: str
+
+
+def require_deployed_revision(
+    config: NativeAuthorityConfig,
+    base_url: str,
+    running_workers: str,
+    *,
+    fetch: Callable[[str], dict[str, object] | None] = _fetch_version,
+    resolve: Callable[[str], str | None] = _resolve,
+) -> None:
+    """Refuse carrier mutation unless reports resolve exactly to the configured full build."""
+    default_urls = readyz_urls(base_url, {})
+    server_url = default_urls["server"]
+    worker_urls = _active_worker_readyz_urls(base_url, running_workers)
+    for process, url in (("server", server_url), *worker_urls):
+        version = fetch(url)
+        commit = version.get("commit") if version is not None else None
+        resolved = resolve(commit) if isinstance(commit, str) else None
+        if resolved != config.installed_revision:
+            reported = commit if isinstance(commit, str) else "unknown"
+            raise AssertionError(
+                f"deployed {process} revision {reported!r} does not match configured "
+                f"installed revision {config.installed_revision}"
+            )
+
+
+def _active_worker_readyz_urls(base_url: str, running_workers: str) -> tuple[tuple[str, str], ...]:
+    """Derive fixed-slot aux URLs from the lifecycle provisioner's assigned bind map."""
+    slots = sorted({int(slot) for slot in _FIXED_WORKER_UNIT.findall(running_workers)})
+    if not slots:
+        raise AssertionError("native authority carrier requires an active fixed worker incarnation")
+    parsed = urlsplit(base_url)
+    host = parsed.hostname
+    if host is None:
+        raise AssertionError("native authority carrier stack URL has no host")
+    authority = f"[{host}]" if ":" in host else host
+    scheme = parsed.scheme or "http"
+    return tuple(
+        (
+            f"worker slot {slot}",
+            f"{scheme}://{authority}:{9465 if slot == 1 else 9468 + slot}/readyz",
+        )
+        for slot in slots
+    )
+
+
+def _active_worker_slots(running_workers: str) -> tuple[int, ...]:
+    """Return the exact fixed-worker slots systemd reports as active for this invocation."""
+    slots = tuple(sorted({int(slot) for slot in _FIXED_WORKER_UNIT.findall(running_workers)}))
+    if not slots:
+        raise AssertionError("native authority carrier requires an active fixed worker incarnation")
+    return slots
+
+
+def _authority_artifacts(config: NativeAuthorityConfig) -> tuple[tuple[str, Path], ...]:
+    """Construct only the selected fixture's two authority-private artifacts."""
+    return (
+        ("overlay", _AUTHORITY_ARTIFACT_ROOTS[0] / f"{config.system_id}-overlay.qcow2"),
+        ("console", _AUTHORITY_ARTIFACT_ROOTS[1] / f"{config.system_id}.log"),
+    )
+
+
+def _sentinel_entries(config: NativeAuthorityConfig) -> tuple[dict[str, str], ...]:
+    """Name the only new files this invocation may create beneath private artifact parents."""
+    return tuple(
+        {
+            "artifact": str(artifact),
+            "sentinel": str(artifact.parent / f".{config.ownership_prefix}-{kind}-sentinel"),
+            "replacement": str(artifact.parent / f".{config.ownership_prefix}-{kind}-replacement"),
+        }
+        for kind, artifact in _authority_artifacts(config)
+    )
+
+
+def _run_identity_program(
+    identity: str,
+    program: str,
+    entries: tuple[dict[str, str], ...],
+    *,
+    sudo: bool,
+) -> None:
+    argv = [_IDENTITY_PYTHON, "-c", program]
+    if sudo:
+        argv = ["sudo", "-n", "-u", identity, *argv]
+    result = subprocess.run(
+        argv,
+        input=json.dumps(entries),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-1000:]
+        raise AssertionError(f"identity {identity} bypass probe failed: {detail}")
+
+
+def require_authority_artifact_confinement(
+    config: NativeAuthorityConfig,
+    running_workers: str,
+) -> None:
+    """Require every active worker and this control uid to be unable to alter private artifacts.
+
+    This is native-only evidence: the subprocesses run under installed identities. Unit tests mock
+    only that subprocess boundary and do not establish host permission enforcement.
+    """
+    entries = _sentinel_entries(config)
+    _run_identity_program(_AUTHORITY_ACCOUNT, _CREATE_SENTINELS, entries, sudo=True)
+    try:
+        for slot in _active_worker_slots(running_workers):
+            _run_identity_program(
+                f"kdive-worker-{slot}", _IDENTITY_BYPASS_PROBE, entries, sudo=True
+            )
+        control_identity = pwd.getpwuid(os.geteuid()).pw_name
+        _run_identity_program(control_identity, _IDENTITY_BYPASS_PROBE, entries, sudo=False)
+    finally:
+        _run_identity_program(_AUTHORITY_ACCOUNT, _REMOVE_SENTINELS, entries, sudo=True)
 
 
 def load_config(environment: dict[str, str] | None = None) -> NativeAuthorityConfig | None:
@@ -143,31 +336,95 @@ def require_fault_barrier(config: NativeAuthorityConfig) -> Path:
     return config.barrier_socket
 
 
-async def await_completed_operations(
-    db_url: str,
-    run_id: str,
-    expected: frozenset[str],
-    *,
-    deadline_s: float = 600.0,
-) -> None:
-    """Wait until durable jobs prove each expected authority operation succeeded."""
-    deadline = time.monotonic() + deadline_s
-    while True:
-        async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+async def assert_root_release_completion(db_url: str, operations: NormalOperationJobs) -> None:
+    """Require the root release job's exact derived recover/cleanup finalizer evidence."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+        for job_id, operation in (
+            (operations.activate_job_id, "activate"),
+            (operations.release_job_id, "release"),
+        ):
             await cur.execute(
-                "SELECT payload->'external_boot_authority_v1'->>'operation', state "
-                "FROM jobs WHERE payload->'external_boot_authority_v1'->>'run_id' = %s",
-                (run_id,),
+                "SELECT state, payload->'external_boot_authority_v1'->>'operation', "
+                "payload->'external_boot_authority_v1'->>'run_id' FROM jobs WHERE id = %s",
+                (job_id,),
             )
-            completed = {
-                operation for operation, state in await cur.fetchall() if state == "succeeded"
-            }
-        if expected <= completed:
-            return
-        if time.monotonic() >= deadline:
-            missing = sorted(expected - completed)
-            raise AssertionError(f"authority operations did not succeed before deadline: {missing}")
-        await asyncio.sleep(2.0)
+            if await cur.fetchall() != [("succeeded", operation, operations.run_id)]:
+                raise AssertionError(
+                    f"root release completion lacks succeeded {operation} job {job_id}"
+                )
+        await cur.execute(
+            "SELECT activation.state, activation.cleanup_complete, attempt.state, "
+            "attempt.authority_generation = root.generation, "
+            "attempt.terminal_evidence IS NOT NULL, root.state, root.purpose, root.operation, "
+            "root.activation_id = activation.id, root.system_id = activation.system_id, "
+            "root.run_id = activation.run_id, root.plan_identity = activation.plan_identity, "
+            "root.job_id = receipt.job_id, root.job_attempt = receipt.job_attempt, "
+            "receipt.consumed, "
+            "receipt.adopted_from_root_authority_id IS NULL, head.phase, "
+            "head.authority_id = root.id, head.generation = root.generation, "
+            "head.sequence = receipt.journal_sequence, head.digest = receipt.journal_digest, "
+            "head.head_record->>'operation', "
+            "head.head_record->>'operation_identity' = receipt.operation_identity, "
+            "head.head_record->>'operation_digest' = receipt.operation_digest, "
+            "head.head_record #>> '{observation,category}', "
+            "head.head_record #>> '{observation,composite_state}' = "
+            "receipt.observed_absent_digest, "
+            "(SELECT count(*) FROM external_boot_reservation_releases AS credit "
+            " WHERE credit.activation_id = activation.id), "
+            "NOT EXISTS (SELECT 1 FROM external_boot_reservations AS pending "
+            "            WHERE pending.activation_id = activation.id) "
+            "FROM external_boot_activations AS activation "
+            "JOIN external_boot_recovery_attempts AS attempt "
+            "  ON attempt.activation_id = activation.id "
+            " AND attempt.attempt_id = activation.current_attempt_id "
+            "JOIN external_boot_release_cleanup_receipts AS receipt "
+            "  ON receipt.activation_id = activation.id "
+            "JOIN external_boot_authorities AS root ON root.id = receipt.root_authority_id "
+            "JOIN external_boot_authority_journal_heads AS head "
+            "  ON head.system_id = root.system_id "
+            " AND head.authority_instance = root.authority_instance "
+            "WHERE activation.run_id = %s AND receipt.job_id = %s "
+            "  AND receipt.run_id = activation.run_id AND receipt.system_id = activation.system_id "
+            "  AND receipt.plan_identity = activation.plan_identity",
+            (operations.run_id, operations.release_job_id),
+        )
+        expected = [
+            (
+                "recovered",
+                True,
+                "recovered",
+                True,
+                True,
+                "retired",
+                "release",
+                "release",
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                "terminal",
+                True,
+                True,
+                True,
+                True,
+                "cleanup",
+                True,
+                True,
+                "absent",
+                True,
+                1,
+                True,
+            )
+        ]
+        actual = await cur.fetchall()
+        if actual != expected:
+            raise AssertionError(
+                f"root release completion lacks exact derived finalizer evidence: {actual!r}"
+            )
 
 
 async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig) -> None:
@@ -205,12 +462,12 @@ async def drive_normal_operations(
     client: LiveStackClient,
     config: NativeAuthorityConfig,
     ledger: ResourceLedger,
-) -> tuple[str, str]:
+) -> NormalOperationJobs:
     """Drive activate then release/cleanup through public tools and real job polling.
 
     ``runs.boot`` is the public activation admission. ``runs.release_external_boot`` is the
-    public release admission; its job performs release and the reconciler-created cleanup is
-    observed separately by the native test from durable job markers.
+    public release admission; its one root release job owns the derived recover and cleanup
+    phases, whose durable finalizer evidence the native carrier verifies after polling.
     """
     opened = ok(
         await scalar(
@@ -246,4 +503,9 @@ async def drive_normal_operations(
         "release",
     )
     await drain_job(client, "release", release.object_id)
-    return investigation_id, run_id
+    return NormalOperationJobs(
+        investigation_id=investigation_id,
+        run_id=run_id,
+        activate_job_id=activate.object_id,
+        release_job_id=release.object_id,
+    )

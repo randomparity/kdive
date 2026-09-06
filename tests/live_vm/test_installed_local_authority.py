@@ -16,10 +16,12 @@ from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.spine import LiveStackClient, mint_role_token
 from tests.live_vm.installed_local_authority_support import (
     ResourceLedger,
-    await_completed_operations,
+    assert_root_release_completion,
     drive_normal_operations,
     load_config,
     provision_authority_fixture,
+    require_authority_artifact_confinement,
+    require_deployed_revision,
 )
 
 
@@ -47,10 +49,10 @@ def test_installed_local_authority_normal_operations() -> None:
         "--state=running",
         "--no-legend",
     )
-    assert running_workers, "native authority carrier requires an active fixed worker incarnation"
 
     issuer = require_issuer()
     base_url = require_stack()
+    require_deployed_revision(config, base_url, running_workers)
     db_url = os.environ.get("KDIVE_DATABASE_URL")
     assert db_url, "native authority carrier requires KDIVE_DATABASE_URL"
     token = mint_role_token(
@@ -63,14 +65,13 @@ def test_installed_local_authority_normal_operations() -> None:
 
     async def run() -> None:
         await provision_authority_fixture(db_url, config)
+        require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
             primary: Exception | None = None
             try:
-                _investigation_id, run_id = await drive_normal_operations(client, config, ledger)
-                await await_completed_operations(
-                    db_url, run_id, frozenset({"activate", "release", "cleanup"})
-                )
+                operations = await drive_normal_operations(client, config, ledger)
+                await assert_root_release_completion(db_url, operations)
             except Exception as exc:  # preserve the native failure while still attempting cleanup
                 primary = exc
             cleanup_failures: list[Exception] = []
