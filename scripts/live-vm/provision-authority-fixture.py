@@ -22,7 +22,7 @@ import libvirt
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
-from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
+from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, overlay_name
 
 _AUTHORITY = "kdive-provider-authority"
 _WORKER_URI = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
@@ -76,6 +76,11 @@ def main() -> None:
     if profile.provider.local_libvirt_section is None:
         raise ValueError("authority fixture requires a local-libvirt profile")
     _undefine_worker_domain(system_id)
+    _remove_regular(Path("/var/lib/kdive/rootfs") / overlay_name(system_id))
+    _remove_regular(Path("/var/lib/kdive/console") / f"{system_id}.log")
+    legacy_baseline = Path("/var/lib/kdive/rootfs") / f"{system_id}-baseline"
+    if legacy_baseline.exists():
+        shutil.rmtree(legacy_baseline)
     _remove_regular(Path(overlay_path(system_id)))
     _remove_regular(console_log_path(system_id))
     _remove_baseline(system_id)

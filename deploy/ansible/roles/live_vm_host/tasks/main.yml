@@ -932,8 +932,6 @@
     - "{{ live_vm_host_authority_console_root }}"
   when: live_vm_host_authority_local_mutation_enabled | bool
 
-    - live_vm_host_authority_local_mutation_enabled | bool
-
 - name: Inspect the fixed worker fixture parent without following links
   ansible.builtin.stat:
     path: /var/lib/kdive/fixtures

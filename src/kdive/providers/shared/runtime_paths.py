@@ -30,7 +30,7 @@ ROOTFS_DIR = _fixed_runtime_root("KDIVE_LIBVIRT_ROOTFS_ROOT", "/var/lib/kdive/ro
 #: The host directory an investigation-scoped uploaded rootfs base is staged under, OUTSIDE the
 #: provider ``allowed_roots`` (ADR-0434 §3 / ADR-0441 §5 no-escape). A staged SENSITIVE image is
 #: never reachable as another System's ``local`` staged-path candidate.
-UPLOADS_DIR = str(Path(ROOTFS_DIR).parent / "rootfs-uploads")
+UPLOADS_DIR = "/var/lib/kdive/rootfs-uploads"
 
 # The qemu:///system hypervisor runtime user (in preference order). QEMU's filter-dump writes the
 # pcap as this unprivileged, SELinux-confined user, so the root worker owns the capture directory
