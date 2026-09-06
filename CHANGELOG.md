@@ -268,6 +268,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run module appliance
 - Clean up module attempt volumes
 - Complete module reap runtime
+- Materialize local external boot artifacts
 
 ### Changed
 
@@ -2137,6 +2138,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reopen restore phase evidence
 - Own terminal evidence connections
 - Validate module runtime boundaries
+- Harden external boot materialization retry
+- Narrow projection reopen authority
+- Validate payloads before projection commit
+- Clean interrupted materializer conversion
+- Verify canonical materialized modules
+- Confine module conversion scratch files
+- Bound materializer validation storage
 
 ### Security
 
