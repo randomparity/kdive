@@ -588,7 +588,6 @@ BEGIN
 END $$;
 
 REVOKE ALL ON public.external_boot_release_cleanup_receipts FROM PUBLIC;
-GRANT SELECT ON public.external_boot_release_cleanup_receipts TO kdive_worker;
 REVOKE ALL ON FUNCTION public.derive_external_boot_release_phase_binding(jsonb,text),
     public.resolve_current_external_boot_release_phase_authority(
         text,uuid,bigint,bigint,text,text),

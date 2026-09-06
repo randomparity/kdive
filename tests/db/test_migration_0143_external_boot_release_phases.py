@@ -365,3 +365,16 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
             assert authority == ("retired",)
 
     asyncio.run(run())
+
+
+def test_worker_cannot_read_release_receipts_directly(
+    authority_role_dsns: Callable[[str], str],
+) -> None:
+    async def run() -> None:
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_worker"), autocommit=True
+        ) as worker:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                await worker.execute("SELECT * FROM external_boot_release_cleanup_receipts")
+
+    asyncio.run(run())
