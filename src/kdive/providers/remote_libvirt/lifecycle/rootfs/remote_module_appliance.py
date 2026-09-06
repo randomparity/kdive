@@ -301,19 +301,20 @@ def _read_console(
         # or when the connection closes, not when the Python wrapper is
         # collected, so a worker holding one connection across many invocations
         # would leak a stream per successful appliance run.
-        cancellation_deadline = min(
-            invocation_deadline,
-            request.monotonic() + WAIT_TIMEOUT_SECONDS,
-        )
-        try:
-            request.executor.call(stream.abort, cancellation_deadline)
-        except UnresolvedCallError:
-            # Only a failed read leaves the stream's state load-bearing; after a
-            # complete read the abort is a best-effort server-side release and
-            # must not turn a finished run into an unresolved one.
-            unresolved_rpc = unresolved_rpc or timed_out
-        except libvirt.libvirtError, TimeoutError:
-            pass
+        if not unresolved_rpc:
+            cancellation_deadline = min(
+                invocation_deadline,
+                request.monotonic() + WAIT_TIMEOUT_SECONDS,
+            )
+            try:
+                request.executor.call(stream.abort, cancellation_deadline)
+            except UnresolvedCallError:
+                # Only a failed read leaves the stream's state load-bearing; after a
+                # complete read the abort is a best-effort server-side release and
+                # must not turn a finished run into an unresolved one.
+                unresolved_rpc = timed_out
+            except libvirt.libvirtError, TimeoutError:
+                pass
     text += decoder.decode(b"", final=True)
     text = Redactor(registry=request.secret_registry).redact_text(text)
     text = _filter_console(text)

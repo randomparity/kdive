@@ -976,7 +976,7 @@ def test_genuinely_blocking_console_recv_times_out_and_preserves_recovery() -> N
     try:
         outcome = run_or_adopt_appliance(conn, req)
         assert outcome.timed_out and outcome.result is None
-        assert conn.blocking_stream.aborted
+        assert not conn.blocking_stream.aborted
         assert scratch_reads == 0
         assert conn.domain is not None and not conn.domain.destroyed
     finally:
