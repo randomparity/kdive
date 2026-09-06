@@ -235,6 +235,34 @@ def test_materialize_streams_exact_version_publishes_last_and_retries(tmp_path: 
     assert set(client.requests) == {("build/kernel", "kernel-v1")}
 
 
+def test_materialize_confines_and_closes_conversion_temporaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle()
+    plan = _plan(bundle)
+    session = _Session(tmp_path / "activation")
+    opened: list[BinaryIO] = []
+    directories: list[Path] = []
+    original = external_boot_module.tempfile.TemporaryFile
+
+    def observed_temporary_file(*, dir: str | None = None) -> BinaryIO:
+        assert dir is not None
+        directories.append(Path(dir).resolve())
+        handle = cast(BinaryIO, original(dir=dir))
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(external_boot_module.tempfile, "TemporaryFile", observed_temporary_file)
+    result = RealLocalExternalBootMaterializer(
+        ObjectStore(_Client({("build/kernel", "kernel-v1"): bundle}), "bucket")
+    ).materialize(plan, cast(LocalExternalBootSession, session))
+
+    projection = session.reopen_projection(result.artifacts.kernel)
+    expected = session.root / projection.digest.removeprefix("sha256:")
+    assert directories and set(directories) == {expected}
+    assert all(handle.closed for handle in opened)
+
+
 class _InterruptedBody(_Body):
     def __init__(self, data: bytes) -> None:
         super().__init__(data)
@@ -291,9 +319,13 @@ def test_interrupted_module_conversion_cleans_temporaries_for_new_session_retry(
     original = external_boot_module.convert_kernel_bundle_modules
 
     def interrupt_conversion(
-        source: BinaryIO, destination: BinaryIO, *, release: str
+        source: BinaryIO,
+        destination: BinaryIO,
+        *,
+        release: str,
+        temporary_directory: str | None = None,
     ) -> tuple[str, int]:
-        del source, release
+        del source, release, temporary_directory
         destination.write(b"partial")
         raise OSError("injected module conversion interruption")
 

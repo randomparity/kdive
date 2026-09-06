@@ -451,14 +451,18 @@ class _ConvertedMember:
 
 
 def convert_kernel_bundle_modules(
-    source: BinaryIO, destination: BinaryIO, *, release: str
+    source: BinaryIO,
+    destination: BinaryIO,
+    *,
+    release: str,
+    temporary_directory: str | None = None,
 ) -> tuple[str, int]:
     """Convert one raw bundle module tree into Task 2's canonical archive."""
     prefix = f"lib/modules/{release}/"
     entries: list[_ConvertedMember] = []
     seen: set[str] = set()
     regular_bytes = 0
-    with tempfile.TemporaryFile() as content:
+    with tempfile.TemporaryFile(dir=temporary_directory) as content:
         with tarfile.open(fileobj=source, mode="r|gz") as archive:
             for member in archive:
                 if member.name == "boot/vmlinuz" or member.name in {
@@ -510,7 +514,7 @@ def convert_kernel_bundle_modules(
                 )
                 if len(entries) > MAX_ENTRIES:
                     raise ValueError("module bundle exceeds the entry-count bound")
-        with tempfile.TemporaryFile() as converted:
+        with tempfile.TemporaryFile(dir=temporary_directory) as converted:
             with tarfile.open(fileobj=converted, mode="w", format=tarfile.PAX_FORMAT) as output:
                 for entry in sorted(entries, key=lambda value: value.name.encode()):
                     info = tarfile.TarInfo(entry.name)
@@ -996,6 +1000,7 @@ class RealLocalExternalBootMaterializer:
         )
 
     def _fetch_and_validate(self, plan: ExternalBootPlan, directory_fd: int) -> None:
+        temporary_directory = f"/proc/self/fd/{directory_fd}"
         bundle_fd = _stream_exact_version(
             self._object_store, plan.bundle, directory_fd, ".bundle.next"
         )
@@ -1020,7 +1025,10 @@ class RealLocalExternalBootMaterializer:
                     os.fdopen(os.dup(modules_fd), "wb") as destination,
                 ):
                     convert_kernel_bundle_modules(
-                        source, destination, release=plan.module_obligation.release
+                        source,
+                        destination,
+                        release=plan.module_obligation.release,
+                        temporary_directory=temporary_directory,
                     )
                 os.fsync(modules_fd)
             finally:
@@ -1069,6 +1077,7 @@ class RealLocalExternalBootMaterializer:
     def _validate_local_bundle(
         self, plan: ExternalBootPlan, directory_fd: int
     ) -> tuple[dict[str, object], str]:
+        temporary_directory = f"/proc/self/fd/{directory_fd}"
         bundle_fd = _stream_exact_version(
             self._object_store, plan.bundle, directory_fd, ".bundle.verify"
         )
@@ -1076,13 +1085,14 @@ class RealLocalExternalBootMaterializer:
             evidence = self._validate_bundle_evidence(plan, bundle_fd)
             os.lseek(bundle_fd, 0, os.SEEK_SET)
             with (
-                tempfile.TemporaryFile() as expected_modules,
+                tempfile.TemporaryFile(dir=temporary_directory) as expected_modules,
                 os.fdopen(os.dup(bundle_fd), "rb") as source,
             ):
                 expected_modules_digest, expected_modules_size = convert_kernel_bundle_modules(
                     source,
                     expected_modules,
                     release=plan.module_obligation.release,
+                    temporary_directory=temporary_directory,
                 )
         finally:
             os.close(bundle_fd)
