@@ -380,12 +380,12 @@ def test_real_receipt_guards_two_real_volume_creates(
         def build(self, operation: bytes, entries: tuple[ModuleTreeEntry, ...]) -> BuiltSourceImage:
             self.operation = operation
             path = tmp_path / "source.ext4"
-            path.write_bytes(b"image")
+            path.write_bytes(b"image" + bytes(4096 - len(b"image")))
             evidence = SourceFilesystemEvidence(operation, "sha256:" + "d" * 64, 1, 3)
-            return BuiltSourceImage(path, 5, evidence)
+            return BuiltSourceImage(path, 4096, evidence)
 
         def inspect(self, path: Path) -> SourceFilesystemEvidence:
-            assert path.read_bytes() == b"image"
+            assert path.read_bytes().startswith(b"image") and path.stat().st_size == 4096
             return SourceFilesystemEvidence(self.operation, "sha256:" + "d" * 64, 1, 3)
 
     async def run() -> None:
@@ -475,8 +475,68 @@ def test_real_receipt_guards_two_real_volume_creates(
                             conn, attempt, reason="restored"
                         )
             release.set()
-            await task
+            prepared = await task
             assert len(storage.pool.volumes) == 2
+            installed = RemoteModuleResultV1.model_validate(_result()).model_copy(
+                update={
+                    "system_id": operation.system_id,
+                    "run_id": operation.run_id,
+                    "operation_nonce": operation.operation_nonce,
+                }
+            )
+            restored = installed.model_copy(
+                update={
+                    "phase": "restored",
+                    "capture_manifest": None,
+                    "capture_absent": True,
+                    "entry_count": None,
+                    "content_bytes": None,
+                }
+            )
+            installed_baseline = restored.model_copy(
+                update={
+                    "phase": "installed",
+                    "entry_count": installed.entry_count,
+                    "content_bytes": installed.content_bytes,
+                }
+            )
+            recovery = _recovery(restored).model_copy(
+                update={
+                    "pool": OpaqueProviderRef(ref="systems"),
+                    "source_volume": OpaqueProviderRef(ref=prepared.source.name),
+                    "scratch_volume": OpaqueProviderRef(ref=prepared.scratch.name),
+                    "source_capacity_bytes": prepared.source.capacity_bytes,
+                    "installed_entry_count": installed.entry_count,
+                    "installed_content_bytes": installed.content_bytes,
+                    "result_identity": identity_for(installed_baseline),
+                }
+            )
+            terminal = RemoteModuleOperationRuntime._restore_operation(operation, restored)
+            evidence = ModuleAttemptTerminalEvidence(
+                terminal_operation=terminal.model_dump(mode="json"),
+                terminal_operation_identity=identity_for(terminal),
+                terminal_result=restored.model_dump(mode="json"),
+                terminal_result_identity=identity_for(restored),
+                baseline_operation_identity=recovery.operation_identity,
+                baseline_result_identity=recovery.result_identity,
+                installed_entry_count=recovery.installed_entry_count or 0,
+                installed_content_bytes=recovery.installed_content_bytes or 0,
+                recovery_reference=recovery.model_dump(mode="json"),
+            )
+            async with server.connection() as conn, conn.transaction():
+                await repository.record_terminal_evidence(conn, attempt, evidence)
+
+            async def absent(_recovery: RemoteModuleRecoveryRefV2) -> None:
+                return None
+
+            restarted = RemoteModuleOperationRuntime(
+                worker,
+                repository,
+                absent,
+                volume_recovery=RemoteModuleVolumeRecovery(storage, "systems"),
+            )
+            assert await restarted.reopen_operation(recovery) == terminal
+            assert restarted._recovery_volumes(terminal, recovery) == prepared
             async with server.connection() as conn, conn.transaction():
                 await repository.discharge_mutation_obligation(conn, attempt, reason="restored")
             before = len(storage.pool.volumes)
