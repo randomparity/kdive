@@ -83,7 +83,10 @@ platform-internal worker-check convention. Project naming is not an isolation bo
 may legitimately have the same project name. `REMOTE_MODULE_VOLUME_REAP` is therefore classified
 by kind as platform-internal. Tenant `jobs.list`, point read/wait, and cancel surfaces exclude it
 before project-role evaluation even when the caller is a member of a colliding `remote-libvirt`
-project. The existing platform-operator `ops.jobs_list` surface remains able to observe the row.
+project. `jobs.list` applies the exclusion within `queue.recent_jobs` SQL before the keyset seek,
+ordering, and `LIMIT`, so hidden rows cannot consume the page budget or alter tenant cursors and
+truncation. The existing platform-operator `ops.jobs_list` query remains unchanged and able to
+observe the row.
 
 Queue uniqueness admits at most one row for the stable key. Each reconciler pass uses terminal
 recycling: an existing queued or running job remains unchanged, while a succeeded, failed, or
@@ -181,8 +184,9 @@ reconciler pass recycles the stable row and re-derives all state.
 - Public errors expose only configured pool and volume identifiers. Connection credentials,
   domain XML, paths, and host identities do not enter error details.
 - `REMOTE_MODULE_VOLUME_REAP` belongs to a shared platform-internal job-kind set consumed by every
-  tenant list/read/wait/cancel path. Denials retain the ordinary not-found-shaped response, while
-  the existing platform-operator queue view continues to include the kind.
+  tenant list/read/wait/cancel path. The tenant repository excludes the set before pagination;
+  point denials retain the ordinary not-found-shaped response. The existing platform-operator
+  queue query does not consume this filter and continues to include the kind.
 - The stable queue key admits one in-flight sweep; terminal recycling, worker leases, and
   idempotent missing-volume deletion make retries and process restart convergent. Queue payload
   validation rejects extra or alternate fields before provider work.

@@ -213,10 +213,12 @@ The reconciler enqueues it under stable key `remote-module-volume-reap:v1`, with
 principal/project `remote-libvirt`, terminal recycling, and the ordinary bounded worker-attempt
 contract. Because tenant project names are not reserved, classify the job kind in a shared
 platform-internal set rather than relying on that synthetic project for isolation. Every tenant
-`jobs.list`, point read/wait, and cancel path denies the kind before project-role evaluation,
-including a caller with a colliding `remote-libvirt` project; the existing platform-operator
-`ops.jobs_list` path remains unchanged and can observe it. No Resource, endpoint, credential,
-path, or owner enters the payload. The worker handler
+point-read/wait and cancel path denies the kind before project-role evaluation, including a
+caller with a colliding `remote-libvirt` project. Tenant `jobs.list` passes the platform-internal
+set into `queue.recent_jobs`, which excludes those kinds in SQL before its keyset predicate,
+ordering, and `LIMIT`; no post-fetch filter may consume or distort a visible page. The existing
+platform-operator `ops.jobs_list` query remains unchanged and can observe internal jobs. No
+Resource, endpoint, credential, path, or owner enters the payload. The worker handler
 constructs the concrete reaper from `WorkerHandlerAssembly`, whose active incarnation credential
 is borrowed only by the typed sender, and calls it with a retained-owner callback over the claimed
 job's database connection. The callback expands mutation retention to `source.ext4` and
@@ -269,10 +271,14 @@ reaper or sender parameter.
    recycle, concurrent admissions yield one active row, failed work retries within the bounded
    worker attempt contract, and an expired lease is reclaimed after worker restart.
 3. Classify `REMOTE_MODULE_VOLUME_REAP` as platform-internal in the job domain and consume that
-   classification in all tenant list/read/wait/cancel paths before project authorization. Prove a
-   tenant whose project is literally `remote-libvirt` cannot list, read, wait for, or cancel the
-   maintenance job; prove an ordinary job in that same project remains accessible; and prove the
-   existing platform-admin queue view still lists the internal job.
+   classification in all tenant list/read/wait/cancel paths before project authorization. Extend
+   `queue.recent_jobs` with the fixed platform-internal exclusion and apply its SQL predicate before
+   keyset seek, ordering, and `LIMIT`; leave `all_recent_jobs` and the platform-admin path unchanged.
+   Prove a tenant whose project is literally `remote-libvirt` cannot read, wait for, or cancel the
+   maintenance job. For listing, place enough newer internal rows to fill a requested page ahead of
+   ordinary jobs in the colliding project, then prove the ordinary rows, full-page size,
+   `truncated`, and cursor continuation are identical to a page without the hidden rows. Prove the
+   platform-admin queue view still lists the internal job.
 4. Convert the reconciler lane to
    `enqueue_remote_module_volume_reap(conn: AsyncConnection) -> bool`, enqueueing the constant
    payload. Register
