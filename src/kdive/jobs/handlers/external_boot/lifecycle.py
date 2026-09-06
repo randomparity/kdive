@@ -8,9 +8,12 @@ handler returns its result and the worker commits it under ``_authority_binding_
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Final, cast
+from typing import Any, Final, LiteralString, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
@@ -39,6 +42,7 @@ from kdive.jobs.handlers.external_boot.runner import (
 from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
+    ExternalBootDerivedReleaseCompletion,
 )
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
@@ -75,6 +79,211 @@ _CLEANUP_STATES: Final = frozenset(
 )
 _TEARDOWN_STATES: Final = frozenset({State.RECOVERY_CONFLICT, State.RECOVERY_FAILED})
 _ORDINARY_CLEANUP_STATES: Final = frozenset({State.RECOVERED, State.ABANDONED})
+
+
+async def _derived_release_status(
+    conn: AsyncConnection, sql: LiteralString, args: tuple[Any, ...]
+) -> str:
+    async with conn.cursor() as cur:
+        await cur.execute(sql, args)
+        row = await cur.fetchone()
+    if row is None or row[0] not in {"applied", "superseded", "conflict", "not_applicable"}:
+        raise RuntimeError("derived release function returned an invalid status")
+    return str(row[0])
+
+
+def _release_phase(context: OperationContext, operation: str) -> tuple[str, str]:
+    root = {
+        "authority_id": str(context.authority.authority_id),
+        "generation": context.authority.generation,
+        "system_id": str(context.marker.system_id),
+        "activation_id": str(context.marker.activation_id),
+        "run_id": str(context.marker.run_id),
+        "plan_identity": context.marker.plan_identity,
+        "provider_kind": context.marker.provider_kind,
+        "authority_instance": context.marker.authority_instance,
+        "worker_incarnation": context.job.worker_id,
+        "root_operation_identity": context.marker.operation_identity,
+        "root_operation_digest": context.authority.operation_digest,
+    }
+    canonical = json.dumps(root | {"operation": operation}, sort_keys=True, separators=(",", ":"))
+    identity = hashlib.sha256(
+        b"kdive-external-boot-release-phase-identity-v1\0" + canonical.encode()
+    ).hexdigest()
+    digest = hashlib.sha256(
+        b"kdive-external-boot-release-phase-digest-v1\0" + canonical.encode()
+    ).hexdigest()
+    return f"sha256:{identity}", f"sha256:{digest}"
+
+
+def _derived_request(context: OperationContext, operation: str) -> AuthorityMutationRequestV1:
+    recovery = _recovery(context)
+    identity, digest = _release_phase(context, operation)
+    return AuthorityMutationRequestV1.model_validate(
+        {
+            "authority_id": context.authority.authority_id,
+            "generation": context.authority.generation,
+            "system_id": context.marker.system_id,
+            "activation_id": context.marker.activation_id,
+            "run_id": context.marker.run_id,
+            "plan_identity": context.marker.plan_identity,
+            "purpose": "release",
+            "operation": operation,
+            "provider_kind": context.marker.provider_kind,
+            "authority_instance": context.marker.authority_instance,
+            "operation_identity": identity,
+            "operation_digest": digest,
+            "attempt_id": uuid5(NAMESPACE_URL, identity),
+            "expected_source_identity": recovery.source_state.definition,
+            "intended_target_identity": recovery.target_state.definition,
+            "recovery_objects": (
+                ()
+                if operation == "recover"
+                else (
+                    RecoveryObjectBindingV1(
+                        system_id=context.marker.system_id,
+                        activation_id=context.marker.activation_id,
+                        reference=recovery.recovery_ref.ref,
+                    ),
+                )
+            ),
+        }
+    )
+
+
+async def _run_active_release(context: OperationContext) -> ExternalBootDerivedReleaseCompletion:
+    """Commit the two derived mutations before the one root release completion."""
+    executor = context.prerequisites.get("authority_executor")
+    if executor is None:
+        raise _refuse("no external-boot authority executor is configured")
+    credential = context.prerequisites["incarnation_credential"]
+    recover = _derived_request(context, "recover")
+    if context.activation.state is not State.RECOVERED:
+        status = await _derived_release_status(
+            context.prerequisites["connection"],
+            "SELECT public.begin_external_boot_derived_release_recovery(%s,%s,%s,%s,%s,%s,%s)",
+            (
+                credential,
+                context.job.id,
+                context.job.attempt,
+                context.authority.authority_id,
+                context.authority.generation,
+                recover.attempt_id,
+                context.prerequisites["deadline"],
+            ),
+        )
+        if status != "applied":
+            raise CategorizedError(
+                "derived release recovery was superseded", category=ErrorCategory.STALE_HANDLE
+            )
+        observed = await cast(ExternalBootAuthorityExecutor, executor).execute(recover)
+        _require_category(context, observed, "source")
+        evidence = terminal_evidence(context, "recovered")
+        status = await _derived_release_status(
+            context.prerequisites["connection"],
+            "SELECT public.commit_external_boot_derived_release_recovery("
+            "%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+            (
+                credential,
+                context.job.id,
+                context.job.attempt,
+                context.authority.authority_id,
+                context.authority.generation,
+                recover.operation_identity,
+                recover.operation_digest,
+                json.dumps(evidence),
+            ),
+        )
+        if status != "applied":
+            raise CategorizedError(
+                "derived release recovery commit was superseded",
+                category=ErrorCategory.STALE_HANDLE,
+            )
+    cleanup = _derived_request(context, "cleanup")
+    observed = await cast(ExternalBootAuthorityExecutor, executor).execute(cleanup)
+    _require_category(context, observed, "absent")
+    status = await _derived_release_status(
+        context.prerequisites["connection"],
+        "SELECT public.adopt_external_boot_release_cleanup_receipt_from_head(%s,%s,%s,%s,%s,%s)",
+        (
+            credential,
+            context.job.id,
+            context.job.attempt,
+            context.authority.authority_id,
+            context.authority.generation,
+            observed.composite_state,
+        ),
+    )
+    if status == "not_applicable":
+        status = await _derived_release_status(
+            context.prerequisites["connection"],
+            "SELECT public.record_external_boot_release_cleanup_receipt_from_head("
+            "%s,%s,%s,%s,%s,%s)",
+            (
+                credential,
+                context.job.id,
+                context.job.attempt,
+                context.authority.authority_id,
+                context.authority.generation,
+                observed.composite_state,
+            ),
+        )
+    if status != "applied":
+        raise CategorizedError(
+            "derived release cleanup receipt was superseded", category=ErrorCategory.STALE_HANDLE
+        )
+    reservation = context.prerequisites["reservation"]
+    release = {
+        "schema": "external-boot-release-evidence-v1",
+        "activation_id": str(context.marker.activation_id),
+        "system_id": str(context.marker.system_id),
+        "store_identity": {"ref": reservation["store_identity"]},
+        "owner_key": {"ref": reservation["owner_key"]},
+        "reserved_bytes": reservation["reserved_bytes"],
+        "enumeration_complete": True,
+        "objects": [],
+        "verified_at": _now(),
+    }
+    identity = evidence_digest(release)
+    cleanup_evidence = {
+        "schema": "external-boot-cleanup-evidence-v1",
+        "activation_id": str(context.marker.activation_id),
+        "system_id": str(context.marker.system_id),
+        "release_identity": identity,
+        "mode": "ordinary",
+        "completed_at": _now(),
+    }
+    status = await _derived_release_status(
+        context.prerequisites["connection"],
+        "SELECT public.finalize_external_boot_derived_release("
+        "%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)",
+        (
+            credential,
+            context.job.id,
+            context.job.attempt,
+            context.authority.authority_id,
+            context.authority.generation,
+            identity,
+            json.dumps(release),
+            json.dumps(cleanup_evidence),
+        ),
+    )
+    if status != "applied":
+        raise CategorizedError(
+            "derived release finalization was superseded", category=ErrorCategory.STALE_HANDLE
+        )
+    return ExternalBootDerivedReleaseCompletion.model_validate(
+        authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "release",
+                "result_ref": None,
+                "release_identity": identity,
+                "evidence": release,
+            },
+        ).model_dump(mode="json", by_alias=True)
+    )
 
 
 def _refuse(message: str) -> CategorizedError:
@@ -637,43 +846,61 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     that is deferral record 0010, which this handler neither introduces nor resolves.
     """
 
-    def build(
-        context: OperationContext, observation: AuthorityObservationV1
+    async def complete(context: OperationContext) -> ExternalBootDerivedReleaseCompletion:
+        prerequisites = dict(context.prerequisites)
+        prerequisites.update(
+            connection=context.prerequisites["connection"],
+            incarnation_credential=hashlib.sha256(
+                ports.incarnation_credential.get_secret_value().encode("utf-8")
+            ).digest(),
+            deadline=_request_deadline(context, ports.clock() + ports.recovery_readiness_timeout),
+        )
+        return await _run_active_release(replace(context, prerequisites=prerequisites))
+
+    async def handler(
+        conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
     ) -> ExternalBootAuthoritySuccessV1:
-        reservation = context.prerequisites["reservation"]
-        evidence = {
-            "schema": "external-boot-release-evidence-v1",
-            "activation_id": str(context.marker.activation_id),
-            "system_id": str(context.marker.system_id),
-            "store_identity": {"ref": reservation["store_identity"]},
-            "owner_key": {"ref": reservation["owner_key"]},
-            "reserved_bytes": reservation["reserved_bytes"],
-            "enumeration_complete": True,
-            "objects": [],
-            "verified_at": _now(),
-        }
-        return authority_result(
-            context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "release",
-                "result_ref": None,
-                "release_identity": evidence_digest(evidence),
-                "evidence": evidence,
-            },
+        return cast(
+            ExternalBootAuthoritySuccessV1,
+            await run_operation(
+                conn,
+                job,
+                marker,
+                ports=ports,
+                require_activation_state=frozenset(
+                    {State.ACTIVE, State.RECOVERING, State.RECOVERED}
+                ),
+                require_activation_evidence=_ACTIVATION_EVIDENCE,
+                require_preconditions=lambda conn, activation, marker: _with_executor(
+                    _release_prerequisites, ports, conn, activation, marker
+                ),
+                call_port=_unreachable_release_port,
+                build_result=_unreachable_release_result,
+                before_port=complete,
+            ),
         )
 
-    return _handler(
-        ports,
-        require_activation_state=_RECOVERY_STATES,
-        # Require the complete persisted activation evidence pair before releasing its reservation.
-        # Only `recovery_point` feeds the source-authority observation, but the domain model binds
-        # it to `materialization`; checking both keeps a partial row from reaching allocation.
-        require_activation_evidence=_ACTIVATION_EVIDENCE,
-        require_preconditions=_require_releasable,
-        expected_observation="source",
-        build_result=build,
-    )
+    return handler
+
+
+def _unreachable_release_port(_context: OperationContext) -> None:
+    raise AssertionError("derived release completion must run before a provider port")
+
+
+def _unreachable_release_result(
+    _context: OperationContext, _observation: object
+) -> ExternalBootDerivedReleaseCompletion:
+    raise AssertionError("derived release completion must run before result construction")
+
+
+async def _release_prerequisites(
+    conn: AsyncConnection,
+    activation: ExternalBootActivation,
+    marker: ExternalBootAuthorityMarkerV1,
+) -> Mapping[str, Any]:
+    values = dict(await _require_releasable(conn, activation, marker))
+    values["connection"] = conn
+    return values
 
 
 def _cleanup_evidence(

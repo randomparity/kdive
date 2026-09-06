@@ -18,6 +18,7 @@ from kdive.db.external_boot_authority_journal import (
     resolve_current_authority_binding,
     resolve_current_authority_candidate,
     resolve_current_preparation_authority_binding,
+    resolve_current_release_phase_authority_binding,
 )
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
@@ -103,6 +104,27 @@ class DatabaseAuthorityRepository:
             raise ValueError("preparation authority operation must be materialize or prepare")
         async with self._connections() as conn, conn.transaction():
             return await resolve_current_preparation_authority_binding(
+                conn,
+                peer_incarnation_id=str(peer.incarnation_id),
+                authority_id=request.authority_id,
+                generation=request.generation,
+                acknowledgement_sequence=acknowledgement_sequence,
+                acknowledgement_digest=acknowledgement_digest,
+                operation=operation,
+            )
+
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None:
+        operation = request.operation.value
+        if operation not in {"recover", "cleanup"}:
+            raise ValueError("release phase operation must be recover or cleanup")
+        async with self._connections() as conn, conn.transaction():
+            return await resolve_current_release_phase_authority_binding(
                 conn,
                 peer_incarnation_id=str(peer.incarnation_id),
                 authority_id=request.authority_id,

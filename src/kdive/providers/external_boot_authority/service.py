@@ -145,6 +145,17 @@ class AuthorityPreparationRepository(Protocol):
     ) -> AuthorityBinding | None: ...
 
 
+@runtime_checkable
+class AuthorityReleasePhaseRepository(Protocol):
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None: ...
+
+
 class AuthorityServiceError(RuntimeError):
     """Bounded failure safe to expose across the authority boundary."""
 
@@ -433,6 +444,25 @@ class ExternalBootAuthorityService:
             and binding.authority_instance == request.authority_instance
         )
 
+    @staticmethod
+    def _root_candidate_matches_release_phase(
+        binding: AuthorityBinding, request: AuthorityMutationRequestV1
+    ) -> bool:
+        return (
+            request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+            and binding.authority_id == request.authority_id
+            and binding.generation == request.generation
+            and binding.system_id == request.system_id
+            and binding.activation_id == request.activation_id
+            and binding.run_id == request.run_id
+            and binding.plan_identity == request.plan_identity
+            and binding.purpose == "release"
+            and binding.operation is AuthorityOperation.RELEASE
+            and binding.provider_kind == request.provider_kind
+            and binding.authority_instance == request.authority_instance
+        )
+
     async def _resolve_confirmed(
         self,
         peer: AuthenticatedPeer,
@@ -443,6 +473,18 @@ class ExternalBootAuthorityService:
             if not isinstance(self._repository, AuthorityPreparationRepository):
                 return None
             return await self._repository.resolve_current_preparation(
+                peer,
+                request,
+                acknowledgement.sequence,
+                record_digest(acknowledgement),
+            )
+        if request.purpose == "release" and request.operation in {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.CLEANUP,
+        }:
+            if not isinstance(self._repository, AuthorityReleasePhaseRepository):
+                return None
+            return await self._repository.resolve_current_release_phase(
                 peer,
                 request,
                 acknowledgement.sequence,
@@ -1092,6 +1134,9 @@ class ExternalBootAuthorityService:
         candidate_matches = trusted is not None and (
             self._root_candidate_matches_preparation(trusted, request)
             if isinstance(request, AuthorityPreparationMutationRequestV1)
+            else self._root_candidate_matches_release_phase(trusted, request)
+            if request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
             else self._binding_matches(trusted, request)
         )
         if not candidate_matches:
@@ -1134,6 +1179,7 @@ class ExternalBootAuthorityService:
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
                     predecessor_receipt_identity: str | None = None
+                    adopted_release_phase: AuthorityObservationV1 | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1173,6 +1219,50 @@ class ExternalBootAuthorityService:
                             )
                             if not self._operation_matches(predecessor_record, predecessor):
                                 raise AuthorityServiceError("journal_conflict")
+                    if request.purpose == "release" and request.operation in {
+                        AuthorityOperation.RECOVER,
+                        AuthorityOperation.CLEANUP,
+                    }:
+                        prior_release_phase = next(
+                            (
+                                record
+                                for record in reversed(records)
+                                if record.phase is JournalPhase.TERMINAL
+                                and record.operation == request.operation
+                                and record.generation < request.generation
+                            ),
+                            None,
+                        )
+                        if prior_release_phase is not None:
+                            candidate = request.model_copy(
+                                update={
+                                    "authority_id": prior_release_phase.authority_id,
+                                    "generation": prior_release_phase.generation,
+                                    "attempt_id": prior_release_phase.attempt_id,
+                                    "operation_identity": prior_release_phase.operation_identity,
+                                    "operation_digest": prior_release_phase.operation_digest,
+                                    "expected_source_identity": (
+                                        prior_release_phase.expected_source_identity
+                                    ),
+                                    "intended_target_identity": (
+                                        prior_release_phase.intended_target_identity
+                                    ),
+                                    "recovery_objects": prior_release_phase.recovery_objects,
+                                }
+                            )
+                            expected_outcome = (
+                                "source"
+                                if request.operation is AuthorityOperation.RECOVER
+                                else "absent"
+                            )
+                            if (
+                                prior_release_phase.outcome != expected_outcome
+                                or prior_release_phase.observation is None
+                                or prior_release_phase.observation.category != expected_outcome
+                                or not self._operation_matches(prior_release_phase, candidate)
+                            ):
+                                raise AuthorityServiceError("journal_conflict")
+                            adopted_release_phase = prior_release_phase.observation
                     unresolved = next(
                         (
                             record
@@ -1282,7 +1372,7 @@ class ExternalBootAuthorityService:
                             cast(str, predecessor_receipt_identity),
                             context,
                         )
-                    else:
+                    elif adopted_release_phase is None:
                         await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
@@ -1299,7 +1389,11 @@ class ExternalBootAuthorityService:
                         self._record(request, records, JournalPhase.PROVIDER_RETURNED),
                     )
                 try:
-                    observation = await self._adapter.observe(request)
+                    observation = (
+                        adopted_release_phase
+                        if adopted_release_phase is not None
+                        else await self._adapter.observe(request)
+                    )
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.

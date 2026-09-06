@@ -1,5 +1,18 @@
 # External-boot job payloads and lifecycle handlers — design
 
+## Amendment — active release completion (2026-09-06)
+
+ADR-0614 replaces this specification's former separate `release` then `cleanup` completion for an
+active public request. The immutable public `purpose=release`, `operation=release` marker owns
+derived `recover` and `cleanup` authority phases. Capacity is credited only after an exact terminal
+cleanup receipt is consumed by the root finalizer.
+
+An interrupted root attempt is retired rather than rebound. A later claimed worker takes an
+ordinary fresh root authority. It may adopt an immutable prior cleanup receipt only after the
+authority journal proves the exact old terminal `absent` cleanup observation; the fresh receipt is
+provenance-linked to the retired root and the provider cleanup call does not repeat. Recovery-only
+restart performs fresh cleanup. A stale old authority or mismatched terminal evidence is refused.
+
 Issue: [#2205](https://github.com/randomparity/kdive/issues/2205). Parent: #2118. Blocker:
 #2201, merged as `951fbaea0`. Decision record:
 [ADR-0593](../../adr/0593-external-boot-operations-ride-marked-boot-and-teardown-jobs.md).
