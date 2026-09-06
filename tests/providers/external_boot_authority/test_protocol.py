@@ -26,7 +26,7 @@ from kdive.providers.external_boot_authority.protocol import (
     decode_authority_request,
     record_digest,
 )
-from kdive.providers.ports.external_boot import ExternalBootPlan
+from tests.support.external_boot_plan import external_boot_plan
 
 _DIGEST = "sha256:" + "a" * 64
 _OTHER_DIGEST = "sha256:" + "b" * 64
@@ -98,52 +98,9 @@ def _mutation(**changes: object) -> AuthorityMutationRequestV1:
     return AuthorityMutationRequestV1.model_validate(values)
 
 
-def _plan(system_id: object, run_id: object) -> ExternalBootPlan:
-    zero = "sha256:" + "0" * 64
-    return ExternalBootPlan.model_validate(
-        {
-            "architecture": "x86_64",
-            "bundle": {
-                "decoded_kernel_size_bytes": 200,
-                "elf_metadata_bytes": 50,
-                "gnu_build_id_size_bytes": 20,
-                "key": "bundles/kernel.tar",
-                "member_count": 2,
-                "sha256": zero,
-                "uncompressed_bytes": 101,
-                "version": "v1",
-                "vmlinuz_sha256": zero,
-                "vmlinuz_size_bytes": 100,
-            },
-            "cmdline": "root=UUID=x",
-            "debug_cmdline": None,
-            "initrd": None,
-            "module_obligation": {
-                "member_count": 1,
-                "release": "6.12.0",
-                "source_manifest": zero,
-                "uncompressed_bytes": 1,
-            },
-            "ownership": {
-                "build_generation": "00000000-0000-0000-0000-000000000001",
-                "run_id": str(run_id),
-                "system_id": str(system_id),
-            },
-            "platform_arguments": ["root=UUID=x"],
-            "root": {
-                "architecture": "x86_64",
-                "arguments": ["root=UUID=x"],
-                "authority": "stage-inspection",
-                "root": "UUID=x",
-                "source": {"identity": zero, "kind": "staged-image"},
-            },
-        }
-    )
-
-
 def _preparation(**changes: object) -> AuthorityPreparationMutationRequestV1:
     values = _binding()
-    plan = _plan(values["system_id"], values["run_id"])
+    plan = external_boot_plan(UUID(str(values["system_id"])), UUID(str(values["run_id"])))
     values.update(
         operation="materialize",
         purpose="activate",
@@ -206,7 +163,7 @@ def test_preparation_request_binds_exact_plan_identity_and_ownership() -> None:
     request = _preparation()
     with pytest.raises(ValidationError, match="bound identity"):
         _preparation(plan_identity=_DIGEST)
-    foreign = _plan(uuid4(), request.run_id)
+    foreign = external_boot_plan(uuid4(), request.run_id)
     with pytest.raises(ValidationError, match="ownership"):
         _preparation(plan=foreign, plan_identity=foreign.identity)
 

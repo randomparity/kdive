@@ -30,6 +30,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     operation_is_permitted,
 )
+from kdive.providers.ports.external_boot import ExternalBootPlan
 
 EXTERNAL_BOOT_AUTHORITY_MARKER_KEY: Final = "external_boot_authority_v1"
 """The top-level JSONB key an authority marker rides under (ADR-0593).
@@ -413,17 +414,29 @@ class BootPayload(RunPayload):
     """
 
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
+    external_boot_plan_v1: ExternalBootPlan | None = None
 
     @model_validator(mode="after")
     def _marker_agrees_with_the_job(self) -> BootPayload:
         marker = self.external_boot_authority_v1
         if marker is None:
+            if self.external_boot_plan_v1 is not None:
+                raise ValueError("external boot plan requires an authority marker")
             return self
         if marker.purpose == "teardown":
             raise ValueError("external boot marker purpose 'teardown' rides a teardown job")
         if marker.run_id != UUID(self.run_id):
             raise ValueError("external boot marker run_id must equal the payload run_id")
         _validated_marker_operation(marker)
+        plan = self.external_boot_plan_v1
+        if plan is not None and (
+            marker.purpose != "activate"
+            or marker.operation != "activate"
+            or plan.identity != marker.plan_identity
+            or plan.ownership.system_id != str(marker.system_id)
+            or plan.ownership.run_id != str(marker.run_id)
+        ):
+            raise ValueError("external boot plan does not match its activate marker")
         return self
 
 
@@ -572,6 +585,11 @@ def dump_payload(kind: JobKind, payload: ActivePayloadModel | dict[str, Any]) ->
     except ValidationError as exc:
         raise _validation_error(f"{kind.value} payload", exc) from exc
     dumped = model.model_dump(mode="json", exclude_none=True, by_alias=True)
+    if isinstance(model, BootPayload) and model.external_boot_plan_v1 is not None:
+        # The plan's explicit nulls are part of its canonical identity and must survive JSONB.
+        dumped["external_boot_plan_v1"] = model.external_boot_plan_v1.model_dump(
+            mode="json", by_alias=True
+        )
     if EXTERNAL_BOOT_AUTHORITY_MARKER_KEY in dumped and kind not in _MARKED_JOB_KINDS:
         # Subclassing leaves one hole, closed here rather than at each of the many call sites:
         # TeardownPayload *is* a SystemPayload, so the isinstance above accepts a marked one for
