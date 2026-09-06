@@ -171,6 +171,32 @@ def test_worker_validation_does_not_require_authority_host_settings() -> None:
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_worker_local_binding_matches_provisioned_authority_socket_and_refs() -> None:
+    from kdive.providers.external_boot_authority.local_client import local_authority_binding
+    from kdive.providers.external_boot_authority.settings import AUTHORITY_REQUEST_SOCKET
+
+    socket_path = "/run/kdive/provider-authority/request/authority.sock"
+    client_key_ref = "worker-client-key"  # pragma: allowlist secret - fixture reference
+    config_registry.load(
+        {
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": socket_path,
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": socket_path,
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": "authority-server-ca",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": "worker-client-cert",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": client_key_ref,
+        }
+    )
+    binding = local_authority_binding()
+    assert binding is not None
+    assert binding.request_socket == config_registry.require(AUTHORITY_REQUEST_SOCKET)
+    assert (
+        binding.server_ca_ref,
+        binding.client_cert_ref,
+        binding.client_key_ref,
+    ) == ("authority-server-ca", "worker-client-cert", client_key_ref)
+
+
 async def test_local_sender_factory_borrows_active_credential_at_encode(
     tmp_path: Path,
 ) -> None:
