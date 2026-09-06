@@ -228,6 +228,41 @@ async def test_cancelled_teardown_caller_does_not_release_underlying_operation(
 
 
 @pytest.mark.anyio
+async def test_cancelled_teardown_retries_after_restart_without_repeating_host_commit(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.release.clear()
+    caller = asyncio.create_task(service.execute_teardown(peer, request))
+    await adapter.entered.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_teardown(peer, request)
+    assert adapter.commit_count == 1
+
+    closing = asyncio.create_task(service.close())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    adapter.release.set()
+    await closing
+
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        adapter=adapter,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+    )
+    response = await restarted.execute_teardown(peer, request)
+    assert response.proof.disposition == "complete_ready"
+    assert response.proof.release_evidence.verified_at == adapter.facts.completed_at
+    assert await restarted.execute_teardown(peer, request) == response
+    assert adapter.commit_count == 1
+    await restarted.close()
+
+
+@pytest.mark.anyio
 async def test_restart_recovers_completed_teardown_without_repeating_mutation(
     tmp_path: Path,
 ) -> None:
