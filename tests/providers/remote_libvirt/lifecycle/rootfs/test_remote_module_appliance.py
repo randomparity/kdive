@@ -205,7 +205,7 @@ def success_result() -> bytes:
         capture_absent=True,
         entry_count=0,
         content_bytes=0,
-    ).to_canonical_json()
+    ).to_wire_bytes()
 
 
 def volume(name: str, purpose: str) -> PreparedVolume:
@@ -292,7 +292,7 @@ def test_launch_uses_auto_destroy_and_only_scratch_proves_completion() -> None:
         capture_absent=True,
         entry_count=0,
         content_bytes=0,
-    ).to_canonical_json()
+    ).to_wire_bytes()
     conn = Conn([forged], clock)
     outcome = run_or_adopt_appliance(conn, request(clock, result=result))
     assert conn.created_flags == libvirt.VIR_DOMAIN_START_AUTODESTROY
@@ -437,7 +437,7 @@ def test_scratch_and_inspection_each_receive_fresh_wait_deadline() -> None:
         capture_absent=True,
         entry_count=0,
         content_bytes=0,
-    ).to_canonical_json()
+    ).to_wire_bytes()
     outcome = run_or_adopt_appliance(
         Conn([], clock), replace(request(clock, result=result), executor=executor)
     )
@@ -715,7 +715,7 @@ def test_wait_timeout_aborts_stream_and_attempts_bounded_teardown() -> None:
         capture_absent=True,
         entry_count=0,
         content_bytes=0,
-    ).to_canonical_json()
+    ).to_wire_bytes()
     outcome = run_or_adopt_appliance(conn, request(clock, result=forged_result))
     assert outcome.result is None
     assert outcome.timed_out
@@ -851,7 +851,7 @@ def test_success_is_not_promoted_while_appliance_remains_present() -> None:
         capture_absent=True,
         entry_count=0,
         content_bytes=0,
-    ).to_canonical_json()
+    ).to_wire_bytes()
     req = replace(
         request(clock, result=valid_result),
         inspect_attachments=lambda: AttachmentInspection(True, True, True, frozenset()),
@@ -996,7 +996,7 @@ def test_genuinely_blocking_console_recv_times_out_and_preserves_recovery() -> N
         capture_absent=True,
         entry_count=0,
         content_bytes=0,
-    ).to_canonical_json()
+    ).to_wire_bytes()
 
     def read_scratch() -> bytes:
         nonlocal scratch_reads
@@ -1098,7 +1098,7 @@ def test_genuinely_blocking_evidence_call_never_promotes_success(stage: str) -> 
         capture_absent=True,
         entry_count=0,
         content_bytes=0,
-    ).to_canonical_json()
+    ).to_wire_bytes()
 
     def blocking_result() -> bytes:
         release.wait()
@@ -1153,6 +1153,18 @@ def test_malformed_result_attempts_teardown_before_preserving_failure() -> None:
     conn = Conn([], clock)
     with pytest.raises(ValueError):
         run_or_adopt_appliance(conn, request(clock, result=b"not-json"))
+    assert conn.domain is not None and conn.domain.destroyed
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [success_result().removesuffix(b"\n"), success_result() + b"\n"],
+)
+def test_result_requires_exact_single_newline_frame(malformed: bytes) -> None:
+    clock = Clock()
+    conn = Conn([], clock)
+    with pytest.raises(ValueError, match="newline-framed"):
+        run_or_adopt_appliance(conn, request(clock, result=malformed))
     assert conn.domain is not None and conn.domain.destroyed
 
 

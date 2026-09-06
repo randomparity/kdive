@@ -49,6 +49,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     delete_owned_attempt_volume,
     expected_attempt_volumes,
     prepare_attempt_volumes,
+    validate_attempt_volumes,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.remote_module_volume_preparation import (
@@ -104,7 +105,7 @@ class RemoteModuleVolumePreparation:
     pool_name: str
     entries: tuple[ModuleTreeEntry, ...]
     writer: FilesystemImageWriter
-    inspect_attachments: Callable[[], AttachmentInspection]
+    inspect_attachments: Callable[[RemoteDeviceIdentityPort], AttachmentInspection]
     work_dir: Path
 
 
@@ -141,7 +142,12 @@ class RemoteModuleOperationRuntime:
             UUID(recovery.system_id), UUID(recovery.run_id), recovery.operation_nonce
         )
 
-    def _volume_request(self, operation: RemoteModuleOperationV1) -> VolumeRequest:
+    def _volume_request(
+        self,
+        operation: RemoteModuleOperationV1,
+        *,
+        identity: RemoteDeviceIdentityPort | None = None,
+    ) -> VolumeRequest:
         configured = self.volume_preparation
         if configured is None:
             raise CategorizedError(
@@ -157,7 +163,11 @@ class RemoteModuleOperationRuntime:
             source_manifest=operation.source_manifest,
             entries=configured.entries,
             writer=configured.writer,
-            inspect_attachments=configured.inspect_attachments,
+            inspect_attachments=(
+                (lambda: configured.inspect_attachments(identity))
+                if identity is not None
+                else self._require_cleanup_inspection
+            ),
             work_dir=configured.work_dir,
         )
 
@@ -186,13 +196,12 @@ class RemoteModuleOperationRuntime:
             identity: RemoteDeviceIdentityPort,
             check_deadline: Callable[[], None],
         ) -> PreparedModuleVolumes:
-            del identity
             if attempt != expected_attempt:
                 raise CategorizedError(
                     "remote module verified attempt differs from operation",
                     category=ErrorCategory.CONFLICT,
                 )
-            volume_request = self._volume_request(operation)
+            volume_request = self._volume_request(operation, identity=identity)
             return prepare_attempt_volumes(
                 configured.storage, volume_request, admit_mutation=check_deadline
             )
@@ -258,7 +267,13 @@ class RemoteModuleOperationRuntime:
             )
 
         def execute() -> RemoteModuleResultV1:
-            request = self._appliance_request(operation, volumes, deadline)
+            validated = validate_attempt_volumes(prepared.storage, self._volume_request(operation))
+            if validated != volumes:
+                raise CategorizedError(
+                    "remote module volumes differ from operation",
+                    category=ErrorCategory.CONFLICT,
+                )
+            request = self._appliance_request(operation, validated, deadline)
             outcome = run_or_adopt_appliance(configured.appliance, request)
             if outcome.result is None:
                 raise CategorizedError(
@@ -273,7 +288,7 @@ class RemoteModuleOperationRuntime:
                     category=ErrorCategory.CONFLICT,
                 )
             try:
-                durable = RemoteModuleResultV1.from_canonical_json(raw)
+                durable = RemoteModuleResultV1.from_wire_bytes(raw)
             except ValueError:
                 raise CategorizedError(
                     "remote module result artifact is invalid",
@@ -287,6 +302,15 @@ class RemoteModuleOperationRuntime:
             return durable
 
         return await executor.run(execute)
+
+    def _require_cleanup_inspection(self) -> AttachmentInspection:
+        configured = self.appliance_execution
+        if configured is None:
+            raise CategorizedError(
+                "remote module cleanup inspection is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        return configured.inspect_attachments()
 
     def _appliance_request(
         self,
@@ -376,7 +400,7 @@ class RemoteModuleOperationRuntime:
         assert configured is not None
 
         def delete() -> None:
-            inspection = configured.inspect_attachments()
+            inspection = self._require_cleanup_inspection()
             delete_owned_attempt_volume(configured.storage, selected, inspection=inspection)
 
         await executor.run(delete)
