@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+import kdive.config as config_registry
 from kdive.db.repositories import JOBS, RUNS
 from kdive.domain.capacity.state import (
     AllocationState,
@@ -53,7 +54,11 @@ from kdive.mcp.tools.lifecycle.runs.metadata import (
     set_run,
     validate_outcome_note,
 )
-from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
+from kdive.mcp.tools.lifecycle.runs.steps import (
+    _restage_and_enqueue_install,
+    boot_run,
+    install_run,
+)
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
@@ -65,6 +70,9 @@ from kdive.services.runs import steps as run_steps
 from kdive.services.runs.admission import RunCreateResult
 from kdive.services.runs.liveness import Liveness
 from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
+from tests.db.external_boot_authority_support import (
+    authority_role_dsns as authority_role_dsns,
+)
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.lifecycle.runs_support import (
@@ -3418,6 +3426,52 @@ _SUCCEEDED_BUILD: dict[str, Any] = {
     **_VALID_BUILD,
     "cmdline": "console=ttyS0 crashkernel=256M",
 }
+_AUTHORITY_INSTANCE = "authority-local"
+_ROOT_IMAGE_DIGEST = "sha256:" + "a" * 64
+_ROOT_SPEC: dict[str, Any] = {
+    "schema": "root-spec-v1",
+    "architecture": "x86_64",
+    "root": "UUID=authority-root",
+    "arguments": ["root=UUID=authority-root", "rootfstype=xfs"],
+    "authority": "stage-inspection",
+    "source": {"kind": "staged-image", "identity": _ROOT_IMAGE_DIGEST},
+}
+
+
+def _configure_install_authority() -> None:
+    config_registry.load(
+        {
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": _AUTHORITY_INSTANCE,
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": _AUTHORITY_INSTANCE,
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": "/run/kdive/test.sock",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": "authority-server-ca",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": "worker-client-cert",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": (
+                "worker-client-key"  # pragma: allowlist secret - reference name only
+            ),
+        }
+    )
+
+
+async def _insert_root_provenance(
+    pool: AsyncConnectionPool, run_id: str, root_spec: object = _ROOT_SPEC
+) -> str:
+    system_id = await _system_id_of(pool, run_id)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO system_root_provenance "
+            "(system_id, source_image_id, project, architecture, image_digest, root_spec) "
+            "VALUES (%s, %s, 'proj', 'x86_64', %s, %s)",
+            (system_id, uuid4(), _ROOT_IMAGE_DIGEST, Jsonb(root_spec)),
+        )
+    return system_id
+
+
+async def _install_job(pool: AsyncConnectionPool, response: ToolResponse) -> Job:
+    async with pool.connection() as conn:
+        job = await JOBS.get(conn, UUID(response.object_id))
+    assert job is not None
+    return job
 
 
 class _FakeInstaller:
@@ -4475,6 +4529,105 @@ def test_install_envelope_omits_replayed_marker(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_authority_install_enqueues_exact_server_root_snapshot(
+    migrated_url: str, authority_role_dsns: Any
+) -> None:
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            await _insert_root_provenance(admin, run_id)
+            async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
+                response = await install_run(
+                    server,
+                    ctx(),
+                    run_id,
+                    resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                )
+            job = await _install_job(admin, response)
+
+        assert response.status == "queued"
+        assert job.payload["run_id"] == run_id
+        assert job.payload["root_spec"] == _ROOT_SPEC
+        assert job.payload["authority_instance"] == _AUTHORITY_INSTANCE
+
+    asyncio.run(_run())
+
+
+def test_authority_install_refuses_stale_run_system_binding(migrated_url: str) -> None:
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            await _insert_root_provenance(admin, run_id)
+            async with admin.connection() as conn:
+                stale_run = await RUNS.get(conn, UUID(run_id))
+            assert stale_run is not None
+            replacement_system_id = await seed_system(admin)
+            async with admin.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET system_id = %s WHERE id = %s",
+                    (replacement_system_id, run_id),
+                )
+                response = await _restage_and_enqueue_install(
+                    conn,
+                    ctx(),
+                    stale_run,
+                    None,
+                    None,
+                    _AUTHORITY_INSTANCE,
+                )
+            jobs = await _count(admin, "SELECT count(*) AS n FROM jobs", ())
+
+        assert response.status == "error"
+        assert response.error_category == "configuration_error"
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("root_spec", "reason"),
+    [
+        (None, "root_provenance_missing"),
+        (
+            {
+                **_ROOT_SPEC,
+                "arguments": ["root=UUID=different", "rootfstype=xfs"],
+            },
+            "malformed_system_root_provenance",
+        ),
+    ],
+)
+def test_authority_install_refuses_missing_or_malformed_root_before_enqueue(
+    migrated_url: str,
+    authority_role_dsns: Any,
+    root_spec: dict[str, Any] | None,
+    reason: str,
+) -> None:
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            if root_spec is not None:
+                await _insert_root_provenance(admin, run_id, root_spec)
+            async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
+                response = await install_run(
+                    server,
+                    ctx(),
+                    run_id,
+                    resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                )
+            jobs = await _count(admin, "SELECT count(*) AS n FROM jobs", ())
+
+        assert response.status == "error"
+        assert response.error_category == "configuration_error"
+        assert response.data["reason"] == reason
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("state", [RunState.CREATED, RunState.FAILED])
 def test_boot_on_non_succeeded_run_is_config_error(migrated_url: str, state: RunState) -> None:
     async def _run() -> None:
@@ -4565,6 +4718,88 @@ async def _install_handler(
         )
     finally:
         await conn.set_autocommit(False)
+
+
+def test_authority_staging_worker_uses_payload_without_root_table_access(
+    migrated_url: str, authority_role_dsns: Any
+) -> None:
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            await _insert_root_provenance(admin, run_id)
+            async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
+                response = await install_run(
+                    server,
+                    ctx(),
+                    run_id,
+                    resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                )
+            job = await _install_job(admin, response)
+
+            async with (
+                runs_support.pool(authority_role_dsns("kdive_worker")) as worker,
+                worker.connection() as conn,
+            ):
+                privilege = await (
+                    await conn.execute(
+                        "SELECT has_table_privilege("
+                        "current_user, 'public.system_root_provenance', 'SELECT')"
+                    )
+                ).fetchone()
+                assert privilege == (False,)
+                await conn.commit()
+                result = await _install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                )
+
+            async with admin.connection() as conn:
+                step = await (
+                    await conn.execute(
+                        "SELECT state, result FROM run_steps "
+                        "WHERE run_id = %s AND step = 'install'",
+                        (run_id,),
+                    )
+                ).fetchone()
+
+        assert result == run_id
+        assert step is not None
+        assert step[0] == "succeeded"
+        assert "root=UUID=authority-root rootfstype=xfs" in step[1]["exact_cmdline"]
+
+    asyncio.run(_run())
+
+
+def test_legacy_authority_install_without_root_snapshot_requests_reenqueue(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            await _insert_root_provenance(admin, run_id)
+            job = await _enqueue_job(admin, JobKind.INSTALL, run_id, "install")
+            job = job.model_copy(
+                update={"payload": {**job.payload, "authority_instance": _AUTHORITY_INSTANCE}}
+            )
+            with pytest.raises(CategorizedError) as caught:
+                async with admin.connection() as conn:
+                    await _install_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                    )
+            step_exists = await _run_step_row_exists(admin, run_id, "install")
+
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert caught.value.details["reason"] == "authority_install_root_snapshot_missing"
+        assert "runs.install" in str(caught.value)
+        assert "re-enqueue" in str(caught.value)
+        assert not step_exists
+
+    asyncio.run(_run())
 
 
 def test_install_handler_applies_and_records_crashkernel(migrated_url: str) -> None:
