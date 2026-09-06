@@ -515,13 +515,16 @@
       - live_vm_host_authority_libvirt_socket.stat.mode == '0700'
   when: live_vm_host_authority_enabled | bool
 
-- name: Verify the authority can use only its dormant provider endpoint
+- name: Verify the authority can use its private provider endpoint
   ansible.builtin.command: "virsh -c {{ live_vm_host_authority_libvirt_uri }} list --name"
   become: true
   become_user: "{{ live_vm_host_authority_account }}"
   register: live_vm_host_authority_domains
   changed_when: false
-  failed_when: live_vm_host_authority_domains.stdout | trim | length > 0
+  failed_when: >-
+    live_vm_host_authority_domains.rc != 0 or
+    (not (live_vm_host_authority_local_mutation_enabled | bool) and
+     live_vm_host_authority_domains.stdout | trim | length > 0)
   when: live_vm_host_authority_enabled | bool
 
 - name: Prove fixed workers cannot traverse authority provider paths
