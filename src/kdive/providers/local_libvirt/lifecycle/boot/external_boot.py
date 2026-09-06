@@ -53,9 +53,9 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ActivationOwnership,
     ArtifactSource,
-    BundleSource,
     ComponentState,
     ExternalBootActivationBinding,
+    ExternalBootArtifactStager,
     ExternalBootMaterialization,
     ExternalBootPlan,
     ExternalBootPreparationObservation,
@@ -70,6 +70,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 from kdive.store.objectstore import ObjectStore
 
@@ -881,7 +882,7 @@ class _ExactVersionDescriptorStore:
         return os.pread(self._descriptor, min(length, self._size - start), start)
 
 
-class RealLocalExternalBootMaterializer:
+class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
     """Materialize exact object versions into one authenticated activation projection."""
 
     def __init__(self, object_store: ObjectStore) -> None:
@@ -906,17 +907,16 @@ class RealLocalExternalBootMaterializer:
                 reopened = TargetProjectionStore.reopen_at(directory_fd, projection)
             except FileNotFoundError:
                 try:
-                    self._fetch_and_validate(plan, directory_fd)
-                    evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
-                    self._validate_local_initrd(plan, directory_fd)
+                    evidence, installed_manifest = self.materialize_artifacts(plan, directory_fd)
                 except BaseException as primary:
                     _cleanup_uncommitted_payloads(directory_fd, primary)
                     raise
                 TargetProjectionStore.publish_at(directory_fd, projection)
                 reopened = TargetProjectionStore.reopen_at(directory_fd, projection)
             else:
-                evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
-                self._validate_local_initrd(plan, directory_fd)
+                evidence, installed_manifest = self.validate_materialized_artifacts(
+                    plan, directory_fd
+                )
             if reopened != projection:
                 raise ValueError("materialized target projection changed on exact reopen")
         return ExternalBootMaterialization(
@@ -940,6 +940,21 @@ class RealLocalExternalBootMaterializer:
                 initrd=(None if plan.initrd is None else _projection_ref(projection, "initrd")),
             ),
         )
+
+    def materialize_artifacts(
+        self, plan: ExternalBootPlan, directory_fd: int
+    ) -> tuple[dict[str, object], str]:
+        """Write and independently revalidate exact artifacts in an owner-selected directory."""
+        self._fetch_and_validate(plan, directory_fd)
+        return self.validate_materialized_artifacts(plan, directory_fd)
+
+    def validate_materialized_artifacts(
+        self, plan: ExternalBootPlan, directory_fd: int
+    ) -> tuple[dict[str, object], str]:
+        """Reopen and validate previously materialized exact artifacts without writing them."""
+        evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
+        self._validate_local_initrd(plan, directory_fd)
+        return evidence, installed_manifest
 
     def inspect_prepare(
         self,
@@ -1191,14 +1206,6 @@ def _stream_exact_version(
                 pass
             except OSError as unlink_error:
                 primary.add_note(f"partial artifact cleanup failed: {unlink_error!r}")
-
-
-def _source_byte_limit(source: ArtifactSource) -> int:
-    if isinstance(source, InitrdSource):
-        return source.size_bytes
-    if isinstance(source, BundleSource):
-        return build_validation._EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES  # noqa: SLF001
-    raise TypeError("unsupported external-boot artifact source")
 
 
 def _commit_private_artifact(directory_fd: int, temporary: str, final: str) -> None:

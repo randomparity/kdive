@@ -115,31 +115,20 @@ def test_concrete_remote_materializer_binds_and_publishes_private_volume_names(
         def __exit__(self, *args: object) -> None:
             del args
 
-    monkeypatch.setattr(
-        materialization_module.RealLocalExternalBootMaterializer,
-        "_fetch_and_validate",
-        lambda self, candidate, descriptor: Path(f"/proc/self/fd/{descriptor}/kernel").write_bytes(
-            b"kernel"
-        ),
-    )
-    monkeypatch.setattr(
-        materialization_module.RealLocalExternalBootMaterializer,
-        "_validate_local_bundle",
-        lambda self, candidate, descriptor: (
-            {
-                "vmlinuz_sha256": candidate.bundle.vmlinuz_sha256,
-                "module_source_manifest": candidate.module_obligation.source_manifest,
-                "release": candidate.module_obligation.release,
-                "gnu_build_id": "01020304",
-            },
-            "sha256:" + "1" * 64,
-        ),
-    )
-    monkeypatch.setattr(
-        materialization_module.RealLocalExternalBootMaterializer,
-        "_validate_local_initrd",
-        lambda self, candidate, descriptor: None,
-    )
+    class Stager:
+        def materialize_artifacts(
+            self, plan: ExternalBootPlan, directory_fd: int
+        ) -> tuple[dict[str, object], str]:
+            Path(f"/proc/self/fd/{directory_fd}/kernel").write_bytes(b"kernel")
+            return (
+                {
+                    "vmlinuz_sha256": plan.bundle.vmlinuz_sha256,
+                    "module_source_manifest": plan.module_obligation.source_manifest,
+                    "release": plan.module_obligation.release,
+                    "gnu_build_id": "01020304",
+                },
+                "sha256:" + "1" * 64,
+            )
 
     def upload(
         connection: object,
@@ -165,6 +154,7 @@ def test_concrete_remote_materializer_binds_and_publishes_private_volume_names(
         pool_name="boot-pool",
         capacity_bytes=64 * 1024**3,
         monotonic=lambda: 1.0,
+        artifact_stager=Stager(),
     )
     result = materializer.materialize(
         plan, binding, OpaqueProviderRef(ref="authority/current"), 2.0
@@ -185,6 +175,7 @@ def test_concrete_remote_materializer_rejects_capacity_and_foreign_binding() -> 
         pool_name="boot-pool",
         capacity_bytes=1,
         monotonic=lambda: 1.0,
+        artifact_stager=cast(Any, object()),
     )
     binding = ExternalBootActivationBinding(
         system_id=plan.ownership.system_id,

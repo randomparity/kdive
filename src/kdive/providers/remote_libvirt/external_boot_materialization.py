@@ -9,14 +9,10 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from uuid import UUID
 
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    MAX_ARCHIVE_BYTES,
-    RealLocalExternalBootMaterializer,
-    _source_byte_limit,
-)
 from kdive.providers.ports.external_boot import (
     ActivationOwnership,
     ExternalBootActivationBinding,
+    ExternalBootArtifactStager,
     ExternalBootMaterialization,
     ExternalBootPlan,
     KernelIdentity,
@@ -26,6 +22,10 @@ from kdive.providers.ports.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     BootArtifactVolumeConn,
     materialize_boot_artifacts,
+)
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MODULE_ARCHIVE_BYTES,
+    source_byte_limit,
 )
 from kdive.store.objectstore import ObjectStore
 
@@ -43,12 +43,14 @@ class ConcreteRemoteExternalBootMaterializer:
         pool_name: str,
         capacity_bytes: int,
         monotonic: Callable[[], float],
+        artifact_stager: ExternalBootArtifactStager,
     ) -> None:
-        self._validator = RealLocalExternalBootMaterializer(object_store)
+        del object_store
         self._connection = connection
         self._pool_name = pool_name
         self._capacity_bytes = capacity_bytes
         self._monotonic = monotonic
+        self._artifact_stager = artifact_stager
 
     def materialize(
         self,
@@ -70,8 +72,8 @@ class ConcreteRemoteExternalBootMaterializer:
             + initrd_bytes
             + plan.module_obligation.uncompressed_bytes
             + plan.module_obligation.member_count * 1024
-            + MAX_ARCHIVE_BYTES * 2
-            + _source_byte_limit(plan.bundle)
+            + MAX_MODULE_ARCHIVE_BYTES * 2
+            + source_byte_limit(plan.bundle)
             + _TEMPORARY_METADATA_BYTES
         )
         if reservation > self._capacity_bytes:
@@ -81,11 +83,9 @@ class ConcreteRemoteExternalBootMaterializer:
             directory = Path(temporary)
             descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                self._validator._fetch_and_validate(plan, descriptor)  # noqa: SLF001
-                evidence, installed_manifest = self._validator._validate_local_bundle(  # noqa: SLF001
+                evidence, installed_manifest = self._artifact_stager.materialize_artifacts(
                     plan, descriptor
                 )
-                self._validator._validate_local_initrd(plan, descriptor)  # noqa: SLF001
                 kernel = directory / "kernel"
                 initrd = None if plan.initrd is None else directory / "initrd"
                 self._require_deadline(deadline)

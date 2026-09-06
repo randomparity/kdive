@@ -284,6 +284,14 @@ class ExternalBootMaterialization(_ClosedValue):
         return _identity(b"kdive-external-boot-materialization-v1", self)
 
 
+class ExternalBootArtifactStager(Protocol):
+    """Write and independently validate exact boot artifacts into an owned directory."""
+
+    def materialize_artifacts(
+        self, plan: ExternalBootPlan, directory_fd: int
+    ) -> tuple[dict[str, object], str]: ...
+
+
 class AbsentComponentState(_ClosedValue):
     state: Literal["absent"] = "absent"
 
