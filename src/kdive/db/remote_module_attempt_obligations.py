@@ -210,6 +210,28 @@ class RemoteModuleAttemptObligationRepository:
         await self._require_state(conn, attempt, "discharge the mutation obligation")
         return False
 
+    async def discharge_system_mutation_obligations(
+        self, conn: AsyncConnection, system_id: UUID
+    ) -> int:
+        """Terminally discharge every still-open mutation obligation for one System.
+
+        The caller owns the surrounding transaction with its terminal System state update. The
+        shared System lock serializes this bulk terminal escape with ADR-0605 verification, while
+        the ``IS NULL`` predicate preserves each attempt's first discharge evidence. Reap
+        obligations are deliberately not touched: their journal retention is independent.
+        """
+        async with (
+            advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "UPDATE remote_module_attempt_obligations "
+                "SET mutation_discharged_at = now(), mutation_discharge_reason = 'terminal_escape' "
+                "WHERE system_id = %s AND mutation_discharged_at IS NULL",
+                (system_id,),
+            )
+            return cur.rowcount
+
     async def record_terminal_evidence(
         self,
         conn: AsyncConnection,

@@ -203,6 +203,47 @@ def test_verification_holds_lock_through_consumer_and_returns_only_result(
     asyncio.run(_run())
 
 
+def test_verification_blocks_terminal_escape_until_its_consumer_finishes(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """The bulk terminal path uses the same System lock as the ADR-0605 verifier."""
+
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            attempt = await _seed(admin)
+            await repo.open_mutation_obligation(admin, attempt)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def consumer(_: ModuleAttempt) -> None:
+            entered.set()
+            await release.wait()
+
+        async with (
+            await _open_pool(authority_role_dsns("kdive_worker")) as worker,
+            await _open_pool(authority_role_dsns("kdive_server")) as server,
+        ):
+            verification = asyncio.create_task(
+                run_verified_module_attempt_preparation(
+                    worker, repo, _request(attempt), attempt, consumer
+                )
+            )
+            await entered.wait()
+            async with server.connection() as conn:
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '100ms'")
+                        await repo.discharge_system_mutation_obligations(conn, attempt.system_id)
+            release.set()
+            await verification
+            async with server.connection() as conn, conn.transaction():
+                assert (
+                    await repo.discharge_system_mutation_obligations(conn, attempt.system_id) == 1
+                )
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("exit_kind", ["exception", "cancellation"])
 def test_consumer_failure_releases_lock_without_detached_work(
     migrated_url: str, authority_role_dsns: _RoleDsns, exit_kind: str
