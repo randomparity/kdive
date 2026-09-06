@@ -18,6 +18,11 @@ from pydantic import (
     model_validator,
 )
 
+from kdive.domain.external_boot_activation import (
+    ExternalBootCleanupEvidenceV1,
+    ExternalBootReleaseEvidenceV1,
+    ExternalBootTeardownEvidenceV1,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootPlan,
     ExternalBootPreparationObservation,
@@ -29,6 +34,7 @@ MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_RECOVERY_OBJECTS = 1_024
 GENESIS_DIGEST = "sha256:" + "0" * 64
+_TEARDOWN_PROOF_IDENTITY_PREFIX = b"kdive-external-boot-teardown-proof-v1\0"
 
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PositiveBigInt = Annotated[int, Field(ge=1, le=MAX_SIGNED_BIGINT)]
@@ -53,6 +59,14 @@ def _canonical_bytes(value: BaseModel) -> bytes:
     if len(encoded) > MAX_MESSAGE_BYTES:
         raise ValueError("authority value exceeds 1048576 bytes")
     return encoded
+
+
+def teardown_proof_digest(proof: AuthorityTeardownProofV1) -> str:
+    """Name one closed teardown disposition with the authority observation digest."""
+    return (
+        "sha256:"
+        + hashlib.sha256(_TEARDOWN_PROOF_IDENTITY_PREFIX + _canonical_bytes(proof)).hexdigest()
+    )
 
 
 class _ClosedValue(BaseModel):
@@ -402,6 +416,89 @@ class AuthorityPreparationResponseV1(_ClosedValue):
     def _receipt_matches_observation(self) -> Self:
         if self.receipt.identity != self.observation.composite_state:
             raise ValueError("preparation receipt does not match its journal observation")
+        return self
+
+
+class AuthorityTeardownCompleteReadyV1(_ClosedValue):
+    """Authority proved domain and owned storage absence for a ready debit."""
+
+    disposition: Literal["complete_ready"]
+    teardown_evidence: ExternalBootTeardownEvidenceV1
+    release_evidence: ExternalBootReleaseEvidenceV1
+    release_identity: Digest
+    cleanup_evidence: ExternalBootCleanupEvidenceV1
+
+    @model_validator(mode="after")
+    def _ready_evidence_is_closed(self) -> Self:
+        if (
+            self.release_identity
+            != "sha256:" + hashlib.sha256(_canonical_bytes(self.release_evidence)).hexdigest()
+            or self.cleanup_evidence.mode != "system_teardown"
+            or self.cleanup_evidence.release_identity != self.release_identity
+            or self.cleanup_evidence.teardown_identity != self.teardown_evidence.identity
+        ):
+            raise ValueError("ready teardown proof evidence does not match")
+        return self
+
+
+class AuthorityTeardownCompletePendingV1(_ClosedValue):
+    """Authority proved absence before a pending debit ever became creditable."""
+
+    disposition: Literal["complete_pending"]
+    teardown_evidence: ExternalBootTeardownEvidenceV1
+    cleanup_evidence: ExternalBootCleanupEvidenceV1
+
+    @model_validator(mode="after")
+    def _pending_evidence_is_closed(self) -> Self:
+        if (
+            self.cleanup_evidence.mode != "pending_system_teardown"
+            or self.cleanup_evidence.release_identity is not None
+            or self.cleanup_evidence.teardown_identity != self.teardown_evidence.identity
+        ):
+            raise ValueError("pending teardown proof evidence does not match")
+        return self
+
+
+class AuthorityTeardownCompleteReleasedV1(_ClosedValue):
+    """Authority proved domain absence after a prior release was already finalized."""
+
+    disposition: Literal["complete_released"]
+    teardown_evidence: ExternalBootTeardownEvidenceV1
+
+
+class AuthorityTeardownRetainedQuarantineV1(_ClosedValue):
+    """Authority retained unresolved residue; this is deliberately not a teardown proof."""
+
+    disposition: Literal["retained_quarantine"]
+
+
+type AuthorityTeardownProofV1 = Annotated[
+    AuthorityTeardownCompleteReadyV1
+    | AuthorityTeardownCompletePendingV1
+    | AuthorityTeardownCompleteReleasedV1
+    | AuthorityTeardownRetainedQuarantineV1,
+    Field(discriminator="disposition"),
+]
+
+
+class AuthorityTeardownResponseV1(_ClosedValue):
+    """One terminal journal receipt plus a closed, digest-bound teardown disposition."""
+
+    schema_: Literal["external-boot-authority-teardown-response-v1"] = Field(
+        "external-boot-authority-teardown-response-v1", alias="schema"
+    )
+    observation: AuthorityObservationV1
+    proof: AuthorityTeardownProofV1
+    journal_sequence: PositiveBigInt
+    journal_digest: Digest
+
+    @model_validator(mode="after")
+    def _proof_is_the_observation(self) -> Self:
+        if teardown_proof_digest(self.proof) != self.observation.composite_state:
+            raise ValueError("teardown proof does not match observation composite state")
+        complete = self.proof.disposition != "retained_quarantine"
+        if complete != (self.observation.category == "absent"):
+            raise ValueError("teardown disposition does not match observation category")
         return self
 
 

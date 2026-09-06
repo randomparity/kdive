@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
+from kdive.domain.external_boot_activation import ExternalBootTeardownEvidenceV1
 from kdive.providers.external_boot_authority import protocol
 from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
@@ -20,12 +22,14 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownResponseV1,
     JournalPhase,
     JournalRecordV1,
     RecoveryObjectBindingV1,
     canonical_record_bytes,
     decode_authority_request,
     record_digest,
+    teardown_proof_digest,
 )
 from tests.support.external_boot_plan import external_boot_plan
 
@@ -287,6 +291,67 @@ def test_observation_is_bounded_and_closed() -> None:
     with pytest.raises(ValidationError):
         AuthorityObservationV1.model_validate(
             {"observation_id": uuid4(), "category": "invented", "composite_state": _DIGEST}
+        )
+
+
+def test_teardown_response_binds_closed_proof_to_absent_observation() -> None:
+    activation_id, system_id = uuid4(), uuid4()
+    teardown = {
+        "schema": "external-boot-teardown-evidence-v1",
+        "system_id": str(system_id),
+        "system_state": "torn_down",
+        "observed_at": "2026-09-06T00:00:00Z",
+    }
+    release = {
+        "schema": "external-boot-release-evidence-v1",
+        "activation_id": str(activation_id),
+        "system_id": str(system_id),
+        "store_identity": {"ref": "store"},
+        "owner_key": {"ref": "owner"},
+        "reserved_bytes": 1,
+        "enumeration_complete": True,
+        "objects": [],
+        "verified_at": "2026-09-06T00:00:00Z",
+    }
+    release_identity = (
+        "sha256:"
+        + sha256(json.dumps(release, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    )
+    teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
+    proof = {
+        "disposition": "complete_ready",
+        "teardown_evidence": teardown,
+        "release_evidence": release,
+        "release_identity": release_identity,
+        "cleanup_evidence": {
+            "schema": "external-boot-cleanup-evidence-v1",
+            "activation_id": str(activation_id),
+            "system_id": str(system_id),
+            "release_identity": release_identity,
+            "mode": "system_teardown",
+            "teardown_identity": teardown_identity,
+            "completed_at": "2026-09-06T00:00:00Z",
+        },
+    }
+    proof_value = TypeAdapter(protocol.AuthorityTeardownProofV1).validate_python(proof)
+    response = AuthorityTeardownResponseV1(
+        observation=AuthorityObservationV1(
+            observation_id=uuid4(),
+            category="absent",
+            composite_state=teardown_proof_digest(proof_value),
+        ),
+        proof=proof_value,
+        journal_sequence=4,
+        journal_digest=_DIGEST,
+    )
+    assert response.proof.disposition == "complete_ready"
+    with pytest.raises(ValidationError, match="observation composite"):
+        AuthorityTeardownResponseV1.model_validate(
+            response.model_dump(mode="json", by_alias=True)
+            | {
+                "observation": response.observation.model_dump(mode="json", by_alias=True)
+                | {"composite_state": _OTHER_DIGEST}
+            }
         )
 
 
