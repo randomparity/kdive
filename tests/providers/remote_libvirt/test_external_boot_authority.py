@@ -16,6 +16,7 @@ from kdive.providers.external_boot_authority.protocol import AuthorityPreparatio
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
+    ExternalBootPlan,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -196,6 +197,20 @@ def _record() -> RemoteExternalBootRecoveryRecord:
                 key=lambda value: value.to_canonical_json(),
             )
         ),
+    )
+
+
+def _plan_for_record(record: RemoteExternalBootRecoveryRecord) -> ExternalBootPlan:
+    base = _plan()
+    return base.model_copy(
+        update={
+            "ownership": base.ownership.model_copy(
+                update={
+                    "system_id": record.binding.system_id,
+                    "run_id": record.binding.run_id,
+                }
+            )
+        }
     )
 
 
@@ -456,8 +471,14 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
             return record.materialization
 
         def prepare(
-            self, materialization: object, binding: object, owner: object, deadline: float
+            self,
+            plan: object,
+            materialization: object,
+            binding: object,
+            owner: object,
+            deadline: float,
         ) -> RemoteExternalBootRecoveryRecord:
+            assert plan == expected_plan
             assert materialization == record.materialization
             assert binding == record.binding
             assert owner == authority
@@ -491,18 +512,8 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
     )
-    base_plan = _plan()
-    plan = base_plan.model_copy(
-        update={
-            "ownership": base_plan.ownership.model_copy(
-                update={
-                    "system_id": record.binding.system_id,
-                    "run_id": record.binding.run_id,
-                }
-            )
-        }
-    )
-    assert coordinator.materialize(plan, authority) == record.materialization
+    expected_plan = _plan_for_record(record)
+    assert coordinator.materialize(expected_plan, authority) == record.materialization
     point = coordinator.prepare(record.materialization, record.binding, authority)
     store.close()
 
@@ -538,6 +549,7 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
             raise AssertionError("provider touched through activate")
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.publish_materialization(_plan_for_record(record), record.materialization)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
     )

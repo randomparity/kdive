@@ -344,6 +344,25 @@ class RemoteModuleVolumePreparationStore:
             else RemoteModuleVolumePreparationResponseV1.from_canonical_json(data)
         )
 
+    def publish_materialization(
+        self, plan: ExternalBootPlan, materialization: ExternalBootMaterialization
+    ) -> None:
+        record = RemoteExternalBootMaterializationRecord(plan=plan, materialization=materialization)
+        identity = materialization.identity.removeprefix("sha256:")
+        self._publish(f"{identity}.materialization", record.to_canonical_json())
+
+    def reopen_materialization(
+        self, materialization: ExternalBootMaterialization
+    ) -> RemoteExternalBootMaterializationRecord:
+        identity = materialization.identity.removeprefix("sha256:")
+        data = self._read(f"{identity}.materialization")
+        if data is None:
+            raise FileNotFoundError("remote materialization record is absent")
+        record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
+        if record.materialization != materialization:
+            raise ValueError("remote materialization differs from durable record")
+        return record
+
     def publish_recovery(self, recovery: RemoteExternalBootRecoveryRecord) -> OpaqueProviderRef:
         encoded = recovery.to_canonical_json()
         identity = hashlib.sha256(b"kdive-remote-recovery-v1\0" + encoded).hexdigest()
@@ -484,6 +503,44 @@ class RemoteExternalBootRecoveryRecord(BaseModel):
         return value
 
 
+class RemoteExternalBootMaterializationRecord(BaseModel):
+    """Exact plan and materialization retained for provider-host PREPARE restart."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
+
+    schema_: Literal["remote-libvirt-external-boot-materialization-v1"] = Field(
+        "remote-libvirt-external-boot-materialization-v1", alias="schema"
+    )
+    plan: ExternalBootPlan
+    materialization: ExternalBootMaterialization
+
+    @model_validator(mode="after")
+    def _materialization_matches_plan(self) -> Self:
+        materialization = self.materialization
+        if (
+            materialization.plan_identity != self.plan.identity
+            or materialization.ownership.system_id != self.plan.ownership.system_id
+            or materialization.ownership.run_id != self.plan.ownership.run_id
+        ):
+            raise ValueError("remote materialization differs from its durable plan")
+        return self
+
+    def to_canonical_json(self) -> bytes:
+        encoded = _canonical_model_bytes(self)
+        if len(encoded) > _MAX_RECORD_BYTES:
+            raise ValueError("remote materialization record exceeds 1048576 bytes")
+        return encoded
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        if len(data) > _MAX_RECORD_BYTES:
+            raise ValueError("remote materialization record exceeds 1048576 bytes")
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote materialization record is not canonical JSON")
+        return value
+
+
 class RemoteExternalBootOperations(Protocol):
     """The six closed operations available to the remote coordinator."""
 
@@ -493,6 +550,7 @@ class RemoteExternalBootOperations(Protocol):
 
     def prepare(
         self,
+        plan: ExternalBootPlan,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
@@ -551,6 +609,7 @@ class RemoteExternalBootCoordinator:
             or materialization.ownership.run_id != plan.ownership.run_id
         ):
             raise ValueError("remote materialization differs from the requested plan")
+        self._store.publish_materialization(plan, materialization)
         return materialization
 
     def prepare(
@@ -559,7 +618,10 @@ class RemoteExternalBootCoordinator:
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
     ) -> RecoveryPoint:
-        recovery = self._operations.prepare(materialization, binding, authority, self._deadline())
+        durable = self._store.reopen_materialization(materialization)
+        recovery = self._operations.prepare(
+            durable.plan, materialization, binding, authority, self._deadline()
+        )
         if recovery.binding != binding or recovery.materialization != materialization:
             raise ValueError("remote preparation returned a different activation")
         reference = self._store.publish_recovery(recovery)
