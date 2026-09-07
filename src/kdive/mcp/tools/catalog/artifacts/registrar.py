@@ -115,9 +115,8 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ],
     ) -> ToolResponse:
         """Fetch a byte window of one redacted artifact, or jump to a literal match in it.
-        Arguments are nested under `request` — the one exception among reads to the
-        `*.list`-only wrapper convention; every other single-object read on this surface
-        (e.g. `artifacts.fetch_raw`) takes flat parameters.
+        Arguments are nested under `request` — on this surface, the only read that is; both
+        `artifacts.list` and `artifacts.fetch_raw` take flat parameters.
 
         Returns the object ref plus a byte window of the redacted bytes inline in
         `data.content` (`[byte_offset, byte_offset + max_bytes)`, capped at a hard token-safe
