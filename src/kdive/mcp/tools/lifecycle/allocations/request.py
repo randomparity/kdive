@@ -23,7 +23,11 @@ from kdive.mcp.schema.tool_payloads import (
 )
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.mcp.tools.lifecycle.allocations.common import allocation_next_actions
+from kdive.mcp.tools.lifecycle.allocations.common import (
+    allocation_next_actions,
+    lease_deadline_data,
+    lease_reference_clock,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, projects_with_role, require_role
@@ -144,19 +148,30 @@ async def request_allocation(
                 spec=spec,
                 idempotency_key=idempotency_key,
             )
+            # Read inside the block the admission already holds; a queued grant carries no
+            # lease, so it costs nothing on the enqueue path.
+            server_time = (
+                await lease_reference_clock(conn)
+                if result.allocation is not None and result.allocation.lease_expiry is not None
+                else None
+            )
         outcome = _outcome_for_metrics(result)
         if outcome is not None:
             (admission_metrics or AdmissionMetrics.disabled()).record_decision(outcome)
-        return _request_response(result, ctx)
+        return _request_response(result, ctx, server_time=server_time)
 
 
-def _request_response(result: RequestAdmissionResult, ctx: RequestContext) -> ToolResponse:
+def _request_response(
+    result: RequestAdmissionResult, ctx: RequestContext, *, server_time: str | None = None
+) -> ToolResponse:
     if result.error is not None:
         return ToolResponse.failure_from_error(result.object_id, result.error)
     if result.resource is None:
         return _no_resource_response(result)
     if result.allocation is not None:
-        return _grant_or_enqueue_response(result.resource, result.project, result.allocation, ctx)
+        return _grant_or_enqueue_response(
+            result.resource, result.project, result.allocation, ctx, server_time=server_time
+        )
     if result.denial is not None:
         caller_is_admin = result.project in projects_with_role(ctx, Role.ADMIN)
         return _denial_response(
@@ -187,9 +202,20 @@ def _no_resource_response(result: RequestAdmissionResult) -> ToolResponse:
 
 
 def _grant_or_enqueue_response(
-    resource: Resource, project: str, allocation: Allocation, ctx: RequestContext
+    resource: Resource,
+    project: str,
+    allocation: Allocation,
+    ctx: RequestContext,
+    *,
+    server_time: str | None = None,
 ) -> ToolResponse:
-    data = {"project": project}
+    """Render an admitted grant or a queued enqueue.
+
+    A grant states its lease deadline in full (#2306): the absolute ``lease_expiry`` plus the
+    ``server_time`` it is measured against, with ``allocations.renew`` in the breadcrumb. A
+    queued allocation holds no lease yet, so it carries neither key.
+    """
+    data = {"project": project, **lease_deadline_data(allocation, server_time)}
     if allocation.state is not AllocationState.REQUESTED:
         data["resource_id"] = str(resource.id)
     return ToolResponse.success(

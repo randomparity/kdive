@@ -38,6 +38,7 @@ from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools.lifecycle.allocations.common import (
     POLL_INTERVAL_S,
     envelope_for_allocation,
+    lease_reference_clock,
     queue_position,
 )
 from kdive.security.authz.context import RequestContext
@@ -84,9 +85,15 @@ async def wait_allocation(
                     if alloc.state is AllocationState.REQUESTED
                     else None
                 )
+                # Gated on the lease, so polling a queued allocation adds no query per iteration.
+                server_time = (
+                    await lease_reference_clock(conn) if alloc.lease_expiry is not None else None
+                )
             now = loop.time()
             if alloc.state is not AllocationState.REQUESTED or now >= deadline:
-                return envelope_for_allocation(alloc, ctx, queue_position=position)
+                return envelope_for_allocation(
+                    alloc, ctx, queue_position=position, server_time=server_time
+                )
             await sleep(min(POLL_INTERVAL_S, deadline - now))
 
 
@@ -160,11 +167,18 @@ async def list_allocations(
             ).format(where=sql.SQL(" AND ").join(where_parts))
             await cur.execute(query, params)
             rows = await cur.fetchall()
+            # One clock read per page, not per row, and unconditional: gating it on the page
+            # holding a lease would put a misfire behind the ValueError the loop below swallows.
+            server_time = await lease_reference_clock(conn)
         kept, truncated = _paginate(rows, capped)
         responses: list[ToolResponse] = []
         for row in kept:
             try:
-                responses.append(envelope_for_allocation(Allocation.model_validate(row), ctx))
+                responses.append(
+                    envelope_for_allocation(
+                        Allocation.model_validate(row), ctx, server_time=server_time
+                    )
+                )
             except ValueError:
                 _log.warning("allocation row violates the response invariant; degraded")
                 responses.append(

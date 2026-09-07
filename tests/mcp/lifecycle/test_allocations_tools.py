@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -22,7 +22,10 @@ from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
-from kdive.mcp.tools.lifecycle.allocations.common import envelope_for_allocation
+from kdive.mcp.tools.lifecycle.allocations.common import (
+    envelope_for_allocation,
+    lease_deadline_data,
+)
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
     ReleaseOutcome,
     RenewOutcome,
@@ -135,10 +138,12 @@ async def _request(
     window: object | None = None,
     idempotency_key: str | None = None,
     kind: str = "local-libvirt",
+    on_capacity: str = "deny",
 ) -> ToolResponse:
     request: dict[str, object] = {
         "window": window,
         "resource": {"mode": "kind", "kind": kind},
+        "on_capacity": on_capacity,
     }
     if shape is not None:
         request["shape"] = shape
@@ -217,6 +222,7 @@ async def _seed_alloc(
     state: AllocationState,
     *,
     project: str = "proj",
+    lease_expiry: datetime | None = None,
 ) -> str:
     # A queued `requested` row holds no host: resource_id must be NULL (the 0016 CHECK).
     placed = state is not AllocationState.REQUESTED
@@ -231,6 +237,7 @@ async def _seed_alloc(
                 project=project,
                 resource_id=UUID(resource_id) if placed else None,
                 state=state,
+                lease_expiry=lease_expiry,
             ),
         )
     return str(alloc.id)
@@ -288,6 +295,7 @@ def test_request_grant_points_contributor_at_systems_provision(migrated_url: str
         assert resp.suggested_next_actions == [
             "allocations.wait",
             "systems.provision",
+            "allocations.renew",
             "allocations.release",
         ]
 
@@ -310,6 +318,7 @@ def test_get_granted_filters_next_actions_by_role(migrated_url: str) -> None:
         assert contributor.suggested_next_actions == [
             "allocations.wait",
             "systems.provision",
+            "allocations.renew",
             "allocations.release",
         ]
         assert "systems.provision" in operator.suggested_next_actions
@@ -1000,7 +1009,12 @@ def test_envelope_role_filters_success_next_actions() -> None:
     viewer = envelope_for_allocation(alloc, _ctx(role=Role.VIEWER))
     role_less = envelope_for_allocation(alloc, _ctx(role=None))
 
-    expected = ["allocations.wait", "systems.provision", "allocations.release"]
+    expected = [
+        "allocations.wait",
+        "systems.provision",
+        "allocations.renew",
+        "allocations.release",
+    ]
     assert operator.suggested_next_actions == expected
     assert contributor.suggested_next_actions == expected
     assert viewer.suggested_next_actions == ["allocations.wait"]
@@ -1760,3 +1774,115 @@ def test_negative_timeout_wait_allocation_is_also_a_single_read(migrated_url: st
         assert resp.status == "requested"
 
     asyncio.run(_run())
+
+
+def _assert_deadline_pair(data: Mapping[str, Any]) -> None:
+    """The lease deadline and its reference clock, both absolute ISO-8601 UTC (#2306).
+
+    The `+00:00` assertion is the load-bearing half: psycopg renders a `timestamptz` in the DB
+    session's timezone, so a value that skipped normalization still parses as ISO-8601 and only
+    this check tells the two apart.
+    """
+    expiry, server_time = data["lease_expiry"], data["server_time"]
+    assert isinstance(expiry, str) and isinstance(server_time, str)
+    assert expiry.endswith("+00:00"), expiry
+    assert server_time.endswith("+00:00"), server_time
+    assert datetime.fromisoformat(expiry) > datetime.fromisoformat(server_time)
+
+
+def test_grant_discloses_lease_deadline(migrated_url: str) -> None:
+    # #1336/#2306: a granted lease states its full contract, so the envelope carries the absolute
+    # deadline and the server clock it is measured against, not a bare relative window.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            return await _request(pool, _ctx(), window=Decimal(4))
+
+    resp = asyncio.run(_run())
+    assert resp.status == "granted"
+    _assert_deadline_pair(resp.data)
+
+
+def test_queued_request_discloses_no_lease_deadline(migrated_url: str) -> None:
+    # A queued `requested` allocation holds no lease yet, so it carries neither key rather than
+    # a null deadline an agent could mistake for one.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=1)
+            async with pool.connection() as conn:
+                # `_register` leaves max_pending_allocations at its fail-closed 0; a queue depth
+                # is what lets the capacity denial enqueue instead of hard-denying (ADR-0069).
+                await QUOTAS.upsert(
+                    conn,
+                    Quota(
+                        project="proj",
+                        max_concurrent_allocations=1_000_000,
+                        max_concurrent_systems=1_000_000,
+                        max_pending_allocations=2,
+                        updated_at=_DT,
+                    ),
+                )
+            await _request(pool, _ctx())  # takes the only host slot
+            return await _request(pool, _ctx(), on_capacity="queue")
+
+    resp = asyncio.run(_run())
+    assert resp.status == "requested", (resp.status, resp.error_category, resp.detail)
+    assert "lease_expiry" not in resp.data
+    assert "server_time" not in resp.data
+
+
+def test_read_paths_disclose_lease_clock(migrated_url: str) -> None:
+    # #2306: an agent that lost the grant envelope recovers the deadline from the read paths, so
+    # `allocations.wait` and `allocations.list` carry the clock beside the `lease_expiry` they
+    # already emitted. The FAILED branch spreads the same recovery dict, so it carries it too —
+    # that is the envelope where a caller most needs to know whether the lease is still live.
+    lease = datetime.now(UTC) + timedelta(hours=6)
+
+    async def _run() -> tuple[ToolResponse, ToolResponse, ToolResponse]:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=4)
+            granted = await _seed_alloc(pool, res_id, AllocationState.GRANTED, lease_expiry=lease)
+            await _seed_alloc(pool, res_id, AllocationState.FAILED, lease_expiry=lease)
+            waited = await wait_allocation(pool, _ctx(), granted, timeout_s=0)
+            listed = await list_allocations(pool, _ctx(), AllocationsListRequest())
+            failed = next(r for r in listed.items if r.data.get("current_status") == "failed")
+            return waited, listed, failed
+
+    waited, listed, failed = asyncio.run(_run())
+    _assert_deadline_pair(waited.data)
+    _assert_deadline_pair(failed.data)
+    assert listed.status == "ok"
+
+
+def test_active_allocation_is_pointed_at_renew(migrated_url: str) -> None:
+    # #2306: the breadcrumb follows the lease, not the GRANTED literal. An `active` allocation
+    # holds the lease the envelope now discloses and `renew` accepts it (renew.py refuses only
+    # terminal states), so the recovery tool is named there as well as on a fresh grant.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=2)
+            alloc_id = await _seed_alloc(
+                pool,
+                res_id,
+                AllocationState.ACTIVE,
+                lease_expiry=datetime.now(UTC) + timedelta(hours=6),
+            )
+            return await wait_allocation(pool, _ctx(), alloc_id, timeout_s=0)
+
+    resp = asyncio.run(_run())
+    assert resp.suggested_next_actions == [
+        "allocations.wait",
+        "allocations.renew",
+        "allocations.release",
+    ]
+
+
+def test_lease_deadline_data_requires_server_time() -> None:
+    # The single enforcement point: a deadline is never surfaced without the clock it is measured
+    # against, so a caller cannot be handed half the contract by a site that forgot to thread it.
+    alloc = _granted_alloc()
+    assert lease_deadline_data(alloc, "2026-01-01T00:00:00+00:00") == {}
+
+    leased = alloc.model_copy(update={"lease_expiry": datetime(2026, 6, 1, tzinfo=UTC)})
+    with pytest.raises(ValueError, match="server_time"):
+        lease_deadline_data(leased, None)
