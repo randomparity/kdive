@@ -112,6 +112,10 @@ def test_malformed_result_maps_to_error() -> None:
     queue = _FakeQueue([_FakeJob(JobState.SUCCEEDED, result_ref="not json")])
     results = asyncio.run(_dispatcher(queue, clock_ticks=[0.0, 0.1]).run_worker_checks())
     assert all(r.status is CheckStatus.ERROR for r in results)
+    # The underlying codec error is threaded into the detail so the failure is diagnosable,
+    # rather than an undifferentiated fixed string.
+    assert all("diagnostics worker returned a malformed result" in r.detail for r in results)
+    assert all("diagnostics result is not valid JSON" in r.detail for r in results)
 
 
 def test_enqueue_failure_maps_to_infrastructure_error() -> None:
