@@ -26,6 +26,7 @@ from kdive.mcp.schema.tool_index import TOOL_KEYWORDS, retired_names_for
 from kdive.mcp.schema.tool_projection import project_listed_tool
 from kdive.mcp.tools import _docmeta
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.authz.errors import AuthError
 from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
@@ -34,6 +35,10 @@ _log = logging.getLogger(__name__)
 _SEARCH_LIMIT_MAX = 50
 _SCHEMA_TERM_LIMIT = 200
 _SCHEMA_DEPTH_LIMIT = 8
+# Same bound ADR-0123 sets on the reserved `errors` key — a caller can drive the pydantic
+# error count arbitrarily high (one entry per bad keyword argument), and this field is a
+# different key but the same class of caller-sized list.
+_FIELD_ERROR_LIMIT = 20
 
 
 class SearchDetail(StrEnum):
@@ -263,8 +268,12 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         middleware handles it and converts it to an ``authorization_denied`` envelope.
         ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
         tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
-        (unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
-        caught and converted to ``configuration_error`` envelopes.
+        (unknown/disabled tool) and a schema-validation failure on ``arguments`` are both
+        caught and converted to ``configuration_error`` envelopes; the latter's
+        ``data.field_errors`` names each offending argument and its failure kind — the same
+        detail a direct bind would raise. ``data.accepted_fields`` additionally lists the
+        tool's top-level keys, but only when you could already see that tool through
+        ``tools.search``; it is omitted otherwise.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)
@@ -286,13 +295,59 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 ),
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
-        except ValidationError, FastMCPValidationError:
-            # FastMCP 3.4.4 wraps a binding pydantic ValidationError in its own
-            # ValidationError; both mean the caller's arguments failed schema validation.
+        except (ValidationError, FastMCPValidationError) as exc:
+            # fastmcp.exceptions.ValidationError is the genuine argument-binding failure:
+            # fastmcp always wraps it there, chaining the original pydantic error as
+            # __cause__ (fastmcp's function_tool.py). A *bare* pydantic.ValidationError
+            # reaching this branch is NOT an argument problem — fastmcp raises that shape
+            # only when a tool's own body re-validates data it read (e.g. from the
+            # database) and lets the error escape (function_tool.py's _ToolBodyError
+            # unwrap; fastmcp.server.server.call_tool draws the identical distinction).
+            # Only the genuine binding case gets the per-field detail below; the bare case
+            # keeps this branch's pre-existing generic envelope so a server-side data
+            # defect is never mislabeled as the caller's bad arguments.
+            data: dict[str, JsonValue] = {}
+            binding_cause = exc.__cause__ if isinstance(exc, FastMCPValidationError) else None
+            # Both operands define "genuine binding failure" for this branch;
+            # suggested_next_actions below reuses the same flag so it can never drift
+            # from what actually populated data (gauntlet finding, branch review).
+            is_binding_failure = isinstance(binding_cause, ValidationError)
+            if is_binding_failure:
+                field_errors = [
+                    cast(
+                        "JsonValue",
+                        {
+                            "field": ".".join(str(part) for part in err["loc"]),
+                            "kind": err["type"],
+                        },
+                    )
+                    for err in binding_cause.errors(include_url=False)[:_FIELD_ERROR_LIMIT]
+                ]
+                # Named field_errors, not ADR-0123's reserved `errors` key: that key is a
+                # closed `list[{loc, msg, type}]` contract (binding_errors.py's curated
+                # conversions are its only other producer), and this shape ({field, kind},
+                # no msg) would collide under the same name for callers of both paths.
+                data["field_errors"] = cast("JsonValue", field_errors)
+                try:
+                    visible = tool_visible(name, current_context())
+                except AuthError:
+                    visible = False
+                # Argument binding fails before a handler's own require_role check ever
+                # runs, so an unauthorized caller can reach this branch without the inner
+                # RBAC gate having fired. Withhold the schema tools.search would also
+                # withhold from them (ADR-0148).
+                if visible:
+                    tool = next((t for t in registered_tools(app) if t.name == name), None)
+                    if tool is not None:
+                        properties = tool.parameters.get("properties")
+                        if isinstance(properties, dict):
+                            data["accepted_fields"] = cast("JsonValue", sorted(properties))
             envelope = ToolResponse.failure(
                 "tools.invoke",
                 ErrorCategory.CONFIGURATION_ERROR,
                 detail=f"Arguments for {name!r} failed schema validation.",
+                suggested_next_actions=["tools.search"] if is_binding_failure else [],
+                data=data,
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
 
