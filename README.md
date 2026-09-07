@@ -61,33 +61,35 @@ future targets, not installable provider paths today. See the
 
 ### Local-libvirt quick start
 
-You need a Linux host with KVM/libvirt, Python 3.14, the provider host packages, Docker for the
-development backends, and a kernel source tree to drive. Clone, build the venv, and run the
-read-only preflight; it reports each missing prerequisite with the command that fixes it:
+You need a Linux host with KVM/libvirt, Docker for the development backends, and a kernel source
+tree to drive. There is no PyPI package yet: the checkout is the install. On a fresh
+Debian/Ubuntu host one script installs the packages, builds the venv, and prepares the host
+(log out and back in afterwards for the group memberships); on other distros follow Step 1 of
+the walkthrough, then run the read-only preflight:
 
 ```bash
 git clone https://github.com/randomparity/kdive.git
 cd kdive
-uv sync
-./scripts/operations/check-local-libvirt.sh
+examples/local-libvirt/install-host.sh          # Debian/Ubuntu; Fedora: walkthrough Step 1 + uv sync
+./scripts/operations/check-local-libvirt.sh     # reports each gap with the command that fixes it
 ```
 
-Then bring the stack up with the example scripts. One command starts the backends (Postgres,
-MinIO, mock OIDC), migrates the database, seeds the `demo` project, installs a `.mcp.json` into
-your kernel tree (`~/src/linux` by default, or `KDIVE_KERNEL_SRC`), and starts the three host
-processes:
+Then bring the stack up and build a guest image. `up.sh` starts the backends (Postgres, MinIO,
+mock OIDC), migrates the database, seeds the `demo` project, installs a `.mcp.json` into your
+kernel tree (`~/src/linux` by default, or `KDIVE_KERNEL_SRC`), and starts the three host
+processes; `build-image.sh` builds a catalog image and registers it so an agent can provision it
+by name:
 
 ```bash
 examples/local-libvirt/up.sh
+examples/local-libvirt/build-image.sh fedora-kdive-ready-44   # once; other catalog names work too
 export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 cd ~/src/linux && claude          # or any MCP client that reads .mcp.json
 examples/local-libvirt/down.sh    # stop the processes when you are done
 ```
 
-Booting a System also needs a guest image at `/var/lib/kdive/rootfs/local/`; build it once with
-`python -m kdive build-fs --image fedora-kdive-ready-44`. The
-[example README](examples/local-libvirt/README.md) documents the scripts, their variables, and
-the token lifecycle; the [local-libvirt walkthrough](
+The [example README](examples/local-libvirt/README.md) documents the scripts, their variables,
+and the token lifecycle; the [local-libvirt walkthrough](
 docs/operating/providers/local-libvirt-walkthrough.md) is the step-by-step reference for host
 packages, worker privileges, the guest-image build, and the first allocation.
 

@@ -23,14 +23,18 @@ and the [four-method live run](../../docs/operating/runbooks/four-method-live-ru
 
 ## Prerequisites
 
+On a fresh Debian/Ubuntu host, `install-host.sh` does all of the host preparation below (see
+[Fresh Debian/Ubuntu host](#fresh-debianubuntu-host)). Otherwise:
+
 - A KVM host with `libvirt` and a running `libvirtd`/`virtqemud`, the `default` network
   active, and your user in the `libvirt` group.
 - Docker with a reachable daemon (for the Postgres / MinIO / mock-OIDC backends).
-- The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`.
-- An operator-built guest image at
-  `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2` (owned so the `qemu` user can
-  read it). Build one with `python -m kdive build-fs --image fedora-kdive-ready-44` — see the
-  [live-stack runbook §3](../../docs/operating/runbooks/live-stack.md).
+- The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`. There is no
+  PyPI wheel yet; the checkout is the install, and the scripts here run from it.
+- A kdive-ready guest image at `/var/lib/kdive/rootfs/local/<name>.qcow2`, declared in
+  `systems.toml` so an agent can provision it by catalog name. `build-image.sh` builds and
+  registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
+  backends up, so run it after `up.sh`.
 - A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
 - For the **kdump capture leg only**: the worker venv must `import guestfs, drgn`. The
   preflight (`scripts/operations/check-local-libvirt.sh`) detects the gap and prints the one-time fix;
@@ -51,8 +55,10 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 
 | File | Purpose |
 |------|---------|
+| `install-host.sh` | Fresh Debian/Ubuntu host preparation: apt packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, `/var/lib/kdive` directories, the venv libguestfs binding. Re-runnable. |
 | `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_LIBVIRT_URI=qemu:///system`, and `KDIVE_PYTHON`. Source it; don't run it. |
-| `up.sh` | Idempotent bring-up: preflight → duplicate-trio guard → staging dir → backends → migrate → seed project → merge `.mcp.json` → start the trio as root → block until all three report ready. |
+| `up.sh` | Idempotent bring-up: preflight → duplicate-trio guard → staging dir → backends → migrate → runtime-role bootstrap → seed project → merge `.mcp.json` → start the trio as root → block until all three report ready. |
+| `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory for `qemu:///system` on SELinux hosts, append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
 | `down.sh` | Stop the root processes by pid file — verifies each pid is still a kdive process (`sudo kill`, then SIGKILL survivors); keeps the pid file if a kdive process refuses to die. Backends are left running. |
 | `mint-token.sh` | Print an admin developer token for `KDIVE_PROJECT` to stdout. |
 | `mcp.json` | The MCP client config installed into the kernel tree; reads the token from `${KDIVE_TOKEN}` (holds no secret). |
@@ -60,21 +66,57 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 ## Usage
 
 ```bash
+# 0. Fresh Debian/Ubuntu host only: prepare it, then log out and back in for the groups.
+examples/local-libvirt/install-host.sh
+
 # 1. Bring everything up (prompts once for sudo; starts root processes on qemu:///system).
 examples/local-libvirt/up.sh
 
-# 2. In the shell you launch your MCP client from, export a fresh token:
+# 2. Build and register a guest image (once; re-run per extra distro you want to boot).
+examples/local-libvirt/build-image.sh fedora-kdive-ready-44
+
+# 3. In the shell you launch your MCP client from, export a fresh token:
 export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 
-# 3. Open your MCP client in the kernel tree — it reads the installed .mcp.json:
+# 4. Open your MCP client in the kernel tree — it reads the installed .mcp.json:
 cd ~/src/linux            # the .mcp.json up.sh installed lives here
 # ...launch your MCP client (it connects to http://127.0.0.1:8000/mcp as Bearer $KDIVE_TOKEN)
 
-# 4. When finished, stop the processes (backends stay up):
+# 5. When finished, stop the processes (backends stay up):
 examples/local-libvirt/down.sh
 docker compose down       # from the repo root: stops the backends, keeps their data
 docker compose down --volumes   # ...or also drop the database and the artifacts bucket
 ```
+
+## Fresh Debian/Ubuntu host
+
+`install-host.sh` is the scripted form of the walkthrough's Step 1 for apt-based hosts
+(validated target: Ubuntu 26.04). What it does, and why, so you can audit or redo a step:
+
+- **Packages** — the operator set: libvirt + the arch's QEMU emulator (`qemu-system-x86` or
+  `qemu-system-ppc`; there is no `qemu-kvm` package on Ubuntu 26.04), libguestfs and its
+  Python binding, `passt`, Docker + compose, and the kernel build toolchain for the tree you
+  will build and upload. Installed through `scripts/apt-install.sh` (bounded retry).
+- **Groups** — `libvirt`, `kvm`, `docker` for the invoking user. They apply on the next login
+  shell, so the script ends by telling you to log out and back in rather than running the
+  preflight (which would report the missing group).
+- **Host kernels** — Ubuntu ships `/boot/vmlinuz-*` as `root:0600`; the libguestfs appliance
+  that `build-fs` and the kdump harvest use reads one of them. The script sets them to
+  `root:kvm 0640`, the same posture as the CI runner's Ansible role. A kernel upgrade lands a
+  new `0600` file: re-run the script afterwards.
+- **`uv sync --group live`** — the venv, plus `drgn` for the kdump capture path. Ubuntu 26.04's
+  system Python is 3.14, the same minor as the project's, so `scripts/check-setup-deps.sh -y`
+  can symlink the distro `python3-guestfs` binding into the venv and the preflight's
+  `import guestfs, drgn` check passes; on a host whose system Python differs it stays a
+  `WARN` (kdump only) and everything else works.
+- **Directories** — `/var/lib/kdive/{install,console,rootfs/local,build}` owned by you,
+  world-traversable.
+
+Known gap on apt hosts: images in the **debian** family (`debian-kdive-ready-*`) are still
+built with `virt-customize --install`, which needs the libguestfs appliance network (`passt`);
+on Ubuntu 24.04 that failed (#694), and the fix is to move the family to the customization
+boot the rhel family already uses (#1167). Fedora/Rocky/CentOS images (`rhel` family) do not
+use the appliance network and build on an Ubuntu host.
 
 ## Tokens
 
@@ -143,6 +185,8 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
 | `KDIVE_TOKEN_TTL` | `2592000` (30d) | Lifetime in seconds of the token `mint-token.sh` issues; inherited from `scripts/live-stack/env.sh`. Minimum `1`; no enforced maximum. |
 | `KDIVE_STACK_PID_FILE` / `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack.pid` / `…/local-stack-logs` | Where `up.sh` records the process pids and writes per-process logs. |
+| `KDIVE_BUILD_IMAGE_WORKSPACE` | `~/.local/share/kdive/build/images` | User-writable `build-fs --workspace` for `build-image.sh` (the build-fs default under `/var/lib/kdive/build` is root-owned). |
+| `KDIVE_LOCAL_ROLE_BOOTSTRAP` | `1` | `up.sh` runs the compose `role-bootstrap` one-shot so the per-process database login members exist; `0` skips it for externally provisioned members. |
 | `KDIVE_SYSTEMS_TOML` | `~/.config/kdive/systems.toml` | Optional declarative inventory the reconciler loads. Absent by default (a quiet no-op) — see [Optional inventory](#optional-inventory-systemstoml). The default is CWD-independent; set this to point at a file elsewhere. |
 
 The pid file and logs live under the XDG state dir (`$XDG_STATE_HOME`, default

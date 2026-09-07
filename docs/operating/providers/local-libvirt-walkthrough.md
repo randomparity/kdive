@@ -32,15 +32,20 @@ dev/CI tier (`just`, `prek`, `node`, `npm`) you can ignore for an operator host:
 ./scripts/check-setup-deps.sh        # report-only; prints the install hints below
 ```
 
-On Debian/Ubuntu the operator set is:
+> **Debian/Ubuntu shortcut.** [`examples/local-libvirt/install-host.sh`](../../../examples/local-libvirt/README.md#fresh-debianubuntu-host)
+> performs the rest of this step (packages, groups, readable host kernels, `uv sync`, the
+> `/var/lib/kdive` directories, and the venv libguestfs binding) in one re-runnable pass.
+
+On Debian/Ubuntu the operator set is (`qemu-system-x86` provides KVM; the transitional
+`qemu-kvm` name no longer exists on Ubuntu 26.04):
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  pkg-config libvirt-dev libvirt-daemon-system libvirt-clients \
-  qemu-system-x86 qemu-utils qemu-kvm \
-  libguestfs-tools python3-guestfs passt \
-  gcc make flex bison bc libssl-dev libelf-dev rsync xz-utils git \
+  build-essential pkg-config libvirt-dev python3-dev \
+  libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils \
+  libguestfs-tools python3-guestfs passt e2fsprogs \
+  gcc make flex bison bc libssl-dev libelf-dev rsync xz-utils git curl ca-certificates \
   docker.io docker-compose-v2 gdb
 ```
 
@@ -312,6 +317,10 @@ bootable, kdive-ready rootfs qcow2 on disk at the path your `staged-path` `[[ima
 declares. Build that first, then connect a client and drive the MCP calls.
 
 ### Build and install the rootfs image(s)
+
+> **Shortcut.** `examples/local-libvirt/build-image.sh <name>…` runs this whole section per
+> image: `build-fs`, the SELinux label below, the `[[image]]` declaration (derived from the
+> build's provenance sidecar), and `reconcile-systems`.
 
 Build images from the declarative rootfs catalog with `build-fs --image <name>` (ADR-0251). The
 catalog (`fixtures/local-libvirt/rootfs_catalog.toml`) ships these debug-guest entries:
