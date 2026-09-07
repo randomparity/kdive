@@ -11,7 +11,8 @@ Cancel a queued or running job.
 A contributor may cancel leaseholder-lifecycle jobs (provision/reprovision/
 install/boot/power/authorize_ssh_key/…) in projects where they have contributor.
 Cancelling a destructive job (teardown/force_crash) or retired server-build job
-requires operator.
+requires operator. An authority-owned preactivation teardown cannot be canceled; wait for
+it to finish.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
