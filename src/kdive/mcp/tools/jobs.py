@@ -32,9 +32,10 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field, field_validator
 
-from kdive.db.repositories import JOBS, ObjectNotFound
+from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.repositories import JOBS, SYSTEMS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import (
     CONTRIBUTOR_CANCELABLE_JOB_KINDS,
     PLATFORM_INTERNAL_JOB_KINDS,
@@ -56,6 +57,7 @@ from kdive.mcp.tools._common import (
     InvalidCursor,
 )
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import authorizing as _job_authorizing
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
@@ -66,6 +68,11 @@ from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
+from kdive.services.systems.authority_owned import (
+    authority_owned_provision_system_id,
+    authority_system_binding,
+    enqueue_preactivation_teardown,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -245,6 +252,30 @@ async def _locked_job_state(conn: AsyncConnection, uid: UUID) -> str | None:
     return row[0] if row else None
 
 
+async def _fence_authority_owned_provision_cancel(
+    conn: AsyncConnection,
+    job: Job,
+    ctx: RequestContext,
+) -> None:
+    """Turn a marked preactivation provision cancellation into its sole authority teardown."""
+    system_id = authority_owned_provision_system_id(job)
+    if system_id is None:
+        return
+    async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        binding = await authority_system_binding(conn, system_id)
+        if system is None or binding is None:
+            raise CategorizedError(
+                "authority-owned provision job has no System ownership binding",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        if binding.ownership_state == "activated":
+            return
+        await enqueue_preactivation_teardown(
+            conn, system, binding, _job_authorizing(ctx, system.project)
+        )
+
+
 async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
     """Transition the job to ``canceled`` (cooperative); error on a terminal job.
 
@@ -276,6 +307,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
             return denied
         try:
             async with pool.connection() as conn, conn.transaction():
+                await _fence_authority_owned_provision_cancel(conn, existing, ctx)
                 # Lock the row and read the true prior state before mutating, so the audited
                 # transition names the state we actually cancel from (not the stale pre-authz
                 # read — see _locked_job_state).
@@ -303,6 +335,8 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
                 current = await JOBS.get(conn, uid)
             data: dict[str, JsonValue] = {"current_status": current.state.value} if current else {}
             return ToolResponse.failure(job_id, ErrorCategory.CONFIGURATION_ERROR, data=data)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(job_id, exc)
         return ToolResponse.from_job(job)
 
 

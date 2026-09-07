@@ -53,10 +53,6 @@ from kdive.profiles.provider_policy import (
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.system_authority.protocol import (
-    AuthoritySystemMarkerV1,
-    AuthoritySystemOperation,
-)
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
@@ -67,6 +63,11 @@ from kdive.services.external_boot import (
 )
 from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from kdive.services.systems.admission import require_pinned_cpu_selectable
+from kdive.services.systems.authority_owned import (
+    AuthoritySystemBinding,
+    authority_system_binding,
+    enqueue_preactivation_teardown,
+)
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -82,9 +83,6 @@ _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 _SYSTEM_TEARDOWN_AUTHORITY_SQL: LiteralString = (
     "SELECT activation_id, run_id, plan_identity, provider_kind, authority_instance "
     "FROM resolve_external_boot_system_teardown_dispatch_binding(%s)"
-)
-_AUTHORITY_SYSTEM_BINDING_SQL: LiteralString = (
-    "SELECT * FROM resolve_authority_system_server_binding(%s)"
 )
 
 
@@ -326,11 +324,8 @@ async def _job_for_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | Non
 
 async def _authority_system_binding(
     conn: AsyncConnection, system_id: UUID
-) -> dict[str, object] | None:
-    async with conn.cursor(row_factory=dict_row) as cursor:
-        await cursor.execute(_AUTHORITY_SYSTEM_BINDING_SQL, (system_id,))
-        row = await cursor.fetchone()
-    return dict(row) if row is not None else None
+) -> AuthoritySystemBinding | None:
+    return await authority_system_binding(conn, system_id)
 
 
 async def _admit_reprovision(
@@ -514,62 +509,24 @@ async def _enqueue_preactivation_authority_teardown(
     conn: AsyncConnection,
     ctx: RequestContext,
     system: System,
-    binding: dict[str, object],
+    binding: AuthoritySystemBinding,
     system_id: str,
     idempotency_key: str | None,
 ) -> ToolResponse:
     """Enqueue and bind one activation-free teardown to immutable ownership."""
-    operation_identity = (
-        "sha256:"
-        + sha256(
-            b"kdive-authority-system-preactivation-teardown-v1\0"
-            + system.id.bytes
-            + _teardown_dedup_key(system.id).encode("utf-8")
-        ).hexdigest()
-    )
-    marker = AuthoritySystemMarkerV1.model_validate(
-        {
-            "system_id": system.id,
-            "allocation_id": binding["allocation_id"],
-            "resource_id": binding["resource_id"],
-            "provider_kind": binding["provider_kind"],
-            "resource_name": binding["resource_name"],
-            "authority_instance": binding["authority_instance"],
-            "profile_identity": binding["profile_identity"],
-            "root_identity": binding["root_identity"],
-            "operation": AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
-            "operation_identity": operation_identity,
-        }
-    )
-    prior = await dedup_replay(conn, _teardown_dedup_key(system.id))
-    if prior is not None:
-        raw = prior.payload.get("authority_system_v1")
-        if raw != marker.model_dump(mode="json", by_alias=True):
-            return ToolResponse.failure(
-                system_id,
-                ErrorCategory.CONFLICT,
-                detail="an ordinary teardown job cannot be replayed for an authority-owned System",
-                suggested_next_actions=["jobs.wait", "systems.get"],
-                data={"reason": "ordinary_teardown_fenced_by_system_authority"},
-            )
-        return job_envelope(prior, "system_id", system.id)
-    job = await queue.enqueue(
-        conn,
-        JobKind.TEARDOWN,
-        TeardownPayload(system_id=str(system.id), authority_system_v1=marker),
-        job_authorizing(ctx, system.project),
-        _teardown_dedup_key(system.id),
-    )
-    result = await (
-        await conn.execute(
-            "SELECT request_authority_system_preactivation_teardown(%s,%s,%s)",
-            (system.id, job.id, operation_identity),
+    try:
+        job = await enqueue_preactivation_teardown(
+            conn, system, binding, job_authorizing(ctx, system.project)
         )
-    ).fetchone()
-    if result is None or result[0] not in {"applied", "replay"}:
-        raise CategorizedError(
-            "authority-owned System teardown admission conflicted",
-            category=ErrorCategory.CONFLICT,
+    except CategorizedError as exc:
+        if exc.category is not ErrorCategory.CONFLICT:
+            raise
+        return ToolResponse.failure(
+            system_id,
+            ErrorCategory.CONFLICT,
+            detail="an ordinary teardown job cannot be replayed for an authority-owned System",
+            suggested_next_actions=["jobs.wait", "systems.get"],
+            data={"reason": "ordinary_teardown_fenced_by_system_authority"},
         )
     envelope = job_envelope(job, "system_id", system.id)
     if idempotency_key is not None:
