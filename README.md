@@ -56,41 +56,42 @@ future targets, not installable provider paths today. See the
 
 | Provider | Best fit | Where KDIVE runs | Start here |
 |---|---|---|---|
-| **local-libvirt** | Development, dedicated lab hosts, and the shortest route to a live VM | The server, worker, and reconciler run as host processes on the KVM/libvirt host | [Local-libvirt walkthrough](docs/operating/providers/local-libvirt-walkthrough.md) |
+| **local-libvirt** | Development, dedicated lab hosts, and the shortest route to a live VM | The server, worker, and reconciler run as host processes on the KVM/libvirt host | [Local-libvirt quick start](#local-libvirt-quick-start) |
 | **remote-libvirt** | Shared labs and deployments where the control plane is separate from the VM hosts | A Kubernetes control plane drives an operator-prepared libvirt host over TLS | [Remote-libvirt walkthrough](docs/operating/providers/remote-libvirt-walkthrough.md) |
 
 ### Local-libvirt quick start
 
-You need a Linux host with KVM/libvirt, Python 3.14, the provider host packages, Docker for the
-development backends, and a bootable guest image. The packaged preflight is read-only and reports
-missing prerequisites before you start the service.
+You need a Linux host with KVM/libvirt, Docker for the development backends, and a kernel source
+tree to drive. There is no PyPI package yet: the checkout is the install. On a fresh
+Debian/Ubuntu host one script installs the packages, builds the venv, installs the fixed
+live-worker lifecycle contract (the root-owned witness that supervises workers, ADR-0574), and
+prepares the host; log out and back in afterwards for the group memberships. On other distros
+follow Step 1 of the walkthrough and the live-stack runbook's prerequisites:
 
 ```bash
 git clone https://github.com/randomparity/kdive.git
 cd kdive
-uv sync
-
-KDIVE_PYTHON="$PWD/.venv/bin/python" \
-  ./scripts/operations/check-local-libvirt.sh
+examples/local-libvirt/install-host.sh          # Debian/Ubuntu; then log out and back in
 ```
 
-Then bring up Postgres, MinIO, and the mock OIDC issuer, migrate the database, and run the three
-host processes:
+Then bring the stack up and build a guest image. `up.sh` runs the preflight, brings up the
+backends (Postgres, MinIO, mock OIDC), migrates the database, starts the daemons and the lifecycle
+workers on the operator's session libvirt, funds the `demo` project, and installs a `.mcp.json`
+into your kernel tree (`~/src/linux` by default, or `KDIVE_KERNEL_SRC`); `build-image.sh` builds
+a catalog image and registers it so an agent can provision it by name:
 
 ```bash
-docker compose up -d --wait postgres minio oidc
-docker compose run --rm minio-init
-
-.venv/bin/python -m kdive migrate
-.venv/bin/python -m kdive server
-# In separate terminals, with the same KDIVE_* environment:
-.venv/bin/python -m kdive worker
-.venv/bin/python -m kdive reconciler
+examples/local-libvirt/up.sh
+examples/local-libvirt/build-image.sh fedora-kdive-ready-44   # once; other catalog names work too
+export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
+cd ~/src/linux && claude          # or any MCP client that reads .mcp.json
+examples/local-libvirt/down.sh    # stop the stack when you are done (state is kept)
 ```
 
-Provider inventory, environment variables, guest-image creation, worker privileges, and the first
-allocation are covered by the [complete local-libvirt walkthrough](
-docs/operating/providers/local-libvirt-walkthrough.md).
+The [example README](examples/local-libvirt/README.md) documents the scripts, their variables,
+and the token lifecycle; the [local-libvirt walkthrough](
+docs/operating/providers/local-libvirt-walkthrough.md) is the step-by-step reference for host
+packages, worker privileges, the guest-image build, and the first allocation.
 
 ### Remote-libvirt quick start
 

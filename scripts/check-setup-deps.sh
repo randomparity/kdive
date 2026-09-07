@@ -312,12 +312,16 @@ distro="$(load_distro_id)"
 # Guard the substitution so an absent `uname` (restricted-PATH tests) does not trip `set -e`.
 host_arch="$(uname -m 2>/dev/null || true)"
 
-# The system dir holding the libguestfs binding: Debian's version-agnostic dist-packages, falling
-# back to the owning interpreter's purelib (Fedora) — the exact logic in runbook §4b. Overridable.
+# The system dir holding the libguestfs binding: Debian's version-agnostic dist-packages, else
+# wherever the system interpreter actually imports it from (Fedora installs the binding under the
+# RPM platlib, /usr/lib64/python3.N/site-packages, which is NOT what `sysconfig.get_path("purelib")`
+# reports there — that is the /usr/local pip prefix, so a purelib fallback reports the binding
+# absent and offers a package install instead of the symlink). An interpreter that cannot import
+# it yields an empty dir, which reads as `absent`. The exact logic in runbook §4b. Overridable.
 guestfs_sys_site() {
   local d="${KDIVE_GUESTFS_SYS_SITE:-/usr/lib/python3/dist-packages}"
   [[ -e "${d}/guestfs.py" ]] ||
-    d="$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))' 2>/dev/null || true)"
+    d="$(/usr/bin/python3 -c 'import os, guestfs; print(os.path.dirname(guestfs.__file__))' 2>/dev/null || true)"
   printf "%s" "${d}"
 }
 

@@ -541,20 +541,11 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "SSH port `check-ssh-reachable.sh` probes.",
     ),
     ExternalEnvVar(
-        "KDIVE_STACK_PID_FILE",
-        "script",
-        "~/.local/state/kdive/local-stack.pid",
-        "PID file managed by `examples/local-libvirt/up.sh` (written) and "
-        "`examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to "
-        "`$XDG_STATE_HOME/kdive/local-stack.pid`.",
-    ),
-    ExternalEnvVar(
         "KDIVE_STACK_LOG_DIR",
         "script",
         "<repo>/.live-stack-logs",
-        "Log directory written by `scripts/live-stack/lib.sh`; also consumed by "
-        "`examples/local-libvirt/up.sh`, which overrides the default to an XDG state path "
-        "via `examples/local-libvirt/env.sh`.",
+        "Log directory for the server/reconciler daemons `scripts/live-stack/lib.sh` starts; "
+        "`examples/local-libvirt/env.sh` overrides the default to an XDG state path.",
     ),
     ExternalEnvVar(
         "KDIVE_ROOTFS_DIR",
@@ -655,6 +646,22 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         None,
         "Lifecycle-generated worker environment value carrying the validated absolute kernel "
         "source root from the current start request; operators set KDIVE_KERNEL_SRC instead.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_PREFLIGHT_KDUMP",
+        "script",
+        "required",
+        "How `scripts/operations/check-local-libvirt.sh` treats the kdump-only libguestfs/drgn "
+        "binding check: `required` fails the preflight, `optional` reports a warning. "
+        "`examples/local-libvirt/up.sh` defaults it to `optional`; CI and onboarding keep the "
+        "hard gate.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_BUILD_IMAGE_WORKSPACE",
+        "script",
+        "~/.local/share/kdive/build/images",
+        "Scratch workspace `examples/local-libvirt/build-image.sh` passes to `build-fs` "
+        "(`--workspace`); holds the downloaded base image and the customization boot state.",
     ),
     ExternalEnvVar(
         "KDIVE_LOCAL_ROLE_BOOTSTRAP",

@@ -174,6 +174,53 @@ def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
     assert "python3-libguestfs" in result.stderr
 
 
+def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
+    """KDIVE_PREFLIGHT_KDUMP=optional downgrades only the guestfs/drgn probe to a WARN.
+
+    The same fix text is still printed, and the host is reported ready (exit 0) because every
+    other check passes.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "virsh", 'case "$*" in *net-info*) echo "Active: yes";; esac\nexit 0')
+    _stub(bindir, "id", "echo kvm libvirt")
+    _stub(bindir, "qemu-system-x86_64", "exit 0")
+    _stub(bindir, "qemu-img", "exit 0")
+    py = _stub_python(bindir, "venv-python", imports_ok=False)
+    kvm = tmp_path / "kvm"
+    kvm.write_text("")
+    staging = tmp_path / "install-staging"
+    staging.mkdir()
+    env = {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(kvm),
+        "KDIVE_PYTHON": str(py),
+        "KDIVE_INSTALL_STAGING": str(staging),
+        "KDIVE_BOOT_DIR": str(tmp_path / "boot-empty"),
+        "KDIVE_PREFLIGHT_KDUMP": "optional",
+    }
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "WARN" in result.stderr
+    assert "FAIL" not in result.stderr
+    assert "guestfs" in result.stderr and "drgn" in result.stderr
+    assert "python3-libguestfs" in result.stderr
+    assert "host is ready" in result.stderr
+
+
+def test_invalid_kdump_preflight_value_rejected(tmp_path: Path) -> None:
+    """A typo in KDIVE_PREFLIGHT_KDUMP is an error, not a silent fallback to 'required'."""
+    env = {
+        "PATH": str(tmp_path),
+        "HOME": str(tmp_path),
+        "KDIVE_PREFLIGHT_KDUMP": "optinal",
+    }
+    result = _run(env)
+    assert result.returncode == 2
+    assert "KDIVE_PREFLIGHT_KDUMP=optinal is not valid" in result.stderr
+
+
 def test_missing_kvm_node_fails(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()

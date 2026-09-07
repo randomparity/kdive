@@ -32,15 +32,22 @@ dev/CI tier (`just`, `prek`, `node`, `npm`) you can ignore for an operator host:
 ./scripts/check-setup-deps.sh        # report-only; prints the install hints below
 ```
 
-On Debian/Ubuntu the operator set is:
+> **Debian/Ubuntu shortcut.** [`examples/local-libvirt/install-host.sh`](../../../examples/local-libvirt/README.md#fresh-debianubuntu-host)
+> performs the rest of this step (packages, groups, readable host kernels, `uv sync`, the
+> fixed live-worker lifecycle contract from the
+> [live-stack runbook](../runbooks/live-stack.md#prerequisites), the guest-image directory, and
+> the venv libguestfs binding) in one re-runnable pass.
+
+On Debian/Ubuntu the operator set is (`qemu-system-x86` provides KVM; the transitional
+`qemu-kvm` name no longer exists on Ubuntu 26.04):
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  pkg-config libvirt-dev libvirt-daemon-system libvirt-clients \
-  qemu-system-x86 qemu-utils qemu-kvm \
-  libguestfs-tools python3-guestfs passt \
-  gcc make flex bison bc libssl-dev libelf-dev rsync xz-utils git \
+  build-essential pkg-config libvirt-dev python3-dev \
+  libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils \
+  libguestfs-tools python3-guestfs passt e2fsprogs \
+  gcc make flex bison bc libssl-dev libelf-dev rsync xz-utils git curl ca-certificates \
   docker.io docker-compose-v2 gdb
 ```
 
@@ -81,14 +88,12 @@ sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install /var/lib/kdive/console
 > - libguestfs builds an appliance from the **host** kernel, which Debian/Ubuntu ship `root:0600`.
 >   Make them readable or the appliance fails with `cp: cannot open '/boot/vmlinuz-…'`:
 >   `sudo chmod 0644 /boot/vmlinuz-*` (re-apply after a kernel upgrade, or use `dpkg-statoverride`).
-> - libguestfs uses `passt` for the appliance's network (needed by `virt-builder --install`). On
->   Ubuntu 24.04 this can fail with `libguestfs error: passt exited with status 1`. Unloading the
->   `passt` AppArmor profile (`sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`) clears one
->   cause, but a libguestfs/passt version mismatch may still block it; if so, build the rootfs on a
->   host with a working libguestfs appliance, or stage a prebuilt bootable qcow2 (see Step 6).
-> - Both failures now report an actionable `configuration_error` from `build-fs` instead of a raw
->   tool dump, and the kernel-readability case is flagged by the preflight (Step 2) when run as the
->   worker user — see [ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md).
+> - `build-fs` no longer uses the libguestfs appliance network: every family installs its
+>   packages inside a throwaway customization boot (#1167), so the Ubuntu 24.04
+>   `libguestfs error: passt exited with status 1` failure (#694) no longer applies.
+> - The kernel-readability failure reports an actionable `configuration_error` from `build-fs`
+>   instead of a raw tool dump, and the preflight (Step 2) flags it when run as the worker user
+>   — see [ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md).
 
 ## 2. Run the preflight
 
@@ -100,14 +105,26 @@ KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/operations/check-local-libvirt.sh
 
 Fix what it reports. One failure is expected to remain on most hosts and is **not** fatal for the
 core lifecycle: the `import guestfs, drgn` check is only needed for the **kdump capture** method
-(Step 5). See [kdump capture prerequisites](#kdump-capture-prerequisites) for the `drgn`/libguestfs
-wiring and a Python-version caveat.
+(Step 5). Run the preflight with `KDIVE_PREFLIGHT_KDUMP=optional` to report that one check as a
+`WARN` and exit 0 when everything else passes (the `examples/local-libvirt/up.sh` bring-up does
+this by default). See [kdump capture prerequisites](#kdump-capture-prerequisites) for the
+`drgn`/libguestfs wiring and a Python-version caveat.
 
 The preflight also flags an unreadable host kernel (`/boot/vmlinuz-*`), which blocks the Step 6
 `build-fs` image build on Debian/Ubuntu; fix it with the `chmod` above. Run the preflight as the
 worker user, since it checks readability as whoever invokes it.
 
 ## 3. Bring up the backends and start the host processes
+
+> **Supported host flow.** Since the fixed live-worker lifecycle (ADR-0574) a worker only starts
+> under the root-owned lifecycle witness, and every process reads its own database authority
+> (#1929), so the plain three-process shape below no longer runs as written. Install the
+> contract once (root; [live-stack runbook prerequisites](../runbooks/live-stack.md#prerequisites))
+> and then use `scripts/live-stack/up.sh`, which does everything in this step in order —
+> backends, migrations, runtime-role bootstrap, the operator's session libvirt, the daemons, the
+> lifecycle workers, and one inventory reconcile. `examples/local-libvirt/up.sh` wraps it with
+> the preflight, the project funding, and the `.mcp.json` install. The commands below remain as
+> the annotated reference for what that script does and which values it exports.
 
 Bring up the backing services with compose (backends only — not the app tier):
 
@@ -311,6 +328,10 @@ declares. Build that first, then connect a client and drive the MCP calls.
 
 ### Build and install the rootfs image(s)
 
+> **Shortcut.** `examples/local-libvirt/build-image.sh <name>…` runs this whole section per
+> image: `build-fs`, the SELinux label below, the `[[image]]` declaration (derived from the
+> build's provenance sidecar), and `reconcile-systems`.
+
 Build images from the declarative rootfs catalog with `build-fs --image <name>` (ADR-0251). The
 catalog (`fixtures/local-libvirt/rootfs_catalog.toml`) ships these debug-guest entries:
 
@@ -348,9 +369,7 @@ qcow2 to the catalog destination:
 The build needs the Step 1 libguestfs tooling and network access — the EL-family images
 `dnf install` their crash toolchain at customize time (Rocky 8 enables EPEL for `drgn`
 automatically), and the Debian images `apt install` theirs (`kdump-tools`, `python3-drgn`, `crash`).
-The Debian build is otherwise the same flow and needs no distro-specific workaround. (On Ubuntu
-24.04 the libguestfs `--install` step may be blocked by the passt/libguestfs mismatch noted in
-Step 1; build on a Fedora host or stage a prebuilt qcow2.)
+The Debian and Ubuntu builds are otherwise the same flow and need no distro-specific workaround.
 
 **Label the image for `qemu:///system` — the easy step to miss.** When `--workspace` is under
 `$HOME`, the cross-filesystem publish move can leave the qcow2 with the home SELinux type
@@ -414,10 +433,10 @@ when it connects**, so after a token expires you must re-export it and then **re
 `kdive` server in your client (in Claude Code: `/mcp` → reconnect), not just re-run the export.
 
 The [`examples/local-libvirt/`](../../../examples/local-libvirt/) helpers automate this end to
-end: `up.sh` installs the `.mcp.json` into `KDIVE_KERNEL_SRC` (merging, not clobbering, any
-existing file) and starts the trio; see that example's README for the full bring-up. Note the
-example seeds and tokenises a project named `local` by default — set `KDIVE_PROJECT=demo` to match
-this walkthrough, or seed `local` instead of `demo` in Step 4.
+end: `up.sh` brings the stack up through `scripts/live-stack/up.sh`, funds the project, and
+installs the `.mcp.json` into `KDIVE_KERNEL_SRC` (merging, not clobbering, any existing file);
+see that example's README for the full bring-up. The example seeds and tokenises the same `demo`
+project as this walkthrough.
 
 **Request an allocation.** With the project onboarded and the resource discovered, this is granted:
 
