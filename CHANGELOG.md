@@ -375,6 +375,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admit authority-owned Systems
 - Compose authority-owned system providers
 - Provision authority-owned system inputs
+- Add Ubuntu 24.04 and 26.04 LTS rootfs catalog rows
 - Customize the debian family through the customization boot
 
 ### Changed
