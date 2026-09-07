@@ -183,8 +183,16 @@ def test_unexpected_check_id_degrades_to_error_result() -> None:
     assert result.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_invalid_item_degrades_to_error_result() -> None:
-    payload = '{"results": [{"check_id": "provider_tls", "status": "weird", "detail": "x"}]}'
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # bad enum value
+        '{"results": [{"check_id": "provider_tls", "status": "weird", "detail": "x"}]}',
+        # fail without a fix violates CheckResult.__post_init__
+        '{"results": [{"check_id": "provider_tls", "status": "fail", "detail": "x"}]}',
+    ],
+)
+def test_invalid_item_degrades_to_error_result(payload: str) -> None:
     [result] = deserialize_results(payload)
     assert result.check_id == PROVIDER_TLS_ID
     assert result.status is CheckStatus.ERROR
@@ -197,15 +205,6 @@ def test_non_dict_item_degrades_to_error_result_with_unknown_id() -> None:
     assert result.check_id == "unknown"
     assert result.status is CheckStatus.ERROR
     assert result.detail == "diagnostics result item is not an object"
-
-
-def test_invariant_violation_degrades_to_error_result() -> None:
-    # fail without a fix violates CheckResult.__post_init__
-    payload = '{"results": [{"check_id": "provider_tls", "status": "fail", "detail": "x"}]}'
-    [result] = deserialize_results(payload)
-    assert result.check_id == PROVIDER_TLS_ID
-    assert result.status is CheckStatus.ERROR
-    assert "invalid diagnostics result item" in result.detail
 
 
 def test_one_bad_id_does_not_poison_the_batch() -> None:
