@@ -104,12 +104,17 @@ def test_unknown_inner_name_is_configuration_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_bad_arguments_is_configuration_error() -> None:
+def test_bad_arguments_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing required arguments for an inner tool yield an informative configuration_error.
 
     Parity target (ADR-0268): the gateway's schema-validation failure names the same
-    field/kind detail a direct bind would raise, not a content-free envelope.
+    field/kind detail a direct bind would raise, not a content-free envelope. The caller
+    holds VIEWER on runs.get's required scope, so accepted_fields is disclosed too — see
+    test_bad_arguments_without_visibility_omits_accepted_fields for the withheld case.
     """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
     # runs.get requires run_id; passing {} triggers pydantic ValidationError
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
@@ -123,7 +128,7 @@ def test_bad_arguments_is_configuration_error() -> None:
     # The detail should name the inner tool
     assert "runs.get" in (content.get("detail") or "")
     assert "tools.search" in content["suggested_next_actions"]
-    errors = content["data"]["errors"]
+    errors = content["data"]["field_errors"]
     assert {"field": "run_id", "kind": "missing_argument"} in errors
     # No caller-supplied value or pydantic ctx leaks through.
     for entry in errors:
@@ -152,8 +157,56 @@ def test_unexpected_argument_is_configuration_error() -> None:
     result = asyncio.run(_run())
     content = _call_result(result)
     assert content["error_category"] == "configuration_error"
-    errors = content["data"]["errors"]
+    errors = content["data"]["field_errors"]
     assert any(e["field"] == "duration_minutes" for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Test 3c: accepted_fields is withheld when the caller cannot see the tool (#2304)
+# ---------------------------------------------------------------------------
+
+
+def test_bad_arguments_without_visibility_omits_accepted_fields() -> None:
+    """No verified caller context means no schema disclosure, matching tools.search's RBAC gate.
+
+    Argument binding fails before an inner handler's own require_role check ever runs, so a
+    caller who could not see runs.get's schema through tools.search must not get it here either.
+    """
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.invoke", {"name": "runs.get", "arguments": {}})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert "accepted_fields" not in content["data"]
+
+
+# ---------------------------------------------------------------------------
+# Test 3d: field_errors stays bounded against an adversarial argument count (#2304)
+# ---------------------------------------------------------------------------
+
+
+def test_field_errors_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller sending many bad keyword arguments gets a capped, not unbounded, error list."""
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    bogus_args = {f"bogus_field_{i}": i for i in range(50)}
+
+    async def _run() -> Any:
+        return await app.call_tool(
+            "tools.invoke", {"name": "runs.get", "arguments": {"run_id": "r-1", **bogus_args}}
+        )
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert len(content["data"]["field_errors"]) == gateway_module._FIELD_ERROR_LIMIT
 
 
 # ---------------------------------------------------------------------------

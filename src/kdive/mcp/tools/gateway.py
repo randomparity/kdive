@@ -26,6 +26,7 @@ from kdive.mcp.schema.tool_index import TOOL_KEYWORDS, retired_names_for
 from kdive.mcp.schema.tool_projection import project_listed_tool
 from kdive.mcp.tools import _docmeta
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.authz.errors import AuthError
 from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
@@ -34,6 +35,10 @@ _log = logging.getLogger(__name__)
 _SEARCH_LIMIT_MAX = 50
 _SCHEMA_TERM_LIMIT = 200
 _SCHEMA_DEPTH_LIMIT = 8
+# Same bound ADR-0123 sets on the reserved `errors` key — a caller can drive the pydantic
+# error count arbitrarily high (one entry per bad keyword argument), and this field is a
+# different key but the same class of caller-sized list.
+_FIELD_ERROR_LIMIT = 20
 
 
 class SearchDetail(StrEnum):
@@ -264,9 +269,11 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
         tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
         (unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
-        caught and converted to ``configuration_error`` envelopes; the latter's ``data``
-        names each offending field, its failure kind, and the tool's accepted top-level
-        keys — the same detail a direct bind would raise.
+        caught and converted to ``configuration_error`` envelopes; the latter's
+        ``data.field_errors`` names each offending field and its failure kind — the same
+        detail a direct bind would raise. ``data.accepted_fields`` additionally lists the
+        tool's top-level keys, but only when you could already see that tool through
+        ``tools.search``; it is omitted otherwise.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)
@@ -305,14 +312,26 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                             "kind": err["type"],
                         },
                     )
-                    for err in pydantic_exc.errors(include_url=False)
+                    for err in pydantic_exc.errors(include_url=False)[:_FIELD_ERROR_LIMIT]
                 ]
-            data: dict[str, JsonValue] = {"errors": field_errors}
-            tool = next((t for t in registered_tools(app) if t.name == name), None)
-            if tool is not None:
-                properties = tool.parameters.get("properties")
-                if isinstance(properties, dict):
-                    data["accepted_fields"] = cast("JsonValue", sorted(properties))
+            # Named field_errors, not ADR-0123's reserved `errors` key: that key is a closed
+            # `list[{loc, msg, type}]` contract (binding_errors.py's curated conversions are
+            # its only other producer), and this shape ({field, kind}, no msg) would collide
+            # under the same name for callers of both paths.
+            data: dict[str, JsonValue] = {"field_errors": field_errors}
+            try:
+                visible = tool_visible(name, current_context())
+            except AuthError:
+                visible = False
+            # Argument binding fails before a handler's own require_role check ever runs, so
+            # an unauthorized caller can reach this branch without the inner RBAC gate having
+            # fired. Withhold the schema tools.search would also withhold from them (ADR-0148).
+            if visible:
+                tool = next((t for t in registered_tools(app) if t.name == name), None)
+                if tool is not None:
+                    properties = tool.parameters.get("properties")
+                    if isinstance(properties, dict):
+                        data["accepted_fields"] = cast("JsonValue", sorted(properties))
             envelope = ToolResponse.failure(
                 "tools.invoke",
                 ErrorCategory.CONFIGURATION_ERROR,
