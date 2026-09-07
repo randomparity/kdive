@@ -16,7 +16,7 @@ kmod puts it. `runs.install` then fails `MISSING_DEPENDENCY` naming a package th
 Resolve `depmod` in `_run_host_depmod` and pass the absolute path to `subprocess.run`: a
 `KDIVE_DEPMOD` override first, then `shutil.which` restricted to `/usr/sbin`, `/usr/bin`,
 `/sbin`, `/bin` — the host-tool list `jobs/capture_operations/bootstrap/bootstrap_elf.py` uses,
-covering merged-usr and split-usr. The override is a `Setting` in
+covering merged-usr and split-usr. The override is a worker-only `Setting` in
 `providers/local_libvirt/settings.py`, because `scripts/guards/config_env_guard.py` forbids
 reading a `KDIVE_*` key outside `kdive.config`; its `parse` takes only an absolute path to an
 executable file. The name is host-tool scoped, so that module's `KDIVE_LIBVIRT_*` docstring
@@ -33,12 +33,12 @@ deferrals are open; no ADR is warranted, as this applies ADR-0087 to one knob.
 ## Success
 
 1. `subprocess.run` gets an absolute `depmod` path, never a bare name.
-2. Unresolvable depmod raises `MISSING_DEPENDENCY`, keeping the "install kmod" remedy, naming
-   `KDIVE_DEPMOD`, with `details["searched"]` listing the directories tried.
+2. Unresolvable depmod raises `MISSING_DEPENDENCY` reporting that none was found in the
+   `details["searched"]` directories, offering both remedies: install kmod or set `KDIVE_DEPMOD`.
 3. A `KDIVE_DEPMOD` that is not an absolute path to an executable file raises
    `CONFIGURATION_ERROR` naming the variable — misconfiguration, not a missing package.
-4. A resolved depmod that cannot be executed (vanished, unreadable, wrong format) raises a
-   categorized error carrying that path; no uncategorized `OSError` escapes the envelope.
+4. A resolved depmod that cannot be executed (vanished, unreadable, wrong format) raises
+   `MISSING_DEPENDENCY` — non-retryable, as today — carrying that path; no `OSError` escapes.
 5. `KDIVE_DEPMOD` survives the gate's `execve`, so the override and its startup `validate` are
    reachable on the fixed live-worker slot rather than silently inert.
 
@@ -53,8 +53,8 @@ red first then green under `uv run python -m pytest <that file> -q`.
   `test_run_host_depmod_unresolvable_names_searched_directories`; red, no `searched` detail.
 - Override honoured, and rejected when not absolute and executable (1, 3). focused-test —
   `test_run_host_depmod_uses_the_override`, `test_override_must_be_absolute_executable`; red.
-- Exec-failure class (4). focused-test — `test_run_host_depmod_unexecutable_is_categorized`, over
+- Exec-failure class (4). focused-test — `test_unexecutable_depmod_is_missing_dependency`, over
   the vanished and wrong-format cases; red, only `FileNotFoundError` is caught.
-- Gate crossing (5). focused-test — `tests/deploy/test_live_worker_gate.py`, extending
-  `test_gate_execs_exact_worker_with_allowlisted_environment`; red, the frozenset omits the name.
+- Gate crossing and startup validate (5); red, the frozenset omits the name. focused-test —
+  `test_live_worker_gate.py` gate assertion, plus `test_validate_worker_rejects_bad_override`.
 - Config reference row. focused-test — `just config-docs-check`; red until `just config-docs` runs.
