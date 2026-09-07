@@ -1484,6 +1484,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make examples/local-libvirt the local-libvirt quick start
 - Catalogue the preflight and build-image example variables
 - Drop the retired virt-customize passt gap from the apt-host guidance
+- Document artifacts.get's request wrapper exception
+- Scope the artifacts.get wrapper claim to this surface
 
 ### Fixed
 
