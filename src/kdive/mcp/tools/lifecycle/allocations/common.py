@@ -23,26 +23,19 @@ opposite case and live in ``tools._common`` (ADR-0476).
 """
 
 
-_LEASEHOLDING_STATES = (AllocationState.GRANTED, AllocationState.ACTIVE)
-"""The states whose envelope discloses a lease deadline, so whose breadcrumb names its recovery.
-
-`renew` refuses only the terminal states (``services/allocation/renew.py``), so both of these
-extend normally. The breadcrumb follows the lease rather than ``granted`` alone: an ``active``
-allocation is the one whose expiry costs a provisioned System.
-"""
-
-
 def allocation_next_actions(state: AllocationState) -> list[str]:
     """Return the next tool breadcrumbs for an allocation state.
 
-    A leaseholding state names ``allocations.renew`` unconditionally rather than on a proximity
-    heuristic: a disclosed deadline without its recovery tool is the half-contract AGENTS.md's
-    "State a limit's full contract" rules out (#1336, #2306).
+    A state that holds a lease names ``allocations.renew`` unconditionally rather than on a
+    proximity heuristic: a disclosed deadline without its recovery tool is the half-contract
+    AGENTS.md's "State a limit's full contract" rules out (#1336, #2306). The breadcrumb follows
+    the lease rather than ``granted`` alone — ``renew`` refuses only the terminal states
+    (``services/allocation/renew.py``), and ``active`` is where expiry costs a provisioned System.
     """
     actions = ["allocations.wait"]
     if state is AllocationState.GRANTED:
         actions.append("systems.provision")
-    if state in _LEASEHOLDING_STATES:
+    if state in (AllocationState.GRANTED, AllocationState.ACTIVE):
         actions.append("allocations.renew")
     actions.append("allocations.release")
     return actions
@@ -158,12 +151,11 @@ def envelope_for_allocation(
     the allocation's project (ADR-0261), so a non-operator is never pointed at operator-only
     ``systems.provision``.
 
-    ``server_time`` is the caller-read reference clock (`lease_reference_clock`), required
-    whenever the allocation holds a lease. The read handler reads it, because this renderer is
-    synchronous. It is spread **after** ``recovery`` on both branches so the UTC-normalized
-    ``lease_expiry`` supersedes the session-offset one ``_allocation_recovery`` renders; a
-    failed allocation keeps its deadline, which is exactly where a caller has to tell a lease
-    still worth renewing from one already gone.
+    ``server_time`` is the reference clock, required whenever the allocation holds a lease; the
+    calling handler reads it (`lease_reference_clock`) because this renderer is synchronous. It
+    is spread **after** ``recovery`` on both branches, so the UTC-normalized ``lease_expiry``
+    supersedes the session-offset one ``_allocation_recovery`` renders — the failure branch
+    included, since that is where a caller decides between renewing and starting over.
     """
     recovery = _allocation_recovery(alloc)
     deadline = lease_deadline_data(alloc, server_time)
