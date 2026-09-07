@@ -2,17 +2,11 @@
 
 Date: 2026-07-15
 Issue: #1181 · Epic: #1139 · ADR-0363 · Prior: #1156 / ADR-0355 (native KVM-HV validation),
-#1151 / ADR-0349 (fadump opt-in)
+#1151 / ADR-0349 (fadump opt-in) · Completed: #1204
 
-> **Status: HOST FADUMP-READY + CODE FIX LANDED; end-to-end native crash→capture at the 4 GiB
-> floor PENDING a fully-provisioned POWER live-stack.** The root cause (fadump fails run-readiness
-> at 2 GiB because it reserves a boot-memory region on top of `crashkernel`) is fixed by a fadump
-> RAM floor of 4096 MiB enforced at admission (ADR-0363). The target POWER10 dev VM advertises the
-> QEMU floor that gates fadump (10.2.1 ≥ 10.2, ADR-0349) and has KVM-HV, so it *would* admit and
-> boot the fadump profile; but the VM is not yet provisioned with the ppc64le rootfs fixture,
-> kernel bundle, OIDC issuer, and live-stack processes the crash→capture proof drives, so the
-> end-to-end capture was not executed in this change. The repro to complete it once the host is
-> provisioned is below.
+> **Status: PASSED.** Native-POWER fadump crash→capture at the 4 GiB floor proved on
+> ltcwspoon18 (Ubuntu 26.04.1 LTS ppc64le, POWER10, QEMU 10.2.1 KVM-HV) on 2026-09-07.
+> `test_ppc64le_fadump_captures_a_vmcore_under_tcg` **PASSED** in 5:41.
 
 ## What this change does (and how it maps to acceptance)
 
@@ -41,34 +35,84 @@ Verified by unit tests (`tests/profiles/test_provisioning.py`): under-floor fadu
 at-floor accepted, floor deferred when `memory_mb` is omitted (the shape-sized lane). `just ci` is
 green.
 
-## Target host — fadump readiness confirmed live
-
-Probed 2026-07-15 over `ssh -p 2223 dave@192.168.2.8`:
+## Target host
 
 | | |
 |---|---|
-| host | POWER10 dev VM, `ppc64le`, 32 cores / 31 GiB RAM |
-| virt | `qemu-system-ppc64` **10.2.1** (Debian 1:10.2.1+ds-1ubuntu3.1), libvirt 12.0, `/dev/kvm` present |
+| host | ltcwspoon18 — POWER10, Ubuntu 26.04.1 LTS, `ppc64le` |
+| virt | `qemu-system-ppc64le` **10.2.1** (Debian 1:10.2.1+ds-1ubuntu3.2), libvirt, `/dev/kvm` present (KVM-HV) |
 | fadump gate | QEMU 10.2.1 ≥ the ADR-0349 `PSERIES_FADUMP_QEMU_FLOOR` (10, 2) → `detect_pseries_fadump` = SUPPORTED |
-| accel | `/dev/kvm` present → a ppc64le guest resolves `accel=kvm` (native, KVM-HV) |
+| accel | `/dev/kvm` present → ppc64le guest resolves `accel=kvm` (native KVM-HV) |
+| kernel bundle | Fedora 44 ppc64le, kernel 6.19.10-300.fc44.ppc64le |
+| guest image | `fedora-kdive-ready-44-ppc64le.qcow2` |
 
-So admission would accept the fadump profile on this host (the fail-closed ADR-0349 host gate
-passes) and boot it under KVM-HV — the exact conditions the #1156 record established for the kdump
-spine.
+## Live-run evidence (2026-09-07)
 
-## Why the end-to-end capture is pending
+```
+ppc64le-fadump:provision: t+0s provisioning
+ppc64le-fadump:provision: t+32s ready
+ppc64le-fadump:crash: t+0s ready
+ppc64le-fadump:crash: t+2s crashed
+PASSED tests/integration/test_live_stack.py::test_ppc64le_fadump_captures_a_vmcore_under_tcg
+1 passed, 18175 deselected, 4 warnings in 341.20s (0:05:41)
+```
 
-The POWER10 dev VM is **not** provisioned with the live-stack the crash→capture proof drives.
-Confirmed absent on the host: `/var/lib/kdive` (no rootfs fixture, no `bundle-ppc64le`), the guestfs
-Python binding in the venv, a ppc64le kernel tree, and any running server/worker/reconciler or
-OIDC issuer. Standing these up is the full runbook §0–§6: install guestfs, `build-fs` a
-`fedora-kdive-ready-44-ppc64le` fixture, extract its kernel bundle, build/run the native OIDC
-issuer, and bring up Postgres + MinIO + server/worker/reconciler — a multi-hour, multi-dependency
-bootstrap not completed in this change.
+Key observations from the guest console:
 
-## Repro to complete the capture (once the host is provisioned)
+- Boot 1: `rtas fadump: Registration is successful!` — fadump registered under KVM-HV, 512 MiB
+  reservation at `0x20000000`.
+- `force_crash` → guest rebooted in 2 s into capture kernel.
+- Boot 2 (capture): `fadump: Firmware-assisted dump is active.` — firmware preserved 3584 MiB
+  of crash memory at `0x20000000`; kernel updated cmdline with `nr_cpus=16 numa=off cgroup_disable=memory`.
+- `fadump-capture.service` detected `/proc/vmcore`, ran `makedumpfile -F -l -d 31`, wrote
+  `vmcore-fadump` to the guest overlay's `/var/crash/`, then powered off.
+- Worker harvested the vmcore from the overlay; `vmcore-fadump` and `vmcore-fadump-redacted`
+  published; `capture_vmcore` job `succeeded`.
 
-Follow `docs/operating/runbooks/power-host-bringup.md` §0–§6 to a ready host, then §7:
+## Bug fixes landed alongside this proof (PR #1204)
+
+Three bugs surfaced during the native-POWER run and were fixed in `feat/ppc64le-live-proof-1204`:
+
+**1. ppc64le ELF banner scan too narrow (`validation.py`)**
+
+`_boot_release` read only the first `_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES` (16 MiB) of
+the ppc64le ELF boot member to locate the `"Linux version "` banner. Real Fedora 44 ppc64le
+kernels place the banner at ~27 MiB into the stripped ELF (past the 16 MiB window), so
+`runs.complete_build` rejected every upload with `"decoded boot/vmlinuz has no bounded
+Linux release banner"`. Fixed by replacing the single read with a chunked scan bounded by
+`_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES`, with an overlap buffer across chunk boundaries.
+Regression test: `test_ppc64le_elf_boot_member_validates_when_banner_is_past_chunk_boundary`.
+
+**2. `kernel.tar.gz` layout exceeded 128 MiB scan cap**
+
+The Fedora 44 bundle's `kernel.tar.gz` included a duplicate `vmlinuz` copy under
+`lib/modules/<rel>/vmlinuz` (63 MiB), pushing the first `.ko.xz` file past the
+`_KERNEL_TAR_SCAN_MAX_BYTES` (128 MiB) scan bound before a kernel-module member could be
+seen. The bundle was rebuilt with `--exclude='lib/modules/*/vmlinuz'` so `.ko.xz` files
+appear at ~71 MiB (within the 128 MiB cap).
+
+**3. fadump capture service missing from guest image**
+
+`kdump.service` attempts to rebuild the fadump initrd in the capture kernel (second boot),
+which fails in the kdive-supplied initrd environment. Without a working capture mechanism the
+guest never writes `/var/crash/vmcore` and never powers off, causing the 120 s worker
+timeout. Fixed by installing `fadump-capture.service` into the guest rootfs: it runs early
+in boot, checks for `/proc/vmcore`, invokes `makedumpfile` when present, and calls
+`poweroff -f`.
+
+**4. Raw-vmcore leak assertion false-positive for large cores**
+
+The inline `assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs)`
+check fails for large vmcores: `artifacts.get` always adds a presigned `download_uri`, whose
+query string follows the `-redacted` path segment, so the URL does not end with `-redacted`
+even when the artifact is correctly redacted. Replaced with `raw_vmcore_refs(refs)` (which
+uses `urlsplit` to check only the URL path) in the fadump, ppc64le-kdump, and x86 proof
+assertions. (The `raw_vmcore_refs` docstring already cited this exact issue as #1610 from the
+first ppc64le live run; the three proof tests had not yet adopted it.)
+
+## Repro
+
+Follow `docs/operating/runbooks/power-host-bringup.md` §0–§6 to a ready POWER10 KVM host, then §7:
 
 ```bash
 cd ~/src/kdive
@@ -83,5 +127,5 @@ uv run python -m pytest -m live_vm_tcg -o addopts="" -q -rA \
 
 Expected: with the 4 GiB floor, the guest reaches run-readiness under `fadump=on`; `control.force_crash`
 panics it; fadump's memory-preserving reboot yields `/proc/vmcore`; `vmcore.fetch` harvests it under
-the `vmcore-fadump` key. The `<cmdline>` assertions (`fadump=on`, `crashkernel=512M`) are unchanged
-from the #1151 driver.
+the `vmcore-fadump` key. The `<cmdline>` assertions (`fadump=on`, `crashkernel=512M`) verify the
+boot path.
