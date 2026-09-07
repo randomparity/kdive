@@ -2,7 +2,8 @@
 # Prepare a fresh Debian/Ubuntu host for the local-libvirt developer setup. Idempotent; safe to
 # re-run. Installs the host packages, adds the invoking user to the libvirt/kvm/docker groups,
 # makes the host kernels readable for the libguestfs appliance, installs uv, builds the project
-# venv, creates the /var/lib/kdive directories, and wires the kdump libguestfs binding.
+# venv, installs the fixed live-worker lifecycle contract (root), and wires the kdump libguestfs
+# binding.
 #
 #   examples/local-libvirt/install-host.sh
 #
@@ -58,16 +59,17 @@ step "sudo (package install, group membership, /var/lib/kdive)"
 # rule applies, which breaks a non-interactive run (ssh without a tty, nohup).
 sudo -n true 2>/dev/null || sudo -v
 
-# 2. Host packages: the operator set from the walkthrough (Step 1). The build toolchain is here
-#    because the kernel under test is built on this host and uploaded on the build lane; the
-#    worker itself never compiles kernel source (ADR-0316). `qemu-kvm` is deliberately absent —
-#    the arch emulator package provides KVM and the transitional name no longer exists on
-#    Ubuntu 26.04. On ppc64le, pydantic-core and the just/prek CLIs build from source, so a Rust
-#    toolchain is needed as well (rustup; see the cross-platform guide).
+# 2. Host packages: the operator set from the walkthrough (Step 1) plus the CI runner's
+#    (elfutils/debuginfod for the debuginfo lane). The build toolchain is here because the
+#    kernel under test is built on this host and uploaded on the build lane; the worker itself
+#    never compiles kernel source (ADR-0316). `qemu-kvm` is deliberately absent — the arch
+#    emulator package provides KVM and the transitional name no longer exists on Ubuntu 26.04.
+#    On ppc64le, pydantic-core and the just/prek CLIs build from source, so a Rust toolchain is
+#    needed as well (rustup; see the cross-platform guide).
 packages=(
   build-essential pkg-config libvirt-dev python3-dev
   libvirt-daemon-system libvirt-clients qemu-utils "${qemu_package}"
-  libguestfs-tools python3-guestfs passt e2fsprogs
+  libguestfs-tools python3-guestfs passt e2fsprogs elfutils debuginfod
   gcc make flex bison bc libssl-dev libelf-dev rsync xz-utils git curl ca-certificates
   docker.io docker-compose-v2 gdb
 )
@@ -97,7 +99,7 @@ for kernel in /boot/vmlinuz-* /boot/vmlinux-*; do
 done
 
 # 5. uv, then the project venv. `--group live` adds drgn, which the kdump capture path imports
-#    from the worker venv alongside the libguestfs binding wired in step 7.
+#    from the worker venv alongside the libguestfs binding wired in step 8.
 step "uv"
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -109,13 +111,30 @@ step "uv sync --group live (${repo_root})"
 (cd "${repo_root}" && uv sync --group live)
 "${repo_root}/.venv/bin/python" -m kdive --help >/dev/null
 
-# 6. Worker host directories: world-traversable (not under $HOME, whose 0700 hides the staged
-#    kernel from the qemu user), owned by the operating user.
-step "/var/lib/kdive directories"
-sudo install -d -o "${USER}" -m 0755 \
-  /var/lib/kdive/install /var/lib/kdive/console /var/lib/kdive/rootfs/local /var/lib/kdive/build
+# 6. The fixed live-worker lifecycle contract (ADR-0555/ADR-0574): eight retained worker slot
+#    accounts, the root socket-activated lifecycle witness that registers each worker
+#    incarnation and hands it its credential, a dedicated operator-owned session libvirt
+#    daemon, the provider data directories under /var/lib/kdive, and an installed worker venv
+#    under /opt/kdive-live-worker-lifecycle. A plain `python -m kdive worker` cannot start
+#    without it (no incarnation credential), so this is part of host preparation, not of the
+#    stack bring-up. Root, idempotent for one checkout; the witness-member DSN goes in on
+#    standard input only (never an argument). The member itself is created by the compose
+#    role-bootstrap one-shot up.sh runs, with this fixed local development password.
+step "fixed live-worker lifecycle contract (deploy/systemd/install-live-worker-lifecycle.sh)"
+witness_password="kdive-witness-local" # pragma: allowlist secret — local development only
+witness_dsn="postgresql://kdive-witness-member:${witness_password}@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive"
+printf '%s\n' "${witness_dsn}" | sudo env "PATH=${PATH}" \
+  "${repo_root}/deploy/systemd/install-live-worker-lifecycle.sh" \
+  --operator "${USER}" --source "${repo_root}"
+unset witness_dsn witness_password
 
-# 7. Venv wiring for build-fs and the kdump capture path: symlink the distro python3-guestfs
+# 7. Where build-image.sh publishes guest images: the installer made /var/lib/kdive/rootfs the
+#    operator's, group kdive-live-libvirt, so the fixed workers can read every image and write
+#    their per-System overlays beside them; `local/` follows the same posture.
+step "/var/lib/kdive/rootfs/local"
+sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/rootfs/local
+
+# 8. Venv wiring for build-fs and the kdump capture path: symlink the distro python3-guestfs
 #    binding into the venv (a uv venv has no system-site-packages). The binding is a C extension
 #    built for the distro Python, so it only imports when the system and venv Python minor
 #    versions match (Ubuntu 26.04 ships 3.14, the project Python); otherwise leave a note. This is
@@ -142,9 +161,9 @@ cat <<EOF
 host prepared for local-libvirt.
 
 Next:
-  1. Log out and back in (or 'exec su -l ${USER}') so the libvirt/kvm/docker groups apply.
-  2. Preflight:  cd ${repo_root} && ./scripts/operations/check-local-libvirt.sh
-     (a remaining 'import guestfs, drgn' FAIL affects only kdump capture; up.sh tolerates it)
-  3. Bring up:   ${example_dir}/up.sh
-  4. Guest image: ${example_dir}/build-image.sh fedora-kdive-ready-44
+  1. Log out and back in (or 'exec su -l ${USER}') so the new groups apply
+     (libvirt, kvm, docker, kdive-live-control, kdive-live-libvirt).
+  2. Bring up:    ${example_dir}/up.sh
+     (runs the preflight first; a remaining 'import guestfs, drgn' WARN affects only kdump capture)
+  3. Guest image: ${example_dir}/build-image.sh fedora-kdive-ready-44
 EOF

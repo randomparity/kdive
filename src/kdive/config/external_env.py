@@ -541,20 +541,11 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "SSH port `check-ssh-reachable.sh` probes.",
     ),
     ExternalEnvVar(
-        "KDIVE_STACK_PID_FILE",
-        "script",
-        "~/.local/state/kdive/local-stack.pid",
-        "PID file managed by `examples/local-libvirt/up.sh` (written) and "
-        "`examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to "
-        "`$XDG_STATE_HOME/kdive/local-stack.pid`.",
-    ),
-    ExternalEnvVar(
         "KDIVE_STACK_LOG_DIR",
         "script",
         "<repo>/.live-stack-logs",
-        "Log directory written by `scripts/live-stack/lib.sh`; also consumed by "
-        "`examples/local-libvirt/up.sh`, which overrides the default to an XDG state path "
-        "via `examples/local-libvirt/env.sh`.",
+        "Log directory for the server/reconciler daemons `scripts/live-stack/lib.sh` starts; "
+        "`examples/local-libvirt/env.sh` overrides the default to an XDG state path.",
     ),
     ExternalEnvVar(
         "KDIVE_ROOTFS_DIR",

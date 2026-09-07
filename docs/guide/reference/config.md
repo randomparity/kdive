@@ -379,8 +379,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
 | `KDIVE_SOURCE_ROOT` | — | Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root setting; start fails when it is not an existing absolute directory. |
-| `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
-| `KDIVE_STACK_PID_FILE` | `~/.local/state/kdive/local-stack.pid` | PID file managed by `examples/local-libvirt/up.sh` (written) and `examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to `$XDG_STATE_HOME/kdive/local-stack.pid`. |
+| `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory for the server/reconciler daemons `scripts/live-stack/lib.sh` starts; `examples/local-libvirt/env.sh` overrides the default to an XDG state path. |
 | `KDIVE_SYSTEM_PY_MINOR` | `$(python3 --version)` | System Python `X.Y` minor `check-setup-deps.sh` compares against the venv's for the libguestfs ABI check before symlinking the binding (ADR-0393). |
 | `KDIVE_TCG_BUDGET_BYTES` | `7000000000` | Enforced `/mnt` disk-budget ceiling for the hosted TCG set (~7 GB): a pre-stage free-space check for the whole budget and a post-stage staged-set footprint cap, each failing loud. |
 | `KDIVE_TCG_IMAGE` | — | ppc64le catalog rootfs image `stage-tcg-images.sh` passes to `python -m kdive build-fs`. Unset → the script dies. |

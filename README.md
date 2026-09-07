@@ -63,29 +63,29 @@ future targets, not installable provider paths today. See the
 
 You need a Linux host with KVM/libvirt, Docker for the development backends, and a kernel source
 tree to drive. There is no PyPI package yet: the checkout is the install. On a fresh
-Debian/Ubuntu host one script installs the packages, builds the venv, and prepares the host
-(log out and back in afterwards for the group memberships); on other distros follow Step 1 of
-the walkthrough, then run the read-only preflight:
+Debian/Ubuntu host one script installs the packages, builds the venv, installs the fixed
+live-worker lifecycle contract (the root-owned witness that supervises workers, ADR-0574), and
+prepares the host; log out and back in afterwards for the group memberships. On other distros
+follow Step 1 of the walkthrough and the live-stack runbook's prerequisites:
 
 ```bash
 git clone https://github.com/randomparity/kdive.git
 cd kdive
-examples/local-libvirt/install-host.sh          # Debian/Ubuntu; Fedora: walkthrough Step 1 + uv sync
-./scripts/operations/check-local-libvirt.sh     # reports each gap with the command that fixes it
+examples/local-libvirt/install-host.sh          # Debian/Ubuntu; then log out and back in
 ```
 
-Then bring the stack up and build a guest image. `up.sh` starts the backends (Postgres, MinIO,
-mock OIDC), migrates the database, seeds the `demo` project, installs a `.mcp.json` into your
-kernel tree (`~/src/linux` by default, or `KDIVE_KERNEL_SRC`), and starts the three host
-processes; `build-image.sh` builds a catalog image and registers it so an agent can provision it
-by name:
+Then bring the stack up and build a guest image. `up.sh` runs the preflight, brings up the
+backends (Postgres, MinIO, mock OIDC), migrates the database, starts the daemons and the lifecycle
+workers on the operator's session libvirt, funds the `demo` project, and installs a `.mcp.json`
+into your kernel tree (`~/src/linux` by default, or `KDIVE_KERNEL_SRC`); `build-image.sh` builds
+a catalog image and registers it so an agent can provision it by name:
 
 ```bash
 examples/local-libvirt/up.sh
 examples/local-libvirt/build-image.sh fedora-kdive-ready-44   # once; other catalog names work too
 export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 cd ~/src/linux && claude          # or any MCP client that reads .mcp.json
-examples/local-libvirt/down.sh    # stop the processes when you are done
+examples/local-libvirt/down.sh    # stop the stack when you are done (state is kept)
 ```
 
 The [example README](examples/local-libvirt/README.md) documents the scripts, their variables,

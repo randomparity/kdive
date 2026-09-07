@@ -34,7 +34,9 @@ dev/CI tier (`just`, `prek`, `node`, `npm`) you can ignore for an operator host:
 
 > **Debian/Ubuntu shortcut.** [`examples/local-libvirt/install-host.sh`](../../../examples/local-libvirt/README.md#fresh-debianubuntu-host)
 > performs the rest of this step (packages, groups, readable host kernels, `uv sync`, the
-> `/var/lib/kdive` directories, and the venv libguestfs binding) in one re-runnable pass.
+> fixed live-worker lifecycle contract from the
+> [live-stack runbook](../runbooks/live-stack.md#prerequisites), the guest-image directory, and
+> the venv libguestfs binding) in one re-runnable pass.
 
 On Debian/Ubuntu the operator set is (`qemu-system-x86` provides KVM; the transitional
 `qemu-kvm` name no longer exists on Ubuntu 26.04):
@@ -113,6 +115,16 @@ The preflight also flags an unreadable host kernel (`/boot/vmlinuz-*`), which bl
 worker user, since it checks readability as whoever invokes it.
 
 ## 3. Bring up the backends and start the host processes
+
+> **Supported host flow.** Since the fixed live-worker lifecycle (ADR-0574) a worker only starts
+> under the root-owned lifecycle witness, and every process reads its own database authority
+> (#1929), so the plain three-process shape below no longer runs as written. Install the
+> contract once (root; [live-stack runbook prerequisites](../runbooks/live-stack.md#prerequisites))
+> and then use `scripts/live-stack/up.sh`, which does everything in this step in order —
+> backends, migrations, runtime-role bootstrap, the operator's session libvirt, the daemons, the
+> lifecycle workers, and one inventory reconcile. `examples/local-libvirt/up.sh` wraps it with
+> the preflight, the project funding, and the `.mcp.json` install. The commands below remain as
+> the annotated reference for what that script does and which values it exports.
 
 Bring up the backing services with compose (backends only — not the app tier):
 
@@ -420,9 +432,10 @@ when it connects**, so after a token expires you must re-export it and then **re
 `kdive` server in your client (in Claude Code: `/mcp` → reconnect), not just re-run the export.
 
 The [`examples/local-libvirt/`](../../../examples/local-libvirt/) helpers automate this end to
-end: `up.sh` installs the `.mcp.json` into `KDIVE_KERNEL_SRC` (merging, not clobbering, any
-existing file) and starts the trio; see that example's README for the full bring-up. The example
-seeds and tokenises the same `demo` project as this walkthrough.
+end: `up.sh` brings the stack up through `scripts/live-stack/up.sh`, funds the project, and
+installs the `.mcp.json` into `KDIVE_KERNEL_SRC` (merging, not clobbering, any existing file);
+see that example's README for the full bring-up. The example seeds and tokenises the same `demo`
+project as this walkthrough.
 
 **Request an allocation.** With the project onboarded and the resource discovered, this is granted:
 

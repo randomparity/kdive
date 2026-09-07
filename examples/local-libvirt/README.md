@@ -4,9 +4,10 @@ A reference for the primary local-libvirt use case — a developer standing up K
 their own workstation and driving a kernel through its build → boot → debug → capture
 lifecycle from an MCP client.
 
-The three KDIVE processes run **as root against `qemu:///system`** (the representative
-identity for managing system-scope QEMU/KVM domains, libguestfs, kexec, and the console
-log), the stack onboards a project named **`demo`**, and an MCP client opened in your
+The server and reconciler run as you, the workers run in fixed slot accounts under the
+root-owned lifecycle witness (ADR-0574; every worker incarnation is registered and credentialed
+by it), and all of them share one operator-owned **session libvirt daemon** the contract
+publishes. The stack onboards a project named **`demo`**, and an MCP client opened in your
 kernel tree (`~/src/linux` by default) drives that very checkout.
 
 This is the supported first-run path for a local-libvirt install. The
@@ -14,9 +15,9 @@ This is the supported first-run path for a local-libvirt install. The
 step-by-step reference for what `up.sh` does and for the host preparation it expects (packages,
 directories, the guest image); this page is the operating manual for the scripts.
 
-This example calls the real product commands (`docker compose`, `python -m kdive migrate`,
-`python -m kdive seed-project`) rather than the source-tree `just` recipes, so it mirrors a
-real deployment. For the underlying reference material see
+The scripts here are thin wrappers over the maintained host flow — `scripts/live-stack/up.sh`,
+`onboard.sh`, `down.sh` — plus the host preparation and the guest-image build that flow assumes
+already happened. For the underlying reference material see
 [`docs/operating/local-stack.md`](../../docs/operating/local-stack.md), the
 [local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md),
 and the [four-method live run](../../docs/operating/runbooks/four-method-live-run.md).
@@ -31,6 +32,10 @@ On a fresh Debian/Ubuntu host, `install-host.sh` does all of the host preparatio
 - Docker with a reachable daemon (for the Postgres / MinIO / mock-OIDC backends).
 - The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`. There is no
   PyPI wheel yet; the checkout is the install, and the scripts here run from it.
+- The fixed live-worker lifecycle contract installed for this checkout and your user
+  (`deploy/systemd/install-live-worker-lifecycle.sh`, root; `install-host.sh` runs it). A
+  worker cannot start outside it — it has no incarnation credential — and it is what publishes
+  the session libvirt endpoint every script here uses.
 - A kdive-ready guest image at `/var/lib/kdive/rootfs/local/<name>.qcow2`, declared in
   `systems.toml` so an agent can provision it by catalog name. `build-image.sh` builds and
   registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
@@ -46,20 +51,20 @@ with `KDIVE_PREFLIGHT_KDUMP=optional`, so that gap prints as a `WARN` with the f
 bring-up continues — provision, build, boot, debug, and the other capture methods do not need
 it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 
-> **Day-to-day development?** If you already have the stack seeded and just want to start/stop
-> the kdive processes, use `scripts/live-stack/up.sh` / `down.sh` / `status.sh` — the
-> host-lifecycle scripts that manage the running processes without re-seeding. This example
-> (`examples/local-libvirt/`) is the **first-run onboarding** path.
+> **Day-to-day development?** `scripts/live-stack/up.sh` / `down.sh` / `status.sh` are the
+> underlying host-lifecycle scripts; `up.sh` here adds the preflight, the project funding, and
+> the `.mcp.json` merge on top of them, and is idempotent, so re-running it is the normal way to
+> restart the stack after editing source (the daemons do not hot-reload).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `install-host.sh` | Fresh Debian/Ubuntu host preparation: apt packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, `/var/lib/kdive` directories, the venv libguestfs binding. Re-runnable. |
-| `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_LIBVIRT_URI=qemu:///system`, and `KDIVE_PYTHON`. Source it; don't run it. |
-| `up.sh` | Idempotent bring-up: preflight → duplicate-trio guard → staging dir → backends → migrate → runtime-role bootstrap → seed project → merge `.mcp.json` → start the trio as root → block until all three report ready. |
-| `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory for `qemu:///system` on SELinux hosts, append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
-| `down.sh` | Stop the root processes by pid file — verifies each pid is still a kdive process (`sudo kill`, then SIGKILL survivors); keeps the pid file if a kdive process refuses to die. Backends are left running. |
+| `install-host.sh` | Fresh Debian/Ubuntu host preparation: apt packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, the fixed live-worker lifecycle contract (root), the guest-image directory, the venv libguestfs binding. Re-runnable. |
+| `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, the published session `KDIVE_LIBVIRT_URI`, and an XDG log directory. Source it; don't run it. |
+| `up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/up.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
+| `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `virt_image_t` on SELinux hosts, append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
+| `down.sh` | `scripts/live-stack/down.sh` with the example env: retires the lifecycle workers through the witness, stops the daemons and the compose backends, keeps state. `--wipe` also drops the data volumes and reaps kdive domains. |
 | `mint-token.sh` | Print an admin developer token for `KDIVE_PROJECT` to stdout. |
 | `mcp.json` | The MCP client config installed into the kernel tree; reads the token from `${KDIVE_TOKEN}` (holds no secret). |
 
@@ -69,7 +74,7 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 # 0. Fresh Debian/Ubuntu host only: prepare it, then log out and back in for the groups.
 examples/local-libvirt/install-host.sh
 
-# 1. Bring everything up (prompts once for sudo; starts root processes on qemu:///system).
+# 1. Bring everything up (no sudo: the lifecycle contract from step 0 does the privileged part).
 examples/local-libvirt/up.sh
 
 # 2. Build and register a guest image (once; re-run per extra distro you want to boot).
@@ -82,10 +87,9 @@ export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 cd ~/src/linux            # the .mcp.json up.sh installed lives here
 # ...launch your MCP client (it connects to http://127.0.0.1:8000/mcp as Bearer $KDIVE_TOKEN)
 
-# 5. When finished, stop the processes (backends stay up):
+# 5. When finished, stop everything (data volumes and domains are kept):
 examples/local-libvirt/down.sh
-docker compose down       # from the repo root: stops the backends, keeps their data
-docker compose down --volumes   # ...or also drop the database and the artifacts bucket
+examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the bucket, and kdive domains
 ```
 
 ## Fresh Debian/Ubuntu host
@@ -110,8 +114,19 @@ docker compose down --volumes   # ...or also drop the database and the artifacts
   passes; on a host whose system Python differs it stays a `WARN` (kdump only) and
   everything else works. Contributors who also want the dev tooling (shellcheck, prek, node)
   run `./scripts/check-setup-deps.sh -y` separately.
-- **Directories** — `/var/lib/kdive/{install,console,rootfs/local,build}` owned by you,
-  world-traversable.
+- **Lifecycle contract** — `deploy/systemd/install-live-worker-lifecycle.sh --operator $USER
+  --source <checkout>` as root, with the witness-member DSN on its standard input (the fixed
+  local development login the compose `role-bootstrap` one-shot creates). It provisions the
+  eight `kdive-worker-N` slot accounts, the `kdive-live-control`/`kdive-live-libvirt` groups
+  (you join both), the root lifecycle witness socket, an operator-owned session `libvirtd` with
+  its endpoint published in `/etc/kdive/live-worker-libvirt.env`, the provider data
+  directories under `/var/lib/kdive`, and a worker venv under `/opt/kdive-live-worker-lifecycle`
+  built from the checkout (re-run the script after pulling a new revision). The
+  [live-stack runbook](../../docs/operating/runbooks/live-stack.md#prerequisites) and
+  [`deploy/systemd/README.md`](../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract)
+  describe the contract.
+- **Directories** — `/var/lib/kdive/rootfs/local` (where `build-image.sh` publishes images) as
+  you, group `kdive-live-libvirt`, the same posture the installer gives its parent.
 
 Every catalog family builds through the customization boot (a throwaway guest installs its
 own packages), so no image build depends on the libguestfs appliance network. The Ubuntu
@@ -140,35 +155,26 @@ own packages), so no image build depends on the libguestfs appliance network. Th
 
 ## How bring-up and teardown behave
 
-- **Readiness gate.** `up.sh` does not print "stack is up" on a timer. After starting the
-  trio it polls **all three** processes' `/readyz` and only prints success once every one
-  returns `200` (the server gates on pg + MinIO + mock-OIDC; the worker and reconciler on
-  pg + MinIO). If a process exits first or readiness is not reached within 90s, `up.sh`
-  prints the per-process log paths under `KDIVE_STACK_LOG_DIR` and exits non-zero. `/readyz`
-  is served by the aux health listener, **not** on the MCP port `:8000`, which has no health
-  routes.
-  - *Caveat:* with `KDIVE_HEALTH_BIND_ADDR` unset (the default), each process gets its own
-    port — server `9464`, worker `9465`, reconciler `9466` — and `up.sh` polls all three. If
-    you export `KDIVE_HEALTH_BIND_ADDR`, it applies to **all three** processes, so worker and
-    reconciler collide with the server on that one port and fail to bind; `up.sh` then polls
-    only that address and the per-process exit check surfaces the bind failure as a stopped
-    process. Leave it unset.
-- **Duplicate-run guard.** `up.sh` refuses to start if a root `kdive` trio is already
-  running (a second trio would fight over the same domains); stop the first with `down.sh`.
-- **`.mcp.json` is merged, not clobbered.** `up.sh` writes `KDIVE_KERNEL_SRC/.mcp.json`
-  *before* starting the trio, so a problem here (missing kernel tree, malformed existing
-  file) stops the run cleanly instead of leaving the trio up. If the file already exists its
-  first version is backed up to `.mcp.json.bak` (never overwritten on re-run, so the original
-  is preserved), and only the `kdive` server entry is replaced — any other MCP servers and
-  top-level keys you configured are kept. A missing file is created from the template. The
-  step is idempotent.
-- **Teardown verifies process identity.** `down.sh` confirms each pid in the pid file is
-  *still a `python -m kdive` process* before signalling it — a stale pid file may name a pid
-  the OS has since recycled onto an unrelated (possibly root) process, and killing by bare
-  number would take down the wrong thing. It sends `sudo kill`, waits, escalates to SIGKILL
-  for kdive processes that remain, and reports both recycled pids (left untouched) and any
-  kdive survivors. If a kdive process cannot be stopped it keeps the pid file and exits
-  non-zero so a re-run can finish the job; a clean stop removes it.
+- **Settle gate.** `scripts/live-stack/up.sh` waits past each daemon's own start budget and
+  fails if the server or reconciler exits, or if the witness does not report exactly the
+  requested worker slots (`KDIVE_WORKER_COUNT`, default 1) as started. Daemon logs are under
+  `KDIVE_STACK_LOG_DIR`; worker diagnostics come from
+  `scripts/live-stack/worker-lifecycle.sh diagnostics` (the units are retained by systemd).
+- **Re-running replaces the fleet.** Bring-up asks the witness to retire any retained worker
+  slots and stops its own daemons before starting again, so `up.sh` is the restart command;
+  anything foreign holding the MCP port fails it loudly instead of losing the bind race.
+- **Session libvirt, not `qemu:///system`.** The installer publishes one operator-owned session
+  daemon; `env.sh` exports it as `KDIVE_LIBVIRT_URI`, so `build-fs`, the preflight, the daemons,
+  and the workers all see the same domains. Files QEMU and virtlogd write belong to you, which
+  is what lets a non-root worker confirm boots and read console logs (ADR-0223).
+- **`.mcp.json` is merged, not clobbered.** If the file already exists its first version is
+  backed up to `.mcp.json.bak` (never overwritten on re-run, so the original is preserved), and
+  only the `kdive` server entry is replaced — any other MCP servers and top-level keys you
+  configured are kept. A missing file is created from the template. The step is idempotent and
+  runs last, so a missing kernel tree leaves a working stack behind.
+- **Teardown goes through the witness.** `down.sh` retires the worker slots, stops the daemons
+  (SIGTERM, then `--force` for SIGKILL), and stops the compose backends. Plain teardown keeps
+  the data volumes and any running kdive domains; `--wipe` drops both.
 
 ## Configuration
 
@@ -179,18 +185,20 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
-| `KDIVE_LIBVIRT_URI` | `qemu:///system` | libvirt connection the worker drives. |
+| `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `up.sh` refuses. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for `python -m kdive` and the processes. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
 | `KDIVE_TOKEN_TTL` | `2592000` (30d) | Lifetime in seconds of the token `mint-token.sh` issues; inherited from `scripts/live-stack/env.sh`. Minimum `1`; no enforced maximum. |
-| `KDIVE_STACK_PID_FILE` / `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack.pid` / `…/local-stack-logs` | Where `up.sh` records the process pids and writes per-process logs. |
+| `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack-logs` | Where the server and reconciler daemons log (workers log to their systemd units). |
+| `KDIVE_WORKER_COUNT` | `1` | Lifecycle worker slots to start (1–8); workers are the job-concurrency unit. |
+| `KDIVE_SKIP_OBS` | `1` | `0` also brings up Prometheus/Grafana with the backends. |
 | `KDIVE_BUILD_IMAGE_WORKSPACE` | `~/.local/share/kdive/build/images` | User-writable `build-fs --workspace` for `build-image.sh` (the build-fs default under `/var/lib/kdive/build` is root-owned). |
 | `KDIVE_LOCAL_ROLE_BOOTSTRAP` | `1` | `up.sh` runs the compose `role-bootstrap` one-shot so the per-process database login members exist; `0` skips it for externally provisioned members. |
 | `KDIVE_SYSTEMS_TOML` | `~/.config/kdive/systems.toml` | Optional declarative inventory the reconciler loads. Absent by default (a quiet no-op) — see [Optional inventory](#optional-inventory-systemstoml). The default is CWD-independent; set this to point at a file elsewhere. |
 
-The pid file and logs live under the XDG state dir (`$XDG_STATE_HOME`, default
+The daemon logs live under the XDG state dir (`$XDG_STATE_HOME`, default
 `~/.local/state/kdive`) — the same place the `kdive login` token cache lives — not inside
-the repo. Set `XDG_STATE_HOME`, or the two `KDIVE_STACK_*` variables, to relocate them.
+the repo. Set `XDG_STATE_HOME` or `KDIVE_STACK_LOG_DIR` to relocate them.
 
 If you change `KDIVE_HTTP_HOST`/`KDIVE_HTTP_PORT` from `127.0.0.1:8000`, edit the `url` in
 the installed `~/src/linux/.mcp.json` to match.
@@ -224,7 +232,7 @@ schema_version = 2
 # discovered vcpus / memory_mb / PCIe fields.
 [[local_libvirt]]
 name = "workstation"
-host_uri = "qemu:///system"
+host_uri = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"  # the published endpoint
 cost_class = "local"
 # concurrent_allocation_cap = 1   # optional; how many allocations this host serves at once
 # pool = "default"                # optional; group interchangeable hosts for by-pool allocation
