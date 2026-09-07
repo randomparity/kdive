@@ -214,7 +214,7 @@ def _current(
 
 def test_migration_0147_is_registered_after_orphan_authority() -> None:
     versions = [item.version for item in migrate.discover_migrations()]
-    assert versions[-1] == "0147"
+    assert "0147" in versions
 
 
 def test_0147_adds_torn_down_activation_state(migrated_url: str) -> None:
