@@ -12,6 +12,13 @@ set -euo pipefail
 example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 
+# install-host.sh installs uv under ~/.local/bin, and the live-stack scripts this example wraps
+# call `uv run` (apply-migrations.sh, onboard.sh). A non-interactive shell (ssh command, nohup,
+# cron) skips the profile line the uv installer added, so put that directory on PATH here.
+if ! command -v uv >/dev/null 2>&1 && [[ -x "${HOME}/.local/bin/uv" ]]; then
+  export PATH="${HOME}/.local/bin:${PATH}"
+fi
+
 # Reuse the live-stack env so this example tracks the same defaults the rest of the project
 # documents. It already exports KDIVE_KERNEL_SRC=~/src/linux, KDIVE_INSTALL_STAGING=
 # /var/lib/kdive/install, and the OIDC issuer on :8090 (the host-published mock issuer).
