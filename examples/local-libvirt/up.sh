@@ -99,7 +99,9 @@ fi
 # re-validated immediately before the start step (the backend image pull can outlast the
 # sudo timestamp).
 step "sudo (root is required for qemu:///system, libguestfs, kexec, console-log reads)"
-sudo -v
+# Prompt only when a password is needed: `sudo -v` insists on a terminal even where a NOPASSWD
+# rule applies, which breaks a non-interactive run (ssh without a tty, nohup).
+sudo -n true 2>/dev/null || sudo -v
 
 # 3. Install-staging directory — runs.install stages the built kernel/initrd here before
 #    defining the domain. It must be worker-writable AND traversable by the qemu user, so it
@@ -213,7 +215,7 @@ PY
 #    (#1929, the scripts/live-stack/lib.sh shape). The three real pids land in the
 #    user-owned pid file, which down.sh reads to stop them.
 step "start server/worker/reconciler as root"
-sudo -v
+sudo -n true 2>/dev/null || sudo -v
 mkdir -p "${log_dir}" "$(dirname "${pid_file}")"
 mapfile -t pids < <(sudo -E bash -c '
   set -euo pipefail
