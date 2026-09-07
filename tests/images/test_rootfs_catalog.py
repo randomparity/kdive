@@ -36,6 +36,8 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
     "centos-stream-kdive-ready-9": "1.7.6",
     "debian-kdive-ready-12": "1.7.2",
     "debian-kdive-ready-13": "1.7.6",
+    "ubuntu-kdive-ready-24.04": "1.7.5",
+    "ubuntu-kdive-ready-26.04": "1.7.7",
     "fedora-kdive-ready-43-cloud-ppc64le": "1.7.8",
     "rocky-kdive-ready-9-ppc64le": "1.7.6",
     "rocky-kdive-ready-10-ppc64le": "1.7.8",
@@ -60,6 +62,8 @@ _EXPECTED_DRGN: dict[str, str] = {
     "centos-stream-kdive-ready-10": "0.0.33",
     "debian-kdive-ready-12": "0.0.22",
     "debian-kdive-ready-13": "0.0.31",
+    "ubuntu-kdive-ready-24.04": "0.0.25",
+    "ubuntu-kdive-ready-26.04": "0.0.33",
     "fedora-kdive-ready-43-cloud-ppc64le": "0.2.0",
     "rocky-kdive-ready-9-ppc64le": "0.0.33",
     "rocky-kdive-ready-10-ppc64le": "0.0.33",
@@ -99,11 +103,34 @@ def test_loads_all_rhel_family_entries() -> None:
     } <= set(cat)
 
 
-def test_loads_debian_entries() -> None:
+_DEBIAN_FAMILY_ROWS = (
+    "debian-kdive-ready-12",
+    "debian-kdive-ready-13",
+    "ubuntu-kdive-ready-24.04",
+    "ubuntu-kdive-ready-26.04",
+)
+
+
+def test_loads_debian_family_entries() -> None:
     cat = load_rootfs_catalog()
-    assert {"debian-kdive-ready-12", "debian-kdive-ready-13"} <= set(cat)
-    for name in ("debian-kdive-ready-12", "debian-kdive-ready-13"):
+    assert set(_DEBIAN_FAMILY_ROWS) <= set(cat)
+    for name in _DEBIAN_FAMILY_ROWS:
         assert cat[name].family == "debian", name
+        assert cat[name].distro == name.split("-", 1)[0], name
+
+
+def test_ubuntu_rows_pin_dated_release_serials() -> None:
+    """An Ubuntu row pins a `release-YYYYMMDD` serial, never the rotating `release/` alias.
+
+    Ubuntu's `.img` cloud files are qcow2; the pin is what makes the sha256 reproducible.
+    """
+    cat = load_rootfs_catalog()
+    for name in ("ubuntu-kdive-ready-24.04", "ubuntu-kdive-ready-26.04"):
+        src = cat[name].source
+        assert isinstance(src, CloudImageSource), name
+        assert "cloud-images.ubuntu.com/releases/" in src.url, name
+        assert "/release-2" in src.url and "/release/" not in src.url, name
+        assert src.url.endswith("-server-cloudimg-amd64.img"), name
 
 
 def test_loads_the_ppc64le_entry() -> None:
@@ -122,7 +149,8 @@ def test_cloud_image_entries_are_sha256_pinned() -> None:
             continue  # the lone virt-builder regression reference (its -cloud sibling is pinned)
         src = cat[name].source
         assert isinstance(src, CloudImageSource), name
-        assert src.url.endswith(".qcow2"), name
+        # Ubuntu publishes its qcow2 cloud images with a `.img` suffix.
+        assert src.url.endswith((".qcow2", ".img")), name
         assert len(src.sha256) == 64, name
 
 
@@ -138,12 +166,15 @@ def test_catalog_drgn_versions_match_snapshot() -> None:
         assert cat[name].drgn_version == version, name
 
 
+_LIVE_DRGN_INCAPABLE_ROWS = {"debian-kdive-ready-12", "ubuntu-kdive-ready-24.04"}
+
+
 def test_only_below_threshold_rows_are_live_drgn_incapable() -> None:
     """Guard: only rows shipping drgn < the 0.0.31 BTF threshold compute ``incapable``."""
     cat = load_rootfs_catalog()
     for name in _EXPECTED_DRGN:
         cap = live_drgn_capability(drgn_version=cat[name].drgn_version, drgn_tooling=True)
-        expected = "incapable" if name == "debian-kdive-ready-12" else "capable"
+        expected = "incapable" if name in _LIVE_DRGN_INCAPABLE_ROWS else "capable"
         assert cap.status == expected, name
 
 
@@ -202,14 +233,16 @@ def test_ppc64le_rows_mirror_their_x86_64_sibling_versions() -> None:
 
 
 def test_no_ppc64le_row_for_deferred_or_unported_distros() -> None:
-    """N/A decision, executable (ADR-0350): no ppc64le row for the debian family (deferred to
-    #1167) or for Rocky 8 (no ppc64le port). A future addition of an un-buildable row fails here
-    loudly. When #1167 adds a debian ppc64le row it must update this guard deliberately.
+    """N/A decision, executable (ADR-0350): no ppc64le row for the debian family (Debian
+    publishes no `genericcloud` ppc64el base; the customization boot itself is cross-arch since
+    #1167) or for Rocky 8 (no ppc64le port). A future addition of an unproven row fails here
+    loudly; adding a debian-family ppc64le row with its TCG proof must update this guard
+    deliberately.
     """
     cat = load_rootfs_catalog()
     ppc = [e for e in cat.values() if e.arch == "ppc64le"]
     assert ppc, "expected ppc64le rows in the catalog"
-    assert not [e for e in ppc if e.family == "debian"], "debian ppc64le is deferred to #1167"
+    assert not [e for e in ppc if e.family == "debian"], "no proven debian-family ppc64le base"
     assert "rocky-kdive-ready-8-ppc64le" not in cat, "Rocky 8 has no ppc64le port"
 
 

@@ -1,10 +1,11 @@
-"""Unit tests for the debian FamilyCustomizer argv contract (ADR-0251, #824, ADR-0288).
+"""Unit tests for the debian FamilyCustomizer step contract (ADR-0251, #824, ADR-0288, #1167).
 
-These pin the virt-customize argv the debian customizer builds without running libguestfs: apt
-install, ``ssh.service``/``kdump-tools.service`` enable, ``USE_KDUMP=1``, the NMI-panic sysctl,
-the kdive-ready unit, and the shared cloud-init first-boot baking (ADR-0288) — and the deliberate
-Debian divergences from ``rhel``: no ``/etc/selinux/config`` edit, no NetworkManager keyfile,
-``ssh.service`` not ``sshd.service``. The image bakes no authorized key (ADR-0289, #963).
+These pin the customization steps the debian customizer emits without running libguestfs or a
+customization boot: the apt index refresh + install, ``ssh.service``/``kdump-tools.service``
+enable, ``USE_KDUMP=1``, the NMI-panic sysctl, the kdive-ready unit, and the shared cloud-init
+first-boot baking (ADR-0288) — and the deliberate Debian divergences from ``rhel``: no
+``/etc/selinux/config`` edit, no NetworkManager keyfile, ``ssh.service`` not ``sshd.service``. The
+image bakes no authorized key (ADR-0289, #963).
 """
 
 from __future__ import annotations
@@ -13,12 +14,19 @@ from pathlib import Path
 
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.debian import DebianFamily
-from kdive.images.families.renderers import render_argv
+from kdive.images.families.steps import InstallPackages, RunCommand, Step
 from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
 )
 from kdive.images.rootfs.kinds import RootfsImageKind
+from tests.support.customize_steps import (
+    baked_paths,
+    commands,
+    installed,
+    rendered,
+    upload_source,
+)
 
 
 def _ctx(
@@ -40,44 +48,50 @@ def _ctx(
     )
 
 
-def _argv(ctx: CustomizeContext, cleanup: list[Path]) -> list[str]:
-    """Render the debian family's steps to the virt-customize argv the tests pin (ADR-0345)."""
-    return render_argv(DebianFamily().customize_steps(ctx), cleanup=cleanup)
+def _steps(ctx: CustomizeContext) -> list[Step]:
+    return DebianFamily().customize_steps(ctx)
 
 
-def test_debug_argv_writes_makedumpfile_version_marker(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"), staged_cleanup)
-    assert MAKEDUMPFILE_MARKER_GUEST_PATH in " ".join(argv)
+def test_debug_steps_write_makedumpfile_version_marker(tmp_path: Path) -> None:
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH in rendered(steps)
 
 
-def test_build_argv_omits_makedumpfile_version_marker(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"), staged_cleanup)
-    assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(argv)
+def test_build_steps_omit_makedumpfile_version_marker(tmp_path: Path) -> None:
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH not in rendered(steps)
 
 
-def test_debug_argv_writes_drgn_version_marker(tmp_path: Path, staged_cleanup: list[Path]) -> None:
+def test_debug_steps_write_drgn_version_marker(tmp_path: Path) -> None:
     # python3-drgn is in the debug set, so the drgn-version marker is written (ADR-0334).
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"), staged_cleanup)
-    joined = " ".join(argv)
-    assert DRGN_MARKER_GUEST_PATH in joined
-    assert "drgn --version" in joined
+    text = rendered(_steps(_ctx(tmp_path, is_cloud_image=True, kind="debug")))
+    assert DRGN_MARKER_GUEST_PATH in text
+    assert "drgn --version" in text
 
 
-def test_build_argv_omits_drgn_version_marker(tmp_path: Path, staged_cleanup: list[Path]) -> None:
+def test_build_steps_omit_drgn_version_marker(tmp_path: Path) -> None:
     # A build-host image installs no python3-drgn, so no drgn marker is written.
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"), staged_cleanup)
-    assert DRGN_MARKER_GUEST_PATH not in " ".join(argv)
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    assert DRGN_MARKER_GUEST_PATH not in rendered(steps)
 
 
-def test_family_identity_and_kdump_unit() -> None:
+def test_family_identity_kdump_unit_and_package_manager() -> None:
     fam = DebianFamily()
     assert fam.family == "debian"
     assert fam.kdump_unit == "kdump-tools.service", "Debian's kdump unit is kdump-tools.service"
     assert fam.guest_mac == "apparmor", "Debian uses AppArmor, not SELinux"
+    # The firstboot script installs with apt, non-interactively (a debconf prompt would hang the
+    # customization boot), and the family — not the renderer — owns that choice (#1167).
+    assert fam.install_command.endswith("apt-get -y install")
+    assert "DEBIAN_FRONTEND=noninteractive" in fam.install_command
+
+
+def test_apt_index_refresh_precedes_the_install(tmp_path: Path) -> None:
+    """A cloud base ships no usable apt index, so the guest refreshes it before installing."""
+    ctx = _ctx(tmp_path, is_cloud_image=True)
+    steps = _steps(ctx)
+    assert steps[0] == RunCommand("apt-get update")
+    assert steps[1] == InstallPackages(ctx.packages)
 
 
 def test_debug_packages_are_the_apt_crash_set() -> None:
@@ -99,84 +113,70 @@ def test_build_packages_are_the_toolchain_set() -> None:
     assert "kdump-tools" not in pkgs and "makedumpfile" not in pkgs
 
 
-def test_debug_argv_enables_ssh_and_kdump_tools(tmp_path: Path, staged_cleanup: list[Path]) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
-    j = " ".join(argv)
-    assert "systemctl enable ssh.service" in argv, "Debian's sshd unit is ssh.service"
-    assert "systemctl enable sshd.service" not in argv
-    assert "systemctl enable kdump-tools.service" in argv
+def test_debug_steps_enable_ssh_and_kdump_tools(tmp_path: Path) -> None:
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    cmds = commands(steps)
+    text = rendered(steps)
+    assert "systemctl enable ssh.service" in cmds, "Debian's sshd unit is ssh.service"
+    assert "systemctl enable sshd.service" not in cmds
+    assert "systemctl enable kdump-tools.service" in cmds
     # USE_KDUMP=1 is required or kdump-tools.service no-ops.
-    assert "USE_KDUMP=1" in j and "/etc/default/kdump-tools" in j
-    assert "99-kdive-kdump.conf" in j and "unknown_nmi_panic=1" in j
+    assert "USE_KDUMP=1" in text and "/etc/default/kdump-tools" in text
+    assert "99-kdive-kdump.conf" in text and "unknown_nmi_panic=1" in text
 
 
-def test_debug_argv_omits_ssh_inject_and_stages_readiness_unit(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
-    j = " ".join(argv)
-    assert "--ssh-inject" not in argv
-    assert "root:file:" not in j
-    assert "systemctl enable kdive-ready.service" in argv
+def test_debug_steps_omit_ssh_inject_and_stage_readiness_unit(tmp_path: Path) -> None:
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    text = rendered(steps)
+    assert "ssh-inject" not in text
+    assert "root:file:" not in text
+    assert "systemctl enable kdive-ready.service" in commands(steps)
 
 
-def test_debian_argv_bakes_cloud_init_drops_sshd_keygen(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
-    j = " ".join(argv)
-    assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j
-    assert "rm -f /etc/cloud/cloud-init.disabled" in j  # undoes any cloud-init disable
-    assert "--touch /etc/cloud/cloud-init.disabled" not in j  # no longer disabled
-    assert "kdive-sshd-keygen" not in j  # cloud-init generates host keys
-    assert "ssh-keygen -A" not in j
+def test_debian_steps_bake_cloud_init_and_drop_sshd_keygen(tmp_path: Path) -> None:
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    text = rendered(steps)
+    assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in baked_paths(steps)
+    assert "rm -f /etc/cloud/cloud-init.disabled" in commands(steps)  # undoes any disable
+    assert "/etc/cloud/cloud-init.disabled" not in baked_paths(steps)  # no longer disabled
+    assert "kdive-sshd-keygen" not in text  # cloud-init generates host keys
+    assert "ssh-keygen -A" not in text
 
 
-def test_debug_argv_touches_no_selinux_and_stages_no_nm_keyfile(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
+def test_debug_steps_touch_no_selinux_and_stage_no_nm_keyfile(tmp_path: Path) -> None:
     # Debian has no /etc/selinux/config and no NetworkManager — neither must be touched (#824).
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
-    j = " ".join(argv)
-    assert "selinux" not in j.lower()
-    assert "NetworkManager" not in j and "kdive-ssh-nic" not in j
+    text = rendered(_steps(_ctx(tmp_path, is_cloud_image=True)))
+    assert "selinux" not in text.lower()
+    assert "NetworkManager" not in text and "kdive-ssh-nic" not in text
 
 
-def test_debug_argv_stages_kdive_drgn_helper(tmp_path: Path, staged_cleanup: list[Path]) -> None:
+def test_debug_steps_stage_kdive_drgn_helper(tmp_path: Path) -> None:
     # The live introspect path SSH-execs /usr/local/sbin/kdive-drgn; python3-drgn ships the drgn CLI
     # so `drgn -k` works. The debug image must carry the reviewed helper, read-executable.
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
-    assert any(a.endswith(":/usr/local/sbin/kdive-drgn") for a in argv)
-    assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    assert upload_source(steps, "/usr/local/sbin/kdive-drgn").is_file()
+    assert "chmod 0755 /usr/local/sbin/kdive-drgn" in rendered(steps)
 
 
-def test_virt_builder_base_installs_cloud_init_and_seeds_machine_id(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=False), staged_cleanup)
-    j = " ".join(argv)
-    assert "--install cloud-init" in j
-    assert "/etc/machine-id" in j
+def test_virt_builder_base_installs_cloud_init_and_seeds_machine_id(tmp_path: Path) -> None:
+    steps = _steps(_ctx(tmp_path, is_cloud_image=False))
+    assert "cloud-init" in installed(steps)
+    assert "/etc/machine-id" in baked_paths(steps)
 
 
-def test_build_argv_omits_kdump_nmi_and_drgn_helper(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
+def test_build_steps_omit_kdump_nmi_and_drgn_helper(tmp_path: Path) -> None:
     # A build-host image never runs force_crash and carries no introspection contract.
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"), staged_cleanup)
-    j = " ".join(argv)
-    assert "kdump-tools.service" not in j
-    assert "unknown_nmi_panic" not in j
-    assert "kdive-drgn" not in j
+    text = rendered(_steps(_ctx(tmp_path, is_cloud_image=True, kind="build")))
+    assert "kdump-tools.service" not in text
+    assert "unknown_nmi_panic" not in text
+    assert "kdive-drgn" not in text
 
 
-def test_ssh_enable_is_coupled_to_the_debug_kind(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
+def test_ssh_enable_is_coupled_to_the_debug_kind(tmp_path: Path) -> None:
     # sshd enablement mirrors the SSH capability, which capabilities() ties to kind: a debug image
     # enables ssh.service, a build-host image (which declares no SSH) never does.
-    debug = _argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"), staged_cleanup)
-    build = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"), staged_cleanup)
+    debug = commands(_steps(_ctx(tmp_path, is_cloud_image=True, kind="debug")))
+    build = commands(_steps(_ctx(tmp_path, is_cloud_image=True, kind="build")))
     assert "systemctl enable ssh.service" in debug
     assert "systemctl enable ssh.service" not in build
 

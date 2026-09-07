@@ -4,16 +4,15 @@ Emits the ordered customization ``Step``s PROVEN live on Fedora 44 in the #817 d
 install the dnf package set, enable ``sshd``/``kdump``, write the NMI-panic sysctl, pin kdump
 ``final_action poweroff``, stage the debug-image drgn helper, upload+enable the kdive-ready
 serial-readiness unit, and set SELinux permissive. It also enables cloud-init via a baked NoCloud
-seed (ADR-0288), the uniform rootfs first-boot mechanism. ``customize_via = "boot"``: the build
-plane boots the image and lets it self-customize (ADR-0345). The image bakes no authorized key
-(ADR-0289, #963); the per-System bootstrap key is injected at provision time.
+seed (ADR-0288), the uniform rootfs first-boot mechanism. The build plane boots the image and lets
+it self-customize with ``dnf`` (ADR-0345). The image bakes no authorized key (ADR-0289, #963); the
+per-System bootstrap key is injected at provision time.
 """
 
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Literal
 
 from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
@@ -78,7 +77,7 @@ class RhelFamily:
     family = "rhel"
     kdump_unit = "kdump.service"
     guest_mac = "selinux-permissive"
-    customize_via: Literal["boot", "virt_customize"] = "boot"
+    install_command = "dnf -y install"
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the dnf package set for ``kind`` on ``distro``/``version``.
@@ -141,15 +140,14 @@ class RhelFamily:
         steps.append(RunCommand(_SELINUX_PERMISSIVE_SED))
         return steps
 
-    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
-        """Normalize fstab/crypttab/SELinux, optionally forcing a first-boot relabel via guestfish.
+    def normalize(self, qcow2: Path) -> None:
+        """Normalize fstab/crypttab and set SELinux permissive via guestfish.
 
-        The tar->ext4 repack drops SELinux xattrs, so ``/.autorelabel`` forces a first-boot
-        ``restorecon``; combined with SELINUX=permissive the guest boots and relabels rather than
-        denying the host-written authorized_keys. The boot path passes ``relabel=False`` to skip
-        the touch here — the customization boot runs before the relabel would, so the offline seal
-        does the touch afterward instead (ADR-0345); the fstab/crypttab/SELINUX=permissive edits
-        are unconditional.
+        The tar->ext4 repack drops SELinux xattrs, so a first-boot ``restorecon`` is needed;
+        combined with SELINUX=permissive the guest boots and relabels rather than denying the
+        host-written authorized_keys. The ``/.autorelabel`` touch that forces it is deliberately
+        not done here: the customization boot runs after normalize and must not spend its boot
+        relabeling, so the offline seal touches it afterward (ADR-0345).
         """
         with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as fstab_handle:
             fstab_handle.write(FSTAB)
@@ -162,8 +160,6 @@ class RhelFamily:
             f"upload {selinux_path} /etc/selinux/config\n"
             "rm-f /etc/crypttab\n"
         )
-        if relabel:
-            script += "touch /.autorelabel\n"
         try:
             run_guestfs_tool(
                 ["guestfish", "--rw", "-a", str(qcow2), "-i"],

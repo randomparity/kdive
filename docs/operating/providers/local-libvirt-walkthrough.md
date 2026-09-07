@@ -342,6 +342,7 @@ catalog (`fixtures/local-libvirt/rootfs_catalog.toml`) ships these debug-guest e
 | `rocky-kdive-ready-8` / `-9` / `-10` | Rocky 8/9/10 | incomplete → use `method="host_dump"` |
 | `centos-stream-kdive-ready-9` / `-10` | CentOS Stream 9/10 | incomplete → use `method="host_dump"` |
 | `debian-kdive-ready-12` / `-13` | Debian 12/13 (makedumpfile 1.7.2 / 1.7.6) | incomplete → use `method="host_dump"` |
+| `ubuntu-kdive-ready-24.04` / `-26.04` | Ubuntu 24.04/26.04 LTS (makedumpfile 1.7.5 / 1.7.7) | incomplete → use `method="host_dump"` |
 
 Only Fedora 44 ships a makedumpfile new enough (≥ 1.7.9) to filter a v7.0 vmcore via the default
 `kdump` method; the others disclose `kdump_core_incomplete` and capture via `host_dump` instead (the
@@ -349,7 +350,7 @@ rest of the lifecycle — provision/build/install/boot — is identical). The fu
 in the [image-lifecycle runbook](../runbooks/image-lifecycle.md).
 
 `--image` resolves the row's pinned base, the family's package set (the EL-version-aware `rhel`
-customizer for Fedora/Rocky/CentOS, the apt-based `debian` customizer for Debian), and **destination**
+customizer for Fedora/Rocky/CentOS, the apt-based `debian` customizer for Debian and Ubuntu), and **destination**
 (`/var/lib/kdive/rootfs/local/<name>.qcow2` — exactly the `staged-path` your inventory declares), so
 no `--dest` is needed. Point `--workspace` at a **user-writable** path (the default
 `/var/lib/kdive/build/images` is root-owned); the build stages there and publishes the finished

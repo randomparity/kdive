@@ -4,8 +4,8 @@ Single source of truth for the constants and typed customization ``Step``s the l
 rootfs build shares with the :mod:`kdive.images.families.rhel` FamilyCustomizer: the kdive-ready
 serial readiness unit, the kdump NMI-panic sysctl and ``final_action`` pin, the debug-image drgn
 staging, the shared cloud-init first-boot seed (ADR-0288), and the default debug/build package
-sets. Each primitive returns ``list[Step]`` — one source of truth the argv renderer
-(``virt_customize`` path) and the firstboot renderer (boot path) both consume (ADR-0345).
+sets. Each primitive returns ``list[Step]`` — one source of truth the offline injector and the
+firstboot renderer of the customization boot consume (ADR-0345).
 """
 
 from __future__ import annotations

@@ -51,15 +51,22 @@ provenance. On success it prints exactly one line to **stdout** — the `KDIVE_G
 for the live spine — while the human summary (the destination path and the `sha256:` content
 digest) goes to **stderr** (the logger). That split makes the command's stdout `eval`-safe.
 
-> **How the packages get installed (ADR-0345, #1147).** For the `rhel` family (Fedora/RHEL),
-> `build-fs` no longer runs the guest's `dnf` inside the host-arch libguestfs appliance — it
-> repacks + normalizes the base first, injects the family customization as a one-shot firstboot
-> unit (file-level, arch-safe), then **boots the image once** (KVM natively, TCG for a foreign
-> arch such as ppc64le on an x86_64 host) so the guest self-installs its packages, and seals the
-> result. This makes foreign-arch image builds possible and keeps native builds on the guest's own
-> package manager. A build boot needs guest network egress for the package fetch; a failed in-guest
-> install surfaces the guest's error via the console tail rather than a silent timeout. The
-> `debian` family still uses the offline `virt-customize` path until its own follow-up (#1167).
+> **How the packages get installed (ADR-0345, #1147, #1167).** `build-fs` never runs the guest's
+> `dnf`/`apt-get` inside the host-arch libguestfs appliance — it repacks + normalizes the base
+> first, injects the family customization as a one-shot firstboot unit (file-level, arch-safe),
+> then **boots the image once** (KVM natively, TCG for a foreign arch such as ppc64le on an x86_64
+> host) so the guest self-installs its packages with its own package manager (`dnf` on the `rhel`
+> family, a non-interactive `apt-get` after an `apt-get update` on the `debian` family), and seals
+> the result. This makes foreign-arch image builds possible and removes the build host's dependency
+> on the libguestfs appliance network (`passt`). A build boot needs guest network egress for the
+> package fetch; a failed in-guest install surfaces the guest's error via the console tail rather
+> than a silent timeout.
+>
+> The boot path extracts the base's baseline kernel with the libguestfs **Python binding**, so
+> `build-fs` needs `import guestfs` to work from the venv it runs in — for every family, not only
+> the kdump capture path that first required it. `scripts/check-setup-deps.sh -y` wires the distro
+> binding into the venv (the four-method runbook §4b has the manual form); a missing binding
+> fails the build with `missing_dependency` before the boot starts.
 
 > **Building a foreign-arch image is slower (TCG).** When the target arch is not the build
 > host's arch (e.g. a `ppc64le` image on an `x86_64` host), the customization boot runs under
@@ -190,9 +197,11 @@ rejected, never published), and publishes row-first.
 `fixtures/local-libvirt/rootfs_catalog.toml`. Each row pins its base (a `virt-builder` template or
 a sha256-pinned cloud-image URL) and carries a `kdump_capable` flag. The RHEL-family entries
 (#823) reuse the `rhel` customizer; on EL 8/9 `makedumpfile`/`kdumpctl` come from `kexec-tools`
-(no standalone packages) and EL 8 pulls `drgn` from EPEL. The Debian entries (#824) use the
-`debian` customizer (apt; `kdump-tools.service`; `ssh.service`; `python3-drgn`; AppArmor instead of
-SELinux, needing no relabel; cloud-init disabled via `/etc/cloud/cloud-init.disabled`).
+(no standalone packages) and EL 8 pulls `drgn` from EPEL. The Debian entries (#824) and the
+Ubuntu LTS entries use the `debian` customizer (apt; `kdump-tools.service`; `ssh.service`;
+`python3-drgn`; AppArmor instead of SELinux, needing no relabel; cloud-init disabled via
+`/etc/cloud/cloud-init.disabled`). Ubuntu rows pin a dated `release-YYYYMMDD` serial under
+`cloud-images.ubuntu.com/releases/<codename>/`; the `.img` file is qcow2.
 
 `kdump_capable` is **kernel-relative** to the current default from-source target (a v7.0-class
 x86_64 kernel): it is `true` only when the makedumpfile the build installs from that release's
@@ -212,8 +221,10 @@ build silently becomes capable while the flag lags until re-verified. The runtim
 | `centos-stream-kdive-ready-10` | CentOS Stream 10 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
 | `debian-kdive-ready-12` | Debian 12 (bookworm) | 1.7.2 | no | `kdump_core_incomplete` → `host_dump` |
 | `debian-kdive-ready-13` | Debian 13 (trixie) | 1.7.6 | no | `kdump_core_incomplete` → `host_dump` |
+| `ubuntu-kdive-ready-24.04` | Ubuntu 24.04 LTS (noble) | 1.7.5 | no | `kdump_core_incomplete` → `host_dump` |
+| `ubuntu-kdive-ready-26.04` | Ubuntu 26.04 LTS (resolute) | 1.7.7 | no | `kdump_core_incomplete` → `host_dump` |
 
-Versions verified against distro package indexes on 2026-06-26 (the guard test
+Versions verified against distro package indexes on 2026-06-26 (Ubuntu rows: 2026-09-07; the guard test
 `tests/images/test_rootfs_catalog.py` asserts each row's flag matches its documented makedumpfile
 version). A `kdump_capable = no` entry still completes the rest of the lifecycle
 (provision/build/install/boot) and captures via the explicit `host_dump` method; only the default

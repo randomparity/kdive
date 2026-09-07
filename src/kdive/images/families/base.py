@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 from kdive.domain.catalog.images import Capability
 from kdive.images.families.steps import Step
@@ -26,7 +26,7 @@ def _mac_tag(guest_mac: str) -> Capability:
 
 @dataclass(frozen=True, slots=True)
 class CustomizeContext:
-    """Inputs a FamilyCustomizer needs to build the customize argv for one rootfs.
+    """Inputs a FamilyCustomizer needs to build the customization steps for one rootfs.
 
     Attributes:
         kind: The image kind (``debug`` or ``build``) the packages were selected for.
@@ -48,7 +48,12 @@ class CustomizeContext:
 
 
 class FamilyCustomizer(Protocol):
-    """How an OS family turns a base image into a kdive-ready rootfs."""
+    """How an OS family turns a base image into a kdive-ready rootfs.
+
+    Every family customizes the same way (ADR-0345): the build plane repacks and normalizes the
+    base, injects the family's file-op steps and a firstboot script offline, boots the image once
+    so the guest runs its own package manager for the exec-op steps, and seals the result.
+    """
 
     family: str
     #: The family's kdump systemd unit. The shared kdive-ready unit is ordered ``After=`` this so
@@ -59,10 +64,11 @@ class FamilyCustomizer(Protocol):
     #: ``selinux-permissive`` (rhel — repack drops xattrs, so a first-boot relabel + permissive) or
     #: ``apparmor`` (debian — profile-based, needs no relabel).
     guest_mac: str
-    #: How the build plane applies this family's ``customize_steps`` (ADR-0345): ``"boot"`` (rhel —
-    #: boot the image and let it self-customize) or ``"virt_customize"`` (debian — render the steps
-    #: to ``virt-customize`` argv and apply them offline).
-    customize_via: Literal["boot", "virt_customize"]
+    #: The in-guest command the firstboot script prefixes each ``InstallPackages`` step's names
+    #: with — the family's package manager in its non-interactive form (``dnf -y install`` /
+    #: ``DEBIAN_FRONTEND=noninteractive apt-get -y install``). Any index refresh the manager needs
+    #: first is a ``RunCommand`` the family emits ahead of the install (ADR-0345).
+    install_command: str
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""
@@ -78,12 +84,11 @@ class FamilyCustomizer(Protocol):
         """Return the ordered customization steps that turn the base into a kdive-ready rootfs."""
         ...
 
-    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
-        """Normalize the repacked qcow2 (fstab/crypttab/SELinux) in place via guestfish.
+    def normalize(self, qcow2: Path) -> None:
+        """Normalize the repacked qcow2 (fstab/crypttab/SELinux config) in place via guestfish.
 
-        ``relabel`` controls the first-boot SELinux relabel (``/.autorelabel``): the
-        virt-customize path leaves it on (default); the boot path passes ``relabel=False`` and
-        defers the touch to the offline seal after the customization boot (ADR-0345). Families
-        with no SELinux (debian) ignore the flag.
+        Runs before the customization boot. A family that needs a first-boot SELinux relabel does
+        not touch ``/.autorelabel`` here — the offline seal after the boot does (ADR-0345), so the
+        customization boot itself never relabels.
         """
         ...

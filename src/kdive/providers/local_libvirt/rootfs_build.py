@@ -7,24 +7,29 @@ provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
 1. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``);
 2. :func:`kdive.images.rootfs.base_source.acquire_base` materializes the base into a scratch
    qcow2 — a ``virt-builder`` template or a sha256-pinned cloud image;
-3. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
-   set, enable ``sshd``/``kdump``, stage the kdive-ready unit, etc. — the image bakes no
-   authorized key (ADR-0289, #963); the per-System bootstrap key is injected at provision time;
-4. ``virt-tar-out`` + ``virt-make-fs --type=ext4 --format=qcow2`` repack the root tree into a
-   **no-partition-table whole-disk ext4 qcow2** — the only layout the direct-kernel boot provider
-   mounts (``root=/dev/vda``, no initramfs unless the build uploaded an initrd artifact or the
-   kernel embeds its own initramfs, ADR-0030);
-5. ``family.normalize`` rewrites fstab to a lone ``/``, removes crypttab, and sets the family's
-   SELinux policy (rhel: permissive + first-boot relabel) via guestfish;
-6. ``verify_cloud_init`` runs an offline guestfish self-check on the staged image, asserting the
+3. ``virt-tar-out`` + ``virt-make-fs --type=ext4`` + ``qemu-img convert`` repack the root tree
+   into a **no-partition-table whole-disk ext4 qcow2** — the only layout the direct-kernel boot
+   provider mounts (``root=/dev/vda``, no initramfs unless the build uploaded an initrd artifact
+   or the kernel embeds its own initramfs, ADR-0030);
+4. ``family.normalize`` rewrites fstab to a lone ``/``, removes crypttab, and sets the family's
+   SELinux policy (rhel: permissive) via guestfish;
+5. the customization boot (ADR-0345): the family's file-op steps, the firstboot script rendered
+   from its exec-op steps, and the firstboot unit are injected offline via guestfish, then the
+   image boots its own baseline kernel once (KVM natively, TCG for a foreign arch) so the guest
+   installs the package set with its own package manager, enables ``sshd``/``kdump``, stages the
+   kdive-ready unit, etc. — the image bakes no authorized key (ADR-0289, #963); the per-System
+   bootstrap key is injected at provision time;
+6. the offline seal resets cloud-init's per-instance state, touches ``/.autorelabel`` for an
+   SELinux family, and asserts the firstboot unit removed itself;
+7. ``verify_cloud_init`` runs an offline guestfish self-check on the staged image, asserting the
    cloud-init first-boot wiring is actually baked in (ADR-0288) — the guard against a silent no-op
    that CI cannot catch by booting.
 
-The slow libguestfs/network seams are injected as acquisition, customization, and provenance
-dependencies. They default to the real implementations, so unit tests cover the orchestration and
-provenance contracts without libguestfs, qemu, or the network; the real path is exercised on the
-operator-run live-stack path. ``build()`` is synchronous — the worker offloads the whole call via
-``asyncio.to_thread`` (ADR-0092).
+The slow libguestfs/libvirt/network seams are injected as acquisition, customization, and
+provenance dependencies. They default to the real implementations, so unit tests cover the
+orchestration and provenance contracts without libguestfs, qemu, or the network; the real path is
+exercised on the operator-run live-stack path. ``build()`` is synchronous — the worker offloads
+the whole call via ``asyncio.to_thread`` (ADR-0092).
 """
 
 from __future__ import annotations
@@ -59,7 +64,6 @@ from kdive.images.families._fedora_customize import (
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.renderers import (
     partition_steps,
-    render_argv,
     render_firstboot_script,
     render_firstboot_unit,
 )
@@ -130,7 +134,6 @@ _log = logging.getLogger(__name__)
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _DEFAULT_IMAGE_SIZE = "6G"
 _ACQUIRE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
-_CUSTOMIZE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
@@ -153,15 +156,6 @@ def _real_virt_builder(*, template: str, output: Path) -> None:  # pragma: no co
         ["virt-builder", template, "--format", "qcow2", "--output", str(output)],
         stage="virt-builder",
         timeout_s=_ACQUIRE_TIMEOUT_S,
-    )
-
-
-def _real_virt_customize(qcow2: Path, argv: list[str]) -> None:  # pragma: no cover - live_vm
-    """Apply the family's customization argv to the acquired scratch via ``virt-customize``."""
-    _run_libguestfs_tool(
-        ["virt-customize", "-a", str(qcow2), *argv],
-        stage="virt-customize",
-        timeout_s=_CUSTOMIZE_TIMEOUT_S,
     )
 
 
@@ -258,7 +252,6 @@ def _grant_hypervisor_traversal(work_dir: Path) -> None:
 
 type AcquireBase = Callable[..., None]
 type VirtBuilder = Callable[..., None]
-type Customize = Callable[[Path, list[str]], None]
 type RepackWholeDiskExt4 = Callable[..., None]
 type FamilyResolver = Callable[[str], FamilyCustomizer]
 type VerifyCloudInit = Callable[[Path], None]
@@ -485,7 +478,6 @@ class RootfsAcquisition:
 class RootfsCustomization:
     """Dependencies used to customize, repack, and validate an acquired image."""
 
-    customize: Customize = _real_virt_customize
     repack_whole_disk_ext4: RepackWholeDiskExt4 = _real_repack_whole_disk_ext4
     verify_cloud_init: VerifyCloudInit = _real_verify_cloud_init
     inject_offline: InjectOffline = _real_inject_offline
@@ -614,51 +606,15 @@ class LocalLibvirtRootfsBuildPlane:
         spec: RootfsBuildSpec,
         entry: RootfsCatalogEntry,
     ) -> Path:
-        """Customize + stage the image per the family's ``customize_via``; return the probe source.
+        """Repack + normalize the base, boot it to self-customize, seal; return the probe source.
 
-        ``virt_customize`` (debian) keeps the historical order and probes provenance from the
-        customized ``scratch``; ``boot`` (rhel) repacks + normalizes first, then boots the image to
-        self-customize and seals it, so provenance is probed from the ``staged`` image (ADR-0345).
+        The base is repacked to whole-disk ext4 and normalized (leaving ``/.autorelabel`` to the
+        seal) *before* customization, then the image boots its own kernel to install packages and
+        run the firstboot script (ADR-0345). Provenance is probed from ``staged`` (the returned
+        path), the image that actually booted.
         """
-        if family.customize_via == "boot":
-            return self._build_via_boot(scratch, staged, family, work_dir, spec=spec, entry=entry)
-        return self._build_via_virt_customize(scratch, staged, family, spec=spec, entry=entry)
-
-    def _build_via_virt_customize(
-        self,
-        scratch: Path,
-        staged: Path,
-        family: FamilyCustomizer,
-        *,
-        spec: RootfsBuildSpec,
-        entry: RootfsCatalogEntry,
-    ) -> Path:
-        """The virt-customize path: customize the scratch, repack, normalize; probe from scratch."""
-        self._customize(scratch, family, spec=spec, entry=entry)
         self._customization.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
         family.normalize(staged)
-        self._customization.verify_cloud_init(staged)
-        return scratch
-
-    def _build_via_boot(
-        self,
-        scratch: Path,
-        staged: Path,
-        family: FamilyCustomizer,
-        work_dir: Path,
-        *,
-        spec: RootfsBuildSpec,
-        entry: RootfsCatalogEntry,
-    ) -> Path:
-        """The boot path: repack + normalize (no relabel), boot to self-customize, seal.
-
-        Provenance is probed from ``staged`` (the returned path), not ``scratch``.
-        The order is reversed from the virt-customize path: the base is repacked to whole-disk ext4
-        and normalized (leaving ``/.autorelabel`` to the seal) *before* customization, then the
-        image boots its own kernel to install packages and run the firstboot script (ADR-0345).
-        """
-        self._customization.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
-        family.normalize(staged, relabel=False)
         self._boot_customize(staged, family, work_dir, spec=spec, entry=entry)
         self._customization.seal_customized_image(
             staged,
@@ -685,6 +641,7 @@ class LocalLibvirtRootfsBuildPlane:
             file_ops, exec_ops = partition_steps(family.customize_steps(ctx))
             script = render_firstboot_script(
                 exec_ops,
+                install_command=family.install_command,
                 console_device=arch_traits(spec.arch).console_device,
                 unit_name=CUSTOMIZE_UNIT,
                 script_path=CUSTOMIZE_SCRIPT_PATH,
@@ -841,25 +798,6 @@ class LocalLibvirtRootfsBuildPlane:
             )
             return None
 
-    def _customize(
-        self,
-        scratch: Path,
-        family: FamilyCustomizer,
-        *,
-        spec: RootfsBuildSpec,
-        entry: RootfsCatalogEntry,
-    ) -> None:
-        """Render the kdive-ready unit and the family steps to argv, then run ``virt-customize``."""
-        cleanup: list[Path] = []
-        unit_path = self._render_readiness_unit(family, spec, cleanup)
-        try:
-            ctx = self._context(unit_path, spec=spec, entry=entry)
-            argv = render_argv(family.customize_steps(ctx), cleanup=cleanup)
-            self._customization.customize(scratch, argv)
-        finally:
-            for path in cleanup:
-                path.unlink(missing_ok=True)
-
     def _render_readiness_unit(
         self, family: FamilyCustomizer, spec: RootfsBuildSpec, cleanup: list[Path]
     ) -> Path:
@@ -877,7 +815,7 @@ class LocalLibvirtRootfsBuildPlane:
         spec: RootfsBuildSpec,
         entry: RootfsCatalogEntry,
     ) -> CustomizeContext:
-        """Build the :class:`CustomizeContext` both customize paths feed the family."""
+        """Build the :class:`CustomizeContext` the customization boot feeds the family."""
         return CustomizeContext(
             kind=entry.kind,
             packages=spec.packages,
