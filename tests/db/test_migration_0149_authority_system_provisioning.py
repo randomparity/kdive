@@ -12,8 +12,15 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
+from pydantic import TypeAdapter
 
 from kdive.db import migrate
+from kdive.domain.external_boot_activation import ExternalBootTeardownEvidenceV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityTeardownProofV1,
+    canonical_teardown_proof_bytes,
+    teardown_proof_digest,
+)
 from kdive.providers.system_authority.protocol import (
     GENESIS_DIGEST,
     AuthoritySystemJournalPhase,
@@ -26,8 +33,11 @@ from kdive.providers.system_authority.protocol import (
     make_authority_system_record,
     system_authority_digest,
 )
+from kdive.security.audit import args_digest
 from tests.db.external_boot_authority_support import (
+    _allocate,
     _RoleDsns,
+    _seed_case,
     authority_role_dsns,  # noqa: F401
 )
 
@@ -96,6 +106,8 @@ def test_0149_installs_two_private_tables_and_exact_function_grants(
             "advance_authority_system_journal_head",
             "list_authority_system_journal_heads",
             "repair_terminal_authority_system_attempts",
+            "list_authority_system_teardown_repairs",
+            "finalize_authority_system_teardown_repair",
         }
 
         allowed = {
@@ -127,6 +139,10 @@ def test_0149_installs_two_private_tables_and_exact_function_grants(
             },
             "list_authority_system_journal_heads(text)": {"kdive_provider_authority"},
             "repair_terminal_authority_system_attempts(integer)": {"kdive_reconciler"},
+            "list_authority_system_teardown_repairs(integer)": {"kdive_reconciler"},
+            ("finalize_authority_system_teardown_repair(uuid,bigint,uuid,bigint,text,text)"): {
+                "kdive_reconciler"
+            },
         }
         for signature, roles in allowed.items():
             for role, login in role_dsns.logins.items():
@@ -196,10 +212,16 @@ def test_0149_attempt_ack_and_receipt_tuples_are_closed(migrated_url: str) -> No
                 "('authority_system_ownership'::regclass,'authority_system_attempts'::regclass)"
             )
         }
+        terminal_job_index = conn.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname='public' "
+            "AND indexname='authority_system_attempt_terminal_job_repair'"
+        ).fetchone()
     assert "authority_system_ownership_journal_shape" in constraints
     assert "authority_system_attempts_ack_shape" in constraints
     assert "authority_system_attempts_receipt_shape" in constraints
     assert "authority_system_attempts_terminal_shape" in constraints
+    assert terminal_job_index is not None
+    assert "(job_id) WHERE ((state = 'terminal'" in terminal_job_index[0]
 
 
 def test_0149_repair_definition_follows_owned_terminal_attempt(migrated_url: str) -> None:
@@ -213,6 +235,7 @@ def test_0149_repair_definition_follows_owned_terminal_attempt(migrated_url: str
     assert "ownership.current_attempt_id = attempt.id" in definition
     assert "attempt.state = 'current'" not in definition
     assert "attempt.state = 'terminal'" in definition
+    assert "attempt.receipt_disposition='provision-ready'" in definition
 
 
 def test_0149_reconciler_consumes_terminal_row_selected_by_ownership(
@@ -255,8 +278,13 @@ def test_0149_reconciler_consumes_terminal_row_selected_by_ownership(
         conn.execute(
             "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
             "payload,authorizing,dedup_key) VALUES "
-            "(%s,'provision','running',1,3,%s,clock_timestamp()-interval '1 second','{}','{}',%s)",
-            (job_id, worker, f"authority-system-repair-{job_id}"),
+            "(%s,'provision','running',1,3,%s,clock_timestamp()-interval '1 second','{}',%s,%s)",
+            (
+                job_id,
+                worker,
+                Jsonb({"principal": "p", "agent_session": "repair-session", "project": "proj"}),
+                f"authority-system-repair-{job_id}",
+            ),
         )
         conn.execute(
             "INSERT INTO authority_system_ownership "
@@ -309,6 +337,223 @@ def test_0149_reconciler_consumes_terminal_row_selected_by_ownership(
             "SELECT consumed_at IS NOT NULL FROM authority_system_attempts WHERE id=%s",
             (authority_id,),
         ).fetchone() == (True,)
+        assert conn.execute(
+            "SELECT active_started_at IS NOT NULL FROM allocations WHERE id=%s",
+            (allocation_id,),
+        ).fetchone() == (True,)
+        assert conn.execute(
+            "SELECT principal,agent_session,project,tool,object_kind,transition,args_digest "
+            "FROM audit_log WHERE object_id=%s",
+            (system_id,),
+        ).fetchone() == (
+            "p",
+            "repair-session",
+            "proj",
+            "systems.provision",
+            "systems",
+            "provisioning->ready",
+            args_digest({"system_id": str(system_id)}),
+        )
+
+
+def test_0149_reconciler_cleans_before_terminalizing_preactivation_absence(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    resource_id, allocation_id, system_id, job_id = (uuid4() for _ in range(4))
+    investigation_id, run_id, authority_id, request_attempt_id = (uuid4() for _ in range(4))
+    worker = f"docker:authority-system-teardown-{uuid4()}"
+    head_digest = "sha256:" + "a" * 64
+    receipt_digest = "sha256:" + "b" * 64
+    operation_digest = "sha256:" + "c" * 64
+    receipt = b'{"disposition":"preactivation-absent"}'
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO resources (id,kind,name,pool,cost_class,status,host_uri) "
+            "VALUES (%s,'local-libvirt','host-t','default','standard','available','qemu:///system')",
+            (resource_id,),
+        )
+        conn.execute(
+            "INSERT INTO allocations (id,resource_id,state,principal,project) "
+            "VALUES (%s,%s,'active','p','proj')",
+            (allocation_id, resource_id),
+        )
+        conn.execute(
+            "INSERT INTO systems (id,allocation_id,state,provisioning_profile,principal,project) "
+            "VALUES (%s,%s,'provisioning','{}','p','proj')",
+            (system_id, allocation_id),
+        )
+        conn.execute(
+            "INSERT INTO investigations (id,principal,project,title,state) "
+            "VALUES (%s,'p','proj','t','active')",
+            (investigation_id,),
+        )
+        conn.execute(
+            "INSERT INTO runs "
+            "(id,investigation_id,system_id,target_kind,state,build_profile,principal,project) "
+            "VALUES (%s,%s,%s,'local-libvirt','created','{}','p','proj')",
+            (run_id, investigation_id, system_id),
+        )
+        conn.execute(
+            "INSERT INTO snapshots "
+            "(system_id,name,include_memory,state,principal,project) "
+            "VALUES (%s,'pre-teardown',false,'available','p','proj')",
+            (system_id,),
+        )
+        conn.execute(
+            "INSERT INTO system_bootstrap_keys (system_id,private_key,public_key) "
+            "VALUES (%s,'private','public')",
+            (system_id,),
+        )
+        conn.execute(
+            "INSERT INTO remote_module_attempt_obligations (system_id,run_id,operation_nonce) "
+            "VALUES (%s,%s,%s)",
+            (system_id, run_id, "1" * 32),
+        )
+        conn.execute(
+            "INSERT INTO worker_incarnations "
+            "(incarnation,authority_kind,authority_binding,fence_protocol,credential_hash,state) "
+            "VALUES (%s,'docker','{}',4,%s,'active')",
+            (worker, b"t" * 32),
+        )
+        conn.execute(
+            "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
+            "payload,authorizing,dedup_key) VALUES "
+            "(%s,'teardown','running',1,3,%s,clock_timestamp()-interval '1 second',%s,%s,%s)",
+            (
+                job_id,
+                worker,
+                Jsonb({"authority_system_v1": {"system_id": str(system_id)}}),
+                Jsonb({"principal": "p", "project": "proj"}),
+                f"authority-system-teardown-repair-{job_id}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,authority_instance,"
+            "profile_identity,root_identity,state,journal_sequence,journal_digest,journal_phase,"
+            "journal_record) VALUES "
+            "(%s,%s,%s,'local-libvirt','host-t','auth-t',%s,%s,'teardown-requested',2,%s,"
+            "'terminal','{}')",
+            (
+                system_id,
+                allocation_id,
+                resource_id,
+                operation_digest,
+                operation_digest,
+                head_digest,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO authority_system_attempts "
+            "(id,system_id,generation,operation,job_id,job_attempt,worker_incarnation,"
+            "request_attempt_id,operation_identity,operation_digest,state,ack_sequence,ack_digest,"
+            "quiescence_digest,acknowledged_at,ack_head_sequence,ack_head_digest,"
+            "terminal_head_sequence,terminal_head_digest,receipt_bytes,receipt_digest,"
+            "receipt_disposition,receipt_at) VALUES "
+            "(%s,%s,1,'preactivation-teardown',%s,1,%s,%s,'teardown-r',%s,'terminal',1,%s,%s,"
+            "clock_timestamp(),0,%s,2,%s,%s,%s,'preactivation-absent',clock_timestamp())",
+            (
+                authority_id,
+                system_id,
+                job_id,
+                worker,
+                request_attempt_id,
+                operation_digest,
+                operation_digest,
+                operation_digest,
+                "sha256:" + "0" * 64,
+                head_digest,
+                receipt,
+                receipt_digest,
+            ),
+        )
+        conn.execute(
+            "UPDATE authority_system_ownership SET current_attempt_id=%s WHERE system_id=%s",
+            (authority_id, system_id),
+        )
+
+    with psycopg.connect(role_dsns("kdive_reconciler")) as reconciler:
+        assert reconciler.execute(
+            "SELECT repair_terminal_authority_system_attempts(100)"
+        ).fetchone() == (0,)
+        with pytest.raises(psycopg.errors.InvalidParameterValue, match="repair limit"):
+            reconciler.execute("SELECT * FROM list_authority_system_teardown_repairs(101)")
+        reconciler.rollback()
+        assert reconciler.execute(
+            "SELECT * FROM list_authority_system_teardown_repairs(100)"
+        ).fetchall() == [(authority_id, 1, system_id, 2, head_digest, receipt_digest)]
+        finalize_args = (authority_id, 1, system_id, 2, head_digest, receipt_digest)
+        assert reconciler.execute(
+            "SELECT finalize_authority_system_teardown_repair(%s,%s,%s,%s,%s,%s)",
+            (*finalize_args[:-1], "sha256:" + "f" * 64),
+        ).fetchone() == ("superseded",)
+        assert reconciler.execute(
+            "SELECT finalize_authority_system_teardown_repair(%s,%s,%s,%s,%s,%s)",
+            finalize_args,
+        ).fetchone() == ("cleanup-required",)
+        reconciler.rollback()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        assert (
+            worker_conn.execute(
+                "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+                (worker, b"t" * 32),
+            ).fetchone()
+            is None
+        )
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT state,consumed_at FROM authority_system_attempts WHERE id=%s",
+            (authority_id,),
+        ).fetchone() == ("terminal", None)
+        assert conn.execute(
+            "SELECT state FROM authority_system_ownership WHERE system_id=%s", (system_id,)
+        ).fetchone() == ("teardown-requested",)
+        conn.execute("DELETE FROM system_bootstrap_keys WHERE system_id=%s", (system_id,))
+        conn.execute("DELETE FROM snapshots WHERE system_id=%s", (system_id,))
+
+    with psycopg.connect(role_dsns("kdive_reconciler")) as reconciler:
+        assert reconciler.execute(
+            "SELECT finalize_authority_system_teardown_repair(%s,%s,%s,%s,%s,%s)",
+            finalize_args,
+        ).fetchone() == ("cleanup-required",)
+        reconciler.rollback()
+
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE remote_module_attempt_obligations SET mutation_discharged_at=now(),"
+            "mutation_discharge_reason='terminal_escape' WHERE system_id=%s",
+            (system_id,),
+        )
+
+    with psycopg.connect(role_dsns("kdive_reconciler")) as reconciler:
+        assert reconciler.execute(
+            "SELECT finalize_authority_system_teardown_repair(%s,%s,%s,%s,%s,%s)",
+            finalize_args,
+        ).fetchone() == ("applied",)
+        reconciler.commit()
+        assert reconciler.execute(
+            "SELECT finalize_authority_system_teardown_repair(%s,%s,%s,%s,%s,%s)",
+            finalize_args,
+        ).fetchone() == ("applied",)
+        assert (
+            reconciler.execute(
+                "SELECT * FROM list_authority_system_teardown_repairs(100)"
+            ).fetchall()
+            == []
+        )
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,attempt.consumed_at IS NOT NULL,system.state,job.state "
+            "FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS attempt ON attempt.id=ownership.current_attempt_id "
+            "JOIN systems AS system ON system.id=ownership.system_id "
+            "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
+            (system_id,),
+        ).fetchone() == ("torn-down", True, "torn_down", "succeeded")
 
 
 def test_0149_worker_authority_journal_and_exact_receipt_replay(
@@ -381,8 +626,14 @@ def test_0149_worker_authority_journal_and_exact_receipt_replay(
         conn.execute(
             "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
             "payload,authorizing,dedup_key) VALUES "
-            "(%s,'provision','running',1,3,%s,clock_timestamp()+interval '5 minutes',%s,'{}',%s)",
-            (job_id, worker, Jsonb({"authority_system_v1": marker}), f"flow-{job_id}"),
+            "(%s,'provision','running',1,3,%s,clock_timestamp()+interval '5 minutes',%s,%s,%s)",
+            (
+                job_id,
+                worker,
+                Jsonb({"authority_system_v1": marker}),
+                Jsonb({"principal": "p", "agent_session": "flow-session", "project": "proj"}),
+                f"flow-{job_id}",
+            ),
         )
         conn.execute(
             "INSERT INTO authority_system_ownership "
@@ -659,8 +910,155 @@ def test_0149_worker_authority_journal_and_exact_receipt_replay(
             "WHERE authority_system_ownership.system_id=%s",
             (system_id,),
         ).fetchone()
+        allocation_started = conn.execute(
+            "SELECT active_started_at IS NOT NULL FROM allocations WHERE id=%s",
+            (allocation_id,),
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT principal,agent_session,project,tool,object_kind,transition,args_digest "
+            "FROM audit_log WHERE object_id=%s",
+            (system_id,),
+        ).fetchone()
     assert stored == (7, receipt, True)
+    assert allocation_started == (True,)
+    assert audit == (
+        "p",
+        "flow-session",
+        "proj",
+        "systems.provision",
+        "systems",
+        "provisioning->ready",
+        args_digest({"system_id": str(system_id)}),
+    )
     assert json.loads(receipt)["disposition"] == "provision-ready"
+
+
+def test_0149_external_boot_teardown_finalizes_matching_system_ownership(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    journal_digest = "sha256:" + "b" * 64
+    quiescence_digest = "sha256:" + "c" * 64
+    profile_digest = "sha256:" + "d" * 64
+    root_digest = "sha256:" + "e" * 64
+    with psycopg.connect(migrated_url) as seed:
+        case = _seed_case(seed, purpose="teardown")
+        resource_row = seed.execute(
+            "SELECT resource_id FROM allocations WHERE id=%s", (case.allocation_id,)
+        ).fetchone()
+        assert resource_row is not None
+        resource_id = resource_row[0]
+        seed.execute("UPDATE resources SET name='host-owned' WHERE id=%s", (resource_id,))
+        seed.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,authority_instance,"
+            "profile_identity,root_identity,state,first_activation_id) VALUES "
+            "(%s,%s,%s,%s,'host-owned',%s,%s,%s,'activated',%s)",
+            (
+                case.system_id,
+                case.allocation_id,
+                resource_id,
+                case.provider_kind,
+                case.authority_instance,
+                profile_digest,
+                root_digest,
+                case.activation_id,
+            ),
+        )
+        seed.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id,store_identity,owner_key,reserved_bytes,state,ready_at) "
+            "VALUES (%s,'store/private','owner/private',4096,'pending',NULL)",
+            (case.activation_id,),
+        )
+
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+
+    teardown = {
+        "schema": "external-boot-teardown-evidence-v1",
+        "system_id": str(case.system_id),
+        "system_state": "torn_down",
+        "observed_at": "2026-09-06T00:00:00Z",
+    }
+    teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
+    proof = TypeAdapter(AuthorityTeardownProofV1).validate_python(
+        {
+            "disposition": "complete_pending",
+            "teardown_evidence": teardown,
+            "cleanup_evidence": {
+                "schema": "external-boot-cleanup-evidence-v1",
+                "activation_id": str(case.activation_id),
+                "system_id": str(case.system_id),
+                "mode": "pending_system_teardown",
+                "teardown_identity": teardown_identity,
+                "completed_at": "2026-09-06T00:00:00Z",
+            },
+        }
+    )
+    with psycopg.connect(migrated_url) as seed:
+        seed.execute(
+            "UPDATE external_boot_authorities SET state='current',acknowledged_at=now() "
+            "WHERE id=%s",
+            (authority.authority_id,),
+        )
+        seed.execute(
+            "INSERT INTO external_boot_authority_acknowledgements "
+            "(authority_id,system_id,generation,authority_instance,operation_identity,"
+            "operation_digest,journal_sequence,journal_digest,positive_quiescence_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s,1,%s,%s)",
+            (
+                authority.authority_id,
+                case.system_id,
+                authority.generation,
+                case.authority_instance,
+                case.operation_identity,
+                authority.operation_digest,
+                journal_digest,
+                quiescence_digest,
+            ),
+        )
+        seed.execute(
+            "INSERT INTO external_boot_authority_journal_heads "
+            "(authority_instance,system_id,sequence,digest,phase,authority_id,generation,"
+            "operation_identity,head_record) VALUES (%s,%s,2,%s,'terminal',%s,%s,%s,%s)",
+            (
+                case.authority_instance,
+                case.system_id,
+                journal_digest,
+                authority.authority_id,
+                authority.generation,
+                case.operation_identity,
+                Jsonb(
+                    {
+                        "observation": {
+                            "category": "absent",
+                            "composite_state": teardown_proof_digest(proof),
+                        }
+                    }
+                ),
+            ),
+        )
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(
+            "SELECT finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,2,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                authority.authority_id,
+                authority.generation,
+                journal_digest,
+                canonical_teardown_proof_bytes(proof),
+            ),
+        ).fetchone() == ("applied",)
+
+    with psycopg.connect(migrated_url) as seed:
+        assert seed.execute(
+            "SELECT state FROM authority_system_ownership WHERE system_id=%s",
+            (case.system_id,),
+        ).fetchone() == ("torn-down",)
 
 
 def test_0149_allocation_supersedes_only_dead_unacknowledged_candidate(

@@ -120,6 +120,9 @@ CREATE UNIQUE INDEX authority_system_attempt_one_allocating
     ON public.authority_system_attempts (system_id) WHERE state = 'allocating';
 CREATE UNIQUE INDEX authority_system_attempt_one_current
     ON public.authority_system_attempts (system_id) WHERE state = 'current';
+CREATE INDEX authority_system_attempt_terminal_job_repair
+    ON public.authority_system_attempts (job_id)
+    WHERE state = 'terminal' AND consumed_at IS NULL;
 
 CREATE FUNCTION public.reject_authority_system_binding_update() RETURNS trigger
 LANGUAGE plpgsql SET search_path = '' AS $$
@@ -830,6 +833,17 @@ BEGIN
           AND v_owner.state='provisioning' THEN
         UPDATE public.authority_system_ownership SET state='ready' WHERE system_id=v_owner.system_id;
         UPDATE public.systems SET state='ready' WHERE id=v_owner.system_id AND state='provisioning';
+        UPDATE public.allocations SET active_started_at=now()
+        WHERE id=v_owner.allocation_id AND active_started_at IS NULL;
+        INSERT INTO public.audit_log (
+            principal,agent_session,project,tool,object_kind,object_id,transition,args_digest
+        ) VALUES (
+            v_job.authorizing->>'principal',v_job.authorizing->>'agent_session',v_system.project,
+            'systems.provision','systems',v_system.id,'provisioning->ready',
+            encode(sha256(convert_to(
+                '{"system_id":"' || v_system.id::text || '"}','UTF8'
+            )),'hex')
+        );
         UPDATE public.jobs SET state='succeeded',result_ref=v_attempt.receipt_digest
         WHERE id=p_job_id AND state='running';
     ELSIF v_attempt.receipt_disposition='preactivation-absent'
@@ -872,6 +886,7 @@ BEGIN
           ON ownership.current_attempt_id = attempt.id
         JOIN public.jobs AS job ON job.id=attempt.job_id
         WHERE attempt.state = 'terminal' AND attempt.consumed_at IS NULL
+          AND attempt.receipt_disposition='provision-ready'
           AND (job.state<>'running' OR job.lease_expires_at<=clock_timestamp()
                OR NOT EXISTS (
                    SELECT 1 FROM public.worker_incarnations AS worker
@@ -907,19 +922,22 @@ BEGIN
             WHERE system_id=v_attempt.system_id;
             UPDATE public.systems SET state='ready'
             WHERE id=v_attempt.system_id AND state='provisioning';
+            UPDATE public.allocations SET active_started_at=now()
+            WHERE id=v_owner.allocation_id AND active_started_at IS NULL;
+            INSERT INTO public.audit_log (
+                principal,agent_session,project,tool,object_kind,object_id,transition,args_digest
+            ) VALUES (
+                v_job.authorizing->>'principal',v_job.authorizing->>'agent_session',
+                v_system.project,'systems.provision','systems',v_system.id,
+                'provisioning->ready',encode(sha256(convert_to(
+                    '{"system_id":"' || v_system.id::text || '"}','UTF8'
+                )),'hex')
+            );
             UPDATE public.jobs SET state='succeeded',result_ref=v_attempt.receipt_digest
             WHERE id=v_attempt.job_id AND state='running';
         ELSIF v_attempt.receipt_disposition='provision-ready'
               AND v_owner.state='teardown-requested' THEN
             NULL; -- Consume the physical fact without reopening a canceled System.
-        ELSIF v_attempt.receipt_disposition='preactivation-absent'
-              AND v_owner.state IN ('teardown-requested','repair-required') THEN
-            UPDATE public.authority_system_ownership SET state='torn-down'
-            WHERE system_id=v_attempt.system_id;
-            UPDATE public.systems SET state='torn_down' WHERE id=v_attempt.system_id
-            AND state IN ('provisioning','ready','failed');
-            UPDATE public.jobs SET state='succeeded',result_ref=v_attempt.receipt_digest
-            WHERE id=v_attempt.job_id AND state='running';
         ELSE
             CONTINUE;
         END IF;
@@ -928,6 +946,181 @@ BEGIN
         IF FOUND THEN v_count := v_count + 1; END IF;
     END LOOP;
     RETURN v_count;
+END
+$$;
+
+CREATE FUNCTION public.list_authority_system_teardown_repairs(p_limit integer)
+RETURNS TABLE(
+    authority_id uuid, generation bigint, system_id uuid, journal_sequence bigint,
+    journal_digest text, receipt_digest text
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' STABLE AS $$
+BEGIN
+    IF NOT pg_has_role(session_user,'kdive_reconciler','member') THEN
+        RAISE EXCEPTION 'reconciler authority is required' USING ERRCODE='42501';
+    END IF;
+    IF p_limit NOT BETWEEN 1 AND 100 THEN
+        RAISE EXCEPTION 'repair limit must be between 1 and 100' USING ERRCODE='22023';
+    END IF;
+    RETURN QUERY
+    SELECT attempt.id,attempt.generation,attempt.system_id,attempt.terminal_head_sequence,
+           attempt.terminal_head_digest,attempt.receipt_digest
+    FROM public.authority_system_attempts AS attempt
+    JOIN public.authority_system_ownership AS ownership
+      ON ownership.current_attempt_id=attempt.id
+    JOIN public.jobs AS job ON job.id=attempt.job_id
+    WHERE attempt.state='terminal' AND attempt.consumed_at IS NULL
+      AND attempt.receipt_disposition='preactivation-absent'
+      AND ownership.state IN ('teardown-requested','repair-required')
+      AND ownership.journal_sequence=attempt.terminal_head_sequence
+      AND ownership.journal_digest=attempt.terminal_head_digest
+      AND (
+          job.state<>'running' OR job.lease_expires_at<=clock_timestamp()
+          OR NOT EXISTS (
+              SELECT 1 FROM public.worker_incarnations AS worker
+              WHERE worker.incarnation=attempt.worker_incarnation AND worker.state='active'
+          )
+      )
+    ORDER BY attempt.receipt_at,attempt.id
+    LIMIT p_limit;
+END
+$$;
+
+CREATE FUNCTION public.finalize_authority_system_teardown_repair(
+    p_authority_id uuid, p_generation bigint, p_system_id uuid, p_journal_sequence bigint,
+    p_journal_digest text, p_receipt_digest text
+) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_attempt public.authority_system_attempts%ROWTYPE;
+    v_owner public.authority_system_ownership%ROWTYPE;
+    v_job public.jobs%ROWTYPE;
+    v_system public.systems%ROWTYPE;
+BEGIN
+    IF NOT pg_has_role(session_user,'kdive_reconciler','member') THEN
+        RAISE EXCEPTION 'reconciler authority is required' USING ERRCODE='42501';
+    END IF;
+    IF p_authority_id IS NULL OR p_system_id IS NULL
+       OR p_generation IS NULL OR p_generation<1
+       OR p_journal_sequence IS NULL OR p_journal_sequence<1
+       OR p_journal_digest IS NULL OR p_receipt_digest IS NULL
+       OR p_journal_digest!~'^sha256:[0-9a-f]{64}$'
+       OR p_receipt_digest!~'^sha256:[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'authority System teardown repair identity is invalid'
+        USING ERRCODE='22023';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'kdive:system:' || p_system_id::text,2125));
+    SELECT * INTO v_owner FROM public.authority_system_ownership
+    WHERE system_id=p_system_id FOR UPDATE;
+    SELECT * INTO v_attempt FROM public.authority_system_attempts
+    WHERE id=p_authority_id AND generation=p_generation AND system_id=p_system_id FOR UPDATE;
+    IF v_attempt.id IS NULL THEN RETURN 'superseded'; END IF;
+    SELECT * INTO v_job FROM public.jobs WHERE id=v_attempt.job_id FOR UPDATE;
+    SELECT * INTO v_system FROM public.systems WHERE id=p_system_id FOR UPDATE;
+    IF v_attempt.consumed_at IS NOT NULL THEN
+        IF v_attempt.terminal_head_sequence=p_journal_sequence
+           AND v_attempt.terminal_head_digest=p_journal_digest
+           AND v_attempt.receipt_digest=p_receipt_digest
+           AND v_owner.state='torn-down' AND v_system.state='torn_down' THEN
+            RETURN 'applied';
+        END IF;
+        RETURN 'conflict';
+    END IF;
+    IF v_owner.current_attempt_id<>v_attempt.id OR v_attempt.state<>'terminal'
+       OR v_attempt.receipt_disposition<>'preactivation-absent'
+       OR v_attempt.terminal_head_sequence<>p_journal_sequence
+       OR v_attempt.terminal_head_digest<>p_journal_digest
+       OR v_attempt.receipt_digest<>p_receipt_digest
+       OR v_owner.journal_sequence<>p_journal_sequence
+       OR v_owner.journal_digest<>p_journal_digest
+       OR v_owner.state NOT IN ('teardown-requested','repair-required')
+       OR v_system.state NOT IN ('provisioning','ready','failed')
+       OR v_job.id IS NULL
+       OR NOT (
+           v_job.state<>'running' OR v_job.lease_expires_at<=clock_timestamp()
+           OR NOT EXISTS (
+               SELECT 1 FROM public.worker_incarnations AS worker
+               WHERE worker.incarnation=v_attempt.worker_incarnation AND worker.state='active'
+           )
+       ) THEN
+        RETURN 'superseded';
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.snapshots WHERE system_id=p_system_id)
+       OR EXISTS (SELECT 1 FROM public.system_bootstrap_keys WHERE system_id=p_system_id)
+       OR EXISTS (
+           SELECT 1 FROM public.remote_module_attempt_obligations
+           WHERE system_id=p_system_id AND mutation_discharged_at IS NULL
+       ) THEN
+        RETURN 'cleanup-required';
+    END IF;
+    UPDATE public.authority_system_ownership SET state='torn-down'
+    WHERE system_id=p_system_id;
+    UPDATE public.systems SET state='torn_down' WHERE id=p_system_id
+    AND state IN ('provisioning','ready','failed');
+    UPDATE public.jobs SET state='succeeded',result_ref=v_attempt.receipt_digest
+    WHERE id=v_attempt.job_id AND state='running';
+    UPDATE public.authority_system_attempts SET consumed_at=clock_timestamp()
+    WHERE id=v_attempt.id AND consumed_at IS NULL;
+    RETURN 'applied';
+END
+$$;
+
+-- A completed authority receipt is the durable handoff to repair.  Keep its job out of generic
+-- worker reclaim until either the worker's still-live exact lease consumes it or the reconciler
+-- completes the cleanup-gated repair above.
+DO $$
+DECLARE
+    v_definition text;
+    v_old constant text := 'AND j.dispatch_lane = ANY(p_accepted_lanes)';
+    v_new constant text := E'AND j.dispatch_lane = ANY(p_accepted_lanes)\n' ||
+        E'          AND NOT EXISTS (\n' ||
+        E'              SELECT 1 FROM public.authority_system_attempts AS authority_attempt\n' ||
+        E'              JOIN public.authority_system_ownership AS authority_ownership\n' ||
+        E'                ON authority_ownership.current_attempt_id=authority_attempt.id\n' ||
+        E'              WHERE authority_attempt.job_id=j.id\n' ||
+        E'                AND authority_attempt.state=''terminal''\n' ||
+        E'                AND authority_attempt.consumed_at IS NULL\n' ||
+        E'          )';
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.claim_worker_job(text,bytea,interval,text[])'::regprocedure
+    ) INTO v_definition;
+    IF strpos(v_definition,v_old)=0 THEN
+        RAISE EXCEPTION 'worker claim authority System fence source changed';
+    END IF;
+    v_definition := replace(v_definition,v_old,v_new);
+    IF strpos(v_definition,'authority_attempt.consumed_at IS NULL')=0 THEN
+        RAISE EXCEPTION 'worker claim authority System fence was not installed';
+    END IF;
+    EXECUTE v_definition;
+END
+$$;
+
+-- Migration 0147 predates activation-free System ownership.  Extend its teardown finalizer
+-- without editing the accepted migration so an activated owner reaches the same terminal fact as
+-- its System in the receipt-consumption transaction.
+DO $$
+DECLARE
+    v_definition text;
+    v_old constant text :=
+        'UPDATE public.systems SET state = ''torn_down'' WHERE id = v_authority.system_id;';
+    v_new constant text :=
+        E'UPDATE public.authority_system_ownership SET state = ''torn-down''\n' ||
+        E'    WHERE system_id = v_authority.system_id AND state = ''activated'';\n' ||
+        '    UPDATE public.systems SET state = ''torn_down'' WHERE id = v_authority.system_id;';
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.finalize_external_boot_authority_teardown('
+        'bytea,uuid,integer,uuid,bigint,bigint,text,bytea)'::regprocedure
+    ) INTO v_definition;
+    IF strpos(v_definition,v_old)=0 THEN
+        RAISE EXCEPTION 'external boot System teardown finalizer shape changed';
+    END IF;
+    v_definition := replace(v_definition,v_old,v_new);
+    IF strpos(v_definition,'UPDATE public.authority_system_ownership SET state = ''torn-down''')=0
+    THEN
+        RAISE EXCEPTION 'authority System teardown transition was not installed';
+    END IF;
+    EXECUTE v_definition;
 END
 $$;
 
@@ -995,9 +1188,15 @@ GRANT EXECUTE ON FUNCTION
     public.list_authority_system_journal_heads(text)
 TO kdive_provider_authority;
 
-REVOKE ALL ON FUNCTION public.repair_terminal_authority_system_attempts(integer)
+REVOKE ALL ON FUNCTION
+    public.repair_terminal_authority_system_attempts(integer),
+    public.list_authority_system_teardown_repairs(integer),
+    public.finalize_authority_system_teardown_repair(uuid,bigint,uuid,bigint,text,text)
 FROM PUBLIC, kdive_server, kdive_worker, kdive_lifecycle_witness, kdive_provider_authority;
-GRANT EXECUTE ON FUNCTION public.repair_terminal_authority_system_attempts(integer)
+GRANT EXECUTE ON FUNCTION
+    public.repair_terminal_authority_system_attempts(integer),
+    public.list_authority_system_teardown_repairs(integer),
+    public.finalize_authority_system_teardown_repair(uuid,bigint,uuid,bigint,text,text)
 TO kdive_reconciler;
 
 REVOKE ALL ON FUNCTION
