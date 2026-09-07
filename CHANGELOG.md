@@ -2431,6 +2431,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Source-lock Ansible collections for offline lint
 - Preserve non-NFC boot command lines
 - Preserve non-NFC command lines in projected targets
+- Bind exhausted retry proof to acknowledged authority attempt
 
 ### Security
 
