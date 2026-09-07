@@ -313,7 +313,6 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
             # from what actually populated data (gauntlet finding, branch review).
             is_binding_failure = isinstance(binding_cause, ValidationError)
             if is_binding_failure:
-                assert isinstance(binding_cause, ValidationError)  # narrows for ty
                 field_errors = [
                     cast(
                         "JsonValue",

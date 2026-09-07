@@ -134,9 +134,7 @@ def test_bad_arguments_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -
     holds VIEWER on runs.get's required scope, so accepted_fields is disclosed too — see
     test_bad_arguments_without_visibility_omits_accepted_fields for the withheld case.
     """
-    import kdive.mcp.tools.gateway as gateway_module
-
-    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+    monkeypatch.setattr(gateway, "current_context", _viewer_ctx)
     # runs.get requires run_id; passing {} triggers pydantic ValidationError
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
@@ -212,9 +210,7 @@ def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.Mo
     Distinct from the no-token case above: tool_visible's own scope check must be what
     denies it, not only the fail-closed AuthError branch.
     """
-    import kdive.mcp.tools.gateway as gateway_module
-
-    monkeypatch.setattr(gateway_module, "current_context", _no_grant_ctx)
+    monkeypatch.setattr(gateway, "current_context", _no_grant_ctx)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
 
@@ -236,9 +232,7 @@ def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.Mo
 
 def test_field_errors_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """A caller sending many bad keyword arguments gets a capped, not unbounded, error list."""
-    import kdive.mcp.tools.gateway as gateway_module
-
-    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+    monkeypatch.setattr(gateway, "current_context", _viewer_ctx)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
     bogus_args = {f"bogus_field_{i}": i for i in range(50)}
@@ -251,7 +245,7 @@ def test_field_errors_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     result = asyncio.run(_run())
     content = _call_result(result)
     assert content["error_category"] == "configuration_error"
-    assert len(content["data"]["field_errors"]) == gateway_module._FIELD_ERROR_LIMIT
+    assert len(content["data"]["field_errors"]) == gateway._FIELD_ERROR_LIMIT
 
 
 # ---------------------------------------------------------------------------
