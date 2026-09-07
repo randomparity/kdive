@@ -471,6 +471,13 @@ lint-workflows:
 # Browserless syntax check of every mermaid block in tracked Markdown.
 # -z/-0 keeps paths with spaces intact; -r skips the run when nothing matches.
 check-mermaid:
+    @checker_deps=.github/scripts/mermaid-check/node_modules; \
+    if [ ! -d "$checker_deps/jsdom" ] || [ ! -d "$checker_deps/mermaid" ]; then \
+        printf '%s%s\n' \
+            'Mermaid checker dependencies are missing; ' \
+            'run `just install-mermaid-deps` from the repository root.' >&2; \
+        exit 1; \
+    fi
     git ls-files -z '*.md' | xargs -0 -r node .github/scripts/mermaid-check/mermaid-check.mjs
 
 # Resolve relative markdown links in tracked *.md against the filesystem.
