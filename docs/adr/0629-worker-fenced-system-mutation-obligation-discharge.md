@@ -8,71 +8,100 @@ Accepted (2026-09-07)
 
 `remote_module_attempt_obligations` grants `kdive_worker` and `kdive_reconciler` `SELECT`
 only (`../../src/kdive/db/schema/0126_remote_module_attempt_obligations.sql:230-232`), and no
-later migration widens either. The bulk terminal-escape discharge
-`RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations` nevertheless
-issues a direct `UPDATE` on that table, and both of its callers run under one of those two
-roles: the teardown job handler through
-`../../src/kdive/jobs/handlers/system_reclaim.py:110-113`, and the reconciler's
-authority-System teardown repair through `../../src/kdive/reconciler/repairs/jobs.py:98-103`.
-`systems.teardown` therefore fails with `permission denied for table
-remote_module_attempt_obligations` (#2302).
+later migration widens either. `RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations`
+(`../../src/kdive/db/remote_module_attempt_obligations.py:305-325`) nevertheless issues a
+direct bulk `UPDATE` on that table, and it is reached from two role families:
 
-ADR-0609 already answers this shape for the per-attempt worker writes: migration 0134 defines
-`public.commit_worker_remote_module_evidence`, a `SECURITY DEFINER` function granted to
-`kdive_worker`, so the worker reaches its own writes without holding table-level `UPDATE`. The
-bulk discharge cannot reuse it: it is per-System rather than per-attempt, and its second caller
-is the reconciler, which holds no job, attempt, or operation nonce to fence on.
+- `kdive_worker` and `kdive_reconciler`, through
+  `../../src/kdive/jobs/handlers/system_reclaim.py:111` — the System-teardown reclaim path, and
+  the one #2302 reports failing with `permission denied for table`.
+- `kdive_server`, through `../../src/kdive/db/external_boot_activations.py:552` and `:886`,
+  which discharge on the `abandoned` and `recovery_failed` activation edges beside an `UPDATE`
+  on `external_boot_activations`, a table granted to `kdive_server` alone. That role holds
+  `UPDATE` on the obligations table too (`0126:230`), so those two paths work today.
 
-The discharge's serializing fence is a caller obligation today: both call sites hold
-`advisory_xact_lock(conn, LockScope.SYSTEM, system_id)`, the same fence ADR-0605 verification
-takes at `../../src/kdive/services/remote_module_attempt_preparation.py:80`.
+The runtime roles hold no memberships and do not inherit
+(`../../src/kdive/db/schema/0104_worker_fence_roles.sql:8-25`), so a fix gated on
+`kdive_worker` membership excludes `kdive_server` outright.
+
+Two in-repo precedents already answer this shape. Migration 0132 splices the identical
+`terminal_escape` `UPDATE` into `commit_external_boot_authority_result`, an existing
+`SECURITY DEFINER` function, under a verbatim-matching premise: "Workers intentionally have
+only SELECT on the obligations table, so compose the write into that function rather than
+widening worker table privileges"; 0147 does the same for
+`finalize_external_boot_authority_teardown`. And ADR-0609's Python-side precedent is a
+**variant-method split**, not a reroute: `worker_record_terminal_evidence`,
+`worker_record_restored_evidence`, and `worker_discharge_reap_obligation`
+(`remote_module_attempt_obligations.py:398`, `:420`, `:442`) route through
+`public.commit_worker_remote_module_evidence` while the server-role siblings beside them keep
+their direct writes.
+
+The System-teardown reclaim path has no enclosing `SECURITY DEFINER` function to splice into —
+`reclaim_system_core_after_provider_teardown` is plain Python — so 0132's composition is not
+available here and the split is.
 
 ## Decision
 
-We will route the bulk discharge through
-`public.discharge_system_mutation_obligations(uuid)`, a `SECURITY DEFINER` function whose body
-is the one `UPDATE` it exists for, gated on `kdive_worker`-or-`kdive_reconciler` role
-membership and granted `EXECUTE` to exactly those two roles. Neither role gains any table
-privilege. The serializing System lock stays with the Python caller.
+We will add `public.discharge_system_mutation_obligations(uuid)`, a `SECURITY DEFINER`
+function whose body is the one bulk `UPDATE` it exists for, gated on
+`kdive_worker`-or-`kdive_reconciler` membership and granted `EXECUTE` to exactly those two
+roles. A new `worker_discharge_system_mutation_obligations` repository method calls it, and
+only the teardown reclaim path switches to that method. The shared
+`discharge_system_mutation_obligations` and its two `kdive_server` call sites are untouched.
 
 ## Consequences
 
-- Both roles can discharge open mutation obligations for one System and can do nothing else
-  through this surface: the function writes `mutation_discharged_at` and the fixed reason
-  `'terminal_escape'`, on rows of one System where `mutation_discharged_at IS NULL`. The
-  write-once trigger `remote_module_attempt_obligations_write_once` still governs the write.
+- The worker and reconciler can discharge open mutation obligations for one System and can do
+  nothing else through this surface: the function writes `mutation_discharged_at` and the fixed
+  reason `'terminal_escape'` on rows of one System where `mutation_discharged_at IS NULL`.
+  Neither role gains a table privilege.
+- The `kdive_server` activation edges keep their existing direct write and their existing
+  behaviour, so this change cannot regress them.
 - The function runs as its owner, so it carries `SET search_path = ''` and fully qualifies
   every name, matching 0134.
-- The role gate uses `pg_has_role(session_user, …)`, which is true for a superuser against
-  every role, so every test arm needs a real `LOGIN` principal.
-- Granting the reconciler is a consequence of rerouting one shared method: without it the
-  sibling call site would trade `permission denied for table` for `permission denied for
-  function`.
-- The raw privilege string stops reaching the agent because the call now succeeds. Mapping
-  `psycopg.errors.InsufficientPrivilege` in the shared worker exception path (#2302's second
-  half) stays open and is unaffected by this record.
+- The repository now has two methods for one write, as it already does three times over for the
+  ADR-0609 evidence writes. The cost is that a future caller must pick the one matching its
+  role; the alternative — one method that works for every role — is what the caller inventory
+  above shows cannot be built from a single grant.
+- The gate uses `pg_has_role(session_user, …)`, which is true for a superuser against every
+  role, so every test arm needs a real `LOGIN` principal.
+- Obligations already leaked by #2302 on production Systems are not repaired by this change.
+  They stay open, and `retained_owners` (`remote_module_attempt_obligations.py:513`) keeps
+  their volumes out of the reaper. Remediating existing rows is separate work.
 
 ## Considered & rejected
 
-- **Grant `UPDATE` on the table to `kdive_worker` and `kdive_reconciler`.** judgment: a
-  table-level write lets either role rewrite any column of any obligation row, including the
-  terminal and restored evidence whose write-once triggers exist to protect it. That is the
-  fence ADR-0609 built, removed to fix one statement.
-- **Reuse `commit_worker_remote_module_evidence`.** verified: that function requires a job id,
-  credential hash, job attempt, run id, and operation nonce, and matches a `running` job with a
-  live lease (`../../src/kdive/db/schema/0134_remote_module_worker_evidence.sql:1-66`). The
-  discharge is per-System and bulk, and its reconciler caller
-  (`../../src/kdive/reconciler/repairs/jobs.py:98-103`) holds none of those five facts.
-- **Move the discharge to a role that already holds `UPDATE`.** verified: only `kdive_server`
-  holds it (`0126:230-232`), and the discharge is ordered after `provisioner.teardown`, which
-  only the worker observes (`../../src/kdive/jobs/handlers/systems.py:717-736`). The reconciler
-  is no alternative either — `0126:231-232` revokes and re-grants it `SELECT` alone.
+- **Reroute the shared `discharge_system_mutation_obligations` through the function.** verified:
+  `external_boot_activations.py:552` and `:886` call it under `kdive_server`, which
+  `0104_worker_fence_roles.sql:8-25` establishes is a member of no role, so it would fail both
+  the `EXECUTE` grant and the in-body gate — trading a working `UPDATE` for `permission denied
+  for function` on two paths that work today.
+- **Grant the two roles table-level `UPDATE`.** verified: the write-once trigger
+  `reject_remote_module_attempt_rewrite` (`0126:184-222`) blocks only *rewrites* — each of its
+  five guards is conditioned on the old value being non-null — so a table grant would let
+  either role make the unfenced **first** write of `terminal_operation`, the restored evidence,
+  `reap_opened_at`, and `reap_discharged_at`. Those first writes are exactly what 0134's
+  job-lease fence governs, and the trigger does not cover them.
+- **Grant `UPDATE (mutation_discharged_at, mutation_discharge_reason)`, column-scoped.**
+  verified: column-scoped grants are established here (`0118:3`, `0115:75`), and this one does
+  escape the trigger objection above. It was excluded by the operator's scope decision for
+  #2302, which directed `EXECUTE` on a function rather than table-level write; independently, it
+  still admits any of the three reasons the column's CHECK allows (`0126:69-73`) on any System,
+  where the function fixes the reason to `'terminal_escape'`.
+- **Splice the write into an existing definer function, as 0132 and 0147 do.** verified: those
+  two both had one — `commit_external_boot_authority_result` and
+  `finalize_external_boot_authority_teardown`. The ordinary teardown reclaim path has none:
+  `../../src/kdive/jobs/handlers/system_reclaim.py:98-113` is plain Python called from four
+  sites.
 - **Take the System advisory lock inside the function.** verified: the fence this discharge
   shares with ADR-0605 verification is the Python helper's key,
-  `blake2b(b'system\x00' || uuid)` (`../../src/kdive/db/locks.py:79-91`), while every in-schema
-  lock uses the disjoint `hashtextextended('kdive:system:' || id, 2125)` key space
+  `blake2b(b'system\x00' || uuid)` (`../../src/kdive/db/locks.py:79-91`), which
+  `../../src/kdive/services/remote_module_attempt_preparation.py:80` takes, while every
+  in-schema lock uses the disjoint `hashtextextended('kdive:system:' || id, 2125)` key space
   (`../../src/kdive/db/schema/0122_external_boot_authority.sql:413`). An in-body lock would
-  serialize against nothing this write needs.
+  serialize against nothing this write needs, and under READ COMMITTED the
+  `mutation_discharged_at IS NULL` predicate is re-checked on each row the statement blocks on,
+  so a concurrent discharge cannot double-write.
 - **Do nothing and let the caller retry.** verified: the first attempt commits the terminal
   System state before the failing discharge
   (`../../src/kdive/jobs/handlers/systems.py:700-706`), and `systems.teardown` then returns

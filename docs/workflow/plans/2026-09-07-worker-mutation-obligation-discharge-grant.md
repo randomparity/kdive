@@ -1,15 +1,17 @@
 # Worker-granted System mutation-obligation discharge — implementation plan
 
-**Goal.** Let the teardown job and the reconciler's authority-teardown repair discharge a
-System's open remote-module mutation obligations without either role holding `UPDATE` on
+**Goal.** Let the System-teardown reclaim path discharge a System's open remote-module mutation
+obligations under `kdive_worker` and `kdive_reconciler`, neither of which holds `UPDATE` on
 `remote_module_attempt_obligations` (#2302).
 
 **Architecture.** A new migration adds one `SECURITY DEFINER` function whose whole body is that
-discharge, gated on `kdive_worker`-or-`kdive_reconciler` role membership and granted `EXECUTE`
-to exactly those two roles. `RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations`
-keeps its signature, its return contract, and its surrounding System advisory lock, and calls
-the function instead of issuing the `UPDATE` itself. This follows the ADR-0609 worker-fence
-precedent set by `public.commit_worker_remote_module_evidence` in migration 0134.
+bulk discharge, gated on `kdive_worker`-or-`kdive_reconciler` membership and granted `EXECUTE`
+to exactly those two roles. A new `worker_discharge_system_mutation_obligations` repository
+method calls it, and only the teardown reclaim path switches to that method. This is the
+variant-method split ADR-0609 already uses three times in the same class
+(`worker_record_terminal_evidence`, `worker_record_restored_evidence`,
+`worker_discharge_reap_obligation`). The shared `discharge_system_mutation_obligations` and its
+two `kdive_server` call sites in `src/kdive/db/external_boot_activations.py` stay as they are.
 
 **Tech stack.** Python 3.14 managed with `uv`; psycopg 3 async; PostgreSQL; pytest with
 testcontainers-backed disposable Postgres.
@@ -17,9 +19,9 @@ testcontainers-backed disposable Postgres.
 Spec: `docs/workflow/specs/2026-09-07-worker-mutation-obligation-discharge-grant-design.md`.
 Decision: `docs/adr/0629-worker-fenced-system-mutation-obligation-discharge.md`.
 
-Expected implementation size: 180–260 changed lines (M) — derived from the file map below: one
-new ~40-line migration, a ~15-line repository method rewrite, and one new test module carrying
-five arms plus its role fixtures.
+Expected implementation size: 190–270 changed lines (M) — derived from the file map below: one
+new ~40-line migration, a ~20-line repository method, a 3-line caller switch, and one new test
+module carrying six arms plus its role fixtures.
 
 ## Global Constraints
 
@@ -45,6 +47,12 @@ five arms plus its role fixtures.
   then re-add exactly the paths that were staged — never `git add -A` or `git add -u`.
 - The db tests need a reachable Docker daemon and **skip** without one. Every run offered as
   evidence sets `KDIVE_REQUIRE_DOCKER=1`, which turns the skip into a hard failure.
+- A `just type` `warning[unused-ignore-comment]` for
+  `src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py:564` or
+  `src/kdive/providers/local_libvirt/retrieve/guestfs.py:121` is a known host-only divergence,
+  not this diff: move the unowned `guestfs.py` and `libguestfsmod*.so` symlinks in
+  `.venv/lib/python3.14/site-packages/` aside and re-run. Do not edit `pyproject.toml` or those
+  two files.
 - `BASE_BRANCH` is `main`; the branch is `feat/worker-discharge-grant-2302`.
 
 ## File map
@@ -52,14 +60,14 @@ five arms plus its role fixtures.
 | Path | Disposition | Answerable for |
 |---|---|---|
 | `src/kdive/db/schema/0152_worker_system_mutation_discharge.sql` | create | the `SECURITY DEFINER` function, its `REVOKE`, and its two `EXECUTE` grants |
-| `src/kdive/db/remote_module_attempt_obligations.py` | modify | routing the bulk discharge through that function |
-| `tests/db/test_worker_system_mutation_discharge.py` | create | the five role-grant proofs |
+| `src/kdive/db/remote_module_attempt_obligations.py` | modify | the new `worker_discharge_system_mutation_obligations` method |
+| `src/kdive/jobs/handlers/system_reclaim.py` | modify | calling the worker variant from the teardown reclaim path |
+| `tests/db/test_worker_system_mutation_discharge.py` | create | the six role-grant proofs |
 
-`src/kdive/jobs/handlers/system_reclaim.py`, `src/kdive/jobs/handlers/systems.py`, and
-`src/kdive/reconciler/repairs/jobs.py` are read but not changed: they already call the
-repository method, and the method keeps its signature.
+`src/kdive/db/external_boot_activations.py`, `src/kdive/jobs/handlers/systems.py`, and
+`src/kdive/reconciler/repairs/jobs.py` are read but not changed.
 
-## Task 1 — Migration 0152 and the rerouted repository method
+## Task 1 — Migration 0152, the worker method, and the caller switch
 
 **Where this fits.** This is the whole production change. Task 2 proves it.
 
@@ -68,30 +76,38 @@ repository method, and the method keeps its signature.
 Consumed from the existing codebase, each confirmed present with the signature assumed here:
 
 - `RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations(self, conn: AsyncConnection, system_id: UUID) -> int`
-  — `src/kdive/db/remote_module_attempt_obligations.py:305`.
+  — `src/kdive/db/remote_module_attempt_obligations.py:305-325`. Left unchanged.
 - `advisory_xact_lock(conn: AsyncConnection, scope: LockScope, key: UUID | str)`, an async
   context manager — `src/kdive/db/locks.py:94-121`. `LockScope.SYSTEM` — `locks.py:69`.
-- The precedent shape: `public.commit_worker_remote_module_evidence`, declared `LANGUAGE
+- The variant-method precedent: `worker_discharge_reap_obligation(self, conn, context, attempt) -> bool`,
+  which issues `SELECT public.commit_worker_remote_module_evidence(...)` and reads the single
+  returned column — `remote_module_attempt_obligations.py:442-460`.
+- The migration precedent: `public.commit_worker_remote_module_evidence`, declared `LANGUAGE
   plpgsql SECURITY DEFINER SET search_path = ''` with a `pg_has_role(session_user,
   'kdive_worker', 'member')` gate raising SQLSTATE `42501`, then `REVOKE ALL … FROM PUBLIC` and
-  `GRANT EXECUTE … TO kdive_worker` — `src/kdive/db/schema/0134_remote_module_worker_evidence.sql:1-140`.
+  `GRANT EXECUTE … TO kdive_worker` — `src/kdive/db/schema/0134_remote_module_worker_evidence.sql`
+  (137 lines).
 - The table's column shapes: `mutation_discharged_at timestamptz` and
   `mutation_discharge_reason text`, neither an enum, so `SET search_path = ''` needs no type
-  qualification — `src/kdive/db/schema/0126_remote_module_attempt_obligations.sql:68-97`.
+  qualification — `src/kdive/db/schema/0126_remote_module_attempt_obligations.sql:68-73`.
 
-Relied on by Task 2: the function name, argument type, and return type
-`public.discharge_system_mutation_obligations(uuid) RETURNS integer`.
+Relied on by Task 2: `public.discharge_system_mutation_obligations(uuid) RETURNS integer`, and
+`RemoteModuleAttemptObligationRepository.worker_discharge_system_mutation_obligations(self, conn: AsyncConnection, system_id: UUID) -> int`.
 
 ### Verification
 
 - **Contract: `kdive_worker` and `kdive_reconciler` can discharge a System's open mutation
   obligations without table-level `UPDATE`.** Mode: `focused-test`. Observable: the reclaim
   helper completes under a real role login and the rows carry `mutation_discharge_reason =
-  'terminal_escape'`. Test: `tests/db/test_worker_system_mutation_discharge.py`, written in
-  Task 2. Expected red before this task's SQL exists: `psycopg.errors.UndefinedFunction`;
-  expected red with the migration reverted to the old inline `UPDATE`:
+  'terminal_escape'`. Tests: `tests/db/test_worker_system_mutation_discharge.py`, written in
+  Task 2. Expected red before this task's SQL exists:
+  `psycopg.errors.UndefinedFunction`; expected red with the caller left on the shared method:
   `psycopg.errors.InsufficientPrivilege`. Green command:
   `KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/db/test_worker_system_mutation_discharge.py -q`.
+- **Contract: the shared method still works under `kdive_server`.** Mode: `focused-test`. Test
+  case `test_server_role_shared_discharge_still_works` in the same module. Expected red if the
+  shared method were rerouted through the function instead of a variant being added:
+  `psycopg.errors.InsufficientPrivilege: permission denied for function`.
 - **Contract: migration ordering and immutability.** Mode: `task-test-not-applicable`. The
   changed surface is a new numbered file under `src/kdive/db/schema/`. `just
   migration-order-check` and `just schema-guard` are the executable consumers of that contract;
@@ -108,8 +124,8 @@ Relied on by Task 2: the function name, argument type, and return type
    --
    -- ADR-0629. `remote_module_attempt_obligations` grants kdive_worker and kdive_reconciler
    -- SELECT only (0126:230-232), but both roles reach the bulk discharge on the System teardown
-   -- path, so the direct UPDATE failed with 42501 (#2302). This follows the ADR-0609 fence
-   -- 0134 established: EXECUTE on one narrow function, never table-level write.
+   -- reclaim path, so the direct UPDATE failed with 42501 (#2302). 0132 and 0147 composed this
+   -- same write into a definer function they already had; that path has none, so it gets one.
 
    CREATE FUNCTION public.discharge_system_mutation_obligations(p_system_id uuid)
    RETURNS integer
@@ -146,24 +162,21 @@ Relied on by Task 2: the function name, argument type, and return type
        TO kdive_worker, kdive_reconciler;
    ```
 
-2. In `src/kdive/db/remote_module_attempt_obligations.py`, replace the body of
-   `discharge_system_mutation_obligations` (currently at lines 305-322) so the method reads:
+2. In `src/kdive/db/remote_module_attempt_obligations.py`, leave
+   `discharge_system_mutation_obligations` (lines 305-325) exactly as it is, and insert this new
+   method immediately after it, before `record_terminal_evidence`:
 
    ```python
-       async def discharge_system_mutation_obligations(
+       async def worker_discharge_system_mutation_obligations(
            self, conn: AsyncConnection, system_id: UUID
        ) -> int:
-           """Terminally discharge every still-open mutation obligation for one System.
+           """The worker/reconciler form of :meth:`discharge_system_mutation_obligations`.
 
-           The caller owns the surrounding transaction with its terminal System state update. The
-           shared System lock serializes this bulk terminal escape with ADR-0605 verification,
-           while the ``IS NULL`` predicate inside the function preserves each attempt's first
-           discharge evidence. Reap obligations are deliberately not touched: their journal
-           retention is independent.
-
-           The write goes through the SECURITY DEFINER function migration 0152 grants to
-           ``kdive_worker`` and ``kdive_reconciler`` (ADR-0629): both teardown callers run under
-           one of those roles, and neither holds ``UPDATE`` on the table (#2302).
+           Same write, same first-write-wins predicate, same System lock. It goes through the
+           SECURITY DEFINER function migration 0152 grants to ``kdive_worker`` and
+           ``kdive_reconciler`` (ADR-0629), because neither role holds ``UPDATE`` on the table
+           and the teardown reclaim path runs under one of them (#2302). The direct-write
+           sibling stays for the ``kdive_server`` activation edges that already hold it.
            """
            async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
                row = await conn.execute(
@@ -173,15 +186,27 @@ Relied on by Task 2: the function name, argument type, and return type
            return 0 if value is None else int(value[0])
    ```
 
-3. Run `just format`. Expect it to exit 0, having rewritten nothing or only whitespace.
-4. Run `just lint`. Expect `All checks passed!` and exit 0.
-5. Run `just type`. Expect `All checks passed` and exit 0. A
-   `warning[unused-ignore-comment]` for
-   `src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py:564` or
-   `src/kdive/providers/local_libvirt/retrieve/guestfs.py:121` is a known host-only
-   divergence, not this diff: move the unowned `guestfs.py` and `libguestfsmod*.so`
-   symlinks in `.venv/lib/python3.14/site-packages/` aside and re-run. Do not edit
-   `pyproject.toml` or those two files.
+3. In `src/kdive/jobs/handlers/system_reclaim.py`, change the call at lines 110-113 from
+   `discharge_system_mutation_obligations` to `worker_discharge_system_mutation_obligations`,
+   so the block reads:
+
+   ```python
+           if discharge_mutation_obligations:
+               await RemoteModuleAttemptObligationRepository().worker_discharge_system_mutation_obligations(
+                   conn, system_id
+               )
+   ```
+
+   That line exceeds 100 characters, so bind the repository to a local name first:
+
+   ```python
+           if discharge_mutation_obligations:
+               obligations = RemoteModuleAttemptObligationRepository()
+               await obligations.worker_discharge_system_mutation_obligations(conn, system_id)
+   ```
+
+4. Run `just format`, then `just lint`. Expect `All checks passed!` and exit 0.
+5. Run `just type`. Expect `All checks passed` and exit 0.
 6. Run `git fetch origin main`, then `just migration-order-check` and `just schema-guard`,
    each bare. Expect exit 0 from both: 0152 is strictly above 0151, and no already-merged
    migration file changed.
@@ -193,8 +218,8 @@ Relied on by Task 2: the function name, argument type, and return type
   no `GRANT` on any table.
 - The function is `SECURITY DEFINER` with `SET search_path = ''`, and every object it names is
   schema-qualified.
-- `discharge_system_mutation_obligations` still takes `(conn, system_id)`, still returns `int`,
-  and still holds `advisory_xact_lock(conn, LockScope.SYSTEM, system_id)` around its work.
+- `discharge_system_mutation_obligations` is byte-identical to its state on `main`.
+- `system_reclaim.py` is the only file calling the new worker method.
 - `just lint`, `just type`, `just migration-order-check`, and `just schema-guard` are green.
 
 ## Task 2 — The role-grant proofs
@@ -208,50 +233,59 @@ Consumed, each confirmed present with the signature assumed here:
 
 - `authority_role_dsns`, a pytest fixture over `migrated_url` yielding a `_RoleDsns` whose
   `__call__(role: str) -> str` returns a DSN for a freshly created `LOGIN` principal that is a
-  member of `role`; it creates principals for `kdive_server`, `kdive_worker`,
-  `kdive_reconciler`, and `kdive_provider_authority` and drops them on teardown —
-  `tests/db/external_boot_authority_support.py:86-109`, with `_RoleDsns` at `:37-47`.
+  member of `role`; it serves exactly `kdive_server`, `kdive_worker`, `kdive_reconciler`, and
+  `kdive_provider_authority`, and drops them on teardown —
+  `tests/db/external_boot_authority_support.py:86-109`, with `_RoleDsns` at `:37-47`. Its
+  `parameters` field holds the base connection parameters, so an ad-hoc principal outside those
+  four is connected by building a DSN from `psycopg.conninfo.make_conninfo(**{**dsns.parameters,
+  "user": <name>, "password": <password>})` rather than through `__call__`.
 - `_seed(conn: psycopg.AsyncConnection) -> tuple[UUID, UUID]`, inserting the
   resource/allocation/system/investigation/run spine and returning `(system_id, run_id)` —
   `tests/db/remote_module_attempt_obligations_support.py:22-53`.
 - `_attempt(system_id: UUID, run_id: UUID, nonce: str = "0" * 32) -> ModuleAttempt` — same file,
-  `:56-57`.
+  `:55-56`.
 - `RemoteModuleAttemptObligationRepository.open_mutation_obligation(conn, attempt) -> bool`,
   which inserts the obligation row — `src/kdive/db/remote_module_attempt_obligations.py:208-221`.
 - `reclaim_system_core_after_provider_teardown(conn, artifact_store, system_id, *, reclaim_snapshot_ledger: bool, discharge_mutation_obligations: bool) -> None`
   — `src/kdive/jobs/handlers/system_reclaim.py:98-113`.
 - `RetiredKeyBatchDeleter`, a `Protocol` with
   `delete_retired_key_batch(self, key: str, limit: int) -> bool` — same file, `:33-36`.
-- `public.discharge_system_mutation_obligations(uuid) RETURNS integer`, from Task 1.
 
 ### Verification
 
-- **Contract: the worker role's teardown reclaim discharges.** Mode: `focused-test`. Test case
-  `test_worker_role_teardown_reclaim_discharges`. Expected red before Task 1:
-  `psycopg.errors.UndefinedFunction: function public.discharge_system_mutation_obligations(uuid) does not exist`.
-- **Contract: the reconciler role's teardown reclaim discharges.** Mode: `focused-test`. Test
-  case `test_reconciler_role_teardown_reclaim_discharges`. Same expected red.
-- **Contract: no table-level `UPDATE` was granted.** Mode: `focused-test`. Test case
-  `test_worker_role_direct_update_still_denied`; a direct `UPDATE` on the table under the
-  worker login must raise `psycopg.errors.InsufficientPrivilege`. Expected red if the fix were
-  a table grant instead of a function grant: no exception raised.
-- **Contract: the in-body role gate refuses a non-member.** Mode: `focused-test`. Test case
-  `test_non_member_execute_is_refused`; a `LOGIN` principal that is a member of neither role
-  but has been granted `EXECUTE` directly must raise `psycopg.errors.InsufficientPrivilege`
-  carrying `worker or reconciler authority is required`. Expected red if the gate were left to
-  the grant alone: no exception raised.
-- **Contract: first-write-wins is preserved.** Mode: `focused-test`. Test case
-  `test_second_discharge_is_a_noop`; a second reclaim returns the row unchanged and the second
-  function call reports `0`. Expected red if the `mutation_discharged_at IS NULL` predicate
-  were dropped: the stored timestamp advances.
+Each entry below is `Mode: focused-test`, in
+`tests/db/test_worker_system_mutation_discharge.py`, with green command
+`KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/db/test_worker_system_mutation_discharge.py -q`.
+
+- **Worker-role teardown reclaim discharges.** `test_worker_role_teardown_reclaim_discharges`.
+  Expected red before Task 1: `psycopg.errors.UndefinedFunction: function
+  public.discharge_system_mutation_obligations(uuid) does not exist`.
+- **Reconciler-role teardown reclaim discharges**, with the `reclaim_snapshot_ledger=True` that
+  `src/kdive/reconciler/repairs/jobs.py:102` passes.
+  `test_reconciler_role_teardown_reclaim_discharges`. Same expected red.
+- **No table-level `UPDATE` was granted.** `test_worker_role_direct_update_still_denied`; a
+  direct `UPDATE` under the worker login must raise `psycopg.errors.InsufficientPrivilege`.
+  Expected red if the fix were a table grant: no exception raised.
+- **The in-body role gate refuses a non-member.** `test_non_member_execute_is_refused`; a
+  `LOGIN` principal that is a member of neither role but has been granted `EXECUTE` directly
+  must raise `psycopg.errors.InsufficientPrivilege` carrying `worker or reconciler authority is
+  required`. Expected red if the gate were left to the grant alone: no exception raised.
+- **First-write-wins is preserved.** `test_second_discharge_is_a_noop`; the stored
+  `mutation_discharged_at` is equal after a second reclaim. Expected red if the
+  `mutation_discharged_at IS NULL` predicate were dropped: the timestamp advances.
+- **The shared method still works under `kdive_server`.**
+  `test_server_role_shared_discharge_still_works`; calling
+  `discharge_system_mutation_obligations` under the server login returns 1 and discharges the
+  row. Expected red if the shared method were rerouted through the function: `permission denied
+  for function`.
 
 ### Steps
 
-1. Create `tests/db/test_worker_system_mutation_discharge.py`. It imports
-   `authority_role_dsns` (re-exported with a `noqa: F401` alias, exactly as
-   `tests/db/test_remote_module_worker_evidence.py:31-33` does), `_seed`, and `_attempt` from
-   the support modules named in Interfaces, plus `psycopg`, `pytest`, `asyncio`, and
-   `uuid.uuid4`.
+1. Create `tests/db/test_worker_system_mutation_discharge.py`. Import `authority_role_dsns`
+   re-exported with a `noqa: F401` alias, exactly as
+   `tests/db/test_remote_module_worker_evidence.py:31-33` does, plus `_seed` and `_attempt` from
+   `tests.db.remote_module_attempt_obligations_support`, and `asyncio`, `psycopg`, `pytest`,
+   `uuid4`, `psycopg.conninfo.make_conninfo`, and `psycopg.sql.SQL`/`Identifier`/`Literal`.
 2. Add a module-level stub store, since the reclaim helper requires one:
 
    ```python
@@ -264,38 +298,44 @@ Consumed, each confirmed present with the signature assumed here:
 
 3. Add a helper that seeds one System with one open mutation obligation on a privileged
    connection and returns its `system_id`, using `_seed`, `_attempt`, and
-   `RemoteModuleAttemptObligationRepository().open_mutation_obligation`. Commit before the role
+   `RemoteModuleAttemptObligationRepository().open_mutation_obligation`. Commit before any role
    connection reads it.
-4. Add a helper that opens a non-autocommit `psycopg.AsyncConnection` for a given role DSN and
-   runs `reclaim_system_core_after_provider_teardown(conn, _NoStore(), system_id,
-   reclaim_snapshot_ledger=False, discharge_mutation_obligations=True)`, matching the flags the
-   teardown handler passes at `src/kdive/jobs/handlers/systems.py:730-736`.
+4. Add a helper that opens a non-autocommit `psycopg.AsyncConnection` for a given DSN and runs
+   `reclaim_system_core_after_provider_teardown(conn, _NoStore(), system_id,
+   reclaim_snapshot_ledger=<flag>, discharge_mutation_obligations=True)`, then commits.
 5. Write `test_worker_role_teardown_reclaim_discharges`: seed, run the helper under
-   `authority_role_dsns("kdive_worker")`, then assert on a privileged connection that the row's
-   `mutation_discharged_at` is not null and `mutation_discharge_reason == "terminal_escape"`.
+   `authority_role_dsns("kdive_worker")` with `reclaim_snapshot_ledger=False` — the flag
+   `src/kdive/jobs/handlers/systems.py:730-736` passes — then assert on a privileged connection
+   that `mutation_discharged_at` is not null and `mutation_discharge_reason ==
+   "terminal_escape"`.
 6. Write `test_reconciler_role_teardown_reclaim_discharges`: the same body under
-   `authority_role_dsns("kdive_reconciler")`.
+   `authority_role_dsns("kdive_reconciler")` with `reclaim_snapshot_ledger=True`. If that flag
+   makes the arm fail on a *different* missing grant — `delete_snapshots_for_system` writes to
+   `snapshots` — that is a separate defect: report it, and do not widen this change to fix it.
 7. Write `test_worker_role_direct_update_still_denied`: under the worker login, execute
    `UPDATE remote_module_attempt_obligations SET mutation_discharged_at = now(),
    mutation_discharge_reason = 'terminal_escape' WHERE system_id = %s` inside
    `pytest.raises(psycopg.errors.InsufficientPrivilege)`.
-8. Write `test_non_member_execute_is_refused`: on a privileged connection create a
-   `LOGIN` role with a unique name that is a member of neither role, `GRANT EXECUTE ON FUNCTION
-   public.discharge_system_mutation_obligations(uuid)` to it, connect as it, and assert the
-   call raises `psycopg.errors.InsufficientPrivilege` whose message contains
-   `worker or reconciler authority is required`. Drop the role in a `finally`. Build every
-   identifier with `psycopg.sql.SQL(...).format(psycopg.sql.Identifier(...))`, never string
-   interpolation.
+8. Write `test_non_member_execute_is_refused`: on a privileged connection create a `LOGIN` role
+   with a unique name and no `IN ROLE` clause, `GRANT EXECUTE ON FUNCTION
+   public.discharge_system_mutation_obligations(uuid)` to it, connect with a DSN built by
+   `make_conninfo(**{**dsns.parameters, "user": name, "password": password})`, and assert the
+   call raises `psycopg.errors.InsufficientPrivilege` whose message contains `worker or
+   reconciler authority is required`. Drop the role in a `finally`. Build every identifier with
+   `SQL(...).format(Identifier(...))`, never string interpolation.
 9. Write `test_second_discharge_is_a_noop`: run the worker-role reclaim twice, read the stored
    `mutation_discharged_at` after each, and assert the two values are equal.
-10. Run `KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest
-    tests/db/test_worker_system_mutation_discharge.py -q` bare. Expect `5 passed` and exit 0. A
-    line reporting skips means the daemon was unreachable and the run is not evidence.
-11. Run `just lint` and `just type`, each bare. Expect exit 0 from both.
+10. Write `test_server_role_shared_discharge_still_works`: under
+    `authority_role_dsns("kdive_server")`, call
+    `RemoteModuleAttemptObligationRepository().discharge_system_mutation_obligations(conn,
+    system_id)` inside a transaction and assert it returns 1.
+11. Run the green command above, bare. Expect `6 passed` and exit 0. A line reporting skips
+    means the daemon was unreachable and the run is not evidence.
+12. Run `just lint` and `just type`, each bare. Expect exit 0 from both.
 
 ### Acceptance criteria
 
-- All five cases pass with `KDIVE_REQUIRE_DOCKER=1` set, and the run reports no skips.
+- All six cases pass with `KDIVE_REQUIRE_DOCKER=1` set, and the run reports no skips.
 - Every arm connects through a real `LOGIN` principal; no arm asserts anything while connected
   as the backend superuser, for which `pg_has_role` is true against every role.
 - Both a permitted arm and a denied arm exist for the same call, so a call broken for everyone
