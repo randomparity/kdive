@@ -105,10 +105,11 @@ docker compose down --volumes   # ...or also drop the database and the artifacts
   `root:kvm 0640`, the same posture as the CI runner's Ansible role. A kernel upgrade lands a
   new `0600` file: re-run the script afterwards.
 - **`uv sync --group live`** — the venv, plus `drgn` for the kdump capture path. Ubuntu 26.04's
-  system Python is 3.14, the same minor as the project's, so `scripts/check-setup-deps.sh -y`
-  can symlink the distro `python3-guestfs` binding into the venv and the preflight's
-  `import guestfs, drgn` check passes; on a host whose system Python differs it stays a
-  `WARN` (kdump only) and everything else works.
+  system Python is 3.14, the same minor as the project's, so the script symlinks the distro
+  `python3-guestfs` binding into the venv and the preflight's `import guestfs, drgn` check
+  passes; on a host whose system Python differs it stays a `WARN` (kdump only) and
+  everything else works. Contributors who also want the dev tooling (shellcheck, prek, node)
+  run `./scripts/check-setup-deps.sh -y` separately.
 - **Directories** — `/var/lib/kdive/{install,console,rootfs/local,build}` owned by you,
   world-traversable.
 

@@ -115,13 +115,27 @@ step "/var/lib/kdive directories"
 sudo install -d -o "${USER}" -m 0755 \
   /var/lib/kdive/install /var/lib/kdive/console /var/lib/kdive/rootfs/local /var/lib/kdive/build
 
-# 7. Venv wiring for the kdump capture path. check-setup-deps.sh -y symlinks the distro
-#    python3-guestfs binding into the venv (only when the system and venv Python minor versions
-#    match — Ubuntu 26.04 ships 3.14, the project Python) and installs any missing dev-tier
-#    packages. Its exit status is the report, not a gate: the kdump binding is optional for the
-#    core lifecycle and the preflight below says which.
-step "check-setup-deps.sh -y (venv libguestfs binding)"
-(cd "${repo_root}" && ./scripts/check-setup-deps.sh -y) || true
+# 7. Venv wiring for build-fs and the kdump capture path: symlink the distro python3-guestfs
+#    binding into the venv (a uv venv has no system-site-packages). The binding is a C extension
+#    built for the distro Python, so it only imports when the system and venv Python minor
+#    versions match (Ubuntu 26.04 ships 3.14, the project Python); otherwise leave a note. This is
+#    the venv remedy of scripts/check-setup-deps.sh alone — `-y` there also installs the dev-tier
+#    tooling (shellcheck, node, ...) a contributor wants and an operator host does not.
+step "venv libguestfs binding"
+venv_python="${repo_root}/.venv/bin/python"
+sys_minor="$(/usr/bin/python3 -c 'import sys; print(sys.version_info[1])')"
+venv_minor="$("${venv_python}" -c 'import sys; print(sys.version_info[1])')"
+if [[ "${sys_minor}" != "${venv_minor}" ]]; then
+  echo "system python3 is 3.${sys_minor} but the venv is 3.${venv_minor}; the distro guestfs binding"
+  echo "cannot be shared. Kernel-under-test builds (build-fs) and kdump capture need it; see"
+  echo "docs/operating/runbooks/four-method-live-run.md section 4b."
+else
+  guestfs_site="$(/usr/bin/python3 -c 'import os, guestfs; print(os.path.dirname(guestfs.__file__))')"
+  venv_site="$("${venv_python}" -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+  ln -sfn "${guestfs_site}/guestfs.py" "${venv_site}/guestfs.py"
+  ln -sfn "${guestfs_site}"/libguestfsmod*.so "${venv_site}/"
+  "${venv_python}" -c 'import guestfs, drgn; print("guestfs + drgn importable from the venv")'
+fi
 
 cat <<EOF
 
