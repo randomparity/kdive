@@ -6,12 +6,17 @@ import pytest
 
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
+    GUEST_ARCH_ACCEL_ID,
     MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
+    PSERIES_FADUMP_ID,
     CheckResult,
     CheckStatus,
 )
+from kdive.diagnostics.contributions.guest_arch_accel import guest_arch_accel_worker_descriptor
+from kdive.diagnostics.contributions.pseries_fadump import pseries_fadump_worker_descriptor
 from kdive.diagnostics.result_codec import (
+    _ALLOWED_IDS,
     ResultCodecError,
     deserialize_results,
     serialize_results,
@@ -58,6 +63,56 @@ def test_multiarch_gdb_id_survives_roundtrip() -> None:
     assert result.check_id == MULTIARCH_GDB_ID
     assert result.status is CheckStatus.FAIL
     assert result.failure_category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_pseries_fadump_id_survives_roundtrip() -> None:
+    src = [
+        CheckResult(
+            PSERIES_FADUMP_ID,
+            CheckStatus.FAIL,
+            "fadump not configured",
+            fix="enable fadump",
+            provider="local-libvirt",
+            failure_category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    ]
+    [result] = deserialize_results(serialize_results(src))
+    assert result.check_id == PSERIES_FADUMP_ID
+    assert result.status is CheckStatus.FAIL
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_guest_arch_accel_id_survives_roundtrip() -> None:
+    src = [
+        CheckResult(
+            GUEST_ARCH_ACCEL_ID,
+            CheckStatus.PASS,
+            "accel available",
+            provider="local-libvirt",
+        )
+    ]
+    [result] = deserialize_results(serialize_results(src))
+    assert result.check_id == GUEST_ARCH_ACCEL_ID
+    assert result.status is CheckStatus.PASS
+
+
+def test_allowed_ids_matches_registered_worker_vantage_descriptors() -> None:
+    """`_ALLOWED_IDS` must track every worker-vantage id the diagnostics contributions register.
+
+    Regression guard for the bug this codec fixed: a registered `WorkerVantageDescriptor` id
+    silently missing from `_ALLOWED_IDS` degraded (or, before per-item isolation, poisoned) its
+    worker result. Calling the real descriptor-producing functions — rather than restating their
+    ids as literals — means renaming or removing a registered id without updating the allowlist
+    fails this test.
+    """
+    expected_ids = {
+        PROVIDER_TLS_ID,
+        GDBSTUB_ACL_ID,
+        MULTIARCH_GDB_ID,
+        pseries_fadump_worker_descriptor().id,
+        guest_arch_accel_worker_descriptor().id,
+    }
+    assert expected_ids == _ALLOWED_IDS
 
 
 def test_roundtrip_preserves_resource_id() -> None:
@@ -112,44 +167,56 @@ def test_missing_results_list_message() -> None:
     assert str(excinfo.value) == "diagnostics result has no 'results' list"
 
 
-def test_unexpected_check_id_message() -> None:
-    payload = '{"results": [{"check_id": "secret_ref", "status": "pass", "detail": "x"}]}'
-    with pytest.raises(ResultCodecError, match="unexpected worker-vantage check id"):
-        deserialize_results(payload)
-
-
-def test_invalid_item_message() -> None:
-    payload = '{"results": [{"check_id": "provider_tls", "status": "weird", "detail": "x"}]}'
-    with pytest.raises(ResultCodecError, match="invalid diagnostics result item"):
-        deserialize_results(payload)
-
-
-def test_non_dict_item_message() -> None:
-    with pytest.raises(ResultCodecError) as excinfo:
-        deserialize_results('{"results": [3]}')
-    assert str(excinfo.value) == "diagnostics result item is not an object"
-
-
 @pytest.mark.parametrize("raw", [None, "", "not json", "{}", '{"results": 3}', "[]"])
-def test_malformed_raises(raw: str | None) -> None:
+def test_malformed_payload_raises(raw: str | None) -> None:
+    # The payload itself cannot be parsed at all, so there is no per-item boundary to isolate.
     with pytest.raises(ResultCodecError):
         deserialize_results(raw)
 
 
-def test_unexpected_check_id_raises() -> None:
+def test_unexpected_check_id_degrades_to_error_result() -> None:
     payload = '{"results": [{"check_id": "secret_ref", "status": "pass", "detail": "x"}]}'
-    with pytest.raises(ResultCodecError):
-        deserialize_results(payload)
+    [result] = deserialize_results(payload)
+    assert result.check_id == "secret_ref"
+    assert result.status is CheckStatus.ERROR
+    assert "unexpected worker-vantage check id" in result.detail
+    assert result.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_invariant_violation_raises() -> None:
-    # fail without a fix violates CheckResult.__post_init__
-    payload = '{"results": [{"check_id": "provider_tls", "status": "fail", "detail": "x"}]}'
-    with pytest.raises(ResultCodecError):
-        deserialize_results(payload)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # bad enum value
+        '{"results": [{"check_id": "provider_tls", "status": "weird", "detail": "x"}]}',
+        # fail without a fix violates CheckResult.__post_init__
+        '{"results": [{"check_id": "provider_tls", "status": "fail", "detail": "x"}]}',
+    ],
+)
+def test_invalid_item_degrades_to_error_result(payload: str) -> None:
+    [result] = deserialize_results(payload)
+    assert result.check_id == PROVIDER_TLS_ID
+    assert result.status is CheckStatus.ERROR
+    assert "invalid diagnostics result item" in result.detail
 
 
-def test_bad_enum_value_raises() -> None:
-    payload = '{"results": [{"check_id": "provider_tls", "status": "weird", "detail": "x"}]}'
-    with pytest.raises(ResultCodecError):
-        deserialize_results(payload)
+def test_non_dict_item_degrades_to_error_result_with_unknown_id() -> None:
+    # No dict, so no check_id to attribute the failure to.
+    [result] = deserialize_results('{"results": [3]}')
+    assert result.check_id == "unknown"
+    assert result.status is CheckStatus.ERROR
+    assert result.detail == "diagnostics result item is not an object"
+
+
+def test_one_bad_id_does_not_poison_the_batch() -> None:
+    payload = (
+        '{"results": ['
+        '{"check_id": "provider_tls", "status": "pass", "detail": "ok"},'
+        '{"check_id": "secret_ref", "status": "pass", "detail": "x"}'
+        "]}"
+    )
+    good, bad = deserialize_results(payload)
+    assert good.check_id == PROVIDER_TLS_ID
+    assert good.status is CheckStatus.PASS
+    assert good.detail == "ok"
+    assert bad.check_id == "secret_ref"
+    assert bad.status is CheckStatus.ERROR

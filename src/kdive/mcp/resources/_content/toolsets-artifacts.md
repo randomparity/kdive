@@ -14,6 +14,9 @@ read each tool's own description.
 - `artifacts.fetch_raw` — get a download URL for a large or binary artifact (such as a
   vmcore or vmlinux) instead of inlining its bytes.
 
+Argument shape: on this surface, `artifacts.get` is the only read that nests its arguments
+under `request`; `artifacts.list` and `artifacts.fetch_raw` both take flat parameters.
+
 ## Uploading a build
 
 - `resource://kdive/contracts/external-build` — learn the exact artifacts, byte layout, and

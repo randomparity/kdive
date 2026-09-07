@@ -161,7 +161,7 @@ class JobWorkerCheckDispatcher:
             except ResultCodecError as exc:
                 _log.error("diagnostics job %s returned a malformed result: %s", job.id, exc)
                 return _unavailable(
-                    "diagnostics worker returned a malformed result",
+                    f"diagnostics worker returned a malformed result: {exc}",
                     _INFRASTRUCTURE_FAILURE,
                     provider=self._provider,
                     check_ids=self._worker_check_ids,

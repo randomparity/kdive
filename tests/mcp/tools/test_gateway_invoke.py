@@ -4,7 +4,18 @@ Coverage:
 * Dispatch to a real inner tool (session.whoami) returns the inner tool's response.
 * An unknown tool name yields a ``configuration_error`` envelope with a pointer
   to ``tools.search`` in the detail.
-* Missing required arguments for an inner tool yield ``configuration_error``.
+* Missing required arguments for an inner tool yield ``configuration_error`` whose
+  ``data`` names the missing field, its failure kind, and the tool's accepted
+  top-level keys, with ``tools.search`` in ``suggested_next_actions`` (#2304).
+* An unexpected keyword argument yields the same informative ``data`` shape,
+  proving the parity holds across pydantic failure kinds, not just "missing" (#2304).
+* ``accepted_fields`` is withheld from a caller with no verified context and from an
+  authenticated caller who lacks the tool's required scope, matching ``tools.search``'s
+  RBAC gate; ``field_errors`` itself is unaffected by visibility (#2304).
+* ``field_errors`` stays capped under an adversarial argument count (#2304).
+* A bare ``pydantic.ValidationError`` escaping a tool's own body (not an argument-binding
+  failure) gets the pre-existing generic envelope, never fabricated field/schema detail
+  attributed to the caller (#2304).
 * An inner tool's ``CategorizedError`` yields the same typed failure envelope as
   direct tool handlers.
 * An inner tool that raises ``fastmcp.exceptions.AuthorizationError`` propagates
@@ -43,6 +54,21 @@ def _viewer_ctx() -> RequestContext:
         agent_session="sess-viewer",
         projects=("proj-a",),
         roles={"proj-a": Role.VIEWER},
+    )
+
+
+def _no_grant_ctx() -> RequestContext:
+    """An authenticated caller with no project membership at all.
+
+    Distinct from the no-token AuthError path: this context resolves without raising, so
+    tool_visible's scope check itself must be what withholds accepted_fields, not merely
+    the fail-closed AuthError branch.
+    """
+    return RequestContext(
+        principal="outsider-user",
+        agent_session="sess-outsider",
+        projects=(),
+        roles={},
     )
 
 
@@ -96,12 +122,19 @@ def test_unknown_inner_name_is_configuration_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: bad arguments for inner tool → configuration_error
+# Test 3: bad arguments for inner tool → informative configuration_error (#2304)
 # ---------------------------------------------------------------------------
 
 
-def test_bad_arguments_is_configuration_error() -> None:
-    """Missing required arguments for an inner tool yield configuration_error."""
+def test_bad_arguments_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing required arguments for an inner tool yield an informative configuration_error.
+
+    Parity target (ADR-0268): the gateway's schema-validation failure names the same
+    field/kind detail a direct bind would raise, not a content-free envelope. The caller
+    holds VIEWER on runs.get's required scope, so accepted_fields is disclosed too — see
+    test_bad_arguments_without_visibility_omits_accepted_fields for the withheld case.
+    """
+    monkeypatch.setattr(gateway, "current_context", _viewer_ctx)
     # runs.get requires run_id; passing {} triggers pydantic ValidationError
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
@@ -114,6 +147,143 @@ def test_bad_arguments_is_configuration_error() -> None:
     assert content["error_category"] == "configuration_error"
     # The detail should name the inner tool
     assert "runs.get" in (content.get("detail") or "")
+    assert "tools.search" in content["suggested_next_actions"]
+    errors = content["data"]["field_errors"]
+    assert {"field": "run_id", "kind": "missing_argument"} in errors
+    # No caller-supplied value or pydantic ctx leaks through.
+    for entry in errors:
+        assert set(entry) == {"field", "kind"}
+    accepted = content["data"]["accepted_fields"]
+    assert "run_id" in accepted
+    assert "include_console_artifacts" in accepted
+
+
+# ---------------------------------------------------------------------------
+# Test 3b: unexpected keyword argument → same informative shape (#2304)
+# ---------------------------------------------------------------------------
+
+
+def test_unexpected_argument_is_configuration_error() -> None:
+    """An unknown keyword argument yields the same field/kind detail, not just "missing"."""
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool(
+            "tools.invoke",
+            {"name": "runs.get", "arguments": {"run_id": "r-1", "duration_minutes": 5}},
+        )
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    errors = content["data"]["field_errors"]
+    assert any(e["field"] == "duration_minutes" for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Test 3c: accepted_fields is withheld when the caller cannot see the tool (#2304)
+# ---------------------------------------------------------------------------
+
+
+def test_bad_arguments_without_visibility_omits_accepted_fields() -> None:
+    """No verified caller context means no schema disclosure, matching tools.search's RBAC gate.
+
+    Argument binding fails before an inner handler's own require_role check ever runs, so a
+    caller who could not see runs.get's schema through tools.search must not get it here either.
+    """
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.invoke", {"name": "runs.get", "arguments": {}})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert "accepted_fields" not in content["data"]
+
+
+def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An authenticated caller with no project membership is also withheld the schema.
+
+    Distinct from the no-token case above: tool_visible's own scope check must be what
+    denies it, not only the fail-closed AuthError branch.
+    """
+    monkeypatch.setattr(gateway, "current_context", _no_grant_ctx)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.invoke", {"name": "runs.get", "arguments": {}})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert "accepted_fields" not in content["data"]
+    # The per-field detail is unaffected by visibility — only the schema list is gated.
+    assert {"field": "run_id", "kind": "missing_argument"} in content["data"]["field_errors"]
+
+
+# ---------------------------------------------------------------------------
+# Test 3d: field_errors stays bounded against an adversarial argument count (#2304)
+# ---------------------------------------------------------------------------
+
+
+def test_field_errors_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller sending many bad keyword arguments gets a capped, not unbounded, error list."""
+    monkeypatch.setattr(gateway, "current_context", _viewer_ctx)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    bogus_args = {f"bogus_field_{i}": i for i in range(50)}
+
+    async def _run() -> Any:
+        return await app.call_tool(
+            "tools.invoke", {"name": "runs.get", "arguments": {"run_id": "r-1", **bogus_args}}
+        )
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert len(content["data"]["field_errors"]) == gateway._FIELD_ERROR_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Test 3e: a body-raised bare ValidationError is not mislabeled as bad arguments (#2304)
+# ---------------------------------------------------------------------------
+
+
+def test_body_raised_validation_error_omits_field_detail() -> None:
+    """A bare pydantic.ValidationError from a tool's own body is not an argument problem.
+
+    fastmcp only wraps a *binding* failure in its own ValidationError; a bare
+    pydantic.ValidationError escaping a tool body (e.g. re-validating data read from the
+    database) reaches this branch unwrapped and must not be attributed to the caller's
+    arguments — no fabricated field_errors/accepted_fields, and no tools.search pointer.
+    """
+    from pydantic import BaseModel
+
+    app = FastMCP("test-gateway-body-validation-error")
+
+    class _Row(BaseModel):
+        kind: str
+
+    @app.tool(name="data.corrupt")  # type: ignore[misc]
+    async def _data_corrupt() -> ToolResponse:
+        _Row.model_validate({"kind": 123, "unexpected": object()})
+        raise AssertionError("model_validate should have raised")
+
+    gateway.register(app, resolver=ProviderResolver({}))
+    advertise_envelope_output_schema(app)
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.invoke", {"name": "data.corrupt", "arguments": {}})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert content["data"] == {}
+    assert content["suggested_next_actions"] == []
 
 
 # ---------------------------------------------------------------------------
