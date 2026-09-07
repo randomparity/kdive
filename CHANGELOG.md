@@ -361,6 +361,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind staged rootfs provenance digest
 - Add native authority fault barrier
 - Add remote authority proof host controls
+- Define authority system provider contracts
+- Add authority-owned system operation ledger
+- Expose authority system provider port
+- Resolve authority system provider snapshots
+- Execute authority-owned system operations
+- Carry authority system operations over transport
+- Implement remote authority system provider
+- Persist local authority system intents
+- Bind local authority provision intent
+- Fence authority-owned local teardown
+- Execute authority-owned system jobs
+- Admit authority-owned Systems
+- Compose authority-owned system providers
+- Provision authority-owned system inputs
 
 ### Changed
 
@@ -531,6 +545,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Index run-scoped job lookups
 - Name typed recovery object deletion explicitly
 - Share installed authority carrier orchestration
+- Thread baseline intent callback
+- Expose baseline pre-extraction intent seam
 
 ### Documentation
 
@@ -1453,6 +1469,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarify selected appliance architecture inputs
 - Record rejected remote authority alternatives
 - Correct authority retry record heading
+- Define authority-owned system provisioning
+- Pin authority system installation checks
+- Preserve accepted authority system decision
+- Describe authority teardown cancellation
 
 ### Fixed
 
@@ -2379,6 +2399,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project authority reservation geometry to workers
 - Bound remote authority proof controls
 - Allow acknowledged authority retry
+- Close authority system provider validation
+- Bind authority system terminal consumption
+- Share exact authority system journal bytes
+- Bind system journal replay identity
+- Reject unowned remote authority state
+- Verify local authority teardown absence
+- Reject unsafe local authority intent roots
+- Verify retained local authority identity
+- Fence local authority domain readback
+- Stabilize local authority terminal facts
+- Replay local authority absence receipts
+- Fence authority-owned system mutations
+- Complete authority system lifecycle effects
+- Repair authority system teardown cleanup
+- Close authority system retry states
+- Route preactivation work through authority
+- Consume authority terminal predecessors
+- Route every control teardown through authority
+- Preserve investigation lock order
+- Preserve SSH authorization replays
 
 ### Security
 
