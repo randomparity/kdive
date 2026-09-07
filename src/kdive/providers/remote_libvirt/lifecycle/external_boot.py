@@ -12,8 +12,6 @@ into ``ProviderRuntime``.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits a trusted tree after a defused parse
 from collections.abc import Callable
@@ -21,8 +19,6 @@ from typing import Annotated, Literal, Protocol, Self
 from uuid import UUID
 
 import libvirt
-from defusedxml.common import DefusedXmlException
-from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -44,23 +40,18 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
+from kdive.providers.shared import libvirt_external_boot as _definition
 from kdive.providers.shared.guest_agent import AgentExecResult, GuestDomain
 from kdive.providers.shared.libvirt_xml import (
-    register_kdive_namespace,
-    register_qemu_namespace,
     remote_metadata_storage_identity,
     remote_metadata_system_id,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 
-_BOOT_FIELDS = ("kernel", "initrd", "cmdline")
-_PRESERVED_PREFIX = b"kdive-libvirt-preserved-v1"
-_BOOT_PROJECTION_PREFIX = b"kdive-libvirt-boot-projection-v1"
-
 # The same unit and number the shared ports module applies to a canonical value
 # (`ports/external_boot.py:26,44` measures `len(data)` over bytes).
 MAX_DEFINITION_BYTES = 65_536
-MAX_ARTIFACT_PATH_BYTES = 1_024
+MAX_ARTIFACT_PATH_BYTES = _definition.MAX_ARTIFACT_PATH_BYTES
 MAX_GUEST_READ_BYTES = 65_536
 MAX_CMDLINE_BYTES = 2_048
 
@@ -73,10 +64,6 @@ KERNEL_NOTES_PATH = "/sys/kernel/notes"
 # The shared contract's two architectures. A guest reporting anything else fails identity proof
 # here rather than inside the shared model, so the failure names the field.
 _ARCHITECTURES: tuple[Architecture, ...] = ("x86_64", "ppc64le")
-
-
-def _digest(prefix: bytes, payload: bytes) -> str:
-    return "sha256:" + hashlib.sha256(prefix + b"\0" + payload).hexdigest()
 
 
 def _malformed(reason: str) -> CategorizedError:
@@ -95,6 +82,11 @@ def _permanent(reason: str) -> CategorizedError:
     )
 
 
+def _definition_failure(exc: _definition.LibvirtDefinitionError) -> CategorizedError:
+    factory = _malformed if exc.retryable else _permanent
+    return factory(str(exc).removeprefix("domain XML "))
+
+
 def parse_domain_xml(domain_xml: str) -> ET.Element:
     """Safely parse an NFC domain definition.
 
@@ -102,15 +94,10 @@ def parse_domain_xml(domain_xml: str) -> ET.Element:
     character data and a non-``domain`` root are ``CONFLICT``: for a given domain ``XMLDesc`` is
     deterministic, so re-reading returns the same bytes and a retry can only burn the deadline.
     """
-    if unicodedata.normalize("NFC", domain_xml) != domain_xml:
-        raise _permanent("must be NFC")
     try:
-        root: ET.Element = _safe_fromstring(domain_xml)
-    except (ET.ParseError, DefusedXmlException) as exc:
-        raise _malformed("is malformed or forbidden") from exc
-    if root.tag != "domain":
-        raise _permanent("must have a domain root")
-    return root
+        return _definition.parse_domain_xml(domain_xml)
+    except _definition.LibvirtDefinitionError as exc:
+        raise _definition_failure(exc) from exc
 
 
 def render_target_xml(source: str, *, kernel: str, initrd: str | None, cmdline: str) -> str:
@@ -120,67 +107,29 @@ def render_target_xml(source: str, *, kernel: str, initrd: str | None, cmdline: 
     from the preserved digest, and libvirt ignores the boot device once ``<kernel>`` is set, so
     removing it would change the preserved digest for no behavioral gain.
     """
-    root = parse_domain_xml(source)
-    os_element = root.find("os")
-    if os_element is None:
-        os_element = ET.SubElement(root, "os")
-    for tag in _BOOT_FIELDS:
-        element = os_element.find(tag)
-        if element is not None:
-            os_element.remove(element)
-    ET.SubElement(os_element, "kernel").text = kernel
-    if initrd is not None:
-        ET.SubElement(os_element, "initrd").text = initrd
-    ET.SubElement(os_element, "cmdline").text = cmdline
-    register_kdive_namespace()
-    register_qemu_namespace()
-    return ET.tostring(root, encoding="unicode")
+    try:
+        return _definition.render_target_xml(source, kernel=kernel, initrd=initrd, cmdline=cmdline)
+    except _definition.LibvirtDefinitionError as exc:
+        raise _definition_failure(exc) from exc
 
 
 def preserved_definition_identity(domain_xml: str) -> str:
     """The ADR-0583 preserved digest: everything but the three provider-owned boot fields."""
-    root = parse_domain_xml(domain_xml)
-    cloned = ET.fromstring(ET.tostring(root, encoding="unicode"))  # noqa: S314 - defused above
-    os_element = cloned.find("os")
-    if os_element is not None:
-        for tag in _BOOT_FIELDS:
-            element = os_element.find(tag)
-            if element is not None:
-                os_element.remove(element)
-    for element in cloned.iter():
-        if len(element) and element.text is not None and not element.text.strip():
-            element.text = None
-        if element.tail is not None and not element.tail.strip():
-            element.tail = None
-    canonical = ET.canonicalize(
-        ET.tostring(cloned, encoding="unicode"),
-        with_comments=False,
-        strip_text=False,
-        rewrite_prefixes=True,
-    ).encode()
-    return _digest(_PRESERVED_PREFIX, canonical)
+    try:
+        return _definition.preserved_definition_identity(domain_xml)
+    except _definition.LibvirtDefinitionError as exc:
+        raise _definition_failure(exc) from exc
 
 
 def boot_projection_identity(domain_xml: str) -> str:
     """The ADR-0583 boot projection digest over the three provider-owned boot fields."""
-    os_element = parse_domain_xml(domain_xml).find("os")
-    value: dict[str, str | None] = {
-        tag: os_element.findtext(tag) if os_element is not None else None for tag in _BOOT_FIELDS
-    }
-    value["schema"] = "libvirt-boot-projection-v1"
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return _digest(_BOOT_PROJECTION_PREFIX, payload)
+    try:
+        return _definition.boot_projection_identity(domain_xml)
+    except _definition.LibvirtDefinitionError as exc:
+        raise _definition_failure(exc) from exc
 
 
-_ALL_NULL_BOOT_PROJECTION = _digest(
-    _BOOT_PROJECTION_PREFIX,
-    json.dumps(
-        {"cmdline": None, "initrd": None, "kernel": None, "schema": "libvirt-boot-projection-v1"},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode(),
-)
+_ALL_NULL_BOOT_PROJECTION = _definition.boot_projection_identity("<domain><os /></domain>")
 
 
 def _conflict(reason: str, *, system_id: UUID, rule: str) -> CategorizedError:
@@ -366,22 +315,14 @@ def _require_artifact_path(value: str, *, system_id: UUID, what: str) -> str:
     defect rather than an attack. It is stated so a later caller change cannot make the boundary
     load-bearing unnoticed.
     """
-    if (
-        not value
-        or unicodedata.normalize("NFC", value) != value
-        or not value.startswith("/")
-        or len(value.encode()) > MAX_ARTIFACT_PATH_BYTES
-        or "\0" in value
-        or ".." in value.split("/")
-        or not _round_trips_in_xml(value)
-    ):
+    try:
+        return _definition.require_artifact_path(value, what=what)
+    except _definition.LibvirtDefinitionError as exc:
         raise _conflict(
-            f"{what} path is empty, non-NFC, relative, oversized, unrepresentable in XML, "
-            "or carries a traversal segment",
+            str(exc),
             system_id=system_id,
             rule="artifact-path",
-        )
-    return value
+        ) from exc
 
 
 def prepare_target_definition(

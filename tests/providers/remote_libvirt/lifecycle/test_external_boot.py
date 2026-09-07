@@ -53,36 +53,18 @@ from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
 
 _OTHER_SYSTEM_ID = UUID("00000000-0000-0000-0000-0000000000aa")
 
-# ADR-0583's three published golden vectors. These are normative: the two identity algorithms
-# exist to reproduce them, and local-libvirt carries a second copy of the same algorithm (#2159).
 _GOLDEN_SOURCE = '<domain><os><type arch="x86_64">hvm</type></os></domain>'
 _GOLDEN_PRESERVED = "sha256:3e3cde0b5115867e991160f1d361fef3ec0734e8a87e2ab003d62cc0f8af4eea"
 _GOLDEN_NULL_BOOT = "sha256:c48b5e5a6e9ac64b1129c1d468ce0de305288a86a6575467fb15f71d3c14b925"
-_GOLDEN_UNICODE_BOOT = "sha256:06bf5b2aceb13f19b7debd17181ada54041d883f926c9c5f4c0acae4336f58fb"
-
-
-def test_preserved_identity_matches_the_adr_golden_vector() -> None:
-    assert preserved_definition_identity(_GOLDEN_SOURCE) == _GOLDEN_PRESERVED
-
-
-def test_all_null_boot_projection_matches_the_adr_golden_vector() -> None:
-    assert boot_projection_identity(_GOLDEN_SOURCE) == _GOLDEN_NULL_BOOT
-
-
-def test_non_ascii_boot_projection_matches_the_adr_golden_vector() -> None:
-    projected = render_target_xml(
-        _GOLDEN_SOURCE,
-        kernel="/var/lib/kdive/café",
-        initrd=None,
-        cmdline="root=LABEL=café",
-    )
-    assert boot_projection_identity(projected) == _GOLDEN_UNICODE_BOOT
 
 
 def test_projection_preserves_every_remote_device_and_the_preserved_digest() -> None:
     source = _source_xml()
     projected = render_target_xml(
-        source, kernel="kernel.img", initrd="initrd.img", cmdline="root=/dev/vda1 console=ttyS0"
+        source,
+        kernel="/artifacts/kernel.img",
+        initrd="/artifacts/initrd.img",
+        cmdline="root=/dev/vda1 console=ttyS0",
     )
     for fragment in (
         '<disk type="file" device="disk">',
@@ -103,31 +85,31 @@ def test_projection_preserves_every_remote_device_and_the_preserved_digest() -> 
         assert fragment in projected, fragment
     assert preserved_definition_identity(projected) == preserved_definition_identity(source)
     assert boot_projection_identity(projected) != boot_projection_identity(source)
-    assert "<kernel>kernel.img</kernel>" in projected
-    assert "<initrd>initrd.img</initrd>" in projected
+    assert "<kernel>/artifacts/kernel.img</kernel>" in projected
+    assert "<initrd>/artifacts/initrd.img</initrd>" in projected
     assert "<cmdline>root=/dev/vda1 console=ttyS0</cmdline>" in projected
     assert '<boot dev="hd" />' in projected
 
 
 def test_projection_omits_the_initrd_element_when_no_initrd_is_supplied() -> None:
-    projected = render_target_xml(_GOLDEN_SOURCE, kernel="k", initrd=None, cmdline="c")
+    projected = render_target_xml(_GOLDEN_SOURCE, kernel="/k", initrd=None, cmdline="c")
     assert "<initrd>" not in projected
 
 
 def test_projection_replaces_rather_than_duplicates_existing_boot_fields() -> None:
-    once = render_target_xml(_GOLDEN_SOURCE, kernel="k1", initrd="i1", cmdline="c1")
-    twice = render_target_xml(once, kernel="k2", initrd="i2", cmdline="c2")
+    once = render_target_xml(_GOLDEN_SOURCE, kernel="/k1", initrd="/i1", cmdline="c1")
+    twice = render_target_xml(once, kernel="/k2", initrd="/i2", cmdline="c2")
     assert twice.count("<kernel>") == 1
     assert twice.count("<initrd>") == 1
     assert twice.count("<cmdline>") == 1
-    assert "k1" not in twice
+    assert "/k1" not in twice
 
 
 def test_projection_creates_the_os_element_when_the_source_has_none() -> None:
     projected = render_target_xml(
-        "<domain><name>d</name></domain>", kernel="k", initrd=None, cmdline="c"
+        "<domain><name>d</name></domain>", kernel="/k", initrd=None, cmdline="c"
     )
-    assert "<os><kernel>k</kernel><cmdline>c</cmdline></os>" in projected
+    assert "<os><kernel>/k</kernel><cmdline>c</cmdline></os>" in projected
 
 
 @pytest.mark.parametrize(
@@ -148,7 +130,7 @@ def test_projection_rejects_malformed_forbidden_or_non_nfc_sources(
     source: str, category: ErrorCategory
 ) -> None:
     with pytest.raises(CategorizedError) as caught:
-        render_target_xml(source, kernel="k", initrd=None, cmdline="c")
+        render_target_xml(source, kernel="/k", initrd=None, cmdline="c")
     assert caught.value.category is category
 
 
@@ -176,7 +158,7 @@ def _add_conflicting_source_identities(xml: str) -> str:
     ("mutate", "rule"),
     [
         (
-            lambda xml: render_target_xml(xml, kernel="k", initrd=None, cmdline="c"),
+            lambda xml: render_target_xml(xml, kernel="/k", initrd=None, cmdline="c"),
             "boot-projection",
         ),
         (lambda xml: xml.replace(str(_SYSTEM_ID), str(_OTHER_SYSTEM_ID)), "system-metadata"),
@@ -342,11 +324,22 @@ def test_prepare_rejects_initrd_presence_disagreement(
         "",
         "relative/kernel.img",
         "/var/lib/kdive/../../etc/shadow",
+        "/var/lib/kdive/./kernel.img",
+        "/var/lib//kdive/kernel.img",
         "/a\x00b",
         "/" + "x" * 1025,
         "/var/lib/kdive/k\x01.img",
     ],
-    ids=["empty", "relative", "traversal", "nul", "oversized", "xml-illegal-control"],
+    ids=[
+        "empty",
+        "relative",
+        "traversal",
+        "dot-segment",
+        "empty-segment",
+        "nul",
+        "oversized",
+        "xml-illegal-control",
+    ],
 )
 def test_prepare_rejects_an_ill_shaped_artifact_path(kernel_path: str) -> None:
     with pytest.raises(CategorizedError) as caught:

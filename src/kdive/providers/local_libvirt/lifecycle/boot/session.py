@@ -38,6 +38,10 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
     HostStatDeviceIdentity,
     prove_no_foreign_path_references,
 )
+from kdive.providers.shared.libvirt_external_boot import (
+    boot_projection_element_identity,
+    preserved_element_identity,
+)
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     recorded_gdb_port_from_root,
@@ -1854,37 +1858,11 @@ def _digest(prefix: bytes, payload: bytes) -> str:
 
 
 def _preserved_identity(root: ET.Element) -> str:
-    cloned = ET.fromstring(ET.tostring(root, encoding="unicode"))  # noqa: S314 - defused above
-    os_element = cloned.find("os")
-    if os_element is not None:
-        for tag in ("kernel", "initrd", "cmdline"):
-            element = os_element.find(tag)
-            if element is not None:
-                os_element.remove(element)
-    for element in cloned.iter():
-        if len(element) and element.text is not None and not element.text.strip():
-            element.text = None
-        if element.tail is not None and not element.tail.strip():
-            element.tail = None
-    canonical = ET.canonicalize(
-        ET.tostring(cloned, encoding="unicode"),
-        with_comments=False,
-        strip_text=False,
-        rewrite_prefixes=True,
-    ).encode()
-    return _digest(b"kdive-libvirt-preserved-v1", canonical)
+    return preserved_element_identity(root)
 
 
 def _boot_identity(root: ET.Element) -> str:
-    os_element = root.find("os")
-    value = {
-        "cmdline": os_element.findtext("cmdline") if os_element is not None else None,
-        "initrd": os_element.findtext("initrd") if os_element is not None else None,
-        "kernel": os_element.findtext("kernel") if os_element is not None else None,
-        "schema": "libvirt-boot-projection-v1",
-    }
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return _digest(b"kdive-libvirt-boot-projection-v1", payload)
+    return boot_projection_element_identity(root)
 
 
 def _attempt_guest_close(guest: _Guest) -> list[Exception]:

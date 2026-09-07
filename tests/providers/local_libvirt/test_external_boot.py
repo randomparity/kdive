@@ -103,22 +103,22 @@ _TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
 def test_render_target_xml_changes_only_owned_boot_projection() -> None:
     rendered = render_target_xml(
         _SOURCE_XML,
-        kernel="artifacts/kernel",
-        initrd="artifacts/initrd",
+        kernel="/artifacts/kernel",
+        initrd="/artifacts/initrd",
         cmdline="root=/dev/vda1 console=ttyS0",
     )
 
     assert '<memory unit="MiB">2048</memory>' in rendered
     assert '<disk type="file"><target dev="vda" /></disk>' in rendered
     assert '<qemu:arg value="-S"' in rendered
-    assert "<kernel>artifacts/kernel</kernel>" in rendered
-    assert "<initrd>artifacts/initrd</initrd>" in rendered
+    assert "<kernel>/artifacts/kernel</kernel>" in rendered
+    assert "<initrd>/artifacts/initrd</initrd>" in rendered
     assert "<cmdline>root=/dev/vda1 console=ttyS0</cmdline>" in rendered
 
 
 def test_render_target_xml_omits_optional_initrd() -> None:
     rendered = render_target_xml(
-        _SOURCE_XML, kernel="artifacts/kernel", initrd=None, cmdline="root=/dev/vda1"
+        _SOURCE_XML, kernel="/artifacts/kernel", initrd=None, cmdline="root=/dev/vda1"
     )
     assert "<initrd>" not in rendered
 
@@ -133,7 +133,7 @@ def test_render_target_xml_omits_optional_initrd() -> None:
 )
 def test_render_target_xml_rejects_malformed_forbidden_or_non_nfc(source: str) -> None:
     with pytest.raises(ValueError, match="domain XML"):
-        render_target_xml(source, kernel="kernel", initrd=None, cmdline="root=/dev/vda1")
+        render_target_xml(source, kernel="/kernel", initrd=None, cmdline="root=/dev/vda1")
 
 
 def _raw_bundle(names: list[tuple[str, bytes]]) -> bytes:

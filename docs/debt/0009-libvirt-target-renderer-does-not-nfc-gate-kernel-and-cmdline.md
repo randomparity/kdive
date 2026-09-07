@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2027-03-03
+> **Resolved by #2159** (2026-09-07)
 
 ## Concern
 
@@ -60,10 +59,9 @@ silent divergence #2159 exists to stop.
 
 ## Non-regression boundary
 
-- The three ADR-0583 golden vectors must keep reproducing against both copies while this record
-  is open. `tests/providers/local_libvirt/lifecycle/boot/test_adr_0583_golden_vectors.py` and
-  `tests/providers/remote_libvirt/lifecycle/test_external_boot.py` assert them independently,
-  each against the published literals rather than against the other implementation.
+- The three ADR-0583 golden vectors must keep reproducing. After convergence,
+  `tests/providers/shared/test_libvirt_external_boot.py` asserts the shared implementation against
+  the published literals rather than against a provider-derived value.
 - Neither renderer may start silently NFC-*normalizing* `cmdline`. ADR-0583's exemption exists
   so the accepted scalar sequence reaches the guest unrewritten, and the fresh-boot check that
   compares `/proc/cmdline` against the plan's bytes fails if anything rewrites them. Rejection
@@ -85,6 +83,19 @@ amend the ADR if they are not.
 Done when a decomposed `kernel` argument cannot reach a rendered definition unnoticed, the
 `cmdline` exemption's extent is stated somewhere durable rather than inferred, and this record
 carries its resolution banner.
+
+## Resolution
+
+#2159 moved both providers onto one renderer and identity implementation. The renderer now accepts
+only bounded canonical NFC absolute POSIX paths for `kernel` and `initrd`; empty paths, root,
+relative paths, dot or empty segments, traversal, NUL, XML-illegal characters, and values beyond
+1,024 UTF-8 bytes are rejected before serialization.
+
+The `cmdline` exemption means byte preservation, not acceptance of every Unicode scalar sequence.
+The shared renderer rejects non-NFC or XML-unrepresentable command lines and never normalizes,
+strips, tokenizes, or otherwise rewrites an accepted value. Both providers already required NFC
+before durable preparation; the renderer now enforces the same fail-closed boundary for every
+caller while preserving each accepted command line exactly.
 
 ## Provenance
 
