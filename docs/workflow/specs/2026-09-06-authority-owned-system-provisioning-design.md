@@ -214,6 +214,13 @@ setting. Remote uses the same fixed session connection/pool as the module host,
 digest-keyed staged base volume, and fixed network/machine/GDB/SSH facts. No
 worker TLS credentials or caller override is reachable.
 
+The deployment preflight parses the canonical manifest, requires an exact base
+mapping, and content-hashes each controller source before any host mutation or
+service restart. Authority startup content-hashes each installed base once outside
+the 20-second operational readiness budget and pins its file identity. Periodic
+readiness and provision-time checks compare the pinned manifest and base metadata;
+they do not repeatedly hash multi-gigabyte bases.
+
 Before mutation the provider persists exact host-derived intent including XML
 identity, owned artifact identities, selected ports, bootstrap digest, and one
 UTC deadline. Retry converts the remaining deadline to the new monotonic clock;
