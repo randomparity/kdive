@@ -209,3 +209,21 @@ async def enqueue_preactivation_teardown(
             category=ErrorCategory.CONFLICT,
         )
     return job
+
+
+async def enqueue_control_teardown(
+    conn: AsyncConnection,
+    system: System,
+    authorizing: Authorizing,
+) -> Job:
+    """Route a System-locked control teardown through its current ownership contract."""
+    binding = await authority_system_binding(conn, system.id)
+    if binding is not None and binding.ownership_state != "activated":
+        return await enqueue_preactivation_teardown(conn, system, binding, authorizing)
+    return await queue.enqueue(
+        conn,
+        JobKind.TEARDOWN,
+        TeardownPayload(system_id=str(system.id)),
+        authorizing,
+        _teardown_dedup_key(system.id),
+    )

@@ -14,14 +14,12 @@ from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, TeardownPayload
+from kdive.jobs.payloads import Authorizing
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
 from kdive.services.systems.authority_owned import (
-    authority_system_binding,
-    enqueue_preactivation_teardown,
+    enqueue_control_teardown,
 )
 
 _log = logging.getLogger(__name__)
@@ -38,7 +36,6 @@ _TERMINAL_ALLOCATION_STATE_VALUES = tuple(state.value for state in _TERMINAL_ALL
 _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
 )
-_TEARDOWN_JOB_KIND = JobKind.TEARDOWN
 
 
 async def repair_orphaned_systems(conn: AsyncConnection) -> int:
@@ -74,21 +71,8 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
                     project=candidate["project"],
                 )
                 system = await SYSTEMS.get(conn, system_id)
-                binding = await authority_system_binding(conn, system_id)
-                if (
-                    system is not None
-                    and binding is not None
-                    and binding.ownership_state != "activated"
-                ):
-                    await enqueue_preactivation_teardown(conn, system, binding, authorizing)
-                else:
-                    await queue.enqueue(
-                        conn,
-                        _TEARDOWN_JOB_KIND,
-                        TeardownPayload(system_id=str(system_id)),
-                        authorizing,
-                        dedup_key,
-                    )
+                if system is not None:
+                    await enqueue_control_teardown(conn, system, authorizing)
         except Exception:  # noqa: BLE001 - one malformed System must not starve sibling cleanup
             _log.warning(
                 "reconciler: orphaned system teardown admission failed",

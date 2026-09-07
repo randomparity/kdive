@@ -199,6 +199,21 @@ async def _job_count(url: str, dedup_key: str) -> int:
     return int(row[0])
 
 
+async def _mark_authority_owned(pool: AsyncConnectionPool, system_id: UUID) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
+            "authority_instance,profile_identity,root_identity,state) "
+            "SELECT system.id,system.allocation_id,allocation.resource_id,'local-libvirt',"
+            "'host-a','authority-a','sha256:' || repeat('a',64),"
+            "'sha256:' || repeat('b',64),'ready' "
+            "FROM systems AS system JOIN allocations AS allocation "
+            "ON allocation.id=system.allocation_id WHERE system.id=%s",
+            (system_id,),
+        )
+
+
 # ---- force_release -----------------------------------------------------------------
 
 
@@ -404,6 +419,30 @@ def test_force_teardown_cross_project_success(migrated_url: str) -> None:
         assert resp.error_category is None
         assert await _job_count(migrated_url, f"{sys_id}:teardown") == 1
         assert await _count_platform_audit(migrated_url) == 1
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_routes_preactivation_authority_system(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _system(pool, state=SystemState.READY)
+            await _mark_authority_owned(pool, sys_id)
+            resp = await breakglass.force_teardown(
+                pool, _admin_ctx(), system_id=str(sys_id), reason="abandoned authority host"
+            )
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT payload, state FROM jobs WHERE dedup_key=%s",
+                    (f"{sys_id}:teardown",),
+                )
+                row = await cur.fetchone()
+
+        assert resp.error_category is None
+        assert row is not None
+        assert row[0]["authority_system_v1"]["operation"] == "preactivation-teardown"
+        assert row[1] == "queued"
+        assert await _job_count(migrated_url, f"{sys_id}:teardown") == 1
 
     asyncio.run(_run())
 

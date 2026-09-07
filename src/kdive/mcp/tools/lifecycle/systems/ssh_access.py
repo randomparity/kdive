@@ -132,6 +132,15 @@ async def authorize_ssh_key(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
             try:
+                await check_external_boot_admission(
+                    conn,
+                    uid,
+                    ExternalBootOperation.SYSTEM_AUTHORIZE_SSH_KEY,
+                    project=system.project,
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(system_id, exc, ctx)
+            try:
                 binding = await resolver.binding_for_system(conn, uid)
                 recorded = binding.runtime.connector.recorded_ssh_endpoint(
                     SystemHandle(system.domain_name or str(system.id))

@@ -62,6 +62,21 @@ async def _seed_system(
     return str(system.id)
 
 
+async def _mark_authority_owned(pool, system_id: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
+            "authority_instance,profile_identity,root_identity,state) "
+            "SELECT system.id,system.allocation_id,allocation.resource_id,'local-libvirt',"
+            "'host-a','authority-a','sha256:' || repeat('a',64),"
+            "'sha256:' || repeat('b',64),'ready' "
+            "FROM systems AS system JOIN allocations AS allocation "
+            "ON allocation.id=system.allocation_id WHERE system.id=%s",
+            (system_id,),
+        )
+
+
 def test_ssh_info_ready_returns_descriptor(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -212,6 +227,24 @@ def test_authorize_ssh_key_happy_path_enqueues_job(migrated_url: str) -> None:
             )
         assert resp.status == "queued"
         assert resp.data["kind"] == "authorize_ssh_key"
+
+    asyncio.run(_run())
+
+
+def test_authorize_ssh_key_fences_before_provider_lookup(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            await _mark_authority_owned(pool, sys_id)
+            connector = _FakeConnector(("127.0.0.1", 22022))
+            resp = await authorize_ssh_key(
+                pool, _ctx(), sys_id, _GOOD_KEY, resolver=_provider_resolver(connector=connector)
+            )
+
+        assert resp.error_category == ErrorCategory.CONFLICT.value
+        assert resp.data["reason"] == "authority_system_preactivation_mutation_fenced"
+        assert connector.seen_handles == []
 
     asyncio.run(_run())
 

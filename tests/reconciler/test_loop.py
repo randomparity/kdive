@@ -203,14 +203,14 @@ def test_orphaned_system_failure_does_not_starve_sibling(
             sibling_id = await seed_system(
                 seed, system_state=SystemState.READY, alloc_state=AllocationState.RELEASED
             )
-        original = system_repairs.authority_system_binding
+        original = system_repairs.enqueue_control_teardown
 
-        async def _binding(conn: psycopg.AsyncConnection, system_id: UUID):
-            if system_id == failed_id:
+        async def _enqueue(conn: psycopg.AsyncConnection, system, authorizing):
+            if system.id == failed_id:
                 raise RuntimeError("injected admission failure")
-            return await original(conn, system_id)
+            return await original(conn, system, authorizing)
 
-        monkeypatch.setattr(system_repairs, "authority_system_binding", _binding)
+        monkeypatch.setattr(system_repairs, "enqueue_control_teardown", _enqueue)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(pool, repair_orphaned_systems)
         assert count == 1

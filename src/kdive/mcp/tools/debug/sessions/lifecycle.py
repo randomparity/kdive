@@ -74,7 +74,11 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import load_system_bootstrap_private_key
 from kdive.serialization import JsonValue
 from kdive.services.debug import lifecycle as debug_lifecycle
-from kdive.services.external_boot import ExternalBootDenied
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 if TYPE_CHECKING:
     from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, DebugRuntimeResolver
@@ -338,6 +342,16 @@ class DebugSessionHandlers:
         system = await _attach_preconditions(conn, run, transport)
         if isinstance(system, ToolResponse):
             return system
+        try:
+            await check_external_boot_admission(
+                conn,
+                system.id,
+                ExternalBootOperation.DEBUG_ATTACH,
+                project=run.project,
+                run_id=run.id,
+            )
+        except ExternalBootDenied as exc:
+            return _external_boot_denial(str(run_id), exc, ctx)
         resources = await self._connector_for_run(conn, run)
         if isinstance(resources, ToolResponse):
             return resources
