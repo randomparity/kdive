@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
 from typing import Protocol, cast
 
+from kdive import config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt import settings as provider_settings
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
     capped_tar_members,
     reject_oversize_member,
@@ -43,6 +47,13 @@ _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
 # The relative in-tar / in-guest modules root (``_MODULES_ROOT`` without the leading slash).
 _MODULES_TREE = _MODULES_ROOT.lstrip("/")
 _DEPMOD_STDERR_MAX = 500
+_DEPMOD = "depmod"
+# depmod is an sbin tool — /usr/sbin under merged-usr, /sbin under split-usr. Resolution never
+# consults PATH: the fixed live-worker gate execs the worker from an environment allowlist that
+# omits it, so a bare name falls back to os.defpath (/bin:/usr/bin) and misses /usr/sbin, which
+# reported a missing package on hosts that had one (#2300). Same four directories
+# ``jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools against.
+_DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 
 
 class DepmodRunner(Protocol):
@@ -78,26 +89,58 @@ def _extract_modules_bounded(archive: tarfile.TarFile, workdir: Path) -> None:
         archive.extract(member, workdir, filter=_safe_module_extract_filter)
 
 
+def _resolve_depmod() -> str:
+    """Resolve ``depmod`` to an absolute path, explicitly rather than through ``PATH``.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` (from the registry) when ``KDIVE_DEPMOD`` is set
+            to something other than an absolute path to an executable file; ``MISSING_DEPENDENCY``
+            naming the searched directories when nothing resolves.
+    """
+    override = config.get(provider_settings.DEPMOD)
+    if override is not None:
+        return str(override)
+    resolved = shutil.which(_DEPMOD, path=os.pathsep.join(_DEPMOD_SEARCH_DIRS))
+    if resolved is None:
+        raise CategorizedError(
+            "no depmod was found in the directories the worker searches, so kernel modules "
+            "cannot be indexed for staging; install kmod (provides depmod), or set KDIVE_DEPMOD "
+            "to its absolute path if depmod is installed somewhere else",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"searched": list(_DEPMOD_SEARCH_DIRS)},
+        )
+    return resolved
+
+
 def _run_host_depmod(*, basedir: Path, version: str) -> None:
     """Index ``basedir/lib/modules/<version>`` with host ``depmod`` (ADR-0346).
 
     Raises:
-        CategorizedError: ``MISSING_DEPENDENCY`` when no ``depmod`` binary is on ``PATH``;
-            ``INFRASTRUCTURE_FAILURE`` on a non-zero exit, carrying the trimmed ``depmod`` stderr
-            in ``details`` so the cause is legible from the tool envelope (the #1146 note).
+        CategorizedError: the ``CONFIGURATION_ERROR`` and ``MISSING_DEPENDENCY`` cases
+            :func:`_resolve_depmod` raises; ``MISSING_DEPENDENCY`` carrying the resolved path when
+            that binary cannot be executed; ``INFRASTRUCTURE_FAILURE`` on a non-zero exit, carrying
+            the trimmed ``depmod`` stderr in ``details`` so the cause is legible from the tool
+            envelope (the #1146 note).
     """
+    depmod = _resolve_depmod()
     try:
         result = subprocess.run(
-            ["depmod", "-b", str(basedir), version],
+            [depmod, "-b", str(basedir), version],
             capture_output=True,
             text=True,
             check=False,
         )
-    except FileNotFoundError as exc:
+    except OSError as exc:
+        # Every exec failure, not just FileNotFoundError: a resolved binary can vanish before the
+        # exec, and an operator-named override can be unreadable (EACCES) or not an executable
+        # format (ENOEXEC, a bare OSError). Uncaught, those escape the uniform envelope entirely.
+        # MISSING_DEPENDENCY keeps the non-retryable disposition a missing depmod has always had,
+        # so the job dead-letters instead of retrying a binary that will not become executable.
         raise CategorizedError(
-            "depmod is required on the worker host to index kernel modules for staging; "
-            "install kmod (provides depmod)",
+            "the resolved depmod binary could not be executed to index the kernel modules "
+            "for staging",
             category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"depmod": depmod, "error": type(exc).__name__},
         ) from exc
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()[-_DEPMOD_STDERR_MAX:]

@@ -171,8 +171,22 @@ def test_index_modules_tar_fails_when_depmod_produces_no_dep(tmp_path: Path) -> 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_run_host_depmod_zero_exit_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_which(monkeypatch: pytest.MonkeyPatch, resolved: str | None) -> dict[str, object]:
+    """Point the fixed-list lookup at ``resolved``, capturing the name and search path it used."""
     captured: dict[str, object] = {}
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        captured["which"] = (name, path)
+        return resolved
+
+    monkeypatch.setattr(gkw.shutil, "which", fake_which)
+    return captured
+
+
+def test_run_host_depmod_runs_the_resolved_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_which(monkeypatch, "/usr/sbin/depmod")
 
     def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         captured["args"] = args
@@ -180,25 +194,99 @@ def test_run_host_depmod_zero_exit_passes(tmp_path: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(gkw.subprocess, "run", fake_run)
     gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
-    # depmod is pointed at the extracted tree with -b, not run against the host's own /lib/modules.
-    assert captured["args"] == ["depmod", "-b", str(tmp_path), _VERSION]
+    # The absolute path, never the bare name: the systemd worker gate execs without PATH, so a
+    # bare name resolves through os.defpath (/bin:/usr/bin), which omits /usr/sbin (#2300).
+    assert captured["args"] == ["/usr/sbin/depmod", "-b", str(tmp_path), _VERSION]
+    # The search is restricted to the fixed host-tool list, not the inherited environment.
+    assert captured["which"] == ("depmod", "/usr/sbin:/usr/bin:/sbin:/bin")
 
 
-def test_run_host_depmod_missing_binary_is_missing_dependency(
+def test_run_host_depmod_unresolvable_names_searched_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def raise_fnf(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise FileNotFoundError("depmod")
-
-    monkeypatch.setattr(gkw.subprocess, "run", raise_fnf)
+    _stub_which(monkeypatch, None)
     with pytest.raises(CategorizedError) as exc:
         gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    # The searched set is in the envelope so the failure is diagnosable without host access.
+    assert exc.value.details.get("searched") == ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+    # Both remedies, because the binary may be genuinely absent *or* merely outside the searched
+    # set — asserting "install kmod" alone is the false remedy #2300 was filed about.
+    assert "kmod" in str(exc.value)
+    assert "KDIVE_DEPMOD" in str(exc.value)
+
+
+def test_run_host_depmod_uses_the_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    override = tmp_path / "depmod"
+    override.write_text("#!/bin/sh\nexit 0\n")
+    override.chmod(0o755)
+    captured: dict[str, object] = {}
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["args"] = args
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    def unreachable_which(*_args: object, **_kwargs: object) -> str | None:
+        raise AssertionError("an explicit override must short-circuit the fixed-list search")
+
+    monkeypatch.setattr(gkw.subprocess, "run", fake_run)
+    monkeypatch.setattr(gkw.shutil, "which", unreachable_which)
+    monkeypatch.setenv("KDIVE_DEPMOD", str(override))
+    gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
+    assert captured["args"] == [str(override), "-b", str(tmp_path), _VERSION]
+
+
+@pytest.mark.parametrize("kind", ["relative", "missing", "not-executable"])
+def test_override_must_be_absolute_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    if kind == "relative":
+        value = "usr/sbin/depmod"
+    elif kind == "missing":
+        value = str(tmp_path / "absent")
+    else:
+        plain = tmp_path / "plain"
+        plain.write_text("")
+        plain.chmod(0o644)
+        value = str(plain)
+    monkeypatch.setenv("KDIVE_DEPMOD", value)
+    with pytest.raises(CategorizedError) as exc:
+        gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
+    # The operator's own value being wrong is a misconfiguration, not a missing package — telling
+    # them to install kmod here would repeat the defect #2300 exists to remove.
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details.get("variable") == "KDIVE_DEPMOD"
+
+
+@pytest.mark.parametrize("kind", ["vanished", "wrong-format"])
+def test_unexecutable_depmod_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    if kind == "vanished":
+        # Resolved and then removed before the exec: the window which()-then-run() opens.
+        resolved = str(tmp_path / "gone")
+    else:
+        # A mode-0755 file with no shebang: execve fails ENOEXEC, which CPython raises as a bare
+        # OSError rather than FileNotFoundError, so catching only the latter lets it escape the
+        # envelope uncategorized.
+        script = tmp_path / "not-elf"
+        script.write_text("not an executable\n")
+        script.chmod(0o755)
+        resolved = str(script)
+    _stub_which(monkeypatch, resolved)
+    with pytest.raises(CategorizedError) as exc:
+        gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
+    # Non-retryable, matching the disposition a missing depmod has always had, so the job
+    # dead-letters instead of retrying a binary that will not become executable.
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert exc.value.details.get("depmod") == resolved
 
 
 def test_run_host_depmod_nonzero_surfaces_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _stub_which(monkeypatch, "/usr/sbin/depmod")
+
     def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args, returncode=1, stdout="", stderr="depmod: ERROR: bad module signature"
