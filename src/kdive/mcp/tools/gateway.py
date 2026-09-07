@@ -268,9 +268,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         middleware handles it and converts it to an ``authorization_denied`` envelope.
         ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
         tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
-        (unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
+        (unknown/disabled tool) and a schema-validation failure on ``arguments`` are both
         caught and converted to ``configuration_error`` envelopes; the latter's
-        ``data.field_errors`` names each offending field and its failure kind — the same
+        ``data.field_errors`` names each offending argument and its failure kind — the same
         detail a direct bind would raise. ``data.accepted_fields`` additionally lists the
         tool's top-level keys, but only when you could already see that tool through
         ``tools.search``; it is omitted otherwise.
@@ -296,14 +296,19 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
         except (ValidationError, FastMCPValidationError) as exc:
-            # FastMCP 3.4.4 wraps a binding pydantic ValidationError in its own
-            # ValidationError, chaining the original as __cause__ (fastmcp's
-            # function_tool.py); both mean the caller's arguments failed schema
-            # validation. Mirror fastmcp.server.server's own cause-unwrapping
-            # (server.py's call_tool) to reach the per-field detail either way.
-            pydantic_exc = exc if isinstance(exc, ValidationError) else exc.__cause__
-            field_errors: list[JsonValue] = []
-            if isinstance(pydantic_exc, ValidationError):
+            # fastmcp.exceptions.ValidationError is the genuine argument-binding failure:
+            # fastmcp always wraps it there, chaining the original pydantic error as
+            # __cause__ (fastmcp's function_tool.py). A *bare* pydantic.ValidationError
+            # reaching this branch is NOT an argument problem — fastmcp raises that shape
+            # only when a tool's own body re-validates data it read (e.g. from the
+            # database) and lets the error escape (function_tool.py's _ToolBodyError
+            # unwrap; fastmcp.server.server.call_tool draws the identical distinction).
+            # Only the genuine binding case gets the per-field detail below; the bare case
+            # keeps this branch's pre-existing generic envelope so a server-side data
+            # defect is never mislabeled as the caller's bad arguments.
+            data: dict[str, JsonValue] = {}
+            is_binding_failure = isinstance(exc, FastMCPValidationError)
+            if is_binding_failure and isinstance(exc.__cause__, ValidationError):
                 field_errors = [
                     cast(
                         "JsonValue",
@@ -312,31 +317,32 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                             "kind": err["type"],
                         },
                     )
-                    for err in pydantic_exc.errors(include_url=False)[:_FIELD_ERROR_LIMIT]
+                    for err in exc.__cause__.errors(include_url=False)[:_FIELD_ERROR_LIMIT]
                 ]
-            # Named field_errors, not ADR-0123's reserved `errors` key: that key is a closed
-            # `list[{loc, msg, type}]` contract (binding_errors.py's curated conversions are
-            # its only other producer), and this shape ({field, kind}, no msg) would collide
-            # under the same name for callers of both paths.
-            data: dict[str, JsonValue] = {"field_errors": field_errors}
-            try:
-                visible = tool_visible(name, current_context())
-            except AuthError:
-                visible = False
-            # Argument binding fails before a handler's own require_role check ever runs, so
-            # an unauthorized caller can reach this branch without the inner RBAC gate having
-            # fired. Withhold the schema tools.search would also withhold from them (ADR-0148).
-            if visible:
-                tool = next((t for t in registered_tools(app) if t.name == name), None)
-                if tool is not None:
-                    properties = tool.parameters.get("properties")
-                    if isinstance(properties, dict):
-                        data["accepted_fields"] = cast("JsonValue", sorted(properties))
+                # Named field_errors, not ADR-0123's reserved `errors` key: that key is a
+                # closed `list[{loc, msg, type}]` contract (binding_errors.py's curated
+                # conversions are its only other producer), and this shape ({field, kind},
+                # no msg) would collide under the same name for callers of both paths.
+                data["field_errors"] = cast("JsonValue", field_errors)
+                try:
+                    visible = tool_visible(name, current_context())
+                except AuthError:
+                    visible = False
+                # Argument binding fails before a handler's own require_role check ever
+                # runs, so an unauthorized caller can reach this branch without the inner
+                # RBAC gate having fired. Withhold the schema tools.search would also
+                # withhold from them (ADR-0148).
+                if visible:
+                    tool = next((t for t in registered_tools(app) if t.name == name), None)
+                    if tool is not None:
+                        properties = tool.parameters.get("properties")
+                        if isinstance(properties, dict):
+                            data["accepted_fields"] = cast("JsonValue", sorted(properties))
             envelope = ToolResponse.failure(
                 "tools.invoke",
                 ErrorCategory.CONFIGURATION_ERROR,
                 detail=f"Arguments for {name!r} failed schema validation.",
-                suggested_next_actions=["tools.search"],
+                suggested_next_actions=["tools.search"] if is_binding_failure else [],
                 data=data,
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
