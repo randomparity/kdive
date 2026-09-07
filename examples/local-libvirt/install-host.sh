@@ -99,7 +99,7 @@ for kernel in /boot/vmlinuz-* /boot/vmlinux-*; do
 done
 
 # 5. uv, then the project venv. `--group live` adds drgn, which the kdump capture path imports
-#    from the worker venv alongside the libguestfs binding wired in step 8.
+#    from the worker venv alongside the libguestfs binding wired in step 9.
 step "uv"
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -134,7 +134,28 @@ unset witness_dsn witness_password
 step "/var/lib/kdive/rootfs/local"
 sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/rootfs/local
 
-# 8. Venv wiring for build-fs and the kdump capture path: symlink the distro python3-guestfs
+# 8. The fixed workers run in their own accounts and execute this checkout's source (through
+#    scripts/live-stack/worker-from-checkout) and read the kernel tree, so every directory on
+#    the way there must be traversable by them; the witness refuses to start a worker otherwise.
+#    The Ansible role gets this by cloning under root-owned /opt; a developer checkout usually
+#    sits under $HOME, which Ubuntu creates 0750. Grant traverse (x) to others on each ancestor
+#    that lacks it — it lets nobody list or read the directory, only pass through to what is
+#    already world-readable beneath (the checkout and tree keep their own modes).
+step "worker-traversable path to the checkout and kernel tree"
+kernel_src="${KDIVE_KERNEL_SRC:-${HOME}/src/linux}"
+for target in "${repo_root}" "${kernel_src}"; do
+  [[ -d "${target}" ]] || continue
+  dir="${target}"
+  while [[ "${dir}" != "/" ]]; do
+    if [[ ! "$(stat -c '%A' "${dir}")" =~ x$ ]]; then
+      chmod o+x "${dir}"
+      echo "  ${dir}: o+x"
+    fi
+    dir="$(dirname -- "${dir}")"
+  done
+done
+
+# 9. Venv wiring for build-fs and the kdump capture path: symlink the distro python3-guestfs
 #    binding into the venv (a uv venv has no system-site-packages). The binding is a C extension
 #    built for the distro Python, so it only imports when the system and venv Python minor
 #    versions match (Ubuntu 26.04 ships 3.14, the project Python); otherwise leave a note. This is
