@@ -4,7 +4,11 @@ Coverage:
 * Dispatch to a real inner tool (session.whoami) returns the inner tool's response.
 * An unknown tool name yields a ``configuration_error`` envelope with a pointer
   to ``tools.search`` in the detail.
-* Missing required arguments for an inner tool yield ``configuration_error``.
+* Missing required arguments for an inner tool yield ``configuration_error`` whose
+  ``data`` names the missing field, its failure kind, and the tool's accepted
+  top-level keys, with ``tools.search`` in ``suggested_next_actions`` (#2304).
+* An unexpected keyword argument yields the same informative ``data`` shape,
+  proving the parity holds across pydantic failure kinds, not just "missing" (#2304).
 * An inner tool's ``CategorizedError`` yields the same typed failure envelope as
   direct tool handlers.
 * An inner tool that raises ``fastmcp.exceptions.AuthorizationError`` propagates
@@ -96,12 +100,16 @@ def test_unknown_inner_name_is_configuration_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: bad arguments for inner tool → configuration_error
+# Test 3: bad arguments for inner tool → informative configuration_error (#2304)
 # ---------------------------------------------------------------------------
 
 
 def test_bad_arguments_is_configuration_error() -> None:
-    """Missing required arguments for an inner tool yield configuration_error."""
+    """Missing required arguments for an inner tool yield an informative configuration_error.
+
+    Parity target (ADR-0268): the gateway's schema-validation failure names the same
+    field/kind detail a direct bind would raise, not a content-free envelope.
+    """
     # runs.get requires run_id; passing {} triggers pydantic ValidationError
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
@@ -114,6 +122,38 @@ def test_bad_arguments_is_configuration_error() -> None:
     assert content["error_category"] == "configuration_error"
     # The detail should name the inner tool
     assert "runs.get" in (content.get("detail") or "")
+    assert "tools.search" in content["suggested_next_actions"]
+    errors = content["data"]["errors"]
+    assert {"field": "run_id", "kind": "missing_argument"} in errors
+    # No caller-supplied value or pydantic ctx leaks through.
+    for entry in errors:
+        assert set(entry) == {"field", "kind"}
+    accepted = content["data"]["accepted_fields"]
+    assert "run_id" in accepted
+    assert "include_console_artifacts" in accepted
+
+
+# ---------------------------------------------------------------------------
+# Test 3b: unexpected keyword argument → same informative shape (#2304)
+# ---------------------------------------------------------------------------
+
+
+def test_unexpected_argument_is_configuration_error() -> None:
+    """An unknown keyword argument yields the same field/kind detail, not just "missing"."""
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool(
+            "tools.invoke",
+            {"name": "runs.get", "arguments": {"run_id": "r-1", "duration_minutes": 5}},
+        )
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    errors = content["data"]["errors"]
+    assert any(e["field"] == "duration_minutes" for e in errors)
 
 
 # ---------------------------------------------------------------------------

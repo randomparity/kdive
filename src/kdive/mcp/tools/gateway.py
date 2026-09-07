@@ -264,7 +264,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
         tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
         (unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
-        caught and converted to ``configuration_error`` envelopes.
+        caught and converted to ``configuration_error`` envelopes; the latter's ``data``
+        names each offending field, its failure kind, and the tool's accepted top-level
+        keys — the same detail a direct bind would raise.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)
@@ -286,13 +288,37 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 ),
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
-        except ValidationError, FastMCPValidationError:
+        except (ValidationError, FastMCPValidationError) as exc:
             # FastMCP 3.4.4 wraps a binding pydantic ValidationError in its own
-            # ValidationError; both mean the caller's arguments failed schema validation.
+            # ValidationError, chaining the original as __cause__ (fastmcp's
+            # function_tool.py); both mean the caller's arguments failed schema
+            # validation. Mirror fastmcp.server.server's own cause-unwrapping
+            # (server.py's call_tool) to reach the per-field detail either way.
+            pydantic_exc = exc if isinstance(exc, ValidationError) else exc.__cause__
+            field_errors: list[JsonValue] = []
+            if isinstance(pydantic_exc, ValidationError):
+                field_errors = [
+                    cast(
+                        "JsonValue",
+                        {
+                            "field": ".".join(str(part) for part in err["loc"]),
+                            "kind": err["type"],
+                        },
+                    )
+                    for err in pydantic_exc.errors(include_url=False)
+                ]
+            data: dict[str, JsonValue] = {"errors": field_errors}
+            tool = next((t for t in registered_tools(app) if t.name == name), None)
+            if tool is not None:
+                properties = tool.parameters.get("properties")
+                if isinstance(properties, dict):
+                    data["accepted_fields"] = cast("JsonValue", sorted(properties))
             envelope = ToolResponse.failure(
                 "tools.invoke",
                 ErrorCategory.CONFIGURATION_ERROR,
                 detail=f"Arguments for {name!r} failed schema validation.",
+                suggested_next_actions=["tools.search"],
+                data=data,
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
 

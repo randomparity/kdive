@@ -22,7 +22,9 @@ middleware handles it and converts it to an ``authorization_denied`` envelope.
 ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
 tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
 (unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
-caught and converted to ``configuration_error`` envelopes.
+caught and converted to ``configuration_error`` envelopes; the latter's ``data``
+names each offending field, its failure kind, and the tool's accepted top-level
+keys — the same detail a direct bind would raise.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
