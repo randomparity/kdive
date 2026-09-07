@@ -274,16 +274,16 @@ DEPMOD = Setting(
     processes=frozenset({"worker"}),
     help=(
         "Absolute path to the depmod binary the worker uses to index kernel modules host-side "
-        "for staging (ADR-0346). Unset — the normal case — searches a fixed list of "
-        "/usr/sbin, /usr/bin, /sbin and /bin, which covers merged-usr and split-usr layouts; "
-        "PATH is deliberately not consulted, because the fixed live-worker gate execs without "
-        "one. Set this only when depmod lives outside those four directories. On a gated "
-        "worker slot the value belongs in a systemd drop-in "
+        "for staging (ADR-0346). Unset — the normal case — searches a fixed directory list "
+        "covering merged-usr, split-usr and /usr/local installs, reported as details['searched'] "
+        "when nothing resolves; PATH is deliberately not consulted, because the fixed "
+        "live-worker gate execs without one. Set this only when depmod lives outside that list. "
+        "On a gated worker slot the value belongs in a systemd drop-in "
         "(systemctl edit kdive-live-worker@N), since that slot's worker.env is generated."
     ),
     suggest=(
         "set an absolute path to an executable depmod, e.g. /usr/sbin/depmod, or leave it "
-        "unset to search /usr/sbin, /usr/bin, /sbin and /bin"
+        "unset to search the fixed host-tool list reported as details['searched']"
     ),
 )
 

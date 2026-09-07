@@ -65,10 +65,10 @@ _DEPMOD_SEARCH_DIRS = (
     "/sbin",
     "/bin",
 )
-# Exec-side errnos: the binary is absent, or present and unusable. Every other OSError
-# subprocess.run can raise comes from the spawn side — pipe creation (EMFILE/ENFILE) or fork
-# (EAGAIN/ENOMEM) — and is transient host pressure, not a broken depmod. Those must stay
-# retryable, so catching OSError wholesale would dead-letter an install a retry would complete.
+# These errnos mean the binary is absent or permanently unusable, so the job should dead-letter.
+# Every other errno stays retryable, whether it came from the spawn side — pipe creation
+# (EMFILE/ENFILE) or fork (EAGAIN/ENOMEM) — or from an exec that can succeed later (ETXTBSY).
+# Catching OSError wholesale would dead-letter an install that a retry would have completed.
 _DEPMOD_EXEC_ERRNOS = frozenset(
     {
         errno.ENOENT,
@@ -159,10 +159,10 @@ def _run_host_depmod(*, basedir: Path, version: str) -> None:
         )
     except OSError as exc:
         if exc.errno not in _DEPMOD_EXEC_ERRNOS:
-            # Spawn-side pressure (out of descriptors, out of processes): depmod is fine and a
-            # retry can succeed, so this stays retryable rather than dead-lettering the install.
+            # Host pressure (no descriptors, no processes) or a transient exec fault (ETXTBSY):
+            # depmod itself is fine and a retry can succeed, so this must not dead-letter.
             raise CategorizedError(
-                "the host could not spawn depmod to index the kernel modules for staging",
+                "the host could not run depmod to index the kernel modules for staging",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"depmod": depmod, "error": type(exc).__name__, "errno": exc.errno},
             ) from exc
