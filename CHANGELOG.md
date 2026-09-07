@@ -2422,6 +2422,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explain missing Mermaid dependencies
 - Recover exhausted acknowledged authority claims
 - Consume acknowledged authority retry proofs
+- Make Ansible lint independent of Galaxy
+- Source-lock Ansible collections for offline lint
 
 ### Security
 
