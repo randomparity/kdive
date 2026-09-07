@@ -222,12 +222,14 @@ def _seed_direct_terminal_attempt(
     return authority_id, request_attempt_id, receipt, head_digest, receipt_digest
 
 
-def test_migration_0149_is_registered_last() -> None:
+def test_migration_0149_is_registered_once() -> None:
     migrations = migrate.discover_migrations()
-    assert (migrations[-1].version, migrations[-1].filename) == (
-        "0149",
-        "0149_authority_owned_system_provisioning.sql",
-    )
+    matching = [
+        (migration.version, migration.filename)
+        for migration in migrations
+        if migration.version == "0149"
+    ]
+    assert matching == [("0149", "0149_authority_owned_system_provisioning.sql")]
 
 
 def test_0149_installs_two_private_tables_and_exact_function_grants(
