@@ -27,10 +27,7 @@ class LibvirtDefinitionError(ValueError):
         self.retryable = retryable
 
 
-def parse_domain_xml(domain_xml: str) -> ET.Element:
-    """Safely parse one NFC libvirt domain definition."""
-    if unicodedata.normalize("NFC", domain_xml) != domain_xml:
-        raise LibvirtDefinitionError("domain XML must be NFC", retryable=False)
+def _parse_domain_xml(domain_xml: str) -> ET.Element:
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
     except (ET.ParseError, DefusedXmlException) as exc:
@@ -39,6 +36,31 @@ def parse_domain_xml(domain_xml: str) -> ET.Element:
         ) from exc
     if root.tag != "domain":
         raise LibvirtDefinitionError("domain XML must have a domain root", retryable=False)
+    return root
+
+
+def parse_domain_xml(domain_xml: str) -> ET.Element:
+    """Safely parse one NFC libvirt domain definition."""
+    if unicodedata.normalize("NFC", domain_xml) != domain_xml:
+        raise LibvirtDefinitionError("domain XML must be NFC", retryable=False)
+    return _parse_domain_xml(domain_xml)
+
+
+def parse_projected_domain_xml(domain_xml: str) -> ET.Element:
+    """Parse a definition whose direct-boot command line is exempt from NFC."""
+    root = _parse_domain_xml(domain_xml)
+    os_element = root.find("os")
+    cmdline = os_element.find("cmdline") if os_element is not None else None
+    for element in root.iter():
+        values = [element.tag, element.tail, *element.attrib, *element.attrib.values()]
+        if element is not cmdline:
+            values.append(element.text)
+        if any(
+            value is not None and unicodedata.normalize("NFC", value) != value for value in values
+        ):
+            raise LibvirtDefinitionError(
+                "domain XML must be NFC outside the direct-boot command line", retryable=False
+            )
     return root
 
 
@@ -73,10 +95,9 @@ def require_artifact_path(value: str, *, what: str) -> str:
 
 
 def _require_cmdline(value: str) -> str:
-    # Reject rather than normalize: every accepted scalar reaches libvirt byte-for-byte.
-    if unicodedata.normalize("NFC", value) != value or not _round_trips_in_xml(value):
+    if not _round_trips_in_xml(value):
         raise LibvirtDefinitionError(
-            "command line must be NFC text representable in XML", retryable=False
+            "command line must be text representable in XML", retryable=False
         )
     return value
 
@@ -144,9 +165,9 @@ def boot_projection_element_identity(root: ET.Element) -> str:
 
 def preserved_definition_identity(domain_xml: str) -> str:
     """Compute ADR-0583's preserved digest from a safely parsed definition."""
-    return preserved_element_identity(parse_domain_xml(domain_xml))
+    return preserved_element_identity(parse_projected_domain_xml(domain_xml))
 
 
 def boot_projection_identity(domain_xml: str) -> str:
     """Compute ADR-0583's boot projection digest from a safely parsed definition."""
-    return boot_projection_element_identity(parse_domain_xml(domain_xml))
+    return boot_projection_element_identity(parse_projected_domain_xml(domain_xml))

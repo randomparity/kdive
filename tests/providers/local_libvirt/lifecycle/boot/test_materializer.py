@@ -422,6 +422,34 @@ def test_inspect_prepare_uses_reopened_bytes_and_preserves_source(tmp_path: Path
         )
 
 
+def test_inspect_prepare_preserves_a_decomposed_command_line(tmp_path: Path) -> None:
+    bundle = _bundle()
+    debug_cmdline = "debug=cafe\u0301"
+    plan_data = _plan(bundle).model_dump(mode="json", by_alias=True)
+    plan_data["debug_cmdline"] = debug_cmdline
+    plan_data["cmdline"] = f"{plan_data['cmdline']} {debug_cmdline}"
+    plan = ExternalBootPlan.model_validate(plan_data)
+    materializer = RealLocalExternalBootMaterializer(
+        ObjectStore(_Client({("build/kernel", "kernel-v1"): bundle}), "bucket")
+    )
+    session = _Session(tmp_path / "activation")
+    result = materializer.materialize(plan, cast(LocalExternalBootSession, session))
+    inspection = ClosedDomainInspection(
+        xml=_SOURCE_XML.encode(),
+        active=True,
+        definition_identity="sha256:" + "b" * 64,
+        source_boot_identity="sha256:" + "c" * 64,
+        domain_name="kdive-test",
+        overlay=OverlayIdentity(1, 2),
+    )
+
+    intent = materializer.inspect_prepare(
+        result, session.binding, inspection, cast(LocalExternalBootSession, session)
+    )
+
+    assert _safe_fromstring(intent.target_xml).findtext("./os/cmdline") == plan.cmdline
+
+
 def test_exact_retry_rejects_changed_source_digest_without_replacing(tmp_path: Path) -> None:
     bundle = _bundle()
     plan = _plan(bundle)

@@ -12,7 +12,6 @@ into ``ProviderRuntime``.
 
 from __future__ import annotations
 
-import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits a trusted tree after a defused parse
 from collections.abc import Callable
 from typing import Annotated, Literal, Protocol, Self
@@ -96,6 +95,14 @@ def parse_domain_xml(domain_xml: str) -> ET.Element:
     """
     try:
         return _definition.parse_domain_xml(domain_xml)
+    except _definition.LibvirtDefinitionError as exc:
+        raise _definition_failure(exc) from exc
+
+
+def parse_projected_domain_xml(domain_xml: str) -> ET.Element:
+    """Safely parse a target definition while preserving its exempt command line."""
+    try:
+        return _definition.parse_projected_domain_xml(domain_xml)
     except _definition.LibvirtDefinitionError as exc:
         raise _definition_failure(exc) from exc
 
@@ -281,7 +288,7 @@ class RemoteExternalBootDefinition(BaseModel):
                     raise ValueError("recorded definition digest does not describe its own XML")
                 if boot_projection_identity(xml) != boot:
                     raise ValueError("recorded boot projection does not describe its own XML")
-            target_os = parse_domain_xml(self.target_xml).find("os")
+            target_os = parse_projected_domain_xml(self.target_xml).find("os")
             recorded_cmdline = target_os.findtext("cmdline") if target_os is not None else None
             if recorded_cmdline != self.expected_cmdline:
                 raise ValueError("expected_cmdline does not match the target definition")
@@ -374,15 +381,6 @@ def prepare_target_definition(
             "initrd presence disagrees across plan, materialization, and supplied path",
             system_id=system_id,
             rule="initrd-presence",
-        )
-    # ExternalBootPlan admits a non-NFC debug_cmdline, and ADR-0583 forbids a provider
-    # normalizing the command line. Left alone it would compose a target XML that this module's
-    # own NFC gate rejects, reporting the domain XML as the subject. Name it here instead.
-    if unicodedata.normalize("NFC", plan.cmdline) != plan.cmdline:
-        raise _conflict(
-            "the plan command line is not NFC and this provider may not normalize it",
-            system_id=system_id,
-            rule="cmdline-nfc",
         )
     # Same shape, different gate: ExternalBootPlan admits a platform argument carrying an XML-
     # illegal C0 control (it rejects only NUL and whitespace), which composes a target XML that

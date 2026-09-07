@@ -775,21 +775,16 @@ def test_boot_projection_distinguishes_an_empty_element_from_an_absent_one() -> 
     assert empty != absent
 
 
-def test_prepare_rejects_a_non_nfc_plan_command_line_naming_itself() -> None:
-    """ExternalBootPlan admits a non-NFC debug_cmdline and ADR-0583 forbids normalizing it."""
-    plan = _plan()
-    decomposed = plan.model_copy(update={"debug_cmdline": "debug=café"})
-    composed = plan.model_copy(
-        update={
-            "debug_cmdline": decomposed.debug_cmdline,
-            "cmdline": f"{plan.cmdline} {decomposed.debug_cmdline}",
-        }
-    )
-    with pytest.raises(CategorizedError) as caught:
-        _prepare(plan=composed, materialization=_materialization(plan=composed))
-    assert caught.value.category is ErrorCategory.CONFLICT
-    assert caught.value.details["rule"] == "cmdline-nfc"
-    assert caught.value.details["system_id"] == str(_SYSTEM_ID)
+def test_prepare_preserves_a_decomposed_plan_command_line() -> None:
+    debug_cmdline = "debug=cafe\u0301"
+    plan_data = _plan().model_dump(mode="json", by_alias=True)
+    plan_data["debug_cmdline"] = debug_cmdline
+    plan_data["cmdline"] = f"{plan_data['cmdline']} {debug_cmdline}"
+    plan = ExternalBootPlan.model_validate(plan_data)
+
+    prepared = _prepare(plan=plan, materialization=_materialization(plan=plan))
+
+    assert ET.fromstring(prepared.target_xml).findtext("./os/cmdline") == plan.cmdline
 
 
 def test_plan_rejects_a_command_line_xml_cannot_represent() -> None:

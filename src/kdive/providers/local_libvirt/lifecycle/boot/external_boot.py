@@ -77,7 +77,10 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
-from kdive.providers.shared.libvirt_external_boot import render_target_xml
+from kdive.providers.shared.libvirt_external_boot import (
+    parse_projected_domain_xml,
+    render_target_xml,
+)
 from kdive.store.objectstore import ObjectStore
 
 
@@ -156,9 +159,9 @@ class LocalRecoveryMetadataV1(_ClosedValue):
 
     @model_validator(mode="after")
     def _domain_xml_matches_digests(self) -> LocalRecoveryMetadataV1:
-        xml_values = (self.source_xml, self.target_xml)
-        if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
-            raise ValueError("source and target domain XML must be NFC")
+        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
+            raise ValueError("source domain XML must be NFC")
+        parse_projected_domain_xml(self.target_xml)
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
@@ -196,9 +199,9 @@ class LocalPreStopIntentV1(_ClosedValue):
 
     @model_validator(mode="after")
     def _domain_xml_matches_digests(self) -> LocalPreStopIntentV1:
-        xml_values = (self.source_xml, self.target_xml)
-        if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
-            raise ValueError("source and target domain XML must be NFC")
+        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
+            raise ValueError("source domain XML must be NFC")
+        parse_projected_domain_xml(self.target_xml)
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
@@ -380,12 +383,6 @@ class TargetProjectionV1(_ClosedValue):
     kernel_filename: Literal["kernel"] = "kernel"
     modules_filename: Literal["modules"] = "modules"
     initrd_filename: Literal["initrd"] | None
-
-    @model_validator(mode="after")
-    def _canonical_text(self) -> TargetProjectionV1:
-        if unicodedata.normalize("NFC", self.cmdline) != self.cmdline:
-            raise ValueError("target projection cmdline must be NFC")
-        return self
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(

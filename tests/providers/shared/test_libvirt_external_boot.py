@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 
 import pytest
 
@@ -111,15 +112,38 @@ def test_projection_rejects_a_noncanonical_initrd_path() -> None:
         )
 
 
-@pytest.mark.parametrize("cmdline", ["root=LABEL=cafe\u0301", "root=/dev/vda1\x01"])
-def test_projection_rejects_an_unrepresentable_command_line(cmdline: str) -> None:
+def test_projection_rejects_an_unrepresentable_command_line() -> None:
     with pytest.raises(ValueError, match="command line"):
         render_target_xml(
             _GOLDEN_SOURCE,
             kernel="/var/lib/kdive/kernel",
             initrd=None,
-            cmdline=cmdline,
+            cmdline="root=/dev/vda1\x01",
         )
+
+
+def test_projection_preserves_a_decomposed_command_line_without_normalizing() -> None:
+    cmdline = "root=LABEL=cafe\u0301"
+    projected = render_target_xml(
+        _GOLDEN_SOURCE,
+        kernel="/var/lib/kdive/kernel",
+        initrd=None,
+        cmdline=cmdline,
+    )
+
+    assert ET.fromstring(projected).findtext("./os/cmdline") == cmdline
+    assert preserved_definition_identity(projected) == preserved_definition_identity(_GOLDEN_SOURCE)
+    assert boot_projection_identity(projected) != boot_projection_identity(_GOLDEN_SOURCE)
+
+
+@pytest.mark.parametrize(
+    "identity", [preserved_definition_identity, boot_projection_identity], ids=["preserved", "boot"]
+)
+def test_identity_rejects_non_nfc_text_outside_the_command_line(
+    identity: Callable[[str], str],
+) -> None:
+    with pytest.raises(ValueError, match="NFC outside"):
+        identity("<domain><name>cafe\u0301</name><os><cmdline>cafe\u0301</cmdline></os></domain>")
 
 
 def test_projection_preserves_the_accepted_command_line_scalar_exactly() -> None:

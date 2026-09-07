@@ -95,11 +95,10 @@ only bounded canonical NFC absolute POSIX paths for `kernel` and `initrd`; empty
 relative paths, dot or empty segments, traversal, NUL, XML-illegal characters, and values beyond
 1,024 UTF-8 bytes are rejected before serialization.
 
-The `cmdline` exemption means byte preservation, not acceptance of every Unicode scalar sequence.
-The shared renderer rejects non-NFC or XML-unrepresentable command lines and never normalizes,
-strips, tokenizes, or otherwise rewrites an accepted value. Both providers already required NFC
-before durable preparation; the renderer now enforces the same fail-closed boundary for every
-caller while preserving each accepted command line exactly.
+The `cmdline` exemption preserves every otherwise valid scalar sequence, including non-NFC text.
+The shared renderer rejects only XML-unrepresentable command lines and never normalizes, strips,
+tokenizes, or otherwise rewrites an accepted value. Both providers carry the plan's exact command
+line through durable preparation and serialization.
 
 ## Provenance
 
