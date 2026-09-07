@@ -375,6 +375,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admit authority-owned Systems
 - Compose authority-owned system providers
 - Provision authority-owned system inputs
+- Script host preparation and guest-image build for local-libvirt
 - Add Ubuntu 24.04 and 26.04 LTS rootfs catalog rows
 - Customize the debian family through the customization boot
 
@@ -1480,6 +1481,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Supersede obsolete config catalog decision
 - Supersede obsolete config catalog decision
 - Link 0096 supersession to renumbered record
+- Make examples/local-libvirt the local-libvirt quick start
+- Catalogue the preflight and build-image example variables
+- Drop the retired virt-customize passt gap from the apt-host guidance
 
 ### Fixed
 
@@ -2434,6 +2438,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve non-NFC boot command lines
 - Preserve non-NFC command lines in projected targets
 - Bind exhausted retry proof to acknowledged authority attempt
+- Make local-libvirt up.sh runnable on a plain host
+- Give each up.sh process its own database authority
+- Find the Fedora libguestfs binding where the RPM installs it
+- Warm sudo only when passwordless sudo is unavailable
+- Wire the venv guestfs binding directly instead of via check-setup-deps -y
+- Warm sudo in up.sh only when passwordless sudo is unavailable
+- Pass the stack environment to root with --preserve-env, not -E
+- Run the local-libvirt example on the fixed live-worker lifecycle
+- Put uv's install directory on PATH for non-interactive shells
+- Make the checkout and kernel tree traversable by the worker accounts
 
 ### Security
 
