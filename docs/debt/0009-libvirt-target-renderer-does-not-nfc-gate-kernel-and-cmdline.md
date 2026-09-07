@@ -59,9 +59,10 @@ silent divergence #2159 exists to stop.
 
 ## Non-regression boundary
 
-- The three ADR-0583 golden vectors must keep reproducing. After convergence,
-  `tests/providers/shared/test_libvirt_external_boot.py` asserts the shared implementation against
-  the published literals rather than against a provider-derived value.
+- The three ADR-0583 golden vectors must keep reproducing against both copies while this record
+  is open. `tests/providers/local_libvirt/lifecycle/boot/test_adr_0583_golden_vectors.py` and
+  `tests/providers/remote_libvirt/lifecycle/test_external_boot.py` assert them independently,
+  each against the published literals rather than against the other implementation.
 - Neither renderer may start silently NFC-*normalizing* `cmdline`. ADR-0583's exemption exists
   so the accepted scalar sequence reaches the guest unrewritten, and the fresh-boot check that
   compares `/proc/cmdline` against the plan's bytes fails if anything rewrites them. Rejection
@@ -71,6 +72,9 @@ silent divergence #2159 exists to stop.
 - The comment beside `_GOLDEN_KERNEL` in the local golden-vector module names this record, so a
   reader who notices the non-ASCII literals is not left to infer that the renderer validates
   them.
+
+After resolution, `tests/providers/shared/test_libvirt_external_boot.py` preserves the three
+golden vectors against their published literals rather than against a provider-derived value.
 
 ## What would resolve it
 
