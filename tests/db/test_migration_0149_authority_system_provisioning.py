@@ -1536,67 +1536,330 @@ def test_0149_allocation_supersedes_only_dead_unacknowledged_candidate(
     assert states == [(first_authority, "superseded"), (successor[1], "allocating")]
 
 
-def test_0149_claim_fences_terminal_receipt_after_successor_ack(
+@pytest.mark.parametrize(
+    ("disposition", "finalize_status"),
+    (("provision-ready", "applied"), ("retained-quarantine", "retained")),
+)
+def test_0149_terminal_predecessor_blocks_then_permits_teardown_successor(
+    migrated_url: str,
+    request: pytest.FixtureRequest,
+    disposition: str,
+    finalize_status: str,
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="provision", ownership_state="teardown-requested"
+        )
+        predecessor, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition=disposition
+        )
+        successor_job, successor_request = uuid4(), uuid4()
+        marker = cast(dict[str, object], case["marker"])
+        teardown_marker = {
+            **marker,
+            "operation": "preactivation-teardown",
+            "operation_identity": f"preactivation-teardown-{successor_job}",
+        }
+        conn.execute(
+            "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
+            "heartbeat_at,payload,authorizing,dedup_key) VALUES "
+            "(%s,'teardown','running',1,3,%s,clock_timestamp()+interval '5 minutes',"
+            "clock_timestamp(),%s,'{}',%s)",
+            (
+                successor_job,
+                case["worker"],
+                Jsonb({"authority_system_v1": teardown_marker}),
+                f"successor-{successor_job}",
+            ),
+        )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        allocate_sql = "SELECT * FROM allocate_authority_system_attempt(%s,%s,1,%s)"
+        allocate_args = (case["credential"], successor_job, successor_request)
+        assert worker.execute(allocate_sql, allocate_args).fetchone() == (
+            "busy",
+            None,
+            None,
+            None,
+        )
+        finalize_sql = "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,1,2,%s,%s)"
+        finalize_args = (
+            case["credential"],
+            case["job_id"],
+            predecessor,
+            head_digest,
+            receipt,
+        )
+        assert worker.execute(finalize_sql, finalize_args).fetchone() == (
+            finalize_status,
+            "canceled",
+            "provisioning",
+        )
+        worker.commit()
+        assert worker.execute(finalize_sql, finalize_args).fetchone() == (
+            finalize_status,
+            "canceled",
+            "provisioning",
+        )
+        successor = worker.execute(allocate_sql, allocate_args).fetchone()
+        assert successor is not None and successor[0] == "allocated"
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,predecessor.consumed_at IS NOT NULL,"
+            "predecessor.state,provision_job.state,successor.state,successor.operation "
+            "FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS predecessor ON predecessor.id=%s "
+            "JOIN jobs AS provision_job ON provision_job.id=predecessor.job_id "
+            "JOIN authority_system_attempts AS successor ON successor.id=%s "
+            "WHERE ownership.system_id=%s",
+            (predecessor, successor[1], case["system_id"]),
+        ).fetchone() == (
+            "teardown-requested",
+            True,
+            "terminal" if disposition == "provision-ready" else "superseded",
+            "canceled",
+            "allocating",
+            "preactivation-teardown",
+        )
+
+
+@pytest.mark.parametrize("disposition", ("provision-ready", "retained-quarantine"))
+def test_0149_reconciler_consumes_late_predecessor_before_teardown_successor(
+    migrated_url: str,
+    request: pytest.FixtureRequest,
+    disposition: str,
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="provision", ownership_state="teardown-requested"
+        )
+        predecessor = _seed_direct_terminal_attempt(conn, case, disposition=disposition)[0]
+        successor_job, successor_request = uuid4(), uuid4()
+        marker = cast(dict[str, object], case["marker"])
+        conn.execute(
+            "UPDATE jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=%s",
+            (case["job_id"],),
+        )
+        conn.execute(
+            "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
+            "heartbeat_at,payload,authorizing,dedup_key) VALUES "
+            "(%s,'teardown','running',1,3,%s,clock_timestamp()+interval '5 minutes',"
+            "clock_timestamp(),%s,'{}',%s)",
+            (
+                successor_job,
+                case["worker"],
+                Jsonb(
+                    {
+                        "authority_system_v1": {
+                            **marker,
+                            "operation": "preactivation-teardown",
+                            "operation_identity": f"preactivation-teardown-{successor_job}",
+                        }
+                    }
+                ),
+                f"repair-successor-{successor_job}",
+            ),
+        )
+        conn.commit()
+
+    allocate_sql = "SELECT * FROM allocate_authority_system_attempt(%s,%s,1,%s)"
+    allocate_args = (case["credential"], successor_job, successor_request)
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        blocked = worker.execute(allocate_sql, allocate_args).fetchone()
+        assert blocked is not None and blocked[0] == "busy"
+
+    with psycopg.connect(role_dsns("kdive_reconciler")) as reconciler:
+        assert reconciler.execute(
+            "SELECT repair_terminal_authority_system_attempts(100)"
+        ).fetchone() == (1,)
+        reconciler.commit()
+        assert reconciler.execute(
+            "SELECT repair_terminal_authority_system_attempts(100)"
+        ).fetchone() == (0,)
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        successor = worker.execute(allocate_sql, allocate_args).fetchone()
+        assert successor is not None and successor[0] == "allocated"
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,predecessor.consumed_at IS NOT NULL,"
+            "predecessor.state,provision_job.state FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS predecessor ON predecessor.id=%s "
+            "JOIN jobs AS provision_job ON provision_job.id=predecessor.job_id "
+            "WHERE ownership.system_id=%s",
+            (predecessor, case["system_id"]),
+        ).fetchone() == (
+            "teardown-requested",
+            True,
+            "terminal" if disposition == "provision-ready" else "superseded",
+            "canceled",
+        )
+
+
+def test_0149_reconciler_requeues_retained_predecessor_after_worker_loss(
     migrated_url: str, request: pytest.FixtureRequest
 ) -> None:
     role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
     with psycopg.connect(migrated_url) as conn:
         case = _seed_direct_authority_case(
-            conn, operation="provision", ownership_state="provisioning"
+            conn,
+            operation="provision",
+            ownership_state="provisioning",
+            attempt=1,
+            max_attempts=1,
         )
-        predecessor = _seed_direct_terminal_attempt(conn, case, disposition="provision-ready")[0]
-        successor_job, successor = uuid4(), uuid4()
+        predecessor = _seed_direct_terminal_attempt(conn, case, disposition="retained-quarantine")[
+            0
+        ]
         conn.execute(
-            "UPDATE jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL,heartbeat_at=NULL,"
-            "error_category=NULL,failure_context='{}' WHERE id=%s",
+            "UPDATE jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=%s",
             (case["job_id"],),
         )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_reconciler")) as reconciler:
+        assert reconciler.execute(
+            "SELECT repair_terminal_authority_system_attempts(100)"
+        ).fetchone() == (1,)
+        reconciler.commit()
+        assert reconciler.execute(
+            "SELECT repair_terminal_authority_system_attempts(100)"
+        ).fetchone() == (0,)
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        claimed = worker.execute(
+            "SELECT id,attempt FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (case["worker"], case["credential"]),
+        ).fetchone()
+        assert claimed == (case["job_id"], 2)
+        successor = worker.execute(
+            "SELECT * FROM allocate_authority_system_attempt(%s,%s,2,%s)",
+            (case["credential"], case["job_id"], uuid4()),
+        ).fetchone()
+        assert successor is not None and successor[0] == "allocated"
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,predecessor.state,predecessor.consumed_at IS NOT NULL,"
+            "job.state,job.attempt,job.max_attempts FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS predecessor ON predecessor.id=%s "
+            "JOIN jobs AS job ON job.id=predecessor.job_id WHERE ownership.system_id=%s",
+            (predecessor, case["system_id"]),
+        ).fetchone() == ("repair-required", "superseded", True, "running", 2, 2)
+
+
+def test_0149_terminal_predecessor_blocks_successor_ack_until_consumed(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    successor_job, successor_request, successor = uuid4(), uuid4(), uuid4()
+    operation_digest = "sha256:" + "f" * 64
+    quiescence_digest = "sha256:" + "e" * 64
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="provision", ownership_state="teardown-requested"
+        )
+        predecessor, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="provision-ready"
+        )
+        marker = cast(dict[str, object], case["marker"])
+        operation_identity = f"preactivation-teardown-{successor_job}"
         conn.execute(
             "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
-            "payload,authorizing,dedup_key) VALUES "
-            "(%s,'provision','running',1,3,%s,clock_timestamp()+interval '5 minutes',%s,'{}',%s)",
+            "heartbeat_at,payload,authorizing,dedup_key) VALUES "
+            "(%s,'teardown','running',1,3,%s,clock_timestamp()+interval '5 minutes',"
+            "clock_timestamp(),%s,'{}',%s)",
             (
                 successor_job,
                 case["worker"],
-                Jsonb({"authority_system_v1": case["marker"]}),
-                f"successor-{successor_job}",
+                Jsonb(
+                    {
+                        "authority_system_v1": {
+                            **marker,
+                            "operation": "preactivation-teardown",
+                            "operation_identity": operation_identity,
+                        }
+                    }
+                ),
+                f"ack-successor-{successor_job}",
             ),
         )
         conn.execute(
             "INSERT INTO authority_system_attempts "
             "(id,system_id,generation,operation,job_id,job_attempt,worker_incarnation,"
-            "request_attempt_id,operation_identity,operation_digest,state,ack_sequence,ack_digest,"
-            "quiescence_digest,acknowledged_at,ack_head_sequence,ack_head_digest) VALUES "
-            "(%s,%s,2,'provision',%s,1,%s,%s,'successor',%s,'current',2,%s,%s,"
-            "clock_timestamp(),2,%s)",
+            "request_attempt_id,operation_identity,operation_digest) VALUES "
+            "(%s,%s,2,'preactivation-teardown',%s,1,%s,%s,%s,%s)",
             (
                 successor,
                 case["system_id"],
                 successor_job,
                 case["worker"],
-                uuid4(),
-                "sha256:" + "f" * 64,
-                "sha256:" + "d" * 64,
-                "sha256:" + "e" * 64,
-                "sha256:" + "d" * 64,
+                successor_request,
+                operation_identity,
+                operation_digest,
             ),
         )
         conn.execute(
-            "UPDATE authority_system_ownership SET current_attempt_id=%s WHERE system_id=%s",
-            (successor, case["system_id"]),
+            "UPDATE authority_system_ownership SET next_generation=3,"
+            "journal_phase='takeover-acknowledged',journal_record=%s WHERE system_id=%s",
+            (Jsonb({"authority_id": str(successor), "generation": 2}), case["system_id"]),
         )
         conn.commit()
 
+    acknowledge_sql = "SELECT * FROM acknowledge_authority_system_attempt(%s,%s,1,%s,2,%s,2,%s,%s)"
+    acknowledge_args = (
+        case["credential"],
+        successor_job,
+        successor,
+        successor_request,
+        head_digest,
+        quiescence_digest,
+    )
+    finalize_sql = "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,1,2,%s,%s)"
+    finalize_args = (
+        case["credential"],
+        case["job_id"],
+        predecessor,
+        head_digest,
+        receipt,
+    )
     with psycopg.connect(role_dsns("kdive_worker")) as worker:
-        claimed = worker.execute(
-            "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
-            (case["worker"], case["credential"]),
-        ).fetchone()
-    assert claimed is None
+        assert worker.execute(acknowledge_sql, acknowledge_args).fetchone() == ("busy", None)
+        assert worker.execute(finalize_sql, finalize_args).fetchone() == (
+            "applied",
+            "canceled",
+            "provisioning",
+        )
+        acknowledged = worker.execute(acknowledge_sql, acknowledge_args).fetchone()
+        assert acknowledged is not None and acknowledged[0] == "acknowledged"
+        worker.commit()
+        assert worker.execute(finalize_sql, finalize_args).fetchone() == (
+            "applied",
+            "canceled",
+            "provisioning",
+        )
+
     with psycopg.connect(migrated_url) as conn:
         assert conn.execute(
-            "SELECT state,consumed_at FROM authority_system_attempts WHERE id=%s", (predecessor,)
-        ).fetchone() == ("terminal", None)
+            "SELECT ownership.state,ownership.current_attempt_id,predecessor.consumed_at IS NOT "
+            "NULL,provision_job.state,successor.state FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS predecessor ON predecessor.id=%s "
+            "JOIN jobs AS provision_job ON provision_job.id=predecessor.job_id "
+            "JOIN authority_system_attempts AS successor ON successor.id=%s "
+            "WHERE ownership.system_id=%s",
+            (predecessor, successor, case["system_id"]),
+        ).fetchone() == (
+            "teardown-requested",
+            successor,
+            True,
+            "canceled",
+            "current",
+        )
 
 
 def test_0149_allocation_enforces_operation_state_matrix(

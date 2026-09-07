@@ -123,6 +123,9 @@ CREATE UNIQUE INDEX authority_system_attempt_one_current
 CREATE INDEX authority_system_attempt_terminal_job_repair
     ON public.authority_system_attempts (job_id)
     WHERE state = 'terminal' AND consumed_at IS NULL;
+CREATE INDEX authority_system_attempt_terminal_system_fence
+    ON public.authority_system_attempts (system_id)
+    WHERE state = 'terminal' AND consumed_at IS NULL;
 
 CREATE FUNCTION public.reject_authority_system_binding_update() RETURNS trigger
 LANGUAGE plpgsql SET search_path = '' AS $$
@@ -409,6 +412,13 @@ BEGIN
         RETURN QUERY SELECT CASE WHEN v_existing.state='allocating' THEN 'allocated' ELSE 'replay' END,
             v_existing.id,v_existing.generation,v_existing.operation_digest; RETURN;
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.authority_system_attempts AS predecessor
+        WHERE predecessor.system_id=v_owner.system_id
+          AND predecessor.state='terminal' AND predecessor.consumed_at IS NULL
+    ) THEN
+        RETURN QUERY SELECT 'busy'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
+    END IF;
     SELECT * INTO v_existing FROM public.authority_system_attempts
     WHERE system_id=v_owner.system_id AND state='allocating' FOR UPDATE;
     IF v_existing.id IS NOT NULL THEN
@@ -497,6 +507,13 @@ BEGIN
                                    AND v_attempt.quiescence_digest=p_quiescence_digest
                                   THEN 'replay' ELSE 'conflict' END,
             v_attempt.acknowledged_at; RETURN;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.authority_system_attempts AS predecessor
+        WHERE predecessor.system_id=v_attempt.system_id
+          AND predecessor.state='terminal' AND predecessor.consumed_at IS NULL
+    ) THEN
+        RETURN QUERY SELECT 'busy'::text,NULL::timestamptz; RETURN;
     END IF;
     IF v_attempt.state <> 'allocating' OR p_ack_sequence <> v_owner.journal_sequence
        OR p_ack_digest <> v_owner.journal_digest
@@ -886,6 +903,11 @@ BEGIN
         );
         UPDATE public.jobs SET state='succeeded',result_ref=v_attempt.receipt_digest
         WHERE id=p_job_id AND state='running';
+    ELSIF v_attempt.receipt_disposition='provision-ready'
+          AND v_owner.state='teardown-requested' THEN
+        UPDATE public.jobs SET state='canceled',worker_id=NULL,lease_expires_at=NULL,
+            heartbeat_at=NULL,error_category=NULL,failure_context='{}'::jsonb
+        WHERE id=p_job_id AND state='running';
     ELSIF v_attempt.receipt_disposition='preactivation-absent'
           AND v_owner.state='teardown-requested' THEN
         INSERT INTO public.audit_log (
@@ -935,7 +957,7 @@ BEGIN
           ON ownership.current_attempt_id = attempt.id
         JOIN public.jobs AS job ON job.id=attempt.job_id
         WHERE attempt.state = 'terminal' AND attempt.consumed_at IS NULL
-          AND attempt.receipt_disposition='provision-ready'
+          AND attempt.receipt_disposition IN ('provision-ready','retained-quarantine')
           AND (job.state<>'running' OR job.lease_expires_at<=clock_timestamp()
                OR NOT EXISTS (
                    SELECT 1 FROM public.worker_incarnations AS worker
@@ -956,7 +978,6 @@ BEGIN
            OR v_owner.current_attempt_id<>v_attempt.id
            OR v_owner.journal_sequence<>v_attempt.terminal_head_sequence
            OR v_owner.journal_digest<>v_attempt.terminal_head_digest
-           OR v_attempt.receipt_disposition='retained-quarantine'
            OR v_job.id IS NULL
            OR NOT (v_job.state<>'running' OR v_job.lease_expires_at<=clock_timestamp()
                    OR NOT EXISTS (
@@ -986,7 +1007,41 @@ BEGIN
             WHERE id=v_attempt.job_id AND state='running';
         ELSIF v_attempt.receipt_disposition='provision-ready'
               AND v_owner.state='teardown-requested' THEN
-            NULL; -- Consume the physical fact without reopening a canceled System.
+            UPDATE public.jobs SET state='canceled',worker_id=NULL,lease_expires_at=NULL,
+                heartbeat_at=NULL,error_category=NULL,failure_context='{}'::jsonb
+            WHERE id=v_attempt.job_id AND state IN ('queued','running');
+        ELSIF v_attempt.receipt_disposition='retained-quarantine'
+              AND v_attempt.operation='provision'
+              AND v_owner.state='teardown-requested' THEN
+            UPDATE public.authority_system_attempts SET state='superseded',
+                superseded_at=clock_timestamp() WHERE id=v_attempt.id;
+            UPDATE public.jobs SET state='canceled',worker_id=NULL,lease_expires_at=NULL,
+                heartbeat_at=NULL,error_category=NULL,failure_context='{}'::jsonb
+            WHERE id=v_attempt.job_id AND state IN ('queued','running');
+        ELSIF v_attempt.receipt_disposition='retained-quarantine'
+              AND v_job.state IN ('queued','running','failed')
+              AND (
+                  (v_attempt.operation='provision'
+                   AND v_owner.state IN ('provisioning','repair-required'))
+                  OR (v_attempt.operation='preactivation-teardown'
+                      AND v_owner.state='teardown-requested')
+              ) THEN
+            IF v_job.attempt>=v_job.max_attempts AND v_job.max_attempts=2147483647 THEN
+                RAISE EXCEPTION 'authority System retained retry attempt limit overflow'
+                USING ERRCODE='22003';
+            END IF;
+            UPDATE public.authority_system_attempts SET state='superseded',
+                superseded_at=clock_timestamp() WHERE id=v_attempt.id;
+            IF v_attempt.operation='provision' THEN
+                UPDATE public.authority_system_ownership SET state='repair-required'
+                WHERE system_id=v_owner.system_id;
+            END IF;
+            UPDATE public.jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL,
+                heartbeat_at=NULL,result_ref=NULL,error_category=NULL,failure_context='{}'::jsonb,
+                max_attempts=CASE
+                    WHEN attempt>=max_attempts THEN max_attempts+1 ELSE max_attempts
+                END
+            WHERE id=v_attempt.job_id;
         ELSE
             CONTINUE;
         END IF;
