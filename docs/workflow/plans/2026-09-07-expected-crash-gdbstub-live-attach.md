@@ -1,20 +1,20 @@
 # Expected-crash gdbstub live attach — implementation plan
 
 Goal: make a reachable gdbstub usable on a Run that declared `expected_boot_failure`, by probing
-the stub when the boot records `expected_crash_observed` and admitting the gdbstub transport
-against the probed result.
+the stub when a readiness-failure boot records `expected_crash_observed` and admitting the gdbstub
+transport against the probed result.
 
 Architecture: the boot worker (`src/kdive/jobs/handlers/runs/`) records a `boot` `run_steps`
 result carrying `available_capture` and `inert_capture`; the MCP debug plane
 (`src/kdive/mcp/tools/debug/sessions/lifecycle.py`) reads that succeeded boot result to decide
 whether a live attach is admissible; `src/kdive/mcp/tools/lifecycle/runs/common.py` renders both
-lists into the `runs.get` envelope. This change adds one bounded probe on the worker side and
-keys the gate on what that probe recorded.
+lists and the next-action list into the `runs.get` envelope. This change adds one bounded probe on
+the worker side and keys both reader surfaces on what that probe recorded.
 
 Tech stack: Python 3.14, `uv`, `pytest`, `ruff`, `ty`.
 
-Expected implementation size: 190–250 changed lines (M) — derived from the file map and the three
-task bodies below: roughly 60 source lines across five files and 140 test lines across three.
+Expected implementation size: 170–230 changed lines (M) — derived from the file map and the three
+task bodies below: roughly 55 source lines across five files and 130 test lines across three.
 
 ## Global Constraints
 
@@ -37,35 +37,37 @@ Transcribed from `AGENTS.md` and the frozen scope record:
   invariant. Do not add a row; do not edit that file.
 - Out of scope, frozen: changing the recorded `boot_outcome`; reversing routing for non-gdbstub
   transports; an on-panic action knob; raising the refusal at `runs.create`; #802's
-  `inert_capture_reason` disclosure work. Owned by parallel work, do not edit: `src/kdive/db/`,
-  `src/kdive/jobs/worker.py`, `src/kdive/jobs/handlers/system_reclaim.py`,
-  `src/kdive/providers/local_libvirt/`, `src/kdive/mcp/tools/gateway.py`.
+  `inert_capture_reason` disclosure work. Also excluded by design review: probing `host_dump`,
+  and the pre-existing `inert_capture_reason`-beside-empty-`inert_capture` emission. Owned by
+  parallel work, do not edit: `src/kdive/db/`, `src/kdive/jobs/worker.py`,
+  `src/kdive/jobs/handlers/system_reclaim.py`, `src/kdive/providers/local_libvirt/`,
+  `src/kdive/mcp/tools/gateway.py`.
 
 ## File map
 
 | File | Answerable for |
 |---|---|
-| `src/kdive/jobs/handlers/runs/boot_evidence.py` | modified — the probe, both capture lists, the parsed-profile helper |
-| `src/kdive/jobs/handlers/runs/boot.py` | modified — threads the existing `connector` into both expected-crash call sites |
+| `src/kdive/jobs/handlers/runs/boot_evidence.py` | modified — the probe and both capture lists |
+| `src/kdive/jobs/handlers/runs/boot.py` | modified — passes its existing `connector` at the readiness-failure call site only |
 | `src/kdive/mcp/tools/debug/sessions/lifecycle.py` | modified — the scoped refusal, the new detail constant, the `available_capture` reader |
 | `src/kdive/mcp/tools/debug/sessions/registrar.py` | modified — the `debug.start_session` wrapper docstring |
-| `src/kdive/mcp/tools/lifecycle/runs/common.py` | modified — suppress `inert_capture_reason` for an empty `inert_capture` |
+| `src/kdive/mcp/tools/lifecycle/runs/common.py` | modified — `_succeeded_next_step` names `debug.start_session` for a probed-live stub |
 | `tests/jobs/handlers/test_runs_boot.py` | modified — probe gating and capture-list contracts |
 | `tests/mcp/debug/test_debug_tools.py` | modified — admission and both refusals |
-| `tests/mcp/lifecycle/test_runs_tools.py` | modified — `inert_capture_reason` suppression |
+| `tests/mcp/lifecycle/test_runs_tools.py` | modified — the next-action contract |
 | `docs/adr/0628-expected-crash-admits-a-reachable-gdbstub.md` | created — the decision (already written) |
 | `docs/workflow/specs/2026-09-07-expected-crash-gdbstub-live-attach-design.md` | created — the spec (already written) |
 
-## Task 1 — Probe the stub on the expected-crash path
+## Task 1 — Probe the stub on the readiness-failure expected-crash path
 
-The worker side; it produces the recorded evidence Task 2 reads.
+The worker side; it produces the recorded evidence Tasks 2 and 3 read.
 
 **Interfaces.** Consumed from the existing codebase, each confirmed present in
 `src/kdive/jobs/handlers/runs/boot_evidence.py` on this branch:
 `def generic_panic_matches(redacted_console: bytes) -> bool` (line 211);
-`def gdbstub_reachable(connector: Connector, system_id: UUID) -> bool` (line 249);
+`def gdbstub_reachable(connector: Connector, system_id: UUID) -> bool` (line 250);
 `def inert_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> list[str]`
-(line 236); `profile_policy.gdbstub_provisioned(profile) -> bool`,
+(line 236), used unchanged; `profile_policy.gdbstub_provisioned(profile) -> bool`,
 `ProvisioningProfile.parse(...)`, `SYSTEMS.get(conn, system_id)`, `CaptureMethod.GDBSTUB.value`,
 `CaptureMethod.CONSOLE.value`; `class ConsoleArtifact(NamedTuple)` with fields `id`,
 `object_key`, `data`.
@@ -73,31 +75,36 @@ The worker side; it produces the recorded evidence Task 2 reads.
 Provided to later tasks:
 
 - `async def record_expected_crash(conn, job_ctx, run, *, system_id: UUID,
-  profile_policy: ProfilePolicy, connector: Connector, artifact: ConsoleArtifact,
-  matched_line: str) -> BootStepResult` — gains the keyword-only `connector`.
-- `async def evaluate_expected_failure_after_ready(conn, job_ctx, run, *, system_id: UUID,
-  profile_policy: ProfilePolicy, connector: Connector,
-  artifact: ConsoleArtifact | None) -> BootStepResult | None` — gains the same keyword.
-- `def inert_capture(profile_policy, profile, *, gdbstub_live: bool = False) -> list[str]` — the
-  default keeps every existing two-argument caller and test unchanged.
+  profile_policy: ProfilePolicy, artifact: ConsoleArtifact, matched_line: str,
+  connector: Connector | None = None) -> BootStepResult` — gains only the optional trailing
+  `connector`. `None` means "do not probe", which is what
+  `evaluate_expected_failure_after_ready` passes by omission.
 - `async def _expected_crash_capture(conn, system_id, profile_policy, *, connector, panicked)
-  -> tuple[list[str], list[str]]` — returns `(available_capture, inert_capture)`.
-- `async def _expected_crash_profile(conn, system_id) -> ProvisioningProfile | None`.
+  -> tuple[list[str], list[str]]` — returns `(available_capture, inert_capture)`. It replaces
+  `_expected_crash_inert_capture` one-for-one; there is no second new helper, and
+  `inert_capture`'s signature does not change.
+- `evaluate_expected_failure_after_ready` keeps its current signature exactly.
 
 **Verification inventory.**
 
-- Contract: the `(available_capture, inert_capture)` pair across all four gate combinations —
-  reachable stub, unreachable stub, unprovisioned stub, no generic panic. Mode: focused-test.
-  Test: `tests/jobs/handlers/test_runs_boot.py`, four `test_record_expected_crash_*` cases.
-  Expected red: `TypeError: record_expected_crash() got an unexpected keyword argument
-  'connector'`. Green: `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q`.
-- Contract: `gdbstub_reachable` is not called when the console shows no generic panic, and not
-  called when `gdbstub` is unprovisioned. Mode: focused-test. Test: same file, a connector fake
-  recording every `open_transport` call, asserted empty. Expected red: the same `TypeError`.
+- Contract: the `(available_capture, inert_capture)` pair across every gate combination —
+  reachable stub, unreachable stub, unprovisioned stub, no generic panic, and no connector.
+  Mode: focused-test. Test: `tests/jobs/handlers/test_runs_boot.py`, five
+  `test_record_expected_crash_*` cases. Expected red: each new case fails on
+  `available_capture == ["console"]` where it asserts `["gdbstub", "console"]`, or on
+  `TypeError: record_expected_crash() got an unexpected keyword argument 'connector'`.
+  Green: `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q`.
+- Contract: `gdbstub_reachable` is not called when no connector is supplied, when the console
+  shows no generic panic, or when `gdbstub` is unprovisioned. Mode: focused-test. Test: same
+  file, a connector fake recording every `open_transport` call, asserted empty. Expected red: the
+  same `TypeError`. Green: the same command.
+- Contract: `evaluate_expected_failure_after_ready` never probes. Mode: focused-test. Test: same
+  file, driving the ready path with `_MARKER_THEN_UBSAN_PANIC` (line 898) — a console that
+  reaches `kdive-ready` and then panics — and asserting the connector fake recorded nothing.
+  Expected red: this case passes before the change and must keep passing after it, so establish
+  its bite with a controlled fault: temporarily pass `connector=connector` at the
+  `evaluate_expected_failure_after_ready` call site in `boot.py`, confirm the case fails, revert.
   Green: the same command.
-- Contract: `inert_capture(policy, profile)` called with no keyword still returns today's list.
-  Mode: focused-test. Test: the existing `test_inert_capture_*` cases, which must stay green
-  unmodified. Green: the same command.
 
 **Steps.**
 
@@ -122,28 +129,27 @@ Provided to later tasks:
            return object()
    ```
 
-2. Add the four contract cases. Each seeds a System whose profile provisions what the case
-   needs, builds a `ConsoleArtifact` whose `data` does or does not contain
+2. Add the five contract cases. Each seeds a System whose profile provisions what the case needs,
+   builds a `ConsoleArtifact` whose `data` does or does not contain
    `b"Kernel panic - not syncing"`, and calls `record_expected_crash` with
-   `connector=_RecordingConnector(reachable=...)`. Assert: reachable →
-   `available_capture == ["console", "gdbstub"]`, `"gdbstub" not in inert_capture`;
-   unreachable → `available_capture == ["console"]`, `"gdbstub" in inert_capture`,
-   `len(conn_fake.opened) == 1`; unprovisioned → `available_capture == ["console"]`,
-   `conn_fake.opened == []`; no panic → `available_capture == ["console"]`,
-   `"gdbstub" in inert_capture`, `conn_fake.opened == []`.
-3. Run `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q`. Expect the four new
-   cases to fail with the `TypeError` above and every pre-existing case to pass.
-4. In `boot_evidence.py`, give `inert_capture` a keyword-only `gdbstub_live: bool = False`
-   parameter (after a `*`) and change its first condition to
-   `if profile_policy.gdbstub_provisioned(profile) and not gdbstub_live:`. Leave the host_dump
-   and `KDUMP_FAMILY` arms untouched. Add to its docstring: `` `gdbstub_live` `` is the ADR-0628
-   probe result — a stub that answered on the halted guest is not inert, so it is reported in
-   `available_capture` instead.
-5. Split `_expected_crash_inert_capture` into `_expected_crash_profile` and
-   `_expected_crash_capture`. `_expected_crash_profile` is the removed function's body verbatim —
-   the `SYSTEMS.get` miss, the `ProvisioningProfile.parse` call, and the `except
-   CategorizedError` branch with its unchanged `_log.warning` — returning the parsed profile, or
-   `None` on either failure, instead of calling `inert_capture`. Then:
+   `connector=_RecordingConnector(reachable=...)` or with the argument omitted. Assert:
+   reachable → `available_capture == ["gdbstub", "console"]`, `"gdbstub" not in inert_capture`,
+   `len(conn_fake.opened) == 1`; unreachable → `available_capture == ["console"]`,
+   `"gdbstub" in inert_capture`, `len(conn_fake.opened) == 1`; unprovisioned →
+   `available_capture == ["console"]`, `conn_fake.opened == []`; no panic →
+   `available_capture == ["console"]`, `"gdbstub" in inert_capture`, `conn_fake.opened == []`;
+   no connector → `available_capture == ["console"]`, `"gdbstub" in inert_capture`.
+   The `["gdbstub", "console"]` order matches the existing `available_capture()` helper (line
+   228), which the `crashed_halted_live` path uses; keep the two paths ordered the same way.
+3. Add the ready-path case named in the third inventory entry, driving `_run_ready_path` with
+   `_MARKER_THEN_UBSAN_PANIC` and a `_RecordingConnector(reachable=True)`, asserting
+   `conn_fake.opened == []`.
+4. Run `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q`. Expect the five new
+   `record_expected_crash` cases to fail as the inventory states, and the ready-path case to pass.
+5. In `boot_evidence.py`, replace `_expected_crash_inert_capture` with `_expected_crash_capture`.
+   Its `SYSTEMS.get` miss, its `ProvisioningProfile.parse` call, and its `except
+   CategorizedError` branch with the unchanged `_log.warning` all carry over; the miss and the
+   parse failure now return `([CaptureMethod.CONSOLE.value], [])`:
 
    ```python
    async def _expected_crash_capture(
@@ -151,32 +157,47 @@ Provided to later tasks:
        system_id: UUID,
        profile_policy: ProfilePolicy,
        *,
-       connector: Connector,
+       connector: Connector | None,
        panicked: bool,
    ) -> tuple[list[str], list[str]]:
        """Return ``(available_capture, inert_capture)`` for an expected-crash boot (ADR-0628).
 
-       The gdbstub probe runs only on a provisioned stub whose console also shows a generic
-       kernel panic. ADR-0233 established why the panic signature gates it: an RSP connect stops
-       the vCPU, and a declared expectation is a caller-supplied literal that can match on a
-       guest which is still running (ADR-0383's post-ready downgrade).
+       The gdbstub probe runs only when the readiness-failure call site supplied a connector, the
+       stub is provisioned, and the console shows a generic kernel panic. ADR-0233 decision 3 is
+       why both gates are needed: an RSP connect stops the vCPU, a readiness timeout can be a
+       slow-but-healthy boot, and a declared expectation is a caller-supplied literal rather than
+       a panic signature.
        """
        available = [CaptureMethod.CONSOLE.value]
-       profile = await _expected_crash_profile(conn, system_id)
-       if profile is None:
+       system = await SYSTEMS.get(conn, system_id)
+       if system is None:
            return available, []
-       gdbstub_live = (
-           panicked
+       try:
+           profile = ProvisioningProfile.parse(system.provisioning_profile)
+       except CategorizedError:
+           _log.warning(
+               "could not parse provisioning profile for system %s; inert capture set omitted",
+               system_id,
+               exc_info=True,
+           )
+           return available, []
+       inert = inert_capture(profile_policy, profile)
+       if (
+           connector is not None
+           and panicked
            and profile_policy.gdbstub_provisioned(profile)
            and await asyncio.to_thread(gdbstub_reachable, connector, system_id)
-       )
-       if gdbstub_live:
-           available.append(CaptureMethod.GDBSTUB.value)
-       return available, inert_capture(profile_policy, profile, gdbstub_live=gdbstub_live)
+       ):
+           # gdbstub_provisioned gated the probe, so inert_capture listed it; a stub that
+           # answered on the halted guest is available, not inert.
+           inert.remove(CaptureMethod.GDBSTUB.value)
+           available.insert(0, CaptureMethod.GDBSTUB.value)
+       return available, inert
    ```
 
-6. Add `connector: Connector` to `record_expected_crash`'s keyword-only parameters. Replace its
-   `inert = await _expected_crash_inert_capture(...)` line with
+6. Add `connector: Connector | None = None` as the last keyword-only parameter of
+   `record_expected_crash`. Replace its `inert = await _expected_crash_inert_capture(...)` line
+   with
 
    ```python
        available, inert = await _expected_crash_capture(
@@ -192,28 +213,27 @@ Provided to later tasks:
    `"available_capture": available`. Every other key in that dict is unchanged. Retitle its
    docstring to `"""Record ``expected_crash_observed`` with console evidence and the probed
    capture sets (ADR-0628)."""`.
-7. Add `connector: Connector` to `evaluate_expected_failure_after_ready`'s keyword-only
-   parameters and pass `connector=connector` in its `record_expected_crash` call.
-8. In `src/kdive/jobs/handlers/runs/boot.py`, add `connector=connector,` to the
-   `boot_evidence.record_expected_crash(...)` call in the `except CategorizedError` branch and
-   to the `boot_evidence.evaluate_expected_failure_after_ready(...)` call on the ready path.
-   Both already hold `connector` as a parameter of `_run_boot_and_capture_outcome`.
-9. Update the five existing cases that name the removed helper or call the changed signature —
-   `test_record_expected_crash_threads_args_and_pins_result`,
-   `test_expected_crash_inert_capture_threads_args`,
-   `test_expected_crash_inert_capture_omits_invalid_profile`,
-   `test_record_expected_crash_degrades_when_system_gone`,
-   `test_record_expected_crash_degrades_when_profile_unparseable` — to the new names and the
-   `connector` keyword, keeping each case's assertion intent. The two degradation cases still
-   assert `inert_capture == []`, and now also `available_capture == ["console"]`.
-10. Run `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q`. Expect every case in
-    the file to pass. Then `just format`, `just lint`, `just type`: `All checks passed!` from
-    each.
+7. In `src/kdive/jobs/handlers/runs/boot.py`, add `connector=connector,` to the
+   `boot_evidence.record_expected_crash(...)` call inside the `except CategorizedError` branch —
+   and only there. Leave the `boot_evidence.evaluate_expected_failure_after_ready(...)` call on
+   the ready path exactly as it is; that path must not probe.
+8. Re-derive the full set of tests that name the removed helper or call the changed signature,
+   rather than working from a list: `rg -n "_expected_crash_inert_capture|record_expected_crash|
+   evaluate_expected_failure_after_ready" tests/jobs/handlers/test_runs_boot.py`. Update each hit
+   to the new helper name, keeping every case's assertion intent. Two classes of case legitimately
+   change their expected values and must be updated rather than preserved: any case whose fixture
+   already provisions `gdbstub` and supplies a panicking console now reports
+   `available_capture == ["gdbstub", "console"]`, and any fake standing in for the replaced
+   helper must match `_expected_crash_capture`'s two-list return.
+9. Run `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q`. Expect every case in
+   the file to pass. Then `just format`, `just lint`, `just type`: `All checks passed!` from each.
 
-**Acceptance criteria.** `record_expected_crash` probes exactly once on a provisioned stub with a
-panicking console and never otherwise; `available_capture` gains `gdbstub` only when the probe
-answered, and `inert_capture` loses it in the same case; every pre-existing case in
-`tests/jobs/handlers/test_runs_boot.py` still passes.
+**Acceptance criteria.** `record_expected_crash` probes exactly once when given a connector, a
+provisioned stub, and a panicking console, and never otherwise; `available_capture` gains
+`gdbstub` only when the probe answered, and `inert_capture` loses it in the same case;
+`evaluate_expected_failure_after_ready`'s signature and behavior are unchanged; the whole file is
+green, with every case that changed its expected values doing so because its fixture reaches the
+newly probed path.
 
 ## Task 2 — Admit the gdbstub transport, with its own refusal
 
@@ -259,13 +279,13 @@ branch: `_GDBSTUB = "gdbstub"` (line 86), `_DRGN_LIVE = "drgn-live"` (line 87),
    imported from `kdive.mcp.tools.debug.sessions.lifecycle`. Keep its other assertions
    (`reason`, `suggested_next_actions`, session count 0, `conn_fake.opened == []`) as they are.
 2. Add `test_start_session_rejects_drgn_live_on_expected_crash`, seeding
-   `{"boot_outcome": "expected_crash_observed", "available_capture": ["console", "gdbstub"]}`
+   `{"boot_outcome": "expected_crash_observed", "available_capture": ["gdbstub", "console"]}`
    and calling with `transport="drgn-live"`. Assert `resp.detail == CONSOLE_CRASH_GUIDANCE` and
    `resp.data["reason"] == "expected_crash_not_live_debuggable"`.
 3. Add `test_start_session_admits_gdbstub_for_expected_crash_with_live_stub`, modelled on the
    existing `test_start_session_admits_gdbstub_for_crashed_halted_live` in the same file, with
    `boot_result={"boot_outcome": "expected_crash_observed",
-   "available_capture": ["console", "gdbstub"]}`. Assert `resp.status == "success"` and that one
+   "available_capture": ["gdbstub", "console"]}`. Assert `resp.status == "success"` and that one
    session row exists.
 4. Run `uv run python -m pytest tests/mcp/debug/test_debug_tools.py -q`. Expect step 1's case to
    fail on the detail assertion and step 3's to fail with
@@ -326,9 +346,10 @@ branch: `_GDBSTUB = "gdbstub"` (line 86), `_DRGN_LIVE = "drgn-live"` (line 87),
        A run that declared an `expected_boot_failure` is attachable over `gdbstub` when its
        boot probed the provisioned stub and found it answering — `runs.get` reports that as
        `gdbstub` in `available_capture` rather than in `inert_capture` (ADR-0628). Check that
-       field before attaching: when the stub did not answer, or when the console matched the
-       expectation without a kernel panic, no probe ran and the attach is refused. `drgn-live`
-       is never admitted against a crashed guest, which has no running sshd.
+       field before attaching: the probe runs only on a boot that failed readiness with a
+       kernel panic, so a run downgraded to an expected crash after reaching readiness is never
+       probed and the attach is refused. `drgn-live` is never admitted against a crashed guest,
+       which has no running sshd.
    ```
 
 9. Run the controlled-fault check named in the third inventory entry, then
@@ -341,42 +362,59 @@ recorded it in `available_capture`; the gdbstub refusal carries `_EXPECTED_CRASH
 and the non-gdbstub refusal still carries `CONSOLE_CRASH_GUIDANCE`; the wrapper docstring names
 the precondition.
 
-## Task 3 — Stop pairing a kexec reason with an empty inert list
+## Task 3 — Keep the `runs.get` next-action agreeing with the capture set
 
-The `runs.get` render path, whose `inert_capture` list Task 1 can now empty.
+`_succeeded_next_step` is the other reader of `boot_outcome`. Without this task, one `runs.get`
+envelope would report `available_capture: ["gdbstub", "console"]` while steering the agent to
+`vmcore.fetch`, which that function's own docstring (lines 158–161) says always rejects on this
+outcome — and that docstring grounds itself in the refusal Task 2 removes.
 
 **Interfaces.** Consumed: `StepProgress` (`src/kdive/services/runs/steps.py:170`) with fields
-`boot_outcome`, `available_capture`, `inert_capture`; `CONSOLE_CRASH_GUIDANCE`;
-`BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED`. Provides nothing.
+`boot_outcome` and `available_capture`; `def _succeeded_next_step(run: Run, progress:
+StepProgress | None) -> list[str]` (`src/kdive/mcp/tools/lifecycle/runs/common.py:154`);
+`BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED`; `CaptureMethod.GDBSTUB.value`. Provides nothing.
 
-**Verification inventory.** Contract: `runs.get` emits `inert_capture_reason` only alongside a
-non-empty `inert_capture`. Mode: focused-test. Test: `tests/mcp/lifecycle/test_runs_tools.py`, a
-case asserting `"inert_capture_reason" not in resp.data` for an `expected_crash_observed` step
-whose `inert_capture` is `[]`. Expected red: the key is present, because the current guard is
-`is not None`. Green: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -q`.
+**Verification inventory.** Contract: `runs.get` on an `expected_crash_observed` Run names
+`debug.start_session` when `available_capture` lists `gdbstub`, and keeps
+`["postmortem.crash", "vmcore.fetch"]` when it does not. Mode: focused-test. Test:
+`tests/mcp/lifecycle/test_runs_tools.py`, two cases. Expected red: the first asserts
+`"debug.start_session" in resp.suggested_next_actions` and fails, because the branch keys only on
+`boot_outcome`. Green: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -q`.
 
 **Steps.**
 
-1. In `tests/mcp/lifecycle/test_runs_tools.py`, add a case beside the existing one at line 1560
-   seeding an `expected_crash_observed` boot step with
-   `available_capture: ["console", "gdbstub"]` and `inert_capture: []`, asserting
-   `resp.data["inert_capture"] == []` and `"inert_capture_reason" not in resp.data`.
-2. Run `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -q`. Expect the new case
-   to fail on the second assertion.
-3. In `src/kdive/mcp/tools/lifecycle/runs/common.py`, change the reason guard inside
-   `_capture_data` from `if step_progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:`
-   to `if step_progress.inert_capture and step_progress.boot_outcome ==
-   BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:`, and extend the existing comment with: `A probed-live
-   gdbstub can empty the list (ADR-0628), and a reason for nothing is not a reason.`
+1. In `tests/mcp/lifecycle/test_runs_tools.py`, add two cases beside the existing
+   `expected_crash_observed` coverage: one seeding a boot step with
+   `available_capture: ["gdbstub", "console"]` and asserting
+   `"debug.start_session" in resp.data["suggested_next_actions"]` (read the envelope field the
+   file's neighbouring cases read), and one seeding `available_capture: ["console"]` and
+   asserting the unchanged `["postmortem.crash", "vmcore.fetch"]`.
+2. Run `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -q`. Expect the first case
+   to fail and the second to pass.
+3. In `src/kdive/mcp/tools/lifecycle/runs/common.py`, replace the `expected_crash_observed` arm
+   of `_succeeded_next_step` with:
+
+   ```python
+       if progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
+           available = progress.available_capture or []
+           if CaptureMethod.GDBSTUB.value in available:
+               return ["debug.start_session", "postmortem.crash"]
+           return ["postmortem.crash", "vmcore.fetch"]
+   ```
+
+   and rewrite the sentence in its docstring that grounds the pair in
+   `sessions_lifecycle.py`'s blanket refusal, since that refusal is now scoped: the pair matches
+   the failure that file returns when the boot recorded no reachable stub, and a recorded stub
+   names `debug.start_session` instead (ADR-0628).
 4. Run `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -q`. Expect every case in
    the file to pass. Then `just format`, `just lint`, `just type`.
 5. Run the full gate bare: `just ci > /tmp/ci-2303.log 2>&1 < /dev/null`, and read the log.
    Expect exit 0.
 
-**Acceptance criteria.** `inert_capture_reason` never accompanies an empty `inert_capture`; the
-existing case at line 1560 still passes unchanged.
+**Acceptance criteria.** One `runs.get` envelope never reports an attachable stub while steering
+away from `debug.start_session`; the non-gdbstub next-action pair is byte-identical to today's.
 
 **Rollback.** Reverting the five source files and their three test files restores the previous
 behavior. No schema, migration, or persisted state is touched: `boot_outcome` and both capture
 lists ride in the schemaless `run_steps.result`, so a revert simply stops writing the probed
-`available_capture` and the gate stops reading it.
+`available_capture` and both readers stop reading it.

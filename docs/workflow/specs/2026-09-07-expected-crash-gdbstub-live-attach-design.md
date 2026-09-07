@@ -18,56 +18,66 @@ about kexec and vmcore capture. The identical panic *without* the declaration ta
 
 ## Scope
 
-Three changes, per ADR-0628, plus the agent-facing text that discloses them.
+Four changes, per ADR-0628, plus the agent-facing text that discloses them.
 
-1. `record_expected_crash` runs the `gdbstub_reachable` probe already used by
-   `record_crash_halted_live`, gated on `gdbstub` being provisioned **and** the captured console
-   matching `generic_panic_matches`. On a reachable stub, `gdbstub` moves from `inert_capture`
-   into `available_capture`; `console` stays in `available_capture` either way. This needs a
-   `Connector` threaded to `record_expected_crash` and through
-   `evaluate_expected_failure_after_ready`, from the `connector` already held by
-   `_run_boot_and_capture_outcome` in `src/kdive/jobs/handlers/runs/boot.py`.
+1. `record_expected_crash` takes an optional `Connector` and runs the `gdbstub_reachable` probe
+   already used by `record_crash_halted_live`, gated on that connector being supplied, on
+   `gdbstub` being provisioned, and on the captured console matching `generic_panic_matches`. On
+   a reachable stub, `gdbstub` moves from `inert_capture` into `available_capture`; `console`
+   stays in `available_capture` either way. Only `boot.py`'s `READINESS_FAILURE` branch supplies
+   the connector — it already holds one. `evaluate_expected_failure_after_ready` supplies none
+   and is otherwise untouched: its guest reached `kdive-ready`, so it may still be executing and
+   an RSP connect would stop a live vCPU (ADR-0628 decision 1, ADR-0233 decision 3).
 2. `_attach_preconditions` admits `expected_crash_observed` for the `gdbstub` transport when the
    succeeded boot step's `available_capture` lists `gdbstub`, and refuses otherwise.
 3. The gdbstub refusal gets its own module-level detail constant; `CONSOLE_CRASH_GUIDANCE` stays
    on the non-gdbstub refusal and on the vmcore surfaces.
+4. `_succeeded_next_step` (`src/kdive/mcp/tools/lifecycle/runs/common.py`) names
+   `debug.start_session` when that same `available_capture` lists `gdbstub`. Without this the one
+   `runs.get` envelope would report an attachable stub while steering the agent to
+   `vmcore.fetch`, which that function's own docstring says always rejects on this outcome.
 
 Also in scope: the `debug.start_session` wrapper docstring, which is the agent-facing contract
-(AGENTS.md); and suppressing `inert_capture_reason` in
-`src/kdive/mcp/tools/lifecycle/runs/common.py` when the probe empties `inert_capture`, so
-`runs.get` cannot emit a kexec-worded reason for an empty list.
+(AGENTS.md).
 
 Out of scope, per the frozen charter: any change to the recorded `boot_outcome`; reversing
 routing for non-gdbstub transports; an on-panic action knob; raising the refusal at
-`runs.create`; and #802's `inert_capture_reason` disclosure work. No deferrals carried in.
+`runs.create`; and #802's `inert_capture_reason` disclosure work. Also deliberately excluded:
+probing `host_dump`, and the pre-existing emission of `inert_capture_reason` beside an empty
+`inert_capture` — both are reachable at HEAD without this change, and the second is pinned by
+existing tests. No deferrals carried in; two follow-up candidates carried out.
 
 ## Success
 
-1. A boot recording `expected_crash_observed` on a gdbstub-provisioned System whose console
-   panics and whose stub answers reports `available_capture` containing `gdbstub` and
-   `inert_capture` without it.
-2. The same boot with an unreachable stub, an unprovisioned stub, or a console that matches the
-   declared expectation but shows no generic panic reports today's lists unchanged and runs no
-   probe in the last two cases.
-3. `debug.start_session(run, "gdbstub")` on outcome 1 falls through to the existing
+1. A boot recording `expected_crash_observed` from the readiness-failure path, on a
+   gdbstub-provisioned System whose console panics and whose stub answers, reports
+   `available_capture` containing `gdbstub` and `inert_capture` without it.
+2. The same boot with an unreachable stub reports today's lists and probes exactly once. With an
+   unprovisioned stub, or a console matching the declared expectation without a generic panic, it
+   reports today's lists and never probes.
+3. A boot downgraded by `evaluate_expected_failure_after_ready` never probes and reports today's
+   lists, whatever its console shows.
+4. `debug.start_session(run, "gdbstub")` on outcome 1 falls through to the existing
    System-ready/occupied checks and attaches.
-4. `debug.start_session(run, "gdbstub")` on outcome 2 is refused with the new gdbstub detail.
-5. `debug.start_session(run, "drgn-live")` on any `expected_crash_observed` run is refused with
+5. `debug.start_session(run, "gdbstub")` on outcomes 2 and 3 is refused with the new gdbstub
+   detail.
+6. `debug.start_session(run, "drgn-live")` on any `expected_crash_observed` run is refused with
    `CONSOLE_CRASH_GUIDANCE`, unchanged.
-6. `runs.get` emits `inert_capture_reason` only alongside a non-empty `inert_capture`.
-7. The `debug.start_session` wrapper docstring states the admission and its precondition.
+7. `runs.get` on outcome 1 names `debug.start_session` in `suggested_next_actions`; on outcomes 2
+   and 3 it names today's `["postmortem.crash", "vmcore.fetch"]` unchanged.
+8. The `debug.start_session` wrapper docstring states the admission and its precondition.
 
 ## Validation
 
 The plan's per-task Verification inventories carry the concrete tests, red observations, and
 green commands. Mapped to the success criteria above:
 
-- Successes 1 and 2 — focused-test, `tests/jobs/handlers/test_runs_boot.py` (plan Task 1): the
-  capture pair across all four gate combinations, and a connector fake proving no probe runs on
-  the two unprobed combinations.
-- Successes 3, 4, and 5 — focused-test, `tests/mcp/debug/test_debug_tools.py` (plan Task 2).
-- Success 6 — focused-test, `tests/mcp/lifecycle/test_runs_tools.py` (plan Task 3).
-- Success 7 — task-test-not-applicable. The changed surface is prose in the `@app.tool`
+- Successes 1, 2, and 3 — focused-test, `tests/jobs/handlers/test_runs_boot.py` (plan Task 1):
+  the capture pair across every gate combination, and a connector fake proving no probe runs on
+  the unprobed ones.
+- Successes 4, 5, and 6 — focused-test, `tests/mcp/debug/test_debug_tools.py` (plan Task 2).
+- Success 7 — focused-test, `tests/mcp/lifecycle/test_runs_tools.py` (plan Task 3).
+- Success 8 — task-test-not-applicable. The changed surface is prose in the `@app.tool`
   docstring FastMCP serializes; the only executable observation would search for or snapshot
   that wording, which the plan contract forbids. Reviewed against AGENTS.md instead.
 - Whole tree — `just lint`, `just type`, `just adr-status-check`, `just test`, `just ci`.
