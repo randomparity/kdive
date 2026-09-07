@@ -12,9 +12,10 @@ then stop before core records the acknowledgement or the authority admits a prov
 The expired job remains `running`, but ordinary claim eligibility requires
 `attempt < max_attempts`. Generic abandoned-job repair deliberately cannot terminalize an
 authority-marked job because it has no authority receipt. The exact acknowledged no-mutation
-state is consequently stranded even though ADR-0625 permits a successor authority. Failed
-successor watermark attempts made before ADR-0625 can also leave newer allocating authority rows
-while the trusted head remains on an older acknowledged predecessor.
+state is consequently stranded even though ADR-0625 permits a successor authority. Successor
+allocations made before ADR-0625 can also remain unanchored when their watermark was never
+appended, leaving newer allocating authority rows while the trusted head remains on an older
+acknowledged predecessor.
 
 ## Decision
 
@@ -36,6 +37,13 @@ receive another claim only after it independently produces another exact acknowl
 no-mutation head. The queue-depth function uses the same eligibility predicate as claim. Integer
 exhaustion fails closed rather than wrapping either counter.
 
+Each acknowledged-head proof is consumed durably and atomically with the exceptional claim. The
+same head cannot extend the budget again after the replacement allocates a newer authority. A
+later extension requires a newly anchored and independently acknowledged head. The claim database
+does not reconcile the authority host's journal file: a longer local suffix or any file/database
+divergence remains operator-repair-only, and the authority service continues to refuse provider
+access until the exact trusted bytes are restored.
+
 ## Consequences
 
 The queue no longer strands the recoverable state that ADR-0625 admits. The exception does not
@@ -45,7 +53,8 @@ generation, so stale worker and result fences remain intact.
 
 `max_attempts` continues to bound ordinary dispatches. Its persisted value may grow by one only as
 part of an acknowledged no-mutation replacement claim, making the exceptional allowance visible
-in the job row.
+in the job row. The consumed proof row makes the one-time allowance durable across worker,
+authority, and database-process restarts.
 
 ## Considered & rejected
 

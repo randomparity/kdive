@@ -1,5 +1,28 @@
 -- Recover a final charged claim that ended after authority acknowledgement but before mutation.
 -- ADR-0626 narrows this exception to exact durable no-mutation evidence.
+CREATE TABLE public.external_boot_acknowledged_retry_consumptions (
+    job_id uuid NOT NULL REFERENCES public.jobs(id) ON DELETE RESTRICT,
+    proof_authority_id uuid NOT NULL
+        REFERENCES public.external_boot_authorities(id) ON DELETE RESTRICT,
+    proof_generation bigint NOT NULL CHECK (proof_generation > 0),
+    proof_sequence bigint NOT NULL CHECK (proof_sequence > 0),
+    proof_digest text NOT NULL CHECK (proof_digest ~ '^sha256:[0-9a-f]{64}$'),
+    claimed_attempt integer NOT NULL CHECK (claimed_attempt > 0),
+    consumed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (
+        job_id, proof_authority_id, proof_generation, proof_sequence, proof_digest
+    ),
+    UNIQUE (job_id, claimed_attempt)
+);
+
+CREATE TRIGGER external_boot_acknowledged_retry_consumptions_immutable
+    BEFORE UPDATE OR DELETE ON public.external_boot_acknowledged_retry_consumptions
+    FOR EACH ROW EXECUTE FUNCTION public.reject_external_boot_authority_immutable_row();
+
+REVOKE ALL ON TABLE public.external_boot_acknowledged_retry_consumptions
+    FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
+         kdive_provider_authority;
+
 CREATE FUNCTION public.has_acknowledged_external_boot_retry_proof(p_job public.jobs)
 RETURNS boolean
 LANGUAGE sql
@@ -77,6 +100,15 @@ AS $$
           AND head.digest = 'sha256:' || encode(sha256(convert_to(
               public.canonical_external_boot_authority_json(head.head_record), 'UTF8'
           )), 'hex')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM public.external_boot_acknowledged_retry_consumptions AS consumed
+              WHERE consumed.job_id = p_job.id
+                AND consumed.proof_authority_id = predecessor.id
+                AND consumed.proof_generation = predecessor.generation
+                AND consumed.proof_sequence = head.sequence
+                AND consumed.proof_digest = head.digest
+          )
           AND (
               (
                   predecessor.id = authority.id
@@ -156,6 +188,52 @@ REVOKE ALL ON FUNCTION public.has_acknowledged_external_boot_retry_proof(public.
     FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
          kdive_provider_authority;
 
+CREATE FUNCTION public.consume_acknowledged_external_boot_retry_proof(p_job public.jobs)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+RETURNS NULL ON NULL INPUT
+SET search_path = ''
+AS $$
+DECLARE
+    v_claimed_attempt integer;
+BEGIN
+    IF p_job.attempt <> p_job.max_attempts OR p_job.max_attempts >= 2147483647
+       OR NOT public.has_acknowledged_external_boot_retry_proof(p_job) THEN
+        RAISE EXCEPTION 'acknowledged external boot retry proof is not claimable'
+            USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO public.external_boot_acknowledged_retry_consumptions (
+        job_id, proof_authority_id, proof_generation, proof_sequence, proof_digest,
+        claimed_attempt
+    )
+    SELECT p_job.id, head.authority_id, head.generation, head.sequence, head.digest,
+           p_job.attempt + 1
+    FROM public.external_boot_authority_counters AS counter
+    JOIN public.external_boot_authorities AS authority
+      ON authority.system_id = counter.system_id
+     AND authority.generation = counter.last_generation
+     AND authority.job_id = p_job.id
+     AND authority.job_attempt = p_job.attempt
+    JOIN public.external_boot_authority_journal_heads AS head
+      ON head.system_id = authority.system_id
+     AND head.authority_instance = authority.authority_instance
+     AND head.operation_identity = authority.operation_identity
+    WHERE public.has_acknowledged_external_boot_retry_proof(p_job)
+    ON CONFLICT DO NOTHING
+    RETURNING claimed_attempt INTO v_claimed_attempt;
+    IF v_claimed_attempt IS NULL THEN
+        RAISE EXCEPTION 'acknowledged external boot retry proof was already consumed'
+            USING ERRCODE = '40001';
+    END IF;
+    RETURN p_job.max_attempts + 1;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.consume_acknowledged_external_boot_retry_proof(public.jobs)
+    FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
+         kdive_provider_authority;
+
 DO $$
 DECLARE
     v_function regprocedure;
@@ -195,7 +273,8 @@ DECLARE
     v_new constant text :=
         E'        attempt = attempt + 1,\n' ||
         E'        max_attempts = CASE\n' ||
-        E'            WHEN attempt = max_attempts THEN max_attempts + 1\n' ||
+        E'            WHEN attempt = max_attempts\n' ||
+        E'            THEN public.consume_acknowledged_external_boot_retry_proof(jobs)\n' ||
         E'            ELSE max_attempts\n' ||
         E'        END,\n' ||
         E'        lease_expires_at = v_lease_deadline,';

@@ -911,6 +911,55 @@ def _register_worker(migrated_url: str, prefix: str, credential: bytes) -> str:
     return worker_id
 
 
+def _assert_acknowledged_proof_consumed_once(
+    migrated_url: str,
+    role_dsns: _RoleDsns,
+    case: Any,
+    authority: Any,
+    acknowledgement: JournalRecordV1,
+) -> None:
+    with psycopg.connect(migrated_url) as connection:
+        consumption = connection.execute(
+            "SELECT proof_authority_id,proof_generation,proof_sequence,proof_digest,"
+            "claimed_attempt FROM external_boot_acknowledged_retry_consumptions "
+            "WHERE job_id=%s",
+            (case.job_id,),
+        ).fetchone()
+        assert consumption == (
+            authority.authority_id,
+            authority.generation,
+            acknowledgement.sequence,
+            record_digest(acknowledgement),
+            4,
+        )
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=%s",
+            (case.job_id,),
+        )
+    with (
+        psycopg.connect(migrated_url, autocommit=True) as connection,
+        pytest.raises(psycopg.errors.RaiseException, match="immutable"),
+    ):
+        connection.execute(
+            "UPDATE external_boot_acknowledged_retry_consumptions "
+            "SET consumed_at=now() WHERE job_id=%s",
+            (case.job_id,),
+        )
+    credential = b"z" * 32
+    worker_id = _register_worker(migrated_url, "unanchored-successor-5", credential)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT count_claimable_worker_jobs(ARRAY['default'])"
+        ).fetchone() == (0,)
+        assert (
+            worker.execute(
+                "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+                (worker_id, credential),
+            ).fetchone()
+            is None
+        )
+
+
 def _seed_exhausted_acknowledged_job(
     migrated_url: str,
     role_dsns: _RoleDsns,
@@ -939,7 +988,6 @@ def _seed_exhausted_acknowledged_job(
 
 
 def test_acknowledged_retry_proof_helper_is_private(migrated_url: str) -> None:
-    signature = "has_acknowledged_external_boot_retry_proof(jobs)"
     with psycopg.connect(migrated_url) as connection:
         for role in (
             "kdive_server",
@@ -948,8 +996,16 @@ def test_acknowledged_retry_proof_helper_is_private(migrated_url: str) -> None:
             "kdive_lifecycle_witness",
             "kdive_provider_authority",
         ):
+            for signature in (
+                "has_acknowledged_external_boot_retry_proof(jobs)",
+                "consume_acknowledged_external_boot_retry_proof(jobs)",
+            ):
+                assert connection.execute(
+                    "SELECT has_function_privilege(%s,%s,'EXECUTE')", (role, signature)
+                ).fetchone() == (False,)
             assert connection.execute(
-                "SELECT has_function_privilege(%s,%s,'EXECUTE')", (role, signature)
+                "SELECT has_table_privilege(%s,%s,'SELECT,INSERT,UPDATE,DELETE')",
+                (role, "external_boot_acknowledged_retry_consumptions"),
             ).fetchone() == (False,)
 
 
@@ -1054,6 +1110,9 @@ def test_exhausted_job_validates_unanchored_successor_authorities(
         )
         successor = _allocate(worker, successor_case)
     assert successor.generation == latest.generation + 1 == 4
+    _assert_acknowledged_proof_consumed_once(
+        migrated_url, authority_role_dsns, first_case, first, acknowledgement
+    )
     successor_watermark = _record(
         successor_case,
         successor,
