@@ -1,8 +1,9 @@
 """The debian-family (apt + kdump-tools) rootfs FamilyCustomizer (ADR-0251, ADR-0345, #824).
 
-Emits the ordered customization ``Step``s that turn a Debian genericcloud base into a kdive-ready
-rootfs; ``customize_via = "virt_customize"``, so the build plane renders them to virt-customize
-argv and applies them offline (ADR-0345).
+Emits the ordered customization ``Step``s that turn a Debian-family cloud base (Debian
+genericcloud, Ubuntu server cloudimg) into a kdive-ready rootfs. The build plane boots the image
+once and the guest runs ``apt-get`` itself (ADR-0345, #1167) — the same customization boot the
+rhel family uses, so the build needs no libguestfs appliance network and works cross-arch.
 Debian diverges from ``rhel`` in ways that need a distinct family (all verified against the Debian
 package database / manpages, 2026-06-26): apt package names (``kdump-tools``, ``python3-drgn``,
 ``crash``); ``kdump-tools.service`` not ``kdump.service``; ``ssh.service`` not ``sshd.service``;
@@ -17,7 +18,6 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
 
 from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
@@ -69,6 +69,11 @@ _USE_KDUMP_CMD = (
     "sed -i '/^[[:space:]]*#\\?[[:space:]]*USE_KDUMP[[:space:]]*=/d' /etc/default/kdump-tools && "
     "printf 'USE_KDUMP=1\\n' >> /etc/default/kdump-tools"
 )
+# A cloud base ships no (or a stale) apt index, so the guest refreshes it before the install; the
+# non-interactive frontend keeps a package postinst from stalling the customization boot on a
+# debconf prompt. Both run in the guest during the customization boot (ADR-0345).
+_APT_UPDATE_CMD = "apt-get update"
+_APT_INSTALL_COMMAND = "DEBIAN_FRONTEND=noninteractive apt-get -y install"
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 # run_guestfs_tool returns the tool's stdout (for callers that parse a native guestfish query);
@@ -80,7 +85,7 @@ class DebianFamily:
     family = "debian"
     kdump_unit = "kdump-tools.service"
     guest_mac = "apparmor"
-    customize_via: Literal["boot", "virt_customize"] = "virt_customize"
+    install_command = _APT_INSTALL_COMMAND
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         del distro, version
@@ -99,7 +104,7 @@ class DebianFamily:
 
     def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
         """Build the ordered steps that turn the Debian base into a kdive-ready rootfs."""
-        steps: list[Step] = [InstallPackages(ctx.packages)]
+        steps: list[Step] = [RunCommand(_APT_UPDATE_CMD), InstallPackages(ctx.packages)]
         # Enable ssh exactly when this image declares the SSH capability, which ``capabilities()``
         # ties to ``kind`` (every debug image, never a build-host image). Gating on ``kind`` (not
         # package membership) keeps the declaration and the enable from diverging: a debug image
@@ -131,18 +136,14 @@ class DebianFamily:
         steps.append(RunCommand(f"systemctl enable {READINESS_MARKER}.service"))
         return steps
 
-    def normalize(
-        self, qcow2: Path, *, relabel: bool = True, _run_guestfs: RunGuestfs = run_guestfs_tool
-    ) -> None:
+    def normalize(self, qcow2: Path, *, _run_guestfs: RunGuestfs = run_guestfs_tool) -> None:
         """Normalize fstab to a lone ``/`` and drop crypttab via guestfish (#824).
 
         Unlike the rhel family there is no SELinux relabel: Debian's AppArmor is profile-based
         (loaded from ``/etc/apparmor.d/`` at boot, not from xattrs the tar->ext4 repack strips), its
         default policy leaves sshd unconfined so the injected authorized_keys is not blocked, and
-        the genericcloud base ships no ``/etc/selinux/config`` to edit. ``relabel`` is accepted for
-        the shared :class:`FamilyCustomizer` signature but ignored (no SELinux, ADR-0345).
+        the genericcloud base ships no ``/etc/selinux/config`` to edit.
         """
-        del relabel
         with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as fstab_handle:
             fstab_handle.write(FSTAB)
             fstab_path = Path(fstab_handle.name)

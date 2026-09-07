@@ -233,11 +233,10 @@ makedumpfile_version = "1.7.6"  # trixie
 drgn_version = "0.0.31"  # trixie (python3-drgn 0.0.31-1); at the BTF-capability threshold
 source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/trixie/20260623-2518/debian-13-genericcloud-amd64-20260623-2518.qcow2", sha256 = "e32d03ec8f05b0b3a4c16e8cc0a5424efa78514141a60a2656623cf422cc6416" }  # pragma: allowlist secret
 
-# N/A (ppc64le, deferred to #1167): Debian publishes only the `generic`/`nocloud` ppc64el variant,
-# not the `genericcloud` variant these x86_64 rows pin, and the debian family is still
-# customize_via="virt_customize" — it cannot cross-arch customize-boot on an x86_64 host until the
-# debian->boot migration (#1167) lands. Debian ppc64le rows are added there, not here; guarded by
-# test_rootfs_catalog.py (ADR-0350, #1152).
+# N/A (ppc64le): Debian publishes only the `generic`/`nocloud` ppc64el variant, not the
+# `genericcloud` variant these x86_64 rows pin. The debian family rides the customization boot
+# since #1167, so the mechanism no longer blocks a cross-arch row; one is added with a suitable base
+# and its TCG proof, not here. Guarded by test_rootfs_catalog.py (ADR-0350, #1152).
 #
 # Scope note (ppc64le): fedora-kdive-build-44 (build-host toolchain) gets no ppc64le sibling — a
 # ppc64le build host only matters for compiling ppc64le kernels, a lane unproven in epic #1139;

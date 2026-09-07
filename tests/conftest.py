@@ -29,8 +29,6 @@ values exported by live_vm jobs. A test that exercises S3 absence builds its own
 The session-scoped autouse ``session_owned_tempdir`` fixture repoints the default temp root at
 pytest's base temp directory, so an unnamed ``tempfile`` destination is bounded by pytest's
 rotation instead of accumulating in ``/tmp`` until the filesystem runs out of inodes (#1613).
-The ``staged_cleanup`` fixture is the matching explicit owner for ``render_argv``'s staged
-host tempfiles.
 """
 
 from __future__ import annotations
@@ -142,8 +140,8 @@ def session_owned_tempdir(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
     Rebinding the default root to pytest's base temp directory makes the leak bounded instead of
     unbounded: pytest already garbage-collects all but the three most recent base temp roots, so a
     forgotten unlink costs a directory for a few runs rather than forever. This is a backstop, not
-    a licence — a helper that creates temp state should still own its lifecycle (see
-    ``staged_cleanup``), and ``tests/guards/test_temp_file_hygiene.py`` pins the backstop itself.
+    a licence — a helper that creates temp state should still own its lifecycle, and
+    ``tests/guards/test_temp_file_hygiene.py`` pins the backstop itself.
     """
     previous_tempdir = tempfile.tempdir
     previous_env = os.environ.get("TMPDIR")
@@ -164,22 +162,6 @@ def standard_test_umask() -> Iterator[None]:
     previous_umask = os.umask(0o022)
     yield
     os.umask(previous_umask)
-
-
-@pytest.fixture
-def staged_cleanup() -> Iterator[list[Path]]:
-    """The ``cleanup`` list :func:`kdive.images.families.renderers.render_argv` stages files into.
-
-    ``render_argv`` writes each ``StageFile`` step's content to a host tempfile and appends the
-    path to this list, leaving the *caller* to unlink them once ``virt-customize`` has consumed
-    them. Production passes a list it drains; a test that passes a throwaway ``[]`` discards the
-    only handle to the staged files and leaks them. This fixture is the test-side owner: the test
-    body can still read what was staged, and teardown unlinks it.
-    """
-    staged: list[Path] = []
-    yield staged
-    for path in staged:
-        path.unlink(missing_ok=True)
 
 
 @pytest.fixture(autouse=True)
