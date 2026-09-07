@@ -2419,6 +2419,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route every control teardown through authority
 - Preserve investigation lock order
 - Preserve SSH authorization replays
+- Explain missing Mermaid dependencies
 
 ### Security
 
