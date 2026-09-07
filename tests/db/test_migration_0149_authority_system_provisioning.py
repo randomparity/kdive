@@ -52,15 +52,15 @@ def _wait_for_advisory_wait(
     raise AssertionError("authority contender did not wait on the System lock")
 
 
-def test_migration_0148_is_registered_last() -> None:
+def test_migration_0149_is_registered_last() -> None:
     migrations = migrate.discover_migrations()
     assert (migrations[-1].version, migrations[-1].filename) == (
-        "0148",
-        "0148_authority_owned_system_provisioning.sql",
+        "0149",
+        "0149_authority_owned_system_provisioning.sql",
     )
 
 
-def test_0148_installs_two_private_tables_and_exact_function_grants(
+def test_0149_installs_two_private_tables_and_exact_function_grants(
     migrated_url: str, request: pytest.FixtureRequest
 ) -> None:
     role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
@@ -143,7 +143,7 @@ def test_0148_installs_two_private_tables_and_exact_function_grants(
                 restricted.execute("SELECT * FROM authority_system_attempts").fetchall()
 
 
-def test_0148_ownership_head_is_global_and_binding_is_immutable(migrated_url: str) -> None:
+def test_0149_ownership_head_is_global_and_binding_is_immutable(migrated_url: str) -> None:
     with psycopg.connect(migrated_url) as conn:
         resource_id, allocation_id, system_id, image_id = (uuid4() for _ in range(4))
         conn.execute(
@@ -187,7 +187,7 @@ def test_0148_ownership_head_is_global_and_binding_is_immutable(migrated_url: st
             )
 
 
-def test_0148_attempt_ack_and_receipt_tuples_are_closed(migrated_url: str) -> None:
+def test_0149_attempt_ack_and_receipt_tuples_are_closed(migrated_url: str) -> None:
     with psycopg.connect(migrated_url) as conn:
         constraints = {
             row[0]
@@ -202,7 +202,7 @@ def test_0148_attempt_ack_and_receipt_tuples_are_closed(migrated_url: str) -> No
     assert "authority_system_attempts_terminal_shape" in constraints
 
 
-def test_0148_repair_definition_follows_owned_terminal_attempt(migrated_url: str) -> None:
+def test_0149_repair_definition_follows_owned_terminal_attempt(migrated_url: str) -> None:
     with psycopg.connect(migrated_url) as conn:
         row = conn.execute(
             "SELECT pg_get_functiondef("
@@ -215,7 +215,7 @@ def test_0148_repair_definition_follows_owned_terminal_attempt(migrated_url: str
     assert "attempt.state = 'terminal'" in definition
 
 
-def test_0148_reconciler_consumes_terminal_row_selected_by_ownership(
+def test_0149_reconciler_consumes_terminal_row_selected_by_ownership(
     migrated_url: str, request: pytest.FixtureRequest
 ) -> None:
     role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
@@ -311,7 +311,7 @@ def test_0148_reconciler_consumes_terminal_row_selected_by_ownership(
         ).fetchone() == (True,)
 
 
-def test_0148_worker_authority_journal_and_exact_receipt_replay(
+def test_0149_worker_authority_journal_and_exact_receipt_replay(
     migrated_url: str, request: pytest.FixtureRequest
 ) -> None:
     role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
@@ -663,7 +663,7 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
     assert json.loads(receipt)["disposition"] == "provision-ready"
 
 
-def test_0148_allocation_supersedes_only_dead_unacknowledged_candidate(
+def test_0149_allocation_supersedes_only_dead_unacknowledged_candidate(
     migrated_url: str, request: pytest.FixtureRequest
 ) -> None:
     role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")

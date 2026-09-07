@@ -293,6 +293,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_LIVE_VM_GDBMI_MODULE_KO` | — | Path to a loaded module .ko for the optional gated gdb-MI module-symbol load smoke. Unset → that portion of the test skips. |
 | `KDIVE_LIVE_VM_GDBMI_MODULE_NAME` | — | Loaded module name matching KDIVE_LIVE_VM_GDBMI_MODULE_KO for the optional gated gdb-MI module-symbol load smoke. Defaults to the .ko path stem. |
 | `KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG` | — | Path to the owner-only JSON configuration for the installed local-authority native carrier (#2151). Names an exact installed revision and disposable System; unset skips, while unsafe configuration or mismatched running builds fails before fixture mutation. |
+| `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG` | — | Path to the owner-only closed JSON configuration for the installed remote-authority proof support (#2151); unset leaves the support dormant, while an unsafe configuration fails before any remote control. |
 | `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE` | — | Operator-staged base-image volume name the live_vm_remote provision profile feeds into base_image_volume (#1424, ADR-0425). Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
 | `KDIVE_LIVE_VM_REMOTE_GDB_ADDR` | — | IP-literal GDB listen address for the live_vm_remote external-boot carrier. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
 | `KDIVE_LIVE_VM_REMOTE_INITRD` | — | Readable local initrd supplied to the live_vm_remote external-boot carrier. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |

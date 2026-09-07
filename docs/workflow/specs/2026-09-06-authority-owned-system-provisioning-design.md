@@ -197,7 +197,7 @@ Retained quarantine keeps the System nonterminal and capacity charged.
 First activation inserts its activation and calls
 `claim_authority_system_first_activation` in the same System-locked transaction.
 Only ownership `ready` succeeds and becomes `activated`; teardown-requested
-blocks. Migration 0148 patches the existing 0147 finalizer so authenticated
+blocks. Migration 0149 patches the existing 0147 finalizer so authenticated
 activated teardown also changes ownership to `torn-down` atomically.
 
 No authority-owned System reaches ordinary provisioner or reprovisioner ports.

@@ -61,5 +61,6 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0145", "0145_remote_module_cleanup_evidence.sql"),
         ("0146", "0146_external_boot_remote_module_attempt.sql"),
         ("0147", "0147_external_boot_system_teardown.sql"),
-        ("0148", "0148_authority_owned_system_provisioning.sql"),
+        ("0148", "0148_acknowledged_authority_retry.sql"),
+        ("0149", "0149_authority_owned_system_provisioning.sql"),
     ]

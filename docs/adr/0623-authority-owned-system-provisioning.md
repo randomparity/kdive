@@ -43,7 +43,7 @@ absent.
 
 ## Consequences
 
-Migration 0148 adds two protected tables and closed role-specific functions.
+Migration 0149 adds two protected tables and closed role-specific functions.
 Generic worker completion, failure, and abandoned-job repair cannot finalize a
 marked operation. A completion-owned authority task may outlive a caller or job
 lease long enough to persist its terminal receipt; a worker or reconciler can

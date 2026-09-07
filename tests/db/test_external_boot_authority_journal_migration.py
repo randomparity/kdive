@@ -800,6 +800,76 @@ def test_full_current_mutation_phase_sequence_and_rejections(
         )
 
 
+def test_acknowledged_authority_without_mutation_allows_successor_watermark(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """A crashed worker may be replaced before its acknowledged operation begins."""
+    first_case, first = _seed_allocated(migrated_url, authority_role_dsns, "q")
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        watermark = _record(first_case, first, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+        assert (
+            _advance_raw(connection, first_case, first, 0, GENESIS_DIGEST, _payload(watermark))
+            == "advanced"
+        )
+        acknowledgement = _record(
+            first_case,
+            first,
+            2,
+            record_digest(watermark),
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            watermark_sequence=1,
+            watermark_digest=record_digest(watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                first_case,
+                first,
+                1,
+                record_digest(watermark),
+                _payload(acknowledgement),
+            )
+            == "advanced"
+        )
+    _promote(migrated_url, first_case, first, acknowledgement)
+    successor_case, successor = _allocate_successor(
+        migrated_url, authority_role_dsns, first_case, new_peer=True
+    )
+    successor_watermark = _record(
+        successor_case,
+        successor,
+        3,
+        record_digest(acknowledgement),
+        JournalPhase.WATERMARK_INSTALLED,
+    )
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                2,
+                record_digest(acknowledgement),
+                _payload(successor_watermark),
+            )
+            == "advanced"
+        )
+        head = _head(connection, successor_case, successor)
+        assert head is not None
+        assert head[:6] == (
+            3,
+            record_digest(successor_watermark),
+            "watermark-installed",
+            successor.authority_id,
+            successor.generation,
+            successor_case.operation_identity,
+        )
+
+
 def test_full_teardown_journal_sequence_uses_the_null_identity_pair(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:

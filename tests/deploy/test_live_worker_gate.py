@@ -61,6 +61,9 @@ def _gate_env(tmp_path: Path, python: Path) -> tuple[dict[str, str], Path]:
         "KDIVE_INSTALL_STAGING": "/install",
         "KDIVE_KERNEL_SRC": "/checkout/linux",
         "KDIVE_LIVE_WORKER_STATE_ROOT": str(root),
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "10737418240",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "10737418240",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": "authority-recovery-store",
         "KDIVE_LIBVIRT_URI": "qemu+unix:///session?socket=/run/libvirt.sock",
         "KDIVE_LIBVIRT_RECOVERY_ROOT": "/recovery/kdive-worker-1",
         "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "10737418240",
@@ -215,6 +218,18 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         "KDIVE_HEALTH_BIND_ADDR": env["KDIVE_HEALTH_BIND_ADDR"],
         "KDIVE_INSTALL_STAGING": env["KDIVE_INSTALL_STAGING"],
         "KDIVE_KERNEL_SRC": env["KDIVE_KERNEL_SRC"],
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": env[
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES"
+        ],
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": env[
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES"
+        ],
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": env[
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY"
+        ],
+        "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": env[
+            "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"
+        ],
         "KDIVE_LIBVIRT_URI": env["KDIVE_LIBVIRT_URI"],
         "KDIVE_LOG_LEVEL": "INFO",
         "KDIVE_ROOTFS_DIR": env["KDIVE_ROOTFS_DIR"],
@@ -244,7 +259,6 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
     monkeypatch.setattr(os, "environ", captured["environment"])
     environment = cast(dict[str, str], captured["environment"])
     assert "KDIVE_LIBVIRT_RECOVERY_ROOT" not in environment
-    assert "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES" not in environment
     credential = Path(environment["CREDENTIALS_DIRECTORY"]) / "worker-incarnation"
     assert worker_incarnation_credential(credential).get_secret_value() == "systemd-secret"
     assert worker_incarnation_credential().get_secret_value() == "systemd-secret"

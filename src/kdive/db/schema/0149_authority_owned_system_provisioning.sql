@@ -1,4 +1,4 @@
--- ADR-0623: activation-free authority ownership for initial System provisioning.
+-- ADR-0623: activation-free authority ownership for initial System provisioning (migration 0149).
 
 CREATE TABLE public.authority_system_ownership (
     system_id uuid PRIMARY KEY REFERENCES public.systems (id) ON DELETE RESTRICT,

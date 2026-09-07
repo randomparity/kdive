@@ -44,6 +44,8 @@ provider_authority_host_remote_libvirt_storage_pool: default
 provider_authority_host_system_manifest_source: ""
 provider_authority_host_system_local_bases: []
 provider_authority_host_system_remote_bases: []
+# ADR-0622 test-only control surface; absent unless explicitly enabled on a disposable proof host.
+provider_authority_host_fault_proof_enabled: false
 provider_authority_host_packages:
   Debian: [acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev, libkdumpfile-dev, e2fsprogs]
   RedHat: [acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel, elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel, e2fsprogs]
