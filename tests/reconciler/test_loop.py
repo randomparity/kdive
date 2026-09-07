@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import fields
 from datetime import timedelta
-from typing import cast
+from typing import Any, cast
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import psycopg
@@ -31,9 +33,13 @@ from kdive.reconciler.loop import (
     ReconcileReport,
     reconcile_once,
 )
+from kdive.reconciler.repairs import jobs as job_repairs
 from kdive.reconciler.repairs.allocations import has_active_capture_job
 from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
-from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
+from kdive.reconciler.repairs.jobs import (
+    repair_abandoned_jobs,
+    repair_terminal_authority_system_attempts,
+)
 from kdive.reconciler.repairs.systems import repair_orphaned_systems
 from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import (
@@ -278,6 +284,14 @@ def test_zombie_authority_marked_job_is_left_for_the_authority_path(migrated_url
                 attempt=3,
                 max_attempts=3,
             )
+            system_marked = await seed_running_job(
+                seed,
+                "dk-zombie-system-marked",
+                payload={"authority_system_v1": {"operation": "provision"}},
+                lease_seconds=-60,
+                attempt=3,
+                max_attempts=3,
+            )
             unmarked = await seed_running_job(
                 seed, "dk-zombie-unmarked", lease_seconds=-60, attempt=3, max_attempts=3
             )
@@ -287,13 +301,200 @@ def test_zombie_authority_marked_job_is_left_for_the_authority_path(migrated_url
         async with await connect(migrated_url) as check:
             cur = await check.execute(
                 "SELECT id, state, error_category FROM jobs WHERE id = ANY(%s) ORDER BY dedup_key",
-                ([marked, unmarked],),
+                ([marked, system_marked, unmarked],),
             )
             rows = await cur.fetchall()
         assert rows == [
             (marked, "running", None),
+            (system_marked, "running", None),
             (unmarked, "failed", "lease_expired"),
         ]
+
+    asyncio.run(_run())
+
+
+def test_terminal_authority_system_receipts_are_repaired_after_generic_abandoned_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_reconcile_config()
+    seen: list[tuple[object, object]] = []
+
+    async def repair(conn: object, store: object) -> int:
+        seen.append((conn, store))
+        return 4
+
+    monkeypatch.setattr(loop, "_repair_terminal_authority_system_attempts", repair)
+    plan = loop._repair_plan(
+        reaper=NullReaper(),
+        config=config,
+        image_publish_grace=timedelta(hours=1),
+    )
+    names = [spec.name for spec in plan]
+
+    assert "terminal_authority_system_attempts" in names
+    assert names.index("abandoned_jobs") < names.index("terminal_authority_system_attempts")
+    conn = object()
+    selected = next(spec for spec in plan if spec.name == "terminal_authority_system_attempts")
+    assert asyncio.run(selected.repair(cast(Any, conn))) == 4
+    assert seen == [(conn, config.upload_store)]
+
+
+def test_terminal_authority_system_receipt_repair_uses_the_fixed_batch_limit() -> None:
+    authority_id, system_id = uuid4(), uuid4()
+    digest = "sha256:" + "a" * 64
+    candidate = (authority_id, 2, system_id, 7, digest, digest)
+    events: list[str] = []
+
+    class Connection:
+        statement = ""
+        statements: list[tuple[str, tuple[object, ...]]] = []
+
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
+        @asynccontextmanager
+        async def cursor(self):
+            yield self
+
+        async def execute(self, query: str, params: tuple[object, ...]) -> None:
+            self.statement = query
+            self.statements.append((query, params))
+            events.append(
+                "list"
+                if "list_authority_system" in query
+                else "finalize"
+                if "finalize_authority_system" in query
+                else "provision"
+            )
+
+        async def fetchone(self) -> tuple[int] | tuple[str]:
+            return ("applied",) if "finalize_authority_system" in self.statement else (2,)
+
+        async def fetchall(self) -> list[tuple[UUID, int, UUID, int, str, str]]:
+            return [candidate]
+
+    async def _run() -> None:
+        conn = Connection()
+        store = object()
+
+        async def reclaim(*args: object, **kwargs: object) -> None:
+            assert args[1:3] == (store, system_id)
+            assert kwargs == {
+                "reclaim_snapshot_ledger": True,
+                "discharge_mutation_obligations": True,
+            }
+            events.append("cleanup")
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(job_repairs, "reclaim_system_core_after_provider_teardown", reclaim)
+            assert (
+                await repair_terminal_authority_system_attempts(cast(Any, conn), cast(Any, store))
+                == 3
+            )
+        assert events == ["provision", "list", "cleanup", "finalize"]
+        assert conn.statements[0][1] == (100,)
+        assert conn.statements[1][1] == (100,)
+        assert conn.statements[2][1] == candidate
+
+    asyncio.run(_run())
+
+
+def test_terminal_authority_system_cleanup_interruption_retries_without_finalizing() -> None:
+    authority_id, system_id = uuid4(), uuid4()
+    digest = "sha256:" + "b" * 64
+    candidate = (authority_id, 3, system_id, 8, digest, digest)
+
+    class Connection:
+        statement = ""
+        finalize_calls = 0
+
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
+        @asynccontextmanager
+        async def cursor(self):
+            yield self
+
+        async def execute(self, query: str, _params: tuple[object, ...]) -> None:
+            self.statement = query
+            if "finalize_authority_system" in query:
+                self.finalize_calls += 1
+
+        async def fetchone(self) -> tuple[int] | tuple[str]:
+            return ("applied",) if "finalize_authority_system" in self.statement else (0,)
+
+        async def fetchall(self) -> list[tuple[UUID, int, UUID, int, str, str]]:
+            return [candidate]
+
+    async def _run() -> None:
+        conn = Connection()
+        interrupted = True
+        cleanups = 0
+
+        async def reclaim(*_args: object, **_kwargs: object) -> None:
+            nonlocal cleanups
+            cleanups += 1
+            if interrupted:
+                raise RuntimeError("interrupted cleanup")
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(job_repairs, "reclaim_system_core_after_provider_teardown", reclaim)
+            assert (
+                await repair_terminal_authority_system_attempts(
+                    cast(Any, conn), cast(Any, object())
+                )
+                == 0
+            )
+            assert conn.finalize_calls == 0
+            interrupted = False
+            assert (
+                await repair_terminal_authority_system_attempts(
+                    cast(Any, conn), cast(Any, object())
+                )
+                == 1
+            )
+            assert conn.finalize_calls == 1
+            # An exact duplicate repair remains idempotent: cleanup and finalization may replay.
+            assert (
+                await repair_terminal_authority_system_attempts(
+                    cast(Any, conn), cast(Any, object())
+                )
+                == 1
+            )
+        assert cleanups == 3
+        assert conn.finalize_calls == 2
+
+    asyncio.run(_run())
+
+
+def test_terminal_authority_system_cleanup_preserves_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_id, system_id = uuid4(), uuid4()
+    digest = "sha256:" + "c" * 64
+    candidate = (authority_id, 4, system_id, 9, digest, digest)
+    finalize = AsyncMock()
+
+    async def cancel(*_args: object, **_kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        job_repairs, "_repair_terminal_authority_system_provisions", AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr(
+        job_repairs, "_authority_system_teardown_candidates", AsyncMock(return_value=[candidate])
+    )
+    monkeypatch.setattr(job_repairs, "reclaim_system_core_after_provider_teardown", cancel)
+    monkeypatch.setattr(job_repairs, "_finalize_authority_system_teardown", finalize)
+
+    async def _run() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await repair_terminal_authority_system_attempts(
+                cast(Any, object()), cast(Any, object())
+            )
+        finalize.assert_not_awaited()
 
     asyncio.run(_run())
 

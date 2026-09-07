@@ -17,12 +17,17 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import AuthoritySystemSenderFactory
+from kdive.jobs.handlers.system_reclaim import (
+    RetiredKeyBatchDeleter,
+    reclaim_system_core_after_provider_teardown,
+)
 from kdive.jobs.payloads import SystemPayload, TeardownPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,
     AuthoritySystemMarkerV1,
     AuthoritySystemMutationRequestV1,
+    AuthoritySystemPreactivationAbsentV1,
     AuthoritySystemResponseV1,
     AuthoritySystemTakeoverRequestV1,
     canonical_system_authority_bytes,
@@ -37,6 +42,7 @@ class AuthoritySystemWorkerPorts:
     incarnation_credential: SecretStr
     secret_registry: SecretRegistry
     sender_factory: AuthoritySystemSenderFactory | None
+    artifact_store: RetiredKeyBatchDeleter
     request_timeout: timedelta = timedelta(minutes=5)
 
 
@@ -213,5 +219,13 @@ async def execute_authority_system_job(
     response = await _replay_once(
         lambda: sender.execute_system_operation(mutation, acknowledgement, deadline=deadline)
     )
+    if isinstance(response.proof, AuthoritySystemPreactivationAbsentV1):
+        await reclaim_system_core_after_provider_teardown(
+            conn,
+            ports.artifact_store,
+            marker.system_id,
+            reclaim_snapshot_ledger=True,
+            discharge_mutation_obligations=True,
+        )
     await _finalize(conn, job, allocated, response, ports.incarnation_credential)
     return response

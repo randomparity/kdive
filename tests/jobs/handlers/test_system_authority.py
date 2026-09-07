@@ -190,6 +190,7 @@ async def test_marked_provision_replays_lost_response_and_never_calls_worker_pro
             incarnation_credential=SecretStr("credential"),
             secret_registry=SecretRegistry(),
             sender_factory=sender_factory,
+            artifact_store=cast(Any, object()),
         ),
     )
     assert response.proof.disposition == "provision-ready"
@@ -220,10 +221,14 @@ async def test_marked_preactivation_teardown_creates_bootstrap_key_before_alloca
         events.append("allocate")
         return allocated
 
+    async def reclaim(*_args: object, **_kwargs: object) -> None:
+        events.append("reclaim")
+
     monkeypatch.setattr(system_authority, "ensure_system_bootstrap_key", ensure_key)
     monkeypatch.setattr(system_authority, "_allocate", allocate)
     monkeypatch.setattr(system_authority, "_acknowledge", AsyncMock(return_value=None))
     monkeypatch.setattr(system_authority, "_finalize", AsyncMock(return_value=None))
+    monkeypatch.setattr(system_authority, "reclaim_system_core_after_provider_teardown", reclaim)
     sender = _Sender()
 
     response = await execute_authority_system_job(
@@ -234,8 +239,61 @@ async def test_marked_preactivation_teardown_creates_bootstrap_key_before_alloca
             incarnation_credential=SecretStr("credential"),
             secret_registry=SecretRegistry(),
             sender_factory=lambda _binding, _marker: cast(Any, sender),
+            artifact_store=cast(Any, object()),
         ),
     )
 
     assert response.proof.disposition == "preactivation-absent"
-    assert events == ["bootstrap", "allocate"]
+    assert events == ["bootstrap", "allocate", "reclaim"]
+
+
+@pytest.mark.anyio
+async def test_preactivation_absence_reclaims_core_before_terminal_sql_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = _marker(AuthoritySystemOperation.PREACTIVATION_TEARDOWN)
+    job = _job(marker)
+    allocated = system_authority._Allocated(uuid4(), 2, _DIGEST_B)
+    events: list[str] = []
+    reclaim_attempts = 0
+    store = object()
+
+    async def reclaim(*args: object, **kwargs: object) -> None:
+        nonlocal reclaim_attempts
+        assert args[1:3] == (store, marker.system_id)
+        assert kwargs == {
+            "reclaim_snapshot_ledger": True,
+            "discharge_mutation_obligations": True,
+        }
+        reclaim_attempts += 1
+        events.append(f"reclaim-{reclaim_attempts}")
+        if reclaim_attempts == 1:
+            raise RuntimeError("retry cleanup")
+
+    async def finalize(*_args: object, **_kwargs: object) -> None:
+        events.append("finalize")
+
+    monkeypatch.setattr(
+        system_authority, "ensure_system_bootstrap_key", AsyncMock(return_value="k")
+    )
+    monkeypatch.setattr(system_authority, "_allocate", AsyncMock(return_value=allocated))
+    monkeypatch.setattr(system_authority, "_acknowledge", AsyncMock(return_value=None))
+    monkeypatch.setattr(system_authority, "_finalize", finalize)
+    monkeypatch.setattr(system_authority, "reclaim_system_core_after_provider_teardown", reclaim)
+    sender = _Sender()
+    ports = AuthoritySystemWorkerPorts(
+        resolver=cast(ProviderResolver, _Resolver()),
+        incarnation_credential=SecretStr("credential"),
+        secret_registry=SecretRegistry(),
+        sender_factory=lambda _binding, _marker: cast(Any, sender),
+        artifact_store=cast(Any, store),
+    )
+
+    with pytest.raises(RuntimeError, match="retry cleanup"):
+        await execute_authority_system_job(cast(Any, _Connection()), job, ports=ports)
+    assert events == ["reclaim-1"]
+
+    response = await execute_authority_system_job(cast(Any, _Connection()), job, ports=ports)
+
+    assert response.proof.disposition == "preactivation-absent"
+    assert events == ["reclaim-1", "reclaim-2", "finalize"]

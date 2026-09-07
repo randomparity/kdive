@@ -184,6 +184,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
             incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
             sender_factory=assembly.authority_system_sender_factory,
+            artifact_store=assembly.object_stores.store,
         ),
     )
     runs.register_handlers(
