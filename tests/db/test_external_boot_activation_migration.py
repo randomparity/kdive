@@ -192,6 +192,7 @@ def test_migration_creates_external_boot_tables_and_run_system_key(migrated_url:
             ).fetchall()
         }
         assert tables == {
+            "external_boot_acknowledged_retry_consumptions",
             "external_boot_activations",
             "external_boot_authorities",
             "external_boot_authority_acknowledgements",

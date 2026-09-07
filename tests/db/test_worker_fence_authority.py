@@ -165,6 +165,7 @@ _PROTECTED_TABLES = {
     "authority_system_ownership",
     "capture_operation_cutoff",
     "capture_operations",
+    "external_boot_acknowledged_retry_consumptions",
     "external_boot_authorities",
     "external_boot_authority_acknowledgements",
     "external_boot_authority_audit",
