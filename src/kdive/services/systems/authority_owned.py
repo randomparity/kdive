@@ -20,7 +20,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemOperation,
 )
 
-_BINDING_SQL = "SELECT * FROM resolve_authority_system_server_binding(%s)"
+_BINDING_SQL = "SELECT * FROM resolve_authority_system_control_binding(%s)"
 _OWNERSHIP_STATES = frozenset(
     {"provisioning", "ready", "teardown-requested", "torn-down", "activated", "repair-required"}
 )
@@ -110,6 +110,26 @@ def authority_owned_provision_system_id(job: Job) -> UUID | None:
     except (ValueError, TypeError) as exc:
         raise CategorizedError(
             "authority-owned provision job payload is malformed",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from exc
+
+
+def authority_owned_preactivation_teardown_system_id(job: Job) -> UUID | None:
+    """Return the System for an authority teardown, rejecting malformed marked payloads."""
+    if job.kind is not JobKind.TEARDOWN or "authority_system_v1" not in job.payload:
+        return None
+    try:
+        payload = load_payload(job, TeardownPayload)
+        marker = payload.authority_system_v1
+        if (
+            marker is None
+            or marker.operation is not AuthoritySystemOperation.PREACTIVATION_TEARDOWN
+        ):
+            raise ValueError("preactivation teardown marker missing")
+        return UUID(payload.system_id)
+    except (ValueError, TypeError) as exc:
+        raise CategorizedError(
+            "authority-owned teardown job payload is malformed",
             category=ErrorCategory.CONFIGURATION_ERROR,
         ) from exc
 

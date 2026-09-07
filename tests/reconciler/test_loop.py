@@ -34,6 +34,7 @@ from kdive.reconciler.loop import (
     reconcile_once,
 )
 from kdive.reconciler.repairs import jobs as job_repairs
+from kdive.reconciler.repairs import systems as system_repairs
 from kdive.reconciler.repairs.allocations import has_active_capture_job
 from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
 from kdive.reconciler.repairs.jobs import (
@@ -187,6 +188,37 @@ def test_multiple_orphaned_systems_all_counted(migrated_url: str) -> None:
             )
             row = await cur.fetchone()
             assert row is not None and row[0] == 3
+
+    asyncio.run(_run())
+
+
+def test_orphaned_system_failure_does_not_starve_sibling(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            failed_id = await seed_system(
+                seed, system_state=SystemState.READY, alloc_state=AllocationState.RELEASED
+            )
+            sibling_id = await seed_system(
+                seed, system_state=SystemState.READY, alloc_state=AllocationState.RELEASED
+            )
+        original = system_repairs.authority_system_binding
+
+        async def _binding(conn: psycopg.AsyncConnection, system_id: UUID):
+            if system_id == failed_id:
+                raise RuntimeError("injected admission failure")
+            return await original(conn, system_id)
+
+        monkeypatch.setattr(system_repairs, "authority_system_binding", _binding)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, repair_orphaned_systems)
+        assert count == 1
+        async with await connect(migrated_url) as check:
+            rows = await (
+                await check.execute("SELECT dedup_key FROM jobs WHERE kind='teardown'")
+            ).fetchall()
+        assert rows == [(f"{sibling_id}:teardown",)]
 
     asyncio.run(_run())
 

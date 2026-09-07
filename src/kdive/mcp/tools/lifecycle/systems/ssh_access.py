@@ -39,6 +39,7 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.systems.authority_owned import ordinary_mutation_is_fenced
 
 _SSH_USER = "root"
 _NOT_READY_DETAIL = "System is not ready; SSH is available only on a ready System."
@@ -203,6 +204,13 @@ async def check_ssh_reachable(
                 return ToolResponse.failure(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                if await ordinary_mutation_is_fenced(conn, uid):
+                    return ToolResponse.failure(
+                        system_id,
+                        ErrorCategory.CONFIGURATION_ERROR,
+                        data={"reason": "authority_system_preactivation_mutation_fenced"},
+                    )
             try:
                 binding = await resolver.binding_for_system(conn, uid)
                 recorded = binding.runtime.connector.recorded_ssh_endpoint(

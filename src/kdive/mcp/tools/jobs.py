@@ -69,6 +69,7 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
 from kdive.services.systems.authority_owned import (
+    authority_owned_preactivation_teardown_system_id,
     authority_owned_provision_system_id,
     authority_system_binding,
     enqueue_preactivation_teardown,
@@ -279,6 +280,9 @@ async def _fence_authority_owned_provision_cancel(
 async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
     """Transition the job to ``canceled`` (cooperative); error on a terminal job.
 
+    An authority-owned preactivation teardown is a non-cancelable safety operation: canceling its
+    stable dedup row would strand the System with no replacement teardown the queue can admit.
+
     Cancelling a job that has already reached a terminal state is a no-op the agent
     must be able to act on, so the error envelope carries the job's actual current
     status in ``data["current_status"]`` (the agent learns *why* without a second
@@ -305,6 +309,18 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
         denied = _require_job_role(existing, ctx, _cancel_role(existing.kind), job_id)
         if denied is not None:
             return denied
+        try:
+            authority_teardown = authority_owned_preactivation_teardown_system_id(existing)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(job_id, exc)
+        if authority_teardown is not None:
+            return ToolResponse.failure(
+                job_id,
+                ErrorCategory.CONFLICT,
+                detail="authority-owned preactivation teardown cannot be canceled",
+                suggested_next_actions=["jobs.wait", "systems.get"],
+                data={"reason": "authority_system_preactivation_teardown_not_cancelable"},
+            )
         try:
             async with pool.connection() as conn, conn.transaction():
                 await _fence_authority_owned_provision_cancel(conn, existing, ctx)
@@ -479,7 +495,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         A contributor may cancel leaseholder-lifecycle jobs (provision/reprovision/
         install/boot/power/authorize_ssh_key/…) in projects where they have contributor.
         Cancelling a destructive job (teardown/force_crash) or retired server-build job
-        requires operator.
+        requires operator. An authority-owned preactivation teardown cannot be canceled; wait for
+        it to finish.
         """
         return await cancel_job(pool, current_context(), job_id)
 

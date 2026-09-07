@@ -84,7 +84,6 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-from kdive.services.systems.authority_owned import ordinary_mutation_is_fenced
 
 _FORCE_CRASH = JobKind.FORCE_CRASH
 # Idempotency-store kinds (the registered tool names); ADR-0193.
@@ -177,11 +176,6 @@ async def power_system(
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing follows it in this handler, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
-                if await ordinary_mutation_is_fenced(conn, uid):
-                    return _config_error(
-                        system_id,
-                        data={"reason": "authority_system_preactivation_mutation_fenced"},
-                    )
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,

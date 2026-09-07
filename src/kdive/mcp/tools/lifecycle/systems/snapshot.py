@@ -43,7 +43,6 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-from kdive.services.systems.authority_owned import ordinary_mutation_is_fenced
 
 # libvirt snapshot names are agent-chosen; constrain to a shell/XML-safe charset so the name is
 # injection-safe in the snapshot XML the provider renders and safe as a dedup-key component.
@@ -208,10 +207,6 @@ async def snapshot_system(
                 return _config_error(system_id)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
-            if await ordinary_mutation_is_fenced(conn, uid):
-                return _config_error(
-                    system_id, data={"reason": "authority_system_preactivation_mutation_fenced"}
-                )
             replay = await _snapshot_replay(conn, uid, validated)
             if replay is not None:
                 return replay
@@ -295,10 +290,6 @@ async def restore_system(
                 return _config_error(system_id)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
-            if await ordinary_mutation_is_fenced(conn, uid):
-                return _config_error(
-                    system_id, data={"reason": "authority_system_preactivation_mutation_fenced"}
-                )
             try:
                 await check_external_boot_admission(
                     conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project

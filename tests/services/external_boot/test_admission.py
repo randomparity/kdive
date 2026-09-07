@@ -95,6 +95,14 @@ _RESTRICTING_CASES = [
 _CALLERS = ("owning_run", "other_run", "no_run")
 
 
+@pytest.fixture(autouse=True)
+def _ordinary_system(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _not_fenced(_conn: AsyncConnection, _system_id: UUID) -> bool:
+        return False
+
+    monkeypatch.setattr(admission_module, "ordinary_mutation_is_fenced", _not_fenced)
+
+
 def _restricted_by(
     monkeypatch: pytest.MonkeyPatch, activation: ExternalBootActivation | None
 ) -> None:
@@ -168,6 +176,33 @@ def test_a_terminal_activation_row_admits_no_operation_if_it_reaches_the_guard(
 def test_the_expected_table_decides_every_operation() -> None:
     assert _ADMITTING_STATES.keys().isdisjoint(_NEVER_ADMITTED)
     assert set(_ADMITTING_STATES) | _NEVER_ADMITTED == set(ExternalBootOperation)
+
+
+def test_authority_preactivation_policy_admits_only_activation_entry_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fenced(_conn: AsyncConnection, _system_id: UUID) -> bool:
+        return True
+
+    monkeypatch.setattr(admission_module, "ordinary_mutation_is_fenced", _fenced)
+    _restricted_by(monkeypatch, None)
+    admitted = {
+        _OP.RUN_CREATE,
+        _OP.RUN_BIND,
+        _OP.RUN_CANCEL,
+        _OP.RUN_INSTALL,
+        _OP.RUN_BOOT,
+    }
+    system_id = uuid4()
+    for operation in ExternalBootOperation:
+        if operation in admitted:
+            _check(system_id, operation)
+            continue
+        with pytest.raises(ExternalBootDenied) as raised:
+            _check(system_id, operation)
+        assert raised.value.details == {
+            "reason": admission_module.AUTHORITY_PREACTIVATION_DENIAL_REASON
+        }
 
 
 @pytest.mark.parametrize("caller", _CALLERS)

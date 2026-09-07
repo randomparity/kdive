@@ -12,13 +12,20 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import ROOTFS_COMPONENT
 from kdive.components.validation import ComponentSourceCapabilities
+from kdive.domain.capacity.state import SystemState
 from kdive.mcp.tools import jobs as jobs_tools
 from kdive.mcp.tools.lifecycle.control.registrar import power_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.snapshot import restore_system, snapshot_system
+from kdive.mcp.tools.lifecycle.systems.ssh_access import check_ssh_reachable
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
+from kdive.reconciler.repairs.systems import repair_orphaned_systems
 from kdive.security.authz.rbac import Role
+from tests.db.external_boot_authority_support import _RoleDsns
+from tests.db.external_boot_authority_support import (
+    authority_role_dsns as authority_role_dsns,  # noqa: F401
+)
 from tests.mcp import systems_support
 
 _DIGEST = "sha256:" + "a" * 64
@@ -287,6 +294,80 @@ def test_preactivation_teardown_uses_immutable_authority_binding(migrated_url: s
     asyncio.run(run())
 
 
+def test_orphan_repair_routes_preactivation_system_to_authority_teardown(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+) -> None:
+    async def run() -> None:
+        handlers = SystemProvisionHandlers(
+            systems_support.TEST_PROFILE_POLICY,
+            systems_support.TEST_COMPONENT_SOURCES,
+            lambda _root: None,
+            authority_route=lambda _kind, _name: "authority-a",
+        )
+        async with systems_support.pool(migrated_url) as pool:
+            allocation_id = await systems_support.granted_allocation(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE resources SET name='host-a' WHERE id=("
+                    "SELECT resource_id FROM allocations WHERE id=%s)",
+                    (allocation_id,),
+                )
+                await conn.execute(
+                    "INSERT INTO image_catalog "
+                    "(id,provider,name,arch,format,root_device,object_key,digest,provenance,"
+                    "visibility,state) VALUES "
+                    "(%s,'local-libvirt','authority-base','x86_64','qcow2','/dev/vda',"
+                    "'authority-base.qcow2',%s,%s,'public','registered')",
+                    (uuid4(), _DIGEST, Jsonb(_ROOT)),
+                )
+            provision = await handlers.provision_system(
+                pool,
+                systems_support.ctx(role=Role.CONTRIBUTOR),
+                allocation_id=allocation_id,
+                profile=_profile(),
+            )
+            system_id = str(provision.data["system_id"])
+            ordinary_allocation_id = await systems_support.granted_allocation(pool)
+            ordinary_system_id = await systems_support.seed_system(
+                pool, ordinary_allocation_id, SystemState.READY
+            )
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE allocations SET state='released' WHERE id IN (%s,%s)",
+                    (allocation_id, ordinary_allocation_id),
+                )
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_reconciler"), min_size=1, max_size=2
+                ) as reconciler_pool,
+                reconciler_pool.connection() as conn,
+            ):
+                first = await repair_orphaned_systems(conn)
+                second = await repair_orphaned_systems(conn)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(
+                    "SELECT kind,payload FROM jobs WHERE payload->>'system_id'=%s "
+                    "ORDER BY created_at",
+                    (system_id,),
+                )
+                jobs = await cursor.fetchall()
+                await cursor.execute(
+                    "SELECT payload FROM jobs WHERE dedup_key=%s",
+                    (f"{ordinary_system_id}:teardown",),
+                )
+                ordinary_job = await cursor.fetchone()
+
+        assert first == 2
+        assert second == 0
+        assert [job["kind"] for job in jobs] == ["provision", "teardown"]
+        assert jobs[1]["payload"]["authority_system_v1"]["operation"] == ("preactivation-teardown")
+        assert ordinary_job is not None
+        assert ordinary_job["payload"].get("authority_system_v1") is None
+
+    asyncio.run(run())
+
+
 def test_preactivation_authority_system_fences_cancel_and_ordinary_mutations(
     migrated_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -372,9 +453,15 @@ def test_preactivation_authority_system_fences_cancel_and_ordinary_mutations(
                 system_id=system_id,
                 action="off",
             )
+            ssh_check = await check_ssh_reachable(
+                pool,
+                systems_support.ctx(role=Role.CONTRIBUTOR),
+                system_id,
+                resolver=resolver,
+            )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
                 await cursor.execute(
-                    "SELECT kind,payload FROM jobs WHERE payload->>'system_id'=%s "
+                    "SELECT id,kind,payload,state FROM jobs WHERE payload->>'system_id'=%s "
                     "ORDER BY created_at",
                     (system_id,),
                 )
@@ -383,15 +470,31 @@ def test_preactivation_authority_system_fences_cancel_and_ordinary_mutations(
                     "SELECT state FROM authority_system_ownership WHERE system_id=%s", (system_id,)
                 )
                 owner = await cursor.fetchone()
+            teardown_cancel = await jobs_tools.cancel_job(
+                pool,
+                systems_support.ctx(role=Role.OPERATOR),
+                str(jobs[1]["id"]),
+            )
+            async with pool.connection() as conn:
+                teardown_state = await (
+                    await conn.execute("SELECT state FROM jobs WHERE id=%s", (jobs[1]["id"],))
+                ).fetchone()
 
         assert canceled.status == "canceled"
         assert before_cancel == {"state": "provisioning"}
         assert before_jobs == {"n": 1}
-        assert snapshot.error_category == "configuration_error"
-        assert restored.error_category == "configuration_error"
-        assert powered.error_category == "configuration_error"
+        assert snapshot.error_category == "conflict"
+        assert restored.error_category == "conflict"
+        assert powered.error_category == "conflict"
+        assert ssh_check.error_category == "configuration_error"
+        assert ssh_check.data["reason"] == "authority_system_preactivation_mutation_fenced"
         assert [job["kind"] for job in jobs] == ["provision", "teardown"]
         assert jobs[1]["payload"]["authority_system_v1"]["operation"] == "preactivation-teardown"
         assert owner == {"state": "teardown-requested"}
+        assert teardown_cancel.error_category == "conflict"
+        assert teardown_cancel.data["reason"] == (
+            "authority_system_preactivation_teardown_not_cancelable"
+        )
+        assert teardown_state == ("queued",)
 
     asyncio.run(run())
