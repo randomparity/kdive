@@ -1,7 +1,7 @@
 # ADR 0096 — Kdump kernel-config fragment as a seeded build-config catalog input
 
-- **Status:** Superseded by [ADR-0626](0626-supersede-obsolete-server-build-config-catalog.md)
-> **Superseded by [0626](0626-supersede-obsolete-server-build-config-catalog.md)** (2026-09-06)
+- **Status:** Superseded by [ADR-0627](0627-supersede-obsolete-server-build-config-catalog.md)
+> **Superseded by [0627](0627-supersede-obsolete-server-build-config-catalog.md)** (2026-09-06)
 - **Date:** 2026-06-11
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0092](0092-image-rootfs-lifecycle.md)
