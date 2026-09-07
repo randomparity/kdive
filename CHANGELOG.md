@@ -2420,6 +2420,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve investigation lock order
 - Preserve SSH authorization replays
 - Explain missing Mermaid dependencies
+- Recover exhausted acknowledged authority claims
+- Consume acknowledged authority retry proofs
 
 ### Security
 

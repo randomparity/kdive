@@ -870,6 +870,344 @@ def test_acknowledged_authority_without_mutation_allows_successor_watermark(
         )
 
 
+def _install_acknowledged_head(role_dsns: _RoleDsns, case: Any, authority: Any) -> JournalRecordV1:
+    with psycopg.connect(role_dsns("kdive_provider_authority"), autocommit=True) as connection:
+        watermark = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+        assert (
+            _advance_raw(connection, case, authority, 0, GENESIS_DIGEST, _payload(watermark))
+            == "advanced"
+        )
+        acknowledgement = _record(
+            case,
+            authority,
+            2,
+            record_digest(watermark),
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            watermark_sequence=1,
+            watermark_digest=record_digest(watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                case,
+                authority,
+                1,
+                record_digest(watermark),
+                _payload(acknowledgement),
+            )
+            == "advanced"
+        )
+    return acknowledgement
+
+
+def _register_worker(migrated_url: str, prefix: str, credential: bytes) -> str:
+    worker_id = f"docker:{prefix}-{uuid4()}"
+    with psycopg.connect(migrated_url) as connection:
+        connection.execute(
+            "INSERT INTO worker_incarnations (incarnation,authority_kind,authority_binding,"
+            "credential_hash,fence_protocol) VALUES (%s,'docker','{}'::jsonb,%s,4)",
+            (worker_id, credential),
+        )
+    return worker_id
+
+
+def _assert_acknowledged_proof_consumed_once(
+    migrated_url: str,
+    role_dsns: _RoleDsns,
+    case: Any,
+    authority: Any,
+    acknowledgement: JournalRecordV1,
+) -> None:
+    with psycopg.connect(migrated_url) as connection:
+        consumption = connection.execute(
+            "SELECT proof_authority_id,proof_generation,proof_sequence,proof_digest,"
+            "claimed_attempt FROM external_boot_acknowledged_retry_consumptions "
+            "WHERE job_id=%s",
+            (case.job_id,),
+        ).fetchone()
+        assert consumption == (
+            authority.authority_id,
+            authority.generation,
+            acknowledgement.sequence,
+            record_digest(acknowledgement),
+            4,
+        )
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=%s",
+            (case.job_id,),
+        )
+    with (
+        psycopg.connect(migrated_url, autocommit=True) as connection,
+        pytest.raises(psycopg.errors.RaiseException, match="immutable"),
+    ):
+        connection.execute(
+            "UPDATE external_boot_acknowledged_retry_consumptions "
+            "SET consumed_at=now() WHERE job_id=%s",
+            (case.job_id,),
+        )
+    credential = b"z" * 32
+    worker_id = _register_worker(migrated_url, "unanchored-successor-5", credential)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT count_claimable_worker_jobs(ARRAY['default'])"
+        ).fetchone() == (0,)
+        assert (
+            worker.execute(
+                "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+                (worker_id, credential),
+            ).fetchone()
+            is None
+        )
+
+
+def _seed_exhausted_acknowledged_job(
+    migrated_url: str,
+    role_dsns: _RoleDsns,
+    suffix: str,
+    *,
+    promote: bool,
+    attempt: int = 3,
+) -> tuple[Any, Any, JournalRecordV1]:
+    with psycopg.connect(migrated_url) as connection:
+        case = replace(_seed_case(connection, worker_suffix=suffix), attempt=attempt)
+        connection.execute(
+            "UPDATE jobs SET attempt=%s,max_attempts=%s WHERE id=%s",
+            (attempt, attempt, case.job_id),
+        )
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    acknowledgement = _install_acknowledged_head(role_dsns, case, authority)
+    if promote:
+        _promote(migrated_url, case, authority, acknowledgement)
+    with psycopg.connect(migrated_url) as connection:
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=%s",
+            (case.job_id,),
+        )
+    return case, authority, acknowledgement
+
+
+def test_acknowledged_retry_proof_helper_is_private(migrated_url: str) -> None:
+    with psycopg.connect(migrated_url) as connection:
+        for role in (
+            "kdive_server",
+            "kdive_worker",
+            "kdive_reconciler",
+            "kdive_lifecycle_witness",
+            "kdive_provider_authority",
+        ):
+            for signature in (
+                "has_acknowledged_external_boot_retry_proof(jobs)",
+                "consume_acknowledged_external_boot_retry_proof(jobs)",
+            ):
+                assert connection.execute(
+                    "SELECT has_function_privilege(%s,%s,'EXECUTE')", (role, signature)
+                ).fetchone() == (False,)
+            assert connection.execute(
+                "SELECT has_table_privilege(%s,%s,'SELECT,INSERT,UPDATE,DELETE')",
+                (role, "external_boot_acknowledged_retry_consumptions"),
+            ).fetchone() == (False,)
+
+
+@pytest.mark.parametrize("promote", [False, True])
+def test_exhausted_acknowledged_authority_job_gets_one_recovery_claim(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    *,
+    promote: bool,
+) -> None:
+    case, _authority, _acknowledgement = _seed_exhausted_acknowledged_job(
+        migrated_url, authority_role_dsns, "x" if promote else "y", promote=promote
+    )
+    successor_credential = b"z" * 32
+    successor_id = _register_worker(migrated_url, "exhausted-successor", successor_credential)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT count_claimable_worker_jobs(ARRAY['default'])"
+        ).fetchone() == (1,)
+        claimed = worker.execute(
+            "SELECT id,attempt,max_attempts FROM claim_worker_job("
+            "%s,%s,interval '1 minute',ARRAY['default'])",
+            (successor_id, successor_credential),
+        ).fetchone()
+    assert claimed == (case.job_id, 4, 4)
+
+
+@pytest.mark.parametrize("intervening_acknowledgement", [False, True])
+def test_exhausted_job_validates_unanchored_successor_authorities(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    *,
+    intervening_acknowledgement: bool,
+) -> None:
+    first_case, first = _seed_allocated(migrated_url, authority_role_dsns, "u")
+    acknowledgement = _install_acknowledged_head(authority_role_dsns, first_case, first)
+    _promote(migrated_url, first_case, first, acknowledgement)
+
+    latest_case = first_case
+    latest = first
+    unanchored = []
+    for attempt, suffix in ((2, "v"), (3, "w")):
+        credential = suffix.encode() * 32
+        worker_id = _register_worker(migrated_url, f"unanchored-successor-{attempt}", credential)
+        with psycopg.connect(migrated_url) as connection:
+            connection.execute(
+                "UPDATE jobs SET worker_id=%s,attempt=%s,"
+                "lease_expires_at=now()+interval '1 minute' "
+                "WHERE id=%s",
+                (worker_id, attempt, first_case.job_id),
+            )
+        latest_case = replace(
+            first_case, worker_id=worker_id, credential=credential, attempt=attempt
+        )
+        with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+            latest = _allocate(worker, latest_case)
+            unanchored.append(latest)
+
+    with psycopg.connect(migrated_url) as connection:
+        if intervening_acknowledgement:
+            intervening = unanchored[0]
+            connection.execute(
+                "INSERT INTO external_boot_authority_acknowledgements "
+                "(authority_id,system_id,generation,authority_instance,operation_identity,"
+                "operation_digest,journal_sequence,journal_digest,positive_quiescence_digest) "
+                "VALUES (%s,%s,%s,%s,%s,%s,1,%s,%s)",
+                (
+                    intervening.authority_id,
+                    first_case.system_id,
+                    intervening.generation,
+                    first_case.authority_instance,
+                    first_case.operation_identity,
+                    intervening.operation_digest,
+                    _DIGEST,
+                    _DIGEST,
+                ),
+            )
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=%s",
+            (first_case.job_id,),
+        )
+    successor_credential = b"x" * 32
+    successor_id = _register_worker(migrated_url, "unanchored-successor-4", successor_credential)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT count_claimable_worker_jobs(ARRAY['default'])"
+        ).fetchone() == (0 if intervening_acknowledgement else 1,)
+        claimed = worker.execute(
+            "SELECT id,attempt,max_attempts FROM claim_worker_job("
+            "%s,%s,interval '1 minute',ARRAY['default'])",
+            (successor_id, successor_credential),
+        ).fetchone()
+        if intervening_acknowledgement:
+            assert claimed is None
+            return
+        assert claimed == (first_case.job_id, 4, 4)
+        successor_case = replace(
+            latest_case,
+            worker_id=successor_id,
+            credential=successor_credential,
+            attempt=4,
+        )
+        successor = _allocate(worker, successor_case)
+    assert successor.generation == latest.generation + 1 == 4
+    _assert_acknowledged_proof_consumed_once(
+        migrated_url, authority_role_dsns, first_case, first, acknowledgement
+    )
+    successor_watermark = _record(
+        successor_case,
+        successor,
+        3,
+        record_digest(acknowledgement),
+        JournalPhase.WATERMARK_INSTALLED,
+    )
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                2,
+                record_digest(acknowledgement),
+                _payload(successor_watermark),
+            )
+            == "advanced"
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_proof", ["no-head", "watermark", "marker-mismatch", "counter-overflow"]
+)
+def test_exhausted_authority_job_without_exact_acknowledged_proof_stays_unclaimable(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    invalid_proof: str,
+) -> None:
+    if invalid_proof in {"marker-mismatch", "counter-overflow"}:
+        case, _authority, _acknowledgement = _seed_exhausted_acknowledged_job(
+            migrated_url,
+            authority_role_dsns,
+            "m" if invalid_proof == "marker-mismatch" else "o",
+            promote=False,
+            attempt=2147483647 if invalid_proof == "counter-overflow" else 3,
+        )
+        if invalid_proof == "marker-mismatch":
+            with psycopg.connect(migrated_url) as connection:
+                connection.execute(
+                    "UPDATE jobs SET payload=jsonb_set(payload,"
+                    "'{external_boot_authority_v1,operation_identity}',to_jsonb(%s::text)) "
+                    "WHERE id=%s",
+                    ("different-operation", case.job_id),
+                )
+    else:
+        with psycopg.connect(migrated_url) as connection:
+            case = replace(
+                _seed_case(
+                    connection,
+                    worker_suffix="n" if invalid_proof == "no-head" else "w",
+                ),
+                attempt=3,
+            )
+            connection.execute(
+                "UPDATE jobs SET attempt=3,max_attempts=3 WHERE id=%s",
+                (case.job_id,),
+            )
+        with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+            authority = _allocate(worker, case)
+        if invalid_proof == "watermark":
+            with psycopg.connect(
+                authority_role_dsns("kdive_provider_authority"), autocommit=True
+            ) as connection:
+                watermark = _record(
+                    case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED
+                )
+                assert (
+                    _advance_raw(
+                        connection, case, authority, 0, GENESIS_DIGEST, _payload(watermark)
+                    )
+                    == "advanced"
+                )
+        with psycopg.connect(migrated_url) as connection:
+            connection.execute(
+                "UPDATE jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=%s",
+                (case.job_id,),
+            )
+    successor_credential = b"y" * 32
+    successor_id = _register_worker(migrated_url, "invalid-successor", successor_credential)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT count_claimable_worker_jobs(ARRAY['default'])"
+        ).fetchone() == (0,)
+        assert (
+            worker.execute(
+                "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+                (successor_id, successor_credential),
+            ).fetchone()
+            is None
+        )
+
+
 def test_full_teardown_journal_sequence_uses_the_null_identity_pair(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
