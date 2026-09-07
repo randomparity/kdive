@@ -7,10 +7,12 @@ import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import cast
 from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.sql import SQL, Identifier
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
@@ -62,6 +64,164 @@ def _wait_for_advisory_wait(
     raise AssertionError("authority contender did not wait on the System lock")
 
 
+def _seed_direct_authority_case(
+    conn: psycopg.Connection,
+    *,
+    operation: str,
+    ownership_state: str,
+    attempt: int = 1,
+    max_attempts: int = 3,
+) -> dict[str, object]:
+    resource_id, allocation_id, system_id, image_id, job_id = (uuid4() for _ in range(5))
+    worker = f"docker:direct-authority-{uuid4()}"
+    credential = uuid4().bytes + uuid4().bytes
+    profile_digest = "sha256:" + "a" * 64
+    root_digest = "sha256:" + "b" * 64
+    marker = {
+        "schema": "authority-system-marker-v1",
+        "system_id": str(system_id),
+        "allocation_id": str(allocation_id),
+        "resource_id": str(resource_id),
+        "provider_kind": "local-libvirt",
+        "resource_name": f"host-{system_id}",
+        "authority_instance": f"authority-{system_id}",
+        "profile_identity": profile_digest,
+        "root_identity": root_digest,
+        "operation": operation,
+        "operation_identity": f"{operation}-{job_id}",
+    }
+    conn.execute(
+        "INSERT INTO resources (id,kind,name,pool,cost_class,status,host_uri) "
+        "VALUES (%s,'local-libvirt',%s,'default','standard','available','qemu:///system')",
+        (resource_id, marker["resource_name"]),
+    )
+    conn.execute(
+        "INSERT INTO allocations (id,resource_id,state,principal,project) "
+        "VALUES (%s,%s,'active','p','proj')",
+        (allocation_id, resource_id),
+    )
+    conn.execute(
+        "INSERT INTO systems (id,allocation_id,state,provisioning_profile,principal,project) "
+        "VALUES (%s,%s,'provisioning','{}','p','proj')",
+        (system_id, allocation_id),
+    )
+    conn.execute(
+        "INSERT INTO system_root_provenance "
+        "(system_id,source_image_id,project,architecture,image_digest,root_spec) "
+        "VALUES (%s,%s,'proj','x86_64',%s,'{}')",
+        (system_id, image_id, root_digest),
+    )
+    conn.execute(
+        "INSERT INTO system_bootstrap_keys (system_id,private_key,public_key) "
+        "VALUES (%s,'private','ssh-ed25519 YWFhYQ== kdive-system')",
+        (system_id,),
+    )
+    conn.execute(
+        "INSERT INTO worker_incarnations "
+        "(incarnation,authority_kind,authority_binding,fence_protocol,credential_hash,state) "
+        "VALUES (%s,'docker','{}',4,%s,'active')",
+        (worker, credential),
+    )
+    conn.execute(
+        "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
+        "heartbeat_at,payload,authorizing,dedup_key,error_category,failure_context) VALUES "
+        "(%s,%s,'running',%s,%s,%s,clock_timestamp()+interval '5 minutes',clock_timestamp(),"
+        "%s,%s,%s,'conflict',%s)",
+        (
+            job_id,
+            "provision" if operation == "provision" else "teardown",
+            attempt,
+            max_attempts,
+            worker,
+            Jsonb({"authority_system_v1": marker}),
+            Jsonb({"principal": "p", "agent_session": "authority-session", "project": "proj"}),
+            f"direct-authority-{job_id}",
+            Jsonb({"reason": "prior-attempt"}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO authority_system_ownership "
+        "(system_id,allocation_id,resource_id,provider_kind,resource_name,authority_instance,"
+        "profile_identity,root_identity,state) VALUES "
+        "(%s,%s,%s,'local-libvirt',%s,%s,%s,%s,%s)",
+        (
+            system_id,
+            allocation_id,
+            resource_id,
+            marker["resource_name"],
+            marker["authority_instance"],
+            profile_digest,
+            root_digest,
+            ownership_state,
+        ),
+    )
+    return {
+        "resource_id": resource_id,
+        "allocation_id": allocation_id,
+        "system_id": system_id,
+        "job_id": job_id,
+        "worker": worker,
+        "credential": credential,
+        "marker": marker,
+    }
+
+
+def _seed_direct_terminal_attempt(
+    conn: psycopg.Connection,
+    case: dict[str, object],
+    *,
+    disposition: str,
+    generation: int = 1,
+) -> tuple[object, object, bytes, str, str]:
+    authority_id, request_attempt_id = uuid4(), uuid4()
+    operation_digest = "sha256:" + "c" * 64
+    head_digest = "sha256:" + "d" * 64
+    receipt_digest = "sha256:" + "e" * 64
+    receipt = json.dumps({"disposition": disposition}, separators=(",", ":")).encode()
+    marker = cast(dict[str, object], case["marker"])
+    job_row = conn.execute("SELECT attempt FROM jobs WHERE id=%s", (case["job_id"],)).fetchone()
+    assert job_row is not None
+    conn.execute(
+        "UPDATE authority_system_ownership SET next_generation=%s,journal_sequence=2,"
+        "journal_digest=%s,journal_phase='terminal',journal_record='{}' WHERE system_id=%s",
+        (generation + 1, head_digest, case["system_id"]),
+    )
+    conn.execute(
+        "INSERT INTO authority_system_attempts "
+        "(id,system_id,generation,operation,job_id,job_attempt,worker_incarnation,"
+        "request_attempt_id,operation_identity,operation_digest,state,ack_sequence,ack_digest,"
+        "quiescence_digest,acknowledged_at,ack_head_sequence,ack_head_digest,"
+        "terminal_head_sequence,terminal_head_digest,receipt_bytes,receipt_digest,"
+        "receipt_disposition,receipt_at) VALUES "
+        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'terminal',1,%s,%s,clock_timestamp(),0,%s,2,%s,"
+        "%s,%s,%s,clock_timestamp())",
+        (
+            authority_id,
+            case["system_id"],
+            generation,
+            marker["operation"],
+            case["job_id"],
+            job_row[0],
+            case["worker"],
+            request_attempt_id,
+            marker["operation_identity"],
+            operation_digest,
+            operation_digest,
+            operation_digest,
+            GENESIS_DIGEST,
+            head_digest,
+            receipt,
+            receipt_digest,
+            disposition,
+        ),
+    )
+    conn.execute(
+        "UPDATE authority_system_ownership SET current_attempt_id=%s WHERE system_id=%s",
+        (authority_id, case["system_id"]),
+    )
+    return authority_id, request_attempt_id, receipt, head_digest, receipt_digest
+
+
 def test_migration_0149_is_registered_last() -> None:
     migrations = migrate.discover_migrations()
     assert (migrations[-1].version, migrations[-1].filename) == (
@@ -95,7 +255,7 @@ def test_0149_installs_two_private_tables_and_exact_function_grants(
         assert functions >= {
             "register_authority_system_ownership",
             "request_authority_system_preactivation_teardown",
-            "resolve_authority_system_server_binding",
+            "resolve_authority_system_control_binding",
             "claim_authority_system_first_activation",
             "allocate_authority_system_attempt",
             "acknowledge_authority_system_attempt",
@@ -114,8 +274,14 @@ def test_0149_installs_two_private_tables_and_exact_function_grants(
             "register_authority_system_ownership(uuid,uuid,text,text,text,text,text)": {
                 "kdive_server"
             },
-            "request_authority_system_preactivation_teardown(uuid,uuid,text)": {"kdive_server"},
-            "resolve_authority_system_server_binding(uuid)": {"kdive_server"},
+            "request_authority_system_preactivation_teardown(uuid,uuid,text)": {
+                "kdive_server",
+                "kdive_reconciler",
+            },
+            "resolve_authority_system_control_binding(uuid)": {
+                "kdive_server",
+                "kdive_reconciler",
+            },
             "claim_authority_system_first_activation(uuid,uuid)": {"kdive_server"},
             "allocate_authority_system_attempt(bytea,uuid,integer,uuid)": {"kdive_worker"},
             (
@@ -144,6 +310,7 @@ def test_0149_installs_two_private_tables_and_exact_function_grants(
                 "kdive_reconciler"
             },
         }
+        assert "resolve_authority_system_server_binding" not in functions
         for signature, roles in allowed.items():
             for role, login in role_dsns.logins.items():
                 assert admin.execute(
@@ -157,6 +324,98 @@ def test_0149_installs_two_private_tables_and_exact_function_grants(
             restricted.rollback()
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 restricted.execute("SELECT * FROM authority_system_attempts").fetchall()
+
+
+def test_0149_control_binding_is_limited_to_server_and_reconciler(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="provision", ownership_state="provisioning"
+        )
+        conn.commit()
+
+    expected = (
+        case["system_id"],
+        case["allocation_id"],
+        case["resource_id"],
+        "local-libvirt",
+        cast(dict[str, object], case["marker"])["resource_name"],
+        cast(dict[str, object], case["marker"])["authority_instance"],
+        "sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+        "provisioning",
+    )
+    for role in ("kdive_server", "kdive_reconciler"):
+        with psycopg.connect(role_dsns(role)) as actor:
+            actor.execute(SQL("SET ROLE {}").format(Identifier(role)))
+            assert (
+                actor.execute(
+                    "SELECT * FROM resolve_authority_system_control_binding(%s)",
+                    (case["system_id"],),
+                ).fetchone()
+                == expected
+            )
+
+    for role in ("kdive_worker", "kdive_provider_authority"):
+        with psycopg.connect(role_dsns(role)) as actor:
+            actor.execute(SQL("SET ROLE {}").format(Identifier(role)))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                actor.execute(
+                    "SELECT * FROM resolve_authority_system_control_binding(%s)",
+                    (case["system_id"],),
+                ).fetchone()
+
+
+def test_0149_teardown_request_is_limited_to_server_and_reconciler(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    teardown_job = uuid4()
+    operation_identity = f"preactivation-teardown-{teardown_job}"
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="provision", ownership_state="provisioning"
+        )
+        conn.execute(
+            "INSERT INTO jobs (id,kind,state,attempt,max_attempts,payload,authorizing,dedup_key) "
+            "VALUES (%s,'teardown','queued',0,3,%s,'{}',%s)",
+            (
+                teardown_job,
+                Jsonb(
+                    {
+                        "authority_system_v1": {
+                            "system_id": str(case["system_id"]),
+                            "operation": "preactivation-teardown",
+                            "operation_identity": operation_identity,
+                        }
+                    }
+                ),
+                f"control-teardown-{teardown_job}",
+            ),
+        )
+        conn.commit()
+
+    for role, expected_status in (
+        ("kdive_server", "applied"),
+        ("kdive_reconciler", "replay"),
+    ):
+        with psycopg.connect(role_dsns(role)) as actor:
+            actor.execute(SQL("SET ROLE {}").format(Identifier(role)))
+            assert actor.execute(
+                "SELECT request_authority_system_preactivation_teardown(%s,%s,%s)",
+                (case["system_id"], teardown_job, operation_identity),
+            ).fetchone() == (expected_status,)
+
+    for role in ("kdive_worker", "kdive_provider_authority"):
+        with psycopg.connect(role_dsns(role)) as actor:
+            actor.execute(SQL("SET ROLE {}").format(Identifier(role)))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                actor.execute(
+                    "SELECT request_authority_system_preactivation_teardown(%s,%s,%s)",
+                    (case["system_id"], teardown_job, operation_identity),
+                ).fetchone()
 
 
 def test_0149_ownership_head_is_global_and_binding_is_immutable(migrated_url: str) -> None:
@@ -554,6 +813,23 @@ def test_0149_reconciler_cleans_before_terminalizing_preactivation_absence(
             "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
             (system_id,),
         ).fetchone() == ("torn-down", True, "torn_down", "succeeded")
+        assert conn.execute(
+            "SELECT principal,agent_session,project,tool,object_kind,transition,args_digest "
+            "FROM audit_log WHERE object_id=%s",
+            (system_id,),
+        ).fetchone() == (
+            "p",
+            None,
+            "proj",
+            "systems.teardown",
+            "systems",
+            "provisioning->torn_down",
+            args_digest({"system_id": str(system_id)}),
+        )
+        assert conn.execute(
+            "SELECT count(*) FROM audit_log WHERE tool='systems.teardown' AND object_id=%s",
+            (system_id,),
+        ).fetchone() == (1,)
 
 
 def test_0149_worker_authority_journal_and_exact_receipt_replay(
@@ -1258,3 +1534,438 @@ def test_0149_allocation_supersedes_only_dead_unacknowledged_candidate(
             (system_id,),
         ).fetchall()
     assert states == [(first_authority, "superseded"), (successor[1], "allocating")]
+
+
+def test_0149_claim_fences_terminal_receipt_after_successor_ack(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="provision", ownership_state="provisioning"
+        )
+        predecessor = _seed_direct_terminal_attempt(conn, case, disposition="provision-ready")[0]
+        successor_job, successor = uuid4(), uuid4()
+        conn.execute(
+            "UPDATE jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL,heartbeat_at=NULL,"
+            "error_category=NULL,failure_context='{}' WHERE id=%s",
+            (case["job_id"],),
+        )
+        conn.execute(
+            "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
+            "payload,authorizing,dedup_key) VALUES "
+            "(%s,'provision','running',1,3,%s,clock_timestamp()+interval '5 minutes',%s,'{}',%s)",
+            (
+                successor_job,
+                case["worker"],
+                Jsonb({"authority_system_v1": case["marker"]}),
+                f"successor-{successor_job}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO authority_system_attempts "
+            "(id,system_id,generation,operation,job_id,job_attempt,worker_incarnation,"
+            "request_attempt_id,operation_identity,operation_digest,state,ack_sequence,ack_digest,"
+            "quiescence_digest,acknowledged_at,ack_head_sequence,ack_head_digest) VALUES "
+            "(%s,%s,2,'provision',%s,1,%s,%s,'successor',%s,'current',2,%s,%s,"
+            "clock_timestamp(),2,%s)",
+            (
+                successor,
+                case["system_id"],
+                successor_job,
+                case["worker"],
+                uuid4(),
+                "sha256:" + "f" * 64,
+                "sha256:" + "d" * 64,
+                "sha256:" + "e" * 64,
+                "sha256:" + "d" * 64,
+            ),
+        )
+        conn.execute(
+            "UPDATE authority_system_ownership SET current_attempt_id=%s WHERE system_id=%s",
+            (successor, case["system_id"]),
+        )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        claimed = worker.execute(
+            "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (case["worker"], case["credential"]),
+        ).fetchone()
+    assert claimed is None
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT state,consumed_at FROM authority_system_attempts WHERE id=%s", (predecessor,)
+        ).fetchone() == ("terminal", None)
+
+
+def test_0149_allocation_enforces_operation_state_matrix(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    expected = {
+        ("provision", "provisioning"): "allocated",
+        ("provision", "repair-required"): "allocated",
+        ("provision", "ready"): "superseded",
+        ("provision", "teardown-requested"): "superseded",
+        ("preactivation-teardown", "provisioning"): "superseded",
+        ("preactivation-teardown", "repair-required"): "superseded",
+        ("preactivation-teardown", "ready"): "superseded",
+        ("preactivation-teardown", "teardown-requested"): "allocated",
+    }
+    with psycopg.connect(migrated_url) as conn:
+        cases = [
+            (
+                operation,
+                state,
+                _seed_direct_authority_case(conn, operation=operation, ownership_state=state),
+            )
+            for operation, state in expected
+        ]
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        observed: dict[tuple[str, str], str] = {}
+        for operation, state, case in cases:
+            row = worker.execute(
+                "SELECT status FROM allocate_authority_system_attempt(%s,%s,1,%s)",
+                (case["credential"], case["job_id"], uuid4()),
+            ).fetchone()
+            assert row is not None
+            observed[(operation, state)] = row[0]
+    assert observed == expected
+    with psycopg.connect(migrated_url) as conn:
+        for operation, state, case in cases:
+            if expected[(operation, state)] == "superseded":
+                assert conn.execute(
+                    "SELECT count(*) FROM authority_system_attempts WHERE system_id=%s",
+                    (case["system_id"],),
+                ).fetchone() == (0,)
+
+
+def test_0149_worker_preactivation_absence_writes_canonical_teardown_audit(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="preactivation-teardown", ownership_state="teardown-requested"
+        )
+        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="preactivation-absent"
+        )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        finalize = "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,1,2,%s,%s)"
+        finalize_args = (case["credential"], case["job_id"], authority_id, head_digest, receipt)
+        assert worker.execute(finalize, finalize_args).fetchone() == (
+            "applied",
+            "succeeded",
+            "torn_down",
+        )
+        assert worker.execute(finalize, finalize_args).fetchone() == (
+            "applied",
+            "succeeded",
+            "torn_down",
+        )
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT principal,agent_session,project,tool,object_kind,transition,args_digest "
+            "FROM audit_log WHERE object_id=%s",
+            (case["system_id"],),
+        ).fetchone() == (
+            "p",
+            "authority-session",
+            "proj",
+            "systems.teardown",
+            "systems",
+            "provisioning->torn_down",
+            args_digest({"system_id": str(case["system_id"])}),
+        )
+        assert conn.execute(
+            "SELECT count(*) FROM audit_log WHERE tool='systems.teardown' AND object_id=%s",
+            (case["system_id"],),
+        ).fetchone() == (1,)
+
+
+def test_0149_stale_teardown_receipt_cannot_consume_provision_repair_state(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn, operation="preactivation-teardown", ownership_state="repair-required"
+        )
+        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="preactivation-absent"
+        )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,1,2,%s,%s)",
+            (case["credential"], case["job_id"], authority_id, head_digest, receipt),
+        ).fetchone() == ("conflict", "running", "provisioning")
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,attempt.consumed_at,system.state,job.state "
+            "FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS attempt ON attempt.id=%s "
+            "JOIN systems AS system ON system.id=ownership.system_id "
+            "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
+            (authority_id, case["system_id"]),
+        ).fetchone() == ("repair-required", None, "provisioning", "running")
+        assert conn.execute(
+            "SELECT count(*) FROM audit_log WHERE tool='systems.teardown' AND object_id=%s",
+            (case["system_id"],),
+        ).fetchone() == (0,)
+
+
+def test_0149_retained_quarantine_requeues_even_at_attempt_limit(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn,
+            operation="provision",
+            ownership_state="provisioning",
+            attempt=1,
+            max_attempts=1,
+        )
+        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="retained-quarantine"
+        )
+        conn.commit()
+
+    finalize = "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,1,2,%s,%s)"
+    finalize_args = (case["credential"], case["job_id"], authority_id, head_digest, receipt)
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(finalize, finalize_args).fetchone() == (
+            "retained",
+            "queued",
+            "provisioning",
+        )
+        worker.commit()
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,attempt.state,attempt.consumed_at IS NOT NULL,"
+            "job.state,job.attempt,job.max_attempts,job.worker_id,job.lease_expires_at,"
+            "job.heartbeat_at,job.error_category,job.failure_context "
+            "FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS attempt ON attempt.id=%s "
+            "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
+            (authority_id, case["system_id"]),
+        ).fetchone() == (
+            "repair-required",
+            "superseded",
+            True,
+            "queued",
+            1,
+            2,
+            None,
+            None,
+            None,
+            None,
+            {},
+        )
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(finalize, finalize_args).fetchone() == (
+            "retained",
+            "queued",
+            "provisioning",
+        )
+        claimed = worker.execute(
+            "SELECT id,attempt FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (case["worker"], case["credential"]),
+        ).fetchone()
+        assert claimed == (case["job_id"], 2)
+        successor = worker.execute(
+            "SELECT * FROM allocate_authority_system_attempt(%s,%s,2,%s)",
+            (case["credential"], case["job_id"], uuid4()),
+        ).fetchone()
+
+    assert successor is not None
+    assert successor[0] == "allocated"
+    assert successor[1] != authority_id
+    assert successor[2] == 2
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,attempt.state,attempt.consumed_at IS NOT NULL,"
+            "job.state,job.attempt,job.max_attempts,job.worker_id IS NOT NULL,"
+            "job.lease_expires_at IS NOT NULL,job.heartbeat_at IS NOT NULL,"
+            "job.error_category,job.failure_context "
+            "FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS attempt ON attempt.id=%s "
+            "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
+            (authority_id, case["system_id"]),
+        ).fetchone() == (
+            "repair-required",
+            "superseded",
+            True,
+            "running",
+            2,
+            2,
+            True,
+            True,
+            True,
+            None,
+            {},
+        )
+
+
+def test_0149_late_provision_quarantine_preserves_teardown_and_only_teardown_retries(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn,
+            operation="provision",
+            ownership_state="teardown-requested",
+            attempt=1,
+            max_attempts=1,
+        )
+        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="retained-quarantine"
+        )
+        teardown_job = uuid4()
+        marker = cast(dict[str, object], case["marker"])
+        teardown_marker = {
+            **marker,
+            "operation": "preactivation-teardown",
+            "operation_identity": f"preactivation-teardown-{teardown_job}",
+        }
+        conn.execute(
+            "INSERT INTO jobs (id,kind,state,attempt,max_attempts,payload,authorizing,dedup_key) "
+            "VALUES (%s,'teardown','queued',0,3,%s,%s,%s)",
+            (
+                teardown_job,
+                Jsonb({"authority_system_v1": teardown_marker}),
+                Jsonb({"principal": "p", "agent_session": "teardown-session", "project": "proj"}),
+                f"late-teardown-{teardown_job}",
+            ),
+        )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,1,2,%s,%s)",
+            (case["credential"], case["job_id"], authority_id, head_digest, receipt),
+        ).fetchone() == ("retained", "canceled", "provisioning")
+        worker.commit()
+        claimed = worker.execute(
+            "SELECT id,attempt FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (case["worker"], case["credential"]),
+        ).fetchone()
+        assert claimed == (teardown_job, 1)
+        teardown = worker.execute(
+            "SELECT status FROM allocate_authority_system_attempt(%s,%s,1,%s)",
+            (case["credential"], teardown_job, uuid4()),
+        ).fetchone()
+    assert teardown == ("allocated",)
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,attempt.state,attempt.consumed_at IS NOT NULL,"
+            "job.state,job.max_attempts FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS attempt ON attempt.id=%s "
+            "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
+            (authority_id, case["system_id"]),
+        ).fetchone() == ("teardown-requested", "superseded", True, "canceled", 1)
+
+
+def test_0149_retained_teardown_preserves_intent_and_opens_one_retry(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn,
+            operation="preactivation-teardown",
+            ownership_state="teardown-requested",
+            attempt=1,
+            max_attempts=1,
+        )
+        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="retained-quarantine"
+        )
+        conn.commit()
+
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,1,2,%s,%s)",
+            (case["credential"], case["job_id"], authority_id, head_digest, receipt),
+        ).fetchone() == ("retained", "queued", "provisioning")
+        worker.commit()
+        claimed = worker.execute(
+            "SELECT id,attempt FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (case["worker"], case["credential"]),
+        ).fetchone()
+        assert claimed == (case["job_id"], 2)
+        successor = worker.execute(
+            "SELECT status,authority_id,generation FROM "
+            "allocate_authority_system_attempt(%s,%s,2,%s)",
+            (case["credential"], case["job_id"], uuid4()),
+        ).fetchone()
+    assert successor is not None
+    assert successor[0] == "allocated"
+    assert successor[1] != authority_id
+    assert successor[2] == 2
+
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,attempt.state,attempt.consumed_at IS NOT NULL,"
+            "job.state,job.attempt,job.max_attempts FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS attempt ON attempt.id=%s "
+            "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
+            (authority_id, case["system_id"]),
+        ).fetchone() == ("teardown-requested", "superseded", True, "running", 2, 2)
+
+
+def test_0149_retained_quarantine_rejects_attempt_limit_overflow(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    attempt_limit = 2_147_483_647
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_direct_authority_case(
+            conn,
+            operation="provision",
+            ownership_state="provisioning",
+            attempt=attempt_limit,
+            max_attempts=attempt_limit,
+        )
+        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="retained-quarantine"
+        )
+        conn.commit()
+
+    with (
+        psycopg.connect(role_dsns("kdive_worker")) as worker,
+        pytest.raises(psycopg.errors.NumericValueOutOfRange, match="attempt limit overflow"),
+    ):
+        worker.execute(
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,%s,%s,1,2,%s,%s)",
+            (
+                case["credential"],
+                case["job_id"],
+                attempt_limit,
+                authority_id,
+                head_digest,
+                receipt,
+            ),
+        )
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT ownership.state,attempt.state,attempt.consumed_at,job.state,job.max_attempts "
+            "FROM authority_system_ownership AS ownership "
+            "JOIN authority_system_attempts AS attempt ON attempt.id=ownership.current_attempt_id "
+            "JOIN jobs AS job ON job.id=attempt.job_id WHERE ownership.system_id=%s",
+            (case["system_id"],),
+        ).fetchone() == ("provisioning", "terminal", None, "running", attempt_limit)

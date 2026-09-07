@@ -271,8 +271,9 @@ DECLARE
     v_owner public.authority_system_ownership%ROWTYPE;
     v_job public.jobs%ROWTYPE;
 BEGIN
-    IF NOT pg_has_role(session_user, 'kdive_server', 'member') THEN
-        RAISE EXCEPTION 'server authority is required' USING ERRCODE = '42501';
+    IF NOT (pg_has_role(session_user, 'kdive_server', 'member')
+            OR pg_has_role(session_user, 'kdive_reconciler', 'member')) THEN
+        RAISE EXCEPTION 'control authority is required' USING ERRCODE = '42501';
     END IF;
     IF octet_length(p_operation_identity) NOT BETWEEN 1 AND 255 THEN
         RAISE EXCEPTION 'authority System teardown identity is invalid' USING ERRCODE = '22023';
@@ -299,7 +300,7 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION public.resolve_authority_system_server_binding(p_system_id uuid)
+CREATE FUNCTION public.resolve_authority_system_control_binding(p_system_id uuid)
 RETURNS TABLE(
     system_id uuid, allocation_id uuid, resource_id uuid, provider_kind text,
     resource_name text, authority_instance text, profile_identity text,
@@ -309,7 +310,8 @@ RETURNS TABLE(
            owner.resource_name,owner.authority_instance,owner.profile_identity,
            owner.root_identity,owner.state
     FROM public.authority_system_ownership AS owner
-    WHERE pg_has_role(session_user,'kdive_server','member')
+    WHERE (pg_has_role(session_user,'kdive_server','member')
+           OR pg_has_role(session_user,'kdive_reconciler','member'))
       AND owner.system_id=p_system_id
 $$;
 
@@ -378,17 +380,10 @@ BEGIN
        OR v_marker->>'system_id' IS DISTINCT FROM v_system_id::text THEN
         RETURN QUERY SELECT 'superseded'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
     END IF;
-    SELECT * INTO v_existing FROM public.authority_system_attempts
-    WHERE job_id=p_job_id AND job_attempt=p_job_attempt AND request_attempt_id=p_request_attempt_id;
-    IF v_existing.id IS NOT NULL THEN
-        RETURN QUERY SELECT CASE WHEN v_existing.state='allocating' THEN 'allocated' ELSE 'replay' END,
-            v_existing.id,v_existing.generation,v_existing.operation_digest; RETURN;
-    END IF;
     SELECT 'sha256:' || encode(sha256(convert_to(public_key,'UTF8')),'hex')
     INTO v_bootstrap_identity FROM public.system_bootstrap_keys
     WHERE system_id=v_owner.system_id;
     IF v_owner.system_id IS NULL OR v_bootstrap_identity IS NULL
-       OR v_owner.state NOT IN ('provisioning','teardown-requested','repair-required','ready')
        OR v_marker->>'allocation_id' IS DISTINCT FROM v_owner.allocation_id::text
        OR v_marker->>'resource_id' IS DISTINCT FROM v_owner.resource_id::text
        OR v_marker->>'provider_kind' IS DISTINCT FROM v_owner.provider_kind
@@ -396,12 +391,23 @@ BEGIN
        OR v_marker->>'authority_instance' IS DISTINCT FROM v_owner.authority_instance
        OR v_marker->>'profile_identity' IS DISTINCT FROM v_owner.profile_identity
        OR v_marker->>'root_identity' IS DISTINCT FROM v_owner.root_identity
-       OR v_marker->>'operation' NOT IN ('provision','preactivation-teardown') THEN
+       OR NOT (
+           (v_marker->>'operation'='provision' AND v_job.kind='provision'
+            AND v_owner.state IN ('provisioning','repair-required'))
+           OR (v_marker->>'operation'='preactivation-teardown' AND v_job.kind='teardown'
+               AND v_owner.state='teardown-requested')
+       ) THEN
         RETURN QUERY SELECT 'superseded'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
     END IF;
     IF v_owner.bootstrap_identity IS NOT NULL
        AND v_owner.bootstrap_identity <> v_bootstrap_identity THEN
         RETURN QUERY SELECT 'conflict'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
+    END IF;
+    SELECT * INTO v_existing FROM public.authority_system_attempts
+    WHERE job_id=p_job_id AND job_attempt=p_job_attempt AND request_attempt_id=p_request_attempt_id;
+    IF v_existing.id IS NOT NULL THEN
+        RETURN QUERY SELECT CASE WHEN v_existing.state='allocating' THEN 'allocated' ELSE 'replay' END,
+            v_existing.id,v_existing.generation,v_existing.operation_digest; RETURN;
     END IF;
     SELECT * INTO v_existing FROM public.authority_system_attempts
     WHERE system_id=v_owner.system_id AND state='allocating' FOR UPDATE;
@@ -814,7 +820,11 @@ BEGIN
         RETURN QUERY SELECT CASE WHEN v_attempt.receipt_bytes=p_receipt_bytes
                                   AND v_attempt.terminal_head_sequence=p_journal_sequence
                                   AND v_attempt.terminal_head_digest=p_journal_digest
-                                 THEN 'applied' ELSE 'conflict' END,
+                                 THEN CASE
+                                     WHEN v_attempt.receipt_disposition='retained-quarantine'
+                                     THEN 'retained' ELSE 'applied'
+                                 END
+                                 ELSE 'conflict' END,
             v_job.state,v_system.state; RETURN;
     END IF;
     IF v_owner.current_attempt_id<>v_attempt.id OR v_attempt.state<>'terminal'
@@ -828,7 +838,37 @@ BEGIN
         RETURN QUERY SELECT 'superseded'::text,v_job.state,v_system.state; RETURN;
     END IF;
     IF v_attempt.receipt_disposition='retained-quarantine' THEN
-        RETURN QUERY SELECT 'retained'::text,v_job.state,v_system.state; RETURN;
+        UPDATE public.authority_system_attempts SET state='superseded',
+            superseded_at=clock_timestamp(),consumed_at=clock_timestamp()
+        WHERE id=v_attempt.id;
+        IF v_attempt.operation='provision' AND v_owner.state='teardown-requested' THEN
+            UPDATE public.jobs SET state='canceled',worker_id=NULL,lease_expires_at=NULL,
+                heartbeat_at=NULL,error_category=NULL,failure_context='{}'::jsonb
+            WHERE id=p_job_id AND state='running';
+            RETURN QUERY SELECT 'retained'::text,'canceled'::text,v_system.state; RETURN;
+        END IF;
+        IF NOT (
+            (v_attempt.operation='provision'
+             AND v_owner.state IN ('provisioning','repair-required'))
+            OR (v_attempt.operation='preactivation-teardown'
+                AND v_owner.state='teardown-requested')
+        ) THEN
+            RAISE EXCEPTION 'authority System retained retry state is invalid'
+            USING ERRCODE='22023';
+        END IF;
+        IF v_job.attempt>=v_job.max_attempts AND v_job.max_attempts=2147483647 THEN
+            RAISE EXCEPTION 'authority System retained retry attempt limit overflow'
+            USING ERRCODE='22003';
+        END IF;
+        IF v_attempt.operation='provision' THEN
+            UPDATE public.authority_system_ownership SET state='repair-required'
+            WHERE system_id=v_owner.system_id;
+        END IF;
+        UPDATE public.jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL,
+            heartbeat_at=NULL,error_category=NULL,failure_context='{}'::jsonb,
+            max_attempts=CASE WHEN attempt>=max_attempts THEN max_attempts+1 ELSE max_attempts END
+        WHERE id=p_job_id AND state='running';
+        RETURN QUERY SELECT 'retained'::text,'queued'::text,v_system.state; RETURN;
     ELSIF v_attempt.receipt_disposition='provision-ready'
           AND v_owner.state='provisioning' THEN
         UPDATE public.authority_system_ownership SET state='ready' WHERE system_id=v_owner.system_id;
@@ -847,7 +887,16 @@ BEGIN
         UPDATE public.jobs SET state='succeeded',result_ref=v_attempt.receipt_digest
         WHERE id=p_job_id AND state='running';
     ELSIF v_attempt.receipt_disposition='preactivation-absent'
-          AND v_owner.state IN ('teardown-requested','repair-required') THEN
+          AND v_owner.state='teardown-requested' THEN
+        INSERT INTO public.audit_log (
+            principal,agent_session,project,tool,object_kind,object_id,transition,args_digest
+        ) VALUES (
+            v_job.authorizing->>'principal',v_job.authorizing->>'agent_session',v_system.project,
+            'systems.teardown','systems',v_system.id,v_system.state || '->torn_down',
+            encode(sha256(convert_to(
+                '{"system_id":"' || v_system.id::text || '"}','UTF8'
+            )),'hex')
+        );
         UPDATE public.authority_system_ownership SET state='torn-down'
         WHERE system_id=v_owner.system_id;
         UPDATE public.systems SET state='torn_down' WHERE id=v_owner.system_id
@@ -970,7 +1019,7 @@ BEGIN
     JOIN public.jobs AS job ON job.id=attempt.job_id
     WHERE attempt.state='terminal' AND attempt.consumed_at IS NULL
       AND attempt.receipt_disposition='preactivation-absent'
-      AND ownership.state IN ('teardown-requested','repair-required')
+      AND ownership.state='teardown-requested'
       AND ownership.journal_sequence=attempt.terminal_head_sequence
       AND ownership.journal_digest=attempt.terminal_head_digest
       AND (
@@ -1032,7 +1081,7 @@ BEGIN
        OR v_attempt.receipt_digest<>p_receipt_digest
        OR v_owner.journal_sequence<>p_journal_sequence
        OR v_owner.journal_digest<>p_journal_digest
-       OR v_owner.state NOT IN ('teardown-requested','repair-required')
+       OR v_owner.state<>'teardown-requested'
        OR v_system.state NOT IN ('provisioning','ready','failed')
        OR v_job.id IS NULL
        OR NOT (
@@ -1052,6 +1101,15 @@ BEGIN
        ) THEN
         RETURN 'cleanup-required';
     END IF;
+    INSERT INTO public.audit_log (
+        principal,agent_session,project,tool,object_kind,object_id,transition,args_digest
+    ) VALUES (
+        v_job.authorizing->>'principal',v_job.authorizing->>'agent_session',v_system.project,
+        'systems.teardown','systems',v_system.id,v_system.state || '->torn_down',
+        encode(sha256(convert_to(
+            '{"system_id":"' || v_system.id::text || '"}','UTF8'
+        )),'hex')
+    );
     UPDATE public.authority_system_ownership SET state='torn-down'
     WHERE system_id=p_system_id;
     UPDATE public.systems SET state='torn_down' WHERE id=p_system_id
@@ -1074,8 +1132,6 @@ DECLARE
     v_new constant text := E'AND j.dispatch_lane = ANY(p_accepted_lanes)\n' ||
         E'          AND NOT EXISTS (\n' ||
         E'              SELECT 1 FROM public.authority_system_attempts AS authority_attempt\n' ||
-        E'              JOIN public.authority_system_ownership AS authority_ownership\n' ||
-        E'                ON authority_ownership.current_attempt_id=authority_attempt.id\n' ||
         E'              WHERE authority_attempt.job_id=j.id\n' ||
         E'                AND authority_attempt.state=''terminal''\n' ||
         E'                AND authority_attempt.consumed_at IS NULL\n' ||
@@ -1152,15 +1208,20 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
 REVOKE ALL ON FUNCTION
     public.register_authority_system_ownership(uuid,uuid,text,text,text,text,text),
     public.request_authority_system_preactivation_teardown(uuid,uuid,text),
-    public.resolve_authority_system_server_binding(uuid),
     public.claim_authority_system_first_activation(uuid,uuid)
 FROM PUBLIC, kdive_worker, kdive_reconciler, kdive_lifecycle_witness, kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION
     public.register_authority_system_ownership(uuid,uuid,text,text,text,text,text),
     public.request_authority_system_preactivation_teardown(uuid,uuid,text),
-    public.resolve_authority_system_server_binding(uuid),
     public.claim_authority_system_first_activation(uuid,uuid)
 TO kdive_server;
+GRANT EXECUTE ON FUNCTION public.request_authority_system_preactivation_teardown(uuid,uuid,text)
+TO kdive_reconciler;
+
+REVOKE ALL ON FUNCTION public.resolve_authority_system_control_binding(uuid)
+FROM PUBLIC, kdive_worker, kdive_lifecycle_witness, kdive_provider_authority;
+GRANT EXECUTE ON FUNCTION public.resolve_authority_system_control_binding(uuid)
+TO kdive_server, kdive_reconciler;
 
 REVOKE ALL ON FUNCTION
     public.allocate_authority_system_attempt(bytea,uuid,integer,uuid),
