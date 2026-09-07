@@ -54,7 +54,9 @@ if ((EUID == 0)); then
 fi
 
 step "sudo (package install, group membership, /var/lib/kdive)"
-sudo -v
+# Prompt only when a password is needed: `sudo -v` insists on a terminal even where a NOPASSWD
+# rule applies, which breaks a non-interactive run (ssh without a tty, nohup).
+sudo -n true 2>/dev/null || sudo -v
 
 # 2. Host packages: the operator set from the walkthrough (Step 1). The build toolchain is here
 #    because the kernel under test is built on this host and uploaded on the build lane; the
