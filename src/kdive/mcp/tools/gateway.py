@@ -307,8 +307,13 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
             # keeps this branch's pre-existing generic envelope so a server-side data
             # defect is never mislabeled as the caller's bad arguments.
             data: dict[str, JsonValue] = {}
-            is_binding_failure = isinstance(exc, FastMCPValidationError)
-            if is_binding_failure and isinstance(exc.__cause__, ValidationError):
+            binding_cause = exc.__cause__ if isinstance(exc, FastMCPValidationError) else None
+            # Both operands define "genuine binding failure" for this branch;
+            # suggested_next_actions below reuses the same flag so it can never drift
+            # from what actually populated data (gauntlet finding, branch review).
+            is_binding_failure = isinstance(binding_cause, ValidationError)
+            if is_binding_failure:
+                assert isinstance(binding_cause, ValidationError)  # narrows for ty
                 field_errors = [
                     cast(
                         "JsonValue",
@@ -317,7 +322,7 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                             "kind": err["type"],
                         },
                     )
-                    for err in exc.__cause__.errors(include_url=False)[:_FIELD_ERROR_LIMIT]
+                    for err in binding_cause.errors(include_url=False)[:_FIELD_ERROR_LIMIT]
                 ]
                 # Named field_errors, not ADR-0123's reserved `errors` key: that key is a
                 # closed `list[{loc, msg, type}]` contract (binding_errors.py's curated
