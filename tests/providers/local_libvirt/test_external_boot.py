@@ -2203,7 +2203,8 @@ class _RealSession:
         )
         self.guest_handle = _GuestTreeHandle([], present=False)
 
-    def inspect_closed(self) -> ClosedDomainInspection:
+    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+        del projected
         return self.inspection
 
     def stop_and_require_inactive(self) -> None:
@@ -2229,7 +2230,8 @@ class _RealSession:
             expected_cmdline=b"root=UUID=x",
         )
 
-    def define_xml(self, xml: str) -> None:
+    def define_xml(self, xml: str, *, projected: bool = False) -> None:
+        del projected
         self.preparation.actions.append(f"define:{xml}")
 
     def restore_power(self, prior: str) -> None:
@@ -2540,7 +2542,8 @@ class _RestartSession(_RealSession):
             expected_cmdline=b"root=UUID=x",
         )
 
-    def inspect_closed(self) -> ClosedDomainInspection:
+    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+        del projected
         return replace(
             self.inspection,
             xml=self.xml.encode(),
@@ -2564,7 +2567,8 @@ class _RestartSession(_RealSession):
         self.require_inactive()
         yield cast(_RestartGuest, self.guest_handle)
 
-    def define_xml(self, xml: str) -> None:
+    def define_xml(self, xml: str, *, projected: bool = False) -> None:
+        del projected
         self.require_inactive()
         self.faults.run("define", lambda: setattr(self, "xml", xml))
 

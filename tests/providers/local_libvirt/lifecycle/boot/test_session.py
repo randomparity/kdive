@@ -48,6 +48,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     RunningKernelObservation,
 )
+from kdive.providers.shared.libvirt_external_boot import boot_projection_identity
 from tests.providers.local_libvirt.external_boot_support import _metadata
 from tests.providers.local_libvirt.fakes import libvirt_error
 from tests.providers.local_libvirt.lifecycle.boot.session_support import (
@@ -2231,6 +2232,76 @@ def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     foreign = Domain(events, _xml(system_id=UUID(int=4)))
     with pytest.raises(ValueError, match="ownership"):
         _factory(events, foreign).open(_lease(), _expected())
+
+
+def test_boot_identity_accepts_a_decomposed_target_command_line() -> None:
+    events: list[str] = []
+    target = _xml().replace("root=x", "root=x debug=cafe\u0301")
+    session = _factory(events).open(_lease(), _expected())
+
+    assert session.boot_identity(target) == boot_projection_identity(target)
+
+    session.close()
+
+
+def test_define_xml_preserves_a_decomposed_target_command_line() -> None:
+    events: list[str] = []
+    domain = Domain(events)
+    target = _xml().replace("root=x", "root=x debug=cafe\u0301")
+    session = _factory(events, domain).open(_lease(), _expected())
+
+    session.define_xml(target, projected=True)
+
+    assert domain.xml == target
+    assert session.inspect_closed(projected=True).xml == target.encode()
+    session.close()
+
+
+def test_factory_reopens_a_target_with_a_decomposed_command_line() -> None:
+    events: list[str] = []
+    target = _xml().replace("root=x", "root=x debug=cafe\u0301")
+    domain = Domain(events, target, inactive_xml=target)
+
+    session = _factory(events, domain).open(_lease(), _expected())
+
+    assert session.inspect_closed(projected=True).xml == target.encode()
+    session.close()
+
+
+def test_factory_rejects_decomposed_non_cmdline_content_in_a_target() -> None:
+    events: list[str] = []
+    target = _xml().replace("/old", "/cafe\u0301")
+    domain = Domain(events, target, inactive_xml=target)
+
+    with pytest.raises(ValueError, match="NFC outside"):
+        _factory(events, domain).open(_lease(), _expected())
+
+
+def test_source_inspection_keeps_the_strict_nfc_contract() -> None:
+    events: list[str] = []
+    domain = Domain(events)
+    session = _factory(events, domain).open(_lease(), _expected())
+    domain.xml = _xml().replace("root=x", "root=x debug=cafe\u0301")
+
+    with pytest.raises(ValueError, match="domain XML must be NFC"):
+        session.inspect_closed()
+
+    session.close()
+
+
+@pytest.mark.parametrize("operation", ["boot_identity", "define_xml"])
+def test_projected_operations_reject_decomposed_non_cmdline_content(operation: str) -> None:
+    events: list[str] = []
+    target = _xml().replace("/old", "/cafe\u0301")
+    session = _factory(events).open(_lease(), _expected())
+
+    with pytest.raises(ValueError, match="NFC outside"):
+        if operation == "boot_identity":
+            session.boot_identity(target)
+        else:
+            session.define_xml(target, projected=True)
+
+    session.close()
 
 
 @pytest.mark.parametrize(

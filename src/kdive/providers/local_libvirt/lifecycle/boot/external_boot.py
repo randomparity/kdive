@@ -1875,7 +1875,7 @@ class _RealLocalExternalBootOperation:
         # exception: the caller must be able to name "unreadable" as an outcome, and no
         # libvirt or libguestfs message may cross this boundary (ADR-0584).
         try:
-            inspection = self._session.inspect_closed()
+            inspection = self._session.inspect_closed(projected=True)
         except Exception:  # noqa: BLE001 - an unreadable definition is a classification
             return LocalObservedState(definition=None, modules=None, active=None)
         modules: ComponentState | None
@@ -1944,7 +1944,7 @@ class _RealLocalExternalBootOperation:
         while metadata.phase == "module-restored":
             xml, active = self._host_state(metadata)
             if xml == "source" and not active:
-                self._session.define_xml(metadata.target_xml)
+                self._session.define_xml(metadata.target_xml, projected=True)
                 continue
             if xml == "target" and not active and metadata.prior_power == "inactive":
                 self.record_phase(metadata, "target-defined")
@@ -2216,7 +2216,7 @@ class _RealLocalExternalBootOperation:
     def _host_state(
         self, metadata: LocalRecoveryMetadataV1
     ) -> tuple[Literal["source", "target"], bool]:
-        inspection = self._session.inspect_closed()
+        inspection = self._session.inspect_closed(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
         if inspection.xml == metadata.target_xml.encode():
