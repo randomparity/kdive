@@ -203,11 +203,12 @@ default. Do both once on the worker host:
      ```bash
      py=.venv/bin/python
      site=$("$py" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
-     # Debian/Ubuntu install the apt binding to the dpkg dist-packages dir, NOT the `purelib` path
-     # `/usr/bin/python3` reports (that is the pip-local `/usr/local/...` tree). Fedora/RHEL install
-     # to purelib, so prefer the dist-packages dir when it exists, else fall back to purelib:
+     # Debian/Ubuntu install the apt binding to the dpkg dist-packages dir and Fedora/RHEL to the
+     # RPM platlib (/usr/lib64/python3.N/site-packages) — neither is the `purelib` path
+     # `/usr/bin/python3` reports (that is the pip-local `/usr/local/...` tree). Prefer the
+     # dist-packages dir when it exists, else ask the system interpreter where it imports it from:
      sys_site=/usr/lib/python3/dist-packages
-     [[ -e "$sys_site/guestfs.py" ]] || sys_site=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+     [[ -e "$sys_site/guestfs.py" ]] || sys_site=$(/usr/bin/python3 -c 'import os, guestfs; print(os.path.dirname(guestfs.__file__))')
      ln -s "$sys_site"/guestfs.py "$site"/
      ln -s "$sys_site"/libguestfsmod*.so "$site"/
      ```
