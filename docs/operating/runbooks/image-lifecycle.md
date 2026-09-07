@@ -190,9 +190,11 @@ rejected, never published), and publishes row-first.
 `fixtures/local-libvirt/rootfs_catalog.toml`. Each row pins its base (a `virt-builder` template or
 a sha256-pinned cloud-image URL) and carries a `kdump_capable` flag. The RHEL-family entries
 (#823) reuse the `rhel` customizer; on EL 8/9 `makedumpfile`/`kdumpctl` come from `kexec-tools`
-(no standalone packages) and EL 8 pulls `drgn` from EPEL. The Debian entries (#824) use the
-`debian` customizer (apt; `kdump-tools.service`; `ssh.service`; `python3-drgn`; AppArmor instead of
-SELinux, needing no relabel; cloud-init disabled via `/etc/cloud/cloud-init.disabled`).
+(no standalone packages) and EL 8 pulls `drgn` from EPEL. The Debian entries (#824) and the
+Ubuntu LTS entries use the `debian` customizer (apt; `kdump-tools.service`; `ssh.service`;
+`python3-drgn`; AppArmor instead of SELinux, needing no relabel; cloud-init disabled via
+`/etc/cloud/cloud-init.disabled`). Ubuntu rows pin a dated `release-YYYYMMDD` serial under
+`cloud-images.ubuntu.com/releases/<codename>/`; the `.img` file is qcow2.
 
 `kdump_capable` is **kernel-relative** to the current default from-source target (a v7.0-class
 x86_64 kernel): it is `true` only when the makedumpfile the build installs from that release's
@@ -212,8 +214,10 @@ build silently becomes capable while the flag lags until re-verified. The runtim
 | `centos-stream-kdive-ready-10` | CentOS Stream 10 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
 | `debian-kdive-ready-12` | Debian 12 (bookworm) | 1.7.2 | no | `kdump_core_incomplete` → `host_dump` |
 | `debian-kdive-ready-13` | Debian 13 (trixie) | 1.7.6 | no | `kdump_core_incomplete` → `host_dump` |
+| `ubuntu-kdive-ready-24.04` | Ubuntu 24.04 LTS (noble) | 1.7.5 | no | `kdump_core_incomplete` → `host_dump` |
+| `ubuntu-kdive-ready-26.04` | Ubuntu 26.04 LTS (resolute) | 1.7.7 | no | `kdump_core_incomplete` → `host_dump` |
 
-Versions verified against distro package indexes on 2026-06-26 (the guard test
+Versions verified against distro package indexes on 2026-06-26 (Ubuntu rows: 2026-09-07; the guard test
 `tests/images/test_rootfs_catalog.py` asserts each row's flag matches its documented makedumpfile
 version). A `kdump_capable = no` entry still completes the rest of the lifecycle
 (provision/build/install/boot) and captures via the explicit `host_dump` method; only the default

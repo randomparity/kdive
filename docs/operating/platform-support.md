@@ -60,6 +60,7 @@ available.
 | Rocky 10 / CentOS Stream 10 (EL10) | rhel (boot) | ◐ shared EL boot path | ⚠️ **not verified — gated** (same as EL9) |
 | Rocky 8 (EL8) | rhel (boot) | ◐ shared EL boot path | — no ppc64le port (Rocky 8 is x86_64 + aarch64) |
 | Debian 12, 13 | debian (`virt_customize`) | ✅ supported | — deferred (#1167) |
+| Ubuntu 24.04, 26.04 LTS | debian (`virt_customize`) | ◐ shared debian path | — deferred (#1167) |
 
 Notes on the matrix:
 
@@ -73,6 +74,11 @@ Notes on the matrix:
 - **EL10 and Rocky 8 on x86_64** ship catalog- and loader-validated and ride the
   same rhel-family boot mechanism as the proven EL9 path, but do not have their own
   recorded end-to-end customize-boot proof — hence ◐, not ✅.
+- **Ubuntu 24.04 / 26.04 on x86_64** ship catalog- and loader-validated rows on the
+  same debian-family `virt_customize` mechanism as the Debian rows, without their own
+  recorded end-to-end build proof — hence ◐. The 24.04 row's `python3-drgn` (0.0.25) is
+  below the live-introspection threshold, so `introspect.run` reports it `incapable`;
+  26.04 (0.0.33) is capable.
 - **Debian ppc64le** is deferred to **#1167**: Debian publishes only the
   `generic`/`nocloud` ppc64el variant (not the `genericcloud` variant the x86_64
   rows pin), and the debian family still uses `virt_customize`, which cannot

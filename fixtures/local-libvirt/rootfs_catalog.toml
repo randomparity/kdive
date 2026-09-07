@@ -233,11 +233,40 @@ makedumpfile_version = "1.7.6"  # trixie
 drgn_version = "0.0.31"  # trixie (python3-drgn 0.0.31-1); at the BTF-capability threshold
 source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/trixie/20260623-2518/debian-13-genericcloud-amd64-20260623-2518.qcow2", sha256 = "e32d03ec8f05b0b3a4c16e8cc0a5424efa78514141a60a2656623cf422cc6416" }  # pragma: allowlist secret
 
+# Ubuntu LTS entries (24.04 noble + 26.04 resolute), same `debian` customizer: apt names, kdump-tools,
+# ssh.service, AppArmor, and a cloud-init NoCloud seed all hold on Ubuntu, and the cloud images
+# enable `universe` (where python3-drgn lives). Pinned to a dated `release-YYYYMMDD` serial under
+# cloud-images.ubuntu.com/releases/<codename>/ (never the rotating `release/` alias); the file is
+# qcow2 despite its `.img` suffix. Versions verified against packages.ubuntu.com on 2026-09-07:
+# makedumpfile 1.7.5 (noble) / 1.7.7 (resolute), both < 1.7.9 -> host_dump for a v7.0 kernel;
+# python3-drgn 0.0.25 (noble, < 0.0.31 -> live_drgn incapable) / 0.0.33 (resolute).
+[[image]]
+name = "ubuntu-kdive-ready-24.04"
+distro = "ubuntu"
+version = "24.04"
+family = "debian"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.5"  # noble (1:1.7.5-1)
+drgn_version = "0.0.25"  # noble (python3-drgn 0.0.25-2build3, universe); < 0.0.31 -> live_drgn incapable
+source = { kind = "cloud-image", url = "https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img", sha256 = "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30" }  # pragma: allowlist secret
+
+[[image]]
+name = "ubuntu-kdive-ready-26.04"
+distro = "ubuntu"
+version = "26.04"
+family = "debian"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.7"  # resolute (1:1.7.7-1)
+drgn_version = "0.0.33"  # resolute (python3-drgn 0.0.33-1build1, universe)
+source = { kind = "cloud-image", url = "https://cloud-images.ubuntu.com/releases/resolute/release-20260823/ubuntu-26.04-server-cloudimg-amd64.img", sha256 = "8196be9d7958059cb56c6c75c80fdf6cee8a8885bc149ea791d7db1c7ef93035" }  # pragma: allowlist secret
+
 # N/A (ppc64le, deferred to #1167): Debian publishes only the `generic`/`nocloud` ppc64el variant,
 # not the `genericcloud` variant these x86_64 rows pin, and the debian family is still
 # customize_via="virt_customize" — it cannot cross-arch customize-boot on an x86_64 host until the
-# debian->boot migration (#1167) lands. Debian ppc64le rows are added there, not here; guarded by
-# test_rootfs_catalog.py (ADR-0350, #1152).
+# debian->boot migration (#1167) lands. Debian and Ubuntu ppc64le rows are added there, not here
+# (Ubuntu does publish a `ppc64el` cloud image); guarded by test_rootfs_catalog.py (ADR-0350, #1152).
 #
 # Scope note (ppc64le): fedora-kdive-build-44 (build-host toolchain) gets no ppc64le sibling — a
 # ppc64le build host only matters for compiling ppc64le kernels, a lane unproven in epic #1139;
