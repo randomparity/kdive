@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2027-03-03
+> **Resolved by #2159** (2026-09-07)
 
 ## Concern
 
@@ -74,6 +73,9 @@ silent divergence #2159 exists to stop.
   reader who notices the non-ASCII literals is not left to infer that the renderer validates
   them.
 
+After resolution, `tests/providers/shared/test_libvirt_external_boot.py` preserves the three
+golden vectors against their published literals rather than against a provider-derived value.
+
 ## What would resolve it
 
 Decide where non-NFC `kernel` and `initrd` input is refused, apply it once in the module
@@ -85,6 +87,18 @@ amend the ADR if they are not.
 Done when a decomposed `kernel` argument cannot reach a rendered definition unnoticed, the
 `cmdline` exemption's extent is stated somewhere durable rather than inferred, and this record
 carries its resolution banner.
+
+## Resolution
+
+#2159 moved both providers onto one renderer and identity implementation. The renderer now accepts
+only bounded canonical NFC absolute POSIX paths for `kernel` and `initrd`; empty paths, root,
+relative paths, dot or empty segments, traversal, NUL, XML-illegal characters, and values beyond
+1,024 UTF-8 bytes are rejected before serialization.
+
+The `cmdline` exemption preserves every otherwise valid scalar sequence, including non-NFC text.
+The shared renderer rejects only XML-unrepresentable command lines and never normalizes, strips,
+tokenizes, or otherwise rewrites an accepted value. Both providers carry the plan's exact command
+line through durable preparation and serialization.
 
 ## Provenance
 

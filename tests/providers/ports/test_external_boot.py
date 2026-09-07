@@ -85,6 +85,21 @@ def test_plan_matches_adr_golden_vector_and_identity() -> None:
     assert ExternalBootPlan.from_canonical_json(plan.to_canonical_json()) == plan
 
 
+def test_plan_preserves_a_decomposed_debug_command_line_in_canonical_json() -> None:
+    debug_cmdline = "debug=cafe\u0301"
+    data = _plan_data()
+    data["debug_cmdline"] = debug_cmdline
+    data["cmdline"] = f"root=UUID=x {debug_cmdline}"
+
+    plan = ExternalBootPlan.model_validate(data)
+    serialized = plan.to_canonical_json()
+    restored = ExternalBootPlan.from_canonical_json(serialized)
+
+    assert debug_cmdline.encode() in serialized
+    assert restored.debug_cmdline == debug_cmdline
+    assert restored.cmdline == f"root=UUID=x {debug_cmdline}"
+
+
 def test_materialization_matches_adr_golden_vector_and_identity() -> None:
     data = {
         "architecture": "x86_64",

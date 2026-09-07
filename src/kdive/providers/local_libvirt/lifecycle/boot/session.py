@@ -20,8 +20,6 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 import libvirt
-from defusedxml.common import DefusedXmlException
-from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
@@ -37,6 +35,12 @@ from kdive.providers.ports.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     HostStatDeviceIdentity,
     prove_no_foreign_path_references,
+)
+from kdive.providers.shared.libvirt_external_boot import (
+    boot_projection_element_identity,
+    parse_domain_xml,
+    parse_projected_domain_xml,
+    preserved_element_identity,
 )
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
@@ -205,13 +209,13 @@ class LocalExternalBootSession(Protocol):
     def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1: ...
     def projection_artifact_path(self, projection: TargetProjectionV1, name: str) -> str: ...
     def boot_identity(self, xml: str) -> str: ...
-    def inspect_closed(self) -> ClosedDomainInspection: ...
+    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection: ...
     def require_inactive(self) -> None: ...
     def stop_and_require_inactive(self) -> None: ...
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
     def unlink_artifact(self, name: str) -> None: ...
     def guest(self) -> AbstractContextManager[InactiveGuest]: ...
-    def define_xml(self, xml: str) -> None: ...
+    def define_xml(self, xml: str, *, projected: bool = False) -> None: ...
     def start(self) -> None: ...
     def readiness(self) -> ReadinessResult: ...
     def observe_running(self) -> RunningKernelObservation: ...
@@ -934,13 +938,13 @@ class _ConcreteSession:
 
     def boot_identity(self, xml: str) -> str:
         """Measure only the boot projection of an owned candidate definition."""
-        root = _parse_owned_xml(xml, self._system_id, self._overlay.path)
+        root = _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=True)
         return _boot_identity(root)
 
-    def inspect_closed(self) -> ClosedDomainInspection:
+    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
         domain = self._require_open_domain()
         xml = domain.XMLDesc(0)
-        root = _parse_owned_xml(xml, self._system_id, self._overlay.path)
+        root = _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         active = _active(domain)
         return ClosedDomainInspection(
             xml=xml.encode(),
@@ -975,10 +979,10 @@ class _ConcreteSession:
         self._require_open_domain()
         return _GuestContext(self)
 
-    def define_xml(self, xml: str) -> None:
+    def define_xml(self, xml: str, *, projected: bool = False) -> None:
         self._require_no_guest_context()
         self.require_inactive()
-        _parse_owned_xml(xml, self._system_id, self._overlay.path)
+        _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         assert self._connection is not None
         prior = self._domain
         replacement = self._connection.defineXML(xml)
@@ -1318,10 +1322,12 @@ class LocalExternalBootSessionFactory:
                     category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                     details={"system_id": str(system_id)},
                 ) from exc
-            inactive_root = _parse_owned_xml(inactive_xml, system_id, expected_overlay)
+            inactive_root = _parse_owned_xml(
+                inactive_xml, system_id, expected_overlay, projected=True
+            )
             _require_guest_agent_channel(inactive_root, system_id)
             xml = domain.XMLDesc(0)
-            _parse_owned_xml(xml, system_id, expected_overlay)
+            _parse_owned_xml(xml, system_id, expected_overlay, projected=True)
             overlay_fd = self._open_overlay(expected_overlay)
             device, inode, mode = self._fstat_overlay(overlay_fd)
             if not stat.S_ISREG(mode):
@@ -1682,8 +1688,15 @@ def _require_guest_agent_channel(root: ET.Element, system_id: UUID) -> None:
         )
 
 
-def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Element:
-    root = _safe_domain_xml(xml)
+def _parse_owned_xml(
+    xml: str,
+    system_id: UUID,
+    expected_overlay: str,
+    *,
+    projected: bool = False,
+) -> ET.Element:
+    parser = parse_projected_domain_xml if projected else parse_domain_xml
+    root = parser(xml)
     if root.tag != "domain" or root.findtext("name") != domain_name_for(system_id):
         raise ValueError("domain ownership does not match the operation lease")
     if root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system") != str(system_id):
@@ -1715,15 +1728,6 @@ def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Ele
     if len(disks) != 1 or overlay_references != 1:
         raise ValueError("domain overlay ownership is absent or ambiguous")
     return root
-
-
-def _safe_domain_xml(xml: str) -> ET.Element:
-    if unicodedata.normalize("NFC", xml) != xml:
-        raise ValueError("domain XML must be NFC")
-    try:
-        return _safe_fromstring(xml)
-    except (ET.ParseError, DefusedXmlException) as exc:
-        raise ValueError("domain XML is malformed or forbidden") from exc
 
 
 def _disk_source_is(disk: ET.Element, expected_overlay: str) -> bool:
@@ -1854,37 +1858,11 @@ def _digest(prefix: bytes, payload: bytes) -> str:
 
 
 def _preserved_identity(root: ET.Element) -> str:
-    cloned = ET.fromstring(ET.tostring(root, encoding="unicode"))  # noqa: S314 - defused above
-    os_element = cloned.find("os")
-    if os_element is not None:
-        for tag in ("kernel", "initrd", "cmdline"):
-            element = os_element.find(tag)
-            if element is not None:
-                os_element.remove(element)
-    for element in cloned.iter():
-        if len(element) and element.text is not None and not element.text.strip():
-            element.text = None
-        if element.tail is not None and not element.tail.strip():
-            element.tail = None
-    canonical = ET.canonicalize(
-        ET.tostring(cloned, encoding="unicode"),
-        with_comments=False,
-        strip_text=False,
-        rewrite_prefixes=True,
-    ).encode()
-    return _digest(b"kdive-libvirt-preserved-v1", canonical)
+    return preserved_element_identity(root)
 
 
 def _boot_identity(root: ET.Element) -> str:
-    os_element = root.find("os")
-    value = {
-        "cmdline": os_element.findtext("cmdline") if os_element is not None else None,
-        "initrd": os_element.findtext("initrd") if os_element is not None else None,
-        "kernel": os_element.findtext("kernel") if os_element is not None else None,
-        "schema": "libvirt-boot-projection-v1",
-    }
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return _digest(b"kdive-libvirt-boot-projection-v1", payload)
+    return boot_projection_element_identity(root)
 
 
 def _attempt_guest_close(guest: _Guest) -> list[Exception]:

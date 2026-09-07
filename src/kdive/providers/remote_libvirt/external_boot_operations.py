@@ -34,7 +34,7 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     activate_definition,
     boot_projection_identity,
     observe_guest_identity,
-    parse_domain_xml,
+    parse_projected_domain_xml,
     prepare_target_definition,
     preserved_definition_identity,
     recover_disk_grub_baseline,
@@ -238,7 +238,7 @@ class ConcreteRemoteExternalBootOperations:
         for path in paths.values():
             if not path.startswith("/"):
                 raise ValueError("remote recovery artifact path is not absolute")
-        os_element = parse_domain_xml(recovery.definition.target_xml).find("os")
+        os_element = parse_projected_domain_xml(recovery.definition.target_xml).find("os")
         if os_element is None:
             raise ValueError("remote target definition omitted operating-system paths")
         recorded_kernel = os_element.findtext("kernel")

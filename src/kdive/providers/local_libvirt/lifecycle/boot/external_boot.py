@@ -10,7 +10,6 @@ import stat
 import tarfile
 import tempfile
 import unicodedata
-import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
@@ -20,8 +19,6 @@ from pathlib import Path
 from typing import Annotated, BinaryIO, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from defusedxml.common import DefusedXmlException
-from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.build_artifacts import validation as build_validation
@@ -80,7 +77,10 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
-from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
+from kdive.providers.shared.libvirt_external_boot import (
+    parse_projected_domain_xml,
+    render_target_xml,
+)
 from kdive.store.objectstore import ObjectStore
 
 
@@ -159,9 +159,9 @@ class LocalRecoveryMetadataV1(_ClosedValue):
 
     @model_validator(mode="after")
     def _domain_xml_matches_digests(self) -> LocalRecoveryMetadataV1:
-        xml_values = (self.source_xml, self.target_xml)
-        if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
-            raise ValueError("source and target domain XML must be NFC")
+        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
+            raise ValueError("source domain XML must be NFC")
+        parse_projected_domain_xml(self.target_xml)
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
@@ -199,9 +199,9 @@ class LocalPreStopIntentV1(_ClosedValue):
 
     @model_validator(mode="after")
     def _domain_xml_matches_digests(self) -> LocalPreStopIntentV1:
-        xml_values = (self.source_xml, self.target_xml)
-        if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
-            raise ValueError("source and target domain XML must be NFC")
+        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
+            raise ValueError("source domain XML must be NFC")
+        parse_projected_domain_xml(self.target_xml)
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
@@ -383,12 +383,6 @@ class TargetProjectionV1(_ClosedValue):
     kernel_filename: Literal["kernel"] = "kernel"
     modules_filename: Literal["modules"] = "modules"
     initrd_filename: Literal["initrd"] | None
-
-    @model_validator(mode="after")
-    def _canonical_text(self) -> TargetProjectionV1:
-        if unicodedata.normalize("NFC", self.cmdline) != self.cmdline:
-            raise ValueError("target projection cmdline must be NFC")
-        return self
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -1881,7 +1875,7 @@ class _RealLocalExternalBootOperation:
         # exception: the caller must be able to name "unreadable" as an outcome, and no
         # libvirt or libguestfs message may cross this boundary (ADR-0584).
         try:
-            inspection = self._session.inspect_closed()
+            inspection = self._session.inspect_closed(projected=True)
         except Exception:  # noqa: BLE001 - an unreadable definition is a classification
             return LocalObservedState(definition=None, modules=None, active=None)
         modules: ComponentState | None
@@ -1950,7 +1944,7 @@ class _RealLocalExternalBootOperation:
         while metadata.phase == "module-restored":
             xml, active = self._host_state(metadata)
             if xml == "source" and not active:
-                self._session.define_xml(metadata.target_xml)
+                self._session.define_xml(metadata.target_xml, projected=True)
                 continue
             if xml == "target" and not active and metadata.prior_power == "inactive":
                 self.record_phase(metadata, "target-defined")
@@ -2222,7 +2216,7 @@ class _RealLocalExternalBootOperation:
     def _host_state(
         self, metadata: LocalRecoveryMetadataV1
     ) -> tuple[Literal["source", "target"], bool]:
-        inspection = self._session.inspect_closed()
+        inspection = self._session.inspect_closed(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
         if inspection.xml == metadata.target_xml.encode():
@@ -4254,29 +4248,3 @@ def advance_absence_publication(
     except (KeyError, ValueError) as exc:
         raise ValueError("external-boot module absence conflict") from exc
     action()
-
-
-def render_target_xml(source: str, *, kernel: str, initrd: str | None, cmdline: str) -> str:
-    """Return source domain XML with only the direct-boot projection replaced."""
-    if unicodedata.normalize("NFC", source) != source:
-        raise ValueError("domain XML must be NFC")
-    try:
-        root = _safe_fromstring(source)
-    except (ET.ParseError, DefusedXmlException) as exc:
-        raise ValueError("domain XML is malformed or forbidden") from exc
-    if root.tag != "domain":
-        raise ValueError("domain XML must have a domain root")
-    os_element = root.find("os")
-    if os_element is None:
-        os_element = ET.SubElement(root, "os")
-    for tag in ("kernel", "initrd", "cmdline"):
-        element = os_element.find(tag)
-        if element is not None:
-            os_element.remove(element)
-    ET.SubElement(os_element, "kernel").text = kernel
-    if initrd is not None:
-        ET.SubElement(os_element, "initrd").text = initrd
-    ET.SubElement(os_element, "cmdline").text = cmdline
-    register_kdive_namespace()
-    register_qemu_namespace()
-    return ET.tostring(root, encoding="unicode")
