@@ -1,4 +1,4 @@
-# 0626 — Supersede obsolete server-build config catalog decision
+# 0627 — Supersede obsolete server-build config catalog decision
 
 ## Status
 
