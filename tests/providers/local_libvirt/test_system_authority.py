@@ -423,6 +423,61 @@ def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: 
     assert calls == ["inspect", "close", "inspect", "close"]
 
 
+def test_manifest_binding_rejects_wrong_resource_before_teardown_provider_call(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    base = tmp_path / "base.qcow2"
+    base.touch()
+
+    def open_teardown(*_args: object) -> _AbsentTeardown:
+        calls.append("teardown")
+        return _AbsentTeardown()
+
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_Provisioner(),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: base},
+        ),
+        readiness_probe=lambda _system_id: False,
+        open_teardown=open_teardown,
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
+        allocate_port=lambda: 2200,
+        manifest_binding=("local-libvirt", "local-a", "authority-a"),
+    )
+    request = AuthoritySystemMutationRequestV1(
+        system_id=uuid4(),
+        allocation_id=uuid4(),
+        resource_id=uuid4(),
+        provider_kind="local-libvirt",
+        resource_name="local-b",
+        authority_instance="authority-a",
+        profile_identity=_DIGEST,
+        root_identity=_DIGEST,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        operation_identity="teardown-a",
+        authority_id=uuid4(),
+        generation=1,
+        attempt_id=uuid4(),
+        operation_digest=_DIGEST,
+        bootstrap_identity=_DIGEST,
+    )
+    context = AuthoritySystemCommitContextV1(
+        attempt_id=request.attempt_id,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        journal_sequence=1,
+        journal_digest=_DIGEST,
+    )
+
+    with pytest.raises(LocalAuthoritySystemError, match="not bound"):
+        asyncio.run(provider.execute_preactivation_teardown(request, context))
+
+    assert calls == []
+
+
 def test_completion_receipt_replays_a_stable_terminal_timestamp(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     intent = _intent(tmp_path)

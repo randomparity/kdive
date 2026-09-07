@@ -1029,6 +1029,22 @@ async def test_shutdown_drains_started_lane_before_closing_adapter(tmp_path: Pat
 
 
 @pytest.mark.anyio
+async def test_shutdown_closes_adapter_when_system_service_close_fails(tmp_path: Path) -> None:
+    service, _repository, adapter, _peer, _request = _service(tmp_path)
+
+    class FailingSystemService:
+        async def close(self) -> None:
+            raise RuntimeError("system service close failed")
+
+    service._system_service = cast(Any, FailingSystemService())  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="system service close failed"):
+        await service.close()
+
+    assert adapter.closed
+
+
+@pytest.mark.anyio
 async def test_readiness_requires_exact_local_and_trusted_head(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

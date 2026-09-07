@@ -76,7 +76,11 @@ def _profile(
             "kernel_source_ref": "git+https://example.invalid/kernel#v1",
             "provider": {
                 "remote-libvirt": {
-                    "base_image_volume": caller_base,
+                    "base_image_source": {
+                        "kind": "catalog",
+                        "provider": "remote-libvirt",
+                        "name": caller_base,
+                    },
                     "crashkernel": "256M",
                 }
             },
@@ -356,6 +360,7 @@ def _provider(
     clock: _Clock | None = None,
     sleep: Callable[[float], None] | None = None,
     architecture: Architecture = "x86_64",
+    validate_private_base: Callable[[str, str], None] = lambda _name, _path: None,
 ) -> tuple[RemoteAuthoritySystemProvider, _Bootstrap, RemoteModulePreparationExecutor, Path]:
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
@@ -372,6 +377,8 @@ def _provider(
         connection=open_connection,
         pool_name=POOL_NAME,
         manifest=(_manifest(architecture=architecture),),
+        private_base_paths={BASE_VOLUME: Path("/authority/pool") / BASE_VOLUME},
+        validate_private_base=validate_private_base,
         state_dir=state,
         executor=owned_executor,
         identity_port=identity or _Identity(),
@@ -461,6 +468,109 @@ async def test_wrong_snapshot_binding_opens_no_connection(tmp_path: Path) -> Non
     try:
         with pytest.raises(ValueError, match="snapshot"):
             await provider.execute_system_provision(_request(), _context(), wrong)
+    finally:
+        executor.shutdown()
+    assert connection.opens == 0
+    assert connection.mutations == []
+
+
+@pytest.mark.anyio
+async def test_base_volume_path_outside_manifest_private_base_fails_before_mutation(
+    tmp_path: Path,
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    volume = connection.pool.storageVolLookupByName(BASE_VOLUME)
+    volume._state = replace(volume._state, path="/escaped/base.qcow2")  # noqa: SLF001
+    try:
+        with pytest.raises(CategorizedError, match="base volume identity is invalid"):
+            await provider.execute_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert connection.mutations == []
+
+
+@pytest.mark.anyio
+async def test_changed_private_base_identity_fails_before_mutation(tmp_path: Path) -> None:
+    connection = _Connection()
+
+    def reject_changed_base(_name: str, _path: str) -> None:
+        raise ValueError("private base changed")
+
+    provider, _bootstrap, executor, _state = _provider(
+        tmp_path, connection, validate_private_base=reject_changed_base
+    )
+    try:
+        with pytest.raises(CategorizedError, match="base volume identity is invalid"):
+            await provider.execute_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert connection.mutations == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "source",
+    (
+        {"kind": "local", "path": "/caller/base.qcow2"},
+        {
+            "kind": "local",
+            "path": "/caller/base.qcow2",
+            "sha256": "sha256:" + "f" * 64,
+        },
+    ),
+)
+async def test_unpinned_or_mismatched_local_source_opens_no_connection(
+    tmp_path: Path, source: dict[str, object]
+) -> None:
+    profile = ProvisioningProfile.parse(
+        {
+            **_profile().model_dump(mode="json", by_alias=True),
+            "provider": {"remote-libvirt": {"base_image_source": source}},
+        }
+    )
+    snapshot = replace(
+        _snapshot(), profile=profile, profile_identity="sha256:" + profile_digest(profile)
+    )
+    request = _request().model_copy(update={"profile_identity": snapshot.profile_identity})
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        with pytest.raises(CategorizedError, match="verified catalog or pinned"):
+            await provider.execute_system_provision(request, _context(), snapshot)
+    finally:
+        executor.shutdown()
+    assert connection.opens == 0
+    assert connection.mutations == []
+
+
+@pytest.mark.anyio
+async def test_wrong_catalog_provider_opens_no_connection(tmp_path: Path) -> None:
+    profile = ProvisioningProfile.parse(
+        {
+            **_profile().model_dump(mode="json", by_alias=True),
+            "provider": {
+                "remote-libvirt": {
+                    "base_image_source": {
+                        "kind": "catalog",
+                        "provider": "local-libvirt",
+                        "name": "base-a",
+                    }
+                }
+            },
+        }
+    )
+    snapshot = replace(
+        _snapshot(), profile=profile, profile_identity="sha256:" + profile_digest(profile)
+    )
+    request = _request().model_copy(update={"profile_identity": snapshot.profile_identity})
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        with pytest.raises(CategorizedError, match="verified catalog or pinned"):
+            await provider.execute_system_provision(request, _context(), snapshot)
     finally:
         executor.shutdown()
     assert connection.opens == 0

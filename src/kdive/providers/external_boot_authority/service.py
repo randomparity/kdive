@@ -58,6 +58,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
+from kdive.providers.system_authority.service import AuthoritySystemService
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +457,7 @@ class ExternalBootAuthorityService:
         metrics: AuthorityServiceMetrics | None = None,
         recovery_orphans: AuthorityRecoveryOrphanResolver | None = None,
         proof_checkpoint: AuthorityProofCheckpoint | None = None,
+        system_service: AuthoritySystemService | None = None,
     ) -> None:
         self._repository = repository
         self._journal_factory = journal_factory
@@ -464,6 +466,7 @@ class ExternalBootAuthorityService:
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._recovery_orphans = recovery_orphans
         self._proof_checkpoint = proof_checkpoint
+        self._system_service = system_service
         self._lanes: dict[UUID, _Lane] = {}
         self._completion_tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
@@ -472,21 +475,38 @@ class ExternalBootAuthorityService:
         if recovery_orphans is not None:
             recovery_orphans.set_serializer(self._serialize_recovery_orphan)
 
+    @property
+    def system_service(self) -> AuthoritySystemService | None:
+        """Return the co-hosted activation-free System service, when configured."""
+        return self._system_service
+
     async def close(self) -> None:
         """Stop admission, drain completion-owned mutations, then close the adapter."""
         self._accepting = False
-        cancellation: asyncio.CancelledError | None = None
+        failure: BaseException | None = None
         while self._completion_tasks:
             pending = asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
             try:
                 await asyncio.shield(pending)
             except asyncio.CancelledError as error:
-                cancellation = error
-        if not self._closed and isinstance(self._adapter, AuthorityAdapterCloser):
-            self._adapter.close()
-        self._closed = True
-        if cancellation is not None:
-            raise cancellation
+                if failure is None:
+                    failure = error
+        try:
+            if self._system_service is not None:
+                await self._system_service.close()
+        except BaseException as error:
+            if failure is None:
+                failure = error
+        try:
+            if not self._closed and isinstance(self._adapter, AuthorityAdapterCloser):
+                self._adapter.close()
+        except BaseException as error:
+            if failure is None:
+                failure = error
+        finally:
+            self._closed = True
+        if failure is not None:
+            raise failure
 
     def _track_completion(self, task: asyncio.Task[object]) -> None:
         self._completion_tasks.add(task)

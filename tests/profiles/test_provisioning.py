@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from kdive.components.references import LocalComponentRef
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -770,7 +771,7 @@ def test_remote_profile_parses_with_supplied_base_image_source() -> None:
     }
     section = ProvisioningProfile.parse(raw).provider.remote_libvirt
     assert section.base_image_volume is None
-    assert section.base_image_source is not None
+    assert isinstance(section.base_image_source, LocalComponentRef)
     assert section.base_image_source.path == "/var/lib/kdive/rootfs/fedora-44.qcow2"
 
 

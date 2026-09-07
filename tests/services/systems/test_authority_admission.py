@@ -7,9 +7,13 @@ from uuid import uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.references import ROOTFS_COMPONENT
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
+from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.security.authz.rbac import Role
 from tests.mcp import systems_support
 
@@ -30,6 +34,50 @@ def _profile() -> dict[str, object]:
     profile = systems_support.provisioning_profile()
     profile["provider"]["local-libvirt"]["rootfs"]["sha256"] = _DIGEST
     return profile
+
+
+def _remote_catalog_profile() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": 8,
+        "boot_method": "disk-image",
+        "provider": {
+            "remote-libvirt": {
+                "base_image_source": {
+                    "kind": "catalog",
+                    "provider": "remote-libvirt",
+                    "name": "authority-base",
+                }
+            }
+        },
+    }
+
+
+def _remote_local_only_sources() -> ComponentSourceCapabilities:
+    return ComponentSourceCapabilities(
+        provider="remote-libvirt",
+        accepted_component_sources={ROOTFS_COMPONENT: frozenset({"local"})},
+    )
+
+
+async def _prepare_remote_allocation(pool: AsyncConnectionPool, allocation_id: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE resources SET kind='remote-libvirt',name='remote-a' WHERE id=("
+            "SELECT resource_id FROM allocations WHERE id=%s)",
+            (allocation_id,),
+        )
+        await conn.execute(
+            "INSERT INTO image_catalog "
+            "(id,provider,name,arch,format,root_device,object_key,digest,provenance,"
+            "visibility,state) VALUES "
+            "(%s,'remote-libvirt','authority-base','x86_64','qcow2','/dev/vda',"
+            "'authority-base.qcow2',%s,%s,'public','registered')",
+            (uuid4(), _DIGEST, Jsonb(_ROOT)),
+        )
 
 
 def test_authority_admission_atomically_marks_job_and_registers_ownership(
@@ -84,6 +132,66 @@ def test_authority_admission_atomically_marks_job_and_registers_ownership(
             assert row["authority_instance"] == "authority-a"
             assert row["profile_identity"] == marker["profile_identity"]
             assert row["root_identity"] == marker["root_identity"]
+
+    asyncio.run(run())
+
+
+def test_remote_catalog_root_is_admitted_only_through_configured_authority(
+    migrated_url: str,
+) -> None:
+    async def run() -> None:
+        validated_worker_paths: list[object] = []
+        authority = SystemProvisionHandlers(
+            RemoteLibvirtProfilePolicy(),
+            _remote_local_only_sources(),
+            validated_worker_paths.append,
+            authority_route=lambda _kind, _name: "authority-a",
+        )
+        ordinary = SystemProvisionHandlers(
+            RemoteLibvirtProfilePolicy(),
+            _remote_local_only_sources(),
+            validated_worker_paths.append,
+            authority_route=lambda _kind, _name: None,
+        )
+        async with systems_support.pool(migrated_url) as pool:
+            ordinary_allocation = await systems_support.granted_allocation(pool)
+            authority_allocation = await systems_support.granted_allocation(pool)
+            await _prepare_remote_allocation(pool, ordinary_allocation)
+            rejected = await ordinary.provision_system(
+                pool,
+                systems_support.ctx(),
+                allocation_id=ordinary_allocation,
+                profile=_remote_catalog_profile(),
+            )
+            assert rejected.status == "error"
+            assert rejected.error_category == "configuration_error"
+
+            admitted = await authority.provision_system(
+                pool,
+                systems_support.ctx(),
+                allocation_id=authority_allocation,
+                profile=_remote_catalog_profile(),
+            )
+            assert admitted.status == "queued"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(
+                    "SELECT system.provisioning_profile,root.image_digest,job.payload "
+                    "FROM systems AS system "
+                    "JOIN system_root_provenance AS root ON root.system_id=system.id "
+                    "JOIN jobs AS job ON job.id=%s WHERE system.id=%s",
+                    (admitted.object_id, admitted.data["system_id"]),
+                )
+                row = await cursor.fetchone()
+            assert row is not None
+            source = row["provisioning_profile"]["provider"]["remote-libvirt"]["base_image_source"]
+            assert source == {
+                "kind": "catalog",
+                "provider": "remote-libvirt",
+                "name": "authority-base",
+            }
+            assert row["image_digest"] == _DIGEST
+            assert row["payload"]["authority_system_v1"]["root_identity"] == _DIGEST
+            assert validated_worker_paths == []
 
     asyncio.run(run())
 

@@ -74,6 +74,7 @@ type OpenTeardown = Callable[[UUID, str, str], _SystemTeardown]
 type ReadinessProbe = Callable[[UUID], bool]
 type PortAllocator = Callable[[], int]
 type AssertNoSiblingAttachment = Callable[[UUID, str, str], None]
+type ValidateProvisionSnapshot = Callable[[AuthoritySystemProvisionSnapshot], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +272,8 @@ class LocalAuthoritySystemProvider:
         open_teardown: OpenTeardown,
         assert_no_sibling_attachment: AssertNoSiblingAttachment,
         allocate_port: PortAllocator,
+        validate_provision_snapshot: ValidateProvisionSnapshot | None = None,
+        manifest_binding: tuple[str, str, str] | None = None,
         owner_uid: int | None = None,
         owner_gid: int | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -284,6 +287,8 @@ class LocalAuthoritySystemProvider:
         self._open_teardown = open_teardown
         self._assert_no_sibling_attachment = assert_no_sibling_attachment
         self._allocate_port = allocate_port
+        self._validate_provision_snapshot = validate_provision_snapshot or (lambda _snapshot: None)
+        self._manifest_binding = manifest_binding
         self._owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self._owner_gid = os.getegid() if owner_gid is None else owner_gid
         self._now = now
@@ -302,6 +307,8 @@ class LocalAuthoritySystemProvider:
         snapshot: AuthoritySystemProvisionSnapshot,
     ) -> AuthoritySystemProvisionFacts:
         request, context, snapshot = _validated_provision_inputs(request, context, snapshot)
+        self._validate_manifest_binding(request)
+        self._validate_provision_snapshot(snapshot)
         return await self._offload(
             lambda: self._execute_system_provision(request, context, snapshot)
         )
@@ -313,6 +320,8 @@ class LocalAuthoritySystemProvider:
         snapshot: AuthoritySystemProvisionSnapshot,
     ) -> AuthoritySystemProvisionFacts:
         request, context, snapshot = _validated_provision_inputs(request, context, snapshot)
+        self._validate_manifest_binding(request)
+        self._validate_provision_snapshot(snapshot)
         return await self._offload(
             lambda: self._observe_system_provision(request, context, snapshot)
         )
@@ -321,13 +330,22 @@ class LocalAuthoritySystemProvider:
         self, request: AuthoritySystemMutationRequestV1, context: AuthoritySystemCommitContextV1
     ) -> AuthoritySystemAbsenceFacts:
         request, context = _validated_teardown_inputs(request, context)
+        self._validate_manifest_binding(request)
         return await self._offload(lambda: self._execute_teardown(request, context))
 
     async def observe_preactivation_teardown(
         self, request: AuthoritySystemMutationRequestV1, context: AuthoritySystemCommitContextV1
     ) -> AuthoritySystemAbsenceFacts:
         request, context = _validated_teardown_inputs(request, context)
+        self._validate_manifest_binding(request)
         return await self._offload(lambda: self._observe_teardown(request, context))
+
+    def _validate_manifest_binding(self, request: AuthoritySystemMutationRequestV1) -> None:
+        binding = self._manifest_binding
+        if binding is None:
+            return
+        if (request.provider_kind, request.resource_name, request.authority_instance) != binding:
+            raise LocalAuthoritySystemError("local authority request is not bound to its manifest")
 
     def close(self) -> None:
         with self._lock:

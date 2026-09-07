@@ -27,7 +27,7 @@ from kdive.services.external_boot.routing import AuthorityReservationGeometry
 
 if TYPE_CHECKING:
     from kdive.jobs.external_boot_authority_client import ExternalBootClientFactory
-    from kdive.jobs.handlers.systems import RetiredKeyBatchDeleter
+    from kdive.jobs.handlers.system_reclaim import RetiredKeyBatchDeleter
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",

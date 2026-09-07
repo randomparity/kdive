@@ -5,18 +5,15 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import shutil
 from collections.abc import Awaitable, Callable
-from typing import LiteralString, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts.console.sidecar import sidecar_object_name
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import (
     SNAPSHOTS,
     SYSTEMS,
@@ -40,6 +37,10 @@ from kdive.jobs.handlers.system_authority import (
     AuthoritySystemWorkerPorts,
     execute_authority_system_job,
 )
+from kdive.jobs.handlers.system_reclaim import (
+    RetiredKeyBatchDeleter,
+    reclaim_system_core_after_provider_teardown,
+)
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import (
     ReprovisionPayload,
@@ -55,43 +56,16 @@ from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import Snapshotter
-from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.providers.system_authority.protocol import AuthoritySystemResponseV1
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import (
-    delete_system_bootstrap_key,
     ensure_system_bootstrap_key,
 )
-from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)
 _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
-
-# The local-libvirt console-rotation parts and sidecar (#892) live under this tenant, matching the
-# rotation handler (``console_rotate.py`` ``_TENANT``) so teardown reclaims the same owner prefix.
-_CONSOLE_TENANT = "local"
-
-# Matches local console part objects ``console-part-<gen>-<index>`` only; the remote collector's
-# ``console-parts-<n>`` keys lack the trailing hyphen after ``part`` and are intentionally excluded.
-_CONSOLE_PART_LIKE: LiteralString = "%console-part-%"
-
-_SELECT_ARTIFACT_ROWS_SQL: LiteralString = (
-    "SELECT id, object_key FROM artifacts WHERE owner_kind = 'systems' "
-    "AND owner_id = %s AND object_key LIKE %s"
-)
-
-_DELETE_ARTIFACT_ROW_SQL: LiteralString = "DELETE FROM artifacts WHERE id = %s"
-
-# System-owned diagnostic SysRq captures (ADR-0285); reclaimed at teardown like console parts,
-# since no gc expiry sweep touches owner_kind='systems'.
-_SYSRQ_DIAGNOSTIC_LIKE: LiteralString = "%sysrq-diagnostic-%"
-
-
-class RetiredKeyBatchDeleter(Protocol):
-    """Bounded object-store retirement surface for System teardown artifacts."""
-
-    def delete_retired_key_batch(self, key: str, limit: int) -> bool: ...
 
 
 class _ProviderLifecycleCall(Protocol):
@@ -672,76 +646,6 @@ async def snapshot_delete_handler(
     return str(system_id)
 
 
-async def _system_artifact_rows(
-    conn: AsyncConnection, system_id: UUID, object_key_like: LiteralString
-) -> list[tuple[UUID, str]]:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_SELECT_ARTIFACT_ROWS_SQL, (system_id, object_key_like))
-        return [(row["id"], row["object_key"]) for row in await cur.fetchall()]
-
-
-async def _reclaim_system_artifact_rows(
-    conn: AsyncConnection,
-    store: RetiredKeyBatchDeleter,
-    system_id: UUID,
-    object_key_like: LiteralString,
-) -> None:
-    for artifact_id, key in await _system_artifact_rows(conn, system_id, object_key_like):
-        try:
-            complete = await asyncio.to_thread(store.delete_retired_key_batch, key, 20)
-        except Exception:  # noqa: BLE001 - teardown must preserve every retryable row
-            _log.warning(
-                "best-effort retired-key batch for System artifact %s failed; retaining its row",
-                key,
-                exc_info=True,
-            )
-            continue
-        if not complete:
-            _log.info(
-                "System artifact %s has more retired versions; retaining its row for retry",
-                key,
-            )
-            continue
-        async with conn.transaction():
-            await conn.execute(_DELETE_ARTIFACT_ROW_SQL, (artifact_id,))
-
-
-async def _reclaim_console_artifacts(
-    conn: AsyncConnection, store: RetiredKeyBatchDeleter, system_id: UUID
-) -> None:
-    """Retire console-part rows and give the rowless sidecar one bounded attempt (#892).
-
-    Each part row remains until its own 20-version batch completes. The rotation-state sidecar has
-    no row, so a false or failed best-effort batch is deliberately left to the System-object sweep.
-    """
-    await _reclaim_system_artifact_rows(conn, store, system_id, _CONSOLE_PART_LIKE)
-    sidecar_key = artifact_key(_CONSOLE_TENANT, "systems", str(system_id), sidecar_object_name())
-    try:
-        complete = await asyncio.to_thread(store.delete_retired_key_batch, sidecar_key, 20)
-    except Exception:  # noqa: BLE001 - the System-object sweep owns durable sidecar continuation
-        _log.warning(
-            "best-effort retired-key batch for System sidecar %s failed",
-            sidecar_key,
-            exc_info=True,
-        )
-    else:
-        if not complete:
-            _log.info(
-                "System sidecar %s has more retired versions; System sweep will retry", sidecar_key
-            )
-
-
-async def _reclaim_sysrq_artifacts(
-    conn: AsyncConnection, store: RetiredKeyBatchDeleter, system_id: UUID
-) -> None:
-    """Retire each System diagnostic SysRq capture row independently (ADR-0285).
-
-    A failed or incomplete 20-version batch leaves only its matching row, so later artifacts can
-    still progress during the same teardown invocation.
-    """
-    await _reclaim_system_artifact_rows(conn, store, system_id, _SYSRQ_DIAGNOSTIC_LIKE)
-
-
 async def _reclaim_snapshots(
     conn: AsyncConnection, snapshotter: Snapshotter | None, system_id: UUID, domain_name: str
 ) -> None:
@@ -764,40 +668,6 @@ async def _reclaim_snapshots(
             )
     async with conn.transaction():
         await delete_snapshots_for_system(conn, system_id)
-
-
-async def reclaim_system_core_after_provider_teardown(
-    conn: AsyncConnection,
-    artifact_store: RetiredKeyBatchDeleter,
-    system_id: UUID,
-    *,
-    reclaim_snapshot_ledger: bool,
-    discharge_mutation_obligations: bool,
-) -> None:
-    """Reclaim core-owned System state after the provider proves physical absence.
-
-    Authority-owned external boot calls this only for a complete proof. Ordinary teardown has
-    already removed its snapshot ledger in ``_reclaim_snapshots`` and passes ``False``.
-    """
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        if reclaim_snapshot_ledger:
-            await delete_snapshots_for_system(conn, system_id)
-        if discharge_mutation_obligations:
-            await RemoteModuleAttemptObligationRepository().discharge_system_mutation_obligations(
-                conn, system_id
-            )
-    async with conn.transaction():
-        await delete_system_bootstrap_key(conn, system_id)
-    await asyncio.to_thread(shutil.rmtree, str(pcap_dir(system_id)), ignore_errors=True)
-    try:
-        await _reclaim_console_artifacts(conn, artifact_store, system_id)
-        await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
-    except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
-        _log.warning(
-            "best-effort System-artifact reclaim for system %s failed",
-            system_id,
-            exc_info=True,
-        )
 
 
 async def teardown_handler(

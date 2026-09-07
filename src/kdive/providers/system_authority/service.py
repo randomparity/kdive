@@ -94,10 +94,12 @@ class AuthoritySystemService:
         repository: AuthoritySystemRepository,
         journal_factory: Callable[[UUID], FileAuthoritySystemJournal],
         provider: AuthoritySystemProvider,
+        close_provider: Callable[[], None] | None = None,
     ) -> None:
         self._repository = repository
         self._journal_factory = journal_factory
         self._provider = provider
+        self._close_provider = close_provider
         self._lanes: dict[UUID, _Lane] = {}
         self._tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
@@ -142,6 +144,9 @@ class AuthoritySystemService:
             if lane.journal is not None:
                 lane.journal.close()
         self._lanes.clear()
+        if self._close_provider is not None:
+            self._close_provider()
+            self._close_provider = None
         if cancellation is not None:
             raise cancellation
 

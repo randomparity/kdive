@@ -74,6 +74,7 @@ from kdive.services.systems.validation import (
     RootfsValidator,
     require_fadump_supported,
     resolve_accel,
+    validate_authority_profile_for_provider,
     validate_profile_for_provider,
     validate_rootfs_for_provider,
 )
@@ -417,7 +418,6 @@ class SystemAdmission:
         """Run the bounded pre-mutation segment; the mutation disables the deadline (ADR-0126)."""
         try:
             parsed = ProvisioningProfile.parse(request.profile)
-            validate_profile_for_provider(parsed, self.profile_policy, self.component_sources)
         except CategorizedError as exc:
             return _failure_from_error(request.allocation_id, exc)
         async with _locked_allocation_system(pool, ctx, request.allocation_id) as locked:
@@ -429,6 +429,28 @@ class SystemAdmission:
                 )
             conn, alloc, existing = locked
             try:
+                resource = (
+                    await RESOURCES.get(conn, alloc.resource_id)
+                    if alloc.resource_id is not None
+                    else None
+                )
+                if resource is None:
+                    return AdmissionFailure(
+                        subject_id=alloc.id,
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+                    )
+                authority_instance = (
+                    self.authority_route(resource.kind, resource.name)
+                    if self.authority_route is not None and resource.name is not None
+                    else None
+                )
+                if authority_instance is None:
+                    validate_profile_for_provider(
+                        parsed, self.profile_policy, self.component_sources
+                    )
+                else:
+                    validate_authority_profile_for_provider(parsed, self.profile_policy)
                 stored = _stored_profile_for(request.profile, alloc)
                 await _validate_investigation_binding(
                     conn, alloc, existing, request.investigation_id
@@ -453,7 +475,7 @@ class SystemAdmission:
                 profile_policy=self.profile_policy,
                 rootfs_validator=self.rootfs_validator,
                 jobs=self.jobs,
-                authority_route=self.authority_route,
+                authority_instance=authority_instance,
                 timeout=timeout,
                 label=request.label,
                 investigation_id=request.investigation_id,
@@ -643,7 +665,7 @@ async def _provision_create_response(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     jobs: ProvisionJobPort,
-    authority_route: AuthoritySystemRoute | None,
+    authority_instance: str | None,
     timeout: PreMutationTimeout,
     label: str | None = None,
     investigation_id: UUID | None = None,
@@ -657,7 +679,7 @@ async def _provision_create_response(
             profile_policy,
             rootfs_validator,
             jobs,
-            authority_route,
+            authority_instance,
             timeout,
             label,
             investigation_id=investigation_id,
@@ -711,6 +733,8 @@ async def _new_system_admission_failure(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    *,
+    authority_owned: bool,
 ) -> AdmissionFailure | None:
     if alloc.state is not AllocationState.GRANTED:
         return AdmissionFailure(
@@ -729,10 +753,11 @@ async def _new_system_admission_failure(
             reason=AdmissionFailureReason.QUOTA_EXCEEDED,
             recovery=AdmissionRecovery.INSPECT_SYSTEMS_AND_ALLOCATIONS,
         )
-    try:
-        await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
-    except CategorizedError as exc:
-        return _failure_from_error(alloc.id, exc)
+    if not authority_owned:
+        try:
+            await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
+        except CategorizedError as exc:
+            return _failure_from_error(alloc.id, exc)
     return None
 
 
@@ -809,7 +834,7 @@ async def _insert_provisioning_system(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     jobs: ProvisionJobPort,
-    authority_route: AuthoritySystemRoute | None,
+    authority_instance: str | None,
     timeout: PreMutationTimeout,
     label: str | None = None,
     investigation_id: UUID | None = None,
@@ -823,7 +848,12 @@ async def _insert_provisioning_system(
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_admission_failure(
-        conn, alloc, profile, profile_policy, rootfs_validator
+        conn,
+        alloc,
+        profile,
+        profile_policy,
+        rootfs_validator,
+        authority_owned=authority_instance is not None,
     )
     if blocked is not None:
         return blocked
@@ -845,11 +875,6 @@ async def _insert_provisioning_system(
             category=ErrorCategory.CONFIGURATION_ERROR,
             reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
         )
-    authority_instance = (
-        authority_route(resource.kind, resource.name)
-        if authority_route is not None and resource.name is not None
-        else None
-    )
     if authority_instance is not None and root_provenance is None:
         return AdmissionFailure(
             subject_id=alloc.id,

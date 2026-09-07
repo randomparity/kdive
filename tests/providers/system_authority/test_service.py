@@ -310,6 +310,26 @@ def test_cancellation_does_not_abandon_provider_completion(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
+def test_close_closes_provider_once(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        provider = _Provider()
+        events: list[str] = []
+        root = _root(tmp_path)
+        service = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=provider,
+            close_provider=lambda: events.append("closed"),
+        )
+        await service.close()
+        await service.close()
+        assert events == ["closed"]
+
+    asyncio.run(scenario())
+
+
 def test_restart_after_mutation_started_observes_without_reexecution(tmp_path: Path) -> None:
     async def scenario() -> None:
         snapshot = _snapshot(uuid4(), uuid4(), uuid4())

@@ -67,6 +67,12 @@ if TYPE_CHECKING:
         AuthenticatedPeer,
         ExternalBootAuthorityService,
     )
+    from kdive.providers.system_authority.composition import AuthoritySystemBaseFile
+    from kdive.providers.system_authority.manifest import (
+        AuthoritySystemManifestFile,
+        AuthoritySystemManifestV1,
+    )
+    from kdive.providers.system_authority.service import AuthoritySystemService
 
 READINESS_INTERVAL_SECONDS = 30.0
 READINESS_CHECK_TIMEOUT_SECONDS = 20.0
@@ -89,6 +95,7 @@ _AUTHORITY_CREDENTIALS_SOURCE_DIR = Path("/etc/kdive/credentials/provider-author
 _AUTHORITY_STATE_DIR = Path("/var/lib/kdive/provider-authority")
 _REMOTE_MODULE_APPLIANCE_ROOT = Path("/var/lib/libvirt/kdive/module-appliance/v1")
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
+_UNPINNED_SYSTEM_INSTALLATION = object()
 
 
 class HostReadinessError(CategorizedError):
@@ -107,6 +114,31 @@ class HostReadinessError(CategorizedError):
             category=ErrorCategory.READINESS_FAILURE,
             details={"component": safe_component, "reason": safe_reason},
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _SystemInstallation:
+    """The System manifest and base files trusted at authority startup."""
+
+    manifest_file: AuthoritySystemManifestFile
+    base_files: tuple[AuthoritySystemBaseFile, ...]
+
+    @property
+    def manifest(self) -> AuthoritySystemManifestV1:
+        return self.manifest_file.manifest
+
+    def verify_current(self, config: AuthorityHostConfig) -> None:
+        from kdive.providers.system_authority.manifest import load_authority_system_manifest_file
+
+        current = load_authority_system_manifest_file(
+            config.authority_system_manifest,
+            owner_uid=config.authority_uid,
+            owner_gid=config.authority_gid,
+        )
+        if current != self.manifest_file:
+            raise ValueError("authority System manifest changed")
+        for base in self.base_files:
+            base.verify_current(owner_uid=config.authority_uid, owner_gid=config.authority_gid)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +200,22 @@ class AuthorityHostConfig:
     @property
     def remote_libvirt_pool_dir(self) -> Path:
         return self.state_dir / "remote-libvirt-pool"
+
+    @property
+    def authority_system_root(self) -> Path:
+        return self.state_dir / "system-provisioning"
+
+    @property
+    def authority_system_manifest(self) -> Path:
+        return self.authority_system_root / "manifest.json"
+
+    @property
+    def authority_system_local_root(self) -> Path:
+        return self.authority_system_root / "local"
+
+    @property
+    def authority_system_remote_root(self) -> Path:
+        return self.authority_system_root / "remote"
 
     @classmethod
     def from_environment(cls) -> AuthorityHostConfig:
@@ -1064,7 +1112,8 @@ async def _check_provider_socket(config: AuthorityHostConfig) -> None:
 async def _check_static_authority_host(
     config: AuthorityHostConfig,
     journal_validator: JournalInventoryValidator | None = None,
-) -> None:
+    system_installation: _SystemInstallation | None | object = _UNPINNED_SYSTEM_INSTALLATION,
+) -> _SystemInstallation | None:
     """Reconstruct the identity, filesystem, database, journal, and provider facts."""
     if os.geteuid() != config.authority_uid:
         raise HostReadinessError("identity", "uid-mismatch")
@@ -1073,6 +1122,21 @@ async def _check_static_authority_host(
     heads = await _database_heads(config)
     await (journal_validator or JournalInventoryValidator()).validate(config, heads)
     await _check_provider_socket(config)
+    if system_installation is _UNPINNED_SYSTEM_INSTALLATION:
+        return await asyncio.to_thread(_load_system_installation, config)
+    if system_installation is None:
+        try:
+            os.stat(config.authority_system_manifest, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise HostReadinessError("system-provider", "installation-changed") from None
+        else:
+            raise HostReadinessError("system-provider", "installation-changed")
+    if not isinstance(system_installation, _SystemInstallation):
+        raise TypeError("authority System installation pin is invalid")
+    await asyncio.to_thread(system_installation.verify_current, config)
+    return system_installation
 
 
 async def check_authority_host(
@@ -1080,9 +1144,10 @@ async def check_authority_host(
     listener: AuthorityListener,
     journal_validator: JournalInventoryValidator | None = None,
     network_listener: AuthorityNetworkListener | None = None,
+    system_installation: _SystemInstallation | None | object = _UNPINNED_SYSTEM_INSTALLATION,
 ) -> None:
     """Reconstruct every static, journal, database, provider, socket, and TLS fact."""
-    await _check_static_authority_host(config, journal_validator)
+    await _check_static_authority_host(config, journal_validator, system_installation)
     try:
         listener.validate()
         if network_listener is not None:
@@ -1227,8 +1292,121 @@ def _open_remote_module_connection(config: AuthorityHostConfig) -> Any:
     return connection
 
 
+def _load_system_installation(config: AuthorityHostConfig) -> _SystemInstallation | None:
+    """Load and validate the optional fixed System-provisioning installation."""
+    from kdive.providers.system_authority.composition import (
+        validate_authority_system_installation,
+    )
+    from kdive.providers.system_authority.manifest import (
+        RemoteAuthoritySystemManifestV1,
+        load_authority_system_manifest_file,
+    )
+
+    try:
+        manifest_file = load_authority_system_manifest_file(
+            config.authority_system_manifest,
+            owner_uid=config.authority_uid,
+            owner_gid=config.authority_gid,
+        )
+        if manifest_file is None:
+            return None
+        manifest = manifest_file.manifest
+        if manifest.authority_instance != config.authority_instance:
+            raise ValueError("authority instance mismatch")
+        if (
+            isinstance(manifest, RemoteAuthoritySystemManifestV1)
+            and not config.remote_module_enabled
+        ):
+            raise ValueError("remote System provider requires the fixed remote binding")
+        bases = validate_authority_system_installation(
+            manifest,
+            state_root=config.authority_system_root,
+            local_root=config.authority_system_local_root,
+            remote_root=config.authority_system_remote_root,
+            remote_pool_root=config.remote_libvirt_pool_dir,
+            owner_uid=config.authority_uid,
+            owner_gid=config.authority_gid,
+        )
+    except OSError, ValueError:
+        raise HostReadinessError("system-provider", "invalid-installation") from None
+    return _SystemInstallation(manifest_file=manifest_file, base_files=bases)
+
+
+def _build_system_service(
+    config: AuthorityHostConfig,
+    connections: Any,
+    system_installation: _SystemInstallation,
+    *,
+    remote_connection: Any | None = None,
+    remote_executor: Any | None = None,
+) -> AuthoritySystemService:
+    """Compose the closed System service from one validated owner manifest."""
+    from kdive.providers.system_authority.composition import (
+        build_local_authority_system_provider,
+        build_remote_authority_system_provider,
+    )
+    from kdive.providers.system_authority.journal import FileAuthoritySystemJournal
+    from kdive.providers.system_authority.manifest import (
+        LocalAuthoritySystemManifestV1,
+        RemoteAuthoritySystemManifestV1,
+    )
+    from kdive.providers.system_authority.repository import DatabaseAuthoritySystemRepository
+    from kdive.providers.system_authority.service import AuthoritySystemService
+
+    manifest = system_installation.manifest
+    close_provider = None
+    if isinstance(manifest, LocalAuthoritySystemManifestV1):
+        import libvirt
+
+        def connect() -> Any:
+            try:
+                connection = libvirt.open(_remote_module_uri(config))
+            except Exception:
+                raise RuntimeError("local authority provider connection is unavailable") from None
+            if connection is None:
+                raise RuntimeError("local authority provider connection is unavailable")
+            return connection
+
+        provider, close_provider = build_local_authority_system_provider(
+            manifest,
+            base_files=system_installation.base_files,
+            connect=connect,
+            state_root=config.authority_system_local_root / "state",
+            rootfs_root=config.authority_system_local_root / "rootfs",
+            owner_uid=config.authority_uid,
+            owner_gid=config.authority_gid,
+        )
+    elif isinstance(manifest, RemoteAuthoritySystemManifestV1):
+        if remote_connection is None or remote_executor is None:
+            raise HostReadinessError("system-provider", "remote-binding-missing")
+        provider = build_remote_authority_system_provider(
+            manifest,
+            base_files=system_installation.base_files,
+            connection=remote_connection,
+            pool_name=config.remote_libvirt_storage_pool,
+            remote_pool_root=config.remote_libvirt_pool_dir,
+            state_root=config.authority_system_remote_root,
+            executor=remote_executor,
+            owner_uid=config.authority_uid,
+            owner_gid=config.authority_gid,
+        )
+    else:  # pragma: no cover - the discriminated manifest union is closed
+        raise HostReadinessError("system-provider", "invalid-installation")
+
+    return AuthoritySystemService(
+        repository=DatabaseAuthoritySystemRepository(connections),
+        journal_factory=lambda system_id: FileAuthoritySystemJournal(
+            config.authority_system_root, system_id, owner_uid=config.authority_uid
+        ),
+        provider=provider,
+        close_provider=close_provider,
+    )
+
+
 def _build_mutation_service(
-    config: AuthorityHostConfig, proof_checkpoint: AuthorityProofBarrier | None = None
+    config: AuthorityHostConfig,
+    proof_checkpoint: AuthorityProofBarrier | None = None,
+    system_installation: _SystemInstallation | None | object = _UNPINNED_SYSTEM_INSTALLATION,
 ) -> ExternalBootAuthorityService | None:
     """Build mutation support only on a host with an explicitly provisioned local root."""
     from kdive import config as runtime_config
@@ -1244,14 +1422,26 @@ def _build_mutation_service(
         ExternalBootAuthorityService,
     )
     from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
+    from kdive.providers.system_authority.manifest import RemoteAuthoritySystemManifestV1
 
+    if system_installation is _UNPINNED_SYSTEM_INSTALLATION:
+        system_installation = _load_system_installation(config)
+    elif system_installation is not None and not isinstance(
+        system_installation, _SystemInstallation
+    ):
+        raise TypeError("authority System installation pin is invalid")
+    system_manifest = None if system_installation is None else system_installation.manifest
     if runtime_config.get(LIBVIRT_RECOVERY_ROOT) is None:
+        if system_manifest is not None:
+            raise HostReadinessError("system-provider", "local-binding-missing")
         if config.remote_module_enabled:
             raise HostReadinessError("remote-module", "local-binding-missing")
         return None
     object_store = object_store_from_env()
     binding = build_authority_mutation_binding(config.provider_socket, object_store)
     if binding is None:
+        if system_manifest is not None:
+            raise HostReadinessError("system-provider", "local-binding-missing")
         if config.remote_module_enabled:
             raise HostReadinessError("remote-module", "local-binding-missing")
         return None
@@ -1276,12 +1466,20 @@ def _build_mutation_service(
         connections, binding.provider, executor=binding.adapter
     )
     if not config.remote_module_enabled:
+        if isinstance(system_manifest, RemoteAuthoritySystemManifestV1):
+            raise HostReadinessError("system-provider", "remote-binding-missing")
+        system_service = (
+            _build_system_service(config, connections, system_installation)
+            if system_installation is not None
+            else None
+        )
         return ExternalBootAuthorityService(
             repository=repository,
             journal_factory=journal_factory,
             adapter=binding.adapter,
             recovery_orphans=recovery_orphans,
             proof_checkpoint=proof_checkpoint,
+            system_service=system_service,
         )
 
     from kdive.providers.remote_libvirt.external_boot_authority import (
@@ -1376,6 +1574,22 @@ def _build_mutation_service(
         close=close_remote,
     )
 
+    try:
+        system_service = (
+            _build_system_service(
+                config,
+                connections,
+                system_installation,
+                remote_connection=connection,
+                remote_executor=module_executor,
+            )
+            if system_installation is not None
+            else None
+        )
+    except BaseException:
+        adapter.close()
+        raise
+
     return ExternalBootAuthorityService(
         repository=repository,
         journal_factory=journal_factory,
@@ -1383,13 +1597,14 @@ def _build_mutation_service(
         remote_module_host=remote_module_host,
         recovery_orphans=recovery_orphans,
         proof_checkpoint=proof_checkpoint,
+        system_service=system_service,
     )
 
 
-async def _bounded_readiness_check(check: Awaitable[None]) -> None:
+async def _bounded_readiness_check(check: Awaitable[Any]) -> Any:
     try:
         async with asyncio.timeout(READINESS_CHECK_TIMEOUT_SECONDS):
-            await check
+            return await check
     except TimeoutError:
         raise HostReadinessError("readiness", "timeout") from None
 
@@ -1402,12 +1617,16 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
     proof_barrier: AuthorityProofBarrier | None = None
     journal_validator = JournalInventoryValidator()
     identity_service = RemoteDeviceIdentityService()
+    system_installation: _SystemInstallation | None = None
 
     async def authenticate(credential: SecretStr) -> AuthenticatedPeer:
         return await _authenticate(config, credential)
 
     try:
-        await _bounded_readiness_check(_check_static_authority_host(config, journal_validator))
+        system_installation = _load_system_installation(config)
+        await _bounded_readiness_check(
+            _check_static_authority_host(config, journal_validator, system_installation)
+        )
         if config.proof_socket is not None:
             try:
                 proof_barrier = AuthorityProofBarrier(config.proof_socket)
@@ -1415,9 +1634,9 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
             except OSError:
                 raise HostReadinessError("proof", "bind-failed") from None
         mutation_service = (
-            _build_mutation_service(config, proof_barrier)
+            _build_mutation_service(config, proof_barrier, system_installation)
             if proof_barrier is not None
-            else _build_mutation_service(config)
+            else _build_mutation_service(config, system_installation=system_installation)
         )
         try:
             listener = await serve_authority_transport(
@@ -1426,6 +1645,9 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                 service=mutation_service,
                 identity_service=identity_service,
                 remote_module_service=mutation_service,
+                system_service=(
+                    mutation_service.system_service if mutation_service is not None else None
+                ),
             )
             if config.network_address is not None:
                 network_listener = await serve_authority_network_transport(
@@ -1434,6 +1656,9 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                     service=mutation_service,
                     identity_service=identity_service,
                     remote_module_service=mutation_service,
+                    system_service=(
+                        mutation_service.system_service if mutation_service is not None else None
+                    ),
                 )
         except Exception:
             raise HostReadinessError("listener", "bind-failed") from None
@@ -1455,7 +1680,13 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
             await asyncio.sleep(READINESS_INTERVAL_SECONDS)
 
             async def periodic_check() -> None:
-                await check_authority_host(config, listener, journal_validator, network_listener)
+                await check_authority_host(
+                    config,
+                    listener,
+                    journal_validator,
+                    network_listener,
+                    system_installation,
+                )
                 await check_tls_health(listener, config)
                 if network_listener is not None:
                     await check_tls_health(network_listener, config)
@@ -1494,7 +1725,10 @@ async def check_authority_host_once(config: AuthorityHostConfig) -> None:
         raise HostReadinessError("probe", "unsafe-directory") from None
     probe_config = replace(config, request_socket=probe)
     journal_validator = JournalInventoryValidator()
-    await _bounded_readiness_check(_check_static_authority_host(probe_config, journal_validator))
+    system_installation = _load_system_installation(probe_config)
+    await _bounded_readiness_check(
+        _check_static_authority_host(probe_config, journal_validator, system_installation)
+    )
     if config.remote_module_enabled:
         connection = _open_remote_module_connection(config)
         try:

@@ -10,7 +10,7 @@ import re
 import stat
 import threading
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import libvirt
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kdive.components.references import CatalogComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import UtcDateTime
 from kdive.profiles.provisioning import require_concrete_sizing
@@ -86,6 +87,7 @@ _PHASES = {
     "complete": 5,
 }
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+type ValidatePrivateBase = Callable[[str, str], None]
 
 
 def _bounded_name(value: str) -> str:
@@ -688,6 +690,8 @@ class RemoteAuthoritySystemProvider:
         connection: ConnectionFactory,
         pool_name: str,
         manifest: tuple[RemoteAuthoritySystemManifestEntry, ...],
+        private_base_paths: Mapping[str, Path],
+        validate_private_base: ValidatePrivateBase,
         state_dir: Path,
         executor: RemoteModulePreparationExecutor,
         identity_port: RemoteDeviceIdentityPort | None = None,
@@ -703,6 +707,12 @@ class RemoteAuthoritySystemProvider:
         self._connection = connection
         self._pool_name = _bounded_name(pool_name)
         self._manifest = self._index_manifest(manifest)
+        self._private_base_paths = {
+            name: _storage_path(str(path)) for name, path in private_base_paths.items()
+        }
+        if set(self._private_base_paths) != {entry.base_volume for entry in manifest}:
+            raise ValueError("remote authority System private base paths do not match its manifest")
+        self._validate_private_base = validate_private_base
         self._store = _PrivateStore(
             state_dir,
             owner_uid=os.getuid() if owner_uid is None else owner_uid,
@@ -782,9 +792,15 @@ class RemoteAuthoritySystemProvider:
         section = snapshot.profile.provider.remote_libvirt_section
         if section is None:
             raise ValueError("remote authority System snapshot has no remote-libvirt profile")
-        if section.base_image_source is not None:
+        source = section.base_image_source
+        if not (
+            isinstance(source, CatalogComponentRef)
+            and source.provider == "remote-libvirt"
+            or isinstance(source, LocalComponentRef)
+            and source.sha256 == snapshot.root_identity
+        ):
             raise CategorizedError(
-                "authority-owned remote Systems require an operator-staged base mapping",
+                "authority-owned remote Systems require a verified catalog or pinned root source",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
 
@@ -863,12 +879,24 @@ class RemoteAuthoritySystemProvider:
                 "remote authority System base volume XML is invalid",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             ) from exc
-        if volume.name() != entry.base_volume or backing_path is not None:
+        resolved_path = _storage_path(path)
+        if (
+            volume.name() != entry.base_volume
+            or backing_path is not None
+            or resolved_path != self._private_base_paths[entry.base_volume]
+        ):
             raise CategorizedError(
                 "remote authority System base volume identity is invalid",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        return pool, volume, _storage_path(path)
+        try:
+            self._validate_private_base(entry.base_volume, resolved_path)
+        except OSError, ValueError:
+            raise CategorizedError(
+                "remote authority System base volume identity is invalid",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            ) from None
+        return pool, volume, resolved_path
 
     @staticmethod
     def _domain_optional(connection: _Connection, system_id: UUID) -> _Domain | None:
