@@ -1,4 +1,5 @@
 ---
 profile: production
+offline: true
 exclude_paths:
   - artifacts/

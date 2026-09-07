@@ -95,6 +95,19 @@ jobs:
       - name: Lint shell scripts
         run: just lint-shell
 
+      - name: Restore pinned Ansible collections
+        id: ansible-collections-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ansible/collections
+          key: ${{ runner.os }}-ansible-collections-${{ hashFiles('deploy/ansible/requirements.yml') }}
+
+      - name: Install pinned Ansible collections
+        if: steps.ansible-collections-cache.outputs.cache-hit != 'true'
+        run: >-
+          uv run --with 'ansible-core==2.21.1' ansible-galaxy collection install
+          --requirements-file deploy/ansible/requirements.yml --no-deps --no-cache
+
       - name: Lint Ansible
         # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
         run: just lint-ansible
