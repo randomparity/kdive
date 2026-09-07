@@ -57,12 +57,6 @@ Retained quarantine never performs core cleanup or releases capacity. Provider
 deployment must stage the same digest-pinned base directly into the authority
 store.
 
-Deployment validates the canonical manifest and exact base set on the controller before
-changing the host. At authority startup, each base is content-hashed once outside the
-20-second operational readiness budget. The authority pins the manifest and base file
-identities; periodic readiness and every provision check metadata identity without
-rehashing multi-gigabyte bases.
-
 ## Considered & rejected
 
 - **Provision through the worker and hand the domain to the authority.**
