@@ -547,6 +547,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share installed authority carrier orchestration
 - Thread baseline intent callback
 - Expose baseline pre-extraction intent seam
+- Share libvirt boot identity
 
 ### Documentation
 
@@ -1473,6 +1474,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin authority system installation checks
 - Preserve accepted authority system decision
 - Describe authority teardown cancellation
+- Preserve libvirt debt boundary history
+- Supersede obsolete config catalog decision
+- Supersede obsolete config catalog decision
+- Link 0096 supersession to renumbered record
 
 ### Fixed
 
@@ -2424,6 +2429,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consume acknowledged authority retry proofs
 - Make Ansible lint independent of Galaxy
 - Source-lock Ansible collections for offline lint
+- Preserve non-NFC boot command lines
+- Preserve non-NFC command lines in projected targets
 
 ### Security
 
@@ -2454,6 +2461,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integrate authority preparation contract
 - Apply local authority route fix
 - Reconcile native proof with remote authority host
+- Reconcile origin main
 
 ### Security
 
