@@ -34,6 +34,7 @@ from tests.integration.live_stack.spine import (
 )
 
 CONFIG_ENV = "KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG"
+POWER_AUTHORITY_CONFIG_ENV = "KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG"
 OPERATIONS = ("activate", "recover", "resolve-conflict", "release", "cleanup", "teardown")
 _PREFIX = re.compile(r"kdive-2151-[0-9a-f]{12}-[0-9a-f]{8}")
 _FIXED_WORKER_UNIT = re.compile(r"kdive-live-worker@([1-8])\.service")
@@ -799,6 +800,106 @@ def run_installed_local_authority_normal_operations() -> None:
     asyncio.run(run())
 
 
+def run_installed_local_authority_ppc64le_normal_operations() -> None:
+    """Run the ppc64le native carrier's activate and root-release proof (#2152).
+
+    Machine-checkable carrier gate: asserts the host is ppc64le and native KVM acceleration is
+    available, rejecting TCG (issue requirement). Skips when the POWER authority config is absent;
+    fails loud when the config is set but the arch or accel gate cannot pass.
+
+    The proof is structurally identical to the x86_64
+    ``run_installed_local_authority_normal_operations`` carrier but: uses
+    ``POWER_AUTHORITY_CONFIG_ENV`` as its trigger, records ``arch=ppc64le`` in the Run's build
+    profile, and enforces the host-arch and KVM gates before any mutation.
+    """
+    import platform as _platform
+
+    host_arch = _platform.machine()
+    if host_arch != "ppc64le":
+        pytest.skip(
+            f"ppc64le native carrier requires a ppc64le host; this host is {host_arch!r} "
+            f"— use the installed local authority carrier for {host_arch!r} hosts instead"
+        )
+    if not os.path.exists("/dev/kvm"):
+        pytest.fail(
+            "ppc64le native carrier requires native KVM acceleration (/dev/kvm) — TCG is not "
+            "an accepted substitute for native ppc64le authority proof (#2152); provision a "
+            "POWER host with KVM-HV enabled"
+        )
+
+    config = load_config(env_name=POWER_AUTHORITY_CONFIG_ENV)
+    if config is None:
+        pytest.skip(
+            f"{POWER_AUTHORITY_CONFIG_ENV} is not set; configure it with the ppc64le authority "
+            "proof config file (see docs/operating/runbooks/live-testing.md § ppc64le carrier)"
+        )
+    assert config is not None  # narrowed: pytest.skip above is the only None path
+
+    installed = _output("sudo", "-n", "cat", "/opt/kdive-provider-authority/revision")
+    assert installed == config.installed_revision, (
+        f"installed authority revision {installed!r} does not match configured coherent revision"
+    )
+    assert _output("systemctl", "is-active", config.authority_service) == "active"
+    running_workers = _output(
+        "systemctl",
+        "list-units",
+        "kdive-live-worker@*.service",
+        "--state=running",
+        "--no-legend",
+    )
+
+    issuer = require_issuer()
+    base_url = require_stack()
+    require_deployed_revision(config, base_url, running_workers)
+    require_installed_authority_routes(config, running_workers)
+    db_url = os.environ.get("KDIVE_DATABASE_URL")
+    assert db_url, "ppc64le native authority carrier requires KDIVE_DATABASE_URL"
+    token = mint_role_token(
+        issuer,
+        project=config.project,
+        agent_session=config.ownership_prefix,
+        role="admin",
+    )
+    ledger = ResourceLedger(config.ownership_prefix)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config)
+        require_authority_artifact_confinement(config, running_workers)
+        client = LiveStackClient.over_http(base_url, token)
+        async with client:
+            primary: Exception | None = None
+            try:
+                operations = await drive_normal_operations(
+                    client, config, ledger, guest_arch="ppc64le"
+                )
+                await assert_root_release_completion(db_url, operations)
+            except Exception as exc:  # preserve the native failure while still attempting cleanup
+                primary = exc
+            cleanup_failures: list[Exception] = []
+            investigations = [r for r in ledger.resources if r.kind == "investigation"]
+            for resource in reversed(investigations):
+                try:
+                    closed = await client.call_tool(
+                        "investigations.close",
+                        investigation_id=resource.identity,
+                        summary="Native ppc64le authority proof cleanup",
+                    )
+                    assert not isinstance(closed, list)
+                    assert closed.status not in {"error", "failed"}
+                except Exception as exc:
+                    cleanup_failures.append(exc)
+            if primary is not None:
+                cleanup_failures.insert(0, primary)
+            if len(cleanup_failures) == 1:
+                raise cleanup_failures[0]
+            if cleanup_failures:
+                raise ExceptionGroup(
+                    "ppc64le native carrier and cleanup failures", cleanup_failures
+                )
+
+    asyncio.run(run())
+
+
 def run_installed_local_authority_restart_recovery() -> None:
     """Prove a real authority restart after provider effect, before its journal return record."""
     config = load_config()
@@ -1120,10 +1221,19 @@ def require_authority_artifact_confinement(
         _run_identity_program(_AUTHORITY_ACCOUNT, _REMOVE_SENTINELS, entries, sudo=True)
 
 
-def load_config(environment: dict[str, str] | None = None) -> NativeAuthorityConfig | None:
-    """Return ``None`` only when the native carrier trigger is absent."""
+def load_config(
+    environment: dict[str, str] | None = None,
+    *,
+    env_name: str = CONFIG_ENV,
+) -> NativeAuthorityConfig | None:
+    """Return ``None`` only when the named carrier trigger is absent.
+
+    ``env_name`` selects which environment variable names the config file (default is
+    ``CONFIG_ENV`` for the x86_64 carrier; pass ``POWER_AUTHORITY_CONFIG_ENV`` for the
+    ppc64le carrier).
+    """
     env = os.environ if environment is None else environment
-    raw = env.get(CONFIG_ENV)
+    raw = env.get(env_name)
     if raw is None:
         return None
     path = Path(raw)
@@ -1812,14 +1922,19 @@ async def drive_normal_operations(
     client: LiveStackClient,
     config: NativeAuthorityConfig,
     ledger: ResourceLedger,
+    *,
+    guest_arch: str = "x86_64",
 ) -> NormalOperationJobs:
     """Drive activate then release/cleanup through public tools and real job polling.
 
     ``runs.boot`` is the public activation admission. ``runs.release_external_boot`` is the
     public release admission; its one root release job owns the derived recover and cleanup
     phases, whose durable finalizer evidence the native carrier verifies after polling.
+
+    ``guest_arch`` is forwarded to ``start_external_boot_activation``; pass ``"ppc64le"`` for
+    the ppc64le carrier (#2152).
     """
-    activation = await start_external_boot_activation(client, config, ledger)
+    activation = await start_external_boot_activation(client, config, ledger, guest_arch=guest_arch)
     await drain_job(client, "activate", activation.activate_job_id)
     release = ok(
         await scalar(client, "runs.release_external_boot", run_id=activation.run_id),
@@ -1839,9 +1954,15 @@ async def start_external_boot_activation(
     config: NativeAuthorityConfig,
     ledger: ResourceLedger,
     *,
+    guest_arch: str = "x86_64",
     before_activate: Callable[[str], None] | None = None,
 ) -> ActivationJob:
-    """Create, install, and publicly admit one activation without polling its job."""
+    """Create, install, and publicly admit one activation without polling its job.
+
+    ``guest_arch`` is the architecture recorded in the Run's build profile; it defaults to
+    ``"x86_64"`` for the native x86_64 carrier and must be ``"ppc64le"`` for the ppc64le
+    carrier (#2152).
+    """
     opened = ok(
         await scalar(
             client,
@@ -1859,7 +1980,7 @@ async def start_external_boot_activation(
             "runs.create",
             investigation_id=investigation_id,
             system_id=str(config.system_id),
-            build_profile={"schema_version": 1, "arch": "x86_64"},
+            build_profile={"schema_version": 1, "arch": guest_arch},
             label=config.ownership_prefix,
         ),
         "create-run",
