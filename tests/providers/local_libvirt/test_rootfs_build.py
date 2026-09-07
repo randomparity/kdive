@@ -1,11 +1,11 @@
 """Unit tests for the in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092, ADR-0251).
 
-These cover the plane's orchestration and provenance contract without libguestfs, qemu, or the
-network: every slow/external seam (``acquire_base``, the ``virt-customize`` runner, the repack, and
-the family's ``normalize``) is an injected stub the tests record. The real libguestfs path is
-exercised on the operator-run live-stack path. The plane now resolves the catalog row for
-``spec.name`` (falling back to a virt-builder template for an uncataloged old-style spec) and
-drives ``acquire base → virt-customize(family argv) → repack ext4 → family.normalize → output``.
+These cover the plane's orchestration and provenance contract without libguestfs, libvirt, qemu,
+or the network: every slow/external seam (``acquire_base``, the repack, the family's
+``normalize``, the offline injector, the customization boot, and the seal) is an injected stub the
+tests record. The real path is exercised on the operator-run live-stack path. The plane resolves
+the catalog row for ``spec.name`` and drives ``acquire base → repack ext4 → family.normalize →
+inject firstboot → customization boot → seal → verify → output`` (ADR-0345).
 """
 
 from __future__ import annotations
@@ -15,14 +15,12 @@ import stat
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import pytest
 
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
-from kdive.images.families.renderers import render_argv
 from kdive.images.families.rhel import RhelFamily
 from kdive.images.families.steps import (
     InstallPackages,
@@ -58,6 +56,7 @@ from kdive.providers.local_libvirt.rootfs_build import (
     family_for,
 )
 from kdive.providers.ports.external_boot import RootSource, RootSpecV1
+from tests.support.customize_steps import rendered, upload_source
 
 
 def test_feature_strip_needed_true_when_orphan_file_present() -> None:
@@ -116,7 +115,7 @@ class _FakeFamily:
     family: str = "rhel"
     kdump_unit: str = "kdump.service"
     guest_mac: str = "selinux-permissive"
-    customize_via: Literal["boot", "virt_customize"] = "virt_customize"
+    install_command: str = "dnf -y install"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
@@ -131,7 +130,7 @@ class _FakeFamily:
         self.rec.readiness_unit_texts.append(ctx.readiness_unit_path.read_text())
         return [InstallPackages(("marker-pkg",)), RunCommand("marker-customize")]
 
-    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
+    def normalize(self, qcow2: Path) -> None:
         self.rec.order.append("normalize")
         self.rec.normalize_calls.append(qcow2)
 
@@ -142,7 +141,7 @@ class _Recorder:
 
     order: list[str] = field(default_factory=list)
     acquired_sources: list[RootfsSource] = field(default_factory=list)
-    customize_argvs: list[list[str]] = field(default_factory=list)
+    inject_scripts: list[str] = field(default_factory=list)
     customize_ctxs: list[CustomizeContext] = field(default_factory=list)
     repack_calls: list[tuple[Path, Path]] = field(default_factory=list)
     repack_sizes: list[str] = field(default_factory=list)
@@ -166,10 +165,6 @@ class _Recorder:
         self.order.append("acquire")
         self.acquired_sources.append(source)
 
-    def customize(self, qcow2: Path, argv: list[str]) -> None:
-        self.order.append("customize")
-        self.customize_argvs.append(argv)
-
     def repack_whole_disk_ext4(self, *, scratch: Path, qcow2: Path, size: str) -> None:
         qcow2.write_bytes(self.payload)
         self.order.append("repack")
@@ -178,6 +173,26 @@ class _Recorder:
 
     def family_for(self, name: str) -> FamilyCustomizer:
         return _FakeFamily(self, kdump_unit=self.family_kdump_unit)
+
+    def inject_offline(
+        self, qcow2: Path, file_ops: list[Step], firstboot_script: str, firstboot_unit: str
+    ) -> None:
+        self.order.append("inject")
+        self.inject_scripts.append(firstboot_script)
+
+    def extract_baseline_kernel(
+        self, base: Path, dest_dir: Path, hint: str | None
+    ) -> BaselineKernel:
+        return BaselineKernel(kernel=dest_dir / "kernel", initrd=None)
+
+    def resolve_accel(self, arch: str) -> tuple[str, str | None]:
+        return ("kvm", None)
+
+    def run_customization_boot(self, build_id: object, domain_xml: str, *, accel: str) -> None:
+        self.order.append("boot")
+
+    def seal_customized_image(self, qcow2: Path, *, unit_name: str, selinux: bool) -> None:
+        self.order.append("seal")
 
     def verify_cloud_init(self, qcow2: Path) -> None:
         self.order.append("verify")
@@ -227,9 +242,13 @@ def _dependencies(
         family_for=rec.family_for,
     )
     customization = RootfsCustomization(
-        customize=rec.customize,
         repack_whole_disk_ext4=rec.repack_whole_disk_ext4,
         verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
+        inject_offline=rec.inject_offline,
+        extract_baseline_kernel=rec.extract_baseline_kernel,
+        resolve_accel=rec.resolve_accel,
+        run_customization_boot=rec.run_customization_boot,
+        seal_customized_image=rec.seal_customized_image,
     )
     provenance = RootfsProvenanceInspection(
         inspect_versions=inspect_versions,
@@ -294,21 +313,23 @@ def test_build_produces_qcow2_with_content_digest(tmp_path: Path) -> None:
     assert out.digest == expected, "image identity is the qcow2 content digest"
 
 
-def test_build_drives_acquire_customize_repack_normalize_in_order(tmp_path: Path) -> None:
+def test_build_drives_acquire_repack_normalize_boot_seal_in_order(tmp_path: Path) -> None:
     rec = _Recorder()
     out = _plane(tmp_path, rec).build(_spec())
 
-    assert rec.order == ["acquire", "customize", "repack", "normalize", "verify"], (
-        "pipeline is acquire base → virt-customize → repack ext4 → family.normalize → "
-        "verify_cloud_init"
+    assert rec.order == ["acquire", "repack", "normalize", "inject", "boot", "seal", "verify"], (
+        "pipeline is acquire base → repack ext4 → family.normalize → inject firstboot → "
+        "customization boot → seal → verify_cloud_init (ADR-0345)"
     )
-    # The family customizer (not a hardcoded SELinux edit) builds the virt-customize argv.
-    assert rec.customize_argvs == [["--install", "marker-pkg", "--run-command", "marker-customize"]]
+    # The family customizer's exec-ops (not a hardcoded script) become the firstboot script, with
+    # the family's own package-install command.
+    (script,) = rec.inject_scripts
+    assert "dnf -y install marker-pkg" in script and "marker-customize" in script
     assert len(rec.repack_calls) == 1
     scratch_path, staged_qcow2 = rec.repack_calls[0]
-    assert scratch_path.name == "scratch.qcow2", "the acquired scratch image is customized in place"
+    assert scratch_path.name == "scratch.qcow2", "the acquired scratch image is repacked"
     assert rec.repack_sizes == ["6G"], "the configured size flows to the repack stage"
-    assert rec.normalize_calls == [staged_qcow2], "the repacked image is normalized before publish"
+    assert rec.normalize_calls == [staged_qcow2], "the repacked image is normalized before the boot"
     assert out.qcow2_path.name == staged_qcow2.name
 
 
@@ -741,16 +762,15 @@ def test_family_for_resolves_rhel_and_rejects_unknown() -> None:
     assert exc.value.details["family"] == "plan9"
 
 
-def _rhel_argv(
+def _rhel_steps(
     tmp_path: Path,
-    cleanup: list[Path],
     *,
     packages: tuple[str, ...],
     is_cloud_image: bool = False,
     distro: str = "fedora",
     version: str = "44",
-) -> list[str]:
-    """Build the rhel customizer argv the plane feeds virt-customize, without running libguestfs."""
+) -> list[Step]:
+    """The rhel customizer's steps the plane injects and boots, without running libguestfs."""
     ctx = CustomizeContext(
         kind="debug",
         packages=packages,
@@ -759,51 +779,36 @@ def _rhel_argv(
         distro=distro,
         version=version,
     )
-    return render_argv(RhelFamily().customize_steps(ctx), cleanup=cleanup)
+    return RhelFamily().customize_steps(ctx)
 
 
-def _upload_target(argv: list[str], guest_path: str) -> str:
-    """Return the host source of the `--upload <src>:<guest_path>` arg, or fail if absent."""
-    for flag, value in zip(argv, argv[1:], strict=False):
-        if flag == "--upload" and value.endswith(f":{guest_path}"):
-            return value.rsplit(":", 1)[0]
-    raise AssertionError(f"no --upload arg targets {guest_path}: {argv}")
-
-
-def test_family_argv_omits_nmi_panic_sysctl_for_a_non_kdump_image(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
+def test_family_steps_omit_nmi_panic_sysctl_for_a_non_kdump_image(tmp_path: Path) -> None:
     # A non-kdump (e.g. build-host) image never runs force_crash; a stray NMI must not panic it,
     # so the sysctl is gated on the same kexec-tools condition that enables kdump.service (#823).
-    joined = " ".join(_rhel_argv(tmp_path, staged_cleanup, packages=("gcc", "make")))
-    assert "unknown_nmi_panic" not in joined
-    assert "99-kdive-kdump.conf" not in joined
-    assert "final_action" not in joined
+    text = rendered(_rhel_steps(tmp_path, packages=("gcc", "make")))
+    assert "unknown_nmi_panic" not in text
+    assert "99-kdive-kdump.conf" not in text
+    assert "final_action" not in text
 
 
-def test_family_argv_stages_kdive_drgn_helper_for_a_debug_image(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
+def test_family_steps_stage_kdive_drgn_helper_for_a_debug_image(tmp_path: Path) -> None:
     # The live `introspect.run` path SSH-execs `/usr/local/sbin/kdive-drgn <helper>` in the guest
     # (ADR-0219/0220, #724). The debug image (drgn in packages) stages the repo's reviewed reference
     # helper read-executable so a live attach can run it; absent → DEBUG_ATTACH_FAILURE.
-    argv = _rhel_argv(tmp_path, staged_cleanup, packages=("drgn",))
-    helper_src = _upload_target(argv, "/usr/local/sbin/kdive-drgn")
-    assert helper_src.endswith("deploy/remote-libvirt-guest-helpers/kdive-drgn")
-    assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv, "helper is made read-executable"
+    steps = _rhel_steps(tmp_path, packages=("drgn",))
+    helper_src = upload_source(steps, "/usr/local/sbin/kdive-drgn")
+    assert str(helper_src).endswith("deploy/remote-libvirt-guest-helpers/kdive-drgn")
+    assert "chmod 0755 /usr/local/sbin/kdive-drgn" in rendered(steps), "helper is read-executable"
 
 
-def test_family_argv_omits_drgn_helper_for_a_non_debug_image(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
+def test_family_steps_omit_drgn_helper_for_a_non_debug_image(tmp_path: Path) -> None:
     # A non-debug (e.g. build-host) image carries no drgn and no introspection contract, so it gets
     # no kdive-drgn helper — gated on `drgn in packages`.
-    joined = " ".join(_rhel_argv(tmp_path, staged_cleanup, packages=("gcc", "make")))
-    assert "kdive-drgn" not in joined
+    assert "kdive-drgn" not in rendered(_rhel_steps(tmp_path, packages=("gcc", "make")))
 
 
-def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged_cleanup: list[Path]
+def test_family_steps_fail_loud_when_drgn_helper_source_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The helper is resolved from the source tree; an absent helper file must fail loud with a
     # CONFIGURATION_ERROR rather than ship a guest that cannot introspect (ADR-0220 D2, #724).
@@ -811,7 +816,7 @@ def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(
 
     monkeypatch.setattr(fedora_customize, "drgn_helper_source", lambda: tmp_path / "missing")
     with pytest.raises(CategorizedError) as exc:
-        _rhel_argv(tmp_path, staged_cleanup, packages=("drgn",))
+        _rhel_steps(tmp_path, packages=("drgn",))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -820,13 +825,13 @@ def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(
 
 @dataclass
 class _RecordingBootFamily:
-    """A FamilyCustomizer stub whose ``customize_via`` drives the build plane's dispatch."""
+    """A FamilyCustomizer stub with a mixed file-op/exec-op plan and its own install command."""
 
     rec: _RecordingBootTools
     family: str = "rhel"
     kdump_unit: str = "kdump.service"
     guest_mac: str = "selinux-permissive"
-    customize_via: Literal["boot", "virt_customize"] = "boot"
+    install_command: str = "dnf -y install"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
@@ -845,9 +850,8 @@ class _RecordingBootFamily:
             UploadFile(ctx.readiness_unit_path, "/etc/systemd/system/kdive-ready.service"),
         ]
 
-    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
+    def normalize(self, qcow2: Path) -> None:
         self.rec.order.append("normalize")
-        self.rec.normalize_relabel = relabel
 
 
 @dataclass
@@ -861,13 +865,11 @@ class _RecordingBootTools:
     staged_path: Path | None = None
     probed_path: Path | None = None
     customization_boot_ran: bool = False
-    virt_customize_ran: bool = False
     boot_accel: str | None = None
     boot_domain_name: str | None = None
     boot_disk_dir_traversable: bool | None = None
     inject_file_ops: list[Step] = field(default_factory=list)
     inject_script: str | None = None
-    normalize_relabel: bool | None = None
     sealed: bool = False
     seal_selinux: bool | None = None
     payload: bytes = b"qcow2-bytes"
@@ -879,7 +881,7 @@ class _RecordingBootTools:
                 family="debian",
                 kdump_unit="kdump-tools.service",
                 guest_mac="apparmor",
-                customize_via="virt_customize",
+                install_command="DEBIAN_FRONTEND=noninteractive apt-get -y install",
             )
         return _RecordingBootFamily(self)
 
@@ -895,10 +897,6 @@ class _RecordingBootTools:
     ) -> None:
         scratch.write_bytes(b"scratch")
         self.order.append("acquire")
-
-    def customize(self, qcow2: Path, argv: list[str]) -> None:
-        self.virt_customize_ran = True
-        self.order.append("customize")
 
     def repack_whole_disk_ext4(self, *, scratch: Path, qcow2: Path, size: str) -> None:
         qcow2.write_bytes(self.payload)
@@ -955,7 +953,6 @@ class _RecordingBootTools:
             family_for=self.family_for,
         )
         customization = RootfsCustomization(
-            customize=self.customize,
             repack_whole_disk_ext4=self.repack_whole_disk_ext4,
             inject_offline=self.inject_offline,
             extract_baseline_kernel=self.extract_baseline_kernel,
@@ -997,14 +994,13 @@ def test_rhel_build_uses_customization_boot(tmp_path: Path) -> None:
     plane = _boot_plane(tmp_path, calls)
     plane.build(_spec(name="fedora-kdive-ready-44", arch="x86_64"))
     assert calls.customization_boot_ran
-    assert not calls.virt_customize_ran, "the boot path never runs virt-customize"
     assert calls.boot_accel == "kvm", "the resolve_accel seam drove the accelerator branch"
     assert calls.boot_domain_name is not None
     assert calls.boot_domain_name.startswith("kdive-build-")
     assert calls.boot_disk_dir_traversable is True, (
         "the boot path must widen the 0700 workspace dir so qemu:///system can reach the disk"
     )
-    assert calls.normalize_relabel is False, "the boot path normalizes without /.autorelabel"
+    assert calls.order.index("normalize") < calls.order.index("boot")
     assert calls.sealed and calls.seal_selinux is True, "selinux family seals with a relabel"
     assert calls.probed_path == calls.staged_path, "provenance is probed from staged, not scratch"
     # The firstboot script carries the exec-ops; the file-ops go to inject_offline.
@@ -1022,13 +1018,17 @@ def test_ppc64le_build_boots_under_tcg(tmp_path: Path) -> None:
     assert calls.customization_boot_ran
 
 
-def test_debian_build_stays_on_virt_customize(tmp_path: Path) -> None:
+def test_debian_build_uses_customization_boot_with_apt(tmp_path: Path) -> None:
+    """The debian family rides the same customization boot, installing with apt (#1167)."""
     calls = _RecordingBootTools()
     plane = _boot_plane(tmp_path, calls)
     plane.build(_spec(name="debian-kdive-ready-13", arch="x86_64", distro="debian"))
-    assert calls.virt_customize_ran
-    assert not calls.customization_boot_ran, "debian is unchanged (virt-customize path)"
-    assert calls.normalize_relabel is True, "the virt-customize path normalizes with relabel"
+    assert calls.customization_boot_ran
+    assert calls.inject_script is not None
+    assert "DEBIAN_FRONTEND=noninteractive apt-get -y install marker-pkg" in calls.inject_script
+    assert "dnf" not in calls.inject_script
+    assert calls.sealed and calls.seal_selinux is False, "an AppArmor family seals without relabel"
+    assert calls.probed_path == calls.staged_path, "provenance is probed from the booted image"
 
 
 def test_boot_failure_aborts_publish(tmp_path: Path) -> None:

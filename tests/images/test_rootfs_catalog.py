@@ -202,14 +202,16 @@ def test_ppc64le_rows_mirror_their_x86_64_sibling_versions() -> None:
 
 
 def test_no_ppc64le_row_for_deferred_or_unported_distros() -> None:
-    """N/A decision, executable (ADR-0350): no ppc64le row for the debian family (deferred to
-    #1167) or for Rocky 8 (no ppc64le port). A future addition of an un-buildable row fails here
-    loudly. When #1167 adds a debian ppc64le row it must update this guard deliberately.
+    """N/A decision, executable (ADR-0350): no ppc64le row for the debian family (Debian
+    publishes no `genericcloud` ppc64el base; the customization boot itself is cross-arch since
+    #1167) or for Rocky 8 (no ppc64le port). A future addition of an unproven row fails here
+    loudly; adding a debian-family ppc64le row with its TCG proof must update this guard
+    deliberately.
     """
     cat = load_rootfs_catalog()
     ppc = [e for e in cat.values() if e.arch == "ppc64le"]
     assert ppc, "expected ppc64le rows in the catalog"
-    assert not [e for e in ppc if e.family == "debian"], "debian ppc64le is deferred to #1167"
+    assert not [e for e in ppc if e.family == "debian"], "no proven debian-family ppc64le base"
     assert "rocky-kdive-ready-8-ppc64le" not in cat, "Rocky 8 has no ppc64le port"
 
 

@@ -1,12 +1,9 @@
-"""Unit tests for the argv renderer that reproduces today's virt-customize bytes (ADR-0345)."""
+"""Unit tests for the customization-boot renderers (ADR-0345)."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from kdive.images.families.renderers import (
     partition_steps,
-    render_argv,
     render_firstboot_script,
     render_firstboot_unit,
 )
@@ -14,61 +11,21 @@ from kdive.images.families.steps import (
     InstallPackages,
     Mkdir,
     RunCommand,
-    StageFile,
     Step,
-    UploadFile,
     WriteFile,
 )
 
 
-def test_render_argv_maps_each_step(staged_cleanup: list[Path]) -> None:
-    argv = render_argv(
-        [
-            Mkdir("/seed"),
-            InstallPackages(("drgn", "kexec-tools")),
-            RunCommand("systemctl enable kdump.service"),
-            WriteFile("/etc/machine-id", "0a1b"),
-            UploadFile(Path("/h/u.service"), "/etc/systemd/system/kdive-ready.service"),
-        ],
-        cleanup=staged_cleanup,
+def _script(exec_steps: list[Step], *, install_command: str, console_device: str = "hvc0") -> str:
+    return render_firstboot_script(
+        exec_steps,
+        install_command=install_command,
+        console_device=console_device,
+        unit_name="kdive-customize.service",
+        script_path="/usr/local/sbin/kdive-customize",
+        ok_marker="kdive-customize-ok",
+        fail_marker="kdive-customize-failed",
     )
-    assert argv == [
-        "--mkdir",
-        "/seed",
-        "--install",
-        "drgn,kexec-tools",
-        "--run-command",
-        "systemctl enable kdump.service",
-        "--write",
-        "/etc/machine-id:0a1b",
-        "--upload",
-        "/h/u.service:/etc/systemd/system/kdive-ready.service",
-    ]
-
-
-def test_stagefile_uploads_a_tempfile_with_content(staged_cleanup: list[Path]) -> None:
-    argv = render_argv(
-        [StageFile("/etc/cloud/x.cfg", "datasource_list: [ NoCloud ]\n")],
-        cleanup=staged_cleanup,
-    )
-    assert argv[0] == "--upload"
-    src, _, dest = argv[1].partition(":")
-    assert dest == "/etc/cloud/x.cfg"
-    assert Path(src).read_text() == "datasource_list: [ NoCloud ]\n"
-    assert staged_cleanup == [Path(src)]
-
-
-def test_uploadfile_mode_appends_chmod(staged_cleanup: list[Path]) -> None:
-    argv = render_argv(
-        [UploadFile(Path("/h/k"), "/usr/local/sbin/k", mode="0755")],
-        cleanup=staged_cleanup,
-    )
-    assert argv == [
-        "--upload",
-        "/h/k:/usr/local/sbin/k",
-        "--run-command",
-        "chmod 0755 /usr/local/sbin/k",
-    ]
 
 
 def test_partition_separates_file_and_exec_ops() -> None:
@@ -84,13 +41,9 @@ def test_partition_separates_file_and_exec_ops() -> None:
 
 
 def test_firstboot_script_shape() -> None:
-    script = render_firstboot_script(
+    script = _script(
         [InstallPackages(("drgn", "kexec-tools")), RunCommand("systemctl enable kdump.service")],
-        console_device="hvc0",
-        unit_name="kdive-customize.service",
-        script_path="/usr/local/sbin/kdive-customize",
-        ok_marker="kdive-customize-ok",
-        fail_marker="kdive-customize-failed",
+        install_command="dnf -y install",
     )
     assert script.startswith("#!/bin/sh\n")
     assert "console=/dev/hvc0" in script
@@ -104,6 +57,23 @@ def test_firstboot_script_shape() -> None:
     assert 'echo kdive-customize-failed > "$console"' in script
 
 
+def test_firstboot_script_uses_the_family_install_command() -> None:
+    """The package manager is the family's, not a hardcoded dnf (#1167).
+
+    The debian family installs with a non-interactive ``apt-get``; its index refresh is a
+    preceding ``RunCommand`` the family emits, so it lands in the script in step order.
+    """
+    apt = "DEBIAN_FRONTEND=noninteractive apt-get -y install"
+    script = _script(
+        [RunCommand("apt-get update"), InstallPackages(("kdump-tools", "python3-drgn"))],
+        install_command=apt,
+    )
+    body = script.splitlines()
+    assert f"{apt} kdump-tools python3-drgn" in body
+    assert body.index("apt-get update") < body.index(f"{apt} kdump-tools python3-drgn")
+    assert "dnf" not in script
+
+
 def test_firstboot_script_derives_verdict_from_captured_status_not_a_serial_write() -> None:
     """The verdict is the captured exit status, and the steps run in a ``set -e`` subshell (#1174).
 
@@ -112,13 +82,8 @@ def test_firstboot_script_derives_verdict_from_captured_status_not_a_serial_writ
     captured to a plain file — which honours dnf's real exit code — and the ok/failed marker is
     chosen from that captured ``$rc``. A serial-write error must never flip a good build to failed.
     """
-    script = render_firstboot_script(
-        [InstallPackages(("drgn",))],
-        console_device="ttyS0",
-        unit_name="kdive-customize.service",
-        script_path="/usr/local/sbin/kdive-customize",
-        ok_marker="kdive-customize-ok",
-        fail_marker="kdive-customize-failed",
+    script = _script(
+        [InstallPackages(("drgn",))], install_command="dnf -y install", console_device="ttyS0"
     )
     # The exec steps DO NOT write straight to the serial tty (that path false-fails), and the
     # verdict marker is gated on the captured subshell status, not on a serial write succeeding.
@@ -140,14 +105,7 @@ def test_firstboot_script_syncs_before_the_ok_marker() -> None:
     The orchestration force-destroys the domain the instant a poll reads the marker, so a marker
     emitted before the flush completes would let the destroy truncate the customization writes.
     """
-    script = render_firstboot_script(
-        [InstallPackages(("drgn",))],
-        console_device="hvc0",
-        unit_name="kdive-customize.service",
-        script_path="/usr/local/sbin/kdive-customize",
-        ok_marker="kdive-customize-ok",
-        fail_marker="kdive-customize-failed",
-    )
+    script = _script([InstallPackages(("drgn",))], install_command="dnf -y install")
     body = script.splitlines()
     sync_idx = body.index("sync")
     ok_idx = next(i for i, ln in enumerate(body) if ln == 'echo kdive-customize-ok > "$console"')

@@ -1,25 +1,16 @@
-"""Renderers that turn a family's typed customization ``Step``s into concrete build actions.
+"""Renderers that turn a family's typed customization ``Step``s into the customization boot.
 
-The argv renderer (:func:`render_argv`) reproduces the exact ``virt-customize`` argv the families
-emitted before the one-list refactor (ADR-0345, reusing ADR-0251/0288): every ``Step`` maps to the
-same flags today's ``virt-customize`` path consumes, so the ``virt_customize`` build lane is
-byte-identical. ``StageFile`` stages its content to a host tempfile at render time (the caller
-unlinks it via ``cleanup``), mirroring the old ``_staged_upload`` helper.
-
-The firstboot renderer (:func:`partition_steps`, :func:`render_firstboot_script`,
-:func:`render_firstboot_unit`) supports the boot-to-self-customize path (ADR-0345): a family's
-``Step`` list is partitioned into offline file-ops (applied via guestfish before boot) and exec-ops
-(collected into a firstboot script the guest runs on its own first boot). The unit name and script
-path are passed in by the provider-layer caller (``rootfs_build.py``, which shares the
-``CUSTOMIZE_UNIT``/``CUSTOMIZE_SCRIPT_PATH`` constants with the offline injector) so the
-self-removal ``rm`` targets and the injector's write locations never skew — this module stays in
-the ``images`` layer and does not depend on the provider.
+:func:`partition_steps` splits a family's ``Step`` list into offline file-ops (applied via
+guestfish before boot) and exec-ops; :func:`render_firstboot_script` collects the exec-ops into
+the firstboot script the guest runs on its own first boot, and :func:`render_firstboot_unit`
+renders the systemd unit that runs it (ADR-0345). The unit name and script path are passed in by
+the provider-layer caller (``rootfs_build.py``, which shares the ``CUSTOMIZE_UNIT`` /
+``CUSTOMIZE_SCRIPT_PATH`` constants with the offline injector) so the self-removal ``rm`` targets
+and the injector's write locations never skew — this module stays in the ``images`` layer and does
+not depend on the provider.
 """
 
 from __future__ import annotations
-
-import tempfile
-from pathlib import Path
 
 from kdive.images.families.steps import (
     InstallPackages,
@@ -32,48 +23,6 @@ from kdive.images.families.steps import (
 )
 
 _FILE_OP_TYPES = (Mkdir, WriteFile, StageFile, UploadFile)
-_EXEC_OP_TYPES = (InstallPackages, RunCommand)
-
-
-def _stage_tempfile(content: str, cleanup: list[Path]) -> Path:
-    """Write ``content`` to a delete-on-cleanup host tempfile and return its path."""
-    with tempfile.NamedTemporaryFile("w", delete=False) as handle:
-        handle.write(content)
-        staged = Path(handle.name)
-    cleanup.append(staged)
-    return staged
-
-
-def render_argv(steps: list[Step], *, cleanup: list[Path]) -> list[str]:
-    """Render ``steps`` into a ``virt-customize`` argv fragment (ADR-0345, ADR-0251).
-
-    Each step maps to the flags the pre-refactor families emitted, so the rendered argv is
-    byte-identical to the historical ``virt-customize`` path. ``StageFile`` and ``UploadFile`` with
-    a ``mode`` expand to two flags each.
-
-    Args:
-        steps: The ordered customization steps a family emitted for one rootfs.
-        cleanup: Mutable list the renderer appends staged host tempfiles to; the caller unlinks
-            them after ``virt-customize`` runs.
-    """
-    argv: list[str] = []
-    for step in steps:
-        match step:
-            case Mkdir(path):
-                argv += ["--mkdir", path]
-            case WriteFile(path, content):
-                argv += ["--write", f"{path}:{content}"]
-            case StageFile(path, content):
-                argv += ["--upload", f"{_stage_tempfile(content, cleanup)}:{path}"]
-            case UploadFile(host_src, dest, mode):
-                argv += ["--upload", f"{host_src}:{dest}"]
-                if mode is not None:
-                    argv += ["--run-command", f"chmod {mode} {dest}"]
-            case InstallPackages(names):
-                argv += ["--install", ",".join(names)]
-            case RunCommand(sh):
-                argv += ["--run-command", sh]
-    return argv
 
 
 def partition_steps(steps: list[Step]) -> tuple[list[Step], list[Step]]:
@@ -114,6 +63,7 @@ _CUSTOMIZE_LOG_PATH = "/run/kdive-customize.log"
 def render_firstboot_script(
     exec_steps: list[Step],
     *,
+    install_command: str,
     console_device: str,
     unit_name: str,
     script_path: str,
@@ -124,16 +74,19 @@ def render_firstboot_script(
 
     The exec steps run in a ``( set -e … )`` subshell whose combined output is captured to a guest
     log file; the subshell aborts on the first failing step and its exit status is the **verdict**.
-    The captured log is then best-effort dumped to the serial console (so a failed dnf/RunCommand's
-    error still lands in the console log — the failure-evidence path, #1147), and a single
-    ``ok``/``failed`` marker line is echoed to the console from the captured status. The verdict is
-    never derived from a serial-console write, because writing a large volume to the serial *tty*
-    can spuriously fail (a Python program exits 120 on the failed shutdown flush; even ``cat`` can
-    error) and would false-fail an otherwise-good customization (#1174).
+    The captured log is then best-effort dumped to the serial console (so a failed install or
+    RunCommand's error still lands in the console log — the failure-evidence path, #1147), and a
+    single ``ok``/``failed`` marker line is echoed to the console from the captured status. The
+    verdict is never derived from a serial-console write, because writing a large volume to the
+    serial *tty* can spuriously fail (a Python program exits 120 on the failed shutdown flush; even
+    ``cat`` can error) and would false-fail an otherwise-good customization (#1174).
 
     Args:
         exec_steps: The ``InstallPackages``/``RunCommand`` steps, in order (see
             :func:`partition_steps`).
+        install_command: The family's package-install command prefix
+            (:attr:`~kdive.images.families.base.FamilyCustomizer.install_command`); each
+            ``InstallPackages`` step renders as ``<install_command> <names…>``.
         console_device: The guest console device (e.g. ``hvc0``) the log + markers are echoed to.
         unit_name: The firstboot systemd unit's file name; must match the value
             ``inject_offline`` writes (the caller passes ``CUSTOMIZE_UNIT``).
@@ -151,13 +104,14 @@ def render_firstboot_script(
         f"log={_CUSTOMIZE_LOG_PATH}",
         # A subshell so ``set -e`` (stop on the first failing step, and NOT leak to the marker
         # logic below) is confined here; its exit status is the customization verdict. Output is
-        # captured to $log (a plain file honours dnf's real exit code — the serial tty does not).
+        # captured to $log (a plain file honours the package manager's real exit code — the serial
+        # tty does not).
         "( set -e",
     ]
     for step in exec_steps:
         match step:
             case InstallPackages(names):
-                lines.append(f"dnf -y install {' '.join(names)}")
+                lines.append(f"{install_command} {' '.join(names)}")
             case RunCommand(sh):
                 lines.append(sh)
     lines += [
@@ -193,11 +147,11 @@ def render_firstboot_unit(*, script_path: str) -> str:
     it offline via a guestfish symlink into ``multi-user.target.wants``.
 
     ``TimeoutStartSec=infinity`` disables systemd's default 90s ``DefaultTimeoutStartSec``: a
-    customization that installs packages can exceed it (a slow dnf under TCG, or a large native
-    install), and a timeout would SIGTERM the service mid-install, fire the script's ``-failed``
-    marker, and fail the build for a reason unrelated to the customization (#1152). The host
-    orchestration's TCG-scaled window is the authoritative deadline; the unit must not impose a
-    shorter one. Deliberately not a large *finite* value matched to that window: the guest cannot
+    customization that installs packages can exceed it (a slow package fetch under TCG, or a large
+    native install), and a timeout would SIGTERM the service mid-install, fire the script's
+    ``-failed`` marker, and fail the build for a reason unrelated to the customization (#1152). The
+    host orchestration's TCG-scaled window is the authoritative deadline; the unit must not impose
+    a shorter one. Deliberately not a large *finite* value matched to that window: the guest cannot
     know the host's config-driven, TCG-scaled deadline, so a finite guess would either re-introduce
     the false-fail (if too short) or duplicate the host bound (if too long). The trade-off is that a
     genuinely *hung* (non-exiting) customization self-reports no marker and instead surfaces as the
