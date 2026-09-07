@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -1779,9 +1779,11 @@ def test_negative_timeout_wait_allocation_is_also_a_single_read(migrated_url: st
 def _assert_deadline_pair(data: Mapping[str, Any]) -> None:
     """The lease deadline and its reference clock, both absolute ISO-8601 UTC (#2306).
 
-    The `+00:00` assertion is the load-bearing half: psycopg renders a `timestamptz` in the DB
-    session's timezone, so a value that skipped normalization still parses as ISO-8601 and only
-    this check tells the two apart.
+    The test Postgres runs with a UTC session TimeZone, so the `+00:00` assertions here prove the
+    values are tz-aware and agree with the session — not that the normalization happened. What
+    discriminates a normalized render from a bare `.isoformat()` is
+    `test_lease_deadline_data_normalizes_a_non_utc_offset`, which feeds the renderer an offset the
+    session can never produce.
     """
     expiry, server_time = data["lease_expiry"], data["server_time"]
     assert isinstance(expiry, str) and isinstance(server_time, str)
@@ -1886,3 +1888,16 @@ def test_lease_deadline_data_requires_server_time() -> None:
     leased = alloc.model_copy(update={"lease_expiry": datetime(2026, 6, 1, tzinfo=UTC)})
     with pytest.raises(ValueError, match="server_time"):
         lease_deadline_data(leased, None)
+
+
+def test_lease_deadline_data_normalizes_a_non_utc_offset() -> None:
+    # The contract says UTC, and psycopg renders a timestamptz in the DB session's timezone --
+    # which the pool never pins, so it is whatever the operator's server is set to. A bare
+    # `.isoformat()` would echo that offset back and still look like valid ISO-8601. Feeding the
+    # renderer an offset no UTC session can produce is what tells the two apart.
+    tehran = timezone(timedelta(hours=3, minutes=30))
+    alloc = _granted_alloc().model_copy(
+        update={"lease_expiry": datetime(2026, 6, 1, 12, tzinfo=tehran)}
+    )
+    data = lease_deadline_data(alloc, "2026-06-01T08:30:00+00:00")
+    assert data["lease_expiry"] == "2026-06-01T08:30:00+00:00"
