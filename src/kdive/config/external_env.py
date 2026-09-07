@@ -657,6 +657,22 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "source root from the current start request; operators set KDIVE_KERNEL_SRC instead.",
     ),
     ExternalEnvVar(
+        "KDIVE_PREFLIGHT_KDUMP",
+        "script",
+        "required",
+        "How `scripts/operations/check-local-libvirt.sh` treats the kdump-only libguestfs/drgn "
+        "binding check: `required` fails the preflight, `optional` reports a warning. "
+        "`examples/local-libvirt/up.sh` defaults it to `optional`; CI and onboarding keep the "
+        "hard gate.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_BUILD_IMAGE_WORKSPACE",
+        "script",
+        "~/.local/share/kdive/build/images",
+        "Scratch workspace `examples/local-libvirt/build-image.sh` passes to `build-fs` "
+        "(`--workspace`); holds the downloaded base image and the customization boot state.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LOCAL_ROLE_BOOTSTRAP",
         "script",
         "1",

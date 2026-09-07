@@ -335,6 +335,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_ACCEPTED_LANES` | `default,state-fenced` | Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request. Must match the process default (`core_settings._DEFAULT_ACCEPTED_LANES`): provision jobs route to `state-fenced` (ADR-0550/0574), so a narrower host-side default starves them. |
 | `KDIVE_APT_TIMEOUT_S` | `60` | Positive whole-second wall-clock bound for each `apt-get install` in scripts/apt-install.sh; `apt-get update` is capped at 60s independently. Raised by live.yml for its larger host-dep set (ADR-0566, #1978). |
 | `KDIVE_BOOT_DIR` | `/boot` | Boot directory `check-local-libvirt.sh` scans for readable `vmlinuz-*` host kernels (libguestfs build-fs appliance, ADR-0222). |
+| `KDIVE_BUILD_IMAGE_WORKSPACE` | `~/.local/share/kdive/build/images` | Scratch workspace `examples/local-libvirt/build-image.sh` passes to `build-fs` (`--workspace`); holds the downloaded base image and the customization boot state. |
 | `KDIVE_DEMO_CONTEXT` | — | kube context `demo-token.sh` uses (unset → the current context). |
 | `KDIVE_DEMO_FULLNAME` | `kdive-kdive` | Chart fullname (`<release>-kdive`) `demo-token.sh` uses to address the server/oidc pods. |
 | `KDIVE_DEMO_NAMESPACE` | `kdive-demo` | Release namespace `demo-token.sh` targets when minting a bundled-demo bearer token. |
@@ -365,6 +366,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_OIDC_PORT` | `8090` | Host port the compose `oidc` mock issuer publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`. |
 | `KDIVE_OS_RELEASE` | `/etc/os-release` | os-release file `check-setup-deps.sh` reads to detect the host distro. |
 | `KDIVE_POSTGRES_PORT` | `5432` | Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it into the default role database DSNs (#1929). |
+| `KDIVE_PREFLIGHT_KDUMP` | `required` | How `scripts/operations/check-local-libvirt.sh` treats the kdump-only libguestfs/drgn binding check: `required` fails the preflight, `optional` reports a warning. `examples/local-libvirt/up.sh` defaults it to `optional`; CI and onboarding keep the hard gate. |
 | `KDIVE_PROJECT` | `demo` | Project the setup-*-libvirt.sh scripts and `scripts/live-stack/onboard.sh` onboard. |
 | `KDIVE_PROMETHEUS_PORT` | `9090` | Host port the compose `prometheus` service publishes (obs profile); an off-host grafana points at this port (#1261). |
 | `KDIVE_PYTHON` | `python3` | Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, e.g. /opt/kdive/.venv/bin/python, when not running inside the venv). |
