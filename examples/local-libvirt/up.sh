@@ -118,21 +118,44 @@ step "backends (docker compose)"
 (cd "${repo_root}" && docker compose up -d --wait --wait-timeout 120 postgres minio oidc)
 (cd "${repo_root}" && docker compose run --rm minio-init)
 
-# 5. Schema.
+# 5. Schema. Every kdive process reads KDIVE_DATABASE_URL, and the live-stack env exports one
+#    DSN per database authority instead (#1929): migrate connects as the migration owner, and
+#    the other authorities are scrubbed so no process sees a DSN that is not its own (the
+#    scripts/live-stack/onboard.sh shape).
 step "migrate"
-(cd "${repo_root}" && "${KDIVE_PYTHON}" -m kdive migrate)
+(cd "${repo_root}" && KDIVE_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL}" \
+  env -u KDIVE_SERVER_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  -u KDIVE_RECONCILER_DATABASE_URL \
+  "${KDIVE_PYTHON}" -m kdive migrate)
 
-# 6. Onboard the project — budget/quota rows plus registration of the discovered local
+# 6. Runtime login members. The compose app tier gates on the role-bootstrap one-shot, but the
+#    backend set above excludes it, so without this step the per-process login members never
+#    exist and the trio fails closed at start (#2036). Idempotent; KDIVE_LOCAL_ROLE_BOOTSTRAP=0
+#    keeps the external-provisioning contract. `env -u` drops the host-facing migration DSN
+#    (localhost), unreachable from inside the compose network, so the one-shot uses its own
+#    container-internal default.
+step "runtime-role bootstrap"
+if [[ "${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}" == "1" ]]; then
+  (cd "${repo_root}" && env -u KDIVE_MIGRATION_DATABASE_URL \
+    docker compose run --rm --no-deps role-bootstrap)
+else
+  echo "KDIVE_LOCAL_ROLE_BOOTSTRAP=0; using externally provisioned login members"
+fi
+
+# 7. Onboard the project — budget/quota rows plus registration of the discovered local
 #    libvirt resource. Token-less bootstrap (raw INSERTs), the correct path for a
 #    single-developer box.
 step "seed project '${KDIVE_PROJECT}'"
-(cd "${repo_root}" && "${KDIVE_PYTHON}" -m kdive seed-project \
+(cd "${repo_root}" && KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  -u KDIVE_RECONCILER_DATABASE_URL \
+  "${KDIVE_PYTHON}" -m kdive seed-project \
   --project "${KDIVE_PROJECT}" \
   --limit-kcu "${KDIVE_LIMIT_KCU}" \
   --max-concurrent-allocations "${KDIVE_MAX_ALLOC}" \
   --max-concurrent-systems "${KDIVE_MAX_SYS}")
 
-# 7. Merge the MCP client config into the kernel tree (the directory you open your MCP client
+# 8. Merge the MCP client config into the kernel tree (the directory you open your MCP client
 #    in) BEFORE starting the trio, so a failure here (missing/unwritable kernel tree, malformed
 #    existing .mcp.json) stops the run cleanly instead of leaving the trio up and the run
 #    blocked by the duplicate-run guard. It references the token via ${KDIVE_TOKEN}, so the
@@ -178,22 +201,32 @@ else:
 target_path.write_text(json.dumps(doc, indent=2) + "\n")
 PY
 
-# 8. Start the three processes AS ROOT on qemu:///system. Root is the representative
+# 9. Start the three processes AS ROOT on qemu:///system. Root is the representative
 #    identity: it manages system-scope domains, runs libguestfs/kexec, and reads the
 #    root:0600 console log virtlogd writes.
 #
-#    All three start inside one `sudo -E bash -c`: each `nohup python -m kdive <proc>` execs
-#    the interpreter, so `$!` is the real kdive pid (not a sudo/bash wrapper), and nohup
-#    keeps it alive after the inner bash exits. The inner shell reads the env preserved by
-#    `-E` (KDIVE_PYTHON / KDIVE_STACK_LOG_DIR). The three real pids land in the user-owned
-#    pid file, which down.sh reads to stop them.
+#    All three start inside one `sudo -E bash -c`: each `nohup env … python -m kdive <proc>`
+#    execs down to the interpreter, so `$!` is the real kdive pid (not a sudo/bash wrapper),
+#    and nohup keeps it alive after the inner bash exits. The inner shell reads the env
+#    preserved by `-E` (KDIVE_PYTHON / KDIVE_STACK_LOG_DIR / the per-role DSNs). Each process
+#    gets exactly its own authority as KDIVE_DATABASE_URL and the other three scrubbed
+#    (#1929, the scripts/live-stack/lib.sh shape). The three real pids land in the
+#    user-owned pid file, which down.sh reads to stop them.
 step "start server/worker/reconciler as root"
 sudo -v
 mkdir -p "${log_dir}" "$(dirname "${pid_file}")"
 mapfile -t pids < <(sudo -E bash -c '
   set -euo pipefail
   for proc in server worker reconciler; do
-    nohup "${KDIVE_PYTHON}" -m kdive "${proc}" >"${KDIVE_STACK_LOG_DIR}/${proc}.log" 2>&1 &
+    case "${proc}" in
+    server) dsn="${KDIVE_SERVER_DATABASE_URL}" ;;
+    worker) dsn="${KDIVE_WORKER_DATABASE_URL}" ;;
+    reconciler) dsn="${KDIVE_RECONCILER_DATABASE_URL}" ;;
+    esac
+    KDIVE_DATABASE_URL="${dsn}" nohup env \
+      -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+      -u KDIVE_WORKER_DATABASE_URL -u KDIVE_RECONCILER_DATABASE_URL \
+      "${KDIVE_PYTHON}" -m kdive "${proc}" >"${KDIVE_STACK_LOG_DIR}/${proc}.log" 2>&1 &
     echo "$!"
   done
 ')
@@ -207,7 +240,7 @@ if ((${#pids[@]} != 3)); then
   exit 1
 fi
 
-# 9. Block until all three processes are actually ready (each process's dependency set
+# 10. Block until all three processes are actually ready (each process's dependency set
 #    reachable). Only then is the stack usable — a bare "it's up" banner after a fixed sleep
 #    would be a false green.
 step "wait for readiness (${readyz_urls[*]})"
@@ -230,4 +263,7 @@ local-libvirt stack is up.
 
 Next, in the shell you launch your MCP client from:
   export KDIVE_TOKEN=\$(${example_dir}/mint-token.sh)
+
+No guest image yet? Build and register one (Fedora 44 is the kdump-capable default):
+  ${example_dir}/build-image.sh fedora-kdive-ready-44
 EOF
