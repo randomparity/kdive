@@ -269,9 +269,11 @@ def test_override_must_be_absolute_executable(
     assert exc.value.details.get("variable") == "KDIVE_DEPMOD"
 
 
-@pytest.mark.parametrize("kind", ["vanished", "wrong-format"])
+@pytest.mark.parametrize(
+    ("kind", "expected_errno"), [("vanished", errno.ENOENT), ("wrong-format", errno.ENOEXEC)]
+)
 def test_unexecutable_depmod_is_missing_dependency(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, expected_errno: int
 ) -> None:
     if kind == "vanished":
         # Resolved and then removed before the exec: the window which()-then-run() opens.
@@ -291,6 +293,9 @@ def test_unexecutable_depmod_is_missing_dependency(
     # dead-letters instead of retrying a binary that will not become executable.
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert exc.value.details.get("depmod") == resolved
+    # errno rides along on both OSError branches, so ENOEXEC stays distinguishable from ENOENT
+    # instead of collapsing into a bare "OSError".
+    assert exc.value.details.get("errno") == expected_errno
 
 
 @pytest.mark.parametrize("spawn_errno", [errno.EMFILE, errno.EAGAIN, errno.ENOMEM])

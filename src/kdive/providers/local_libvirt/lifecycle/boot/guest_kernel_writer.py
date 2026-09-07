@@ -55,11 +55,12 @@ _DEPMOD = "depmod"
 # reported a missing package on hosts that had one (#2300). The first four are the set
 # ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
 # against. The /usr/local pair trails rather than leads, and the order is the security property,
-# not a preference: those two are group- or world-writable by default on the Debian family
-# (root:staff 2775 per policy, 0777 on some hosts), so searching them first would let anyone who
-# can write there shadow the distribution depmod this privileged staging step executes. Last, they
-# only fill a gap — a source-built kmod on a host with no packaged depmod, which an ungated worker
-# reaches through PATH today. A host whose depmod is outside all six sets KDIVE_DEPMOD.
+# not a preference: /usr/local is where an unmanaged binary appears — a local build, or a
+# directory an admin has opened up (Debian's /etc/staff-group-for-usr-local makes it group
+# writable) — so searching it first would let that binary shadow the packaged depmod this
+# privileged staging step executes. Trailing, it only fills a gap: a source-built kmod on a host
+# with no packaged depmod, which an ungated worker reaches through PATH today. A host whose
+# depmod is outside all six sets KDIVE_DEPMOD.
 _DEPMOD_SEARCH_DIRS = (
     "/usr/sbin",
     "/usr/bin",
@@ -181,7 +182,7 @@ def _run_host_depmod(*, basedir: Path, version: str) -> None:
             "the resolved depmod binary could not be executed to index the kernel modules "
             "for staging",
             category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"depmod": depmod, "error": type(exc).__name__},
+            details={"depmod": depmod, "error": type(exc).__name__, "errno": exc.errno},
         ) from exc
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()[-_DEPMOD_STDERR_MAX:]

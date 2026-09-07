@@ -283,7 +283,9 @@ DEPMOD = Setting(
     ),
     suggest=(
         "set an absolute path to an executable depmod, e.g. /usr/sbin/depmod, or leave it "
-        "unset to search the fixed host-tool list reported as details['searched']"
+        "unset to search the fixed host-tool list reported as details['searched']. A value "
+        "that is not an executable file fails `kdive worker` at startup, not merely the next "
+        "install, so unset it rather than leaving a stale path behind"
     ),
 )
 
