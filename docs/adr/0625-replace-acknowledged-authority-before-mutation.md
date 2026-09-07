@@ -28,7 +28,7 @@ The transition does not infer provider completion, skip takeover acknowledgement
 generation, or repair a divergent local journal. Existing fail-closed recovery remains unchanged
 for every uncommitted local suffix.
 
-## Considered and rejected
+## Considered & rejected
 
 - Treat the acknowledged head as terminal: no provider outcome exists, so that would invent
   evidence.
