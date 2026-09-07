@@ -302,8 +302,9 @@ def test_zombie_authority_marked_job_is_left_for_the_authority_path(migrated_url
     0127_reopen_external_boot_claim_lane.sql makes that reachable (#2201). Reaping one here
     would fail the job and drive its Run to failed from outside that commit.
 
-    The marked job is left ``running`` with an expired lease. Nothing reaps it until #2203
-    adds the detection lane that routes it to the authority path.
+    The marked job is left ``running`` with an expired lease. Migration 0150 permits a worker
+    claim only for an exact acknowledged no-mutation authority proof; this deliberately malformed
+    marker has no such proof and remains fenced for authority-specific repair.
     """
 
     async def _run() -> None:
