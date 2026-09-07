@@ -1,0 +1,16 @@
+---
+# SCM sources for CI cache misses. The corresponding immutable commit's galaxy.yml must report
+# the exact same collection name and version as requirements.yml; the post-install guard checks it.
+collections:
+  - name: https://github.com/ansible-collections/community.crypto.git
+    type: git
+    version: 39f8c847ebbfee966b00c9d3c9a22cb819df8316  # pragma: allowlist secret — 3.2.2
+  - name: https://github.com/ansible-collections/community.general.git
+    type: git
+    version: 73be10786b529acac83267edaaacda2cb4f627c9  # pragma: allowlist secret — 13.1.0
+  - name: https://github.com/ansible-collections/ansible.posix.git
+    type: git
+    version: d9af430396cd12fce473d29182305b1617125da7  # pragma: allowlist secret — 2.2.0
+  - name: https://github.com/ansible-collections/community.libvirt.git
+    type: git
+    version: 25427a148e5b61b71a97bcb9904ff904d5df9d0d  # pragma: allowlist secret — 2.2.0

@@ -100,13 +100,23 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.ansible/collections
-          key: ${{ runner.os }}-ansible-collections-${{ hashFiles('deploy/ansible/requirements.yml') }}
+          key: ${{ runner.os }}-ansible-collections-${{ hashFiles('deploy/ansible/requirements.yml', 'deploy/ansible/requirements-ci.lock.yml') }}
 
-      - name: Install pinned Ansible collections
+      - name: Install source-locked Ansible collections
         if: steps.ansible-collections-cache.outputs.cache-hit != 'true'
+        env:
+          # A cold cache must use only the immutable Git sources below. Keeping Galaxy
+          # deliberately unreachable makes that availability boundary executable in CI.
+          ANSIBLE_GALAXY_SERVER: http://127.0.0.1:9
         run: >-
           uv run --with 'ansible-core==2.21.1' ansible-galaxy collection install
-          --requirements-file deploy/ansible/requirements.yml --no-deps --no-cache
+          --requirements-file deploy/ansible/requirements-ci.lock.yml
+          --collections-path ~/.ansible/collections --no-deps --no-cache
+
+      - name: Verify pinned Ansible collections
+        run: >-
+          uv run python scripts/guards/check_ansible_collections.py
+          deploy/ansible/requirements.yml ~/.ansible/collections
 
       - name: Lint Ansible
         # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
