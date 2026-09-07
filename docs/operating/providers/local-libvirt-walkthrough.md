@@ -86,14 +86,12 @@ sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install /var/lib/kdive/console
 > - libguestfs builds an appliance from the **host** kernel, which Debian/Ubuntu ship `root:0600`.
 >   Make them readable or the appliance fails with `cp: cannot open '/boot/vmlinuz-…'`:
 >   `sudo chmod 0644 /boot/vmlinuz-*` (re-apply after a kernel upgrade, or use `dpkg-statoverride`).
-> - libguestfs uses `passt` for the appliance's network (needed by `virt-builder --install`). On
->   Ubuntu 24.04 this can fail with `libguestfs error: passt exited with status 1`. Unloading the
->   `passt` AppArmor profile (`sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`) clears one
->   cause, but a libguestfs/passt version mismatch may still block it; if so, build the rootfs on a
->   host with a working libguestfs appliance, or stage a prebuilt bootable qcow2 (see Step 6).
-> - Both failures now report an actionable `configuration_error` from `build-fs` instead of a raw
->   tool dump, and the kernel-readability case is flagged by the preflight (Step 2) when run as the
->   worker user — see [ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md).
+> - `build-fs` no longer uses the libguestfs appliance network: every family installs its
+>   packages inside a throwaway customization boot (#1167), so the Ubuntu 24.04
+>   `libguestfs error: passt exited with status 1` failure (#694) no longer applies.
+> - The kernel-readability failure reports an actionable `configuration_error` from `build-fs`
+>   instead of a raw tool dump, and the preflight (Step 2) flags it when run as the worker user
+>   — see [ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md).
 
 ## 2. Run the preflight
 
@@ -358,9 +356,7 @@ qcow2 to the catalog destination:
 The build needs the Step 1 libguestfs tooling and network access — the EL-family images
 `dnf install` their crash toolchain at customize time (Rocky 8 enables EPEL for `drgn`
 automatically), and the Debian images `apt install` theirs (`kdump-tools`, `python3-drgn`, `crash`).
-The Debian build is otherwise the same flow and needs no distro-specific workaround. (On Ubuntu
-24.04 the libguestfs `--install` step may be blocked by the passt/libguestfs mismatch noted in
-Step 1; build on a Fedora host or stage a prebuilt qcow2.)
+The Debian and Ubuntu builds are otherwise the same flow and need no distro-specific workaround.
 
 **Label the image for `qemu:///system` — the easy step to miss.** When `--workspace` is under
 `$HOME`, the cross-filesystem publish move can leave the qcow2 with the home SELinux type

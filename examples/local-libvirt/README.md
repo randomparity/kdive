@@ -112,11 +112,9 @@ docker compose down --volumes   # ...or also drop the database and the artifacts
 - **Directories** — `/var/lib/kdive/{install,console,rootfs/local,build}` owned by you,
   world-traversable.
 
-Known gap on apt hosts: images in the **debian** family (`debian-kdive-ready-*`) are still
-built with `virt-customize --install`, which needs the libguestfs appliance network (`passt`);
-on Ubuntu 24.04 that failed (#694), and the fix is to move the family to the customization
-boot the rhel family already uses (#1167). Fedora/Rocky/CentOS images (`rhel` family) do not
-use the appliance network and build on an Ubuntu host.
+Every catalog family builds through the customization boot (a throwaway guest installs its
+own packages), so no image build depends on the libguestfs appliance network. The Ubuntu
+24.04 `passt` failure (#694) applied to the earlier `virt-customize` path, retired in #1167.
 
 ## Tokens
 
