@@ -41,9 +41,9 @@ from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,
     AuthoritySystemMutationRequestV1,
     AuthoritySystemOperation,
-    AuthoritySystemProvider,
     AuthoritySystemProvisionSnapshot,
 )
+from kdive.providers.system_authority.ports import AuthoritySystemProvider
 from tests.providers.remote_libvirt.conftest import libvirt_error
 from tests.providers.remote_libvirt.fakes import FakeStoragePool
 
@@ -913,8 +913,8 @@ async def test_persisted_absence_receipt_replays_after_deadline(tmp_path: Path) 
     provider, _bootstrap, executor, state = _provider(tmp_path, connection, clock=clock)
     request = _request(AuthoritySystemOperation.PREACTIVATION_TEARDOWN)
     context = _context(AuthoritySystemOperation.PREACTIVATION_TEARDOWN)
-    store = cast(Any, provider)._store
-    original_delete = store.delete
+    state_store = cast(Any, provider)._state
+    original_delete = state_store.delete
     interrupted = False
 
     def stop_after_receipt(name: str) -> None:
@@ -926,12 +926,12 @@ async def test_persisted_absence_receipt_replays_after_deadline(tmp_path: Path) 
 
     try:
         await provider.execute_system_provision(_request(), _context(), _snapshot())
-        store.delete = stop_after_receipt
+        state_store.delete = stop_after_receipt
         with pytest.raises(RuntimeError, match="after receipt"):
             await provider.execute_preactivation_teardown(request, context)
         assert (state / f"{SYSTEM_ID}.absent.json").is_file()
         assert (state / f"{SYSTEM_ID}.teardown.json").is_file()
-        store.delete = original_delete
+        state_store.delete = original_delete
         clock.utc += timedelta(hours=1)
 
         facts = await provider.execute_preactivation_teardown(request, context)

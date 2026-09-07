@@ -537,7 +537,7 @@ def _projection_identity(domain_xml: str) -> str:
     return _digest(b"kdive-remote-authority-system-domain-v1", _domain_projection(domain_xml))
 
 
-class _PrivateStore:
+class _PrivateState:
     def __init__(self, root: Path, *, owner_uid: int, owner_gid: int) -> None:
         self._root = root
         self._owner_uid = owner_uid
@@ -713,7 +713,7 @@ class RemoteAuthoritySystemProvider:
         if set(self._private_base_paths) != {entry.base_volume for entry in manifest}:
             raise ValueError("remote authority System private base paths do not match its manifest")
         self._validate_private_base = validate_private_base
-        self._store = _PrivateStore(
+        self._state = _PrivateState(
             state_dir,
             owner_uid=os.getuid() if owner_uid is None else owner_uid,
             owner_gid=os.getgid() if owner_gid is None else owner_gid,
@@ -1055,7 +1055,7 @@ class RemoteAuthoritySystemProvider:
         adopted = _ProvisionIntentV1.model_validate(
             {**intent.model_dump(mode="python", by_alias=True), "current_attempt": attempt}
         )
-        self._store.write(self._store.provision_name(request.system_id), adopted)
+        self._state.write(self._state.provision_name(request.system_id), adopted)
         return adopted
 
     def _checkpoint(
@@ -1080,7 +1080,7 @@ class RemoteAuthoritySystemProvider:
         if phase == "complete" and intent.completed_at is None:
             values["completed_at"] = self._utc_now()
         updated = _ProvisionIntentV1.model_validate(values)
-        self._store.write(self._store.provision_name(intent.system_id), updated)
+        self._state.write(self._state.provision_name(intent.system_id), updated)
         return updated
 
     @staticmethod
@@ -1234,12 +1234,12 @@ class RemoteAuthoritySystemProvider:
                 "remote authority System base architecture differs from root provenance",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        name = self._store.provision_name(request.system_id)
-        intent = self._store.read(name, _ProvisionIntentV1)
+        name = self._state.provision_name(request.system_id)
+        intent = self._state.read(name, _ProvisionIntentV1)
         with self._connection() as connection:
             if intent is None:
                 intent = self._new_intent(connection, entry, request, context, snapshot)
-                self._store.write(name, intent)
+                self._state.write(name, intent)
             else:
                 intent = self._adopt(intent, request, context, entry)
             if intent.phase == "complete":
@@ -1320,7 +1320,7 @@ class RemoteAuthoritySystemProvider:
         snapshot: AuthoritySystemProvisionSnapshot,
     ) -> AuthoritySystemProvisionFacts:
         entry = self._entry(request)
-        intent = self._store.read(self._store.provision_name(request.system_id), _ProvisionIntentV1)
+        intent = self._state.read(self._state.provision_name(request.system_id), _ProvisionIntentV1)
         if intent is None:
             return AuthoritySystemProvisionFacts(
                 intent_identity=request.operation_digest,
@@ -1392,13 +1392,13 @@ class RemoteAuthoritySystemProvider:
         context: AuthoritySystemCommitContextV1,
     ) -> AuthoritySystemAbsenceFacts:
         entry = self._entry(request)
-        provision_name = self._store.provision_name(request.system_id)
-        teardown_name = self._store.teardown_name(request.system_id)
-        absent_name = self._store.absent_name(request.system_id)
-        provision = self._store.read(provision_name, _ProvisionIntentV1)
+        provision_name = self._state.provision_name(request.system_id)
+        teardown_name = self._state.teardown_name(request.system_id)
+        absent_name = self._state.absent_name(request.system_id)
+        provision = self._state.read(provision_name, _ProvisionIntentV1)
         if provision is not None:
             self._validate_teardown_subject(provision, request, entry)
-        receipt = self._store.read(absent_name, _AbsenceReceiptV1)
+        receipt = self._state.read(absent_name, _AbsenceReceiptV1)
         provision_identity = (
             provision.intent_identity
             if provision is not None
@@ -1408,7 +1408,7 @@ class RemoteAuthoritySystemProvider:
                 else _never_began_identity(request)
             )
         )
-        teardown = self._store.read(teardown_name, _TeardownIntentV1)
+        teardown = self._state.read(teardown_name, _TeardownIntentV1)
         if receipt is not None:
             self._validate_receipt(receipt, request, provision_identity)
         if teardown is None and receipt is None:
@@ -1426,7 +1426,7 @@ class RemoteAuthoritySystemProvider:
                 provision_intent_identity=provision_identity,
                 deadline=self._deadline(),
             )
-            self._store.write(teardown_name, teardown)
+            self._state.write(teardown_name, teardown)
         elif teardown is not None:
             teardown = self._adopt_teardown(
                 teardown, request, context, provision_identity, write=receipt is None
@@ -1463,15 +1463,15 @@ class RemoteAuthoritySystemProvider:
                 unchecked = _AbsenceReceiptV1.model_construct(**values)
                 values["receipt_identity"] = _absence_identity(unchecked)
                 receipt = _AbsenceReceiptV1.model_validate(values)
-                self._store.write(absent_name, receipt)
+                self._state.write(absent_name, receipt)
             observed = self._inspect_absence(connection, request, provision)
             if not all(observed):
                 raise CategorizedError(
                     "remote authority System absence receipt conflicts with provider state",
                     category=ErrorCategory.CONFLICT,
                 )
-        self._store.delete(provision_name)
-        self._store.delete(teardown_name)
+        self._state.delete(provision_name)
+        self._state.delete(teardown_name)
         return self._absence_facts(
             provision_identity, observed, receipt.completed_at, private_intent_absent=True
         )
@@ -1482,12 +1482,12 @@ class RemoteAuthoritySystemProvider:
         context: AuthoritySystemCommitContextV1,
     ) -> AuthoritySystemAbsenceFacts:
         entry = self._entry(request)
-        provision = self._store.read(
-            self._store.provision_name(request.system_id), _ProvisionIntentV1
+        provision = self._state.read(
+            self._state.provision_name(request.system_id), _ProvisionIntentV1
         )
         if provision is not None:
             self._validate_teardown_subject(provision, request, entry)
-        receipt = self._store.read(self._store.absent_name(request.system_id), _AbsenceReceiptV1)
+        receipt = self._state.read(self._state.absent_name(request.system_id), _AbsenceReceiptV1)
         provision_identity = (
             provision.intent_identity
             if provision is not None
@@ -1497,7 +1497,7 @@ class RemoteAuthoritySystemProvider:
                 else _never_began_identity(request)
             )
         )
-        teardown = self._store.read(self._store.teardown_name(request.system_id), _TeardownIntentV1)
+        teardown = self._state.read(self._state.teardown_name(request.system_id), _TeardownIntentV1)
         if teardown is not None:
             self._adopt_teardown(teardown, request, context, provision_identity, write=False)
         if receipt is not None:
@@ -1571,7 +1571,7 @@ class RemoteAuthoritySystemProvider:
             {**teardown.model_dump(mode="python", by_alias=True), "current_attempt": attempt}
         )
         if write:
-            self._store.write(self._store.teardown_name(request.system_id), adopted)
+            self._state.write(self._state.teardown_name(request.system_id), adopted)
         return adopted
 
     @staticmethod
