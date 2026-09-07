@@ -38,6 +38,12 @@ provider_authority_host_s3_credentials_source: ""
 provider_authority_host_remote_module_enabled: false
 provider_authority_host_remote_module_architectures: []
 provider_authority_host_remote_libvirt_storage_pool: default
+# Authority-owned System provisioning remains disabled until an operator supplies one canonical
+# manifest and the corresponding immutable private base images. Local and remote bases are
+# deliberately separate so their target roots cannot be caller-selected.
+provider_authority_host_system_manifest_source: ""
+provider_authority_host_system_local_bases: []
+provider_authority_host_system_remote_bases: []
 # ADR-0622 test-only control surface; absent unless explicitly enabled on a disposable proof host.
 provider_authority_host_fault_proof_enabled: false
 provider_authority_host_packages:

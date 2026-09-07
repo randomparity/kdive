@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 
-from kdive.components.references import ROOTFS_COMPONENT
+from kdive.components.references import (
+    ROOTFS_COMPONENT,
+    CatalogComponentRef,
+    LocalComponentRef,
+)
 from kdive.components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
@@ -103,6 +107,27 @@ def validate_profile_for_provider(
         capabilities,
         component_kind=ROOTFS_COMPONENT,
         ref=rootfs,
+    )
+
+
+def validate_authority_profile_for_provider(
+    profile: ProvisioningProfile,
+    profile_policy: ProfilePolicy,
+) -> None:
+    """Accept only a verified-root source the private authority can bind without fetching."""
+    _require_profile_matches_resource_kind(profile, profile_policy)
+    _reject_unknown_destructive_ops(profile)
+    profile_policy.validate_profile(profile)
+    rootfs = profile_policy.rootfs_source(profile)
+    if (
+        isinstance(rootfs, CatalogComponentRef) and rootfs.provider == profile_policy.kind.value
+    ) or (isinstance(rootfs, LocalComponentRef) and rootfs.sha256 is not None):
+        return
+    raise CategorizedError(
+        "authority-owned provisioning requires a provider catalog source or checksum-pinned "
+        "local source",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"reason": "authority_root_source_unsupported"},
     )
 
 

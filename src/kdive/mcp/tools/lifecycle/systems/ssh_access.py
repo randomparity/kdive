@@ -39,6 +39,7 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.systems.authority_owned import ordinary_mutation_is_fenced
 
 _SSH_USER = "root"
 _NOT_READY_DETAIL = "System is not ready; SSH is available only on a ready System."
@@ -131,6 +132,26 @@ async def authorize_ssh_key(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
             try:
+                normalized = validate_authorized_public_key(public_key)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(system_id, exc)
+            # Probe the stable key before the admission guard or any provider read. An existing
+            # job remains a replay even when a later activation now fences fresh SSH mutations.
+            fingerprint = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+            dedup_key = f"{system_id}:authorize_ssh_key:{fingerprint}"
+            replay = await dedup_replay(conn, dedup_key)
+            if replay is not None:
+                return ToolResponse.from_job(replay)
+            try:
+                await check_external_boot_admission(
+                    conn,
+                    uid,
+                    ExternalBootOperation.SYSTEM_AUTHORIZE_SSH_KEY,
+                    project=system.project,
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(system_id, exc, ctx)
+            try:
                 binding = await resolver.binding_for_system(conn, uid)
                 recorded = binding.runtime.connector.recorded_ssh_endpoint(
                     SystemHandle(system.domain_name or str(system.id))
@@ -144,14 +165,9 @@ async def authorize_ssh_key(
                     detail=_UNPROVISIONED_DETAIL,
                     data={"reason": "ssh_not_provisioned"},
                 )
-            try:
-                normalized = validate_authorized_public_key(public_key)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(system_id, exc)
             # The dedup_key includes the key fingerprint so re-authorizing the *same* key is
             # idempotent, but a *distinct* key gets its own job — a System-only key would collapse
             # every key after the first into the first job (dedup_key is a permanent UNIQUE column).
-            fingerprint = hashlib.sha256(normalized.encode()).hexdigest()[:16]
             # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing but the envelope render follows it, so the lock never spans later work.
@@ -160,7 +176,7 @@ async def authorize_ssh_key(
                 # its only replay path — a caller has no keyed escape hatch. Probed ahead of the
                 # guard: re-authorizing the same key while its job is live must keep returning
                 # that job rather than becoming a refusal.
-                replay = await dedup_replay(conn, f"{system_id}:authorize_ssh_key:{fingerprint}")
+                replay = await dedup_replay(conn, dedup_key)
                 if replay is not None:
                     return ToolResponse.from_job(replay)
                 try:
@@ -177,7 +193,7 @@ async def authorize_ssh_key(
                     JobKind.AUTHORIZE_SSH_KEY,
                     AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
                     job_authorizing(ctx, system.project),
-                    f"{system_id}:authorize_ssh_key:{fingerprint}",
+                    dedup_key,
                 )
     return ToolResponse.from_job(job)
 
@@ -203,6 +219,13 @@ async def check_ssh_reachable(
                 return ToolResponse.failure(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                if await ordinary_mutation_is_fenced(conn, uid):
+                    return ToolResponse.failure(
+                        system_id,
+                        ErrorCategory.CONFIGURATION_ERROR,
+                        data={"reason": "authority_system_preactivation_mutation_fenced"},
+                    )
             try:
                 binding = await resolver.binding_for_system(conn, uid)
                 recorded = binding.runtime.connector.recorded_ssh_endpoint(

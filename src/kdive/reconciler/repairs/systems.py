@@ -14,11 +14,13 @@ from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs import queue
-from kdive.jobs.payloads import TeardownPayload
+from kdive.jobs.payloads import Authorizing
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
+from kdive.services.systems.authority_owned import (
+    enqueue_control_teardown,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -34,7 +36,6 @@ _TERMINAL_ALLOCATION_STATE_VALUES = tuple(state.value for state in _TERMINAL_ALL
 _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
 )
-_TEARDOWN_JOB_KIND = JobKind.TEARDOWN
 
 
 async def repair_orphaned_systems(conn: AsyncConnection) -> int:
@@ -55,25 +56,30 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
     for candidate in candidates:
         system_id: UUID = candidate["id"]
         dedup_key = f"{system_id}:teardown"
-        async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
-                fresh = await cur.fetchone()
-                if fresh is None or fresh["state"] in _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES:
-                    continue
-                await cur.execute("SELECT 1 FROM jobs WHERE dedup_key = %s", (dedup_key,))
-                already_queued = await cur.fetchone() is not None
-            await queue.enqueue(
-                conn,
-                _TEARDOWN_JOB_KIND,
-                TeardownPayload(system_id=str(system_id)),
-                {
-                    "principal": SYSTEM_RECONCILER_PRINCIPAL,
-                    "agent_session": None,
-                    "project": candidate["project"],
-                },
-                dedup_key,
+        try:
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
+                    fresh = await cur.fetchone()
+                    if fresh is None or fresh["state"] in _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES:
+                        continue
+                    await cur.execute("SELECT 1 FROM jobs WHERE dedup_key = %s", (dedup_key,))
+                    already_queued = await cur.fetchone() is not None
+                authorizing = Authorizing(
+                    principal=SYSTEM_RECONCILER_PRINCIPAL,
+                    agent_session=None,
+                    project=candidate["project"],
+                )
+                system = await SYSTEMS.get(conn, system_id)
+                if system is not None:
+                    await enqueue_control_teardown(conn, system, authorizing)
+        except Exception:  # noqa: BLE001 - one malformed System must not starve sibling cleanup
+            _log.warning(
+                "reconciler: orphaned system teardown admission failed",
+                extra={"system_id": str(system_id)},
+                exc_info=True,
             )
+            continue
         if not already_queued:
             enqueued += 1
             _log.info("reconciler: orphaned system %s -> teardown job enqueued", system_id)

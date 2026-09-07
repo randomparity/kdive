@@ -240,6 +240,8 @@ type RemoveOverlay = Callable[[str], None]
 type RemoveBaseline = Callable[[str], None]
 type OverlayExists = Callable[[str], bool]
 type PrepareConsoleLog = Callable[[Path], None]
+type OverlayPathFor = Callable[[UUID], str]
+type BaselineDirFor = Callable[[UUID], str]
 
 
 def _console_identity_failure(path: Path, reason: str) -> CategorizedError:
@@ -353,11 +355,13 @@ class ProvisioningFiles:
     # The baseline directory presence check reuses the overlay path-presence predicate.
     baseline_exists: OverlayExists = _real_overlay_exists
     prepare_console_log: PrepareConsoleLog = _prepare_console_log
+    overlay_path_for: OverlayPathFor = overlay_path
+    baseline_dir_for: BaselineDirFor = baseline_dir
 
     def prepare_overlay(
         self, system_id: UUID, *, base: str, disk_gb: int | None
     ) -> PreparedOverlay:
-        overlay = overlay_path(system_id)
+        overlay = self.overlay_path_for(system_id)
         created = not self.overlay_exists(overlay)
         if created:
             self.make_overlay(base, overlay)
@@ -387,7 +391,7 @@ class ProvisioningFiles:
         self.prepare_console_log(console_log_path(system_id))
 
     def remove_overlay_for_domain(self, domain_name: str) -> None:
-        self.remove_overlay(overlay_path(domain_name.removeprefix("kdive-")))
+        self.remove_overlay(self.overlay_path_for(UUID(domain_name.removeprefix("kdive-"))))
 
     def remove_baseline_for_domain(self, domain_name: str) -> None:
-        self.remove_baseline(baseline_dir(domain_name.removeprefix("kdive-")))
+        self.remove_baseline(self.baseline_dir_for(UUID(domain_name.removeprefix("kdive-"))))

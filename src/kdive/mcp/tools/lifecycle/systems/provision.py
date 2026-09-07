@@ -45,6 +45,7 @@ from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionRecovery,
     AdmissionResult,
+    AuthoritySystemRoute,
     CreateSystemRequest,
     ProvisionJobAdmitted,
     SystemAdmission,
@@ -175,10 +176,15 @@ class SystemProvisionHandlers:
     component_sources: ComponentSourceCapabilities
     rootfs_validator: RootfsValidator
     jobs: ProvisionJobPort = field(default_factory=JobOperations)
+    authority_route: AuthoritySystemRoute | None = None
 
     def _admission(self) -> SystemAdmission:
         return SystemAdmission(
-            self.profile_policy, self.component_sources, self.rootfs_validator, self.jobs
+            self.profile_policy,
+            self.component_sources,
+            self.rootfs_validator,
+            self.jobs,
+            self.authority_route,
         )
 
     async def provision_system(

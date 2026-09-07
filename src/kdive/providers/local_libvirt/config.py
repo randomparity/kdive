@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.path import systems_toml_path
@@ -63,3 +64,18 @@ def local_guest_egress_for_resource(resource_name: str) -> bool:
         )
         return False
     return instance.guest_egress
+
+
+def local_authority_instance_for_resource(resource_name: str) -> str | None:
+    """Resolve the configured authority identity without allowing malformed-config fallback."""
+    try:
+        doc = load_inventory_optional(systems_toml_path())
+    except InventoryError as exc:
+        raise CategorizedError(
+            "local authority System inventory is invalid",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from exc
+    if doc is None:
+        return None
+    instance = next((entry for entry in doc.local_libvirt if entry.name == resource_name), None)
+    return None if instance is None else instance.authority_instance

@@ -176,6 +176,124 @@
     - /var/lib/kdive/provider-authority/remote-libvirt-pool
   when: provider_authority_host_remote_module_enabled | bool
 
+- name: Inspect authority System provisioning paths without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: >-
+    {{ ['/var/lib/kdive/provider-authority/system-provisioning',
+        '/var/lib/kdive/provider-authority/system-provisioning/system-operations']
+       + (['/var/lib/kdive/provider-authority/system-provisioning/local',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state/intents',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/systems',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/baselines',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases']
+          if provider_authority_host_system_local_bases else
+          ['/var/lib/kdive/provider-authority/system-provisioning/remote']) }}
+  register: provider_authority_host_system_paths
+  when: provider_authority_host_system_manifest_source | length > 0
+
+- name: Refuse substituted authority System provisioning paths
+  ansible.builtin.assert:
+    that: not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    quiet: true
+  loop: "{{ provider_authority_host_system_paths.results | default([]) }}"
+  when: provider_authority_host_system_manifest_source | length > 0
+
+- name: Create private authority System provisioning paths
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0700"
+    follow: false
+  loop: >-
+    {{ ['/var/lib/kdive/provider-authority/system-provisioning',
+        '/var/lib/kdive/provider-authority/system-provisioning/system-operations']
+       + (['/var/lib/kdive/provider-authority/system-provisioning/local',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state/intents',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/systems',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/baselines',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases']
+          if provider_authority_host_system_local_bases else
+          ['/var/lib/kdive/provider-authority/system-provisioning/remote']) }}
+  when: provider_authority_host_system_manifest_source | length > 0
+
+- name: Inspect authority System base destinations without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: >-
+    {{ (provider_authority_host_system_local_bases
+        | map(attribute='digest')
+        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\\1.qcow2')
+        | list)
+       + (provider_authority_host_system_remote_bases
+          | map(attribute='name')
+          | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/remote-libvirt-pool/\\1')
+          | list) }}
+  register: provider_authority_host_system_base_destinations
+  when: provider_authority_host_system_manifest_source | length > 0
+
+- name: Refuse substituted authority System base destinations
+  ansible.builtin.assert:
+    that: >-
+      not item.stat.exists or (item.stat.isreg and not item.stat.islnk and item.stat.nlink == 1)
+    quiet: true
+  loop: "{{ provider_authority_host_system_base_destinations.results | default([]) }}"
+  when: provider_authority_host_system_manifest_source | length > 0
+
+- name: Install owner-only local authority System bases
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: >-
+      /var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/{{ item.digest }}.qcow2
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0400"
+    follow: false
+  loop: "{{ provider_authority_host_system_local_bases }}"
+  no_log: true
+  when: provider_authority_host_system_manifest_source | length > 0
+  notify: Restart provider authority after deployed changes
+
+- name: Install owner-only remote authority System bases
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "/var/lib/kdive/provider-authority/remote-libvirt-pool/{{ item.name }}"
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0400"
+    follow: false
+  loop: "{{ provider_authority_host_system_remote_bases }}"
+  no_log: true
+  when: provider_authority_host_system_manifest_source | length > 0
+  notify: Restart provider authority after deployed changes
+
+- name: Install the canonical authority System manifest
+  ansible.builtin.copy:
+    src: "{{ provider_authority_host_system_manifest_source }}"
+    dest: /var/lib/kdive/provider-authority/system-provisioning/manifest.json
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0400"
+    follow: false
+  no_log: true
+  when: provider_authority_host_system_manifest_source | length > 0
+  notify: Restart provider authority after deployed changes
+
+- name: Remove the disabled authority System manifest
+  ansible.builtin.file:
+    path: /var/lib/kdive/provider-authority/system-provisioning/manifest.json
+    state: absent
+  when: provider_authority_host_system_manifest_source | length == 0
+  notify: Restart provider authority after deployed changes
+
 - name: Install the boot-persistent authority runtime directory policy
   ansible.builtin.copy:
     dest: /etc/tmpfiles.d/kdive-provider-authority.conf

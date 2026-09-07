@@ -81,6 +81,7 @@ from kdive.mcp.tools.lifecycle.systems.view import (
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.system_authority.routing import authority_instance_for_resource
 from kdive.security.authz.rbac import Role
 
 _LABEL_DESCRIPTION = (
@@ -161,7 +162,10 @@ def _rootfs_validator(runtime: ProviderRuntime):
 
 def _provision_handlers(runtime: ProviderRuntime) -> _SystemProvisionHandlers:
     return _SystemProvisionHandlers(
-        runtime.profile_policy, runtime.support.component_sources, _rootfs_validator(runtime)
+        runtime.profile_policy,
+        runtime.support.component_sources,
+        _rootfs_validator(runtime),
+        authority_route=authority_instance_for_resource,
     )
 
 

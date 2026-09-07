@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -197,8 +198,23 @@ async def _close_locked(
     project: str,
     force: bool,
     jobs: TeardownJobPort,
-) -> Investigation:
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
+) -> Investigation | None:
+    async with conn.transaction(), AsyncExitStack() as locks:
+        locked_system_ids: frozenset[UUID] = frozenset()
+        if force:
+            locked_system_ids = frozenset(await _bound_live_systems(conn, uid))
+            for system_id in sorted(locked_system_ids):
+                await locks.enter_async_context(
+                    advisory_xact_lock(conn, LockScope.SYSTEM, system_id)
+                )
+        await locks.enter_async_context(advisory_xact_lock(conn, LockScope.INVESTIGATION, uid))
+        if force:
+            current_system_ids = frozenset(await _bound_live_systems(conn, uid))
+            if not current_system_ids.issubset(locked_system_ids):
+                # A concurrent System bind committed between discovery and the Investigation
+                # lock. End this read-only attempt so every transaction keeps SYSTEM before
+                # INVESTIGATION, then retry with the expanded authoritative set.
+                return None
         current = await INVESTIGATIONS.get(conn, uid)
         if current is None:
             raise InvestigationServiceError(
@@ -257,16 +273,20 @@ async def close_investigation_record(
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await resolve_contributor_investigation(conn, ctx, uid, raw_id)
+        while True:
             try:
-                return await _close_locked(
-                    conn,
-                    ctx,
-                    uid,
-                    summary=summary,
-                    project=inv.project,
-                    force=force,
-                    jobs=jobs,
-                )
+                async with pool.connection() as conn:
+                    closed = await _close_locked(
+                        conn,
+                        ctx,
+                        uid,
+                        summary=summary,
+                        project=inv.project,
+                        force=force,
+                        jobs=jobs,
+                    )
+                if closed is not None:
+                    return closed
             except IllegalTransition:
                 async with pool.connection() as conn2:
                     latest = await INVESTIGATIONS.get(conn2, uid)

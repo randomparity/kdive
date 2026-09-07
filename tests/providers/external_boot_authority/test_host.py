@@ -139,6 +139,149 @@ def _access_boundary_config(tmp_path: Path) -> AuthorityHostConfig:
     )
 
 
+def _install_local_system_manifest(config: AuthorityHostConfig) -> None:
+    root = config.authority_system_root
+    local = config.authority_system_local_root
+    for path in (
+        root,
+        root / "system-operations",
+        local,
+        local / "state",
+        local / "state/intents",
+        local / "rootfs",
+        local / "rootfs/systems",
+        local / "rootfs/baselines",
+        local / "rootfs/bases",
+    ):
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.chmod(0o700)
+    digest = hashlib.sha256(b"base").hexdigest()
+    base = local / "rootfs/bases" / f"{digest}.qcow2"
+    base.write_bytes(b"base")
+    base.chmod(0o400)
+    config.authority_system_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "authority-system-manifest-v1",
+                "provider_kind": "local-libvirt",
+                "resource_name": "local-a",
+                "authority_instance": config.authority_instance,
+                "bases": [
+                    {
+                        "root_identity": f"sha256:{digest}",
+                        "architecture": "x86_64",
+                        "source_kind": "local",
+                    }
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    config.authority_system_manifest.chmod(0o400)
+
+
+def _install_remote_system_manifest(config: AuthorityHostConfig) -> None:
+    root = config.authority_system_root
+    for path in (root, root / "system-operations", config.authority_system_remote_root):
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.chmod(0o700)
+    base = config.remote_libvirt_pool_dir / "base-a.qcow2"
+    base.write_bytes(b"base")
+    base.chmod(0o400)
+    config.authority_system_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "authority-system-manifest-v1",
+                "provider_kind": "remote-libvirt",
+                "resource_name": "remote-a",
+                "authority_instance": config.authority_instance,
+                "entries": [
+                    {
+                        "root_identity": "sha256:" + hashlib.sha256(b"base").hexdigest(),
+                        "architecture": "x86_64",
+                        "base_volume": base.name,
+                        "network": "provider-net",
+                        "machine": "pc-q35-9.2",
+                        "gdb_addr": "127.0.0.1",
+                        "gdb_port_min": 31000,
+                        "gdb_port_max": 31002,
+                        "ssh_addr": "127.0.0.1",
+                        "ssh_port_min": 32000,
+                        "ssh_port_max": 32002,
+                    }
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    config.authority_system_manifest.chmod(0o400)
+
+
+def test_pinned_system_installation_rejects_manifest_or_base_drift_without_rehashing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kdive.providers.system_authority import composition as system_composition
+
+    config = _access_boundary_config(tmp_path)
+    _install_local_system_manifest(config)
+    installation = host._load_system_installation(config)  # noqa: SLF001
+    assert installation is not None
+    original_manifest = config.authority_system_manifest.read_bytes()
+    monkeypatch.setattr(
+        system_composition,
+        "_require_private_base",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("periodic check rehashed a base")),
+    )
+
+    installation.verify_current(config)
+    manifest = config.authority_system_manifest
+    manifest.chmod(0o600)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "authority-system-manifest-v1",
+                "provider_kind": "local-libvirt",
+                "resource_name": "local-b",
+                "authority_instance": config.authority_instance,
+                "bases": [
+                    {
+                        "root_identity": "sha256:" + hashlib.sha256(b"base").hexdigest(),
+                        "architecture": "x86_64",
+                        "source_kind": "local",
+                    }
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    manifest.chmod(0o400)
+
+    with pytest.raises(ValueError, match="manifest changed"):
+        installation.verify_current(config)
+
+    monkeypatch.undo()
+    manifest.chmod(0o600)
+    manifest.write_bytes(original_manifest)
+    manifest.chmod(0o400)
+    installation = host._load_system_installation(config)  # noqa: SLF001
+    assert installation is not None
+    base = (
+        config.authority_system_local_root
+        / "rootfs/bases"
+        / (hashlib.sha256(b"base").hexdigest() + ".qcow2")
+    )
+    base.chmod(0o600)
+
+    with pytest.raises(ValueError, match="base metadata changed"):
+        installation.verify_current(config)
+
+
 def test_host_rejects_unsafe_credentials(tmp_path: Path) -> None:
     config = _config(tmp_path)
     validate_credential_paths(config)
@@ -515,6 +658,8 @@ def test_host_database_role_query_inventories_all_application_privileges() -> No
     assert "acldefault" in query
     assert "pg_shdepend" in query
     assert "resolve_current_external_boot_preparation_authority" in query
+    assert "resolve_current_authority_system_attempt" in query
+    assert "advance_authority_system_journal_head" in query
     assert "acl.grantee IN (0, role.oid, accepted_role.oid)" in query
     assert "accepted_public_function" in query
     for attribute in (
@@ -823,12 +968,13 @@ def test_host_shares_one_mutation_service_between_listeners(
 
     class Service:
         closed = False
+        system_service = object()
 
         async def close(self) -> None:
             self.closed = True
 
     service = Service()
-    received: list[object | None] = []
+    received: list[tuple[object | None, object | None]] = []
 
     class Listener:
         def validate(self) -> None:
@@ -841,25 +987,35 @@ def test_host_shares_one_mutation_service_between_listeners(
             return None
 
     async def serve(*_args: object, **kwargs: object) -> Listener:
-        received.append(kwargs.get("service"))
+        received.append((kwargs.get("service"), kwargs.get("system_service")))
         return Listener()
 
     async def ready(*_args: object) -> None:
         return None
 
+    installation_loaded = False
+
+    def load_installation(_config: AuthorityHostConfig) -> None:
+        nonlocal installation_loaded
+        installation_loaded = True
+
+    async def static_check(*_args: object) -> None:
+        assert installation_loaded
+
     async def stop(_delay: float) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(host, "_build_mutation_service", lambda _config: service)
+    monkeypatch.setattr(host, "_build_mutation_service", lambda *_args, **_kwargs: service)
+    monkeypatch.setattr(host, "_load_system_installation", load_installation)
     monkeypatch.setattr(host, "serve_authority_transport", serve)
     monkeypatch.setattr(host, "serve_authority_network_transport", serve)
-    monkeypatch.setattr(host, "_check_static_authority_host", ready)
+    monkeypatch.setattr(host, "_check_static_authority_host", static_check)
     monkeypatch.setattr(host, "check_tls_health", ready)
     monkeypatch.setattr(host, "_notify_systemd", lambda _message: None)
     monkeypatch.setattr(host.asyncio, "sleep", stop)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run_authority_host(config))
-    assert received == [service, service]
+    assert received == [(service, service.system_service), (service, service.system_service)]
     assert service.closed
 
 
@@ -868,6 +1024,24 @@ def test_host_keeps_identity_only_mode_without_local_recovery_root(
 ) -> None:
     monkeypatch.delenv("KDIVE_LIBVIRT_RECOVERY_ROOT", raising=False)
     assert host._build_mutation_service(_config(tmp_path)) is None  # noqa: SLF001
+
+
+def test_host_preserves_an_explicitly_pinned_absent_system_installation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_RECOVERY_ROOT", raising=False)
+    monkeypatch.setattr(
+        host,
+        "_load_system_installation",
+        lambda _config: (_ for _ in ()).throw(AssertionError("installation was reloaded")),
+    )
+
+    assert (
+        host._build_mutation_service(  # noqa: SLF001
+            _config(tmp_path), system_installation=None
+        )
+        is None
+    )
 
 
 def test_host_keeps_local_mutation_without_remote_module_dependencies(
@@ -903,6 +1077,57 @@ def test_host_keeps_local_mutation_without_remote_module_dependencies(
     assert service._remote_module_host is None  # noqa: SLF001
     assert isinstance(service._recovery_orphans, RecoveryOrphanAuthorityService)  # noqa: SLF001
     assert service._recovery_orphans._executor is binding.adapter  # noqa: SLF001
+
+
+def test_host_attaches_manifest_bound_local_system_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kdive import config as kdive_config
+    from kdive.providers.assembly import composition as provider_assembly
+    from kdive.providers.local_libvirt import composition
+
+    config = _access_boundary_config(tmp_path)
+    _install_local_system_manifest(config)
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir(mode=0o700)
+    kdive_config.load({"KDIVE_LIBVIRT_RECOVERY_ROOT": str(recovery_root)})
+    binding = SimpleNamespace(adapter=object(), provider=object())
+    monkeypatch.setattr(provider_assembly, "object_store_from_env", object)
+    monkeypatch.setattr(
+        composition,
+        "build_local_external_boot_authority",
+        lambda _store, _socket: binding,
+    )
+    built = object()
+    captured: list[tuple[object, object]] = []
+
+    def build_system(
+        actual_config: AuthorityHostConfig, connections: object, manifest: object, **_kwargs: object
+    ) -> object:
+        assert actual_config is config
+        captured.append((connections, manifest))
+        return built
+
+    monkeypatch.setattr(host, "_build_system_service", build_system)
+
+    service = host._build_mutation_service(config)  # noqa: SLF001
+
+    assert service is not None
+    assert service.system_service is built
+    assert len(captured) == 1
+
+
+def test_manifest_without_mutation_binding_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kdive import config as kdive_config
+
+    config = _access_boundary_config(tmp_path)
+    _install_local_system_manifest(config)
+    kdive_config.load({})
+
+    with pytest.raises(HostReadinessError, match="system-provider: local-binding-missing"):
+        host._build_mutation_service(config)  # noqa: SLF001
 
 
 def test_host_constructs_mutation_chain_for_checked_provider_socket(
@@ -956,6 +1181,7 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
         remote_module_appliance_root=tmp_path / "appliance",
     )
     _install_remote_module_appliance(config.remote_module_appliance_root, "x86_64")
+    _install_remote_system_manifest(config)
     opened: list[str] = []
 
     def open_connection(uri: str) -> Connection:
@@ -963,6 +1189,26 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
         return Connection()
 
     monkeypatch.setattr(libvirt, "open", open_connection)
+
+    class SystemService:
+        async def close(self) -> None:
+            return None
+
+    system_service = SystemService()
+    system_inputs: list[tuple[object, object]] = []
+
+    def build_system(
+        _config: AuthorityHostConfig,
+        _connections: object,
+        _manifest: object,
+        *,
+        remote_connection: object,
+        remote_executor: object,
+    ) -> SystemService:
+        system_inputs.append((remote_connection, remote_executor))
+        return system_service
+
+    monkeypatch.setattr(host, "_build_system_service", build_system)
 
     service = host._build_mutation_service(config)  # noqa: SLF001
     assert service is not None
@@ -974,6 +1220,10 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
     assert operations._pool_name == "authority-systems"  # noqa: SLF001
     assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001
+    assert service.system_service is system_service
+    assert len(system_inputs) == 1
+    assert system_inputs[0][0].__class__ is Connection
+    assert system_inputs[0][1] is cast(Any, service._adapter)._executor  # noqa: SLF001
     asyncio.run(service.close())
     assert closed == [True]
 
@@ -1313,6 +1563,9 @@ def test_one_shot_probe_validates_remote_prerequisites_when_enabled(
         events.append("health")
 
     monkeypatch.setattr(host, "_check_static_authority_host", static_check)
+    monkeypatch.setattr(
+        host, "_load_system_installation", lambda _config: events.append("load") or None
+    )
     monkeypatch.setattr(host, "_open_remote_module_connection", lambda _config: Connection())
     monkeypatch.setattr(host, "validate_socket_parent", lambda *_args: None)
     monkeypatch.setattr(host, "serve_authority_transport", serve)
@@ -1321,6 +1574,7 @@ def test_one_shot_probe_validates_remote_prerequisites_when_enabled(
     asyncio.run(host.check_authority_host_once(config))
 
     assert events == [
+        "load",
         "static",
         "remote-close",
         "listener-validate",

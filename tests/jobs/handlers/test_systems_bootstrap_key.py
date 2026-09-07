@@ -35,6 +35,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
+from kdive.jobs.handlers import system_reclaim
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.handlers.module_volume_reaping import remote_module_volume_reap_handler
 from kdive.jobs.payloads import (
@@ -675,7 +676,7 @@ def test_teardown_handler_reclaims_pcap_directory(migrated_url, tmp_path, monkey
             )
             pcap_root = tmp_path / str(system_id)
             # Key the pcap dir on the id so a wrong-id lookup (a mutated arg) points elsewhere.
-            monkeypatch.setattr(systems_handlers, "pcap_dir", lambda sid: tmp_path / str(sid))
+            monkeypatch.setattr(system_reclaim, "pcap_dir", lambda sid: tmp_path / str(sid))
             pcap_root.mkdir(parents=True)
             (pcap_root / "job.pcap").write_bytes(b"\xd4\xc3\xb2\xa1")
             resolver = provider_resolver(provisioner=_RecordingProvisioner())
@@ -706,7 +707,7 @@ def test_teardown_handler_pcap_reclaim_tolerates_absent_dir(
             )
             # pcap_dir points at a path that was never created — teardown must still succeed.
             monkeypatch.setattr(
-                systems_handlers, "pcap_dir", lambda _sid: tmp_path / "absent" / str(system_id)
+                system_reclaim, "pcap_dir", lambda _sid: tmp_path / "absent" / str(system_id)
             )
             resolver = provider_resolver(provisioner=_RecordingProvisioner())
             async with pool.connection() as conn:

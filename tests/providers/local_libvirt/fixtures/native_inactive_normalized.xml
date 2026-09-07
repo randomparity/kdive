@@ -1,0 +1,37 @@
+<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+  <name>kdive-11111111-1111-1111-1111-111111111111</name>
+  <uuid>11111111-1111-1111-1111-111111111111</uuid>
+  <memory unit="KiB">2097152</memory>
+  <currentMemory unit="KiB">2097152</currentMemory>
+  <vcpu placement="static">2</vcpu>
+  <cpu mode="host-passthrough" check="none" migratable="on"/>
+  <os>
+    <type arch="x86_64" machine="pc-q35-10.2">hvm</type>
+    <kernel>/example/provider/rootfs/11111111-1111-1111-1111-111111111111-baseline/kernel</kernel>
+    <initrd>/example/provider/rootfs/11111111-1111-1111-1111-111111111111-baseline/initrd</initrd>
+    <cmdline>root=/dev/vda console=ttyS0 rw</cmdline>
+    <boot dev="hd"/>
+  </os>
+  <features><acpi/><vmcoreinfo state="on"/></features>
+  <on_crash>preserve</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <controller type="pci" index="0" model="pcie-root"/>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="/example/provider/rootfs/11111111-1111-1111-1111-111111111111-overlay.qcow2"/>
+      <target dev="vda" bus="virtio"/>
+      <alias name="virtio-disk0"/>
+      <address type="pci" slot="0x04"/>
+    </disk>
+    <serial type="pty"><log file="/example/provider/console/11111111-1111-1111-1111-111111111111.log" append="on"/><target type="isa-serial" port="0"/></serial>
+    <channel type="unix"><target type="virtio" name="org.qemu.guest_agent.0"/><address type="virtio-serial" controller="0" bus="0" port="1"/></channel>
+  </devices>
+  <metadata><kdive:system xmlns:kdive="https://kdive.dev/libvirt/1">11111111-1111-1111-1111-111111111111</kdive:system></metadata>
+  <qemu:commandline>
+    <qemu:arg value="-netdev"/>
+    <qemu:arg value="user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:32222-:22"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="virtio-net-pci,netdev=kdivessh,addr=0x10"/>
+  </qemu:commandline>
+</domain>

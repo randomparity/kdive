@@ -230,9 +230,10 @@ class RemoteLibvirtProfile(_ProfileBase):
 
     - ``base_image_volume`` names an **operator-staged** qcow2 volume already present on the
       remote host's storage pool; provisioning references it by name and verifies it exists.
-    - ``base_image_source`` supplies a worker-host ``local`` qcow2 (a ``LocalComponentRef``,
-      the same ``local`` source kind remote accepts for kernel/vmlinux) which provisioning stages
-      onto the pool per-System via the volume-upload primitive.
+    - ``base_image_source`` supplies either a worker-host ``local`` qcow2 or a catalog identity.
+      Ordinary remote provisioning accepts only ``local`` and stages it onto the pool per-System;
+      the catalog form is admitted only for an authority-owned Resource whose private manifest
+      maps the verified catalog digest to its fixed host base.
 
     Either way the base image carries the **image-content obligations the supplier owns**: the
     base OS with qemu-guest-agent enabled, drgn, and matching vmlinux/debuginfo. Provisioning
@@ -257,7 +258,9 @@ class RemoteLibvirtProfile(_ProfileBase):
     """
 
     base_image_volume: NonEmptyStr | None = None
-    base_image_source: LocalComponentRef | None = None
+    base_image_source: LocalComponentRef | CatalogComponentRef | None = Field(
+        default=None, discriminator="kind"
+    )
     crashkernel: CrashkernelToken | None = None
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
     host_dump: bool = False
@@ -267,14 +270,14 @@ class RemoteLibvirtProfile(_ProfileBase):
         """Require exactly one of ``base_image_volume`` / ``base_image_source`` (ADR-0440).
 
         The two are alternatives: an operator-staged volume named by ``base_image_volume``, or a
-        supplied worker-host qcow2 in ``base_image_source`` that provisioning stages. Neither is a
-        System with no base image; both is an ambiguous source — both are configuration errors.
+        supplied source in ``base_image_source``. Neither is a System with no base image; both is
+        an ambiguous source — both are configuration errors.
         """
         present = [self.base_image_volume is not None, self.base_image_source is not None]
         if sum(present) != 1:
             raise ValueError(
                 "remote-libvirt requires exactly one of base_image_volume "
-                "(an operator-staged volume name) or base_image_source (a supplied local qcow2)"
+                "(an operator-staged volume name) or base_image_source"
             )
         return self
 

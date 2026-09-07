@@ -465,6 +465,26 @@ def test_local_libvirt_guest_egress_opt_in_parses() -> None:
     assert doc.local_libvirt[0].guest_egress is True
 
 
+def test_local_libvirt_authority_instance_is_bounded_and_nonblank() -> None:
+    instance = {
+        "name": "loc",
+        "cost_class": "local",
+        "host_uri": "qemu:///system",
+        "authority_instance": "authority-a",
+    }
+    doc = InventoryDoc.parse(_doc(remote_libvirt=[], local_libvirt=[instance]))
+    assert doc.local_libvirt[0].authority_instance == "authority-a"
+
+    for invalid in (" ", "a" * 256):
+        with pytest.raises(InventoryError):
+            InventoryDoc.parse(
+                _doc(
+                    remote_libvirt=[],
+                    local_libvirt=[{**instance, "authority_instance": invalid}],
+                )
+            )
+
+
 def test_missing_required_field_rejected() -> None:
     d = _doc()
     del d["image"][0]["root_device"]

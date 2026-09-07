@@ -40,6 +40,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     PinOperationLease,
     _ConcreteSession,
     _Find0TreeCursor,
+    open_authority_system_teardown,
+    owned_system_semantic_identity,
+    prove_no_foreign_system_storage_references,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -106,6 +109,9 @@ class _TeardownDomain(Domain):
         self.defined = False
         return 0
 
+    def isPersistent(self) -> int:  # noqa: N802
+        return int(self.defined)
+
 
 class _TeardownConn(Conn):
     domain: _TeardownDomain
@@ -115,6 +121,16 @@ class _TeardownConn(Conn):
         if not self.domain.defined:
             raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
         return self.domain
+
+
+class _DomainListConn(_TeardownConn):
+    def __init__(self, events: list[str], domains: list[_TeardownDomain]) -> None:
+        super().__init__(events, domains[0])
+        self._domains = domains
+
+    def listAllDomains(self, flags: int) -> list[_TeardownDomain]:  # noqa: N802
+        self.events.append(f"domain.list:{flags}")
+        return self._domains
 
 
 def _teardown_factory(
@@ -214,6 +230,102 @@ def test_teardown_session_absent_replay_is_read_only_and_creates_nothing(tmp_pat
     assert observed.overlay_absent
     assert observed.baseline_absent
     assert sorted(tmp_path.iterdir()) == before == []
+
+
+def test_authority_teardown_session_requires_no_activation_or_run(tmp_path: Path) -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    _, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+
+    session = open_authority_system_teardown(
+        lambda: _TeardownConn(events, domain), SYSTEM_ID, str(overlay), str(baseline)
+    )
+
+    assert session.inspect().domain_validated
+    session.close()
+
+
+def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path) -> None:
+    events: list[str] = []
+    owner = _TeardownDomain(events)
+    _, overlay, _baseline = _teardown_factory(tmp_path, events, owner)
+    kernel = tmp_path / "kernel"
+    kernel.write_bytes(b"kernel")
+    sibling_xml = _xml(overlay=str(overlay), system_id=UUID(int=9)).replace(
+        "<kernel>/old</kernel>", f"<kernel>{kernel}</kernel>"
+    )
+    owner.xml = owner.xml.replace("<kernel>/old</kernel>", f"<kernel>{kernel}</kernel>")
+    owner.inactive_xml = owner.xml
+    sibling = _TeardownDomain(events, xml=sibling_xml)
+
+    with pytest.raises(CategorizedError, match="another domain references"):
+        prove_no_foreign_system_storage_references(
+            lambda: _DomainListConn(events, [owner, sibling]),
+            SYSTEM_ID,
+            str(overlay),
+            str(_baseline),
+        )
+
+    assert "domain.list:0" in events
+    assert events.count("domain.close") == 2
+    assert "connection.close" in events
+
+
+def test_authority_semantic_identity_permits_libvirt_generated_device_fields() -> None:
+    rendered = _xml().replace(
+        "<os>", '<memory unit="MiB">2</memory><cpu mode="host-passthrough"/><os>'
+    )
+    libvirt_readback = rendered.replace(
+        '<target dev="vda" bus="virtio"/>',
+        '<target dev="vda" bus="virtio"/><alias name="virtio-disk0"/>'
+        '<address type="pci" slot="0x04"/>',
+    ).replace(
+        '<memory unit="MiB">2</memory><cpu mode="host-passthrough"/>',
+        '<memory unit="KiB">2048</memory>'
+        '<cpu mode="host-passthrough" check="none" migratable="on"/>',
+    )
+    changed_kernel = rendered.replace("<kernel>/old</kernel>", "<kernel>/other</kernel>")
+
+    assert owned_system_semantic_identity(
+        rendered, SYSTEM_ID, OVERLAY
+    ) == owned_system_semantic_identity(libvirt_readback, SYSTEM_ID, OVERLAY)
+    assert owned_system_semantic_identity(
+        rendered, SYSTEM_ID, OVERLAY
+    ) != owned_system_semantic_identity(changed_kernel, SYSTEM_ID, OVERLAY)
+
+
+def test_authority_semantic_identity_accepts_sanitized_native_inactive_readback() -> None:
+    fixture = (
+        Path(__file__).parents[2] / "fixtures" / "native_inactive_normalized.xml"
+    ).read_text()
+    rendered = fixture.replace(
+        '<memory unit="KiB">2097152</memory>', '<memory unit="MiB">2048</memory>'
+    ).replace(
+        '<cpu mode="host-passthrough" check="none" migratable="on"/>',
+        '<cpu mode="host-passthrough"/>',
+    )
+    overlay = "/example/provider/rootfs/11111111-1111-1111-1111-111111111111-overlay.qcow2"
+
+    assert owned_system_semantic_identity(
+        rendered, SYSTEM_ID, overlay
+    ) == owned_system_semantic_identity(fixture, SYSTEM_ID, overlay)
+
+
+def test_teardown_rejects_a_second_alias_to_the_owned_overlay(tmp_path: Path) -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    factory, overlay, _baseline = _teardown_factory(tmp_path, events, domain)
+    duplicate = (
+        '<disk type="file" device="disk"><driver name="qemu" type="qcow2" />'
+        f'<source file="{overlay}" /><target dev="vdb" bus="virtio" /></disk>'
+    )
+    domain.xml = domain.xml.replace("</devices>", f"{duplicate}</devices>")
+    domain.inactive_xml = domain.xml
+
+    session = factory.open_teardown(_lease(), _expected())
+    with pytest.raises(ValueError, match="ambiguous"):
+        session.inspect()
+    session.close()
 
 
 LANE = FakeLane()

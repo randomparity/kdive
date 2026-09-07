@@ -63,6 +63,11 @@ from kdive.services.external_boot import (
 )
 from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from kdive.services.systems.admission import require_pinned_cpu_selectable
+from kdive.services.systems.authority_owned import (
+    AuthoritySystemBinding,
+    authority_system_binding,
+    enqueue_preactivation_teardown,
+)
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -211,6 +216,14 @@ async def _reprovision_in_lock(
         if investigation is None or investigation.state in TERMINAL_INVESTIGATION_STATES:
             state = investigation.state.value if investigation is not None else "missing"
             return _config_error(str(system_id), data={"investigation_state": state})
+    if await _authority_system_binding(conn, system_id) is not None:
+        return ToolResponse.failure(
+            str(system_id),
+            ErrorCategory.CONFLICT,
+            detail="authority-owned Systems cannot be reprovisioned in place",
+            suggested_next_actions=["systems.teardown", "systems.get"],
+            data={"reason": "authority_system_reprovision_unsupported"},
+        )
     digest = profile_digest(profile)
     dedup_key = f"{system_id}:reprovision:{digest}"
     if system.state is SystemState.REPROVISIONING:
@@ -307,6 +320,12 @@ async def _job_for_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | Non
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
     return Job.model_validate(row) if row else None
+
+
+async def _authority_system_binding(
+    conn: AsyncConnection, system_id: UUID
+) -> AuthoritySystemBinding | None:
+    return await authority_system_binding(conn, system_id)
 
 
 async def _admit_reprovision(
@@ -441,6 +460,16 @@ async def _teardown_locked(
                 suggested_next_actions=["allocations.release", "systems.get"],
                 data={"project": system.project},
             )
+        authority_binding = await _authority_system_binding(conn, uid)
+        if authority_binding is not None:
+            return await _enqueue_preactivation_authority_teardown(
+                conn,
+                ctx,
+                system,
+                authority_binding,
+                system_id,
+                idempotency_key,
+            )
         # `{uid}:teardown` is stable and recycles nothing, so an unkeyed repeat while the teardown
         # job is live replays it. Both replay paths stay below the current-activation safety fence:
         # an old ordinary teardown job cannot gain authority from its replay envelope.
@@ -474,6 +503,42 @@ async def _teardown_locked(
                 envelope=envelope,
             )
         return envelope
+
+
+async def _enqueue_preactivation_authority_teardown(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    system: System,
+    binding: AuthoritySystemBinding,
+    system_id: str,
+    idempotency_key: str | None,
+) -> ToolResponse:
+    """Enqueue and bind one activation-free teardown to immutable ownership."""
+    try:
+        job = await enqueue_preactivation_teardown(
+            conn, system, binding, job_authorizing(ctx, system.project)
+        )
+    except CategorizedError as exc:
+        if exc.category is not ErrorCategory.CONFLICT:
+            raise
+        return ToolResponse.failure(
+            system_id,
+            ErrorCategory.CONFLICT,
+            detail="an ordinary teardown job cannot be replayed for an authority-owned System",
+            suggested_next_actions=["jobs.wait", "systems.get"],
+            data={"reason": "ordinary_teardown_fenced_by_system_authority"},
+        )
+    envelope = job_envelope(job, "system_id", system.id)
+    if idempotency_key is not None:
+        await record_envelope(
+            conn,
+            principal=ctx.principal,
+            key=idempotency_key,
+            project=system.project,
+            kind=_TEARDOWN_KIND,
+            envelope=envelope,
+        )
+    return envelope
 
 
 async def _enqueue_authority_teardown(

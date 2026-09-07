@@ -183,6 +183,21 @@ async def _session_count(pool: AsyncConnectionPool) -> int:
     return 0 if row is None else int(row["n"])
 
 
+async def _mark_authority_owned(pool: AsyncConnectionPool, system_id: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
+            "authority_instance,profile_identity,root_identity,state) "
+            "SELECT system.id,system.allocation_id,allocation.resource_id,'local-libvirt',"
+            "'host-a','authority-a','sha256:' || repeat('a',64),"
+            "'sha256:' || repeat('b',64),'ready' "
+            "FROM systems AS system JOIN allocations AS allocation "
+            "ON allocation.id=system.allocation_id WHERE system.id=%s",
+            (system_id,),
+        )
+
+
 # --- debug.start_session -------------------------------------------------------------------
 
 
@@ -229,6 +244,31 @@ def test_start_session_attaches_and_row_is_live(migrated_url: str) -> None:
             assert audit_row["object_kind"] == "debug_sessions"
             assert audit_row["project"] == "proj"
             assert audit_row["args_digest"] == expected_digest
+
+    asyncio.run(_run())
+
+
+def test_start_session_fences_before_opening_provider_transport(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            await _mark_authority_owned(pool, sys_id)
+            connector = _FakeConnector()
+
+            resp = await _start_session(
+                pool,
+                request_context(),
+                run_id=run_id,
+                transport="gdbstub",
+                connector=connector,
+            )
+
+            assert resp.error_category == ErrorCategory.CONFLICT.value
+            assert resp.data["reason"] == "authority_system_preactivation_mutation_fenced"
+            assert connector.opened == []
+            assert await _session_count(pool) == 0
 
     asyncio.run(_run())
 

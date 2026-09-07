@@ -1,9 +1,9 @@
-"""The System-wide external-boot admission matrix (ADR-0583).
+"""The System-wide external-boot and initial-authority admission policy (ADR-0583, ADR-0623).
 
-One closed table decides every operation against the activation restricting a System. A
-System with no restricting activation admits everything; a restricted one admits only what
-its state's row lists, and the owning-Run-scoped subset only for the Run that owns the
-activation.
+Authority-owned Systems admit only activation-entry operations before their first activation.
+After that fence, one closed table decides every operation against the activation restricting a
+System. A System with neither restriction admits everything; a restricted one admits only what
+its state's row lists, and the owning-Run-scoped subset only for the Run that owns the activation.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from psycopg import AsyncConnection
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.services.systems.authority_owned import ordinary_mutation_is_fenced
 
 
 class ExternalBootOperation(StrEnum):
@@ -137,6 +138,17 @@ _ESCALATION_HINT = "systems.teardown is admitted in every restricting state and 
 # set (`no_active_activation`, `system_job_active`, `debug_session_active`, ...). A bounded
 # scalar, so `safe_error_details` passes it through and it can label bounded telemetry.
 DENIAL_REASON = "external_boot_restricted"
+AUTHORITY_PREACTIVATION_DENIAL_REASON = "authority_system_preactivation_mutation_fenced"
+
+_AUTHORITY_PREACTIVATION_ADMITTED = frozenset(
+    {
+        ExternalBootOperation.RUN_CREATE,
+        ExternalBootOperation.RUN_BIND,
+        ExternalBootOperation.RUN_CANCEL,
+        ExternalBootOperation.RUN_INSTALL,
+        ExternalBootOperation.RUN_BOOT,
+    }
+)
 
 _REPOSITORY = ExternalBootActivationRepository()
 
@@ -151,13 +163,22 @@ async def check_external_boot_admission(
 ) -> None:
     """Admit `operation` on `system_id`, or raise :class:`ExternalBootDenied`.
 
-    Returns `None` both when no activation restricts the System and when the matrix admits
-    the operation against the restricting one: this is a guard, not a lookup.
+    Returns `None` when neither authority ownership nor an activation restricts the operation, or
+    when the applicable policy admits it: this is a guard, not a lookup.
 
     `project` decides nothing here; it is stamped onto the denial so the render frame can drop
     the next actions the caller cannot invoke for that project (ADR-0261). It is required
     rather than optional so a new call site cannot silently ship an unfiltered breadcrumb.
     """
+    if operation not in _AUTHORITY_PREACTIVATION_ADMITTED and await ordinary_mutation_is_fenced(
+        conn, system_id
+    ):
+        raise ExternalBootDenied(
+            f"{operation.value} is denied before the authority-owned System's first activation",
+            details={"reason": AUTHORITY_PREACTIVATION_DENIAL_REASON},
+            next_actions=["systems.get", "systems.teardown"],
+            project=project,
+        )
     activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
     if activation is None:
         return
@@ -181,6 +202,7 @@ async def check_external_boot_admission(
 
 
 __all__ = [
+    "AUTHORITY_PREACTIVATION_DENIAL_REASON",
     "DENIAL_REASON",
     "ExternalBootDenied",
     "ExternalBootOperation",

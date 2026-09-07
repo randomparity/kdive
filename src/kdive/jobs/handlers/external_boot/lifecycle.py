@@ -40,7 +40,7 @@ from kdive.jobs.handlers.external_boot.runner import (
     authority_ref,
     run_operation,
 )
-from kdive.jobs.handlers.systems import reclaim_system_core_after_provider_teardown
+from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
 from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,

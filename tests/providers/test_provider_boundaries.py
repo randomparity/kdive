@@ -11,6 +11,9 @@ def test_only_composition_imports_local_libvirt_provider_implementation() -> Non
     allowed = {
         Path("src/kdive/providers/assembly/composition.py"),
         Path("src/kdive/providers/local_libvirt"),
+        # ADR-0623 owns its provider-specific assembly and per-Resource route here.
+        Path("src/kdive/providers/system_authority/composition.py"),
+        Path("src/kdive/providers/system_authority/routing.py"),
     }
     offenders: list[str] = []
     for path in src_root.rglob("*.py"):

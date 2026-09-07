@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -27,12 +27,37 @@ from kdive.jobs.payloads import (
     ReprovisionPayload,
     SysRqPayload,
     SystemPayload,
+    TeardownPayload,
     WatchForCrashPayload,
     dump_authorizing,
     dump_payload,
     load_payload,
     run_id_from_payload,
 )
+from kdive.providers.system_authority.protocol import (
+    AuthoritySystemMarkerV1,
+    AuthoritySystemOperation,
+)
+
+_DIGEST_A = "sha256:" + "a" * 64
+_DIGEST_B = "sha256:" + "b" * 64
+
+
+def _authority_system_marker(
+    system_id: UUID, *, operation: AuthoritySystemOperation = AuthoritySystemOperation.PROVISION
+) -> AuthoritySystemMarkerV1:
+    return AuthoritySystemMarkerV1(
+        system_id=system_id,
+        allocation_id=uuid4(),
+        resource_id=uuid4(),
+        provider_kind="local-libvirt",
+        resource_name="host-a",
+        authority_instance="authority-a",
+        profile_identity=_DIGEST_A,
+        root_identity=_DIGEST_B,
+        operation=operation,
+        operation_identity=f"{operation.value}-a",
+    )
 
 
 def test_recovery_request_requires_digest_and_aware_deadline() -> None:
@@ -44,6 +69,70 @@ def test_recovery_request_requires_digest_and_aware_deadline() -> None:
             request_identity="not-a-digest",
             readiness_deadline=datetime(2026, 9, 6, tzinfo=UTC),
         )
+
+
+def test_authority_system_provision_marker_round_trips_exactly() -> None:
+    system_id = uuid4()
+    marker = _authority_system_marker(system_id)
+
+    dumped = dump_payload(
+        JobKind.PROVISION,
+        SystemPayload(system_id=str(system_id), authority_system_v1=marker),
+    )
+    job = Job(
+        id=uuid4(),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        kind=JobKind.PROVISION,
+        payload=dumped,
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "p", "agent_session": None, "project": "proj"},
+        dedup_key=f"{system_id}:provision",
+    )
+
+    assert load_payload(job, SystemPayload).authority_system_v1 == marker
+
+
+@pytest.mark.parametrize("mismatch", ["system", "operation"])
+def test_authority_system_provision_marker_rejects_mismatched_binding(mismatch: str) -> None:
+    system_id = uuid4()
+    marker = _authority_system_marker(
+        uuid4() if mismatch == "system" else system_id,
+        operation=(
+            AuthoritySystemOperation.PREACTIVATION_TEARDOWN
+            if mismatch == "operation"
+            else AuthoritySystemOperation.PROVISION
+        ),
+    )
+
+    with pytest.raises(ValueError, match="authority System marker"):
+        SystemPayload(system_id=str(system_id), authority_system_v1=marker)
+
+
+def test_authority_system_marker_cannot_ride_unrelated_job_kind() -> None:
+    system_id = uuid4()
+    marker = _authority_system_marker(system_id)
+    payload = SystemPayload.model_construct(
+        system_id=str(system_id), authority_system_v1=marker
+    ).model_dump(mode="json", exclude_none=True)
+
+    with pytest.raises(PayloadValidationError, match="may not ride a force_crash payload"):
+        dump_payload(JobKind.FORCE_CRASH, payload)
+
+
+def test_authority_system_preactivation_teardown_marker_round_trips() -> None:
+    system_id = uuid4()
+    marker = _authority_system_marker(
+        system_id, operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN
+    )
+
+    dumped = dump_payload(
+        JobKind.TEARDOWN,
+        TeardownPayload(system_id=str(system_id), authority_system_v1=marker),
+    )
+
+    assert dumped["authority_system_v1"]["operation"] == "preactivation-teardown"
 
 
 WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID

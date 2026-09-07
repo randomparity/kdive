@@ -41,6 +41,10 @@ from kdive.providers.external_boot_authority.protocol import (
     operation_is_permitted,
 )
 from kdive.providers.ports.external_boot import ExternalBootPlan, RootSpecV1
+from kdive.providers.system_authority.protocol import (
+    AuthoritySystemMarkerV1,
+    AuthoritySystemOperation,
+)
 
 EXTERNAL_BOOT_AUTHORITY_MARKER_KEY: Final = "external_boot_authority_v1"
 """The top-level JSONB key an authority marker rides under (ADR-0593).
@@ -50,6 +54,9 @@ fences, ``repair_abandoned_jobs``, and the two ``SECURITY DEFINER`` authority fu
 ``payload ? 'external_boot_authority_v1'``, so renaming the field silently detaches a marked job
 from every one of them.
 """
+
+AUTHORITY_SYSTEM_MARKER_KEY: Final = "authority_system_v1"
+"""The top-level JSONB key selecting activation-free System authority (ADR-0623)."""
 
 ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS: Final[frozenset[str]] = frozenset(
     {"activate", "recover", "resolve-conflict", "release", "cleanup", "teardown"}
@@ -88,12 +95,33 @@ class Authorizing(_PayloadBase):
 
 class SystemPayload(_PayloadBase):
     system_id: str
+    authority_system_v1: AuthoritySystemMarkerV1 | None = None
+
+    @field_validator("authority_system_v1", mode="before")
+    @classmethod
+    def _decode_authority_system_marker(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return AuthoritySystemMarkerV1.model_validate_json(json.dumps(value))
+        return value
 
     @field_validator("system_id")
     @classmethod
     def _valid_system_id(cls, value: str) -> str:
         UUID(value)
         return value
+
+    @model_validator(mode="after")
+    def _authority_marker_matches_system(self) -> SystemPayload:
+        marker = self.authority_system_v1
+        if marker is not None and (
+            marker.system_id != UUID(self.system_id)
+            or (
+                type(self) is SystemPayload
+                and marker.operation is not AuthoritySystemOperation.PROVISION
+            )
+        ):
+            raise ValueError("authority System marker does not match its System")
+        return self
 
 
 class RecoveryRequestV1(_PayloadBase):
@@ -521,6 +549,7 @@ class TeardownPayload(SystemPayload):
     """
 
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
+    authority_system_v1: AuthoritySystemMarkerV1 | None = None
     remote_module_attempt_v1: ModuleAttemptPreparationRequestV1 | None = None
 
     @field_validator("remote_module_attempt_v1", mode="before")
@@ -532,6 +561,14 @@ class TeardownPayload(SystemPayload):
 
     @model_validator(mode="after")
     def _marker_agrees_with_the_job(self) -> TeardownPayload:
+        system_marker = self.authority_system_v1
+        if system_marker is not None and (
+            system_marker.system_id != UUID(self.system_id)
+            or system_marker.operation is not AuthoritySystemOperation.PREACTIVATION_TEARDOWN
+            or self.external_boot_authority_v1 is not None
+            or self.remote_module_attempt_v1 is not None
+        ):
+            raise ValueError("authority System teardown marker does not match its job")
         if (
             self.remote_module_attempt_v1 is not None
             and self.remote_module_attempt_v1.module_attempt_obligation.system_id
@@ -634,6 +671,9 @@ _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
 # failure — a behaviour change nothing asked for.
 _MARKED_JOB_KINDS: Final[frozenset[JobKind]] = frozenset({JobKind.BOOT, JobKind.TEARDOWN})
 """The only kinds an authority marker may ride, pinning ``0122…sql:465`` on the wire."""
+_AUTHORITY_SYSTEM_JOB_KINDS: Final[frozenset[JobKind]] = frozenset(
+    {JobKind.PROVISION, JobKind.TEARDOWN}
+)
 
 
 def _validation_error(label: str, exc: ValidationError) -> PayloadValidationError:
@@ -689,6 +729,10 @@ def dump_payload(kind: JobKind, payload: ActivePayloadModel | dict[str, Any]) ->
         raise PayloadValidationError(
             f"{EXTERNAL_BOOT_AUTHORITY_MARKER_KEY} may not ride a {kind.value} payload"
         )
+    if AUTHORITY_SYSTEM_MARKER_KEY in dumped and kind not in _AUTHORITY_SYSTEM_JOB_KINDS:
+        raise PayloadValidationError(
+            f"{AUTHORITY_SYSTEM_MARKER_KEY} may not ride a {kind.value} payload"
+        )
     return dumped
 
 
@@ -702,7 +746,15 @@ def load_payload[T: ActivePayloadModel](job: Job, model_class: type[T]) -> T:
             f"{model_class.__name__} does not match {job.kind.value} payload contract"
         )
     try:
-        return cast("T", model_class.model_validate(job.payload))
+        model = cast("T", model_class.model_validate(job.payload))
+        if (
+            AUTHORITY_SYSTEM_MARKER_KEY in job.payload
+            and job.kind not in _AUTHORITY_SYSTEM_JOB_KINDS
+        ):
+            raise PayloadValidationError(
+                f"{AUTHORITY_SYSTEM_MARKER_KEY} may not ride a {job.kind.value} payload"
+            )
+        return model
     except ValidationError as exc:
         raise _validation_error(f"{job.kind.value} payload", exc) from exc
 

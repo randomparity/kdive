@@ -105,7 +105,11 @@ def _resolve_hint(hint: str, kernels: list[str]) -> str:
 
 
 def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
-    base: Path, dest_dir: Path, hint: str | None = None
+    base: Path,
+    dest_dir: Path,
+    hint: str | None = None,
+    *,
+    before_extract: Callable[[BaselineKernel], None] | None = None,
 ) -> BaselineKernel:
     """Mount ``base`` read-only via libguestfs and stage its baseline kernel+initramfs.
 
@@ -141,6 +145,14 @@ def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
             )
         guest.mount_ro(roots[0], "/")
         kernel_name, initrd_name = select_kernel_and_initrd(guest.glob_expand("/boot/*"), hint)
+        selected = BaselineKernel(
+            kernel=dest_dir / "kernel",
+            initrd=(dest_dir / "initrd") if initrd_name is not None else None,
+        )
+        if before_extract is not None:
+            # The authority-owned provisioner uses this last read-only boundary to persist the
+            # exact domain intent. Keep it before even resetting the staging directory.
+            before_extract(selected)
         _reset_dir(tmp)
         guest.download(f"/boot/{kernel_name}", str(tmp / "kernel"))
         if initrd_name is not None:
@@ -156,9 +168,7 @@ def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
     finally:
         _shutdown(guest)
     os.rename(tmp, dest_dir)
-    return BaselineKernel(
-        kernel=dest_dir / "kernel", initrd=(dest_dir / "initrd") if initrd_name else None
-    )
+    return selected
 
 
 def _reset_dir(path: Path) -> None:  # pragma: no cover - live_vm

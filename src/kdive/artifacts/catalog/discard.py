@@ -4,9 +4,9 @@ A worker handler that writes its object *outside* the advisory lock and register
 *inside* it can find the lock's guard refusing the registration — the job was canceled, or the
 System left its live state — after the object has already landed. Nothing else reclaims that
 object: every System-artifact sweep is **row-driven** (``_reclaim_console_artifacts`` and
-``_reclaim_sysrq_artifacts`` in ``kdive.jobs.handlers.systems`` select ``object_key`` *from the
-``artifacts`` rows*), so an object with no row is invisible to teardown and permanent. This
-module is the compensating delete that closes that gap.
+``_reclaim_sysrq_artifacts`` in ``kdive.jobs.handlers.system_reclaim`` select ``object_key``
+*from the ``artifacts`` rows*), so an object with no row is invisible to teardown and permanent.
+This module is the compensating delete that closes that gap.
 
 The delete runs after the lock is released, so it cannot simply trust the row probe the locked
 phase made. The worker tier is at-least-once by design — a lapsed lease lets a second attempt of

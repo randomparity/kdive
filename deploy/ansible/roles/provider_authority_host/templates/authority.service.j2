@@ -60,6 +60,17 @@ ReadWritePaths={{ provider_authority_host_console_root }}
 ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations/evidence
 ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations/work
 {% endif %}
+{% if provider_authority_host_system_manifest_source | default('') %}
+ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/system-operations
+{% if provider_authority_host_system_local_bases | default([]) %}
+ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/state
+ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/systems
+ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/baselines
+{% endif %}
+{% if provider_authority_host_system_remote_bases | default([]) %}
+ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/remote
+{% endif %}
+{% endif %}
 
 [Install]
 WantedBy=multi-user.target

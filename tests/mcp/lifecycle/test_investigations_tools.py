@@ -419,6 +419,21 @@ async def _seed_bound_system(pool: AsyncConnectionPool, inv_id: str, state: Syst
     return system.id
 
 
+async def _mark_authority_owned(pool: AsyncConnectionPool, system_id: UUID) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
+            "authority_instance,profile_identity,root_identity,state) "
+            "SELECT system.id,system.allocation_id,allocation.resource_id,'local-libvirt',"
+            "'host-a','authority-a','sha256:' || repeat('a',64),"
+            "'sha256:' || repeat('b',64),'ready' "
+            "FROM systems AS system JOIN allocations AS allocation "
+            "ON allocation.id=system.allocation_id WHERE system.id=%s",
+            (system_id,),
+        )
+
+
 async def _inv_markers(pool: AsyncConnectionPool, inv_id: str) -> dict[str, object]:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -493,6 +508,82 @@ def test_close_force_tears_down_bound_systems_and_closes(migrated_url: str) -> N
             assert markers["rootfs_cleanup_pending_at"] is not None
 
     asyncio.run(_run())
+
+
+def test_close_force_routes_each_system_by_authority_ownership(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            authority_system = await _seed_bound_system(pool, inv_id, SystemState.READY)
+            ordinary_system = await _seed_bound_system(pool, inv_id, SystemState.READY)
+            await _mark_authority_owned(pool, authority_system)
+
+            resp = await close_investigation(pool, _ctx(Role.ADMIN), inv_id, _SUMMARY, force=True)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT payload FROM jobs WHERE kind='teardown' ORDER BY dedup_key"
+                )
+                jobs = await cur.fetchall()
+
+        assert resp.status == "closed"
+        payloads = {job["payload"]["system_id"]: job["payload"] for job in jobs}
+        assert payloads[str(authority_system)]["authority_system_v1"]["operation"] == (
+            "preactivation-teardown"
+        )
+        assert "authority_system_v1" not in payloads[str(ordinary_system)]
+
+    asyncio.run(_run())
+
+
+def test_close_force_does_not_deadlock_with_system_first_run_create(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Force-close waits behind SYSTEM without holding INVESTIGATION (the global lock order)."""
+    from kdive.db.locks import LockScope
+    from kdive.services.runs import admission as run_admission
+    from tests.mcp.lifecycle.runs_support import create as create_run
+
+    system_locked = asyncio.Event()
+    release_run = asyncio.Event()
+    system_holder: list[Any] = []
+    original_lock = run_admission.advisory_xact_lock
+
+    @asynccontextmanager
+    async def pause_run_after_system_lock(conn, scope, key):
+        async with original_lock(conn, scope, key):
+            if scope is LockScope.SYSTEM:
+                system_holder.append(conn)
+                system_locked.set()
+                await release_run.wait()
+            yield
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            system_id = await _seed_bound_system(pool, inv_id, SystemState.READY)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE allocations SET state='active', active_started_at=now() "
+                    "WHERE id=(SELECT allocation_id FROM systems WHERE id=%s)",
+                    (system_id,),
+                )
+
+            create = asyncio.create_task(create_run(pool, _ctx(Role.ADMIN), inv_id, str(system_id)))
+            await system_locked.wait()
+            close = asyncio.create_task(
+                close_investigation(pool, _ctx(Role.ADMIN), inv_id, _SUMMARY, force=True)
+            )
+            assert system_holder
+            await wait_until_any_backend_waiting(system_holder[0], locktype="advisory")
+            release_run.set()
+            created, closed = await asyncio.wait_for(asyncio.gather(create, close), timeout=5.0)
+
+        assert created.status == "created"
+        assert closed.status == "closed"
+
+    with monkeypatch.context() as patched:
+        patched.setattr(run_admission, "advisory_xact_lock", pause_run_after_system_lock)
+        asyncio.run(_run())
 
 
 def test_close_force_refuses_reprovisioning_bound_system(migrated_url: str) -> None:

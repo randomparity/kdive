@@ -161,6 +161,8 @@ The longest is the control's `role_sql`, issued when the migration is submitted 
 flight across the pause edge, the drop's completion, and its own — 8 + 90 + 90 = 188s.
 """
 _PROTECTED_TABLES = {
+    "authority_system_attempts",
+    "authority_system_ownership",
     "capture_operation_cutoff",
     "capture_operations",
     "external_boot_authorities",

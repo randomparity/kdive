@@ -25,7 +25,6 @@ from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
-from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
@@ -33,9 +32,6 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs import queue
-from kdive.jobs.payloads import TeardownPayload
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -64,6 +60,7 @@ from kdive.services.allocation.release import (
     ReleaseOutcome,
     breakglass_release_allocation,
 )
+from kdive.services.systems.authority_owned import enqueue_control_teardown
 
 _log = logging.getLogger(__name__)
 
@@ -257,21 +254,8 @@ async def _teardown_locked(
                 suggested_next_actions=["systems.get"],
                 data={"project": system.project},
             )
-        job = await _enqueue_teardown(conn, ctx, uid, system.project)
+        job = await enqueue_control_teardown(conn, system, job_authorizing(ctx, system.project))
     return job_envelope(job, "system_id", uid)
-
-
-async def _enqueue_teardown(
-    conn: AsyncConnection, ctx: RequestContext, system_id: UUID, project: str
-) -> Job:
-    """Enqueue the idempotent teardown job under the target's project (break-glass attribution)."""
-    return await queue.enqueue(
-        conn,
-        JobKind.TEARDOWN,
-        TeardownPayload(system_id=str(system_id)),
-        job_authorizing(ctx, project),
-        f"{system_id}:teardown",
-    )
 
 
 def register(

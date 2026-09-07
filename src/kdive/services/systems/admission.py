@@ -11,6 +11,7 @@ Worker-owned ``provision``/``teardown``/``reprovision`` execution lives in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resource_capabilities import ResourceCapabilities, host_cpu_json
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
@@ -48,10 +50,15 @@ from kdive.profiles.provider_policy import (
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     dump_profile,
+    profile_digest,
     reconcile_profile_sizing,
     require_concrete_sizing,
 )
 from kdive.profiles.types import ProvisioningProfileInput
+from kdive.providers.system_authority.protocol import (
+    AuthoritySystemMarkerV1,
+    AuthoritySystemOperation,
+)
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -67,6 +74,7 @@ from kdive.services.systems.validation import (
     RootfsValidator,
     require_fadump_supported,
     resolve_accel,
+    validate_authority_profile_for_provider,
     validate_profile_for_provider,
     validate_rootfs_for_provider,
 )
@@ -107,6 +115,7 @@ class PreMutationTimeout(Protocol):
 
 
 type TimeoutFactory = Callable[[float], PreMutationTimeout]
+type AuthoritySystemRoute = Callable[[ResourceKind, str], str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +351,7 @@ class SystemAdmission:
     component_sources: ComponentSourceCapabilities
     rootfs_validator: RootfsValidator
     jobs: ProvisionJobPort
+    authority_route: AuthoritySystemRoute | None = None
     premutation_timeout_s: float | None = None
     timeout_factory: TimeoutFactory | None = None
 
@@ -408,7 +418,6 @@ class SystemAdmission:
         """Run the bounded pre-mutation segment; the mutation disables the deadline (ADR-0126)."""
         try:
             parsed = ProvisioningProfile.parse(request.profile)
-            validate_profile_for_provider(parsed, self.profile_policy, self.component_sources)
         except CategorizedError as exc:
             return _failure_from_error(request.allocation_id, exc)
         async with _locked_allocation_system(pool, ctx, request.allocation_id) as locked:
@@ -420,6 +429,28 @@ class SystemAdmission:
                 )
             conn, alloc, existing = locked
             try:
+                resource = (
+                    await RESOURCES.get(conn, alloc.resource_id)
+                    if alloc.resource_id is not None
+                    else None
+                )
+                if resource is None:
+                    return AdmissionFailure(
+                        subject_id=alloc.id,
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+                    )
+                authority_instance = (
+                    self.authority_route(resource.kind, resource.name)
+                    if self.authority_route is not None and resource.name is not None
+                    else None
+                )
+                if authority_instance is None:
+                    validate_profile_for_provider(
+                        parsed, self.profile_policy, self.component_sources
+                    )
+                else:
+                    validate_authority_profile_for_provider(parsed, self.profile_policy)
                 stored = _stored_profile_for(request.profile, alloc)
                 await _validate_investigation_binding(
                     conn, alloc, existing, request.investigation_id
@@ -444,6 +475,7 @@ class SystemAdmission:
                 profile_policy=self.profile_policy,
                 rootfs_validator=self.rootfs_validator,
                 jobs=self.jobs,
+                authority_instance=authority_instance,
                 timeout=timeout,
                 label=request.label,
                 investigation_id=request.investigation_id,
@@ -633,6 +665,7 @@ async def _provision_create_response(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     jobs: ProvisionJobPort,
+    authority_instance: str | None,
     timeout: PreMutationTimeout,
     label: str | None = None,
     investigation_id: UUID | None = None,
@@ -646,6 +679,7 @@ async def _provision_create_response(
             profile_policy,
             rootfs_validator,
             jobs,
+            authority_instance,
             timeout,
             label,
             investigation_id=investigation_id,
@@ -680,6 +714,7 @@ async def _enqueue_provision_job(
     allocation_id: UUID,
     system_id: UUID,
     jobs: ProvisionJobPort,
+    authority_marker: AuthoritySystemMarkerV1 | None = None,
 ) -> ProvisionJobAdmitted:
     job = await jobs.enqueue_provision(
         conn,
@@ -687,6 +722,7 @@ async def _enqueue_provision_job(
         project=project,
         allocation_id=allocation_id,
         system_id=system_id,
+        authority_marker=authority_marker,
     )
     return ProvisionJobAdmitted(job=job, system_id=system_id)
 
@@ -697,6 +733,8 @@ async def _new_system_admission_failure(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    *,
+    authority_owned: bool,
 ) -> AdmissionFailure | None:
     if alloc.state is not AllocationState.GRANTED:
         return AdmissionFailure(
@@ -715,10 +753,11 @@ async def _new_system_admission_failure(
             reason=AdmissionFailureReason.QUOTA_EXCEEDED,
             recovery=AdmissionRecovery.INSPECT_SYSTEMS_AND_ALLOCATIONS,
         )
-    try:
-        await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
-    except CategorizedError as exc:
-        return _failure_from_error(alloc.id, exc)
+    if not authority_owned:
+        try:
+            await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
+        except CategorizedError as exc:
+            return _failure_from_error(alloc.id, exc)
     return None
 
 
@@ -795,6 +834,7 @@ async def _insert_provisioning_system(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     jobs: ProvisionJobPort,
+    authority_instance: str | None,
     timeout: PreMutationTimeout,
     label: str | None = None,
     investigation_id: UUID | None = None,
@@ -808,7 +848,12 @@ async def _insert_provisioning_system(
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_admission_failure(
-        conn, alloc, profile, profile_policy, rootfs_validator
+        conn,
+        alloc,
+        profile,
+        profile_policy,
+        rootfs_validator,
+        authority_owned=authority_instance is not None,
     )
     if blocked is not None:
         return blocked
@@ -816,6 +861,29 @@ async def _insert_provisioning_system(
         root_provenance = await resolve_root_provenance(conn, profile, alloc.project)
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
+    resource_id = alloc.resource_id
+    if resource_id is None:
+        return AdmissionFailure(
+            subject_id=alloc.id,
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+        )
+    resource = await RESOURCES.get(conn, resource_id)
+    if resource is None:
+        return AdmissionFailure(
+            subject_id=alloc.id,
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+        )
+    if authority_instance is not None and root_provenance is None:
+        return AdmissionFailure(
+            subject_id=alloc.id,
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            reason=AdmissionFailureReason.PROVIDER_POLICY_REJECTED,
+            failure_message=(
+                "authority-owned provisioning requires a mechanically verified staged root"
+            ),
+        )
     timeout.reschedule(None)  # mutation boundary: the insert+enqueue runs unbounded (ADR-0126)
     system = await _insert_system_and_activate(
         conn,
@@ -831,11 +899,65 @@ async def _insert_provisioning_system(
         investigation_id=investigation_id,
         root_provenance=root_provenance,
     )
-    return await _enqueue_provision_job(
+    marker: AuthoritySystemMarkerV1 | None = None
+    if authority_instance is not None:
+        assert root_provenance is not None
+        if resource.kind not in {ResourceKind.LOCAL_LIBVIRT, ResourceKind.REMOTE_LIBVIRT}:
+            raise CategorizedError(
+                "authority-owned System route selected an unsupported provider",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        assert resource.name is not None
+        profile_identity = "sha256:" + profile_digest(profile)
+        operation_identity = (
+            "sha256:"
+            + hashlib.sha256(
+                b"kdive-authority-system-provision-v1\0"
+                + system.id.bytes
+                + alloc.id.bytes
+                + resource_id.bytes
+                + profile_identity.encode("ascii")
+                + root_provenance.image_digest.encode("ascii")
+            ).hexdigest()
+        )
+        marker = AuthoritySystemMarkerV1(
+            system_id=system.id,
+            allocation_id=alloc.id,
+            resource_id=resource_id,
+            provider_kind=resource.kind.value,
+            resource_name=resource.name,
+            authority_instance=authority_instance,
+            profile_identity=profile_identity,
+            root_identity=root_provenance.image_digest,
+            operation=AuthoritySystemOperation.PROVISION,
+            operation_identity=operation_identity,
+        )
+    admitted = await _enqueue_provision_job(
         conn,
         ctx,
         project=alloc.project,
         allocation_id=alloc.id,
         system_id=system.id,
         jobs=jobs,
+        authority_marker=marker,
     )
+    if marker is not None:
+        row = await conn.execute(
+            "SELECT register_authority_system_ownership(%s,%s,%s,%s,%s,%s,%s)",
+            (
+                marker.system_id,
+                admitted.job.id,
+                marker.provider_kind,
+                marker.resource_name,
+                marker.authority_instance,
+                marker.profile_identity,
+                marker.root_identity,
+            ),
+        )
+        result = await row.fetchone()
+        if result is None or result[0] not in {"applied", "replay"}:
+            raise CategorizedError(
+                "authority-owned System registration conflicted with admission",
+                category=ErrorCategory.CONFLICT,
+            )
+    return admitted

@@ -35,6 +35,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
+from kdive.providers.system_authority.protocol import AuthoritySystemMarkerV1
 from kdive.security.secrets.secrets import SecretBackend
 
 
@@ -133,6 +134,39 @@ type ExternalBootClientFactory = Callable[
     [ProviderBinding, ExternalBootAuthorityMarkerV1, float], ExternalBootAuthorityClient
 ]
 type RecoveryOrphanAuthoritySenderFactory = Callable[[], AuthorityRequestSender]
+type AuthoritySystemSenderFactory = Callable[
+    [ProviderBinding, AuthoritySystemMarkerV1], AuthorityRequestSender
+]
+
+
+def authority_system_sender_factory(
+    secrets: SecretBackend, borrow: Callable[[], SecretStr]
+) -> AuthoritySystemSenderFactory:
+    """Resolve one fixed authority route for a server-derived System marker."""
+    remote_sender = authority_sender_factory(secrets, borrow)
+
+    def build(binding: ProviderBinding, marker: AuthoritySystemMarkerV1) -> AuthorityRequestSender:
+        if binding.kind.value != marker.provider_kind:
+            raise _refuse("binding-mismatch")
+        if marker.provider_kind == "local-libvirt":
+            configured = local_authority_binding()
+            if configured is None or configured.authority_instance != marker.authority_instance:
+                raise _refuse("binding-mismatch")
+            sender = local_authority_sender_factory(secrets, borrow, binding=configured)
+            if sender is None:
+                raise _refuse("binding-unavailable")
+            return sender
+        if binding.resource_name != marker.resource_name:
+            raise _refuse("binding-mismatch")
+        try:
+            configured = remote_config_for_resource(marker.resource_name).authority
+        except CategorizedError:
+            raise _refuse("binding-unavailable") from None
+        if configured is None or configured.authority_instance != marker.authority_instance:
+            raise _refuse("binding-mismatch")
+        return remote_sender(configured)
+
+    return build
 
 
 def external_boot_client_factory(

@@ -12,6 +12,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.providers.system_authority.protocol import AuthoritySystemMarkerV1
 from kdive.security.authz.context import RequestContext
 
 
@@ -26,6 +27,7 @@ class ProvisionJobPort(Protocol):
         project: str,
         allocation_id: UUID,
         system_id: UUID,
+        authority_marker: AuthoritySystemMarkerV1 | None = None,
     ) -> Job: ...
 
     async def find_by_dedup_key(self, conn: AsyncConnection, dedup_key: str) -> Job | None: ...

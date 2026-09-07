@@ -379,6 +379,11 @@ class RemoteLibvirtProvisioning:
                     category=ErrorCategory.CONFIGURATION_ERROR,
                 )
             return volume, False
+        if not isinstance(source, LocalComponentRef):
+            raise CategorizedError(
+                "ordinary remote-libvirt provisioning requires a worker-local base source",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         return self._stage_supplied_base(conn, source, system_id, config)
 
     def _stage_supplied_base(

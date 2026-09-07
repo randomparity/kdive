@@ -150,6 +150,7 @@ _promote_pending = allocation_promotion.promote_pending
 _reap_orphaned_active_allocations = allocation_repairs.reap_orphaned_active_allocations
 _reap_queue_timeouts_for = allocation_repairs.reap_queue_timeouts_for
 _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
+_repair_terminal_authority_system_attempts = job_repairs.repair_terminal_authority_system_attempts
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
 _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_systems
@@ -255,6 +256,7 @@ class ReconcileReport:
     leaked_domains: int
     idempotency_keys_gc_count: int
     failures: tuple[str, ...]
+    terminal_authority_system_attempts: int = 0
     abandoned_uploads: int = 0
     reconciled_inventory: int = 0
     reaped_active_allocations: int = 0
@@ -567,6 +569,13 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         "abandoned_jobs",
         lambda _r, _c, _g: _repair_abandoned_jobs,
         report_field="abandoned_jobs",
+    ),
+    _RepairCatalogEntry(
+        "terminal_authority_system_attempts",
+        lambda _r, c, _g: (
+            lambda conn: _repair_terminal_authority_system_attempts(conn, c.upload_store)
+        ),
+        report_field="terminal_authority_system_attempts",
     ),
     _RepairCatalogEntry(
         "external_boot_activations_enqueued",

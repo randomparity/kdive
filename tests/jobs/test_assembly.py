@@ -133,3 +133,31 @@ def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> No
     registered = frozenset(kind for kind in JobKind if registry.get(kind) is not None)
     assert registered == ACTIVE_JOB_KINDS
     assert registered.isdisjoint(RETIRED_JOB_KINDS)
+
+
+def test_authority_system_handler_receives_the_worker_artifact_store(monkeypatch) -> None:
+    from kdive.jobs.handlers import systems
+
+    seen = []
+
+    def capture(*_args, authority_system, **_kwargs) -> None:
+        seen.append(authority_system.artifact_store)
+
+    monkeypatch.setattr(systems, "register_handlers", capture)
+    credential = SecretStr("worker-test-incarnation-credential")
+    assembly = WorkerHandlerAssembly(
+        resolver=ProviderResolver({}),
+        incarnation_credential=credential,
+        secret_registry=SecretRegistry(),
+        object_stores=ObjectStoreAssembly(store=INERT_OBJECT_STORE),
+        capture_supervisor=cast(
+            CaptureOperationSupervisor,
+            SimpleNamespace(credential=credential),
+        ),
+        worker_check_builders={},
+        module_volume_reaper=NullModuleVolumeReaper(),
+    )
+
+    register_all_handlers(HandlerRegistry(), assembly)
+
+    assert seen == [INERT_OBJECT_STORE]
