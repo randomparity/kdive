@@ -1452,6 +1452,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record rejected remote authority alternatives
 - Clarify selected appliance architecture inputs
 - Record rejected remote authority alternatives
+- Correct authority retry record heading
 
 ### Fixed
 
@@ -2377,6 +2378,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inspect installed authority route
 - Project authority reservation geometry to workers
 - Bound remote authority proof controls
+- Allow acknowledged authority retry
 
 ### Security
 
