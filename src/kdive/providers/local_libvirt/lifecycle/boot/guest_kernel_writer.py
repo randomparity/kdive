@@ -54,21 +54,13 @@ _DEPMOD = "depmod"
 # omits it, so a bare name falls back to os.defpath (/bin:/usr/bin) and misses /usr/sbin, which
 # reported a missing package on hosts that had one (#2300). The first four are the set
 # ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
-# against. The /usr/local pair trails rather than leads, and the order is the security property,
-# not a preference: /usr/local is where an unmanaged binary appears — a local build, or a
-# directory an admin has opened up (Debian's /etc/staff-group-for-usr-local makes it group
-# writable) — so searching it first would let that binary shadow the packaged depmod this
-# privileged staging step executes. Trailing, it only fills a gap: a source-built kmod on a host
-# with no packaged depmod, which an ungated worker reaches through PATH today. A host whose
-# depmod is outside all six sets KDIVE_DEPMOD.
-_DEPMOD_SEARCH_DIRS = (
-    "/usr/sbin",
-    "/usr/bin",
-    "/sbin",
-    "/bin",
-    "/usr/local/sbin",
-    "/usr/local/bin",
-)
+# against. Deliberately all root-owned: /usr/local/{sbin,bin} are excluded even though an ungated
+# worker reaches them through PATH today, because this argv[0] is executed by a privileged
+# staging step and /usr/local is group-writable by default on part of the Debian family. Only a
+# host with no packaged depmod anywhere would fall through to them, so including them would buy
+# an unusual host a silent success at the cost of letting a non-root principal choose the binary
+# there. Such a host sets KDIVE_DEPMOD instead, which the resolution failure names explicitly.
+_DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 # These errnos mean the binary is absent or permanently unusable, so the job should dead-letter.
 # Every other errno stays retryable, whether it came from the spawn side — pipe creation
 # (EMFILE/ENFILE) or fork (EAGAIN/ENOMEM) — or from an exec that can succeed later (ETXTBSY).

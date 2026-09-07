@@ -199,13 +199,11 @@ def test_run_host_depmod_runs_the_resolved_absolute_path(
     # The absolute path, never the bare name: the systemd worker gate execs without PATH, so a
     # bare name resolves through os.defpath (/bin:/usr/bin), which omits /usr/sbin (#2300).
     assert captured["args"] == ["/usr/sbin/depmod", "-b", str(tmp_path), _VERSION]
-    # The search is restricted to the fixed host-tool list, not the inherited environment. The
-    # distribution directories lead: /usr/local/{sbin,bin} are group- or world-writable by default
-    # on the Debian family, so searching them first would let a planted binary shadow the
-    # distribution depmod that this privileged staging step executes.
+    # The search is restricted to the fixed host-tool list, not the inherited environment, and
+    # every directory in it is root-owned: this argv[0] is executed by a privileged staging step.
     assert captured["which"] == (
         "depmod",
-        "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin",
+        "/usr/sbin:/usr/bin:/sbin:/bin",
     )
 
 
@@ -220,7 +218,7 @@ def test_run_host_depmod_unresolvable_names_searched_directories(
     # it is a scalar because jobs/worker.py::_safe_detail drops a list before the operator sees it.
     searched = exc.value.details.get("searched")
     assert isinstance(searched, str)
-    assert searched == "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin"
+    assert searched == "/usr/sbin:/usr/bin:/sbin:/bin"
     # Both remedies, because the binary may be genuinely absent *or* merely outside the searched
     # set — asserting "install kmod" alone is the false remedy #2300 was filed about.
     assert "kmod" in str(exc.value)

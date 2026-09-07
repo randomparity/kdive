@@ -14,8 +14,8 @@ kmod puts it. `runs.install` then fails `MISSING_DEPENDENCY` naming a package th
 ## Scope
 
 Resolve `depmod` in `_run_host_depmod` and pass an absolute path to `subprocess.run`: a
-`KDIVE_DEPMOD` override, then the four in `src/kdive/jobs/.../bootstrap/bootstrap_elf.py`, then
-`/usr/local/{sbin,bin}` — trailing, so an unmanaged local binary cannot shadow a packaged depmod.
+`KDIVE_DEPMOD` override, then the four root-owned dirs in `src/kdive/jobs/.../bootstrap_elf.py`.
+`/usr/local/{sbin,bin}` stay out — argv[0] runs privileged — so a kmod there sets the override.
 The override is a worker-only `Setting` with no default in `providers/local_libvirt/settings.py`,
 because `config_env_guard.py` forbids `KDIVE_*` reads outside `kdive.config`; its `parse` takes
 only an absolute path to an executable file, and that module's `KDIVE_LIBVIRT_*` docstring widens

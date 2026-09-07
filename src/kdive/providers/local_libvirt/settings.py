@@ -274,10 +274,12 @@ DEPMOD = Setting(
     processes=frozenset({"worker"}),
     help=(
         "Absolute path to the depmod binary the worker uses to index kernel modules host-side "
-        "for staging (ADR-0346). Unset — the normal case — searches a fixed directory list "
-        "covering merged-usr, split-usr and /usr/local installs, reported as details['searched'] "
-        "when nothing resolves; PATH is deliberately not consulted, because the fixed "
-        "live-worker gate execs without one. Set this only when depmod lives outside that list. "
+        "for staging (ADR-0346). Unset — the normal case — searches a fixed list of root-owned "
+        "directories covering merged-usr and split-usr, reported as details['searched'] when "
+        "nothing resolves; PATH is deliberately not consulted, because the fixed live-worker "
+        "gate execs without one. Set this when depmod lives outside that list, which a "
+        "source-built kmod under /usr/local does — those directories are left out on purpose, "
+        "since this binary is executed by a privileged step. "
         "On a gated worker slot the value belongs in a systemd drop-in "
         "(systemctl edit kdive-live-worker@N), since that slot's worker.env is generated."
     ),
