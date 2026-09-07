@@ -52,18 +52,21 @@ _DEPMOD = "depmod"
 # depmod is an sbin tool — /usr/sbin under merged-usr, /sbin under split-usr. Resolution never
 # consults PATH: the fixed live-worker gate execs the worker from an environment allowlist that
 # omits it, so a bare name falls back to os.defpath (/bin:/usr/bin) and misses /usr/sbin, which
-# reported a missing package on hosts that had one (#2300). The last four are the set
+# reported a missing package on hosts that had one (#2300). The first four are the set
 # ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
-# against; the /usr/local pair leads because an ungated worker inherits a PATH carrying it today,
-# and a source-built kmod — routine on a kernel-testing box — installs depmod there. A host whose
-# depmod is outside all six sets KDIVE_DEPMOD.
+# against. The /usr/local pair trails rather than leads, and the order is the security property,
+# not a preference: those two are group- or world-writable by default on the Debian family
+# (root:staff 2775 per policy, 0777 on some hosts), so searching them first would let anyone who
+# can write there shadow the distribution depmod this privileged staging step executes. Last, they
+# only fill a gap — a source-built kmod on a host with no packaged depmod, which an ungated worker
+# reaches through PATH today. A host whose depmod is outside all six sets KDIVE_DEPMOD.
 _DEPMOD_SEARCH_DIRS = (
-    "/usr/local/sbin",
-    "/usr/local/bin",
     "/usr/sbin",
     "/usr/bin",
     "/sbin",
     "/bin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
 )
 # These errnos mean the binary is absent or permanently unusable, so the job should dead-letter.
 # Every other errno stays retryable, whether it came from the spawn side — pipe creation
@@ -134,7 +137,10 @@ def _resolve_depmod() -> str:
             "cannot be indexed for staging; install kmod (provides depmod), or set KDIVE_DEPMOD "
             "to its absolute path if depmod is installed somewhere else",
             category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"searched": list(_DEPMOD_SEARCH_DIRS)},
+            # A single string, not a list: the worker's failure context keeps only scalar details
+            # (``_safe_detail`` in jobs/worker.py), so a list is dropped before it reaches the
+            # operator — which is exactly the diagnosability this failure exists to provide.
+            details={"searched": os.pathsep.join(_DEPMOD_SEARCH_DIRS)},
         )
     return resolved
 

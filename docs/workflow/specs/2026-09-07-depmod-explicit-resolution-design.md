@@ -14,10 +14,10 @@ kmod puts it. `runs.install` then fails `MISSING_DEPENDENCY` naming a package th
 ## Scope
 
 Resolve `depmod` in `_run_host_depmod` and pass an absolute path to `subprocess.run`: a
-`KDIVE_DEPMOD` override, then `shutil.which` over `/usr/local/{sbin,bin}` ahead of the four in
-`src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`, so a source-built kmod resolves.
-The override is a worker-only `Setting` with no default in `providers/local_libvirt/settings.py`,
-because `scripts/guards/config_env_guard.py` forbids reading a `KDIVE_*` key outside
+`KDIVE_DEPMOD` override, then the four in `src/kdive/jobs/.../bootstrap/bootstrap_elf.py`, then
+`/usr/local/{sbin,bin}` — trailing, since they are non-root-writable by default and must not
+shadow a packaged depmod. The override is a worker-only `Setting` with no default in
+`providers/local_libvirt/settings.py`, because `config_env_guard.py` forbids `KDIVE_*` reads outside
 `kdive.config`; its `parse` takes only an absolute path to an executable file, and that module's
 `KDIVE_LIBVIRT_*` docstring widens for it. `deploy/systemd/bin/kdive-live-worker-gate` rebuilds
 the worker environment strictly from `_WORKER_ENV_NAMES` before `execve`, so this adds that one
@@ -26,8 +26,8 @@ slot's generated `worker.env` is a closed model, so the operator sets the overri
 systemd drop-in (`systemctl edit kdive-live-worker@N`), never a role template.
 
 Excluded, with owners: any other `_WORKER_ENV_NAMES` addition, `PATH` included (this change);
-guest-side depmod invocation (ADR-0346); the gate's credential and invocation-binding invariants
-(gate-hardening work); the `ops.diagnostics` preflight (a follow-up). No deferrals open, no ADR.
+guest-side depmod (ADR-0346); gate credential invariants (gate-hardening); the `ops.diagnostics`
+preflight (a follow-up). Nothing deferred, and no ADR — this applies ADR-0087 to one knob.
 
 ## Success
 
