@@ -44,6 +44,19 @@ readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 # KDIVE_EFFECTIVE_UID overrides $EUID for tests, mirroring the KDIVE_KVM_NODE override.
 readonly LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 readonly EFFECTIVE_UID="${KDIVE_EFFECTIVE_UID:-$EUID}"
+# The guestfs/drgn venv probe gates only the kdump capture method. A host that must capture
+# kdump cores (the CI runner, `just onboard`) keeps it as a FAIL; a first-run developer box can
+# downgrade it to a WARN with KDIVE_PREFLIGHT_KDUMP=optional, so the core provision/build/boot
+# lifecycle starts without the one-time libguestfs wiring. Every other check stays required.
+readonly KDUMP_PREFLIGHT="${KDIVE_PREFLIGHT_KDUMP:-required}"
+case "${KDUMP_PREFLIGHT}" in
+required | optional) ;;
+*)
+  printf "KDIVE_PREFLIGHT_KDUMP=%s is not valid; set 'required' (default) or 'optional'\n" \
+    "${KDUMP_PREFLIGHT}" >&2
+  exit 2
+  ;;
+esac
 fail=0
 
 note_fail() {
@@ -220,6 +233,10 @@ fi
 printf "\n%s\n" "-- Worker venv & host paths" >&2
 if _venv_imports_kdump_deps; then
   note_ok "worker venv (${PY}) imports guestfs and drgn"
+elif [[ "${KDUMP_PREFLIGHT}" == "optional" ]]; then
+  note_warn \
+    "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203); provision/build/boot and the other capture methods still work" \
+    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
 else
   note_fail \
     "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203)" \

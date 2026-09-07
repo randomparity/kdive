@@ -79,10 +79,13 @@ wait_ready() {
   return 1
 }
 
-# 1. Preflight — fail early with actionable fixes (KVM, libvirt, qemu:///system, the worker
-#    venv's drgn/libguestfs imports, and a writable install-staging directory).
+# 1. Preflight — fail early with actionable fixes (KVM, libvirt, qemu:///system, and a writable
+#    install-staging directory). The worker venv's drgn/libguestfs imports gate only the kdump
+#    capture method, so a first-run box gets a WARN with the fix rather than a stop; export
+#    KDIVE_PREFLIGHT_KDUMP=required to insist on it.
 step "preflight (check-local-libvirt.sh)"
-"${repo_root}/scripts/check-local-libvirt.sh"
+KDIVE_PREFLIGHT_KDUMP="${KDIVE_PREFLIGHT_KDUMP:-optional}" \
+  "${repo_root}/scripts/operations/check-local-libvirt.sh"
 
 # 2. Refuse to stack a second root trio on top of a running one — duplicate processes would
 #    fight over the same domains. Stop the existing one first.

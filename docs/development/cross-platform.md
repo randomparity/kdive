@@ -134,7 +134,7 @@ For a clean `ppc64le` KVM-HV box — from OS install through a running local-lib
 provider and the full kdive spine — follow the
 [POWER host bring-up runbook](../operating/runbooks/power-host-bringup.md). It is
 POWER-generic (POWER9 or POWER10) and its exit criterion is a single
-`scripts/check-local-libvirt.sh` invocation that names the fix for each gap.
+`scripts/operations/check-local-libvirt.sh` invocation that names the fix for each gap.
 
 Two notes where the compose flow now differs from a hand-run stack:
 
