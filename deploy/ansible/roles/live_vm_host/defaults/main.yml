@@ -122,6 +122,10 @@ live_vm_host_authority_s3_endpoint_url: ""
 live_vm_host_authority_s3_bucket: ""
 live_vm_host_authority_s3_region: us-east-1
 live_vm_host_authority_s3_credentials_source: ""
+# Authority-owned local Systems are an explicit operator installation. Each base entry maps a
+# controller ``source`` to one 64-hex ``digest`` filename beneath the private base root.
+live_vm_host_authority_system_manifest_source: ""
+live_vm_host_authority_system_local_bases: []
 live_vm_host_worker_authority_enabled: false
 live_vm_host_worker_authority_instance: "{{ live_vm_host_authority_instance }}"
 live_vm_host_worker_authority_request_socket: /run/kdive/provider-authority/request/authority.sock

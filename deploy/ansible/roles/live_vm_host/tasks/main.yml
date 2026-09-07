@@ -706,6 +706,124 @@
       mode: "0700"
   when: live_vm_host_authority_enabled | bool
 
+- name: Inspect authority System provisioning paths without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: >-
+    {{ ['/var/lib/kdive/provider-authority/system-provisioning',
+        '/var/lib/kdive/provider-authority/system-provisioning/system-operations']
+       + (['/var/lib/kdive/provider-authority/system-provisioning/local',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state/intents',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/systems',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/baselines',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases']
+          if live_vm_host_authority_system_local_bases else
+          []) }}
+  register: live_vm_host_authority_system_paths
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length > 0
+
+- name: Refuse substituted authority System provisioning paths
+  ansible.builtin.assert:
+    that: not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    quiet: true
+  loop: "{{ live_vm_host_authority_system_paths.results | default([]) }}"
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length > 0
+
+- name: Create private authority System provisioning paths
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0700"
+    follow: false
+  loop: >-
+    {{ ['/var/lib/kdive/provider-authority/system-provisioning',
+        '/var/lib/kdive/provider-authority/system-provisioning/system-operations']
+       + (['/var/lib/kdive/provider-authority/system-provisioning/local',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/state/intents',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/systems',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/baselines',
+           '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases']
+          if live_vm_host_authority_system_local_bases else
+          []) }}
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length > 0
+
+- name: Inspect authority System base destinations without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: >-
+    {{ (live_vm_host_authority_system_local_bases
+        | map(attribute='digest')
+        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\\1.qcow2')
+        | list)
+       }}
+  register: live_vm_host_authority_system_base_destinations
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length > 0
+
+- name: Refuse substituted authority System base destinations
+  ansible.builtin.assert:
+    that: >-
+      not item.stat.exists or (item.stat.isreg and not item.stat.islnk and item.stat.nlink == 1)
+    quiet: true
+  loop: "{{ live_vm_host_authority_system_base_destinations.results | default([]) }}"
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length > 0
+
+- name: Install owner-only local authority System bases
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: >-
+      /var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/{{ item.digest }}.qcow2
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0400"
+    follow: false
+  loop: "{{ live_vm_host_authority_system_local_bases }}"
+  no_log: true
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length > 0
+  notify: Restart the external-boot authority service after deployed changes
+
+- name: Install the canonical authority System manifest
+  ansible.builtin.copy:
+    src: "{{ live_vm_host_authority_system_manifest_source }}"
+    dest: /var/lib/kdive/provider-authority/system-provisioning/manifest.json
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0400"
+    follow: false
+  no_log: true
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length > 0
+  notify: Restart the external-boot authority service after deployed changes
+
+- name: Remove the disabled authority System manifest
+  ansible.builtin.file:
+    path: /var/lib/kdive/provider-authority/system-provisioning/manifest.json
+    state: absent
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_system_manifest_source | length == 0
+  notify: Restart the external-boot authority service after deployed changes
+
 - name: Create the external-boot authority venv
   ansible.builtin.command:
     cmd: >-

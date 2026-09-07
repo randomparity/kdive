@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
@@ -16,6 +17,9 @@ from jinja2 import Environment, StrictUndefined
 ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / "deploy" / "ansible" / "roles" / "provider_authority_host"
 UNIT = ROLE / "templates" / "authority.service.j2"
+SYSTEM_PROVISIONING_VALIDATOR = (
+    ROOT / "deploy" / "ansible" / "scripts" / "validate_authority_system_provisioning.py"
+)
 
 
 def _yaml(path: Path) -> dict[str, object]:
@@ -23,6 +27,22 @@ def _yaml(path: Path) -> dict[str, object]:
     if not isinstance(value, dict):
         raise TypeError(f"expected mapping in {path}")
     return cast(dict[str, object], value)
+
+
+def _canonical_manifest(value: dict[str, object]) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def _run_system_provisioning_validator(
+    value: dict[str, object],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SYSTEM_PROVISIONING_VALIDATOR)],
+        input=json.dumps(value),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def test_local_mutation_is_disabled_by_default() -> None:
@@ -92,6 +112,19 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
     assert "s3_credentials" in script
     assert "urlsplit" in script
     assert validation["no_log"] is True
+    system_validation = next(
+        task
+        for task in tasks
+        if task["name"]
+        == "Verify canonical authority System manifest and base digests on the controller"
+    )
+    assert system_validation["delegate_to"] == "localhost"
+    assert system_validation["become"] is False
+    assert system_validation["no_log"] is True
+    assert (
+        "validate_authority_system_provisioning.py"
+        in system_validation["ansible.builtin.command"]["argv"][-1]
+    )
     source_check = next(
         task
         for task in tasks
@@ -157,6 +190,14 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
             },
             True,
         ),
+        (
+            {
+                "system_manifest": "/protected/manifest.json",
+                "system_local_bases": [{"source": "/protected/base.qcow2", "digest": "a" * 64}],
+            },
+            True,
+        ),
+        ({"system_manifest": "/protected/manifest.json"}, False),
     ],
 )
 def test_local_mutation_preflight_is_executable_and_fails_closed(
@@ -187,6 +228,9 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
         "remote_module": False,
         "architectures": [],
         "pool": "default",
+        "system_manifest": "",
+        "system_local_bases": [],
+        "system_remote_bases": [],
     }
     values.update(override)
     result = subprocess.run(
@@ -199,6 +243,108 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
     assert (result.returncode == 0) is accepted
     if not accepted:
         assert result.stderr.strip() == "invalid or incomplete provider authority deployment inputs"
+
+
+def test_system_provisioning_validator_requires_exact_local_manifest_mapping(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.qcow2"
+    base.write_bytes(b"local-base")
+    base.chmod(0o600)
+    digest = sha256(base.read_bytes()).hexdigest()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(
+        _canonical_manifest(
+            {
+                "schema": "authority-system-manifest-v1",
+                "provider_kind": "local-libvirt",
+                "resource_name": "local-resource",
+                "authority_instance": "authority-test",
+                "bases": [
+                    {
+                        "root_identity": f"sha256:{digest}",
+                        "architecture": "x86_64",
+                        "source_kind": "local",
+                        "source_name": None,
+                    }
+                ],
+            }
+        )
+    )
+    manifest.chmod(0o600)
+    value: dict[str, object] = {
+        "manifest": str(manifest),
+        "authority_instance": "authority-test",
+        "expected_provider_kind": "local-libvirt",
+        "local_bases": [{"source": str(base), "digest": digest}],
+        "remote_bases": [],
+    }
+
+    assert _run_system_provisioning_validator(value).returncode == 0
+
+    base.write_bytes(b"different-base")
+    assert _run_system_provisioning_validator(value).returncode != 0
+
+    base.write_bytes(b"local-base")
+    value["local_bases"] = []
+    assert _run_system_provisioning_validator(value).returncode != 0
+
+    extra = tmp_path / "extra.qcow2"
+    extra.write_bytes(b"extra-base")
+    extra.chmod(0o600)
+    value["local_bases"] = [
+        {"source": str(base), "digest": digest},
+        {"source": str(extra), "digest": sha256(extra.read_bytes()).hexdigest()},
+    ]
+    assert _run_system_provisioning_validator(value).returncode != 0
+
+
+def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_mapping(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "remote-base.qcow2"
+    base.write_bytes(b"remote-base")
+    base.chmod(0o600)
+    digest = sha256(base.read_bytes()).hexdigest()
+    manifest = tmp_path / "remote-manifest.json"
+    manifest.write_bytes(
+        _canonical_manifest(
+            {
+                "schema": "authority-system-manifest-v1",
+                "provider_kind": "remote-libvirt",
+                "resource_name": "remote-resource",
+                "authority_instance": "authority-test",
+                "entries": [
+                    {
+                        "root_identity": f"sha256:{digest}",
+                        "architecture": "x86_64",
+                        "base_volume": "remote-base.qcow2",
+                        "network": "provider-net",
+                        "machine": "pc-q35-9.2",
+                        "gdb_addr": "127.0.0.1",
+                        "gdb_port_min": 31000,
+                        "gdb_port_max": 31002,
+                        "ssh_addr": "127.0.0.1",
+                        "ssh_port_min": 32000,
+                        "ssh_port_max": 32002,
+                    }
+                ],
+            }
+        )
+    )
+    manifest.chmod(0o600)
+    value: dict[str, object] = {
+        "manifest": str(manifest),
+        "authority_instance": "authority-test",
+        "expected_provider_kind": "local-libvirt",
+        "local_bases": [],
+        "remote_bases": [{"source": str(base), "name": "remote-base.qcow2"}],
+    }
+
+    assert _run_system_provisioning_validator(value).returncode != 0
+
+    value["expected_provider_kind"] = "remote-libvirt"
+    assert _run_system_provisioning_validator(value).returncode == 0
 
 
 def test_local_mutation_installs_owner_only_root_tools_and_s3_credentials() -> None:
@@ -263,6 +409,98 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
         in mutation
     )
     assert "remote-module-preparations" not in identity_only
+
+
+def test_authority_system_installation_is_opt_in_and_keeps_bases_read_only() -> None:
+    defaults = _yaml(ROLE / "defaults" / "main.yml")
+    assert defaults["provider_authority_host_system_manifest_source"] == ""
+    assert defaults["provider_authority_host_system_local_bases"] == []
+    assert defaults["provider_authority_host_system_remote_bases"] == []
+
+    tasks = yaml.safe_load((ROLE / "tasks" / "install.yml").read_text(encoding="utf-8"))
+    names = [task["name"] for task in tasks]
+    for name in (
+        "Inspect authority System provisioning paths without following links",
+        "Create private authority System provisioning paths",
+        "Install the canonical authority System manifest",
+        "Install owner-only local authority System bases",
+        "Install owner-only remote authority System bases",
+    ):
+        assert name in names
+    assert names.index("Install the canonical authority System manifest") < names.index(
+        "Start the configured authority after firewall and protected inputs converge"
+    )
+
+    local_bases = next(
+        task for task in tasks if task["name"] == "Install owner-only local authority System bases"
+    )
+    remote_bases = next(
+        task for task in tasks if task["name"] == "Install owner-only remote authority System bases"
+    )
+    for task in (local_bases, remote_bases):
+        copy = task["ansible.builtin.copy"]
+        assert copy["owner"] == "kdive-provider-authority"
+        assert copy["group"] == "kdive-provider-authority"
+        assert copy["mode"] == "0400"
+        assert copy["follow"] is False
+
+    template = Environment(undefined=StrictUndefined).from_string(UNIT.read_text(encoding="utf-8"))
+    disabled = template.render(
+        provider_authority_host_local_mutation_enabled=False,
+        provider_authority_host_remote_module_enabled=False,
+        provider_authority_host_system_manifest_source="",
+        provider_authority_host_system_local_bases=[],
+        provider_authority_host_system_remote_bases=[],
+    )
+    assert "system-provisioning" not in disabled
+    enabled = template.render(
+        provider_authority_host_local_mutation_enabled=True,
+        provider_authority_host_recovery_root="/var/lib/kdive/provider-authority/recovery",
+        provider_authority_host_rootfs_root="/var/lib/kdive/provider-authority/rootfs",
+        provider_authority_host_console_root="/var/lib/kdive/provider-authority/console",
+        provider_authority_host_remote_module_enabled=False,
+        provider_authority_host_system_manifest_source="/controller/manifest.json",
+        provider_authority_host_system_local_bases=[
+            {"digest": "a" * 64, "source": "/controller/base"}
+        ],
+        provider_authority_host_system_remote_bases=[],
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/system-operations"
+        in enabled
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/state"
+        in enabled
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/systems"
+        in enabled
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/baselines"
+        in enabled
+    )
+    assert "system-provisioning/local/rootfs/bases" not in enabled
+
+    remote = template.render(
+        provider_authority_host_local_mutation_enabled=True,
+        provider_authority_host_recovery_root="/var/lib/kdive/provider-authority/recovery",
+        provider_authority_host_rootfs_root="/var/lib/kdive/provider-authority/rootfs",
+        provider_authority_host_console_root="/var/lib/kdive/provider-authority/console",
+        provider_authority_host_remote_module_enabled=True,
+        provider_authority_host_system_manifest_source="/controller/manifest.json",
+        provider_authority_host_system_local_bases=[],
+        provider_authority_host_system_remote_bases=[
+            {"name": "remote-base.qcow2", "source": "/controller/base"}
+        ],
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/system-operations"
+        in remote
+    )
+    assert "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/remote" in remote
+    assert "system-provisioning/local/rootfs" not in remote
 
 
 def test_remote_module_private_pool_uses_the_authority_session_daemon() -> None:

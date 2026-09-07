@@ -107,6 +107,103 @@
       changed_when: false
       check_mode: false
 
+    - name: Validate the closed authority System provisioning contract
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import json, re, sys
+            try:
+                value = json.load(sys.stdin)
+                manifest = value['manifest']
+                local_bases = value['local_bases']
+                assert type(manifest) is str and type(local_bases) is list
+                if manifest:
+                    assert manifest.startswith('/') and '\n' not in manifest and '\r' not in manifest
+                    assert '\x00' not in manifest and bool(local_bases)
+                    assert value['mutation'] is True
+                    for base in local_bases:
+                        assert type(base) is dict and set(base) == {'source', 'digest'}
+                        assert type(base['source']) is str and base['source'].startswith('/')
+                        assert re.fullmatch(r'[0-9a-f]{64}', base['digest'])
+                else:
+                    assert not local_bases
+            except Exception:
+                sys.exit('invalid or incomplete authority System provisioning inputs')
+        stdin: >-
+          {{ {'manifest': live_vm_host_authority_system_manifest_source,
+              'local_bases': live_vm_host_authority_system_local_bases,
+              'mutation': live_vm_host_authority_local_mutation_enabled} | to_json }}
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Inspect authority System manifest source on the control host
+      ansible.builtin.stat:
+        path: "{{ live_vm_host_authority_system_manifest_source }}"
+        follow: false
+      delegate_to: localhost
+      become: false
+      register: live_vm_host_authority_system_manifest_source_stat
+      when: live_vm_host_authority_system_manifest_source | length > 0
+      no_log: true
+
+    - name: Require a protected regular authority System manifest source
+      ansible.builtin.assert:
+        that:
+          - live_vm_host_authority_system_manifest_source_stat.stat.exists
+          - live_vm_host_authority_system_manifest_source_stat.stat.isreg
+          - not live_vm_host_authority_system_manifest_source_stat.stat.islnk
+          - live_vm_host_authority_system_manifest_source_stat.stat.mode in ['0400', '0600']
+          - live_vm_host_authority_system_manifest_source_stat.stat.size > 0
+        quiet: true
+      when: live_vm_host_authority_system_manifest_source | length > 0
+      no_log: true
+
+    - name: Inspect authority System base sources on the control host
+      ansible.builtin.stat:
+        path: "{{ item.source }}"
+        follow: false
+      loop: >-
+        {{ live_vm_host_authority_system_local_bases }}
+      delegate_to: localhost
+      become: false
+      register: live_vm_host_authority_system_base_source_stats
+      when: live_vm_host_authority_system_manifest_source | length > 0
+      no_log: true
+
+    - name: Require protected regular authority System base sources
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - not item.stat.islnk
+          - item.stat.mode in ['0400', '0600']
+          - item.stat.size > 0
+        quiet: true
+      loop: "{{ live_vm_host_authority_system_base_source_stats.results | default([]) }}"
+      when: live_vm_host_authority_system_manifest_source | length > 0
+      no_log: true
+
+    - name: Verify canonical authority System manifest and base digests on the control host
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - "{{ role_path }}/../../scripts/validate_authority_system_provisioning.py"
+        stdin: >-
+          {{ {'manifest': live_vm_host_authority_system_manifest_source,
+              'authority_instance': live_vm_host_authority_instance,
+              'expected_provider_kind': 'local-libvirt',
+              'local_bases': live_vm_host_authority_system_local_bases,
+              'remote_bases': []} | to_json }}
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      when: live_vm_host_authority_system_manifest_source | length > 0
+      no_log: true
+
     - name: Inspect the local-mutation S3 credential source
       ansible.builtin.stat:
         path: "{{ live_vm_host_authority_s3_credentials_source }}"

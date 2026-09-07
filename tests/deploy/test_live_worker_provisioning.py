@@ -431,6 +431,68 @@ def test_live_authority_local_mutation_is_closed_and_owner_only() -> None:
     assert "ReadWritePaths=/var/lib/kdive\n" not in service
 
 
+def test_live_authority_system_installation_precedes_readiness_and_scopes_writes() -> None:
+    defaults = _yaml(DEFAULTS)
+    assert defaults["live_vm_host_authority_system_manifest_source"] == ""
+    assert defaults["live_vm_host_authority_system_local_bases"] == []
+
+    tasks = _text(MAIN_TASKS)
+    for name in (
+        "Inspect authority System provisioning paths without following links",
+        "Create private authority System provisioning paths",
+        "Install the canonical authority System manifest",
+        "Install owner-only local authority System bases",
+    ):
+        assert name in tasks
+    assert tasks.index("Install the canonical authority System manifest") < tasks.index(
+        "Run the one-shot authority readiness probe"
+    )
+
+    preflight = _text(AUTHORITY_PREFLIGHT)
+    for value in (
+        "live_vm_host_authority_system_manifest_source",
+        "live_vm_host_authority_system_local_bases",
+        "validate_authority_system_provisioning.py",
+    ):
+        assert value in preflight
+
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["bool"] = bool
+    template = environment.from_string(_text(AUTHORITY_SERVICE_TEMPLATE))
+    rendered = template.render(
+        live_vm_host_authority_account="kdive-provider-authority",
+        live_vm_host_authority_environment="/etc/kdive/provider-authority.env",
+        live_vm_host_authority_credentials_dir="/etc/kdive/credentials/provider-authority",
+        live_vm_host_authority_runtime_install="/opt/kdive-provider-authority",
+        live_vm_host_authority_local_mutation_enabled=True,
+        live_vm_host_authority_recovery_root="/var/lib/kdive/provider-authority/recovery",
+        live_vm_host_authority_rootfs_root="/var/lib/kdive/provider-authority/rootfs",
+        live_vm_host_authority_console_root="/var/lib/kdive/provider-authority/console",
+        live_vm_host_authority_fault_proof_enabled=False,
+        live_vm_host_authority_system_manifest_source="/controller/manifest.json",
+        live_vm_host_authority_system_local_bases=[
+            {"digest": "a" * 64, "source": "/controller/base"}
+        ],
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/system-operations"
+        in rendered
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/state"
+        in rendered
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/systems"
+        in rendered
+    )
+    assert (
+        "ReadWritePaths=/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/baselines"
+        in rendered
+    )
+    assert "system-provisioning/local/rootfs/bases" not in rendered
+
+
 def test_existing_worker_provider_contract_is_preserved() -> None:
     defaults = _yaml(DEFAULTS)
     assert defaults["live_vm_host_worker_accounts"] == [

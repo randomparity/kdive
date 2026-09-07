@@ -92,6 +92,25 @@
                     assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', pool)
                 else:
                     assert architectures == []
+                manifest = value['system_manifest']
+                local_bases, remote_bases = value['system_local_bases'], value['system_remote_bases']
+                assert type(manifest) is str
+                assert type(local_bases) is list and type(remote_bases) is list
+                if manifest:
+                    assert manifest.startswith('/') and '\n' not in manifest and '\r' not in manifest
+                    assert '\x00' not in manifest and bool(local_bases) != bool(remote_bases)
+                    assert local_mutation
+                    assert not remote_bases or remote_module
+                    for base in local_bases:
+                        assert type(base) is dict and set(base) == {'source', 'digest'}
+                        assert type(base['source']) is str and base['source'].startswith('/')
+                        assert re.fullmatch(r'[0-9a-f]{64}', base['digest'])
+                    for base in remote_bases:
+                        assert type(base) is dict and set(base) == {'source', 'name'}
+                        assert type(base['source']) is str and base['source'].startswith('/')
+                        assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,254}', base['name'])
+                else:
+                    assert not local_bases and not remote_bases
         except Exception:
             sys.exit('invalid or incomplete provider authority deployment inputs')
     stdin: >-
@@ -121,9 +140,92 @@
           's3_credentials': provider_authority_host_s3_credentials_source,
           'remote_module': provider_authority_host_remote_module_enabled,
           'architectures': provider_authority_host_remote_module_architectures,
-          'pool': provider_authority_host_remote_libvirt_storage_pool} | to_json }}
+          'pool': provider_authority_host_remote_libvirt_storage_pool,
+          'system_manifest': provider_authority_host_system_manifest_source,
+          'system_local_bases': provider_authority_host_system_local_bases,
+          'system_remote_bases': provider_authority_host_system_remote_bases} | to_json }}
   changed_when: false
   check_mode: false
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Inspect authority System manifest source on the controller
+  ansible.builtin.stat:
+    path: "{{ provider_authority_host_system_manifest_source }}"
+    follow: false
+  delegate_to: localhost
+  become: false
+  register: provider_authority_host_system_manifest_source_stat
+  when:
+    - provider_authority_host_enabled | bool
+    - provider_authority_host_system_manifest_source | length > 0
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Require a protected regular authority System manifest source
+  ansible.builtin.assert:
+    that:
+      - provider_authority_host_system_manifest_source_stat.stat.exists
+      - provider_authority_host_system_manifest_source_stat.stat.isreg
+      - not provider_authority_host_system_manifest_source_stat.stat.islnk
+      - provider_authority_host_system_manifest_source_stat.stat.mode in ['0400', '0600']
+      - provider_authority_host_system_manifest_source_stat.stat.size > 0
+    quiet: true
+  when:
+    - provider_authority_host_enabled | bool
+    - provider_authority_host_system_manifest_source | length > 0
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Inspect authority System base sources on the controller
+  ansible.builtin.stat:
+    path: "{{ item.source }}"
+    follow: false
+  loop: >-
+    {{ provider_authority_host_system_local_bases + provider_authority_host_system_remote_bases }}
+  delegate_to: localhost
+  become: false
+  register: provider_authority_host_system_base_source_stats
+  when:
+    - provider_authority_host_enabled | bool
+    - provider_authority_host_system_manifest_source | length > 0
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Require protected regular authority System base sources
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - not item.stat.islnk
+      - item.stat.mode in ['0400', '0600']
+      - item.stat.size > 0
+    quiet: true
+  loop: "{{ provider_authority_host_system_base_source_stats.results | default([]) }}"
+  when:
+    - provider_authority_host_enabled | bool
+    - provider_authority_host_system_manifest_source | length > 0
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Verify canonical authority System manifest and base digests on the controller
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_python_interpreter | default('/usr/bin/python3') }}"
+      - "{{ role_path }}/../../scripts/validate_authority_system_provisioning.py"
+    stdin: >-
+      {{ {'manifest': provider_authority_host_system_manifest_source,
+          'authority_instance': provider_authority_host_instance,
+          'expected_provider_kind': ('local-libvirt' if provider_authority_host_system_local_bases else 'remote-libvirt'),
+          'local_bases': provider_authority_host_system_local_bases,
+          'remote_bases': provider_authority_host_system_remote_bases} | to_json }}
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  check_mode: false
+  when:
+    - provider_authority_host_enabled | bool
+    - provider_authority_host_system_manifest_source | length > 0
   no_log: true
   tags: [provider_authority_preflight]
 
