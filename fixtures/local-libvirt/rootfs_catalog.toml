@@ -262,11 +262,11 @@ makedumpfile_version = "1.7.7"  # resolute (1:1.7.7-1)
 drgn_version = "0.0.33"  # resolute (python3-drgn 0.0.33-1build1, universe)
 source = { kind = "cloud-image", url = "https://cloud-images.ubuntu.com/releases/resolute/release-20260823/ubuntu-26.04-server-cloudimg-amd64.img", sha256 = "8196be9d7958059cb56c6c75c80fdf6cee8a8885bc149ea791d7db1c7ef93035" }  # pragma: allowlist secret
 
-# N/A (ppc64le, deferred to #1167): Debian publishes only the `generic`/`nocloud` ppc64el variant,
-# not the `genericcloud` variant these x86_64 rows pin, and the debian family is still
-# customize_via="virt_customize" — it cannot cross-arch customize-boot on an x86_64 host until the
-# debian->boot migration (#1167) lands. Debian and Ubuntu ppc64le rows are added there, not here
-# (Ubuntu does publish a `ppc64el` cloud image); guarded by test_rootfs_catalog.py (ADR-0350, #1152).
+# N/A (ppc64le): Debian publishes only the `generic`/`nocloud` ppc64el variant, not the
+# `genericcloud` variant these x86_64 rows pin. The debian family rides the customization boot
+# since #1167, so the mechanism no longer blocks a cross-arch row; one is added with a suitable base
+# and its TCG proof, not here (Ubuntu does publish a `ppc64el` cloud image, so it is the nearer
+# candidate). Guarded by test_rootfs_catalog.py (ADR-0350, #1152).
 #
 # Scope note (ppc64le): fedora-kdive-build-44 (build-host toolchain) gets no ppc64le sibling — a
 # ppc64le build host only matters for compiling ppc64le kernels, a lane unproven in epic #1139;

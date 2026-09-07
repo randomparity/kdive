@@ -10,8 +10,8 @@ from kdive.domain.catalog.images import Capability
 from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS
 from kdive.images.families import _FAMILIES
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer, _mac_tag
-from kdive.images.families.renderers import render_argv
 from kdive.images.rootfs.kinds import RootfsImageKind
+from tests.support.customize_steps import baked_paths
 
 
 def test_mac_tag_selinux_permissive() -> None:
@@ -64,26 +64,7 @@ def test_every_declared_tag_is_evidenced(family: FamilyCustomizer) -> None:
                 )
 
 
-def _baked_paths(argv: list[str]) -> set[str]:
-    """Guest paths the argv actually *creates*: ``--write dest:content`` / ``--upload src:dest``.
-
-    Matches only file-creating destinations — not any substring of the joined argv — so a path
-    merely *referenced* in a ``--run-command`` (never materialized) is not mistaken for a baked
-    marker. The validator does an exact ``exists <path>``, so the guard must prove creation, not
-    mention.
-    """
-    created: set[str] = set()
-    for flag, value in zip(argv, argv[1:], strict=False):
-        if flag == "--write":  # dest:content
-            created.add(value.split(":", 1)[0])
-        elif flag == "--upload":  # host-src:dest
-            created.add(value.rsplit(":", 1)[1])
-    return created
-
-
-def test_guest_contract_markers_are_baked_by_declaring_families(
-    tmp_path: Path, staged_cleanup: list[Path]
-) -> None:
+def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) -> None:
     # The tests above prove a declared tag maps to an installed *package*. This proves the second
     # vocabulary — the guest-contract *file probe* (validation.GUEST_CONTRACT_PATHS) — is created
     # by customize_steps for every family that declares the tag, and NOT created when the tag is
@@ -103,9 +84,9 @@ def test_guest_contract_markers_are_baked_by_declaring_families(
                     distro=name,
                     version=version,
                 )
-                created = _baked_paths(
-                    render_argv(family.customize_steps(ctx), cleanup=staged_cleanup)
-                )
+                # Only file-creating steps count — a path merely referenced by a RunCommand is
+                # never materialized, and the validator does an exact ``exists <path>``.
+                created = baked_paths(family.customize_steps(ctx))
                 declared = family.capabilities(kind, name, version)
                 for element, path in GUEST_CONTRACT_PATHS.items():
                     baked = path in created

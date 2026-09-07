@@ -41,10 +41,10 @@ runs are slow but do not spuriously fail readiness.
 
 "Customize-boot" is how KDIVE bakes a debug-ready base image: it boots the vendor
 cloud image once, runs the first-boot customization (install `drgn`, `kdump`,
-`openssh-server`, seal), and publishes the sealed image. The rhel family
-(Fedora, Rocky, CentOS Stream) customizes via an in-guest **boot** pass, which is
-cross-arch capable; the debian family still customizes via `virt_customize`, which
-is x86_64-only today.
+`openssh-server`, seal), and publishes the sealed image. Both families — rhel
+(Fedora, Rocky, CentOS Stream) and debian (Debian, Ubuntu) — customize via the same
+in-guest **boot** pass (ADR-0345, #1167): the guest runs its own package manager, so
+the build needs no libguestfs appliance network and is cross-arch capable.
 
 The column that matters for a newcomer is whether a given distro has actually
 reached the `kdive-customize-ok` marker and published on a given arch.
@@ -59,8 +59,8 @@ available.
 | Rocky 9 / CentOS Stream 9 (EL9) | rhel (boot) | ✅ verified (Rocky 9) | ⚠️ **not verified — gated** (see below) |
 | Rocky 10 / CentOS Stream 10 (EL10) | rhel (boot) | ◐ shared EL boot path | ⚠️ **not verified — gated** (same as EL9) |
 | Rocky 8 (EL8) | rhel (boot) | ◐ shared EL boot path | — no ppc64le port (Rocky 8 is x86_64 + aarch64) |
-| Debian 12, 13 | debian (`virt_customize`) | ✅ supported | — deferred (#1167) |
-| Ubuntu 24.04, 26.04 LTS | debian (`virt_customize`) | ◐ shared debian path | — deferred (#1167) |
+| Debian 12, 13 | debian (boot) | ◐ shared boot path | — no `genericcloud` ppc64el image (see below) |
+| Ubuntu 24.04, 26.04 LTS | debian (boot) | ◐ shared boot path | — no row yet (Ubuntu does publish `ppc64el`) |
 
 Notes on the matrix:
 
@@ -74,15 +74,23 @@ Notes on the matrix:
 - **EL10 and Rocky 8 on x86_64** ship catalog- and loader-validated and ride the
   same rhel-family boot mechanism as the proven EL9 path, but do not have their own
   recorded end-to-end customize-boot proof — hence ◐, not ✅.
+- **Debian on x86_64** moved from the offline `virt-customize` path to the shared
+  customization boot in #1167 (the family emits an `apt-get update` and installs
+  with a non-interactive `apt-get`), so a Debian-family image no longer needs the
+  libguestfs appliance network (`passt`) on the build host — the failure seen on
+  Ubuntu 24.04 hosts (#694). Until a Debian customize boot is recorded reaching
+  `kdive-customize-ok` it is ◐, not ✅.
 - **Ubuntu 24.04 / 26.04 on x86_64** ship catalog- and loader-validated rows on the
-  same debian-family `virt_customize` mechanism as the Debian rows, without their own
+  same debian-family customization boot as the Debian rows, without their own
   recorded end-to-end build proof — hence ◐. The 24.04 row's `python3-drgn` (0.0.25) is
   below the live-introspection threshold, so `introspect.run` reports it `incapable`;
   26.04 (0.0.33) is capable.
-- **Debian ppc64le** is deferred to **#1167**: Debian publishes only the
-  `generic`/`nocloud` ppc64el variant (not the `genericcloud` variant the x86_64
-  rows pin), and the debian family still uses `virt_customize`, which cannot
-  cross-arch customize-boot on an x86_64 host.
+- **Debian ppc64le** has no catalog row because Debian publishes only the
+  `generic`/`nocloud` ppc64el variant, not the `genericcloud` variant the x86_64
+  rows pin. The mechanism no longer blocks it: a debian-family row can now
+  customize-boot cross-arch under TCG like the rhel rows, once a suitable base and
+  its proof exist. Ubuntu does publish a `ppc64el` cloud image, so Ubuntu ppc64le
+  rows are the nearer candidate; none is added until a TCG proof is recorded.
 
 ### Known gap — EL9 customize-boot on ppc64le (#1174)
 

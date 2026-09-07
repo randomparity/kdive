@@ -1,9 +1,9 @@
 """Typed customization ``Step`` value objects shared by every rootfs family (ADR-0345, #1147).
 
 A :class:`FamilyCustomizer` emits one ordered list of these ``Step``s describing how to
-customize a rootfs. Two renderers consume the same list: an argv renderer (the
-``virt-customize`` path) and an offline-injector + firstboot renderer (the boot-to-self-customize
-path). Steps are pure data — no rendering or execution logic lives here.
+customize a rootfs. The build plane partitions the list into file-ops it applies offline via
+guestfish and exec-ops it renders into the firstboot script the guest runs during the
+customization boot. Steps are pure data — no rendering or execution logic lives here.
 """
 
 from __future__ import annotations
