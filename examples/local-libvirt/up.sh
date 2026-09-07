@@ -207,17 +207,19 @@ PY
 #    identity: it manages system-scope domains, runs libguestfs/kexec, and reads the
 #    root:0600 console log virtlogd writes.
 #
-#    All three start inside one `sudo -E bash -c`: each `nohup env … python -m kdive <proc>`
+#    All three start inside one `sudo bash -c`: each `nohup env … python -m kdive <proc>`
 #    execs down to the interpreter, so `$!` is the real kdive pid (not a sudo/bash wrapper),
 #    and nohup keeps it alive after the inner bash exits. The inner shell reads the env
-#    preserved by `-E` (KDIVE_PYTHON / KDIVE_STACK_LOG_DIR / the per-role DSNs). Each process
+#    carried across by `--preserve-env=<list>` (every KDIVE_* plus the S3 credentials);
+#    an explicit list, not `-E`, because sudo-rs (Ubuntu 26.04) ignores `-E`. Each process
 #    gets exactly its own authority as KDIVE_DATABASE_URL and the other three scrubbed
 #    (#1929, the scripts/live-stack/lib.sh shape). The three real pids land in the
 #    user-owned pid file, which down.sh reads to stop them.
 step "start server/worker/reconciler as root"
 sudo -n true 2>/dev/null || sudo -v
 mkdir -p "${log_dir}" "$(dirname "${pid_file}")"
-mapfile -t pids < <(sudo -E bash -c '
+keep_env="$(compgen -e | grep -E '^(KDIVE_|AWS_ACCESS_KEY_ID$|AWS_SECRET_ACCESS_KEY$)' | paste -sd,)"
+mapfile -t pids < <(sudo --preserve-env="${keep_env}" bash -c '
   set -euo pipefail
   for proc in server worker reconciler; do
     case "${proc}" in
@@ -234,11 +236,11 @@ mapfile -t pids < <(sudo -E bash -c '
 ')
 printf '%s\n' "${pids[@]}" >"${pid_file}"
 # A short count means the inner root shell never echoed three pids — almost always sudo
-# unable to preserve KDIVE_* (sudoers env_reset / missing env_keep), or a process that could
+# refusing --preserve-env (sudoers without SETENV), or a process that could
 # not exec. Fail loudly here rather than time out opaquely on readiness below.
 if ((${#pids[@]} != 3)); then
   echo "expected 3 pids from the start step, got ${#pids[@]}; sudo may be unable to preserve" \
-    "the environment (need 'sudo -E' / env_keep for KDIVE_*). Check ${log_dir}/*.log" >&2
+    "the environment (--preserve-env refused; check sudoers SETENV). Check ${log_dir}/*.log" >&2
   exit 1
 fi
 
