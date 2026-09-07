@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import re
@@ -51,9 +52,35 @@ _DEPMOD = "depmod"
 # depmod is an sbin tool — /usr/sbin under merged-usr, /sbin under split-usr. Resolution never
 # consults PATH: the fixed live-worker gate execs the worker from an environment allowlist that
 # omits it, so a bare name falls back to os.defpath (/bin:/usr/bin) and misses /usr/sbin, which
-# reported a missing package on hosts that had one (#2300). Same four directories
-# ``jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools against.
-_DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
+# reported a missing package on hosts that had one (#2300). The last four are the set
+# ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
+# against; the /usr/local pair leads because an ungated worker inherits a PATH carrying it today,
+# and a source-built kmod — routine on a kernel-testing box — installs depmod there. A host whose
+# depmod is outside all six sets KDIVE_DEPMOD.
+_DEPMOD_SEARCH_DIRS = (
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+)
+# Exec-side errnos: the binary is absent, or present and unusable. Every other OSError
+# subprocess.run can raise comes from the spawn side — pipe creation (EMFILE/ENFILE) or fork
+# (EAGAIN/ENOMEM) — and is transient host pressure, not a broken depmod. Those must stay
+# retryable, so catching OSError wholesale would dead-letter an install a retry would complete.
+_DEPMOD_EXEC_ERRNOS = frozenset(
+    {
+        errno.ENOENT,
+        errno.EACCES,
+        errno.EPERM,
+        errno.ENOEXEC,
+        errno.EISDIR,
+        errno.ELOOP,
+        errno.ENOTDIR,
+        errno.ENAMETOOLONG,
+    }
+)
 
 
 class DepmodRunner(Protocol):
@@ -118,9 +145,9 @@ def _run_host_depmod(*, basedir: Path, version: str) -> None:
     Raises:
         CategorizedError: the ``CONFIGURATION_ERROR`` and ``MISSING_DEPENDENCY`` cases
             :func:`_resolve_depmod` raises; ``MISSING_DEPENDENCY`` carrying the resolved path when
-            that binary cannot be executed; ``INFRASTRUCTURE_FAILURE`` on a non-zero exit, carrying
-            the trimmed ``depmod`` stderr in ``details`` so the cause is legible from the tool
-            envelope (the #1146 note).
+            that binary cannot be executed; ``INFRASTRUCTURE_FAILURE`` when the host cannot spawn
+            it at all, and on a non-zero exit, carrying the trimmed ``depmod`` stderr in
+            ``details`` so the cause is legible from the tool envelope (the #1146 note).
     """
     depmod = _resolve_depmod()
     try:
@@ -131,6 +158,14 @@ def _run_host_depmod(*, basedir: Path, version: str) -> None:
             check=False,
         )
     except OSError as exc:
+        if exc.errno not in _DEPMOD_EXEC_ERRNOS:
+            # Spawn-side pressure (out of descriptors, out of processes): depmod is fine and a
+            # retry can succeed, so this stays retryable rather than dead-lettering the install.
+            raise CategorizedError(
+                "the host could not spawn depmod to index the kernel modules for staging",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"depmod": depmod, "error": type(exc).__name__, "errno": exc.errno},
+            ) from exc
         # Every exec failure, not just FileNotFoundError: a resolved binary can vanish before the
         # exec, and an operator-named override can be unreadable (EACCES) or not an executable
         # format (ENOEXEC, a bare OSError). Uncaught, those escape the uniform envelope entirely.

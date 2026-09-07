@@ -9,7 +9,9 @@ appliance, which fails for a ppc64le module tree under an x86_64 appliance (``Ex
 
 from __future__ import annotations
 
+import errno
 import io
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -198,7 +200,10 @@ def test_run_host_depmod_runs_the_resolved_absolute_path(
     # bare name resolves through os.defpath (/bin:/usr/bin), which omits /usr/sbin (#2300).
     assert captured["args"] == ["/usr/sbin/depmod", "-b", str(tmp_path), _VERSION]
     # The search is restricted to the fixed host-tool list, not the inherited environment.
-    assert captured["which"] == ("depmod", "/usr/sbin:/usr/bin:/sbin:/bin")
+    assert captured["which"] == (
+        "depmod",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    )
 
 
 def test_run_host_depmod_unresolvable_names_searched_directories(
@@ -209,7 +214,14 @@ def test_run_host_depmod_unresolvable_names_searched_directories(
         gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
     # The searched set is in the envelope so the failure is diagnosable without host access.
-    assert exc.value.details.get("searched") == ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+    assert exc.value.details.get("searched") == [
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    ]
     # Both remedies, because the binary may be genuinely absent *or* merely outside the searched
     # set — asserting "install kmod" alone is the false remedy #2300 was filed about.
     assert "kmod" in str(exc.value)
@@ -280,6 +292,26 @@ def test_unexecutable_depmod_is_missing_dependency(
     # dead-letters instead of retrying a binary that will not become executable.
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert exc.value.details.get("depmod") == resolved
+
+
+@pytest.mark.parametrize("spawn_errno", [errno.EMFILE, errno.EAGAIN, errno.ENOMEM])
+def test_spawn_pressure_stays_retryable_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_errno: int
+) -> None:
+    # subprocess.run raises OSError from pipe creation and fork too, not only from the exec. A
+    # worker host short of descriptors or processes must not have an in-flight install
+    # dead-lettered as a missing dependency — MISSING_DEPENDENCY is non-retryable, so catching
+    # OSError wholesale would turn "retry me" into "your depmod is broken".
+    _stub_which(monkeypatch, "/usr/sbin/depmod")
+
+    def raise_spawn_failure(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError(spawn_errno, os.strerror(spawn_errno))
+
+    monkeypatch.setattr(gkw.subprocess, "run", raise_spawn_failure)
+    with pytest.raises(CategorizedError) as exc:
+        gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details.get("errno") == spawn_errno
 
 
 def test_run_host_depmod_nonzero_surfaces_stderr(
