@@ -19,8 +19,9 @@ repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 source "${repo_root}/scripts/live-stack/env.sh"
 
 # The project this example onboards and mints a token for. One name, threaded through the
-# seed step (up.sh) and the token claims (mint-token.sh) so they always agree.
-export KDIVE_PROJECT="${KDIVE_PROJECT:-local}"
+# seed step (up.sh) and the token claims (mint-token.sh) so they always agree. `demo` matches
+# the walkthrough, `just onboard`, and the Kubernetes demo chart.
+export KDIVE_PROJECT="${KDIVE_PROJECT:-demo}"
 
 # Quota/budget seeded for the project. Generous defaults for a single-developer box.
 export KDIVE_LIMIT_KCU="${KDIVE_LIMIT_KCU:-1000000}"

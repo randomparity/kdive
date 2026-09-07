@@ -110,6 +110,38 @@ wrong audience.
 > re-export and reconnect the server. A token exported in a shell *after* Claude
 > Code is already running does not reach an already-loaded MCP entry.
 
+## Connecting to a local-libvirt host
+
+A stack started with [`examples/local-libvirt/up.sh`](../../../examples/local-libvirt/README.md)
+serves MCP on `http://127.0.0.1:8000/mcp` and has already written a `.mcp.json` with that URL
+into your kernel tree (`KDIVE_KERNEL_SRC`, default `~/src/linux`), so there is nothing to copy
+from this page. Two local specifics replace the stable URL and external IdP above:
+
+1. **Mint the token from the bundled mock issuer**, which runs on the host and accepts any
+   caller — never expose it beyond the machine:
+
+   ```bash
+   export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
+   ```
+
+   The token grants `admin` on the seeded `demo` project plus the platform roles, so every
+   tool works. It lasts `KDIVE_TOKEN_TTL` seconds (default 30 days).
+
+2. **Launch the client from the kernel tree**, after the export, so Claude Code reads both
+   the `.mcp.json` and `${KDIVE_TOKEN}` at startup:
+
+   ```bash
+   cd ~/src/linux && claude
+   ```
+
+   Approve the `kdive` server when prompted. If the token expires, re-run the export and
+   reconnect the server (`/mcp` → reconnect).
+
+If you started the processes by hand instead (the
+[walkthrough](../../operating/providers/local-libvirt-walkthrough.md#connect-an-mcp-client)),
+copy [`mcp.json`](mcp.json) yourself with `url` set to `http://127.0.0.1:8000/mcp` and mint
+the token with `KDIVE_PROJECT=<the project you seeded>`.
+
 ## Connecting to a bundled-backends demo (Kubernetes)
 
 The `values-demo.yaml` deployment (in-chart Postgres/MinIO/mock-OIDC) does **not**

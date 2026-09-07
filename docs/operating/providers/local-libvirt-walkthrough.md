@@ -100,8 +100,10 @@ KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/operations/check-local-libvirt.sh
 
 Fix what it reports. One failure is expected to remain on most hosts and is **not** fatal for the
 core lifecycle: the `import guestfs, drgn` check is only needed for the **kdump capture** method
-(Step 5). See [kdump capture prerequisites](#kdump-capture-prerequisites) for the `drgn`/libguestfs
-wiring and a Python-version caveat.
+(Step 5). Run the preflight with `KDIVE_PREFLIGHT_KDUMP=optional` to report that one check as a
+`WARN` and exit 0 when everything else passes (the `examples/local-libvirt/up.sh` bring-up does
+this by default). See [kdump capture prerequisites](#kdump-capture-prerequisites) for the
+`drgn`/libguestfs wiring and a Python-version caveat.
 
 The preflight also flags an unreadable host kernel (`/boot/vmlinuz-*`), which blocks the Step 6
 `build-fs` image build on Debian/Ubuntu; fix it with the `chmod` above. Run the preflight as the
@@ -414,9 +416,8 @@ when it connects**, so after a token expires you must re-export it and then **re
 
 The [`examples/local-libvirt/`](../../../examples/local-libvirt/) helpers automate this end to
 end: `up.sh` installs the `.mcp.json` into `KDIVE_KERNEL_SRC` (merging, not clobbering, any
-existing file) and starts the trio; see that example's README for the full bring-up. Note the
-example seeds and tokenises a project named `local` by default — set `KDIVE_PROJECT=demo` to match
-this walkthrough, or seed `local` instead of `demo` in Step 4.
+existing file) and starts the trio; see that example's README for the full bring-up. The example
+seeds and tokenises the same `demo` project as this walkthrough.
 
 **Request an allocation.** With the project onboarded and the resource discovered, this is granted:
 

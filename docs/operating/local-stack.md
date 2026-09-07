@@ -3,6 +3,13 @@
 This guide assumes KDIVE is installed as a Python package on the libvirt host. It does not
 use `just` or require running from a source checkout.
 
+> **Not the local-libvirt install path.** The compose app tier below runs the worker in a
+> container with no `/dev/kvm` or libvirt socket, so it cannot provision guests. To drive VMs on
+> the host, use [`examples/local-libvirt/`](../../examples/local-libvirt/README.md) (one-command
+> bring-up with host processes) or the
+> [local-libvirt walkthrough](providers/local-libvirt-walkthrough.md). This page covers the
+> backends, schema, and seeding steps those paths share.
+
 The app processes (`server` / `worker` / `reconciler`) and the `migrate` one-shot now run
 from the published image via the reference compose app tier (ADR-0088); the hand-rolled
 `stack` supervisor and the `install-compose`/`print-local-env` helpers were retired. See

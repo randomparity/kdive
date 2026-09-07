@@ -6,8 +6,13 @@ lifecycle from an MCP client.
 
 The three KDIVE processes run **as root against `qemu:///system`** (the representative
 identity for managing system-scope QEMU/KVM domains, libguestfs, kexec, and the console
-log), the stack onboards a project named **`local`**, and an MCP client opened in your
+log), the stack onboards a project named **`demo`**, and an MCP client opened in your
 kernel tree (`~/src/linux` by default) drives that very checkout.
+
+This is the supported first-run path for a local-libvirt install. The
+[local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md) is the
+step-by-step reference for what `up.sh` does and for the host preparation it expects (packages,
+directories, the guest image); this page is the operating manual for the scripts.
 
 This example calls the real product commands (`docker compose`, `python -m kdive migrate`,
 `python -m kdive seed-project`) rather than the source-tree `just` recipes, so it mirrors a
@@ -28,11 +33,14 @@ and the [four-method live run](../../docs/operating/runbooks/four-method-live-ru
   [live-stack runbook §3](../../docs/operating/runbooks/live-stack.md).
 - A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
 - For the **kdump capture leg only**: the worker venv must `import guestfs, drgn`. The
-  preflight (`scripts/check-local-libvirt.sh`) detects the gap and prints the one-time fix;
+  preflight (`scripts/operations/check-local-libvirt.sh`) detects the gap and prints the one-time fix;
   see the [four-method runbook §4b](../../docs/operating/runbooks/four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
 
 `up.sh` runs the preflight first and stops with an actionable message if anything is
-missing.
+missing. The kdump-only `guestfs`/`drgn` check is the one exception: `up.sh` runs the preflight
+with `KDIVE_PREFLIGHT_KDUMP=optional`, so that gap prints as a `WARN` with the fix and the
+bring-up continues — provision, build, boot, debug, and the other capture methods do not need
+it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 
 > **Day-to-day development?** If you already have the stack seeded and just want to start/stop
 > the kdive processes, use `scripts/live-stack/up.sh` / `down.sh` / `status.sh` — the
@@ -127,7 +135,7 @@ Everything is overridable from the environment before running the scripts:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `KDIVE_PROJECT` | `local` | Project the stack seeds and the token grants `admin` on. |
+| `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | `qemu:///system` | libvirt connection the worker drives. |
