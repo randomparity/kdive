@@ -10,6 +10,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.services.systems.authority_owned as authority_owned
 from kdive.components.references import ROOTFS_COMPONENT
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capacity.state import SystemState
@@ -408,6 +409,7 @@ def test_preactivation_authority_system_fences_cancel_and_ordinary_mutations(
                 await conn.execute("UPDATE systems SET state='ready' WHERE id=%s", (system_id,))
                 resolver = systems_support.provider_resolver()
                 runtime = await resolver.runtime_for_system(conn, UUID(system_id))
+                assert await authority_owned.ordinary_mutation_is_fenced(conn, UUID(system_id))
 
             async def audit_failure(*_args: object, **_kwargs: object) -> None:
                 raise RuntimeError("audit failure")

@@ -132,6 +132,17 @@ async def authorize_ssh_key(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
             try:
+                normalized = validate_authorized_public_key(public_key)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(system_id, exc)
+            # Probe the stable key before the admission guard or any provider read. An existing
+            # job remains a replay even when a later activation now fences fresh SSH mutations.
+            fingerprint = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+            dedup_key = f"{system_id}:authorize_ssh_key:{fingerprint}"
+            replay = await dedup_replay(conn, dedup_key)
+            if replay is not None:
+                return ToolResponse.from_job(replay)
+            try:
                 await check_external_boot_admission(
                     conn,
                     uid,
@@ -154,14 +165,9 @@ async def authorize_ssh_key(
                     detail=_UNPROVISIONED_DETAIL,
                     data={"reason": "ssh_not_provisioned"},
                 )
-            try:
-                normalized = validate_authorized_public_key(public_key)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(system_id, exc)
             # The dedup_key includes the key fingerprint so re-authorizing the *same* key is
             # idempotent, but a *distinct* key gets its own job — a System-only key would collapse
             # every key after the first into the first job (dedup_key is a permanent UNIQUE column).
-            fingerprint = hashlib.sha256(normalized.encode()).hexdigest()[:16]
             # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing but the envelope render follows it, so the lock never spans later work.
@@ -170,7 +176,7 @@ async def authorize_ssh_key(
                 # its only replay path — a caller has no keyed escape hatch. Probed ahead of the
                 # guard: re-authorizing the same key while its job is live must keep returning
                 # that job rather than becoming a refusal.
-                replay = await dedup_replay(conn, f"{system_id}:authorize_ssh_key:{fingerprint}")
+                replay = await dedup_replay(conn, dedup_key)
                 if replay is not None:
                     return ToolResponse.from_job(replay)
                 try:
@@ -187,7 +193,7 @@ async def authorize_ssh_key(
                     JobKind.AUTHORIZE_SSH_KEY,
                     AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
                     job_authorizing(ctx, system.project),
-                    f"{system_id}:authorize_ssh_key:{fingerprint}",
+                    dedup_key,
                 )
     return ToolResponse.from_job(job)
 
