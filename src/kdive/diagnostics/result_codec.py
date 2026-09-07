@@ -1,11 +1,13 @@
 """Inline (de)serialization of worker-vantage CheckResults carried in a job's result_ref (ADR-0164).
 
-The diagnostics worker job returns its two CheckResults as a compact JSON string inline in
+The diagnostics worker job returns its CheckResults as a compact JSON string inline in
 ``result_ref`` (the verdict is small, non-secret, and read only by the dispatcher). The dispatcher
 reconstructs each result through :class:`CheckResult`, re-running its invariants, and accepts only
-the two worker-vantage check ids — a malformed, empty, or unexpected payload becomes a
-:class:`ResultCodecError` that the dispatcher maps to an ``error`` verdict rather than injecting a
-surprising result verbatim.
+the registered worker-vantage check ids. A payload that cannot be parsed at all (empty, invalid
+JSON, no ``results`` list) raises :class:`ResultCodecError` for the whole batch, since there is no
+per-item boundary to attribute it to. A single rejected item (an unexpected id, a bad enum value,
+an invariant violation) instead degrades to an ``error`` :class:`CheckResult` for that item alone,
+so one bad id cannot poison its recognised siblings.
 """
 
 from __future__ import annotations
@@ -15,14 +17,24 @@ from typing import Any
 
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
+    GUEST_ARCH_ACCEL_ID,
     MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
+    PSERIES_FADUMP_ID,
     CheckResult,
     CheckStatus,
 )
 from kdive.domain.errors import ErrorCategory
 
-_ALLOWED_IDS = frozenset({PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID})
+_ALLOWED_IDS = frozenset(
+    {
+        PROVIDER_TLS_ID,
+        GDBSTUB_ACL_ID,
+        MULTIARCH_GDB_ID,
+        PSERIES_FADUMP_ID,
+        GUEST_ARCH_ACCEL_ID,
+    }
+)
 
 
 class ResultCodecError(ValueError):
@@ -53,7 +65,11 @@ def serialize_results(results: list[CheckResult]) -> str:
 
 
 def deserialize_results(raw: str | None) -> list[CheckResult]:
-    """Parse and validate inline worker results; raise ResultCodecError on anything unexpected."""
+    """Parse inline worker results, degrading each rejected item to its own ``error`` result.
+
+    Raises ResultCodecError only when the payload itself cannot be parsed (empty, invalid JSON,
+    no ``results`` list) — there is no per-item boundary to attribute that to.
+    """
     if not raw:
         raise ResultCodecError("empty diagnostics result")
     try:
@@ -63,7 +79,21 @@ def deserialize_results(raw: str | None) -> list[CheckResult]:
     items = doc.get("results") if isinstance(doc, dict) else None
     if not isinstance(items, list):
         raise ResultCodecError("diagnostics result has no 'results' list")
-    return [_reconstruct(item) for item in items]
+    return [_reconstruct_or_error(item) for item in items]
+
+
+def _reconstruct_or_error(item: Any) -> CheckResult:
+    """Reconstruct one item, mapping a rejected item to an ``error`` result for its own check id."""
+    try:
+        return _reconstruct(item)
+    except ResultCodecError as exc:
+        check_id = item.get("check_id") if isinstance(item, dict) else None
+        return CheckResult(
+            check_id=check_id if isinstance(check_id, str) else "unknown",
+            status=CheckStatus.ERROR,
+            detail=str(exc),
+            failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
 
 
 def _reconstruct(item: Any) -> CheckResult:
