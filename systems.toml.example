@@ -201,6 +201,33 @@ capabilities = ["ssh", "apparmor", "kdump", "drgn"]
 kind = "s3"
 object_key = "rootfs/local/debian-kdive-ready-13.qcow2"
 
+# Ubuntu LTS entries (24.04 noble + 26.04 resolute) ride the same `debian` customizer. Both ship
+# makedumpfile < 1.7.9 (host_dump for a v7.0-class kernel); 24.04's python3-drgn (0.0.25) is below
+# the live-introspection threshold, 26.04's (0.0.33) is not.
+[[image]]
+provider = "local-libvirt"
+name = "ubuntu-kdive-ready-24.04"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["ssh", "apparmor", "kdump", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/ubuntu-kdive-ready-24.04.qcow2"
+
+[[image]]
+provider = "local-libvirt"
+name = "ubuntu-kdive-ready-26.04"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["ssh", "apparmor", "kdump", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/ubuntu-kdive-ready-26.04.qcow2"
+
 # A `staged-path` source (local-libvirt only, ADR-0228) registers an operator-staged rootfs
 # FILE — the qcow2 `build-fs` writes to local disk — without any object-store upload. It seeds
 # `registered` (bootable) immediately and is discoverable from the MCP surface

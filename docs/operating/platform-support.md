@@ -60,6 +60,7 @@ available.
 | Rocky 10 / CentOS Stream 10 (EL10) | rhel (boot) | ◐ shared EL boot path | ⚠️ **not verified — gated** (same as EL9) |
 | Rocky 8 (EL8) | rhel (boot) | ◐ shared EL boot path | — no ppc64le port (Rocky 8 is x86_64 + aarch64) |
 | Debian 12, 13 | debian (boot) | ◐ shared boot path | — no `genericcloud` ppc64el image (see below) |
+| Ubuntu 24.04, 26.04 LTS | debian (boot) | ◐ shared boot path | — no row yet (Ubuntu does publish `ppc64el`) |
 
 Notes on the matrix:
 
@@ -79,11 +80,17 @@ Notes on the matrix:
   libguestfs appliance network (`passt`) on the build host — the failure seen on
   Ubuntu 24.04 hosts (#694). Until a Debian customize boot is recorded reaching
   `kdive-customize-ok` it is ◐, not ✅.
+- **Ubuntu 24.04 / 26.04 on x86_64** ship catalog- and loader-validated rows on the
+  same debian-family customization boot as the Debian rows, without their own
+  recorded end-to-end build proof — hence ◐. The 24.04 row's `python3-drgn` (0.0.25) is
+  below the live-introspection threshold, so `introspect.run` reports it `incapable`;
+  26.04 (0.0.33) is capable.
 - **Debian ppc64le** has no catalog row because Debian publishes only the
   `generic`/`nocloud` ppc64el variant, not the `genericcloud` variant the x86_64
   rows pin. The mechanism no longer blocks it: a debian-family row can now
   customize-boot cross-arch under TCG like the rhel rows, once a suitable base and
-  its proof exist.
+  its proof exist. Ubuntu does publish a `ppc64el` cloud image, so Ubuntu ppc64le
+  rows are the nearer candidate; none is added until a TCG proof is recorded.
 
 ### Known gap — EL9 customize-boot on ppc64le (#1174)
 
