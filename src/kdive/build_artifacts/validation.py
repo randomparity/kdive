@@ -777,8 +777,27 @@ def _boot_release(boot: IO[bytes], arch: str) -> str:
             raise _build_failure("boot/vmlinuz has no bounded x86 kernel version string")
         release = release.partition(b" ")[0]
         return _validated_release(release)
+    # ppc64le: the ELF boot member is uncompressed and the "Linux version " banner can sit
+    # well past the first _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES of the file (e.g. ~27 MiB
+    # into a 64 MiB stripped Fedora ppc64le kernel — #1204).  Scan in chunks bounded by
+    # _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES; keep a short overlap across chunk boundaries
+    # so a marker split between two reads is not missed.
+    _LINUX_BANNER_MARKER = b"Linux version "
+    _OVERLAP = len(_LINUX_BANNER_MARKER) - 1 + 64  # marker boundary + max release token
     boot.seek(0)
-    return _release_from_linux_banner(boot.read(_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES))
+    tail = b""
+    total = 0
+    while total < _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES:
+        chunk = boot.read(_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES)
+        if not chunk:
+            break
+        data = tail + chunk
+        release = _optional_linux_release(data)
+        if release is not None:
+            return release
+        tail = data[-_OVERLAP:]
+        total += len(chunk)
+    raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
 
 
 def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile[bytes]:
