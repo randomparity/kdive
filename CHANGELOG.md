@@ -551,9 +551,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread baseline intent callback
 - Expose baseline pre-extraction intent seam
 - Share libvirt boot identity
-- Simplify tools.invoke's binding-failure classification
-- Inline the one-caller leaseholding-state tuple
 - Tighten the depmod search-list rationale
+- Inline the one-caller leaseholding-state tuple
+- Simplify tools.invoke's binding-failure classification
 
 ### Documentation
 
@@ -1489,19 +1489,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop the retired virt-customize passt gap from the apt-host guidance
 - Document artifacts.get's request wrapper exception
 - Scope the artifacts.get wrapper claim to this surface
-- Design the worker-granted mutation-obligation discharge
-- Correct the discharge caller inventory and split the worker path
-- Name an owner for the already-leaked obligations follow-up
-- Record the fence delta and cover every reclaim call shape
-- Pin the discharge to one System and correct the fence rationale
-- Design the allocation lease deadline disclosure
-- Apply design review to the lease disclosure spec
 - Design explicit depmod resolution for module staging
 - Carry depmod override across the live-worker gate
 - Name the depmod exec-failure category and validate scope
 - Record the drop-in override channel and validate home
 - Stop hand-listing the depmod search directories
 - State the worker's actual privilege level
+- Design the allocation lease deadline disclosure
+- Apply design review to the lease disclosure spec
+- Design the worker-granted mutation-obligation discharge
+- Correct the discharge caller inventory and split the worker path
+- Name an owner for the already-leaked obligations follow-up
+- Record the fence delta and cover every reclaim call shape
+- Pin the discharge to one System and correct the fence rationale
 
 ### Fixed
 
@@ -2467,12 +2467,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Put uv's install directory on PATH for non-interactive shells
 - Make the checkout and kernel tree traversable by the worker accounts
 - Accept all registered worker-vantage check ids
-- Discharge mutation obligations through a worker-granted path
-- Bind tools.invoke's ValidationError to name field/kind detail
-- Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
-- Stop mislabeling a body-raised ValidationError as bad arguments
-- Couple suggested_next_actions to the same binding-failure flag
-- Disclose the lease deadline and its reference clock
 - Resolve depmod explicitly instead of through PATH
 - Keep spawn-pressure depmod failures retryable
 - Stop /usr/local shadowing the packaged depmod
@@ -2480,6 +2474,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the depmod search path root-owned
 - Drop the KDIVE_DEPMOD override, resolve by fixed list
 - Name the searched directories in the failure message
+- Disclose the lease deadline and its reference clock
+- Bind tools.invoke's ValidationError to name field/kind detail
+- Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
+- Stop mislabeling a body-raised ValidationError as bad arguments
+- Couple suggested_next_actions to the same binding-failure flag
+- Guide boot pairing corrections
+- Complete pairing recovery hint
+- Discharge mutation obligations through a worker-granted path
 
 ### Security
 

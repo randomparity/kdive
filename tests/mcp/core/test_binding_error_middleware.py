@@ -74,6 +74,27 @@ def _profile_validation_error() -> ValidationError:
     raise AssertionError("expected a ValidationError")
 
 
+def _profile_pairing_validation_error() -> ValidationError:
+    """A profile root error whose message must guide the agent to the valid boot method."""
+    try:
+        _CallModel.model_validate(
+            {
+                "profile": {
+                    "schema_version": 1,
+                    "arch": "x86_64",
+                    "boot_method": "disk-image",
+                    "kernel_source_ref": "linux-6.9",
+                    "provider": {
+                        "local-libvirt": {"rootfs": {"kind": "local", "path": "/tmp/rootfs.qcow2"}}
+                    },
+                }
+            }
+        )
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
 class _BuildCallModel(BaseModel):
     """Mirrors the binding model FastMCP builds for ``runs.create``: a typed ``build_profile``."""
 
@@ -135,6 +156,22 @@ def test_binding_error_on_typed_profile_tool_becomes_configuration_error() -> No
     errors = envelope["data"].get("errors")
     assert isinstance(errors, list) and errors  # field-path entries surfaced
     assert all(set(e) <= {"loc", "msg", "type"} for e in errors)  # no input/ctx echoed
+
+
+def test_pairing_binding_error_exposes_actionable_boot_method() -> None:
+    envelope = _envelope(
+        _drive(
+            "systems.provision",
+            {"allocation_id": "alloc-1", "profile": {"boot_method": "disk-image"}},
+            _profile_pairing_validation_error(),
+        )
+    )
+    errors = envelope["data"].get("errors")
+    assert isinstance(errors, list) and errors
+    messages = " ".join(str(error["msg"]) for error in errors)
+    assert "direct-kernel" in messages
+    assert "kernel_source_ref" in messages
+    assert "ADR-" not in messages
 
 
 def test_runs_create_build_profile_binding_becomes_configuration_error() -> None:
