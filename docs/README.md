@@ -18,8 +18,8 @@ Start here if someone already operates a KDIVE server for you.
    [errors and recovery](guide/errors.md), and [permissions](guide/safety-and-rbac.md)
    as you encounter them.
 
-The [user and agent guide](guide/index.md) is the full reading map. The
-[generated tool reference](guide/reference/index.md) owns exact parameters and tool contracts.
+The [generated tool reference](guide/reference/index.md) owns exact parameters and tool
+contracts.
 The [agent workflow index](guide/agent-index.md) and toolset guides are also served over MCP.
 
 ## Run KDIVE — operators

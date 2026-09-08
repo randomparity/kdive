@@ -12,7 +12,7 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache-2.0 license">
   </a>
-  <a href="docs/guide/index.md">
+  <a href="docs/README.md">
     <img src="https://img.shields.io/badge/MCP-streamable_HTTP-5b4bdb" alt="MCP over streamable HTTP">
   </a>
   <a href="docs/development/cross-platform.md">
