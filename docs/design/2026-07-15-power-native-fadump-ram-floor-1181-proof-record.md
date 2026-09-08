@@ -1,5 +1,8 @@
 # Proof record — native-POWER fadump RAM floor (#1181)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-15
 Issue: #1181 · Epic: #1139 · ADR-0363 · Prior: #1156 / ADR-0355 (native KVM-HV validation),
 #1151 / ADR-0349 (fadump opt-in)
@@ -43,7 +46,7 @@ green.
 
 ## Target host — fadump readiness confirmed live
 
-Probed 2026-07-15 over `ssh -p 2223 dave@192.168.2.8`:
+Probed 2026-07-15 over `ssh -p 2223 <REDACTED-USER>@<REDACTED-HOST-IP>`:
 
 | | |
 |---|---|

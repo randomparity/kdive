@@ -1,5 +1,8 @@
 # `systems.get` reports the failing job's real error category (#1550)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#1550](https://github.com/randomparity/kdive/issues/1550)
 - **ADR:** [ADR-0454](../adr/0454-systems-get-resolves-the-failing-job-category.md)
 - **Date:** 2026-07-25

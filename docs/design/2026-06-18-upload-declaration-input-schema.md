@@ -1,5 +1,8 @@
 # Spec — Discoverable upload-declaration input schema (#567)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#567](https://github.com/randomparity/kdive/issues/567)
 - **ADR:** [ADR-0173](../adr/0173-upload-declaration-input-schema.md)
 - **Date:** 2026-06-18

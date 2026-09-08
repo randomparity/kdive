@@ -1,5 +1,8 @@
 # Token-keyed staging drain + a staging-drain reconciler lane (#1559)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **ADR:** [`../adr/0494-token-keyed-staging-drain.md`](../adr/0494-token-keyed-staging-drain.md)
 - **Issue:** #1559 — *No sweep reclaims a staged rootfs base whose artifacts row is already gone*
 

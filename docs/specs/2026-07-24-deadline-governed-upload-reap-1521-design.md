@@ -1,5 +1,8 @@
 # Deadline-governed reap of uncommitted investigation uploads (#1521)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#1521](https://github.com/randomparity/kdive/issues/1521)
 - **ADR:** [ADR-0444](../adr/0444-enforce-upload-deadline-at-investigation-finalize.md)
 - **Status:** implemented

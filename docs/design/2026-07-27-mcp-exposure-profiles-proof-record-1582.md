@@ -1,5 +1,8 @@
 # Proof record — agent/operator MCP exposure profiles + gateway default flip (#1581, #1582)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-27
 Issues: #1581 (profiles), #1582 (default flip) · Epic: #1576
 ADRs: [0456](../adr/0456-agent-operator-mcp-exposure-profiles.md) (exposure profiles),

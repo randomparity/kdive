@@ -35,17 +35,12 @@ So every obvious hypothesis was wrong: the file exists, is executable, has a val
 and the interpreter exists. `ENOENT` ("No such file or directory") for a present, executable
 script is the misdirection.
 
-## Root cause
+## Diagnosis recorded at the time
 
-`virt-customize --copy-in` preserves the **source file's uid/gid** (here `1000:1000`, the
-workstation user) and assigns it a **generic/default SELinux type**, not the executable type a
-program under `/usr/local/sbin` needs. On an SELinux-**enforcing** Fedora guest, the
-qemu-guest-agent (running as root) is denied `execute` on the mislabeled file. The kernel /
-guest-agent surfaces that failure as `ENOENT` rather than `EACCES`, which is what derails the
-diagnosis — you go looking for a missing file instead of a wrong label.
-
-The `--run-command 'chmod 0755 ...'` only fixes the mode, not the ownership or the SELinux
-context, so it does not help.
+The copied executable retained uid/gid `1000:1000` and a generic SELinux type. The follow-up
+changed ownership and restored its label together, after which the helper launched. This
+combined intervention supports investigating ownership and labels, but the record includes no
+isolated-variable test or denial audit establishing SELinux alone as the cause of `ENOENT`.
 
 ## Solution
 
@@ -71,12 +66,9 @@ virsh qemu-agent-command helper-test \
 
 (Before the chown+restorecon, the same guest-exec returned the ENOENT failure above.)
 
-## Prevention
+## Current setup owner
 
-Always pair `virt-customize --copy-in` of an executable with `chown root:root` **and**
-`restorecon` run-commands — never just `chmod`. This is now documented in
-`deploy/remote-libvirt-guest-helpers/README.md` and the campaign rerun runbook
-(`docs/runbooks/mcp-coverage-campaign-rerun.md`). No automated guard is practical (the image
-build is out-of-band on the operator's host), so the runbook note is the control. When a
-guest-agent `guest-exec` reports `ENOENT` for a path you can prove exists, suspect the SELinux
-label / ownership before the file path.
+This is the dated before/after experiment from 2026-06-13. Its commands describe that
+experiment; they are not the current base-image installation procedure. Follow the
+[guest-helper guide](../../../deploy/remote-libvirt-guest-helpers/README.md) and its Ansible
+image-building owner for packages, ownership, labels, and guest confinement.

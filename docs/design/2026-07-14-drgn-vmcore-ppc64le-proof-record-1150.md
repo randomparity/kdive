@@ -1,5 +1,8 @@
 # Proof record — drgn opens a ppc64le vmcore (#1150)
 
+> Historical proof or design for the dated checkout below, not current operating instructions.
+> Use the [current documentation index](../README.md) for supported workflows.
+
 Date: 2026-07-14
 Issue: #1150 · Epic: #1139 · Spec: `2026-07-14-drgn-vmcore-ppc64le-1150.md` · ADR-0348
 
@@ -14,14 +17,14 @@ Issue: #1150 · Epic: #1139 · Spec: `2026-07-14-drgn-vmcore-ppc64le-1150.md` ·
 - Core: the real ppc64le vmcore captured by **#1148** (PR#1169) under TCG, from Run
   `9359253e-017a-4740-bb2a-3f008bae520c`. Object-store key
   `local/runs/9359253e-017a-4740-bb2a-3f008bae520c/vmcore-kdump` (bucket `kdive-artifacts`).
-- Retained at: `/home/dave/kdive-ppc-proof/vmcore-kdump-ppc64le`.
+- Retained at: `<REDACTED-HOME>/kdive-ppc-proof/vmcore-kdump-ppc64le`.
 - **SHA-256: `bd322c68c540542484cde32df94d3e074874374a1eb2ca50551e808f4c7190fa`**  <!-- pragma: allowlist secret (vmcore digest) -->
 - **Size: 90463884 bytes** — matches #1148's own recorded captured-core size
   (`docs/design/2026-07-13-ppc64le-kdump-proof-record-1148.md`), corroborating the pin against
   the artifact's birth record.
 - Driver: `tests/providers/local_libvirt/test_introspect_ppc64le_live.py::
   test_ppc64le_vmcore_opens_and_is_identified_as_ppc64le` (`@pytest.mark.live_vm`), run with
-  `KDIVE_PPC64LE_VMCORE=/home/dave/kdive-ppc-proof/vmcore-kdump-ppc64le`.
+  `KDIVE_PPC64LE_VMCORE=<REDACTED-HOME>/kdive-ppc-proof/vmcore-kdump-ppc64le`.
 
 ## Result — a ppc64le vmcore opens and drgn identifies it as ppc64le (PASS)
 

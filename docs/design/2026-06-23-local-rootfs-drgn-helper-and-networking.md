@@ -1,5 +1,8 @@
 # Spec — Local rootfs: stage `kdive-drgn` helper + enable guest SSH-NIC DHCP
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Date:** 2026-06-23
 - **Issue:** [#724](https://github.com/randomparity/kdive/issues/724) (M2.8 Epic B, closes #682)
 - **ADR:** [ADR-0220](../adr/0220-local-rootfs-drgn-helper-and-networking.md)

@@ -1,5 +1,8 @@
 # Design — `wait` as the single point-read and polling contract (#1592)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** #1592 (epic #1576)
 - **ADR:** [ADR-0468](../adr/0468-wait-as-the-single-point-read.md)
 - **Migration:** none

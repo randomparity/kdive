@@ -1,5 +1,8 @@
 # Spec — Bundled, opt-in Prometheus to collect the aux `/metrics` (#600)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **ADR:** [ADR-0189](../adr/0189-bundled-prometheus-metrics-collection.md)
 - **Status:** Accepted
 - **Issue:** #600 (collection); #601 enriches the emitted series (out of scope here).

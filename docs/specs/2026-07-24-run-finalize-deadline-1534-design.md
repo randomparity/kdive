@@ -1,5 +1,8 @@
 # Enforce the upload deadline at `runs.complete_build` — design (#1534)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#1534](https://github.com/randomparity/kdive/issues/1534)
 - **ADR:** [ADR-0448](../adr/0448-enforce-upload-deadline-at-run-finalize.md)
 - **Depends on:** [ADR-0444](../adr/0444-enforce-upload-deadline-at-investigation-finalize.md) (the

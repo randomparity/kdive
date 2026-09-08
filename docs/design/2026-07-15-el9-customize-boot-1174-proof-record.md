@@ -1,5 +1,8 @@
 # Proof record — EL9 customize-boot end-to-end + firstboot serial-verdict fix (#1174)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-15
 Issue: #1174 · Epic: #1139 · Follows #1152
 (`docs/design/2026-07-14-ppc64le-catalog-parity-1152-proof-record.md`)
@@ -76,7 +79,7 @@ clean.
 
 The ppc64le EL9 customize-boot proof remains gated on the CentOS mirror-CDN `dnf4` metadata stall
 under the TCG/SLIRP emulated network (not kdive code) — see #1152's proof record. It is solvable
-only on native POWER10 (`ssh -p 2223 dave@192.168.2.8`, KVM-HV), not on this x86_64 host. The
+only on native POWER10 (`ssh -p 2223 <REDACTED-USER>@<REDACTED-HOST-IP>`, KVM-HV), not on this x86_64 host. The
 acceptance criterion is satisfied by the x86_64 composed-path proof above ("on at least one arch");
 the ppc64le arch proof is left to the native-POWER validation track.
 

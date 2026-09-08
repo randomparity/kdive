@@ -1,5 +1,8 @@
 # Remote-libvirt supplied rootfs — provision-time volume staging (#1433)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 **ADR:** [ADR-0440](../adr/0440-remote-libvirt-supplied-rootfs-staging.md)
 **Issue:** #1433 (epic #1423 remote-libvirt parity)
 **Status:** design

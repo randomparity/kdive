@@ -1,18 +1,19 @@
-# KDIVE MCP Tool Coverage Campaign — Report (in progress)
+# KDIVE MCP Tool Coverage Campaign — Incomplete historical report
 
 - Date: 2026-06-13
 - Branch: `test/mcp-coverage-campaign`
 - Spec: `docs/superpowers/specs/2026-06-13-mcp-coverage-campaign-design.md`
 - Plan: `docs/superpowers/plans/2026-06-13-mcp-coverage-campaign.md`
 - Companion: `docs/reports/provider-configuration-requirements.md`
-- Status: **execution in progress** — Arc 0 complete (all deployments), arc execution underway.
+- Status: **incomplete historical snapshot** — Arc 0 complete; later arcs were unfinished.
 
-This report is updated as the campaign runs. The tool census is 91 registered MCP tools
+This records the campaign as of 2026-06-13; it is not an active execution plan. The then-current
+tool census was 91 registered MCP tools
 (65 `implemented`, 26 `partial`).
 
 ## Deployment topology (as built)
 
-| | D1 workstation | D2 k8s `kdive-demo` | ub24-big |
+| | D1 workstation | D2 k8s `kdive-demo` | sys-R2 |
 |---|---|---|---|
 | Control plane | host processes | helm rev 3 (`:edge`) | — (target) |
 | Reach | `http://127.0.0.1:8000/mcp` | port-forward `:18000` | qemu+tls |
@@ -36,7 +37,7 @@ layout, the demo-OIDC role-claim gap).
 - **Platform ops**: `ops.reconcile_now` (clean accounting envelope), `ops.force_release`
   (break-glass; correctly released leaked allocations — used 3×).
 - **Remote lifecycle (Arc 2 — through build)**: on remote-libvirt, `allocations.request`,
-  `systems.provision` (disk-image domain on ub24-big), `runs.create`, **`runs.build` (a real
+  `systems.provision` (disk-image domain on sys-R2), `runs.create`, **`runs.build` (a real
   kernel compile, ~134s on the warm tree)**, and `runs.complete_build` all **PASS**. The arc
   then fails at `runs.install` (finding F7). So the build plane is proven end-to-end on
   remote-libvirt; the boot/debug/capture plane is blocked downstream by F7.
@@ -86,9 +87,9 @@ platform-ops mutations, and the targeted D2 cells — none of which need a boote
 the boot→capture plane once F7's base image is re-staged (or F3's local guest image is built).
 The coverage grid (per `scripts/coverage_campaign/`) is assembled once those arcs run.
 
-## Cleanup tracked for campaign end
+## Cleanup tracked for campaign end (historical; completion not established)
 
-- ub24-big: remove the iptables ACCEPTs for `192.168.2.8` (`16514` + `47000:47099`).
+- sys-R2: remove the iptables ACCEPTs for `<REDACTED-HOST-IP>` (`16514` + `47000:47099`).
 - workstation: `rm -rf ~/.kdive-secrets ~/.kdive-pkipath`; stop the host stack + port-forwards.
 - D2: the demo OIDC `JSON_CONFIG` removal + `KDIVE_FAULT_INJECT` were applied to evaluate RBAC;
   revert if restoring the pristine demo.

@@ -1,5 +1,8 @@
 # Proof record — live TCG boot of an *uploaded* ppc64le kernel bundle (#1146)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-13
 Issue: #1146 · Epic: #1139 · Spec: `2026-07-13-ppc64le-boot-bundle-1146.md` · ADR-0344
 
@@ -113,4 +116,4 @@ guest's ppc64le `depmod` ELF cannot execute in the x86_64 appliance without `qem
 | pseries initrd addressing needs an accommodation | **NO (no quirk)** | `kdive-ready` on `hvc0` (post-pivot); no VFS-mount panic — retires issue 7 |
 | real writer's in-guest `depmod` works on a ppc64le overlay (x86_64 appliance) | **CONSTRAINED** | `depmod: Exec format error`; deferred to issue 9 |
 
-Bundle build + driver scripts retained out of tree under `/home/dave/kdive-ppc-proof/`.
+Bundle build + driver scripts retained out of tree under `<REDACTED-HOME>/kdive-ppc-proof/`.

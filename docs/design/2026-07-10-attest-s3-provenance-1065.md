@@ -1,5 +1,8 @@
 # Spec — operator-attested provenance for s3 catalog images (#1065, P5)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** #1065 (BLACK_BOX_REVIEW P5)
 - **ADR:** [`../adr/0323-attest-operator-provenance.md`](../adr/0323-attest-operator-provenance.md)
 - **Date:** 2026-07-10
@@ -79,5 +82,3 @@ once the operands are attested (operator) or published (KDIVE build).
 - Migration test (mirrors `tests/db/test_migration_0061_*.py`) proves the column is absent before
   0064 and a `NOT NULL`/`false`-default boolean after.
 - `just ci` green.
-</content>
-</invoke>

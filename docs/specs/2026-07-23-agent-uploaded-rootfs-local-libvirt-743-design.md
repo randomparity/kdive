@@ -1,5 +1,8 @@
 # Agent-uploaded rootfs for local-libvirt (#743)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#743](https://github.com/randomparity/kdive/issues/743) — Allow Local-Libvirt
   Systems to Use Agent Uploaded Rootfs Image
 - **ADR:** [ADR-0434](../adr/0434-local-libvirt-agent-uploaded-rootfs-staging.md)
