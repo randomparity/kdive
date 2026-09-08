@@ -383,6 +383,29 @@ def test_teardown_job_appearing_under_the_lock_defers_the_candidate(
     asyncio.run(run())
 
 
+def test_a_pass_is_bounded_and_the_remainder_drains_next_pass(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound costs passes, not coverage: whatever it defers is repaired by the next pass.
+
+    Patched down to 2 rather than seeding 101 Systems — the property under test is that the pass
+    stops at the limit and the remainder is still drained, not the value of the constant.
+    """
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        monkeypatch.setattr(repairs_systems, "_LEAKED_MUTATION_REPAIR_LIMIT", 2)
+        for _ in range(3):
+            await _seed_open_obligation(conn)
+
+        assert await _run(migrated_url) == 2
+        assert await _run(migrated_url) == 1
+        assert await _run(migrated_url) == 0
+        await conn.close()
+
+    asyncio.run(run())
+
+
 def test_repair_runs_after_abandoned_jobs() -> None:
     """abandoned_jobs is what makes a stuck teardown repairable *at all*, not what exposes it.
 
