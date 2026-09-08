@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import errno
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -19,6 +18,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
     capped_tar_members,
     reject_oversize_member,
 )
+from kdive.providers.shared.module_staging_tools import DEPMOD, DEPMOD_SEARCH_PATH
 
 _log = logging.getLogger(__name__)
 
@@ -46,20 +46,6 @@ _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
 # The relative in-tar / in-guest modules root (``_MODULES_ROOT`` without the leading slash).
 _MODULES_TREE = _MODULES_ROOT.lstrip("/")
 _DEPMOD_STDERR_MAX = 500
-_DEPMOD = "depmod"
-# depmod is an sbin tool — /usr/sbin under merged-usr, /sbin under split-usr. Resolution never
-# consults PATH: the fixed live-worker gate execs the worker from an environment allowlist that
-# omits it, so a bare name falls back to os.defpath (/bin:/usr/bin) and misses /usr/sbin, which
-# reported a missing package on hosts that had one (#2300). These are the set
-# ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
-# against, and every one is root-owned. /usr/local/{sbin,bin} are left out on purpose even though
-# an ungated worker reaches them through PATH today: /usr/local is group-writable by default on
-# part of the Debian family, and a binary planted there would run as the worker slot account
-# (User=kdive-worker-N, in kdive-live-libvirt), inheriting its authority over guest overlays.
-# These four are the contract: no operator override for a depmod outside them (ADR-0631). A
-# symlink into one of them is the supported answer, and its target must be root-owned too --
-# which() takes the link and the exec follows it to the target's bytes.
-_DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 # The permanent exec-side returns: the binary vanished between which() and exec, sits on a
 # noexec mount or lacks the bit (EACCES/EPERM), or is not an executable format — a partially
 # written file gives ENOEXEC, which CPython raises as a bare OSError. These dead-letter, because
@@ -120,8 +106,8 @@ def _resolve_depmod() -> str:
         CategorizedError: ``MISSING_DEPENDENCY`` naming the searched directories when nothing
             resolves.
     """
-    searched = os.pathsep.join(_DEPMOD_SEARCH_DIRS)
-    resolved = shutil.which(_DEPMOD, path=searched)
+    searched = DEPMOD_SEARCH_PATH
+    resolved = shutil.which(DEPMOD, path=searched)
     if resolved is None:
         raise CategorizedError(
             # The directories are named in the message, not only in details: failure_message is

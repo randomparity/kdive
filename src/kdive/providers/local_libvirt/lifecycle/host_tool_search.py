@@ -6,10 +6,11 @@ worker from an environment allowlist that omits ``PATH``, so a bare ``shutil.whi
 silently falls back to ``os.defpath`` (``:/bin:/usr/bin``) instead of failing loudly when a host
 lays tools out differently. Resolution here never consults ``PATH``.
 
-Unlike ``depmod`` (an sbin tool needing the four-directory ``_DEPMOD_SEARCH_DIRS``), virsh,
+Unlike ``depmod`` (an sbin tool needing the four-directory
+``module_staging_tools.DEPMOD_SEARCH_DIRS``), virsh,
 qemu-img, and virt-customize all ship under ``/usr/bin`` on the distributions in use, so this is
 the narrower two-directory subset. ``/usr/local/{sbin,bin}`` stay excluded for the same reason
-``_DEPMOD_SEARCH_DIRS`` excludes them: part of the Debian family makes ``/usr/local``
+``DEPMOD_SEARCH_DIRS`` excludes them: part of the Debian family makes ``/usr/local``
 group-writable by default, and a binary planted there would run as the worker slot account,
 inheriting its authority over guest overlays.
 """

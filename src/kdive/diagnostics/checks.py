@@ -29,6 +29,7 @@ BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
 MULTIARCH_GDB_ID = "multiarch_gdb"
 PSERIES_FADUMP_ID = "pseries_fadump"
 GUEST_ARCH_ACCEL_ID = "guest_arch_accel"
+DEPMOD_TOOLCHAIN_ID = "depmod_toolchain"
 
 _log = logging.getLogger(__name__)
 
