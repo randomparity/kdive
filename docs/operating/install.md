@@ -12,12 +12,25 @@ vmcore retrieval, debuginfo staging, console parts, and artifact egress.
 `server`/`worker`/`reconciler` fail startup validation with an actionable
 `configuration_error` when `KDIVE_S3_ENDPOINT_URL` or `KDIVE_S3_BUCKET` is unset or blank.
 
+### Object-store preflight
+
 The configured bucket must have bucket-wide versioning `Enabled`, with MFA Delete off and no
 MinIO prefix or folder exclusions. The runtime credential needs its existing object permissions
 plus `s3:GetObjectVersion`, `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
 `s3:DeleteObjectVersion`. The standard
 S3 versioning response does not expose MinIO's prefix/folder exclusions, so the operator must
 verify that provider-specific policy separately for an external store.
+
+Upload a disposable probe, record the `VersionId` returned by `put-object`, then fetch that exact
+version with `aws s3api get-object --version-id "$version_id" --bucket "$bucket" --key
+"$probe_key" /tmp/kdive-version-probe`. Delete that exact version after the bytes compare equal.
+Do not start KDIVE until this exact-version read succeeds with the runtime identity.
+
+### Earlier versioning adoption
+
+The following adoption and migration notes apply only to releases that support those upgrades.
+They do not provide a protocol-4 migration path: that release requires fresh resources as stated
+in the [Kubernetes deployment boundary](runbooks/kubernetes-deploy.md#capture-publication-protocol-4-migration-0113).
 
 The first upgrade to a version-aware image is a stop-old-first maintenance operation:
 
@@ -27,10 +40,6 @@ The first upgrade to a version-aware image is a stop-old-first maintenance opera
    then verify that MFA Delete is off and no provider-specific exclusion policy applies.
 3. Enable versioning for the whole bucket and wait for the provider's documented activation
    barrier.
-4. Upload a disposable probe, record the `VersionId` returned by `put-object`, then fetch that exact
-   version with `aws s3api get-object --version-id "$version_id" --bucket "$bucket" --key
-   "$probe_key" /tmp/kdive-version-probe`. Delete that exact version after the bytes compare equal.
-   Do not start KDIVE until this exact-version read succeeds with the runtime identity.
 4. Run database migrations, then start only the new version-aware image and verify readiness.
 
 Do not run an old and new image together during this adoption. Suspending bucket versioning and a
@@ -362,8 +371,8 @@ Pick one of the three deployment shapes:
 
 - [Docker Compose](docker-compose.md) — the app tier plus dev backends in one graph;
   the quickest way to a working endpoint for demos and evaluation.
-- [Kubernetes (Helm)](kubernetes.md) — the chart deploys the three core processes, a dedicated
-  lifecycle witness, and the migrate Job against external backends.
+- [Kubernetes (Helm)](runbooks/kubernetes-deploy.md) — the chart deploys the three core
+  processes, a dedicated lifecycle witness, and the migrate Job against external backends.
 - [systemd](systemd.md) — run the processes as host services against external backends.
 
 ## Optional fixture catalog override

@@ -15,7 +15,6 @@ _INSTALL = _ROOT / "docs/operating/install.md"
 _COMPOSE_DOC = _ROOT / "docs/operating/docker-compose.md"
 _COMPOSE_REFERENCE = _ROOT / "deploy/compose/README.md"
 _HELM_REFERENCE = _ROOT / "deploy/helm/kdive/README.md"
-_KUBERNETES_DOC = _ROOT / "docs/operating/kubernetes.md"
 _KUBERNETES_RUNBOOK = _ROOT / "docs/operating/runbooks/kubernetes-deploy.md"
 _BUILD_USE_RECOVERY = _ROOT / "docs/operating/runbooks/build-use-recovery.md"
 _HELM_VALUES = _ROOT / "deploy/helm/kdive/values.yaml"
@@ -148,8 +147,8 @@ def test_helm_confines_witness_credentials_to_its_dedicated_workload() -> None:
     assert "confined to the reconciler" not in text
 
 
-def test_kubernetes_page_counts_the_dedicated_witness_as_a_long_running_workload() -> None:
-    text = _KUBERNETES_DOC.read_text()
+def test_kubernetes_runbook_counts_the_dedicated_witness_as_a_long_running_workload() -> None:
+    text = _KUBERNETES_RUNBOOK.read_text()
 
     assert "four long-running Kubernetes workloads" in text
 

@@ -13,7 +13,7 @@ runbooks.
 |---|---|
 | [Install](install.md) | Install paths, host prerequisites, and the run modes |
 | [Docker Compose](docker-compose.md) | App tier plus dev backends in one graph |
-| [Kubernetes (Helm)](kubernetes.md) | The chart for four long-running workloads and the migrate Job |
+| [Kubernetes (Helm)](runbooks/kubernetes-deploy.md) | The chart for four long-running workloads and the migrate Job |
 | [systemd](systemd.md) | Running the processes as host services |
 | [Platform and architecture support](platform-support.md) | Supported arches, accelerators, and per-distro customize-boot tiers |
 
@@ -42,7 +42,6 @@ Step-by-step procedures for live runs and operational tasks.
 | [Remote libvirt host setup](runbooks/remote-libvirt-host-setup.md) | Preparing a remote libvirt host |
 | [Four-method live run](runbooks/four-method-live-run.md) | Exercising all four crash-capture methods |
 | [Image lifecycle](runbooks/image-lifecycle.md) | Building, publishing, and pruning base images |
-| [Kubernetes deploy](runbooks/kubernetes-deploy.md) | Deploying the Helm chart to a cluster |
 | [kdivectl](runbooks/kdivectl.md) | Operating the admin CLI |
 | [Doctor exit criterion](runbooks/doctor-exit-criterion.md) | The doctor readiness check |
 | [MCP coverage campaign rerun](runbooks/mcp-coverage-campaign-rerun.md) | Re-running the MCP tool coverage sweep |
