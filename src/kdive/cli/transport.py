@@ -12,12 +12,25 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import httpx
 from fastmcp import Client
 from fastmcp.client.auth import BearerAuth
 
 import kdive.config as config
 from kdive.cli.login import read_cached_token
 from kdive.config.cli_settings import SERVER_URL, TOKEN
+
+
+def is_connection_failure(exc: BaseException) -> bool:
+    """Return whether ``exc`` has a supported MCP connection-failure shape."""
+    return isinstance(exc, httpx.ConnectError) or (
+        isinstance(exc, RuntimeError) and isinstance(exc.__cause__, httpx.ConnectError)
+    )
+
+
+def is_authentication_failure(exc: BaseException) -> bool:
+    """Return whether ``exc`` is an HTTP authentication failure from MCP session setup."""
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {401, 403}
 
 
 def tool_envelope(result: object) -> Mapping[str, object]:

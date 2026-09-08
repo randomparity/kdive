@@ -36,7 +36,12 @@ from kdive.cli.passthrough import (
     classify_tool,
 )
 from kdive.cli.render import render_envelope
-from kdive.cli.transport import Session, tool_envelope
+from kdive.cli.transport import (
+    Session,
+    is_authentication_failure,
+    is_connection_failure,
+    tool_envelope,
+)
 
 _TIER_NOT_ALLOWED_EXIT = 3
 _TOOL_ERROR_EXIT = 1
@@ -48,11 +53,12 @@ async def run(args: argparse.Namespace) -> int:
 
     A tool that signals failure by *raising* ``ToolError`` — a server fault with no typed
     category behind it — is surfaced as a one-line stderr message and a generic nonzero exit,
-    never an uncaught traceback. Failures returned as a ``ToolResponse`` envelope keep their
-    mapped exit code (:mod:`kdive.cli.errors`), and since ADR-0486 an authorization denial is
-    always the second shape: the dispatch boundary unwraps FastMCP's ``ToolError`` and returns
-    the ``authorization_denied`` envelope, so a project-not-granted call to ``allocations.list``
-    exits 3 rather than landing here (ADR-0098).
+    never an uncaught traceback. Connection and HTTP authentication failures during MCP session
+    setup likewise become fixed, secret-safe stderr diagnostics. Failures returned as a
+    ``ToolResponse`` envelope keep their mapped exit code (:mod:`kdive.cli.errors`), and since
+    ADR-0486 an authorization denial is always the second shape: the dispatch boundary unwraps
+    FastMCP's ``ToolError`` and returns the ``authorization_denied`` envelope, so a
+    project-not-granted call to ``allocations.list`` exits 3 rather than landing here (ADR-0098).
 
     Returns:
         The process exit code (0 on success; see :mod:`kdive.cli.errors` for failures).
@@ -62,6 +68,20 @@ async def run(args: argparse.Namespace) -> int:
     except ToolError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return _TOOL_ERROR_EXIT
+    except Exception as exc:
+        if is_connection_failure(exc):
+            print(
+                "error: connection failed; verify KDIVE_SERVER_URL and server availability",
+                file=sys.stderr,
+            )
+            return _TOOL_ERROR_EXIT
+        if is_authentication_failure(exc):
+            print(
+                "error: authentication failed; verify KDIVE_TOKEN and server authorization",
+                file=sys.stderr,
+            )
+            return _TOOL_ERROR_EXIT
+        raise
 
 
 async def _dispatch(args: argparse.Namespace) -> int:

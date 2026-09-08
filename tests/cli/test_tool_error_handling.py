@@ -15,12 +15,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import socket
 
+import httpx
 import pytest
 from fastmcp.exceptions import ToolError
 
 import kdive.cli.commands.reads as reads
+import kdive.config as config
 from kdive.cli import dispatch
+from kdive.cli.__main__ import main
+from kdive.config.cli_settings import SERVER_URL, TOKEN
 
 
 class _FakeResult:
@@ -74,6 +79,27 @@ class _RaisingSession:
         return _RaisingClient()
 
 
+class _EnteringClient:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def __aenter__(self) -> _EnteringClient:
+        raise self._error
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _EnteringSession:
+    token = "token-secret"
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def client(self) -> _EnteringClient:
+        return _EnteringClient(self._error)
+
+
 def test_membership_denial_envelope_exits_3(monkeypatch: pytest.MonkeyPatch) -> None:
     # A non-member naming a project gets an authorization_denied ENVELOPE (not a raise) → exit 3.
     monkeypatch.setattr(reads, "_session_factory", lambda: _EnvelopingSession())
@@ -97,3 +123,54 @@ def test_raised_tool_error_exits_nonzero_without_traceback(
     err = capsys.readouterr().err
     assert "provider unavailable" in err
     assert "Traceback" not in err
+
+
+def test_refused_connection_exits_with_secret_safe_endpoint_guidance(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with socket.socket() as refused:
+        refused.bind(("127.0.0.1", 0))
+        port = refused.getsockname()[1]
+        monkeypatch.setenv(TOKEN.name, "bearer-secret")
+        # Keep synthetic URL credentials visible to the assertion without resembling a live secret.
+        server_url = f"http://url-user:url-password@127.0.0.1:{port}/mcp?sensitive=query-secret"  # noqa: E501  # pragma: allowlist secret
+        monkeypatch.setenv(
+            SERVER_URL.name,
+            server_url,
+        )
+        config.load()
+
+        code = main(["resources", "list"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "error: connection failed; verify KDIVE_SERVER_URL and server availability\n"
+    )
+    assert "Traceback" not in captured.err
+    for secret in ("bearer-secret", "url-user", "url-password", "query-secret"):
+        assert secret not in captured.err
+
+
+def test_authentication_failure_stays_distinct_and_secret_safe(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url = "https://url-user:url-password@example.invalid/mcp?sensitive=query-secret"  # noqa: E501  # pragma: allowlist secret
+    request = httpx.Request("GET", url)
+    response = httpx.Response(401, request=request)
+    error = httpx.HTTPStatusError("bearer-secret", request=request, response=response)
+    monkeypatch.setattr(reads, "_session_factory", lambda: _EnteringSession(error))
+
+    code = main(["resources", "list"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "error: authentication failed; verify KDIVE_TOKEN and server authorization\n"
+    )
+    assert "connection failed" not in captured.err
+    assert "Traceback" not in captured.err
+    for secret in ("bearer-secret", "url-user", "url-password", "query-secret"):
+        assert secret not in captured.err
