@@ -270,8 +270,9 @@ handling. Treat raw memory dumps and packet captures as sensitive when storing o
 
 Project audit records attribute events to a principal, agent session, tool, project, and
 transition. Transition handlers can write the state change and audit row in the same database
-transaction. Project-member role denials are recorded at the dispatch boundary; that denial
-write is best-effort, so an audit failure does not turn a refusal into an allowed operation.
+transaction. Project-member role denials that reach the dispatch middleware are audited
+best-effort there. Some handlers, including image upload and teardown, audit their own denials;
+failures of those writes can propagate as errors. Neither path grants the denied operation.
 Platform events use a separate table and caller classification. Routine non-membership denials
 are excluded from these audit writers; the tables are not a record of every attempted call.
 
