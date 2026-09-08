@@ -339,25 +339,28 @@ error (exit `2`) — the flag's choices are the tool schema's own enum, derived 
 
 ## Diagnostics (`doctor`)
 
-`doctor` runs the read-only deployment diagnostics through the operator-gated
-`ops.diagnostics` tool and renders one verdict row per check (`check`, `status`, `detail`,
-`fix`, `provider`). It is usable as a deployment/CI gate as well as interactively:
+`doctor` calls the operator-gated `ops.diagnostics` tool and renders one row per check. It requires
+`platform_operator`; a token lacking that role exits `3`.
 
 ```bash
-kdivectl doctor                              # the three cheap read checks (default)
-kdivectl doctor --provider remote-libvirt    # diagnose one named registered provider
-kdivectl doctor --with-egress                # also run the heavyweight egress probe
-kdivectl doctor --json                       # the whole verdict envelope (checks under items)
+kdivectl doctor
+kdivectl doctor --json
 ```
 
-The exit code is **gate-safe** (ADR-0091 §5): all-`pass` exits `0`; any `fail` exits `1`
-(a contract is violated, and `fix` names the remediation); a check that could not run to a
-verdict (a down dependency) is reported as `error` and exits `6` — a *distinct* nonzero code,
-so a gate never goes green on a check that did not actually pass. A `fail` and an `error`
-together exit `1` (a real contract violation is never masked by an unrelated down
-dependency). `doctor` is operator-gated, so it exits `3` if your token lacks
-`platform_operator`. The default run is the three read checks; `--with-egress` is opt-in
-because the egress probe provisions a probe guest.
+JSON preserves the full envelope, with check results under `items[].data`. Any failed check exits
+`1`; errors without failures exit `6`; no failure/error flags exits `0`. An empty verdict also
+exits `0`, so verify the expected checks are present. These codes describe diagnostic verdicts;
+transport errors and tool denials follow their own failure paths.
+
+The default check set comes from configured provider contributions and includes worker jobs.
+The production factory currently does not filter those contributions by `--provider`; read each
+row's scope instead of treating that flag as isolation. Neither production provider supplies the
+optional guest-egress probe: `--with-egress` currently yields a diagnostics assembly error and
+exit `6`. It is not enabled by staging a guest image.
+
+Use [deployment diagnostic verification](doctor-exit-criterion.md) for fault injection, evidence
+capture and the TLS, ACL, secret-coverage and unavailable-egress limitations. Check process health
+before invoking diagnostics; a missing worker or unavailable check is not a passed contract.
 
 ## Shell completion
 
