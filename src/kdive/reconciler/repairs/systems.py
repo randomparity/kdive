@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import SNAPSHOTS, SYSTEMS, record_system_failure_category
 from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState, SystemState
 from kdive.domain.errors import ErrorCategory
@@ -35,6 +37,30 @@ _ORPHANED_SYSTEM_TERMINAL_STATES = (SystemState.TORN_DOWN, SystemState.FAILED)
 _TERMINAL_ALLOCATION_STATE_VALUES = tuple(state.value for state in _TERMINAL_ALLOCATION_STATES)
 _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
+)
+
+# Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
+# job out of `queued`/`running` while its handler keeps running to completion, so job state alone
+# does not bound the window; the teardown job's own `updated_at` does, because nothing but that
+# teardown writes it.
+_TEARDOWN_SETTLE = timedelta(minutes=15)
+# Shared, because the candidate query and the locked re-read have to defer on the same thing. It
+# contributes the active-state list and the settle window, in that order, as the last two
+# parameters of whichever query embeds it. Both teardown families enqueue at
+# `_teardown_dedup_key(system_id)` and `jobs.dedup_key` is UNIQUE, so the one row either query
+# matches carries that System's whole teardown history.
+_TEARDOWN_IN_FLIGHT = "(j.state = ANY(%s) OR j.updated_at > now() - %s)"
+_LEAKED_MUTATION_CANDIDATES_SQL = (
+    "SELECT DISTINCT o.system_id "
+    "FROM remote_module_attempt_obligations o "
+    "JOIN systems s ON s.id = o.system_id "
+    "WHERE o.mutation_discharged_at IS NULL "
+    "  AND s.state = %s "
+    "  AND NOT EXISTS ( "
+    "    SELECT 1 FROM jobs j "
+    "    WHERE j.dedup_key = s.id::text || ':teardown' "
+    f"      AND {_TEARDOWN_IN_FLIGHT} "
+    "  )"
 )
 
 
@@ -84,6 +110,84 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
             enqueued += 1
             _log.info("reconciler: orphaned system %s -> teardown job enqueued", system_id)
     return enqueued
+
+
+async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
+    """Discharge mutation obligations left open on a `torn_down` System (ADR-0634, #2326).
+
+    The teardown handler commits the terminal state before the discharge that follows it, and
+    `systems.teardown` then short-circuits on `torn_down` without enqueueing a job, so nothing
+    else ever reaches that discharge and `retained_owners` holds the attempt's volumes out of the
+    module-volume sweep. Returns the number of obligation rows discharged.
+
+    A candidate is deferred while its teardown job is active *or* terminal within
+    `_TEARDOWN_SETTLE`; ADR-0634 carries why job state alone is not enough and what the window
+    does not cover.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _LEAKED_MUTATION_CANDIDATES_SQL,
+            (
+                SystemState.TORN_DOWN.value,
+                list(_ACTIVE_JOB_STATE_VALUES),
+                _TEARDOWN_SETTLE,
+            ),
+        )
+        candidates: list[UUID] = [row["system_id"] for row in await cur.fetchall()]
+    obligations = RemoteModuleAttemptObligationRepository()
+    discharged_rows = 0
+    failures = 0
+    for system_id in candidates:
+        try:
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+                # Only the job half is re-read: `torn_down` is terminal, so the state half cannot
+                # change between the candidate query and this lock. The lock is taken here, rather
+                # than left to the repository method below, because the re-read has to happen
+                # under it; the method retaking the same key is a no-op, since
+                # `pg_advisory_xact_lock` is reference-counted per transaction (0152:28).
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"SELECT 1 FROM jobs j WHERE j.dedup_key = %s AND {_TEARDOWN_IN_FLIGHT}",
+                        (
+                            f"{system_id}:teardown",
+                            list(_ACTIVE_JOB_STATE_VALUES),
+                            _TEARDOWN_SETTLE,
+                        ),
+                    )
+                    if await cur.fetchone() is not None:
+                        continue
+                discharged = await obligations.worker_discharge_system_mutation_obligations(
+                    conn, system_id
+                )
+        except Exception:  # noqa: BLE001 - one System must not starve the rest of the batch
+            failures += 1
+            _log.warning(
+                "reconciler: leaked mutation obligation discharge failed for system %s; "
+                "retrying next pass",
+                system_id,
+                exc_info=True,
+            )
+            continue
+        if discharged:
+            discharged_rows += discharged
+            _log.info(
+                "reconciler: torn-down system %s had %d leaked mutation obligation(s) discharged",
+                system_id,
+                discharged,
+            )
+    if failures:
+        # Per-candidate isolation keeps a failure out of `ReconcileReport.failures`, and a pass
+        # that discharged nothing returns 0 — byte-identical to a database with nothing to repair,
+        # so without this line a systematic cause is silent (ADR-0634). Fires on any failure, not
+        # only a total one: a denial that begins mid-batch is the same defect caught earlier.
+        _log.error(
+            "reconciler: %d of %d leaked mutation obligation candidates failed this pass; "
+            "the repair count of %d is a floor, not a measure of what needed repairing",
+            failures,
+            len(candidates),
+            discharged_rows,
+        )
+    return discharged_rows
 
 
 def gone_system_state_values() -> tuple[str, ...]:
