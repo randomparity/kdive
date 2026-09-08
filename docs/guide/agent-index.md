@@ -12,8 +12,10 @@ the canonical path — by default the server lists its full catalog. If a capabi
 is not a callable tool in your client — including lazy-loading hosts that materialize only
 some of the ~130 tools and may never bind `tools.invoke` — reach it through the gateway:
 `tools.search` finds the name — matches are compact summaries, so pass `detail="full"` (with a
-small `limit`) to get the schema — and `tools.invoke(name, arguments)` executes any
-registered tool. `tools.search` and `tools.invoke` are always available. Both paths enforce
+small `limit`) to get the schema, or, when you already have the name, `names=["runs.install"]`
+(1-10 per call) to skip the search and get those tools' full description and `input_schema`
+in one call — and `tools.invoke(name, arguments)` executes any registered tool.
+`tools.search` and `tools.invoke` are always available. Both paths enforce
 the same RBAC. If an operator enables the core-set gateway, only a small core set is listed
 directly, so reach everything else through `tools.search` / `tools.invoke`.
 
