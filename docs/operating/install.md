@@ -108,8 +108,8 @@ just setup
 ```
 
 The recipe checks host dependencies, syncs the locked environment, builds the capture-bootstrap
-manifest, and installs the development hooks and documentation-check dependencies. Choose a
-[run mode](#run-modes) below to configure backends and start the processes.
+manifest, and installs the development hooks. Choose a [run mode](#run-modes) below to configure
+backends and start the processes.
 
 ### Container image
 
@@ -156,14 +156,14 @@ interactively; inspect its proposed actions before accepting them.
 
 ```bash
 sudo apt install build-essential pkg-config libvirt-dev python3-dev \
-  libelf-dev shellcheck shfmt nodejs npm git curl ca-certificates
+  libelf-dev shellcheck shfmt git curl ca-certificates
 ```
 
 **Fedora:**
 
 ```bash
 sudo dnf install gcc make pkgconf-pkg-config libvirt-devel python3-devel \
-  elfutils-libelf-devel ShellCheck shfmt nodejs npm git curl
+  elfutils-libelf-devel ShellCheck shfmt git curl
 ```
 
 On POWER, complete the [architecture-specific prerequisites](

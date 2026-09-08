@@ -159,7 +159,7 @@ done
 #    built for the distro Python, so it only imports when the system and venv Python minor
 #    versions match (Ubuntu 26.04 ships 3.14, the project Python); otherwise leave a note. This is
 #    the venv remedy of scripts/check-setup-deps.sh alone — `-y` there also installs the dev-tier
-#    tooling (shellcheck, node, ...) a contributor wants and an operator host does not.
+#    tooling (shellcheck, ...) a contributor wants and an operator host does not.
 step "venv libguestfs binding"
 venv_python="${repo_root}/.venv/bin/python"
 sys_minor="$(/usr/bin/python3 -c 'import sys; print(sys.version_info[1])')"

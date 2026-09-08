@@ -125,9 +125,6 @@ package_for() {
   python3-guestfs:fedora | python3-guestfs:opensuse) printf "python3-libguestfs" ;;
   python3-guestfs:arch) printf "libguestfs" ;;
   python3-guestfs:*) printf "python3-guestfs" ;;
-  node:opensuse) printf "nodejs-default" ;;
-  node:*) printf "nodejs" ;;
-  npm:opensuse) printf "npm-default" ;;
   docker:debian) printf "docker.io" ;;
   docker:*) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
@@ -399,9 +396,6 @@ probe_all() {
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
   require_command recommended docker "${distro}"
-  command_exists node || command_exists nodejs ||
-    note_package recommended node "$(package_for node "${distro}")"
-  require_command recommended npm "${distro}"
 
   # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
   future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)

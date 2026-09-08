@@ -130,7 +130,7 @@ Edit generated documentation at its source: tool wrapper docstrings and paramete
 the configuration registry, or the canonical Markdown named in
 [`DOC_RESOURCES`](src/kdive/mcp/resources/registrar.py). Run the corresponding `just docs`,
 `just config-docs`, or `just resources-docs` recipe, then its `-check` counterpart.
-For prose changes run `just docs-links`, `just docs-paths`, and `just check-mermaid`;
+For prose changes run `just docs-links` and `just docs-paths`;
 served documents also need `just served-doc-links` and `just resources-docs-check`.
 Ruff formats Python inside Markdown fences outside `docs/adr`, but the pre-commit formatter
 selects Python files. Check Markdown explicitly with

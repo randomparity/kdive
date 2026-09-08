@@ -39,17 +39,3 @@ updates:
       docker-images:
         patterns:
           - "*"
-
-  # The browserless mermaid checker (.github/scripts/mermaid-check) pins its own
-  # npm lockfile. It is dev/CI-only tooling that never ships, but uses the same
-  # weekly cadence, grouping, and 7-day cooldown as the other ecosystems.
-  - package-ecosystem: "npm"
-    directory: "/.github/scripts/mermaid-check"
-    schedule:
-      interval: "weekly"
-    cooldown:
-      default-days: 7
-    groups:
-      mermaid-check:
-        patterns:
-          - "*"

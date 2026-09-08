@@ -247,12 +247,12 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
             ):
                 unbounded.append(f"{path.name}:{job_name}={declared!r}")
 
-    # The real count across the ten workflows is 17. `>= len(paths)` would be satisfied by a
+    # The real count across the nine workflows is 16. `>= len(paths)` would be satisfied by a
     # parser that found one job per file and silently stopped checking the other seven. It is a
     # tripwire for that regression, not a coverage assertion, and it goes slack as jobs are
-    # added — at 20 jobs a parser hiding three of them still clears 17. An exact count would
+    # added — at 20 jobs a parser hiding four of them still clears 16. An exact count would
     # redden on every legitimate new job, which is churn this buys nothing for.
-    assert checked >= 17, (
+    assert checked >= 16, (
         f"only {checked} job(s) parsed across {[path.name for path in paths]}. Either the parser "
         "has drifted and this guard is checking a fraction of what it claims to, or a workflow "
         "or job was removed — if that removal was intended, lower this floor in the same change "

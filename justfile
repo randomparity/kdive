@@ -19,16 +19,8 @@ default:
     @just --list
 
 # One-command first-time setup: check host deps, sync the venv, install hooks.
-setup: check-deps sync build-capture-bootstrap-manifest install-hooks install-mermaid-deps
+setup: check-deps sync build-capture-bootstrap-manifest install-hooks
     @echo "Development environment is ready."
-
-# `check-mermaid` runs a Node script whose dependencies live in a gitignored `node_modules`, so a
-# fresh clone or `git worktree` has none and the recipe dies on ERR_MODULE_NOT_FOUND before it
-# checks a single diagram. `package.json` and `package-lock.json` are tracked; only the installed
-# tree is not. `check-setup-deps.sh` already requires node and npm, so this adds no host
-# prerequisite.
-install-mermaid-deps:
-    cd .github/scripts/mermaid-check && npm ci
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
 # intentionally unprivileged and never writes /usr; operators install in a separate step.
@@ -468,18 +460,6 @@ lint-workflows:
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
     if [ "$(uname -m)" = "ppc64le" ]; then actionlint; else uv run --with 'actionlint-py==1.7.12.24' actionlint; fi
 
-# Browserless syntax check of every mermaid block in tracked Markdown.
-# -z/-0 keeps paths with spaces intact; -r skips the run when nothing matches.
-check-mermaid:
-    @checker_deps=.github/scripts/mermaid-check/node_modules; \
-    if [ ! -d "$checker_deps/jsdom" ] || [ ! -d "$checker_deps/mermaid" ]; then \
-        printf '%s%s\n' \
-            'Mermaid checker dependencies are missing; ' \
-            'run `just install-mermaid-deps` from the repository root.' >&2; \
-        exit 1; \
-    fi
-    git ls-files -z '*.md' | xargs -0 -r node .github/scripts/mermaid-check/mermaid-check.mjs
-
 # Resolve relative markdown links in tracked *.md against the filesystem.
 docs-links:
     ./scripts/check-doc-links.sh
@@ -694,4 +674,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
