@@ -53,7 +53,7 @@ the guard test, ~35 changed lines in `docs/development/releasing.md`, and 2 in `
 | Path | Created / changed | Answerable for |
 |---|---|---|
 | `.github/workflows/changelog-sync.yml` | deleted | The per-merge regeneration and its push to `main` |
-| `tests/guards/test_no_workflow_pushes_to_default_branch.py` | created | Two standing checks: no workflow pushes to `main`, and no operative file names a YAML file the repository lacks |
+| `tests/guards/test_no_workflow_pushes_to_default_branch.py` | created | One standing check: no workflow — or shell script a workflow invokes — pushes to `main` |
 | `docs/development/releasing.md` | changed | The post-release bump bullet, the changelog section, and the branch-protection note |
 | `justfile` | changed | The `release` recipe's closing operator reminder |
 | `docs/adr/0633-regenerate-the-committed-changelog-at-release-time.md` | created | The decision |
@@ -97,48 +97,68 @@ is written first so its red run demonstrates it detects the workflow this task t
    **Module docstring** — why the property is held directly: the per-merge push cost was invisible
    in the workflow that caused it because it landed on every *other* open pull request (#2337), so
    nothing else was going to notice it coming back. State plainly that the check is a text proxy,
-   and name the case it cannot see — a marketplace commit-and-push action contains no `git push`
-   text at all, and that is the shape a reacquisition would most cheaply take for as long as the
-   `DeployKey` bypass survives (#2337).
+   and enumerate the shapes it cannot see: a variable refspec; a marketplace commit-and-push
+   action, which contains no `git push` text at all and is the shape a reacquisition would most
+   cheaply take for as long as the `DeployKey` bypass survives (#2337); a command a YAML folded
+   scalar joins in the runner; an indirect invocation (`git -C <dir> push`, or a wrapper outside
+   the scanned directories); and a bare `git push` after a `git checkout main`.
 
    **Constants.**
-   - `_ROOT = Path(__file__).resolve().parents[2]`, `_WORKFLOWS = _ROOT / ".github" / "workflows"`.
+   - `_REPO_ROOT = Path(__file__).resolve().parents[2]`, `_GITHUB = _REPO_ROOT / ".github"`,
+     `_WORKFLOWS = _GITHUB / "workflows"`, `_SCRIPTS = _GITHUB / "scripts"`.
    - `_DEFAULT_BRANCH = "main"`, named once so both patterns stay in step.
    - `_PUSH = re.compile(r"git\s+push\b(?P<args>[^\n]*)")` — any `git push` wherever it sits on the
      line, because the removed workflow's sat under `if !`.
+   - `_OPERAND_END = re.compile(r"\s#|[;&|]")` — where a push's own operands stop. Without it a
+     trailing comment or a following command supplies the word `main` and reddens a legitimate
+     push to a pull-request head.
+   - `_CONTINUATION = re.compile(r"\\\n[ \t]*")` — a `\`-continued command, joined as the shell
+     joins it, so wrapping a long push over two lines does not hide the refspec.
    - `_DEFAULT_REF = re.compile(rf"(?<![\w-]){re.escape(_DEFAULT_BRANCH)}(?![\w-])")` — `main` as a
      whole ref component (`HEAD:main`, `origin/main`, `:main`, `main;`), not `domain` or
      `maintenance`.
 
    **Helpers.**
-   - `_workflow_files() -> list[Path]` — the sorted `*.yml` + `*.yaml` glob above.
+   - `_scanned_files() -> list[Path]` — the sorted `*.yml` + `*.yaml` glob above, **plus**
+     `.github/scripts/**/*.sh` minus vendored `node_modules`. `records.yml` already invokes
+     `./.github/scripts/check-records.sh`, so a workflows-only scan would pass over a push moved
+     one call deep.
    - `_strip_comments(text: str) -> str` — blanks whole-line `#` comments, so prose about a push is
      not read as one.
-   - `_default_branch_pushes(text: str) -> list[str]` — over `_strip_comments(text)`, for each
-     `_PUSH` match take the non-`-` operands and keep the match when any operand matches
-     `_DEFAULT_REF`. Return `match.group(0).strip()`. There is deliberately **no** operand-less
-     branch: flagging a bare `git push` would guess at a trigger the function does not read, and
-     would redden `git push --tags` and the standard idiom for pushing to a pull-request head.
+   - `_operands(args: str) -> list[str]` — the non-flag tokens before `_OPERAND_END`.
+   - `_default_branch_pushes(text: str) -> list[str]` — over `_strip_comments(text)` with
+     `_CONTINUATION` joined, keep each `_PUSH` match whose `_operands` include one matching
+     `_DEFAULT_REF`. Return `match.group(0).strip()` — the whole matched line, so the reported
+     offender is what the author wrote even though operand extraction stopped earlier. There is
+     deliberately **no** operand-less branch: flagging a bare `git push` would guess at a trigger
+     the function does not read, and would redden `git push --tags` and the standard idiom for
+     pushing to a pull-request head.
 
    **Tests**, exactly these three names:
-   - `test_workflow_files_are_discoverable` — asserts `_workflow_files()` is non-empty.
-   - `test_the_detector_recognises_a_default_branch_push` — asserts `len(caught) == 3` for the
-     three removed-workflow shapes, and an empty result for the four negatives named above.
-   - `test_no_workflow_pushes_to_the_default_branch` — builds `dict[str, list[str]]` keyed by
-     `path.name` over `_workflow_files()` and asserts it is empty. Its message must name ADR-0633
-     and #2337, say the push forces a base refresh on every other open pull request, and give the
-     false-positive escape: if the push targets a pull-request head, use an explicit refspec
-     (`git push origin HEAD:$BRANCH`) so the guard can tell them apart.
+   - `test_workflow_files_are_discoverable` — asserts both scan roots are non-empty, since scripts
+     alone would keep `_scanned_files()` non-empty with every workflow gone.
+   - `test_the_detector_recognises_a_default_branch_push` — asserts `len(caught) == 4` for the
+     three removed-workflow shapes plus the same push wrapped over a `\` continuation, and an
+     empty result for the negatives named above (tag push, `domain-work`, `--tags`, a whole-line
+     comment, a trailing comment, and quoted prose after `&&`).
+   - `test_no_workflow_pushes_to_the_default_branch` — builds `dict[str, list[str]]` keyed by the
+     repository-relative path over `_scanned_files()` and asserts it is empty. Its message must
+     name ADR-0633 and #2337, say the push forces a base refresh on every other open pull request,
+     and give the two false-positive escapes: if the push targets a pull-request head, use an
+     explicit refspec (`git push origin HEAD:$BRANCH`) so the guard can tell them apart; and if it
+     targets a *different* repository whose default branch is also `main`, the refspec cannot say
+     so, which is a review conversation.
 
 2. Run the focused test and confirm it is **red**. Executed against the tree at this commit, the
    exact result is `1 failed, 2 passed`, with
    `test_no_workflow_pushes_to_the_default_branch` reporting
 
-   `Offenders: {'changelog-sync.yml': ['git push "$remote" HEAD:main; then', 'git push "$remote" HEAD:main']}`
+   `Offenders: {'.github/workflows/changelog-sync.yml': ['git push "$remote" HEAD:main; then', 'git push "$remote" HEAD:main']}`
 
    The first offender carries `; then` because line 87 of the workflow is
-   `if ! git push "$remote" HEAD:main; then` and `_PUSH` captures to end of line. Match this
-   output, not a paraphrase of it; a different failure means the file was not written to contract.
+   `if ! git push "$remote" HEAD:main; then` and `_PUSH` captures to end of line — `_OPERAND_END`
+   stops the *operand* scan at the `;`, not the reported text. Match this output, not a paraphrase
+   of it; a different failure means the file was not written to contract.
 
    `uv run python -m pytest tests/guards/test_no_workflow_pushes_to_default_branch.py -q`
 
@@ -167,9 +187,9 @@ decision about whether to re-apply the guard.
 
 **Modifies:** `docs/development/releasing.md`, `justfile`.
 
-**Interfaces.** Consumes from Task 1 the red
-`test_no_operative_file_names_a_missing_yaml_file`, which this task turns green by removing the
-last operative reference to the deleted workflow. The `justfile` symbol it edits is the
+**Interfaces.** Consumes nothing from Task 1: the structural check that would have coupled them
+(`test_no_operative_file_names_a_missing_yaml_file`) was cut as broader than any completion
+criterion authorizes — see the Verification note below. The `justfile` symbol it edits is the
 `release VERSION:` recipe's final `echo`, confirmed present verbatim at `justfile:571` as
 `echo "(just set-version <next>) — CHANGELOG auto-syncs on merge; see docs/development/releasing.md."`.
 The recipe's other statements (tag creation and `git push origin "v{{VERSION}}"`) are not touched.

@@ -10,10 +10,19 @@ The cost was invisible in the workflow that caused it: it landed on every *other
 request, which is why nothing noticed for as long as it did, and why the property is worth holding
 directly rather than trusting review to catch a reintroduction.
 
-This reads command text, so it is a proxy, not a proof. A push whose refspec is built from a
-variable is invisible to it, and so is a marketplace commit-and-push action, which contains no
-`git push` text at all — that is the shape a reacquisition would most cheaply take for as long as
-the `DeployKey` bypass on the protect-main ruleset survives (#2337).
+This reads command text, so it is a proxy, not a proof. It cannot see:
+
+- a push whose refspec is built from a variable (`git push origin "HEAD:$TARGET"`);
+- a marketplace commit-and-push action, which contains no `git push` text at all — the shape a
+  reacquisition would most cheaply take for as long as the `DeployKey` bypass on the protect-main
+  ruleset survives (#2337);
+- a command a YAML *folded* scalar (`run: >`) joins out of several lines, since the join happens
+  in the runner, not here;
+- an indirect invocation — `git -C <dir> push`, or a wrapper script living outside the two
+  directories scanned below;
+- a bare `git push` in a block that has already run `git checkout main`. Flagging every
+  operand-less push would redden `git push --tags` and the ordinary idiom for pushing to a
+  pull-request head, so the trade is deliberate; see `_default_branch_pushes`.
 
 Stdlib + pytest only, matching `tests/guards/test_workflow_action_pins.py`: this reads the tree,
 not the project.
@@ -21,10 +30,14 @@ not the project.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
-_WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_GITHUB = _REPO_ROOT / ".github"
+_WORKFLOWS = _GITHUB / "workflows"
+_SCRIPTS = _GITHUB / "scripts"
 
 #: The repository's default branch, named once so both patterns below stay in step.
 _DEFAULT_BRANCH = "main"
@@ -32,13 +45,30 @@ _DEFAULT_BRANCH = "main"
 #: Any `git push`, wherever it sits on the line — the removed workflow's sat under `if !`.
 _PUSH = re.compile(r"git\s+push\b(?P<args>[^\n]*)")
 
+#: Where a push's own operands stop: a trailing comment, or the next command on the line.
+#: Without this, `git push origin HEAD:$B  # never main` and `… && echo "not main"` both read
+#: as pushes to the default branch.
+_OPERAND_END = re.compile(r"\s#|[;&|]")
+
+#: A `\`-continued command, as the shell joins it. Wrapping a long push over two lines is
+#: ordinary formatting, not evasion, so it must not hide the refspec.
+_CONTINUATION = re.compile(r"\\\n[ \t]*")
+
 #: `main` as a whole ref component: `main`, `HEAD:main`, `origin/main`, `:main`, `main;`.
 #: Not `domain`, `maintenance`, or `main-line`.
 _DEFAULT_REF = re.compile(rf"(?<![\w-]){re.escape(_DEFAULT_BRANCH)}(?![\w-])")
 
 
-def _workflow_files() -> list[Path]:
-    return sorted([*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml")])
+def _scanned_files() -> list[Path]:
+    """Workflow YAML, plus the shell scripts under `.github/scripts/` that workflows invoke.
+
+    A `git push origin main` moved into a script (`records.yml` already calls
+    `./.github/scripts/check-records.sh`) would satisfy a workflows-only scan while breaking the
+    property this file is named for. Vendored `node_modules` is excluded — third-party content
+    this repository does not author and does not run against its own remote.
+    """
+    scripts = [path for path in _SCRIPTS.rglob("*.sh") if "node_modules" not in path.parts]
+    return sorted([*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml"), *scripts])
 
 
 def _strip_comments(text: str) -> str:
@@ -46,57 +76,75 @@ def _strip_comments(text: str) -> str:
     return "\n".join("" if line.lstrip().startswith("#") else line for line in text.splitlines())
 
 
+def _operands(args: str) -> list[str]:
+    """The push's own non-flag operands: everything before a comment or the next command."""
+    end = _OPERAND_END.search(args)
+    return [token for token in args[: end.start() if end else None].split() if token[:1] != "-"]
+
+
 def _default_branch_pushes(text: str) -> list[str]:
     """Return each `git push` in *text* whose refspec names the default branch, as matched.
 
     A `git push` carrying no ref operand is deliberately *not* flagged: whether it reaches the
-    default branch depends on the workflow's trigger, which this function does not read, and
-    flagging it would redden `git push --tags` and the ordinary idiom for pushing to a
-    pull-request head.
+    default branch depends on the workflow's trigger and on any preceding checkout, neither of
+    which this function reads, and flagging it would redden `git push --tags` and the ordinary
+    idiom for pushing to a pull-request head. The module docstring lists that gap alongside the
+    other shapes a text proxy cannot see.
     """
-    offenders: list[str] = []
-    for match in _PUSH.finditer(_strip_comments(text)):
-        operands = [token for token in match.group("args").split() if not token.startswith("-")]
-        if any(_DEFAULT_REF.search(token) for token in operands):
-            offenders.append(match.group(0).strip())
-    return offenders
+    scanned = _CONTINUATION.sub(" ", _strip_comments(text))
+    return [
+        match.group(0).strip()
+        for match in _PUSH.finditer(scanned)
+        if any(_DEFAULT_REF.search(token) for token in _operands(match.group("args")))
+    ]
 
 
 def test_workflow_files_are_discoverable() -> None:
-    # A rename or a moved directory would make the assertion below pass over nothing.
-    assert _workflow_files(), f"no workflow files found under {_WORKFLOWS}"
+    # A rename or a moved directory would make the assertion below pass over nothing. Both halves
+    # are checked: scripts alone would keep `_scanned_files()` non-empty with every workflow gone.
+    assert list(_WORKFLOWS.glob("*.yml")), f"no workflow files found under {_WORKFLOWS}"
+    assert list(_SCRIPTS.rglob("*.sh")), f"no shell scripts found under {_SCRIPTS}"
 
 
 def test_the_detector_recognises_a_default_branch_push() -> None:
-    # The three shapes `changelog-sync.yml` used before ADR-0633 removed it. This runs against
-    # literal strings, so it stays meaningful once that workflow is gone.
+    # The three shapes `changelog-sync.yml` used before ADR-0633 removed it, plus the same push
+    # wrapped over two lines. This runs against literal strings, so it stays meaningful once that
+    # workflow is gone.
     caught = _default_branch_pushes(
         'if ! git push "$remote" HEAD:main; then\n'
         '            git push "$remote" HEAD:main\n'
         "          git push origin main\n"
+        "          git push \\\n            origin main\n"
     )
-    assert len(caught) == 3, f"the detector stopped recognising a push to main: {caught}"
-    # A tag push, a feature branch whose name merely contains "main", a bare tag push, and
-    # prose about pushing are all outside what this guard claims.
+    assert len(caught) == 4, f"the detector stopped recognising a push to main: {caught}"
+    # A tag push, a feature branch whose name merely contains "main", a bare tag push, prose
+    # about pushing, a trailing comment, and a quoted string are all outside what this claims.
     assert not _default_branch_pushes(
         'git push origin "v{{VERSION}}"\n'
         "  git push origin HEAD:refs/heads/domain-work\n"
         "  git push --tags\n"
         "  # never git push origin main from a workflow\n"
+        '  git push origin HEAD:"$BRANCH"  # never main\n'
+        '  git push origin "$BRANCH" && echo "not main"\n'
     )
 
 
 def test_no_workflow_pushes_to_the_default_branch() -> None:
     offenders: dict[str, list[str]] = {}
-    for path in _workflow_files():
+    for path in _scanned_files():
         found = _default_branch_pushes(path.read_text(encoding="utf-8"))
         if found:
-            offenders[path.name] = found
+            # relpath, not Path.relative_to: a symlinked scan root must name the offender,
+            # not raise ValueError over where the file turned out to live.
+            offenders[os.path.relpath(path, _REPO_ROOT)] = found
     assert not offenders, (
-        f"a workflow pushes to {_DEFAULT_BRANCH!r}. Such a push moves the default branch outside a "
-        "pull request, which forces every other open pull request through a base refresh and a "
-        "full CI cycle (ADR-0633, #2337). Route the change through a reviewed pull request. If it "
+        f"a workflow — or a script one invokes — pushes to {_DEFAULT_BRANCH!r}. Such a push moves "
+        "the default branch outside a pull request, which forces every open pull request through "
+        "a base refresh and a full CI cycle (ADR-0633, #2337). Route the change through a "
+        "reviewed pull request. If it "
         "targets a pull-request head rather than the default branch, give it an explicit refspec "
-        "(`git push origin HEAD:$BRANCH`) so this guard can tell them apart. "
+        "(`git push origin HEAD:$BRANCH`) so this guard can tell them apart. If it pushes to a "
+        f"*different* repository whose default branch is also {_DEFAULT_BRANCH!r}, this guard "
+        "cannot tell that from the refspec — say so in review and add the case here. "
         f"Offenders: {offenders}"
     )
