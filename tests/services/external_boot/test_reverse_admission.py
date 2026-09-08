@@ -1605,8 +1605,12 @@ def test_a_cancel_refuses_a_run_bound_after_its_pre_lock_read(
     A Run that was unbound at that read and is bound by the time the RUN lock is acquired would
     otherwise take neither the lock nor the guard, and cancel against a restricted System. The
     barrier is a test-only ``pg_advisory_xact_lock`` on the RUN key, not a sleep: the writer
-    holds the key, commits the binding, and releases it at commit, so the cancel is guaranteed
-    to have read the Run unbound and to see it bound once it gets the lock.
+    holds the key so the cancel is guaranteed to have read the Run unbound before it can acquire
+    the lock itself. But *when* the cancel task reaches that lock attempt is ordinary asyncio
+    scheduling, not something a bare ``await`` yield bounds, so the writer confirms at the
+    Postgres level (`tests/db_waits.py`) that the cancel backend is actually blocked on the RUN
+    key before it commits the binding — otherwise the writer can commit before the cancel task
+    is even scheduled, and the interleaving under test never happens.
     """
 
     async def _run() -> tuple[ToolResponse, str | None]:
@@ -1627,9 +1631,10 @@ def test_a_cancel_refuses_a_run_bound_after_its_pre_lock_read(
                 async with writer, writer.transaction():
                     await writer.execute("SELECT pg_advisory_xact_lock(%s)", (run_key,))
                     barrier_taken.set()
-                    # Let the cancel take its pre-lock read of the still-unbound Run, then
-                    # commit exactly what `runs.bind` commits.
-                    await asyncio.sleep(0)
+                    # Don't just yield once and hope: poll pg_locks until the cancel task's own
+                    # lock attempt is actually blocked behind ours, so its pre-lock read of the
+                    # still-unbound Run is guaranteed to have already happened.
+                    await wait_until_any_backend_waiting(writer, locktype="advisory")
                     await writer.execute(
                         "UPDATE runs SET system_id = %s WHERE id = %s",
                         (UUID(restricted.system_id), UUID(run_id)),

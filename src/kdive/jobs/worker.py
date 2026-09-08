@@ -29,6 +29,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg import Error as PsycopgError
+from psycopg.errors import InsufficientPrivilege
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
@@ -690,6 +691,11 @@ def _failure_category(exc: Exception) -> ErrorCategory:
         return exc.category
     if isinstance(exc, PayloadValidationError):
         return ErrorCategory.CONFIGURATION_ERROR
+    if isinstance(exc, InsufficientPrivilege):
+        # A missing role grant is operator-fixable, not a transient fault (#2329): retrying
+        # cannot succeed until the grant is added, so this must not fall through to the
+        # retryable INFRASTRUCTURE_FAILURE default below.
+        return ErrorCategory.CONFIGURATION_ERROR
     return ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -929,6 +935,16 @@ def _failure_context(exc: Exception, registry: SecretRegistry) -> dict[str, str]
                 context[f"failure_detail_{_context_key(str(key))}"] = _redacted(
                     redactor, "" if value is None else str(value)
                 )
+    elif isinstance(exc, InsufficientPrivilege):
+        # Postgres's own message — already in failure_message above — names the denied
+        # object (e.g. "permission denied for table jobs"); a bare ACL-check failure leaves
+        # diag.table_name/schema_name unset (verified against a live grant denial, #2329), so
+        # the fix stays generic rather than guessing a role or grant it cannot see.
+        context["failure_detail_fix"] = _redacted(
+            redactor,
+            "grant the missing privilege named above to the role this worker incarnation "
+            "runs as, then retry",
+        )
     return context
 
 

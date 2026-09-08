@@ -13,8 +13,10 @@ is not a callable tool in your client — including lazy-loading hosts that mate
 some of the ~130 tools and may never bind `tools.invoke` — reach it through the gateway:
 `tools.search` finds the name — matches are compact summaries, so pass `detail="full"` (with a
 small `limit`) to get the schema — and `tools.invoke(name, arguments)` executes any
-registered tool. `tools.search` and `tools.invoke` are always available. Both paths enforce
-the same RBAC. If an operator enables the core-set gateway, only a small core set is listed
+registered tool. When you already have the name, `tools.search(names=["runs.install"])` (1-10
+per call) skips the search and returns each named tool's full description and `input_schema`
+in one call. `tools.search` and `tools.invoke` are always available. Both paths enforce the
+same RBAC. If an operator enables the core-set gateway, only a small core set is listed
 directly, so reach everything else through `tools.search` / `tools.invoke`.
 
 The server negotiates MCP protocol revision 2025-11-25; a client offering an older supported

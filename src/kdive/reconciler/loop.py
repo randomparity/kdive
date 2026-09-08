@@ -153,6 +153,7 @@ _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
 _repair_terminal_authority_system_attempts = job_repairs.repair_terminal_authority_system_attempts
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
+_repair_leaked_mutation_obligations = system_repairs.repair_leaked_mutation_obligations
 _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_systems
 _repair_stalled_restoring_systems = system_repairs.repair_stalled_restoring_systems
 _repair_stalled_creating_snapshots = system_repairs.repair_stalled_creating_snapshots
@@ -569,6 +570,13 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         "abandoned_jobs",
         lambda _r, _c, _g: _repair_abandoned_jobs,
         report_field="abandoned_jobs",
+    ),
+    # Runs after abandoned_jobs, which dead-letters a lease-lapsed teardown job — and a teardown
+    # job that is active or recently terminal is what defers this repair's candidate (ADR-0634,
+    # #2326). No report field: the count reaches operators through repair_counts, as the
+    # stalled-state repairs do.
+    _RepairCatalogEntry(
+        "leaked_mutation_obligations", lambda _r, _c, _g: _repair_leaked_mutation_obligations
     ),
     _RepairCatalogEntry(
         "terminal_authority_system_attempts",

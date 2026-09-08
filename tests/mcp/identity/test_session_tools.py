@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from kdive.mcp.resources.registrar import DOC_RESOURCES
 from kdive.mcp.tools.identity.session import whoami
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
@@ -58,6 +59,19 @@ def test_whoami_empty_context_keeps_every_key_present() -> None:
     assert data["projects"] == []
     assert data["roles"] == {}
     assert data["platform_roles"] == []
+
+
+def test_whoami_refs_the_registered_agent_index_doc_resource() -> None:
+    """The ref resolves against the live allowlist, so a URI that drifts fails here (#2342)."""
+    entry = next(e for e in DOC_RESOURCES if e.name == "agent-index")
+
+    response = whoami(RequestContext(principal="agent-1", agent_session=None, projects=()))
+
+    assert response.refs == {"agent_index": entry.uri}
+    # whoami admits viewer and role-less callers (PUBLIC_TOOLS), so the doc it hands them must
+    # be one DocExposureMiddleware serves to anyone and no provider gate can withhold.
+    assert entry.audience == "all"
+    assert entry.required_kind is None
 
 
 def test_whoami_does_not_leak_agent_session() -> None:
