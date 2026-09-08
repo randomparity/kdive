@@ -395,14 +395,21 @@ class ProvisioningProfile(_ProfileBase):
 
     @model_validator(mode="after")
     def _pair_boot_method_with_provider(self) -> ProvisioningProfile:
-        """``disk-image`` and the remote-libvirt section require each other (ADR-0080)."""
+        """Keep the provider and boot method on one supported provisioning lane (ADR-0080)."""
         remote = self.provider.remote_libvirt_section is not None
         disk_image = self.boot_method is BootMethod.DISK_IMAGE
         if remote != disk_image:
-            raise ValueError(
-                "boot_method 'disk-image' and the remote-libvirt provider section "
-                "require each other (ADR-0080)"
-            )
+            if remote:
+                message = (
+                    "provider 'remote-libvirt' requires boot_method 'disk-image'; "
+                    "change boot_method to 'disk-image'"
+                )
+            else:
+                message = (
+                    "boot_method 'disk-image' requires provider 'remote-libvirt'; "
+                    "use boot_method 'direct-kernel' with local-libvirt or fault-inject"
+                )
+            raise ValueError(message)
         return self
 
     @model_validator(mode="after")
