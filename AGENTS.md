@@ -31,7 +31,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
-| `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, mermaid + doc-link guards, all generated-artifact checks, then the suite |
+| `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, doc-link guards, all generated-artifact checks, then the suite |
 | `just compose-up` / `compose-down` | Postgres + MinIO + mock-OIDC backing services for a live run |
 | `just stack-up` | bring the live-stack backends up healthy + print host-process env (see runbook) |
 | `just test-live-stack` | the `live_stack` suite; skips cleanly when the stack/fixtures are absent |
@@ -288,8 +288,8 @@ and constraint an agent must know, and does not invite a pattern the behavior di
 - **Releasing** — see [`docs/development/releasing.md`](docs/development/releasing.md) and
   [ADR-0041](docs/adr/0041-versioning-release-process.md) (SemVer, milestone→minor,
   tag-driven release).
-- **Doc-style guard** (enforced in CI / `check-mermaid` is mermaid-only, but the prose
-  rule is project-wide): use **Milestone**, never "Sprint"; keep prose plain and factual —
+- **Doc-style guard** (no check enforces it, but the prose rule is
+  project-wide): use **Milestone**, never "Sprint"; keep prose plain and factual —
   avoid "critical", "robust", "comprehensive", "elegant". This applies to ADRs, specs,
   commit messages, and code comments.
 - **Never pass a PR or issue body as a shell string.** Write the body to a file and use

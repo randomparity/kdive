@@ -15,9 +15,6 @@ __pycache__/
 .hypothesis/
 .desloppify/
 
-# Node (mermaid doc checker tooling)
-node_modules/
-
 # Generated build info (baked into artifacts only; never committed)
 /src/kdive/_buildinfo.py
 

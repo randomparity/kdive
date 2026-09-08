@@ -19,8 +19,8 @@ This reads command text, so it is a proxy, not a proof. It cannot see:
 - a command a YAML *folded* scalar (`run: >`) joins out of several lines, since the join happens
   in the runner, not here;
 - an indirect invocation — `git -C <dir> push`, or a script the scan does not read: anything
-  outside `.github/workflows/` and `.github/scripts/`, and any non-`.sh` file inside
-  `.github/scripts/`, such as the `mermaid-check.mjs` that `docs-mermaid.yml` invokes;
+  outside `.github/workflows/` and `.github/scripts/`, such as the `scripts/apt-install.sh` that
+  `ci.yml` invokes, and any non-`.sh` file inside `.github/scripts/`;
 - a bare `git push` in a block that has already run `git checkout main`. Flagging every
   operand-less push would redden `git push --tags` and the ordinary idiom for pushing to a
   pull-request head, so the trade is deliberate; see `_default_branch_pushes`.
