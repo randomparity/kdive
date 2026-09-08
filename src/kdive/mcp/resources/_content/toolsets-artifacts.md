@@ -1,41 +1,45 @@
 # artifacts toolset
 
-Artifacts are the files a run or system produces or consumes: console logs, kernel images,
-build outputs. Reach for these to read evidence after a boot or crash, and to upload a
-prebuilt kernel on the external build lane. For exact parameters, types, and return schema,
-read each tool's own description.
+Use these tools to read evidence or upload externally built files. Exact argument shapes,
+limits, and returned fields belong to each tool's schema.
 
 ## Reading evidence
 
-- `artifacts.list` — list the artifacts available for a run or system, by name.
-- `artifacts.get` — fetch an artifact's bytes in a token-safe window. Pass `find` to jump
-  straight to a literal crash signature in a large console log instead of paging the whole
-  file.
-- `artifacts.fetch_raw` — get a download URL for a large or binary artifact (such as a
-  vmcore or vmlinux) instead of inlining its bytes.
+- `artifacts.list` takes a **System ID** and lists its redacted artifacts, newest first,
+  across Runs and debug sessions. Follow `data.next_cursor` while `data.truncated` is true.
+  For a non-failed Run's console, prefer `runs.get`: `refs.latest_console` selects its newest
+  evidence; `include_console_artifacts=true` requests the bounded Run-scoped manifest. Failed
+  Runs omit these surfaces: list the bound System's artifacts and inspect available job refs.
+- `artifacts.get` takes an **artifact ID** inside `request` and returns redacted text in
+  `data.content`. Follow `data.next_offset` when `data.content_truncated` is true. Use `find`
+  for literal search; inspect `data.match_found` instead of treating an empty window as a hit.
+  An artifact over the fetch ceiling cannot be searched and returns `artifact_too_large`.
+  A plain read may offer `refs.download_uri`; `data.content_unavailable` can mean neither
+  inline content nor a download is available. These two tools require viewer access.
+- `artifacts.fetch_raw` takes a **Run ID** and `asset` (`vmcore`, `vmlinux`, or `pcap`). It
+  requires contributor access and returns a sensitive download URL in `refs.download_uri`,
+  with no inline bytes. For multiple pcaps, select `artifact_id` from the capture job's
+  `refs.result`, or omit it for the newest. See resource://kdive/docs/guide/toolsets/postmortem.md
+  for the difference between redacted crash evidence and a raw core.
 
-Argument shape: on this surface, `artifacts.get` is the only read that nests its arguments
-under `request`; `artifacts.list` and `artifacts.fetch_raw` both take flat parameters.
+Only `artifacts.get` nests its read arguments under `request`; the other two reads use
+flat parameters. Uploaded build files are not part of the System's redacted listing.
 
-## Uploading a build
+## Uploading files
 
-- `resource://kdive/contracts/external-build` — learn the exact artifacts, byte layout, and
-  advisory feature `CONFIG_*` requirements before you upload.
-- `artifacts.create_run_upload` — mint presigned PUTs for a run's build artifacts.
-- `artifacts.create_investigation_upload` — mint a presigned PUT for an investigation-scoped
-  rootfs, reusable across every system bound to that investigation.
+`artifacts.create_run_upload` creates an external-build Run's upload manifest. Declare the
+complete artifact set on each call: a later call replaces the manifest. Upload through the
+returned signed URLs and headers, then finalize with `runs.complete_build`. Read the byte
+contract at resource://kdive/contracts/external-build and follow the detailed procedure at
+resource://kdive/docs/operating/external-build-upload.md, which owns packaging and build upload.
 
-## Uploading a large rootfs (gzip transport encoding)
+`artifacts.create_investigation_upload` creates signed upload instructions for one
+Investigation-owned rootfs. PUT its bytes using the returned URL and required headers, then
+finalize with `investigations.complete_rootfs_upload`. Use the returned `checksum_sha256` in a
+System's upload-rootfs profile bound to that Investigation. Rootfs uses a single PUT; optional
+gzip transport encoding and its size constraints are described in the tool schema. Build
+uploads do not accept that transport encoding.
 
-An investigation's rootfs is uploaded as a single PUT (chunked upload is rejected), so a canonical
-qcow2 larger than the 5 GiB single-PUT cap cannot be uploaded directly. Instead, gzip the qcow2 and
-declare a transport encoding on `artifacts.create_investigation_upload`: set `encoding: "gzip"` and
-`uncompressed_size` to the canonical (decompressed) qcow2 size in bytes. kdive strips the gzip on
-download — streaming and bomb-bounded against `uncompressed_size` — then verifies the qcow2 magic
-before the image backs the guest, so a wrong-format or truncated upload is rejected early with a
-clear message rather than failing late at boot.
-
-Constraints: gzip is the only encoding; `uncompressed_size` is required with it and is capped at
-50 GiB; `encoding` cannot be combined with `chunks`; and `sha256`/`size_bytes` describe the
-uploaded (compressed) bytes. Transport encoding is a rootfs-only surface —
-`artifacts.create_run_upload` rejects it, since build artifacts are validated and uploaded as-is.
+For both upload tools, follow the returned `expires_at`, `manifest_deadline`, `server_time`,
+and `on_expiry` contract. URL expiry and the deadline to finalize the whole manifest are
+different. Do not replace a manifest while its finalization is running.
