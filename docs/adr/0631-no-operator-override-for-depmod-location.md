@@ -28,13 +28,19 @@ pins that as an exact dictionary, with an ambient control entry (`KDIVE_LIBVIRT_
 that does not appear in it.
 
 That set is not frozen, and this record does not claim it is. ADR-0621 removed
-`KDIVE_LIBVIRT_RECOVERY_ROOT` from it and routed the setting to the authority host instead, which
-is the precedent for declining a widening rather than a rule against every one; `d4b130d5a` added
-four names the same day. What the allowlist admits is worker *settings*, whose values the worker
-reads. An override admits something different in kind: an operator-chosen absolute path that the
-gated child then executes, as the worker slot account (`User=kdive-worker-%i`) that holds
-authority over guest overlays. That difference, not the size of the set, is why this one is
-declined where those were not.
+`KDIVE_LIBVIRT_RECOVERY_ROOT` from it, which is a precedent for declining one widening rather
+than a rule against every one; `d4b130d5a` added four names the same day. What the allowlist
+admits is worker *settings*, whose values the worker reads.
+
+An override is different, and the difference is who can supply the value. A path in the allowlist
+is set by whoever controls the worker unit's environment, and the gated child would execute the
+binary it names as the worker slot account (`User=kdive-worker-%i`), which holds authority over
+guest overlays. Putting a binary — or a link — into `/usr/sbin` takes root on the worker host.
+Both routes end at "the worker executes this file", so the four-directory list is not a check on
+the path; it is the requirement that only root could have chosen it. An environment name would
+admit a chooser who is not root, and that is what makes it a different kind of value from a
+setting. Note that kdive verifies none of this: the guarantee is the host's filesystem
+permissions on those four directories, not anything `_resolve_depmod` inspects.
 
 The four directories are not an arbitrary list. Every one is root-owned, they are the set
 `bootstrap_elf.py` already resolves its own host tools against (`_TOOL_PATH`, line 23), and
@@ -66,8 +72,8 @@ ADR so the list and its decision are one lookup apart.
   an operator in this position is told what the contract is and can act on it without host
   access. That message is what makes relocate-or-symlink actionable rather than a guess, and it
   is the part of this decision that must not regress.
-- No new environment name reaches the gated worker, so ADR-0621's exact-environment invariant and
-  the test that pins it are unchanged, and the control entry keeps meaning what it means.
+- No new environment name reaches the gated worker, so the gate's exact child environment and the
+  test that pins it are unchanged, and the control entry keeps meaning what it means.
 - An operator running a distribution that puts `depmod` outside the four directories is blocked
   from local-libvirt module indexing until they relocate or symlink it. No such distribution is
   known to us; the failure message is what surfaces one if it exists, and a report of a real host
@@ -86,8 +92,8 @@ ADR so the list and its decision are one lookup apart.
 - **A `KDIVE_DEPMOD` environment override.** verified: the value cannot reach the worker without
   adding a name to `_WORKER_ENV_NAMES` in `deploy/systemd/bin/kdive-live-worker-gate`, whose
   child environment `_worker_environment` builds from that set alone and `os.execve` installs
-  wholesale. That widening is what ADR-0621 narrowed and what
-  `tests/deploy/test_live_worker_gate.py:209-261` asserts against. The admitted value would be an
+  wholesale, and what `tests/deploy/test_live_worker_gate.py:209-261` asserts as an exact
+  dictionary. The admitted value would be an
   absolute path the worker slot account then executes, so the gate would be carrying an operator's
   choice of binary rather than a setting. Built once and withdrawn in `b0cefbedb`.
 - **A configuration-file override read by the worker rather than an environment variable.**
