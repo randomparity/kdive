@@ -247,10 +247,13 @@ that fail when followed.
 
 **Acceptance criteria.**
 
-- `rg -n 'changelog-sync' -- .github justfile docs/development` returns nothing. (The ADR, spec
-  and plan keep their mentions by design — they are the record of what was removed, and the
-  `records` gate holds a merged ADR append-only. Scoping the grep this way is what makes the
-  criterion satisfiable at all.)
+- `rg -n 'changelog-sync' -- .github justfile docs/development` returns exactly one hit: the
+  deploy key's own name, `changelog-sync (auto)`, in the branch-protection note. That is a
+  GitHub-settings identifier the repository owner needs in order to remove the key, not a
+  reference to the deleted workflow file. No hit names `changelog-sync.yml`. (The ADR, spec and
+  plan keep their mentions by design — they are the record of what was removed, and the `records`
+  gate holds a merged ADR append-only. Scoping the grep this way is what makes the criterion
+  satisfiable at all.)
 - `docs/development/releasing.md` names `just changelog` as a step of the post-release bump PR and
   states the tag precondition.
 - `just release` prints a reminder naming `just changelog` and does not claim an automatic sync.
