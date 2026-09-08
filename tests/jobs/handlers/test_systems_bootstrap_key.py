@@ -628,7 +628,7 @@ def test_failed_teardown_keeps_module_attempt_for_worker_reap(migrated_url: str)
 def test_teardown_discharge_rollback_keeps_module_attempt_for_worker_reap(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations
+    original = RemoteModuleAttemptObligationRepository.worker_discharge_system_mutation_obligations
 
     async def fault(
         repository: RemoteModuleAttemptObligationRepository, conn: Any, system_id: UUID
@@ -637,7 +637,9 @@ def test_teardown_discharge_rollback_keeps_module_attempt_for_worker_reap(
         raise RuntimeError(f"after discharge {count}")
 
     monkeypatch.setattr(
-        RemoteModuleAttemptObligationRepository, "discharge_system_mutation_obligations", fault
+        RemoteModuleAttemptObligationRepository,
+        "worker_discharge_system_mutation_obligations",
+        fault,
     )
 
     async def _run() -> tuple[ModuleAttempt, list[ModuleVolumeKey]]:

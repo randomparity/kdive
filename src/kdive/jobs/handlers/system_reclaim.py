@@ -108,9 +108,11 @@ async def reclaim_system_core_after_provider_teardown(
         if reclaim_snapshot_ledger:
             await delete_snapshots_for_system(conn, system_id)
         if discharge_mutation_obligations:
-            await RemoteModuleAttemptObligationRepository().discharge_system_mutation_obligations(
-                conn, system_id
-            )
+            # The worker-fenced form: every caller of this helper that discharges runs under
+            # kdive_worker or kdive_reconciler, and neither holds UPDATE on the obligations
+            # table (ADR-0629, #2302).
+            obligations = RemoteModuleAttemptObligationRepository()
+            await obligations.worker_discharge_system_mutation_obligations(conn, system_id)
     async with conn.transaction():
         await delete_system_bootstrap_key(conn, system_id)
     await asyncio.to_thread(shutil.rmtree, str(pcap_dir(system_id)), ignore_errors=True)

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
+import os
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -43,6 +46,35 @@ _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
 # The relative in-tar / in-guest modules root (``_MODULES_ROOT`` without the leading slash).
 _MODULES_TREE = _MODULES_ROOT.lstrip("/")
 _DEPMOD_STDERR_MAX = 500
+_DEPMOD = "depmod"
+# depmod is an sbin tool — /usr/sbin under merged-usr, /sbin under split-usr. Resolution never
+# consults PATH: the fixed live-worker gate execs the worker from an environment allowlist that
+# omits it, so a bare name falls back to os.defpath (/bin:/usr/bin) and misses /usr/sbin, which
+# reported a missing package on hosts that had one (#2300). These are the set
+# ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
+# against, and every one is root-owned. /usr/local/{sbin,bin} are left out on purpose even though
+# an ungated worker reaches them through PATH today: /usr/local is group-writable by default on
+# part of the Debian family, and a binary planted there would run as the worker slot account
+# (User=kdive-worker-N, in kdive-live-libvirt), inheriting its authority over guest overlays.
+_DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
+# The permanent exec-side returns: the binary vanished between which() and exec, sits on a
+# noexec mount or lacks the bit (EACCES/EPERM), or is not an executable format — a partially
+# written file gives ENOEXEC, which CPython raises as a bare OSError. These dead-letter, because
+# a retry cannot make them succeed. Everything else is retryable, which deliberately inverts the
+# usual default: the spawn side raises EMFILE/ENFILE from pipe creation and EAGAIN/ENOMEM from
+# fork, ETXTBSY clears once a writer closes, and none of those mean depmod is broken. Catching
+# OSError wholesale dead-lettered installs that a retry would have completed.
+_DEPMOD_EXEC_ERRNOS = frozenset(
+    {
+        errno.ENOENT,
+        errno.EACCES,
+        errno.EPERM,
+        errno.ENOEXEC,
+        errno.ELOOP,
+        errno.ENOTDIR,
+        errno.ENAMETOOLONG,
+    }
+)
 
 
 class DepmodRunner(Protocol):
@@ -78,26 +110,70 @@ def _extract_modules_bounded(archive: tarfile.TarFile, workdir: Path) -> None:
         archive.extract(member, workdir, filter=_safe_module_extract_filter)
 
 
+def _resolve_depmod() -> str:
+    """Resolve ``depmod`` to an absolute path, explicitly rather than through ``PATH``.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` naming the searched directories when nothing
+            resolves.
+    """
+    searched = os.pathsep.join(_DEPMOD_SEARCH_DIRS)
+    resolved = shutil.which(_DEPMOD, path=searched)
+    if resolved is None:
+        raise CategorizedError(
+            # The directories are named in the message, not only in details: failure_message is
+            # the one field every failure surface forwards, and an operator who sees "install
+            # kmod" without them is back at the #2300 defect of being told to install a package
+            # they have.
+            f"depmod is required on the worker host to index kernel modules for staging, and was "
+            f"not found in any of {searched}; install kmod (provides depmod), or confirm depmod "
+            f"is in one of those directories",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            # A single string, not a list: the worker's failure context keeps only scalar details
+            # (``_safe_detail`` in jobs/worker.py), so a list is dropped before it reaches the
+            # operator — which is exactly the diagnosability this failure exists to provide.
+            details={"searched": searched},
+        )
+    return resolved
+
+
 def _run_host_depmod(*, basedir: Path, version: str) -> None:
     """Index ``basedir/lib/modules/<version>`` with host ``depmod`` (ADR-0346).
 
     Raises:
-        CategorizedError: ``MISSING_DEPENDENCY`` when no ``depmod`` binary is on ``PATH``;
-            ``INFRASTRUCTURE_FAILURE`` on a non-zero exit, carrying the trimmed ``depmod`` stderr
-            in ``details`` so the cause is legible from the tool envelope (the #1146 note).
+        CategorizedError: the ``MISSING_DEPENDENCY`` case :func:`_resolve_depmod` raises, and
+            again carrying the resolved path when that binary cannot be executed;
+            ``INFRASTRUCTURE_FAILURE`` when the host cannot run it at all, and on a non-zero exit,
+            carrying the trimmed ``depmod`` stderr in ``details`` so the cause is legible from the
+            tool envelope (the #1146 note).
     """
+    depmod = _resolve_depmod()
     try:
         result = subprocess.run(
-            ["depmod", "-b", str(basedir), version],
+            [depmod, "-b", str(basedir), version],
             capture_output=True,
             text=True,
             check=False,
         )
-    except FileNotFoundError as exc:
+    except OSError as exc:
+        if exc.errno not in _DEPMOD_EXEC_ERRNOS:
+            # Host pressure (no descriptors, no processes) or a transient exec fault (ETXTBSY):
+            # depmod itself is fine and a retry can succeed, so this must not dead-letter.
+            raise CategorizedError(
+                "the host could not run depmod to index the kernel modules for staging",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"depmod": depmod, "error": type(exc).__name__, "errno": exc.errno},
+            ) from exc
+        # Every permanent exec failure, not just FileNotFoundError: a resolved binary can vanish
+        # between which() and exec, sit on a noexec mount, or be an unexecutable format — ENOEXEC
+        # arrives as a bare OSError. Uncaught, those escape the uniform envelope entirely.
+        # MISSING_DEPENDENCY keeps the non-retryable disposition a missing depmod has always had,
+        # so the job dead-letters instead of retrying a binary that will not become executable.
         raise CategorizedError(
-            "depmod is required on the worker host to index kernel modules for staging; "
-            "install kmod (provides depmod)",
+            "the resolved depmod binary could not be executed to index the kernel modules "
+            "for staging",
             category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"depmod": depmod, "error": type(exc).__name__, "errno": exc.errno},
         ) from exc
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()[-_DEPMOD_STDERR_MAX:]
