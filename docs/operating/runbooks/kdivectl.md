@@ -1,341 +1,166 @@
-# Runbook: `kdivectl` operator CLI
+# Runbook: kdivectl operator CLI
 
-Operator guide for `kdivectl`, the kdive admin CLI. `kdivectl` is a FastMCP **client**: it
-attaches an OIDC bearer token and calls the same MCP tools an agent does — there is no new
-server transport and no direct database or object-store access from the operator host (the
-host holds only the bearer token). Every registered MCP tool is reachable as a
-`group subcommand` verb: a hand-curated subset renders read tools as tables/JSON and wraps the
-M1.3 break-glass mutations, and every other tool is a **schema-generated verb** with typed
-flags (see [The generated verb surface](#the-generated-verb-surface)). A tiered, fail-closed
-`tool call` passthrough additionally reaches any tool by raw name for scripting. See
-[ADR-0089](../../adr/0089-operator-cli-mcp-client.md),
-[ADR-0421](../../adr/0421-schema-generated-kdivectl-verbs.md),
-[ADR-0423](../../adr/0423-generic-generated-verb-dispatch.md), and the
-[M2.2 plan](../../archive/superpowers/plans/2026-06-10-m22-admin-cli.md).
+`kdivectl` calls KDIVE's MCP endpoint with a bearer token. Use this page for authentication,
+command discovery, output handling, and CLI safeguards. The [tool reference](
+../../guide/reference/index.md) owns each tool's parameters and behavior; [Safety and RBAC](
+../../guide/safety-and-rbac.md) owns the permissions model.
 
-Every call `kdivectl` makes is attributed: the server records the OIDC `client_id` and
-resolves an `actor`. When you authenticate under the dedicated `kdivectl` OIDC client, your
-actions are audited as **`operator-cli`** — distinct from an agent's `agent` actor. Reading
-the audit trail by `actor` is how you separate operator break-glass from routine agent work
-(see [Reading the audit trail](#reading-the-audit-trail-by-actor)).
+## Before you start
 
-## Prerequisites
+Follow [installation from source](../install.md#from-source). In the configured checkout,
+activate the installed environment so the commands below resolve:
 
-1. **A dedicated `kdivectl` OIDC client.** Register a client in your IdP whose id is
-   recorded as the CLI's `azp`/`client_id`. The server maps this client id to
-   `actor=operator-cli`. The default is `kdivectl`; override with `KDIVE_CLI_CLIENT_ID` if
-   you registered a different id.
-2. **Environment.** `kdivectl` reads its configuration from `KDIVE_*` environment variables
-   (the single config source of truth, ADR-0087):
+```bash
+source .venv/bin/activate
+kdivectl --help
+```
 
-   | variable | purpose | default |
-   |----------|---------|---------|
-   | `KDIVE_SERVER_URL` | the server's streamable-HTTP MCP endpoint | `http://127.0.0.1:8080/mcp` |
-   | `KDIVE_TOKEN` | bearer token (prod path; overrides the login cache) | unset |
-   | `KDIVE_CLI_CLIENT_ID` | OIDC `client_id` the CLI authenticates under | `kdivectl` |
-   | `KDIVE_OIDC_ISSUER` | mock-OIDC issuer base URL (dev `login` path) | unset |
-   | `KDIVE_OIDC_AUDIENCE` | token audience (dev `login` path) | the server default |
-
-   Point `KDIVE_SERVER_URL` at the running stack's MCP endpoint (for a local stack that is
-   typically `http://127.0.0.1:8000/mcp` — keep it in sync with the bind address; see
-   [live-stack.md](live-stack.md)).
-3. **Install.** `kdivectl` is the `kdivectl` console script from this package
-   (`pip install kdive` / `uv pip install kdive`), or run it in-tree as
-   `python -m kdive.cli`.
+Set `KDIVE_SERVER_URL` to your deployment's streamable-HTTP endpoint, including `/mcp`.
+For a development host stack, use the endpoint printed by the [live-stack runbook](live-stack.md).
+The [configuration reference](../../guide/reference/config.md) lists CLI defaults. The CLI
+connects to the server; ordinary tool calls do not need database or object-store credentials.
 
 ## Authenticating
 
-There are two token paths; `KDIVE_TOKEN` always wins over the login cache.
+In production, obtain an operator token through your identity provider's supported flow and
+supply it as `KDIVE_TOKEN`. A nonempty value takes precedence over the login cache. The token
+must have the audience and grants required by the server and requested tool.
 
-### Production: supply `KDIVE_TOKEN`
+For platform audit attribution, the token's verified `azp` or `client_id` must match the
+server's `KDIVE_CLI_CLIENT_ID`. Merely running the CLI, or setting that variable locally with
+an existing token, does not make the request `actor=operator-cli`.
 
-Have your IdP mint an access token for an operator principal under the `kdivectl` client
-and export it:
-
-```bash
-export KDIVE_TOKEN="$(your-idp-mint-operator-token)"
-export KDIVE_SERVER_URL="https://kdive.example.com/mcp"
-kdivectl resources list
-```
-
-`kdivectl` never prints or logs the token.
-
-### Development: `kdivectl login` against the mock-OIDC issuer
-
-With `KDIVE_OIDC_ISSUER` set, `kdivectl login` drives the mock-OIDC authorization-code flow,
-mints a token under `KDIVE_CLI_CLIENT_ID`, and caches it `0600` (under a `0700` parent) at
-`$XDG_STATE_HOME/kdive/token` (default `~/.local/state/kdive/token`). The cached token is
-read automatically when `KDIVE_TOKEN` is unset.
+`kdivectl login` implements the bundled mock-OIDC development flow. Configure
+`KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_AUDIENCE` for that stack, then choose the needed role:
 
 ```bash
-export KDIVE_OIDC_ISSUER="http://127.0.0.1:8081/default"
-export KDIVE_SERVER_URL="http://127.0.0.1:8000/mcp"
-
-kdivectl login                              # no platform role
+unset KDIVE_TOKEN
 kdivectl login --platform-role platform_operator
-kdivectl login --platform-role platform_admin
+kdivectl session whoami --json
 ```
 
-The `--platform-role` axis encodes the platform role into the minted token. Break-glass
-mutating verbs need the platform role the underlying tool gates on — see
-[Break-glass mutating verbs](#break-glass-mutating-verbs).
+Use `platform_operator` for diagnostics or `platform_admin` for administrative break-glass
+operations. These roles do not imply one another; neither grants project membership. Login
+without `--platform-role` requests no platform role, and none of these login forms grants
+project roles. Follow [project onboarding](../project-onboarding.md) for project-scoped tokens.
+
+Login writes a `0600` token file under a `0700` parent at `$XDG_STATE_HOME/kdive/token`, defaulting
+to `~/.local/state/kdive/token`. It prints a confirmation, not the token. Refresh a development
+token by logging in again; refresh a production token through the identity provider and replace
+`KDIVE_TOKEN`. An old environment token continues to override a newly written cache.
 
 ## The generated verb surface
 
-`kdivectl` exposes **every** registered MCP tool as a verb, not just the hand-curated ones
-below. Each tool contributes one verb at a canonical path derived from its name, so the CLI
-surface tracks the server's tool surface automatically (ADR-0421, ADR-0423). Run `kdivectl
---help` to list the groups, `kdivectl <group> --help` to list a group's verbs, and `kdivectl
-<group> <verb> --help` to see a verb's flags — the parser is built offline, so `--help` and
-[shell completion](#shell-completion) never open a session.
-
-### Canonical path derivation
-
-A tool named `namespace.op` maps to the verb `namespace op`, with underscores in `op`
-becoming dashes; each scalar tool parameter `some_param` maps to the flag `--some-param`
-(ADR-0421 §2). For example:
-
-| MCP tool | generated verb |
-|----------|----------------|
-| `control.force_crash` | `kdivectl control force-crash` |
-| `systems.authorize_ssh_key` | `kdivectl systems authorize-ssh-key` |
-| `accounting.set_quota` | `kdivectl accounting set-quota` |
-| `debug.set_breakpoint` | `kdivectl debug set-breakpoint` |
-
-A parameter the generator cannot express as a typed scalar flag — a nested object, an object
-array — is surfaced as a single `--<param>-json` escape that takes a JSON object or array
-(validated at parse time; a malformed or bare-scalar value is a usage error, exit `2`). A
-generated verb emits the server response envelope the same way `--json` does for curated verbs
-(the scriptable contract is the tool's own output schema, not a CLI-chosen column subset).
-
-### Curated vs. generated verbs
-
-A **curated** verb (the read verbs and break-glass mutations documented below) overrides the
-generated shape at its path with hand-tuned positionals, flags, and table rendering; it wins at
-its own path only. **Every other tool** takes the schema-derived shape: typed `--flags` plus
-the `--<param>-json` escapes, rendering the response envelope. Both kinds call the same
-underlying tool and are gated by the **same** server-side authorization — the generated shape
-is a convenience layer, never a second authorization path.
-
-### Generated-verb mutation ceremony
-
-Curated break-glass verbs and the `tool call` passthrough are not the only way to reach a
-mutating or destructive tool: a generated verb reaches its own tool directly. The ceremony
-differs from the passthrough's in one way — **naming the generated verb is itself the
-acknowledgement, so no `--allow-mutating` / `--allow-destructive` opt-in flag is used** (ADR-0421
-§4, ADR-0423). The tier is resolved from the tool's **live** server annotations at call time
-(never the committed artifact, so a stale artifact cannot downgrade a tool's tier), and drives
-the ceremony:
-
-- **read-only** tool → called directly.
-- **mutating** tool → a fail-closed token-`exp` preflight runs first (a near-expired token is
-  refused up front; re-run `kdivectl login` and retry), then the call.
-- **destructive** tool → the preflight **plus** a typed-`yes` confirmation on a TTY (or `--yes`
-  for non-interactive use; a non-interactive stdin without `--yes` refuses).
-- **unclassifiable** tool (annotations missing or not a literal `readOnlyHint`/`destructiveHint`)
-  → fail-closed and **unreachable** (exit `3`), so nothing slips through unclassified.
-
-The server-side destructive-op gate (ADR-0006/0020) remains the real authorization boundary;
-this ceremony is the client-side UX guard on top of it. Server-side authorization for each
-generated verb is the underlying tool's own — a mutating/destructive verb still requires
-whatever platform role or project grant the tool enforces, exactly as the break-glass verbs do.
-
-## Read verbs
-
-The curated read verbs call one read-only MCP tool and render a table (or JSON with `--json`).
-They are a hand-tuned subset of the [generated surface](#the-generated-verb-surface) above;
-every other read tool is reachable as a generated verb (`kdivectl <group> <verb>`) or through
-the read-only [`tool call` passthrough](#tiered-passthrough-tool-call):
+Discover commands and their exact arguments from the installed parser, offline:
 
 ```bash
-kdivectl resources list [--kind <kind>]
-kdivectl resources describe <resource_id>
-kdivectl allocations list --project <project>
-kdivectl systems list [--state <state>]
-kdivectl systems get <system_id>
-kdivectl runs get <run_id>
-kdivectl jobs list
-kdivectl jobs wait <job_id> [--timeout-s <seconds>]
-kdivectl allocations wait <allocation_id> [--timeout-s <seconds>]
-kdivectl accounting usage (--project <project> | --investigation-id <uuid>)
-kdivectl accounting report --scope all-projects [--group-by principal] [--since <ts>] [--until <ts>]
-kdivectl accounting report --scope granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
-kdivectl inventory list [--project <project>]
+kdivectl --help
+kdivectl resources --help
+kdivectl resources describe --help
+kdivectl jobs wait --help
+kdivectl accounting report --help
 ```
 
-There is no `jobs get` / `allocations get` verb: `jobs.get` and `allocations.get` were removed
-([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). `wait` is both the poll and the
-point read. Omitting `--timeout-s` waits for the tool's own default — the CLI never picks the
-timeout for you — and the server clamps a larger value rather than refusing it. Both figures
-are rendered from the server constants into `kdivectl jobs wait --help` and
-`kdivectl allocations wait --help`; read them there rather than from this page.
-The point read is therefore the zero timeout spelled out, which does one lookup and returns
-without blocking:
+MCP names become grouped commands: `resources.describe` becomes `resources describe`, and
+underscores in operation names become hyphens. Generated descriptors own every MCP command's
+path and argument grammar, including positionals. Some handlers specialize payload assembly or
+rendering; they do not define a second parser. The installed descriptors may differ from a
+server running another revision, so compare the client and server versions when a command is
+missing or rejected.
+
+Scalar parameters use typed flags or positionals shown by `--help`; complex parameters use
+`--<parameter>-json` with a JSON object or array. The server validates the payload's structure.
+For example, after setting `KDIVE_TOKEN` to a token with membership in the example project:
 
 ```bash
-kdivectl jobs wait <job_id> --timeout-s 0
-kdivectl allocations wait <allocation_id> --timeout-s 0
+kdivectl allocations list --project example-project --json
+kdivectl accounting usage --project example-project --json
 ```
 
-A non-terminal return is normal, not an error: it carries the current state and means "still
-running, call again". Re-issue short waits rather than one long hold.
+The role and scope of the underlying tool apply equally to CLI calls. A by-id tenant lookup
+can return a not-found-shaped result for an ungranted object; supplying a project name can
+instead produce authorization denied. Use the tool reference and permissions guide to resolve
+a denial rather than assuming a platform role gives access to every project.
 
-**Exit `0` does not mean the job finished.** The exit code is derived from the envelope's
-`error_category` alone, and a wait that times out on a still-queued or still-running job
-carries none — so it exits `0`, exactly as a wait on a *succeeded* job does.
-`kdivectl jobs wait <id> --timeout-s 30 && next-step` will therefore run `next-step` against a
-job that never completed. Read `status` from the `--json` envelope to tell the two apart:
-terminal for a job is `succeeded` / `failed` / `canceled`, and for an allocation it is any
-state other than `requested`.
+## Output, waits, and exit codes
 
-Exit `0` is not the whole story either, so a poll loop needs both signals:
+For MCP verbs, `--json` before the group or after the verb preserves the full server envelope,
+including `status`, `data`, `items`, `error_category`, and `suggested_next_actions`. Default
+output renders tables or records; specialized handlers choose their own columns. Scripts should
+request `--json` and inspect the envelope instead of parsing presentation tables.
 
-- **Nonzero exit — stop, do not re-issue.** A job that finished *failed* carries its own
-  `error_category`, so it exits nonzero (see the [exit-code table](#exit-codes)) with
-  `status: failed`. So do the calls that never waited at all: an unknown or malformed id, or a
-  read your token is not granted for, returns `status: "error"` immediately. Re-issuing any of
-  these is a hot spin against the server, not a poll.
-- **Nonzero exit with no envelope — check the cause before retrying.** Several failures print
-  to stderr and emit nothing on stdout, so there is no `status` to read, and they are not all
-  alike. Exit `2` is a **usage** error (a malformed `--timeout-s`, a missing argument): it is
-  permanent, and retrying it never succeeds — fix the command line. A missing or expired token
-  (`no token: run kdivectl login …`) is likewise permanent until you re-authenticate. Only a
-  no-envelope failure that is *neither* of those is the transient case: a read timeout, a
-  reset, or an intermediary severing the held request. That one is worth retrying with backoff,
-  and it is the concrete reason to prefer repeated short waits over `--timeout-s 300` — the
-  longer the hold, the likelier a proxy severs it.
-- **Exit `0` plus a non-terminal `status` — re-issue.** This is the only case that means "call
-  again", and it is the only one where the call actually consumed `--timeout-s` seconds.
-  Bound the loop with your own overall deadline; nothing caps how many times you re-issue.
-
-Scripts under `set -e` / `pipefail` must tolerate the nonzero exit on a failed-job read rather
-than treating it as a call failure — including the point read, where
-`kdivectl jobs wait <id> --timeout-s 0` exits nonzero on exactly the failed job you are
-investigating.
-
-**Breaking change since v0.4.0 (pre-1.0):** `kdivectl jobs get <id>` and
-`kdivectl allocations get <id>` no longer exist
-([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). Replace them with
-`kdivectl jobs wait <id> --timeout-s 0` and `kdivectl allocations wait <id> --timeout-s 0`
-([ADR-0470](../../adr/0470-positional-id-for-the-cli-point-read.md)) — the id stays positional,
-as it is on every other single-record read.
-
-`--json` may be given before or after the verb (`kdivectl --json resources list` or
-`kdivectl resources list --json`). It emits the server response envelope **verbatim** — the
-same shape every verb returns, curated or generated: `object_id`, `status`, `data`,
-`suggested_next_actions`, `refs`, `error_category`, and nested `items` for a collection. The
-scriptable contract is the tool's own published output schema (ADR-0421 §6), not a CLI-chosen
-column subset. The default (no `--json`) table output is unchanged; only its columns are
-projected. **Breaking change (pre-1.0):** `--json` previously emitted only the verb's declared
-columns; scripts that read those column keys must now read them from the envelope's `data`
-(and each row from `items[*].data`).
-
-`--project` is **required** for `allocations list` (no square brackets): `allocations.list`
-reads exactly one project, so the CLI enforces the flag up front — omitting it is a usage
-error (exit `2`), not a cross-project listing. `accounting usage` reads one project *or* one
-investigation (`accounting.usage` discriminates on `target.kind`), so it needs exactly one of
-`--project` / `--investigation-id`; neither or both is a usage error (exit `2`). `inventory list` is the exception: its `--project` is an
-**optional** narrowing filter on a cross-project auditor read (`inventory.list`, see
-[the matrix below](#read-authorization-platform-axis-vs-project-axis)), omitted for the
-all-projects view. There is no "list across all my projects" verb today; query each project
-in turn.
-
-### Cross-project accounting reports
-
-One verb renders the multi-project accounting rollups (`reserved` / `reconciled` / `variance`
-per project, plus a totals footer). `--scope` picks which of the two authorization axes the
-read runs on, and is **required** — the CLI never picks a scope for you:
+`jobs wait` and `allocations wait` perform one bounded server call. Pass `--timeout-s 0` for
+one immediate read; use a positive timeout to wait. Read defaults and bounds from `--help` and
+the [jobs](../../guide/reference/jobs.md) / [allocations](../../guide/reference/allocations.md)
+references. For a job ID obtained from a previous response:
 
 ```bash
-kdivectl accounting report --scope all-projects [--group-by principal] [--since <ts>] [--until <ts>]
-kdivectl accounting report --scope granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
+kdivectl jobs wait "$job_id" --timeout-s 0 --json
 ```
 
-- `--scope all-projects` is the **platform-axis** read: it needs a `platform_auditor` token
-  (satisfied by `platform_admin`) and rolls up every project. A token without that role gets
-  `authorization_denied` (exit `3`) — it is in the platform-axis row of
-  [the matrix below](#read-authorization-platform-axis-vs-project-axis). Passing the wider
-  scope never grants it; the server checks the role inside that branch.
-- `--scope granted-set` is the **project-axis** read: it rolls up the projects you hold a role
-  on. `--projects a,b` narrows to a named subset (each is `viewer`-checked; a project you are
-  not a member of is denied) and is valid only with this scope. Omit `--projects` for all your
-  granted projects; a given-but-empty value (e.g. a stray comma) is a usage error (exit `2`).
-- `--group-by principal` groups rows by principal instead of per-project. `--since` and
-  `--until` are timezone-aware ISO-8601 bounds forming a half-open window; omit both for all
-  time. The bounds are validated server-side — a non-ISO-8601, timezone-naive, or inverted
-  (`start >= end`) window returns `configuration_error` (exit `2`).
-- Both render the per-project rows as a table with a totals footer. Under `--json` they emit
-  the whole server envelope (like every verb): the rollup totals in `data` and the per-project
-  rows as nested `items[*]` envelopes — not the former projected `{"items": ..., "totals": ...}`
-  object.
+Exit `0` does not establish that a wait reached its desired outcome. Inspect `status`: a job
+can still be `queued` or `running`; an allocation can still be `requested`. Repeat a bounded
+wait while the result remains nonterminal, with an overall deadline in your script. A terminal
+job may be `succeeded`, `failed`, or `canceled`; an allocation leaving `requested` may be granted
+or may have ended without a grant. Handle the actual state, including failures.
 
-### Read authorization: platform axis vs. project axis
+| Code | Meaning |
+|------|---------|
+| `0` | No mapped tool error; inspect the returned state. Doctor has separate verdict semantics below. |
+| `1` | Generic failure, including tool errors without a mapped category; doctor check failure. |
+| `2` | Argument usage error or tool `configuration_error`. |
+| `3` | Tool `authorization_denied`, or refusal by the generic command/passthrough ceremony. |
+| `4` | Tool `not_found`. |
+| `5` | Tool `conflict`. |
+| `6` | Tool `capacity_exhausted`; also doctor errors without failed checks. |
 
-Read verbs split across the two independent authorization axes (ADR-0043 §7), and the split
-is **load-bearing**: a platform role does **not** grant project-scoped reads, and project
-membership does **not** grant cross-project reads. A `kdivectl login --platform-role …` token
-with no project grant sees no project tenant data — there is no implicit "admin sees
-everything." To read a specific project's data, be granted on that project; for the
-cross-project oversight view, use a `platform_auditor` token.
+Client failures can exit without a server envelope. Inspect the diagnostic output and fix its
+cause before retrying; a nonzero exit alone does not establish that retrying will help. When
+capturing output, preserve the command's exit status. Piping through `head`/`tail` or appending
+`echo $?` makes the shell command report the last command's status instead.
 
-| read | authorized by | denied to |
-|------|---------------|-----------|
-| `allocations list/wait`, `systems list/get`, `runs get`, `jobs list/wait`, `accounting usage` (`accounting.usage`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id read returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `accounting usage --project …` / `accounting.usage`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
-| cross-project `inventory list` (`inventory.list`), `accounting.report` (all-projects), `audit.query` (cross-project) | `platform_auditor` (satisfied by `platform_admin`) | a project-member token holding no platform role |
-| `secrets list`, `doctor` | `platform_operator` | any token lacking `platform_operator` |
-| `resources list/get`, `images list` | plain authenticated read (no project scope, no role floor) | unauthenticated callers only |
+## Tiered passthrough (`tool call`)
 
-Note `inventory list` is the **cross-project auditor** read (it maps to the `inventory.list`
-tool, gated `platform_auditor`), not a per-project read — it is the one read verb where a
-platform-axis token is *granted* and a bare project member is *denied*. Every other project-data
-read is the inverse.
-
-The matrix is keyed by the **underlying tool**, so every [generated read
-verb](#the-generated-verb-surface) inherits the axis of its tool — the curated verbs above are
-a subset, not the whole authorized surface. For example `audit query` (`audit.query`) is a
-platform-axis auditor read like `inventory list`; `session whoami` (`session.whoami`) and
-`projects list` (`projects.list`) are plain authenticated reads like `resources list`; and
-`runs list` / `investigations list` are per-project `viewer` reads like `systems get`. When in doubt,
-`kdivectl <group> <verb>` returns the same `authorization_denied` (exit `3`) or
-not-found-shaped (exit `4`) result its tool would for an agent.
-
-Three project-axis outcomes are distinct and should not be conflated. (1) A **non-member**
-(including a platform-only token) reaching a **by-id** read (`systems get`, `runs get`,
-`jobs wait`, `allocations wait`) gets the **not-found-shaped** result above (exit `4`) — the tool resolves the object's project, finds the
-caller is not a member, and returns not-found *before* the role check, so a non-grant never
-surfaces a distinct authorization-denied code (and is **not** audited; only platform-role
-*overreach* within the platform tier leaves a denial row — ADR-0043 §4, see
-[Reading the audit trail](#reading-the-audit-trail-by-actor)). The distinction is deliberate: a
-by-id lookup must not become a cross-tenant existence oracle, so "ungranted, exists" is
-indistinguishable from "absent". (2) A **non-member naming a project** in a named-scope read/op
-(`allocations list --project`, `accounting.usage`, `accounting.estimate`) is denied
-`authorization_denied` (**exit `3`**, ADR-0098) — the caller already supplied the project name, so
-there is no existence to hide, and the denial surfaces distinctly rather than collapsing to a
-generic error; like the by-id non-grant it is **not** audited (the non-member case is
-non-amplifying). (3) A **member** whose role ranks below the required floor reaches `require_role`,
-which surfaces `authorization_denied` (**exit `3`**) **and** is audited as a member-over-reach
-denial.
-
-### Secret-presence and baseline-catalog reads
-
-Two reads surface catalog presence without exposing values. `secrets list` is
-platform-role gated; `images list` is a plain authenticated read:
+Use the passthrough to call a server tool by its MCP name and supply a raw argument object:
 
 ```bash
-kdivectl secrets list                                # secret *presence* (refs only), platform-gated
-kdivectl images list --scope public_baseline         # baseline rootfs images, plain authenticated read
+kdivectl tool call accounting.usage \
+  --json '{"target":{"kind":"project","project":"example-project"}}'
 ```
 
-`secrets list` reports presence/refs only — it never returns secret values.
+Here `--json` is the **input payload**, not an output switch. The passthrough always prints the
+full response envelope as JSON.
 
-`images list` replaces the removed `fixtures list` verb. Its `--scope` flag selects the rows:
-`visible` (the server default, applied when the flag is omitted) returns the public images plus the
-private images owned by projects you can view, and `public_baseline` returns the public baseline
-rootfs images alone — the set `fixtures list` used to print. The response shape is the same for both
-scopes, and it is the full image row (publish state, capabilities, OS identity, default kernel), not
-the four-column fixture projection. An unrecognized scope is refused by argument parsing as a usage
-error (exit `2`) — the flag's choices are the tool schema's own enum, derived rather than restated
-(ADR-0465, ADR-0469).
+It lists the server's tools and classifies the target from live annotations. With no opt-in it
+admits only read-only tools; `--allow-mutating` also admits mutations; `--allow-destructive`
+admits both mutations and destructive tools. Destructive calls additionally require typed `yes`
+on a TTY, or `--yes` for noninteractive use. Missing or unclassifiable tools are refused at every
+tier with exit `3`. These client safeguards do not grant server-side permissions.
+
+## Break-glass mutating verbs
+
+Inspect the command and [operations](../../guide/reference/ops.md) or
+[resources](../../guide/reference/resources.md) reference before invoking a mutation:
+
+```bash
+kdivectl ops force-teardown --help
+kdivectl ops force-release --help
+kdivectl resources set-scheduling --help
+kdivectl resources drain --help
+```
+
+Generic generated mutations treat naming the verb as tier opt-in, check live annotations, and
+use the same destructive confirmation as the passthrough. The specialized commands above take
+a different execution path: they check token expiry and call the tool directly, without the
+generic live-annotation or typed-`yes` ceremony. `ops force-teardown` additionally requires
+`--force`. Do not assume every named destructive command prompts before acting.
+
+Before a mutating passthrough, generic mutation, or these specialized commands, the client
+requires the token's integer `exp` to be more than 30 seconds beyond the client's current Unix
+time. This is a per-call admission check, not a job deadline or token renewal. Missing,
+unreadable, or near-expired claims prevent the call. Refresh the token through the appropriate
+flow above and retry. Generic commands and passthrough return `3` for this refusal; the
+specialized break-glass path currently raises a client error instead.
 
 ## Diagnostics (`doctor`)
 
@@ -364,145 +189,37 @@ before invoking diagnostics; a missing worker or unavailable check is not a pass
 
 ## Shell completion
 
-`kdivectl completion {bash,zsh}` prints a self-contained completion script covering every
-group, verb, and per-verb flag across the merged curated + generated surface (ADR-0424). It
-resolves **offline** — no bearer token, no server call — so it is safe to run and install on any
-host, authenticated or not: the script is walked from the parser tree, which the CLI builds
-without opening a session. Regenerate it after upgrading `kdivectl` to pick up new verbs.
+Completion is generated from the installed parser and needs neither a token nor a server.
+Regenerate or reload it after upgrading the CLI. It completes command names and flags, not
+runtime object IDs or other positional values.
 
-Positional argument *values* (a `resource_id`, a tool `name`) are not completed — they are
-runtime/tenant data with no offline source; completion of a verb's `--` flags still works after
-one is typed.
-
-### bash
+For Bash with `bash-completion` and Bash 4 or later, add this to `~/.bashrc`:
 
 ```bash
-# System-wide (bash-completion loads it lazily):
-kdivectl completion bash | sudo tee /usr/share/bash-completion/completions/kdivectl >/dev/null
-
-# Or per-user:
-mkdir -p ~/.local/share/bash-completion/completions
-kdivectl completion bash > ~/.local/share/bash-completion/completions/kdivectl
-
-# Or source it directly from ~/.bashrc:
 source <(kdivectl completion bash)
 ```
 
-Requires `bash-completion` (bash 4+). Start a new shell to load it.
-
-### zsh
+For Zsh, add this after `compinit` in `~/.zshrc`:
 
 ```zsh
-# Autoload from your fpath (run once, then restart the shell):
-kdivectl completion zsh > "${fpath[1]}/_kdivectl"
-
-# Or source it from ~/.zshrc, after `compinit`:
 source <(kdivectl completion zsh)
 ```
 
-The same script works either way: autoloaded from `$fpath` zsh runs it as the completion
-function; sourced from `~/.zshrc` it registers itself with `compdef`.
-
-## Tiered passthrough (`tool call`)
-
-To reach any MCP tool by raw name — for scripting, or a tool with no convenient generated
-verb — use the passthrough. It is **read-only by default and fail-closed**: it lists the
-server's tools, classifies the target from its live annotations, and admits only tiers you
-have explicitly opted into (ADR-0107).
-
-```bash
-kdivectl tool call accounting.usage --json '{"target": {"kind": "project", "project": "my-proj"}}'  # read-only default
-kdivectl tool call resources.set_status --allow-mutating --json '{...}'       # opt in to mutating
-kdivectl tool call systems.teardown --allow-destructive --yes --json '{...}'  # opt in to destructive
-```
-
-The tier opt-in is cumulative: no flag admits read-only tools only; `--allow-mutating` also
-admits mutating tools; `--allow-destructive` implies `--allow-mutating` and also admits
-destructive tools. A target above the tier you opted into exits `3` without calling the tool,
-naming the flag that would admit it. A mutating or destructive call runs the same fail-closed
-token-`exp` preflight the [break-glass verbs](#break-glass-mutating-verbs) do; a destructive
-call additionally needs a typed-`yes` confirmation on a TTY (or `--yes`). An unclassifiable
-tool (annotations missing or not a literal hint) is fail-closed and unreachable at every tier
-(exit `3`), so nothing slips through unclassified.
-
-This is a client-side policy/UX guard; the server-side destructive-op gate (ADR-0006/0020)
-remains the real authorization boundary, so opting a tier in never bypasses the platform-role
-or project grant the underlying tool enforces.
-
-## Break-glass mutating verbs
-
-These verbs route through the M1.3 break-glass tools. Each is single-call and re-runnable
-(the server tools are idempotent against already-torn-down/already-released state). Before
-its one call, each verb runs a fail-closed token-`exp` preflight: a near-expired token is
-refused up front (re-run `kdivectl login` and retry) rather than risking a mid-operation
-401. These curated verbs are the ergonomic path to the break-glass tools; the same tools are
-also reachable — with the same server-side authorization — as [generated
-verbs](#the-generated-verb-surface) or through the `tool call`
-[passthrough](#tiered-passthrough-tool-call) with an explicit `--allow-mutating` /
-`--allow-destructive` opt-in.
-
-```bash
-kdivectl ops force-teardown <system_id> --reason <R> --force   # ops.force_teardown (needs --force)
-kdivectl ops force-release <allocation_id> --reason <R>  # ops.force_release
-kdivectl resources set-scheduling <resource_id> cordoned|schedulable  # resources.set_scheduling
-kdivectl resources drain <resource_id> [--mode passive|force_release] [--reason <R>]  # resources.drain
-```
-
-**Platform roles required (these are not implied by one another):**
-
-| verb | gated on |
-|------|----------|
-| `ops force-teardown`, `ops force-release` | `platform_admin` |
-| `resources set-scheduling` | `platform_operator` |
-| `resources drain --mode passive` (default) | `platform_operator` |
-| `resources drain --mode force_release` | `platform_admin` (it empties tenant allocations) |
-
-`platform_admin` does **not** imply `platform_operator`, and vice versa — authenticate with
-the platform role the specific verb gates on. A verb invoked without the required platform
-role exits `3` (`authorization_denied`), and — when your token holds *some* platform role —
-the denial is itself audited under `actor=operator-cli` (separation-of-duties accountability).
-
-`ops force-teardown` additionally requires `--force` as an explicit break-glass acknowledgement.
-
-### Exit codes
-
-| code | meaning |
-|------|---------|
-| `0` | success |
-| `1` | generic failure |
-| `2` | configuration error |
-| `3` | authorization denied, **or** a client-side ceremony refusal: a `tool call` target above the opted-in tier, an unclassifiable (fail-closed) tool on the passthrough or a generated verb, a token-`exp` preflight refusal, or an unconfirmed destructive call |
-| `4` | not found |
-| `5` | conflict |
-| `6` | `doctor` only: a check could not run to a verdict (`error`); not a passed contract |
-
 ## Reading the audit trail by `actor`
 
-Every break-glass call writes a `platform_audit_log` row carrying the `tool`, a `scope`
-(the target project and object id), a one-way digest of the arguments (the `reason` is
-digested, never stored in plaintext), the held `platform_role`, and the resolved `actor`.
-When you authenticate under the `kdivectl` client, that `actor` is `operator-cli`.
-
-To review operator break-glass activity, filter by `actor` against the stack's Postgres:
+Platform audit rows classify callers from verified token claims as described under
+[authentication](#authenticating). With authorized database access, inspect recent rows
+attributed to the CLI:
 
 ```sql
 SELECT ts, principal, tool, scope, platform_role, actor
 FROM platform_audit_log
 WHERE actor = 'operator-cli'
-ORDER BY ts DESC;
+ORDER BY ts DESC
+LIMIT 100;
 ```
 
-Both successful break-glass calls and audited denials appear here, so the trail is a
-complete operator accountability record. (A denial from a token holding *no* platform role
-is the routine non-grant case and is deliberately not recorded; only platform-role overreach
-leaves a denial row.)
-
-## Exit-criterion boundary test
-
-`tests/integration/test_kdivectl_boundary.py` is the load-bearing proof of the above: it
-drives `kdivectl ops force-release` through the real entry point twice — once with a
-`platform_admin` token (succeeds; `operator-cli` audit row) and once with an under-privileged
-`platform_operator` token (exit `3` + a `operator-cli` denial audit row). It is gated
-`live_stack`, so it runs only against a running stack (`just stack-up` + the app tier, then
-`just test-live-stack`) and skips cleanly in normal CI. Running it is part of this runbook,
-not the CI gate.
+This is the platform audit table, not a complete record of every CLI attempt. Client-side
+refusals never reach the server, and platform denials from callers holding no platform role
+are deliberately not recorded here. Project audit queries have their own
+[tool and scope rules](../../guide/reference/audit.md).
