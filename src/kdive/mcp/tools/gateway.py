@@ -315,9 +315,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         (unknown/disabled tool) and a schema-validation failure on ``arguments`` are both
         caught and converted to ``configuration_error`` envelopes; the latter's
         ``data.field_errors`` names each offending argument and its failure kind — the same
-        detail a direct bind would raise. ``data.accepted_fields`` additionally lists the
-        tool's top-level keys, but only when you could already see that tool through
-        ``tools.search``; it is omitted otherwise.
+        detail a direct bind would raise — and ``data.accepted_fields`` additionally lists
+        the tool's top-level keys. Both are included only when you could already see that
+        tool through ``tools.search``; both are omitted otherwise.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)

@@ -211,6 +211,9 @@ def test_bad_arguments_without_visibility_omits_accepted_fields() -> None:
     assert content["error_category"] == "configuration_error"
     assert "accepted_fields" not in content["data"]
     assert "field_errors" not in content["data"]
+    # Withholding the schema detail doesn't withhold the tools.search pointer itself —
+    # is_binding_failure, which drives suggested_next_actions, is independent of visibility.
+    assert "tools.search" in content["suggested_next_actions"]
 
 
 def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.MonkeyPatch) -> None:
