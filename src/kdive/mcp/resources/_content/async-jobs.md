@@ -48,9 +48,9 @@ before assuming its resources can be reused or released.
 
 The required role depends on the job kind. Some safety operations cannot be canceled:
 an authority-owned preactivation teardown returns a conflict with `jobs.wait` and
-`systems.get` as next actions. Canceling an already terminal job returns a configuration
-error with its `current_status` in `data`; read it with `jobs.wait` instead. See the
-[jobs reference](reference/jobs.md#jobscancel) for the cancellation role contract.
+`systems.get` as next actions. To check an already terminal job, use `jobs.wait` instead
+of `jobs.cancel`. See the [jobs reference](reference/jobs.md#jobscancel) for the
+cancellation role contract.
 
 ## Transport resets and retries
 
