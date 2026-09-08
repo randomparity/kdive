@@ -39,7 +39,7 @@ which operations your deployment can execute; see [platform support](../operatin
 
 | Page | What it covers |
 |---|---|
-| [Core reproduce/verify path](core-path.md) | The ~12-tool path from acquiring capacity to triaging a crash, and the curated MCP prompts |
+| [Core reproduce/verify path](core-path.md) | Acquire capacity, upload/boot, collect evidence, verify a fix, and finish |
 | [Concepts](concepts.md) | Core objects, relationships, and lifetimes |
 | [Response envelope](response-envelope.md) | `ToolResponse` fields; the references-not-dumps rule |
 | [Async jobs](async-jobs.md) | The long-op pattern and the `jobs.*` polling tools |

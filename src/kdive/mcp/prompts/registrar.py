@@ -92,7 +92,7 @@ class PromptSpec:
 
 _NOTES = (
     "Notes:\n"
-    "- Poll long-running steps with jobs.wait; pass timeout_s=0 for a plain status read.\n"
+    "- Poll long-running steps with jobs.wait; advance after success, and inspect failures.\n"
     "- Read any tool's full contract before calling it; see "
     "resource://kdive/docs/guide/response-envelope.md for how to read results.\n"
     "- [partial] steps are not yet proven end-to-end; check the tool's maturity_detail."
@@ -126,7 +126,8 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
             ),
             Step(
                 "systems.provision",
-                "provision the target system to build/boot on, then jobs.wait for it",
+                "provision the target system to boot/debug on; wait for job success and "
+                "read systems.get",
                 requires=("granted-allocation",),
                 provides=("system",),
             ),
@@ -141,18 +142,20 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
             "yourself and upload it (ADR-0234): upload a prebuilt artifact via "
             "resource://kdive/contracts/external-build -> artifacts.create_run_upload -> "
             "runs.complete_build. "
-            "Prerequisite: an open investigation and a defined, allocated system "
+            "Prerequisite: an open investigation and a ready System on usable allocated capacity "
             "(see start_investigation)."
         ),
         steps=(
             Step(
                 "runs.create",
-                "create a run with source='external' (the default upload lane)",
+                "create a bound run with its investigation_id, system_id and build_profile; "
+                "omit build_ref",
                 provides=("run",),
             ),
             Step(
                 "artifacts.create_run_upload",
-                "declare and upload the prebuilt kernel artifact",
+                "declare the complete build manifest, then PUT each file to its upload_url "
+                "with required_headers",
                 requires=("run",),
             ),
             Step(
@@ -194,26 +197,35 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
         description="Turn a crash into a captured vmcore and a postmortem.",
         summary=(
             "Capture and analyze a crash. "
-            "Prerequisite: a booted system on a kdump-capable run (see build_boot_debug)."
+            "Prerequisite: a Run bound to a System with a supported capture method and "
+            "required guest/kernel assets. For an observed panic, confirm systems.get "
+            "reports crashed before capture; a watch verdict alone does not change that "
+            "state. Preserve evidence and ask an operator if it is not crashed."
         ),
         steps=(
             Step(
                 "control.force_crash",
-                "induce a crash (or react to an observed panic)",
+                "optional deliberate capture check on a ready System (admin plus profile "
+                "opt-in); skip for an already crashed System, never use it to repair state "
+                "after an observed panic",
                 provides=("crash",),
             ),
             Step(
                 "vmcore.fetch",
-                "capture the vmcore from the crashed system",
+                "enqueue capture for the Run whose bound System is crashed",
                 requires=("crash",),
                 provides=("vmcore",),
             ),
             Step(
                 "jobs.wait",
-                "wait for the capture job; its refs.result is the captured vmcore artifact id",
+                "wait for capture success; refs.result is the captured vmcore artifact id",
                 requires=("vmcore",),
             ),
-            Step("postmortem.crash", "run the first-pass crash triage", requires=("vmcore",)),
+            Step(
+                "postmortem.crash",
+                "run first-pass triage with the Run ID; omit commands",
+                requires=("vmcore",),
+            ),
             Step(
                 "introspect.from_vmcore",
                 "inspect kernel state from the captured vmcore",
