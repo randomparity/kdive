@@ -551,6 +551,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread baseline intent callback
 - Expose baseline pre-extraction intent seam
 - Share libvirt boot identity
+- Simplify tools.invoke's binding-failure classification
 
 ### Documentation
 
@@ -2450,6 +2451,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run the local-libvirt example on the fixed live-worker lifecycle
 - Put uv's install directory on PATH for non-interactive shells
 - Make the checkout and kernel tree traversable by the worker accounts
+- Bind tools.invoke's ValidationError to name field/kind detail
+- Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
+- Stop mislabeling a body-raised ValidationError as bad arguments
+- Couple suggested_next_actions to the same binding-failure flag
 - Accept all registered worker-vantage check ids
 
 ### Security

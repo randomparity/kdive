@@ -21,8 +21,12 @@ validation, and denial audit — natively, exactly as a direct call would.
 middleware handles it and converts it to an ``authorization_denied`` envelope.
 ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
 tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
-(unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
-caught and converted to ``configuration_error`` envelopes.
+(unknown/disabled tool) and a schema-validation failure on ``arguments`` are both
+caught and converted to ``configuration_error`` envelopes; the latter's
+``data.field_errors`` names each offending argument and its failure kind — the same
+detail a direct bind would raise. ``data.accepted_fields`` additionally lists the
+tool's top-level keys, but only when you could already see that tool through
+``tools.search``; it is omitted otherwise.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
