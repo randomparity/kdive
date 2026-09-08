@@ -42,10 +42,17 @@ _FIELD_ERROR_LIMIT = 20
 # Bound on the caller-supplied `query` copied into the `tool_search_miss` record. The unit is
 # characters (code points), it applies only to that telemetry field — ranking still sees the whole
 # string, and the response carries no query at all — and a longer query is cut to the first
-# _QUERY_LOG_LEN_MAX characters with a trailing "…" so a reader can tell truncation from a short
-# query. Under the OTel bridge (kdive.observability.facade) `extra` becomes telemetry attributes,
-# so without this the field is caller-sized. 128 matches `_NAME_LEN_MAX` and is far above the
-# capability phrases the field exists to curate (#2327).
+# _QUERY_LOG_LEN_MAX characters with a trailing "…". Under the OTel bridge
+# (kdive.observability.facade) `extra` becomes telemetry attributes, so without this the field is
+# caller-sized. 128 matches `_NAME_LEN_MAX` and is far above the capability phrases the field
+# exists to curate (#2327).
+#
+# Two properties of the cut a reader needs. Length is what separates a truncated value from a
+# short one — anything longer than _QUERY_LOG_LEN_MAX was cut — while the trailing marker is a
+# human hint a caller can forge by ending a short query with U+2026. And the cut happens here, at
+# the emit site, ahead of the log pipeline's `RedactingLogProcessor`, so a registered secret
+# straddling the boundary survives as a prefix its exact-value replacement no longer matches:
+# bounding this field does not make it redacted.
 _QUERY_LOG_LEN_MAX = 128
 # `names` forces full detail and ignores `limit`, so its own bound is the only one left.
 # Ten is `limit`'s default. Measured, a full match runs from under 1 KB to about 16 KB — the
