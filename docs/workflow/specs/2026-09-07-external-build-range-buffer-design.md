@@ -71,7 +71,7 @@ does not alter timing budgets or transport recovery, which #2318 and #2319 own.
    size is from 1 MiB through 2 MiB require at most eight kernel range calls for the complete
    `validate_external_artifacts` operation. This count includes the content check, both independent
    archive readers, and the checksum pass. The pre-change implementation makes 117 calls on the
-   1,049,341-byte fixture, so the ceiling is fixed before implementation and fails red.
+   1,049,287-byte fixture, so the ceiling is fixed before implementation and fails red.
 2. Buffer-boundary reads and seeks return the same byte sequence as a seekable in-memory file.
 3. EOF, seek-beyond-EOF, invalid seek, `read()` through recorded EOF, caller reads larger than the
    retained window, empty/short/oversized responses, and store exceptions retain explicit, tested

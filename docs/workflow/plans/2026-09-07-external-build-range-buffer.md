@@ -13,8 +13,9 @@ version pinning.
 
 Spec: `docs/workflow/specs/2026-09-07-external-build-range-buffer-design.md`.
 
-Expected implementation size: 110–180 changed lines (M) — derived from one roughly 50-line reader
-change, a focused roughly 80-line reader test module, and a roughly 30-line validator regression.
+Expected implementation size: 220–260 changed lines (M) — corrected after the focused contract
+inventory required a roughly 150-line reader test module, alongside the roughly 60-line reader
+change and roughly 30-line validator regression.
 
 ## Global Constraints
 
@@ -148,7 +149,7 @@ the real parser path materially reduces requests while all validation still succ
 - **Contract: real external-build validation materially reduces parser-driven requests and keeps
   version identity.** Mode: `focused-test`. Add
   `test_external_boot_archive_validation_buffers_range_reads`. Expected red: the pre-change reader
-  makes 117 kernel range calls for the 1,049,341-byte fixture and exceeds the fixed ceiling of
+  makes 117 kernel range calls for the 1,049,287-byte fixture and exceeds the fixed ceiling of
   eight. The count includes content checking, both independent archive readers, and checksumming.
   Green command: `uv run python -m pytest
   tests/providers/local_libvirt/test_validate_external_artifacts.py::test_external_boot_archive_validation_buffers_range_reads -q`.
