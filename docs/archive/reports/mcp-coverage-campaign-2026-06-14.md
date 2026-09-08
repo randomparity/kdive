@@ -1,11 +1,15 @@
 # MCP Tool Coverage Campaign — Rerun 2026-06-14
 
-> **Superseded by [`mcp-coverage-campaign-2026-06-18.md`](mcp-coverage-campaign-2026-06-18.md)**
-> (current 112-tool surface). Kept for history.
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../README.md).
 
-Rerun of the MCP tool coverage campaign per `docs/runbooks/mcp-coverage-campaign-rerun.md`.
-Drives every reachable MCP tool over the live transport across the three providers
-(`local-libvirt`, `remote-libvirt` @ ub24-big, `fault-inject`) on two deployments
+> **Superseded by [`mcp-coverage-campaign-2026-06-18.md`](mcp-coverage-campaign-2026-06-18.md)**
+> (the later June 18 report). Kept for history.
+
+Historical rerun of the MCP tool coverage campaign.
+Drove every reachable MCP tool over the live transport across the three providers
+(`local-libvirt`, `remote-libvirt` @ sys-R2, `fault-inject`) on two deployments
 (D1 workstation, D2 k8s). Supersedes `mcp-coverage-campaign-2026-06-13.md`.
 
 ## Deployments
@@ -13,18 +17,9 @@ Drives every reachable MCP tool over the live transport across the three provide
 | Deployment | Providers registered | Identity gate | Notes |
 |---|---|---|---|
 | D1 workstation | local-libvirt, fault-inject, remote-libvirt | PASS (6 roles) | source-checkout host path; MCP at `127.0.0.1:8000/mcp` |
-| D2 k8s (`kdive-demo`) | remote-libvirt, fault-inject | PASS (6 roles) | helm `kdive-0.2.0`/app `0.3.0`; **87 tools vs 91 HEAD** (image predates build-host tools) |
+| D2 k8s (`cluster-R1`) | remote-libvirt, fault-inject | PASS (6 roles) | helm `kdive-0.2.0`/app `0.3.0`; **87 tools vs 91 HEAD** (image predates build-host tools) |
 
-Setup is now captured in a single root-level gitignored descriptor, `systems.toml` (scaffold:
-the committed `systems.toml.example`). The loader renders the workstation env and the
-per-deployment setup commands:
-
-```
-uv run python -m scripts.coverage_campaign.systems render-env > artifacts/coverage-campaign/d1.env
-uv run python -m scripts.coverage_campaign.systems setup-commands
-```
-
-## Result — pass/fail per provider (deployment-collapsed cells)
+## Result — deployment-collapsed cells
 
 | Provider | pass | fail | blocked | cells driven |
 |---|---|---|---|---|
@@ -69,18 +64,7 @@ uv run python -m scripts.coverage_campaign.systems setup-commands
 - **#369** demo OIDC ships hardcoded `interactiveLogin:false`; role-token minting on D2 still
   requires removing `JSON_CONFIG` and restarting the auth/provider tier.
 
-### Setup deltas worth folding into the runbook / descriptor
-
-- The ssh login for ub24-big is `dave@ub24-big.prod.pdx.drc.nz` (FQDN + `dave` user), not
-  `ub24-big@<ip>`. Corrected in `systems.toml`.
-- The remote TLS client PKI lives on the host at `/home/dave/kdive-pki/`
-  (`cacert.pem`/`clientcert.pem`/`clientkey.pem`) → stage as
-  `remote-ca.pem`/`remote-clientcert.pem`/`remote-clientkey.pem` under `$KDIVE_SECRETS_ROOT`.
-- A `fastmcp` client logs `ForwardRef('Root') is not fully defined` / `maximum recursion depth`
-  while parsing structured content; benign (the harness reads `structured_content` directly), but
-  noisy — filter it from sweep output.
-
-## Coverage grid (non-empty cells)
+## Recorded coverage grid
 
 Legend: ✅ pass · ❌ fail · ⏭ blocked · ★ destructive-member.
 

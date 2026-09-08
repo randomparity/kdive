@@ -1,7 +1,11 @@
 # Spec: Retire the vestigial `ssh_credential_ref` and gate drgn-live on the per-System bootstrap key (#1037)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** [#1037](https://github.com/randomparity/kdive/issues/1037)
-- **ADR:** [ADR-0315](../../adr/0315-retire-drgn-live-ssh-credential-ref.md)
+- **ADR:** [ADR-0315](../../../adr/0315-retire-drgn-live-ssh-credential-ref.md)
 - **Status:** Draft
 - **Date:** 2026-07-08
 - **Provider scope:** local-libvirt (remote-libvirt / fault-inject drgn-live behavior unchanged)
@@ -42,8 +46,9 @@ bootstrap key value — the secret actually in play — before the transport ope
 ADR-0039 §2 "seed-before-output" ordering. Remove `ssh_credential_ref` from the local-libvirt
 profile section and the two vestigial `ProfilePolicy` methods.
 
-**No opt-in knob.** drgn-live is available on every ready local System. It is read-only,
-contributor-RBAC-gated, and non-destructive; the SSH forward always renders and the bootstrap key
+**No opt-in knob.** Opening a drgn-live session on a ready local System is read-only,
+contributor-RBAC-gated, and non-destructive; arbitrary `introspect.script` execution is mutating.
+The SSH forward always renders and the bootstrap key
 is always present. Re-introducing a required profile field would recreate the exact P6
 discoverability dead-end this fixes. The real prerequisite — drgn installed in-guest — is still
 enforced downstream: `introspect.run` reports `missing_dependency` off a prepared host
@@ -84,9 +89,9 @@ Replace the two vestigial methods:
 
 - **Remove** `ssh_credential_ref(profile) -> str | None`.
 - **Replace** `drgn_live_requires_credential(profile) -> bool` with
-  `drgn_live_seeds_bootstrap_key(profile) -> bool` — "True iff the drgn-live transport-open **at
-  `start_session`** authenticates over the loopback SSH forward, so `start_session` must gate on the
-  per-System bootstrap key's presence and seed redaction from it."
+  `drgn_live_seeds_bootstrap_key(profile) -> bool` — "True iff `start_session` must gate on
+  the per-System bootstrap key and seed redaction for later introspection over the loopback
+  SSH forward." The opening banner probe itself does not authenticate over SSH.
   - local-libvirt → `True`
   - remote-libvirt → `False`
   - fault-inject → `False`

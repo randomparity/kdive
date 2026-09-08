@@ -1,5 +1,9 @@
 # Live attach to a halted early-boot crash (#747)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Approved (design)
 - **Date:** 2026-06-23
 - **Issue:** [#747](https://github.com/randomparity/kdive/issues/747) (part of #746)

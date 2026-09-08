@@ -1,9 +1,13 @@
 # Spec — Make guest disk real, agent-selectable, bounded, and observable (#985)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Accepted
 - **Date:** 2026-07-04
 - **Issue:** #985 — "Make guest disk adequate and agent-selectable for debug Systems"
-- **ADR:** [0312](../../adr/0312-agent-selectable-guest-disk.md)
+- **ADR:** [0312](../../../adr/0312-agent-selectable-guest-disk.md)
 
 ## Problem
 
@@ -43,8 +47,7 @@ Ground truth (verified in the tree, not the issue text):
 - Pricing disk in the kcu cost model (disk stays a capacity bound, not a price).
 - The aggregate live/historic utilization view (sum of active disk/cpu/ram vs
    host capacity, windowed trends) — a follow-up on the same stamped columns.
-- remote-libvirt disk sizing beyond declaring the ceiling in `systems.toml`
-  (remote uses a `disk-image`, not the local overlay path).
+- remote-libvirt disk sizing (remote uses a `disk-image`, not the local overlay path).
 - Auto-growing non-debug guests.
 
 ## Design
@@ -188,8 +191,8 @@ Forward-only migration `0061_debug_system_shape.sql` inserts
   (custom triple or via a shape) now sizes the guest disk, bounded by the host
   disk ceiling; name the `debug` shape as the ready-sized debug preset.
 - `shapes.list` docs: the `debug` preset and what it is for.
-- local-libvirt operator docs: the `KDIVE_LIBVIRT_DISK_CEILING_GB` env and the
-  rebuild-to-enable-resize requirement.
+- local-libvirt operator docs: the ceiling derived from total backing-filesystem capacity
+  and the rebuild-to-enable-resize requirement.
 - Regenerate the agent-facing MCP docs (`just docs`) after wrapper/`Field`
   changes.
 
@@ -210,9 +213,8 @@ Forward-only migration `0061_debug_system_shape.sql` inserts
   and `growpart: {mode: "off"}`; `verify_cloud_init` self-check asserts
   `resize_rootfs: true` (update the existing `false` assertion).
 - **Ceiling** (unit): `disk_gb == ceiling` admits; `disk_gb > ceiling` →
-  `configuration_error` naming value + ceiling; missing ceiling →
-  host-registration-gap `configuration_error`; local discovery reads the env,
-  invalid env → `configuration_error`.
+  `configuration_error` naming value + ceiling. Local discovery derives the ceiling from
+  backing-filesystem capacity; an un-stat-able rootfs directory is an infrastructure failure.
 - **Report** (service): custom-triple System shows real vcpus/memory/disk (was
   `NULL`); shaped System shows its size via the catalog fallback; a legacy
   allocation with `NULL requested_*` and no shape reports `NULL` (documented,
@@ -228,6 +230,5 @@ Forward-only migration `0061_debug_system_shape.sql` inserts
 - Forward-only migration (ADR-0015); no down-migration. Rollback is reverting the
   code — the `debug` row is inert if unused (shape name is a label, not an FK,
   ADR-0067).
-- The overlay resize and ceiling are additive; a host with no `disk_gb` ceiling
-  fails closed (operator adds the env / `systems.toml` key), which is the
-  intended fail-closed behavior, called out in the operator docs.
+- The overlay resize and ceiling are additive. Local discovery supplies the ceiling from
+  total backing-filesystem capacity; this design adds no ceiling environment or TOML setting.

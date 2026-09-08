@@ -1,15 +1,19 @@
 # Local-libvirt kdump: modules in the guest (#654)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-21
 - **Issue:** [#654](https://github.com/randomparity/kdive/issues/654)
-- **ADR:** [ADR-0206](../../adr/0206-modules-in-guest-shared-contract.md)
+- **ADR:** [ADR-0206](../../../adr/0206-modules-in-guest-shared-contract.md)
 - **Status:** Approved (design)
 
 ## Problem
 
 A local-libvirt System whose provisioning profile sets `crashkernel` selects
 `CaptureMethod.KDUMP`, boots with `crashkernel=256M` reserved, and (since
-[ADR-0203](../../adr/0203-local-libvirt-kdump-overlay-harvest.md)) can have a
+[ADR-0203](../../../adr/0203-local-libvirt-kdump-overlay-harvest.md)) can have a
 guest-written `/var/crash/<ts>/vmcore` harvested host-side. But the arc cannot be
 driven by a *real* in-guest kdump: `runs.install` rejects a KDUMP System because the
 build never produces the artifact the install preflight requires, and even if it
@@ -33,7 +37,7 @@ to build a crash initramfs via dracut against `/lib/modules/<running-ver>` — w
 custom kernel never installs into the guest. So `crashkernel=` is reserved but no capture
 environment can be assembled.
 
-[ADR-0055](../../adr/0055-install-readiness-kdump-seam.md) §5 made the *presence of a
+[ADR-0055](../../../adr/0055-install-readiness-kdump-seam.md) §5 made the *presence of a
 staged `<initrd>`* the host-observable proxy for "capture path armed", and `steps.py`
 carries an `initrd_ref` field for it — but the build never produces an initrd, so the
 gate is permanently unsatisfiable for local kdump. ADR-0055 §5 itself anticipated this:
@@ -181,8 +185,8 @@ Pure orchestration cores unit-tested with fakes:
 - config-driven modules-build trigger (fires on `CONFIG_CRASH_DUMP=y`, skips otherwise);
 - `modules_ref` round-trip through `BuildStepResult` (`dump`/`load`/`refs`);
 - install injection orchestration (fetch → write → depmod → verify; error paths above);
-- the replaced gate (KDUMP + no `modules_ref` → `configuration_error`; KDUMP + `modules_ref`
-  → admitted, **no `<initrd>`** emitted in the domain XML).
+- the replaced gate (KDUMP + neither `modules_ref` nor `initrd_ref` → `configuration_error`;
+  KDUMP + `modules_ref` → admitted with no `<initrd>`; the initrd-only upload arm remains admitted).
 
 Real libguestfs / `make modules_install` / `depmod` / panic→capture stays `live_vm`-gated and
 runbook-validated. The four-method runbook §4b note and ADR-0203's "boot side ready"

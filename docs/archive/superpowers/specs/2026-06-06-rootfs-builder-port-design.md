@@ -1,5 +1,9 @@
 # Bootable kdive-ready rootfs builder (port v1 `build-rootfs.sh`) — design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-06
 - **Issue:** [#124](https://github.com/randomparity/kdive/issues/124) (gap **G3** of epic
   [#123](https://github.com/randomparity/kdive/issues/123) — the one hard blocker).

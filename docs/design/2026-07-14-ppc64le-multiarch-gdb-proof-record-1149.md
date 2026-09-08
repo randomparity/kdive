@@ -4,7 +4,7 @@
 > Use the [current documentation index](../README.md) for supported workflows.
 
 Date: 2026-07-14
-Issue: #1149 · Epic: #1139 · Spec: `2026-07-14-ppc64le-multiarch-gdb-1149.md` · ADR-0347
+Issue: #1149 · Epic: #1139 · ADR-0347
 
 This is the documented live proof required by #1149 AC5: a gdb attaches to a **ppc64le** guest's
 gdbstub from the **x86_64** host and reads registers, through the real arch-aware

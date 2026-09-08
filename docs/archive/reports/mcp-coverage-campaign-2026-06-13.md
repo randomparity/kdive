@@ -2,9 +2,6 @@
 
 - Date: 2026-06-13
 - Branch: `test/mcp-coverage-campaign`
-- Spec: `docs/superpowers/specs/2026-06-13-mcp-coverage-campaign-design.md`
-- Plan: `docs/superpowers/plans/2026-06-13-mcp-coverage-campaign.md`
-- Companion: `docs/reports/provider-configuration-requirements.md`
 - Status: **incomplete historical snapshot** — Arc 0 complete; later arcs were unfinished.
 
 This records the campaign as of 2026-06-13; it is not an active execution plan. The then-current

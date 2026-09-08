@@ -1,5 +1,9 @@
 # Operator override for local-libvirt fixture profiles
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 > **Superseded (2026-07-09).** The server-build lane that read a profile's `requires` was removed by
 > [ADR-0316](../adr/0316-remove-server-build-lane.md); the `requires` data shape itself
 > (`ProfileRequirements` / `ConfigRequirements` / `CmdlineRequirements`) was removed by

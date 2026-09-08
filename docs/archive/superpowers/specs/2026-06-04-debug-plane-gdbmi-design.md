@@ -1,5 +1,9 @@
 # Debug plane: gdb-MI tier (M0) — design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** #21 (M0: Debug plane: port gdb-MI tier)
 - **ADR:** [ADR-0034](../../adr/0034-debug-plane-gdbmi-tier.md)
 - **Depends on:** #20 (Connect plane + DebugSession lifecycle, merged) — its

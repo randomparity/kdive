@@ -1,5 +1,9 @@
 # Spec — Local-libvirt drgn-live SSH transport (M2.8, #697)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-23
 - **Issue:** [#697](https://github.com/randomparity/kdive/issues/697) (M2.8 Epic B; blocks B3 #677)

@@ -1,5 +1,9 @@
 # Upload-prefix orphan sweep — design (#1556)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#1556](https://github.com/randomparity/kdive/issues/1556)
 - **ADR:** [ADR-0455](../adr/0455-upload-prefix-orphan-sweep.md)
 - **Depends on:** [ADR-0453](../adr/0453-row-first-upload-reap.md) (the disclosure this closes),

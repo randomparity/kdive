@@ -1,7 +1,11 @@
 # Agent-facing image-selection affordance (#1017)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** #1017 (reframed; `BLACK_BOX_REVIEW.md` Finding 2(a), Epic #1018)
-- **ADR:** [ADR-0311](../../adr/0311-image-selection-affordance.md)
+- **ADR:** [ADR-0311](../../../adr/0311-image-selection-affordance.md)
 - **Status:** Draft
 
 ## Problem
@@ -220,8 +224,8 @@ This self-hosted control plane is not a long-lived multi-instance rolling tier
 only skew window — old code reading a migrated DB (`extra="forbid"` rejects the
 unexpected column) — is the brief service restart during the deploy, not a
 sustained state. Migrations are forward-only (`db/migrate.py` applies
-`NNNN_*.sql` ascending; no down-migrations); "rollback" of `0060` leaves the
-unused nullable column in place, which is inert.
+`NNNN_*.sql` ascending; no down-migrations). Application rollback leaves the nullable
+column in place, so old binaries that reject the extra field remain incompatible.
 
 ## Out of scope
 

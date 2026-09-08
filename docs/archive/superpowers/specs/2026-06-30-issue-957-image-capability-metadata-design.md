@@ -1,5 +1,9 @@
 # Design — Honest image capability metadata (#957)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** #957
 - **ADR:** [0286](../../adr/0286-image-capability-metadata.md)
 - **Date:** 2026-06-30

@@ -1,10 +1,10 @@
 # Runbook: live-stack end-to-end bring-up
 
-Operator guide for standing up the M1.2 live stack and running the `live_stack` suite.
+Operator guide for standing up the live stack and running the `live_stack` suite.
 The suite drives the full kdive spine over the real MCP HTTP transport against a running
 `server`/`worker`/`reconciler` and the containerized backing services. See
-[ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) for the decision and
-[`docs/archive/plans/m1.2-implementation.md`](../../archive/plans/m1.2-implementation.md) for the epic.
+[ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) for the original decision and
+[the live-testing map](live-testing.md) for the test tiers and prerequisites.
 
 The `server` and `reconciler` run as ordinary operator-owned host processes. Workers run in the
 fixed `kdive-live-worker@1..8.service` units through the installed lifecycle socket. All use the

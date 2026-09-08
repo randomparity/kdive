@@ -1,11 +1,15 @@
 # M1 — Allocation/Accounting Depth Implementation Plan
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement each sub-issue. Each
 > sub-issue below is sized for a single PR; its bite-sized TDD steps are authored at
 > execution time. Steps within an issue use checkbox (`- [ ]`) tracking.
 
-**Goal:** Make the allocation plane real from [`../specs/m1-allocation-accounting.md`](../specs/m1-allocation-accounting.md) — cost model + metering ledger, enforced budgets/quotas (fail-closed), real lease/reservation semantics, and operator/admin RBAC separation — plus two swept-in M0 deferrals (System reprovision-in-place, live drgn introspection over SSH). Still local-libvirt only; **no new resource kind**.
+**Goal:** Make the allocation plane real from [`../specs/m1-allocation-accounting.md`](../../design/m1-allocation-accounting.md) — cost model + metering ledger, enforced budgets/quotas (fail-closed), real lease/reservation semantics, and operator/admin RBAC separation — plus two swept-in M0 deferrals (System reprovision-in-place, live drgn introspection over SSH). Still local-libvirt only; **no new resource kind**.
 
 **Architecture:** Unchanged from M0 — a thin async core over Postgres + S3, a Postgres-backed job queue + worker tier, and typed provider runtime ports (ADR-0063). M1 *activates* dormant seams (`allocations.lease_expiry`, `capability_scope`, `resources.cost_class`) and *composes* a per-project admission gate onto M0's per-host capacity check; it does not restructure the core. The "new transport/op = provider change only" hypothesis is tested by reprovision and SSH landing entirely behind existing `Protocol`s.
 
@@ -135,7 +139,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 ### Issue ④ — Budget/quota admission gate + set_budget/set_quota
 - **Labels:** `area:allocation` · `area:security`
 - **Depends on:** ③
-- **Goal:** Fail-closed admission: per-project quota + budget check-then-debit, composed with M0's host cap, plus the admin set tools and the lease window at grant. Concurrency/idempotency contract per [ADR-0040](../adr/0040-admission-lifecycle-concurrency.md) (lock order, idempotency key, atomic check-then-debit).
+- **Goal:** Fail-closed admission: per-project quota + budget check-then-debit, composed with M0's host cap, plus the admin set tools and the lease window at grant. Concurrency/idempotency contract per [ADR-0040](../../adr/0040-admission-lifecycle-concurrency.md) (lock order, idempotency key, atomic check-then-debit).
 - **Files:** Extend `src/kdive/services/allocation/admission.py`,
   `mcp/tools/lifecycle/allocations.py` (request selector/window),
   `mcp/tools/lifecycle/systems/provision.py` (system-quota check),
@@ -150,7 +154,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 ### Issue ⑤ — Lease window, renew, reconciler →expired sweep
 - **Labels:** `area:allocation` · `area:core-platform`
 - **Depends on:** ④
-- **Goal:** Renewal and automatic reclamation of expired allocations. Single-reconciliation + renew-idempotency contract per [ADR-0040](../adr/0040-admission-lifecycle-concurrency.md).
+- **Goal:** Renewal and automatic reclamation of expired allocations. Single-reconciliation + renew-idempotency contract per [ADR-0040](../../adr/0040-admission-lifecycle-concurrency.md).
 - **Files:** Extend `mcp/tools/lifecycle/allocations.py` (renew),
   `src/kdive/services/allocation/renew.py`, `reconciler/loop.py` (expiry sweep);
   `__main__.py` unchanged; tests.
@@ -168,7 +172,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Goal:** Make the role boundary real and tested; provide the separated-principal fixtures later issues reuse.
 - **Files:** Extend `security/authz/rbac.py` call sites across `mcp/tools/*`; extend the mock-OIDC test fixture (separated principals); tests under `tests/security/`, `tests/mcp/`.
 - **Scope:**
-  - Pin each tool to its **lowest** sufficient role (table in [0037](../adr/0037-rbac-hardening-role-separation.md)): `accounting.set_budget`/`set_quota` → `admin`; the destructive gate's role factor → `admin` (force_crash, power off/cycle/reset, teardown); read/usage → `viewer`; lifecycle → `operator`. Every check binds to the **target object's project**, resolved per-object — `accounting.usage(investigation_id)` resolves the investigation's project before `require_role(viewer)` (no cross-project bypass).
+  - Pin each tool to its **lowest** sufficient role (table in [0037](../../adr/0037-rbac-hardening-role-separation.md)): `accounting.set_budget`/`set_quota` → `admin`; the destructive gate's role factor → `admin` (force_crash, power off/cycle/reset, teardown); read/usage → `viewer`; lifecycle → `operator`. Every check binds to the **target object's project**, resolved per-object — `accounting.usage(investigation_id)` resolves the investigation's project before `require_role(viewer)` (no cross-project bypass).
   - Mock-OIDC fixture mints distinct `viewer`/`operator`/`admin` tokens per test project (≥ two projects, so cross-project access can be tested).
   - Negative tests: each privileged tool refuses the next-lower role (`AuthorizationError` → mapped `authorization_error`); plus a `viewer` in project A refused `usage(investigation_id)` for a B-owned investigation.
 - **Acceptance:** `operator` is refused `set_budget`/`set_quota` and `force_crash` (three+ negative tests); `admin` succeeds; `viewer` may read its own project's usage but not request an allocation, and is refused a foreign project's `usage(investigation_id)`; the separated-principal fixture is importable by other test modules.
@@ -184,7 +188,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
   (handler); tests.
 - **Scope:**
   - `systems.reprovision(system_id, provisioning_profile)` → `reprovision` job, `dedup_key=(system_id,"reprovision",profile_digest)`; drives `ready → reprovisioning → ready`, updating `provisioning_profile`/`target_fingerprint` on the **same** row and re-defining the domain re-tagged with the same `system_id`.
-  - Contract: idempotent (profile digest), destructive, cleanup `best-effort` (interrupted → `failed`). Gate: capability scope ∧ profile opt-in ∧ **`operator`** role ([0038](../adr/0038-system-reprovision-in-place.md)). Refuse if a non-terminal Run exists (`stale_handle`).
+  - Contract: idempotent (profile digest), destructive, cleanup `best-effort` (interrupted → `failed`). Gate: capability scope ∧ profile opt-in ∧ **`operator`** role ([0038](../../adr/0038-system-reprovision-in-place.md)). Refuse if a non-terminal Run exists (`stale_handle`).
 - **Acceptance:** `systems.reprovision` cycles `ready → reprovisioning → ready` on the same `system_id` with no new System/Allocation row; re-issue with the same profile returns the existing job (dedup), a different profile is a new job; reprovision under a live Run → `stale_handle`; (live_vm) the libvirt domain is re-defined and boots the new install; `operator` may invoke it, `viewer` may not.
 
 ### Issue ⑧ — SSH Connect transport + live introspect.run

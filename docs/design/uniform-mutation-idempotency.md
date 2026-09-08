@@ -1,5 +1,9 @@
 # Spec: Uniform `idempotency_key` on mutations (#619, AX_REVIEW A1)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Status: accepted · ADR: [0193](../adr/0193-uniform-mutation-idempotency.md) · Issue: #619 (part of #618)
 
 ## Goal

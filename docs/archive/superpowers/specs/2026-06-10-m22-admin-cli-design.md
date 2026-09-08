@@ -1,8 +1,12 @@
 # M2.2 — Admin CLI (`kdivectl`) — Design
 
-**Status:** accepted · **Date:** 2026-06-10 · **Milestone:** M2.2 — Admin CLI (`kdivectl`) (GitHub milestone to be created at plan time) · **Owner:** David Christensen
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
 
-Companion ADR: [ADR-0089](../../adr/0089-operator-cli-mcp-client.md).
+**Status:** accepted · **Date:** 2026-06-10 · **Milestone:** M2.2 — Admin CLI (`kdivectl`) (GitHub milestone to be created at plan time) · **Owner:** KDIVE maintainer
+
+Companion ADR: [ADR-0089](../../../adr/0089-operator-cli-mcp-client.md).
 Band context: [`2026-06-10-m2x-productionization-band-design.md`](2026-06-10-m2x-productionization-band-design.md).
 
 ## Context
@@ -180,8 +184,8 @@ cannot erode through the transport or login modules where a shortcut would be te
 
 Read-only lands first; ordering shows hard dependencies, the rest parallelize.
 
-0. **Server-side audit attribution** — the milestone's only non-`kdive.cli` change: the
-   audit middleware records the caller's `client_id`/`azp` and resolves `actor` from the
+0. **Server-side audit attribution** — an independently ordered server foundation:
+   the audit middleware records the caller's `client_id`/`azp` and resolves `actor` from the
    closed map (`kdivectl`-client → `operator-cli`; recognized agent client + `agent_session`
    → `agent`; `actor=unknown` otherwise, never defaulting to `agent`). Extends the OIDC test
    harness (`mint_token` in `tests/integration/live_stack/harness.py`) to mint under a

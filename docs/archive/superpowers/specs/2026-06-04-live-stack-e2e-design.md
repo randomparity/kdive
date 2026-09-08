@@ -1,5 +1,9 @@
 # Live-stack end-to-end functional test (MCP protocol, real libvirt) — Epic design (M1.2)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Parent spec:** [`docs/specs/m1.2-live-stack-e2e.md`](../../specs/m1.2-live-stack-e2e.md)
 (the M1.2 integration contract) · **Decisions:**
 [ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) (the cross-cutting decisions this epic

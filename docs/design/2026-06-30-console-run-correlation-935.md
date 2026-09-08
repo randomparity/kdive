@@ -1,5 +1,9 @@
 # Spec: Run-correlated console artifacts and a Run-scoped console manifest (#935)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - Issue: #935
 - ADR: [ADR-0279](../adr/0279-console-run-correlation.md)
 - Status: Draft

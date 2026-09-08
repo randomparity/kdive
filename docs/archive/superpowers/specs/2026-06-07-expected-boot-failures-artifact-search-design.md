@@ -1,5 +1,9 @@
 # Expected boot failures + artifact search design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **ADR:** [ADR-0064](../../adr/0064-expected-boot-failures-artifact-search.md)
 - **Motivating test case:** [`docs/test-cases/05-dcache-dhash-entries-oob-read.md`](../../test-cases/05-dcache-dhash-entries-oob-read.md)
 - **Status:** Draft

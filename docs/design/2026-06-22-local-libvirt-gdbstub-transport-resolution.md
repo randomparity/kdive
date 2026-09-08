@@ -1,5 +1,9 @@
 # Spec — Local-libvirt gdbstub live-debug transport resolution (M2.8 B1, #675)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-22
 - **Issue:** [#675](https://github.com/randomparity/kdive/issues/675) (M2.8 Epic B, B1)

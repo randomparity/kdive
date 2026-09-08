@@ -1,5 +1,9 @@
 # Spec — Diagnostics local build-host warm-tree source check (#533, #532)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#533](https://github.com/randomparity/kdive/issues/533)
 - **ADR:** [`0163`](../adr/0163-diagnostics-local-kernel-src-check.md)
 - **Covers:** #532 (the `KDIVE_KERNEL_SRC` blind spot). #531 (the ephemeral-libvirt

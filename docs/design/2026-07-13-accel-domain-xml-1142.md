@@ -1,5 +1,9 @@
 # Accel-derived domain type, emulator, and per-arch CPU in the local-libvirt domain XML (#1142)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Date: 2026-07-13
 Status: approved (design)
 Issue: #1142 · Epic: #1139 (full ppc64le support) · ADR: `docs/adr/0340-accel-derived-domain-xml.md`

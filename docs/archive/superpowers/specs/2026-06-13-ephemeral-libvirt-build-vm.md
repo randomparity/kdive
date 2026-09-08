@@ -1,5 +1,9 @@
 # Ephemeral remote-libvirt build VM (target 3) — implementation spec
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-13
 - **Issue:** [#355](https://github.com/randomparity/kdive/issues/355)
 - **ADR:** [ADR-0100](../../adr/0100-ephemeral-libvirt-build-vm.md)

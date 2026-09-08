@@ -1,5 +1,9 @@
 # Spec — Reclassify power lifecycle as leaseholder control (#1062)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** [#1062](https://github.com/randomparity/kdive/issues/1062) —
   "control: no in-band break-glass reboot when `destructive_ops` was not opted in at
   provision (P2)" (BLACK_BOX_REVIEW.md P2)

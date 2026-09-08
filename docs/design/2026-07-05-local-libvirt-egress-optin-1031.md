@@ -1,5 +1,9 @@
 # Spec: operator-gated guest egress on local-libvirt (`restrict=on` opt-out) (#1031)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - Issue: #1031 (parent epic #998; relates #985 / ADR-0312)
 - ADR: [ADR-0313](../adr/0313-local-libvirt-operator-gated-egress.md)
 - Status: Draft

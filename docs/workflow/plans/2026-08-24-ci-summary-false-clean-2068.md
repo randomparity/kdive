@@ -1,9 +1,8 @@
 # Implementation plan — CI test summary must not report a red run as clean (#2068)
 
 Derived from
-[the spec](../specs/2026-08-24-ci-summary-false-clean-2068-design.md) and
 [ADR-0578](../../adr/0578-the-ci-test-summary-fails-closed-on-an-unusable-report.md),
-both hardened by adversarial review. **Do not re-open the decisions they record.**
+which preserves the design and measured verification evidence.
 
 **Goal.** `scripts/pytest_summary.py` must never render a red or aborted run as clean, and
 must not raise on a truncated report. Two independent parts (a renderer floor, an environment

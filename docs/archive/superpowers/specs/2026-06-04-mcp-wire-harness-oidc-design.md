@@ -1,5 +1,9 @@
 # MCP-over-HTTP wire harness + OIDC token issuance — design (M1.2 sub-issue A)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Parent spec:** [`../specs/m1.2-live-stack-e2e.md`](../../specs/m1.2-live-stack-e2e.md) ·
 **Umbrella:** [`2026-06-04-live-stack-e2e-design.md`](2026-06-04-live-stack-e2e-design.md)
 (sub-issue A) · **Decision:**

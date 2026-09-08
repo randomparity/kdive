@@ -1,5 +1,9 @@
 # Spec: Expanded operational metrics (#601, first cut)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Status: accepted · ADR: [0190](../adr/0190-expanded-operational-metrics.md) · Issue: #601
 
 ## Goal

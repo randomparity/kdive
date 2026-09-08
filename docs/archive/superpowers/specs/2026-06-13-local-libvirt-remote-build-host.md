@@ -1,5 +1,9 @@
 # Local-libvirt builds on a remote build host
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** [#356](https://github.com/randomparity/kdive/issues/356)
 - **ADR:** [ADR-0101](../../adr/0101-local-libvirt-remote-build-host.md)
 - **Status:** Draft

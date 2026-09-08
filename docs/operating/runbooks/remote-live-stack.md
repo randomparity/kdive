@@ -9,8 +9,7 @@ two-phase vmcore upload. See [ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.m
 e2e shape), [ADR-0076](../../adr/0076-remote-libvirt-provider-package.md) (the provider package +
 portability gate), [ADR-0079](../../adr/0079-remote-live-debug-transport.md) (the gdbstub ACL +
 in-guest debug), and [ADR-0084](../../adr/0084-remote-control-two-phase-vmcore-retrieve.md) (the
-two-phase KDUMP capture). The design is in
-[the spec](../../archive/superpowers/specs/2026-06-09-remote-live-stack-e2e-207.md).
+two-phase KDUMP capture). See [the live-testing map](live-testing.md) for the test tiers.
 
 This is **operator-run, not CI**: the suite is `live_stack`-marked and CI deselects it. The
 preflight skips when remote inventory, the base-volume test input, or the required stack

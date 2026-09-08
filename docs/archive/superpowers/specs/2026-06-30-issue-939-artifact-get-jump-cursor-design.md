@@ -1,7 +1,11 @@
 # Filtered jump-cursor `artifacts.get`, retiring `artifacts.search_text`
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** #939 — `artifacts.search_text` is literal and line-oriented; weak for multi-line crash signatures
-- **ADR:** [ADR-0283](../../adr/0283-artifact-get-jump-cursor.md)
+- **ADR:** [ADR-0283](../../../adr/0283-artifact-get-jump-cursor.md)
 - **Status:** Draft (pending review)
 - **Date:** 2026-06-30
 

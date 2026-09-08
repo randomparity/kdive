@@ -1,5 +1,9 @@
 # Remove the server-build lane — design (Spec 1 of 3)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Draft (approved in brainstorming 2026-07-08)
 - **Date:** 2026-07-08
 - **Scope:** Spec 1 of a three-spec redesign of kernel build & config handling.
@@ -77,9 +81,10 @@ smaller surface.
    `runs.complete_build` → `runs.install` → `runs.boot` only. A composite can be
    re-added later if it is actually wanted.
 7. **Drop migration for orphaned schema.** A new forward migration drops the dead
-   server-build tables. Postgres cannot remove a value from an existing enum without
-   recreating the type, so the `JobKind` values `BUILD` / `BUILD_INSTALL_BOOT` are
-   left **inert with a comment** rather than recreating the enum.
+   server-build tables. Keep the Python `JobKind` values `BUILD` / `BUILD_INSTALL_BOOT`
+   inert for persisted legacy jobs. **Historical factual correction:** `jobs.kind` is
+   SQL `text` with a CHECK constraint, not a PostgreSQL enum; enum-removal restrictions
+   do not explain this retention choice.
 
 ## What is deleted (subtraction)
 
@@ -187,8 +192,8 @@ DROP TABLE IF EXISTS build_config_catalog;
 DROP TABLE IF EXISTS buildhost_agent_probe_guests;   -- real name (0041), not "buildhost_agent_probes"
 DROP TABLE IF EXISTS build_host_leases;
 DROP TABLE IF EXISTS build_hosts;                     -- ephemeral columns (0029) drop with the table
--- JobKind enum values BUILD, BUILD_INSTALL_BOOT are left in place:
--- Postgres cannot drop a value from an existing enum without recreating the type.
+-- Python JobKind values BUILD, BUILD_INSTALL_BOOT remain for legacy persisted jobs.
+-- jobs.kind is text with a CHECK constraint, not a PostgreSQL enum.
 ```
 
 The migration is destructive but touches only server-build infrastructure state.

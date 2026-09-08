@@ -1,5 +1,9 @@
 # Spec: provision-time baseline-kernel boot for local-libvirt direct-kernel (#905)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - Issue: #905
 - ADR: [ADR-0272](../adr/0272-provision-baseline-kernel-boot.md)
 - Status: Draft

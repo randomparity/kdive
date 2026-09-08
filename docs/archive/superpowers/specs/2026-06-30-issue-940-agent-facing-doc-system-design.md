@@ -1,7 +1,11 @@
 # Agent-facing workflow doc system (#940)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - Issue: [#940](https://github.com/randomparity/kdive/issues/940)
-- ADR: [ADR-0284](../../adr/0284-agent-facing-workflow-docs.md)
+- ADR: [ADR-0284](../../../adr/0284-agent-facing-workflow-docs.md)
 - Date: 2026-06-30
 
 ## Problem
@@ -78,7 +82,7 @@ two index docs, each gated like the toolset docs it links:
   name any operator doc or operator URI.
 - **`agent-index-operator.md`** (under `docs/guide/`, `audience="operator"`, role-gated,
   planned for the operator phase) — the
-  operator/admin entry point. Listed and readable only for platform-operator callers, so
+  operator/admin entry point. Listed and readable only for callers with any platform role, so
   it can safely name the operator toolset docs.
 
 The investigation index has these sections:
@@ -89,7 +93,7 @@ The investigation index has these sections:
 2. **Toolset catalog** — a table: toolset, a one-line "what it's for in an investigation",
    and a link to the toolset's purpose-doc URI. Investigation toolsets only.
 3. **Pointers** — to the three lifecycle prompts (for prompt-capable clients) and to
-   `response-envelope.md`. For a platform-operator caller, a pointer to the operator index
+   `response-envelope.md`. For a caller with any platform role, a pointer to the operator index
    resolves; for others it is absent from the listing.
 
 ### Per-toolset purpose doc — `docs/guide/toolsets/<ns>.md`
@@ -197,11 +201,11 @@ authoring.
 
 - Registrar provider-skip: a doc with `required_kind` not in `registered_kinds()` is not
   registered; one with a matching kind is.
-- Middleware role filter (list): platform-operator token sees operator docs; a caller
-  without the platform-operator role does not; an unauthenticated lister sees only
+- Middleware role filter (list): a token with any platform role sees operator docs; a caller
+  without any platform role does not; an unauthenticated lister sees only
   `audience="all"` (fail-closed).
-- Middleware role filter (read): a non-operator read of an `audience="operator"` URI is
-  rejected; a platform-operator read succeeds; an unauthenticated read of an operator URI
+- Middleware role filter (read): a caller with no platform role reading an `audience="operator"` URI is
+  rejected; a read by any platform role succeeds; an unauthenticated read of an operator URI
   is rejected.
 - Investigation index names no operator doc or operator URI (so a non-operator never learns
   an operator URI from a doc it can read).
@@ -218,14 +222,14 @@ authoring.
 - Each served investigation toolset doc names every tool in that namespace with a purpose
   line. (CI enforces that each tool is named; the prose itself is reviewed by a human.)
 - Provider-specific docs are absent on deployments without that provider; operator docs are
-  neither listed nor readable by callers without the platform-operator role.
+  neither listed nor readable by callers without any platform role.
 - The served set is visible in `docs/README.md`.
 - CI fails if a namespace with a served doc gains a tool the doc does not name, or if a doc
   snapshot drifts from canonical `docs/`.
 
 ## Considered & rejected
 
-See [ADR-0284](../../adr/0284-agent-facing-workflow-docs.md) for the decision record and
+See [ADR-0284](../../../adr/0284-agent-facing-workflow-docs.md) for the decision record and
 rejected alternatives (new composite tools; serving the generated per-namespace reference;
 folding the prompts away; ungated docs; embedding the full workflow in server
 instructions).

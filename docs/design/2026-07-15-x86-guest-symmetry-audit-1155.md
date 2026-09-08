@@ -1,5 +1,9 @@
 # x86_64-guest symmetry audit for ppc64le hosts (#1155)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Date: 2026-07-15
 Status: approved (design)
 Issue: #1155 · Epic: #1139 (full ppc64le support) · ADR: `docs/adr/0354-host-arch-guest-symmetry-invariant.md`

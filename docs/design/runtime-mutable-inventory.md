@@ -1,5 +1,9 @@
 # Design — Runtime-mutable inventory (M2.7)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Proposed
 - **Date:** 2026-06-20
 - **Formal decision:** [ADR-0199](../adr/0199-seed-once-runtime-authoritative-inventory.md)
@@ -14,7 +18,7 @@ Two operator needs converge on one model.
 1. **Durable runtime inventory mutation.** Operators must add and remove systems
    (`remote_libvirt` resources) and build-hosts at runtime — schedulable without a
    cluster restart, a ConfigMap re-apply, or a hand-edited database. Today there is
-   no such path for a **config-declared** host: removing the prod host `ub24-big`
+   no such path for a **config-declared** host: removing the prod host `sys-R2`
    required editing `systems.toml`, re-applying the `kdive-systems` ConfigMap, and
    waiting for reconcile to prune.
 

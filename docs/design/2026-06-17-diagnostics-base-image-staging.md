@@ -1,5 +1,9 @@
 # Spec — Diagnostics remote-libvirt base-image-staging check (#513)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#513](https://github.com/randomparity/kdive/issues/513)
 - **ADR:** [`0150`](../adr/0150-diagnostics-base-image-staging-check.md)
 - **Companion:** #511 (volume-discoverability read) reuses the shared `lookup_volume_staged` helper.

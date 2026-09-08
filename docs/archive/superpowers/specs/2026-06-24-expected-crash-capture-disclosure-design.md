@@ -1,5 +1,9 @@
 # Expected-crash capture disclosure (#760)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-24
 - **Issue:** [#760](https://github.com/randomparity/kdive/issues/760) (Part 3 black-box review, epic #764)

@@ -1,5 +1,9 @@
 # M2.5 — Remote-libvirt capture-method parity
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** accepted (design)
 - **Date:** 2026-06-11
 - **Deciders:** kdive maintainers

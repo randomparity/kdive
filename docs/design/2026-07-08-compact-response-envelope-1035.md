@@ -1,5 +1,9 @@
 # Spec — Opt-in compact response envelope (#1035)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-07-08
 - **Issue:** #1035 (`BLACK_BOX_REVIEW.md` pain point P4, cf. epic #998)

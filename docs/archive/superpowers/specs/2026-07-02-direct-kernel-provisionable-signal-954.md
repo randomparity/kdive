@@ -1,5 +1,9 @@
 # Direct-kernel provisionability capability signal (#954)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Status:** Draft for review
 **Date:** 2026-07-02
 **ADR:** [0295](../../adr/0295-direct-kernel-provisionable-signal.md)

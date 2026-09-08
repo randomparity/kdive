@@ -1,5 +1,9 @@
 # Design — MCP prompts surface for canonical lifecycle workflows
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** #624 (part of #618; source AX_REVIEW A5)
 - **ADR:** [ADR-0202](../adr/0202-mcp-lifecycle-prompts.md)
 - **Status:** Draft

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.14, FastMCP/Starlette ASGI, stdlib `logging`, `pytest`, `httpx.ASGITransport`.
 
-Spec: `docs/specs/2026-07-21-asgi-transport-trace-1391-design.md`. ADR: `docs/adr/0417-opt-in-asgi-transport-trace.md`.
+ADR: `docs/adr/0417-opt-in-asgi-transport-trace.md`.
 
 ## Global Constraints
 

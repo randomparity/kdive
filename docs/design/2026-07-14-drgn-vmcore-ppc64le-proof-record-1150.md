@@ -4,7 +4,7 @@
 > Use the [current documentation index](../README.md) for supported workflows.
 
 Date: 2026-07-14
-Issue: #1150 · Epic: #1139 · Spec: `2026-07-14-drgn-vmcore-ppc64le-1150.md` · ADR-0348
+Issue: #1150 · Epic: #1139 · ADR-0348
 
 > **Status: PASS (2026-07-14).** drgn opened the real #1148 ppc64le vmcore on the x86_64 host and
 > identified it as ppc64le specifically (`Architecture.PPC64` + little-endian), and its VMCOREINFO

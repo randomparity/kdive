@@ -1,5 +1,9 @@
 # Full ppc64le support in the local-libvirt provider
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Date: 2026-07-13
 Status: approved (design)
 Epic: tracked as a GitHub epic with one sub-issue per PR (numbers recorded on the epic).

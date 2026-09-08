@@ -1,5 +1,9 @@
 # Spec — Advertise a fielded, non-recursive `ToolResponse` output schema
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#565](https://github.com/randomparity/kdive/issues/565)
 - **ADR:** [ADR-0170](../adr/0170-fielded-tool-output-schema.md)
 - **Date:** 2026-06-18

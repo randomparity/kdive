@@ -1,7 +1,11 @@
 # Retrieve plane: vmcore capture/fetch + crash postmortem — design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** #24 (M0: Retrieve plane)
-- **ADR:** [ADR-0031](../../adr/0031-retrieve-plane-vmcore-postmortem.md)
+- **ADR:** [ADR-0031](../../../adr/0031-retrieve-plane-vmcore-postmortem.md)
 - **Date:** 2026-06-04
 - **Depends on (merged):** #23 (control: `crashed` System, `force_crash`), #25
   (redaction / secret backend), #8 (object store), #18 (build plane: `debuginfo_ref`).

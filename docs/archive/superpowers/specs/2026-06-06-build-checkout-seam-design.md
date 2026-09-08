@@ -1,13 +1,17 @@
 # Build checkout seam — design (issue #125, gap G1)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-06
 - **Issue:** [#125](https://github.com/randomparity/kdive/issues/125) (gap **G1** of
   [#123](https://github.com/randomparity/kdive/issues/123)).
-- **Depends on:** [ADR-0029](../../adr/0029-build-plane-local-make.md) (the build plane,
+- **Depends on:** [ADR-0029](../../../adr/0029-build-plane-local-make.md) (the build plane,
   the `ServerBuildProfile`, the injected-seam shape, and the
   `configuration_error` vs `build_failure` split this seam slots into).
-- **ADR:** [ADR-0053](../../adr/0053-build-checkout-seam.md) (the open decisions this
+- **ADR:** [ADR-0053](../../../adr/0053-build-checkout-seam.md) (the open decisions this
   spec settles).
 - **Port from:** `~/src/kdive-v1` `LocalKernelBuildProvider` (kernel checkout/config path).
 
@@ -39,7 +43,7 @@ In scope (one file + tests):
 
 Out of scope: the rsync full-tree copy and the full `make` stay behind the existing
 `live_vm` gate (no toolchain in CI); object-store / `https://` ref resolution (that is the
-external-build lane, [ADR-0048](../../adr/0048-external-build-artifact-ingestion.md)); any
+external-build lane, [ADR-0048](../../../adr/0048-external-build-artifact-ingestion.md)); any
 change to `build()`'s orchestration, the profile schema, or the artifact store.
 
 ## 3. Source of the warm tree

@@ -1,5 +1,9 @@
 # Tunable kdump crashkernel reservation per install (#989)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** #989 (`OPUS_REVIEW.md` §5, item I-9, Tier 3)
 - **ADR:** [ADR-0300](../../adr/0300-tunable-crashkernel-reservation.md)
 - **Status:** Draft

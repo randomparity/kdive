@@ -1,5 +1,9 @@
 # SysRq diagnostic capture for local-libvirt Systems (#925)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** #925
 - **ADR:** [0285](../adr/0285-sysrq-diagnostic-capture.md)
 - **Status:** Draft

@@ -1,5 +1,9 @@
 # Destructive-gate per-op revision — revive reprovision/power/force_crash (#465)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** #465 (spun out of #463 / ADR-0129)
 - **ADR:** [0130](../adr/0130-destructive-gate-per-op-revision.md)
 - **Status:** Draft

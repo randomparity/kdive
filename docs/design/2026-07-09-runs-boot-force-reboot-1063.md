@@ -1,5 +1,9 @@
 # Spec — `runs.boot` explicit re-boot + replayed-job marker (#1063)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-07-09
 - **Issue:** #1063 (`BLACK_BOX_REVIEW.md` pain point P3)

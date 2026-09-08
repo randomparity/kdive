@@ -1,9 +1,13 @@
 # Decouple build submission from a provisioned system
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Approved
 - **Date:** 2026-06-18
 - **Issue:** [#554](https://github.com/randomparity/kdive/issues/554)
-- **ADR:** [ADR-0169](../../adr/0169-decouple-build-system-binding.md)
+- **ADR:** [ADR-0169](../../../adr/0169-decouple-build-system-binding.md)
 
 ## Problem
 
@@ -232,7 +236,7 @@ find a System of the right kind.
 | Unbound create with `reuse_requirement` | `configuration_error` | `reuse_requires_system` |
 | `bind` of an already-bound Run | `transport_conflict` | `run_already_bound` |
 | `bind` where System kind ≠ `target_kind` | `configuration_error` | `target_kind_mismatch` |
-| `bind`/`install`/`boot` of a terminal Run | `stale_handle` | — |
+| `bind`/`install`/`boot` of a failed or canceled Run | `stale_handle` | — |
 | `install`/`boot` of an unbound Run | `configuration_error` | `run_not_bound` |
 | `bind` losing the CAS race | `transport_conflict` | `run_already_bound` |
 
@@ -247,7 +251,8 @@ find a System of the right kind.
   `open→active` flip on an unbound first Run.
 - **Builder resolution**: an unbound Run builds (builder resolved from `target_kind`, no System
   touched).
-- **`runs.bind`**: success; kind mismatch; already-bound; terminal Run; one-Run-per-System;
+- **`runs.bind`**: success, including a succeeded Run; kind mismatch; already-bound;
+  failed/canceled Run; one-Run-per-System;
   reuse assertion; concurrent double-bind (CAS) and two Runs racing for one System
   (`tests/adversarial/`, hypothesis).
 - **Guards**: `install`/`boot` of an unbound Run at the MCP boundary and at the worker handler.

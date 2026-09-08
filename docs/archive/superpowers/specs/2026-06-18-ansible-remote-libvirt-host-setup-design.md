@@ -1,5 +1,9 @@
 # Design: Ansible roles for remote-libvirt host bring-up
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Status:** Implemented + verified on real hardware (Ubuntu 26.04, Fedora 44, Rocky 10.2; 2026-06-19); x86_64 only, ppc64le unvalidated
 **Date:** 2026-06-18 (rev. 2026-06-19 — per-distro daemon model after live findings)
 **Worktree/branch:** `feat/ansible-remote-libvirt`
@@ -57,9 +61,9 @@ slow image build) and a single many-task-file role (loses per-step variable scop
 deploy/ansible/
   README.md  ansible.cfg  requirements.yml      # community.crypto, community.general,
   inventory/                                    #   ansible.posix, community.libvirt
-    hosts.yml                                   # ub26-big, fed44-big; grouped by os_family + arch
+    hosts.yml                                   # sys-R3, sys-R4; grouped by os_family + arch
     group_vars/all.yml                          # the tunable surface
-    host_vars/{ub26-big,fed44-big}.yml
+    host_vars/{sys-R3,sys-R4}.yml
   site.yml                                       # full bring-up: stack → tls → pool/net → acl → emit
   playbooks/
     pki.yml                                      # controller-side CA + per-host certs (run once)
@@ -248,8 +252,8 @@ host's pool/network names aligned with those values and document them in the emi
   named here as implementation obligations.
 - **Idempotence bar:** read-only/assert/command tasks set `changed_when:` honestly (above), so
   the second-run-0-changed measure reflects real drift, not command-task noise.
-- **Acceptance (real hosts) — DONE 2026-06-19** on `ub26-big.dev` (Ubuntu 26.04, monolithic),
-  `fed44-big.dev` (Fedora 44, modular), and `rock10-big.dev` (Rocky 10.2, modular): `site.yml`
+- **Acceptance (real hosts) — DONE 2026-06-19** on `sys-R3` (Ubuntu 26.04, monolithic),
+  `sys-R4` (Fedora 44, modular), and `sys-R5` (Rocky 10.2, modular): `site.yml`
   applied, the **second run reported 0 changed** on all three, `:16514` was served by the right
   socket unit, and a worker→host **mutual TLS handshake succeeded** with the generated PKI. The
   gdbstub/TLS ACL was **enforced on all** (off-CIDR connect to `:16514` refused, in-CIDR

@@ -1,5 +1,9 @@
 # ppc64le catalog parity across image families (#1152)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Date: 2026-07-14
 Status: approved (design)
 Epic: #1139 (full ppc64le support in the local-libvirt provider), sub-issue #13.

@@ -1,5 +1,9 @@
 # `recycle_terminal` re-dates `created_at` (#1528)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#1528](https://github.com/randomparity/kdive/issues/1528) — P3 bug
 - **ADR:** [ADR-0447](../adr/0447-recycle-terminal-redates-created-at.md)
 - **Revises:** [ADR-0442](../adr/0442-rootfs-reclaim-worker-job.md) §6's *first* justification for

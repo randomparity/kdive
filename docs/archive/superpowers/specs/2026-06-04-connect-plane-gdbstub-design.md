@@ -1,9 +1,13 @@
 # Connect plane (gdbstub) + DebugSession lifecycle — design (M0, #20)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-04
 - **Issue:** #20 (M0: Connect plane (gdbstub) + DebugSession lifecycle)
-- **ADR:** [ADR-0032](../../adr/0032-connect-plane-gdbstub-debugsession.md)
+- **ADR:** [ADR-0032](../../../adr/0032-connect-plane-gdbstub-debugsession.md)
 - **Depends on (merged):** #13 (provisioning/discovery), #19 (response envelope /
   artifacts), #25 (control plane #23 / ADR-0028 — the `force_crash` `live → detached`
   edge and the `debug_sessions` join-through-`runs` pattern).

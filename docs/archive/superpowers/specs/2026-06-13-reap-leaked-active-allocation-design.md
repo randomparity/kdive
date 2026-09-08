@@ -1,5 +1,9 @@
 # Reap leaked `active` allocations — design (#371)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-13
 - **Issue:** [#371](https://github.com/randomparity/kdive/issues/371)
 - **ADR:** [ADR-0109](../../adr/0109-reap-leaked-active-allocation.md)

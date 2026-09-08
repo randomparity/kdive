@@ -1,8 +1,12 @@
 # Rootfs capability tags (S1) — per-distro static capabilities
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Status:** Draft for review
 **Date:** 2026-07-01
-**ADR:** [0287](../../adr/0287-per-distro-capability-tags.md)
+**ADR:** [0287](../../../adr/0287-per-distro-capability-tags.md)
 **Depends on:** #957 / ADR-0286 (the `Capability` enum and `capability_signals` framework)
 
 ## Problem
@@ -40,9 +44,9 @@ In scope:
   registry.
 - Converge the repo-tracked staged-path metadata to the family-accurate per-distro sets.
 
-What S1's honesty claim does and does not cover: the guard proves **declaration ↔ recipe
-consistency** — that a family declares exactly the tags its own `packages()`/`customize_argv`
-install. It does **not** prove **recipe ↔ image efficacy** — that the installed tooling
+What S1's honesty claim covers: declared tags are a **subset** of recipe-evidenced tags,
+with an explicit check that each family declares its MAC tag. It does not catch every
+omitted evidenced capability, or prove **recipe ↔ image efficacy** — that the tooling
 actually works at runtime (sshd answers, the relabel didn't deny the key). Runtime truth is
 verified by the S2 boot-probe; S1 tags mean "the build installs this", not "this works".
 
@@ -153,11 +157,10 @@ unmapped posture fails the guard here, not at a later `build-fs`). The guard als
 family that declares a tag with **no** evidence rule, so a stray tag cannot slip through
 unchecked.
 
-What the guard proves and does not prove: it enforces **declaration ↔ recipe** consistency
-(the family declares exactly what its `packages()`/`customize_argv` install). It does not
-prove **recipe ↔ efficacy** (that a `systemctl enable` was not a no-op, that sshd actually
-answers). That is the S2 boot-probe's job; S1 deliberately stops at "the build installs
-this".
+The guard checks declared ⊆ evidenced plus the explicit MAC-tag requirement. It does not
+require every evidenced capability to be declared, or prove runtime efficacy (that a
+`systemctl enable` was not a no-op, or that sshd answers). The S2 boot-probe owns runtime
+proof; S1 stops at evidence that the recipe installs a declared capability.
 
 ### Staged-path metadata convergence
 

@@ -1,5 +1,9 @@
 # Platform-scoped RBAC tier + auditor suite — Epic design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Parent spec:** [`docs/specs/m1.1-platform-rbac-tier.md`](../../specs/m1.1-platform-rbac-tier.md)
 (the M1.1 integration contract) · **Decisions:**
 [ADR-0043](../../adr/0043-platform-scoped-rbac-tier.md) (the role-model decision this epic
