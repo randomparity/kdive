@@ -20,11 +20,10 @@ deliberately **not** used: serial-log mtime advances on every append
 mid-boot and resurface a pre-watch panic as a false ``fired``.
 
 Because ``mark`` is snapshotted at worker pickup, a panic that landed before it (queue latency,
-or an at-least-once retry) is outside the scanned suffix and returns ``not_fired``. That
-window is covered without a provider-crossing liveness probe: the agent driving the reproducer
-over SSH already holds the authoritative liveness signal — its SSH channel drops the instant the
-kernel panics — so a ``not_fired`` verdict paired with a dropped SSH loop means "read the full
-console" (documented on the tool and in the race-debugging guide).
+or an at-least-once retry) is outside the scanned suffix and returns ``not_fired``.
+An SSH disconnect does not identify the cause of failure. When a watch returns
+``not_fired`` but the guest disconnects, inspect the full console and System state: the
+verdict describes only the observed suffix and does not transition the System to CRASHED.
 """
 
 from __future__ import annotations
