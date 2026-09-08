@@ -100,6 +100,14 @@ _CRASHED_HALTED_LIVE_DRGN_DETAIL = (
     "run crashed during early boot and is halted with a live gdbstub; attach over gdbstub. "
     "drgn-live needs a running in-guest sshd, which a halted crash does not have"
 )
+# An expected console_crash whose provisioned gdbstub did not answer at boot (ADR-0628). The
+# vmcore-worded CONSOLE_CRASH_GUIDANCE would be wrong here: a gdbstub attach needs no capture
+# kernel and produces no vmcore, so the refusal is about the stub, not about kdump.
+_EXPECTED_CRASH_GDBSTUB_DETAIL = (
+    "this run declared an early-boot console_crash and its gdbstub did not answer when the boot "
+    "recorded the crash, so there is no halted stub to attach to. Read the console artifact "
+    "instead — fetch its reference with runs.get"
+)
 
 
 @dataclass(frozen=True)
@@ -583,6 +591,17 @@ async def _end_debug_session(
         return envelope
 
 
+def _gdbstub_recorded_available(boot_result: dict[str, Any]) -> bool:
+    """True iff the boot step recorded a gdbstub that answered its probe (ADR-0628).
+
+    The isinstance guard makes this total against a boot step recorded before ADR-0628, whose
+    result carries ``available_capture: ["console"]`` or no such key at all: no probe ever ran for
+    those, so an absent or unexpected value must read as "no stub" rather than as an admission.
+    """
+    available = boot_result.get("available_capture")
+    return isinstance(available, list) and _GDBSTUB in available
+
+
 async def _attach_preconditions(
     conn: AsyncConnection, run: Run, transport: DebugTransportKind
 ) -> System | ToolResponse:
@@ -610,15 +629,21 @@ async def _attach_preconditions(
             data={"reason": "boot_first"},
         )
     boot_outcome = parse_boot_outcome(boot_result.get("boot_outcome"))
-    if boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
+    if boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED and not (
+        transport == _GDBSTUB and _gdbstub_recorded_available(boot_result)
+    ):
         # An expected console_crash leaves the System READY, so vmcore.fetch always rejects and
-        # postmortem.crash only self-corrects back to the console (#759). Point straight at the
-        # console artifact and reuse postmortem.crash's shared CONSOLE_CRASH_GUIDANCE so the two
-        # surfaces cannot drift.
+        # postmortem.crash only self-corrects back to the console (#759). The non-gdbstub refusal
+        # points straight at the console artifact and reuses postmortem.crash's shared
+        # CONSOLE_CRASH_GUIDANCE so the two surfaces cannot drift. A gdbstub attach is refused
+        # only when the boot's probe found no reachable stub (ADR-0628), and says so in gdbstub
+        # terms rather than kdump ones.
         return ToolResponse.failure(
             str(run.id),
             ErrorCategory.CONFIGURATION_ERROR,
-            detail=CONSOLE_CRASH_GUIDANCE,
+            detail=(
+                _EXPECTED_CRASH_GDBSTUB_DETAIL if transport == _GDBSTUB else CONSOLE_CRASH_GUIDANCE
+            ),
             suggested_next_actions=["runs.get", "artifacts.list"],
             data={"reason": "expected_crash_not_live_debuggable"},
         )

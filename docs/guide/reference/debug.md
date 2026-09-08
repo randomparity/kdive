@@ -273,6 +273,14 @@ A `gdbstub` session on a System whose guest architecture differs from the worker
 later debug op failing with `missing_dependency` naming `gdb-multiarch` means installing
 it (or a multiarch gdb build) — the `multiarch_gdb` doctor check reports this ahead of time.
 
+A run that declared an `expected_boot_failure` is attachable over `gdbstub` when its boot
+probed the provisioned stub and found it answering — `runs.get` reports that as `gdbstub`
+in `available_capture` rather than in `inert_capture` (ADR-0628). Check that field before
+attaching: the probe runs only on a boot that failed readiness with a kernel panic, so a
+run downgraded to an expected crash after reaching readiness is never probed and the
+attach is refused. `drgn-live` is never admitted against a crashed guest, which has no
+running sshd.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `run_id` | string | yes | The booted Run to attach a debug session to. |
