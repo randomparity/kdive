@@ -28,10 +28,16 @@ def _boot_elf(
     *,
     e_machine: int = _EM_PPC64,
     pad: int = 0,
+    banner_gap: int = 0,
     release: str = "6.9.0",
     build_ids: tuple[bytes, ...] = (_BUILD_ID,),
 ) -> bytes:
-    """A minimal ELF64-LE boot member with the given ``e_machine`` at offset 0x12."""
+    """A minimal ELF64-LE boot member with the given ``e_machine`` at offset 0x12.
+
+    ``banner_gap`` inserts that many zero bytes before the ``Linux version`` text inside the
+    PT_LOAD segment, placing the banner further into the file (used to test the chunked scan
+    path for ppc64le kernels where the banner is well past the first read window — #1204).
+    """
     body = bytearray(0x40)
     body[0:4] = b"\x7fELF"
     body[4] = 2  # ELFCLASS64
@@ -43,7 +49,8 @@ def _boot_elf(
     notes = b"".join(
         struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id for build_id in build_ids
     )
-    banner = f"Linux version {release} test\x00".encode() + b"\x00" * pad
+    banner_text = f"Linux version {release} test\x00".encode()
+    banner = b"\x00" * banner_gap + banner_text + b"\x00" * pad
     note_offset = 64 + 2 * 56
     banner_offset = note_offset + len(notes)
     note_header = bytearray(56)
@@ -950,6 +957,47 @@ def test_boot_member_formats_covers_supported_arches() -> None:
 def test_ppc64le_elf_boot_member_validates() -> None:
     # A combined tar whose boot/vmlinuz is a ppc64le ELF64-LE kernel validates under ppc64le.
     _validate_kernel_blob(_combined_kernel_tar(boot=_boot_elf()), arch="ppc64le")
+
+
+def test_ppc64le_elf_boot_member_validates_when_banner_is_past_chunk_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real ppc64le kernels place "Linux version " well past the first chunk of the ELF (~27 MiB
+    # into a 64 MiB stripped Fedora kernel — #1204). Shrink the scan chunk and push the banner
+    # past it. The chunk size is its own constant, so the ELF metadata reader is unaffected and
+    # this runs through the real entry point rather than calling _boot_release directly.
+    monkeypatch.setattr(validation, "_BANNER_SCAN_CHUNK_BYTES", 64)
+    _validate_kernel_blob(_combined_kernel_tar(boot=_boot_elf(banner_gap=100)), arch="ppc64le")
+
+
+@pytest.mark.parametrize("banner_gap", range(0, 160))
+def test_ppc64le_elf_banner_release_is_whole_across_every_chunk_alignment(
+    monkeypatch: pytest.MonkeyPatch, banner_gap: int
+) -> None:
+    # Sweep the banner one byte at a time so it lands at every alignment against the scan's
+    # chunk boundaries, including the ones that cut the release token. A scan that accepts a
+    # cut token returns a truncated-but-canonical release ("6.9" for "6.9.0") rather than
+    # failing, so the defect is silent (#1204); only the whole release is correct. The range
+    # must span a full chunk plus the banner's offset in _boot_elf, or it tests no boundary
+    # at all — an earlier version of this sweep straddled none and passed against the bug.
+    monkeypatch.setattr(validation, "_BANNER_SCAN_CHUNK_BYTES", 64)
+    elf = _boot_elf(banner_gap=banner_gap, release="6.9.0")
+    assert validation._boot_release(io.BytesIO(elf), "ppc64le") == "6.9.0"
+
+
+def test_optional_linux_release_is_none_when_the_buffer_ends_at_the_marker() -> None:
+    # The shared banner helper also reads bounded ELF segment slices, and a slice can end right
+    # after the marker with no release token behind it. It must report "nothing here" so the
+    # caller keeps its own control flow, not raise IndexError out of the taxonomy (#1204).
+    assert validation._optional_linux_release(b"\x00" * 8 + b"Linux version ") is None
+
+
+def test_ppc64le_elf_banner_marker_at_end_of_member_is_build_failure() -> None:
+    # A member whose bytes stop right after the marker leaves no release token. The scan must
+    # report a build failure, not raise IndexError out of the taxonomy (#1204).
+    with pytest.raises(CategorizedError) as e:
+        validation._boot_release(io.BytesIO(b"\x00" * 32 + b"Linux version "), "ppc64le")
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
 
 
 def test_x86_bzimage_under_ppc64le_is_build_failure() -> None:

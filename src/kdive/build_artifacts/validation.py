@@ -64,8 +64,20 @@ _EXTERNAL_BOOT_EXTENSION_MAX_BYTES = 1024 * 1024
 _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 16 * 1024 * 1024
 _EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX = 64
+_BANNER_SCAN_CHUNK_BYTES = 16 * 1024 * 1024
 _SHA256_PREFIX = "sha256:"
 _KERNEL_RELEASE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+_LINUX_BANNER_MARKER = b"Linux version "
+# The banner scan needs _KERNEL_RELEASE_RE's shape inline so it can demand a terminator after
+# the release token; _validated_release remains the authority on what a release may be. The
+# terminator is what makes a token cut by a chunk boundary fail to match instead of matching
+# short (#1204) — every prefix of a canonical release is itself canonical.
+_LINUX_BANNER_RE = re.compile(
+    re.escape(_LINUX_BANNER_MARKER) + rb"([A-Za-z0-9][A-Za-z0-9._+-]{0,63})[ \t\r\n\x00]"
+)
+# A marker starting one byte before a chunk boundary, its longest release token, and that
+# token's terminator all have to survive into the next chunk's scan.
+_BANNER_SCAN_OVERLAP_BYTES = len(_LINUX_BANNER_MARKER) + 64 + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -827,8 +839,29 @@ def _boot_release(boot: IO[bytes], arch: str) -> str:
             raise _build_failure("boot/vmlinuz has no bounded x86 kernel version string")
         release = release.partition(b" ")[0]
         return _validated_release(release)
+    # ppc64le: the ELF boot member is uncompressed and the "Linux version " banner can sit well
+    # past the first _BANNER_SCAN_CHUNK_BYTES of the file (~27 MiB into a 64 MiB stripped Fedora
+    # ppc64le kernel — #1204), so scan the whole member in chunks, carrying an overlap so a
+    # banner straddling a chunk boundary is seen whole by the next scan.
     boot.seek(0)
-    return _release_from_linux_banner(boot.read(_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES))
+    tail = b""
+    scanned = 0
+    while scanned < _EXTERNAL_BOOT_MEMBER_MAX_BYTES:
+        chunk = boot.read(_BANNER_SCAN_CHUNK_BYTES)
+        if not chunk:
+            # End of the member. A banner terminated by EOF rather than by a delimiter would
+            # not match, so give the carried tail an explicit terminator before the last scan.
+            release = _scan_linux_release(tail + b"\0")
+            if release is not None:
+                return release
+            break
+        data = tail + chunk
+        release = _scan_linux_release(data)
+        if release is not None:
+            return release
+        tail = data[-_BANNER_SCAN_OVERLAP_BYTES:]
+        scanned += len(chunk)
+    raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
 
 
 def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile[bytes]:
@@ -1071,12 +1104,28 @@ def _release_from_linux_banner(data: bytes) -> str:
 
 
 def _optional_linux_release(data: bytes) -> str | None:
-    marker = b"Linux version "
-    start = data.find(marker)
+    start = data.find(_LINUX_BANNER_MARKER)
     if start < 0:
         return None
-    release = data[start + len(marker) :].split(maxsplit=1)[0]
-    return _validated_release(release)
+    token = data[start + len(_LINUX_BANNER_MARKER) :].split(maxsplit=1)
+    if not token:
+        # The buffer ends at the marker, so there is no token to validate.
+        return None
+    return _validated_release(token[0])
+
+
+def _scan_linux_release(data: bytes) -> str | None:
+    """The release from the first complete ``Linux version`` banner in ``data``, else ``None``.
+
+    Unlike :func:`_optional_linux_release` this requires a terminator after the release token,
+    so a token cut by a chunk boundary does not match and the caller retries it against the
+    next chunk. Accepting the cut token instead would silently record a truncated release,
+    because every prefix of a canonical release is itself canonical (#1204). A banner whose
+    token is not canonical is skipped rather than fatal — the scan continues to the next
+    occurrence, since a kernel image may carry the marker in unrelated strings.
+    """
+    match = _LINUX_BANNER_RE.search(data)
+    return None if match is None else _validated_release(match.group(1))
 
 
 def _validated_release(value: bytes) -> str:

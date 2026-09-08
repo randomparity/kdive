@@ -64,6 +64,7 @@ from tests.integration.live_stack.spine import (
     ok,
     phase,
     put_presigned,
+    raw_vmcore_refs,
     record_provision_evidence_target,
     scalar,
     seed_metering,
@@ -460,9 +461,8 @@ def test_spine_over_the_wire() -> None:
                 refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
                 assert refs, "capture published no vmcore reference (#1)"
                 # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
-                assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
-                    "raw vmcore leaked (#1)"
-                )
+                leaked = raw_vmcore_refs(refs)
+                assert not leaked, f"raw vmcore leaked (#1) — {leaked!r}"
             async with phase("introspect"):
                 env = ok(await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect")
                 report = json.dumps(data_mapping(env, "report"), sort_keys=True)
@@ -1406,9 +1406,14 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         f"no vmcore-fadump artifact — got {refs!r}"
                     )
                     # Only the redacted core is exposed (raw vmcore-<method> must never surface).
-                    assert all(
-                        not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs
-                    ), "raw ppc64le vmcore leaked"
+                    # Use raw_vmcore_refs to strip presigned-URL query params before checking — a
+                    # ``vmcore-fadump-redacted?AWSAccessKeyId=…`` URL contains ``/vmcore-`` but
+                    # does not end with ``-redacted`` (the URL query string follows), so the
+                    # bare string check would incorrectly fail for large cores that get a
+                    # download_uri (#1610, raw_vmcore_refs docstring).
+                    assert not raw_vmcore_refs(refs), (
+                        f"raw ppc64le vmcore leaked — {raw_vmcore_refs(refs)!r}"
+                    )
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)
@@ -1576,9 +1581,9 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                     )
                     assert refs, "no vmcore reference published — kdump captured no core"
                     # Only the redacted core is exposed (raw vmcore-<method> must never surface).
-                    assert all(
-                        not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs
-                    ), "raw ppc64le vmcore leaked"
+                    assert not raw_vmcore_refs(refs), (
+                        f"raw ppc64le vmcore leaked — {raw_vmcore_refs(refs)!r}"
+                    )
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)
