@@ -1,59 +1,70 @@
 # Domain concepts
 
-KDIVE separates experiment history from leased VM capacity. Six domain objects connect a
-kernel experiment to its resources; their records live in Postgres and bulk artifacts live
-in the object store.
-
-## The six objects
+KDIVE separates experiment history from leased VM capacity. The main relationships are:
 
 ```text
-Investigation ──< Run ──< DebugSession
-                  │
-                  └── System ── Allocation ── Resource
-                      (after binding)
+Capacity: Resource → Allocation → System
+History:  Investigation → Run → DebugSession
+                          └── binds to a System
 ```
 
-**Resource** is bookable capacity registered or discovered by a provider. The implemented
-production providers use local and remote libvirt hosts. Resource descriptions expose
-capabilities and availability; use them to select a host that can run your target architecture.
+These records live in Postgres. A record's state, the existence of a live guest, and the
+retention of its artifacts are separate facts.
 
-**Allocation** is a project's capacity claim for a lease window. Admission checks permissions,
-quota, budget, and capacity. A successful request returns `granted`, or `requested` when queued;
-use `allocations.wait` to follow a queued request. The lease is per allocation: `lease_expiry`
-is an absolute ISO-8601 UTC deadline measured against `server_time`. Renew with
-`allocations.renew` before expiry; after expiry the reconciler reclaims the allocation and its
-Systems. See the [allocation reference](reference/allocations.md) for recovery and constraints.
+## Capacity
 
-**System** is a provisioned VM associated with an Allocation. `systems.provision` creates its
-row in `provisioning` and queues provider work; successful provisioning makes it `ready`.
-Installing another kernel reuses the System. Reprovisioning cycles the same System through
-`reprovisioning` back to `ready` or `failed`. Its live infrastructure is bounded by its
-Allocation's lifetime. See the [System reference](reference/systems.md).
+**Resource** describes a registered provider host and its capabilities. Production defaults
+to local libvirt; remote libvirt is an operator-configured option. Select a host using its
+advertised guest-architecture support and availability. See the [resource reference](reference/resources.md).
 
-**Investigation** groups Runs toward a goal such as reproducing and fixing a bug. It is scoped
-to a principal and project and may span Systems, Allocations, and provider kinds. Closing an
-Investigation does not cascade to its Runs. See the [Investigation reference](reference/investigations.md).
+**Allocation** is a project's capacity claim. Admission checks permissions, quota, budget,
+and capacity. A request may be granted immediately or queued; a queued request is not yet
+usable capacity. A grant has its own lease window, shared by operations using that Allocation.
+Read and renew it through the [allocation tools](reference/allocations.md), which document
+the deadline, reference clock, and expiry behavior.
 
-**Run** records one kernel-build attempt within an Investigation. Build the kernel externally
-and upload it, or reuse a compatible build from the same Investigation. Create a Run bound
-to a ready System, or omit `system_id` and supply `target_kind` to create it unbound; later use
-`runs.bind` to select the System. Binding determines the Run's Allocation.
+**System** is the VM target associated with an Allocation. Provisioning creates its record
+and queues the provider work; a successful job leaves the System ready for use. The current
+admission path permits one System per Allocation. Reusing that System for another kernel
+experiment differs from provisioning another System: install and reprovision have their own
+preconditions. See the [System reference](reference/systems.md).
 
-A Run's `succeeded` state means its **build** succeeded. It does not establish that install or
-boot succeeded: inspect `runs.get`'s `data.steps` and `data.boot_readiness`, and follow the
-returned job's outcome. See the [Run reference](reference/runs.md) and [async jobs](async-jobs.md).
+## Experiment history
 
-**DebugSession** records a debug attachment to a Run and its current boot. Reboot or crash
-invalidates live transport state; inspect the session and establish a valid attachment before
-continuing. See the [debug reference](reference/debug.md) for supported transports and operations.
+**Investigation** groups Runs toward a goal such as reproducing and fixing a bug. It belongs
+to a project and records the creating principal; access follows project grants, rather than
+being restricted to the creator. Its Runs can use different Systems, Allocations, and provider
+kinds. Some Systems also name an Investigation directly, for Investigation-owned rootfs reuse
+and cleanup. See the [Investigation reference](reference/investigations.md).
 
-## Lifecycle ordering
+**Run** records an experiment attempt using a kernel build. Build externally and upload the
+artifacts, or reuse a compatible, unexpired build from the same Investigation. A Run can be
+created with a ready System or left unbound with a `target_kind`. `runs.bind` connects an
+unbound Run to a suitable System of that kind; the System determines its Allocation.
 
-A System's live resources cannot outlast its Allocation. The reconciler repairs orphaned
-infrastructure and affected Runs when leases expire or Systems are torn down. Teardown does
-not erase the Investigation's experiment history. Artifact retention and allocation leases
-are separate lifetimes; follow the deadlines and recovery actions returned by the tools.
+A Run's `succeeded` state means its **build** is complete, not that install or boot succeeded.
+Read `runs.get`'s step and readiness information together with the relevant job's outcome.
+The [Run reference](reference/runs.md) owns these fields and binding/build-reuse constraints;
+[async jobs](async-jobs.md) explains polling.
 
-For implementation, the [state definitions and transition table](../../src/kdive/domain/capacity/state.py)
-are the current state-machine contract. The [architecture](../design/top-level-design.md)
-explains how the service enforces it; ADRs record the decisions and their later amendments.
+**DebugSession** records a debug attachment to a Run for one boot. After reboot or crash,
+do not assume the old transport remains usable; inspect the session and establish a valid
+attachment before continuing. See the [debug reference](reference/debug.md).
+
+## Separate lifetimes
+
+An Allocation's lease governs use of its capacity. Expiry and physical cleanup are separate:
+reconciliation is periodic, and provider failures or safety gates can delay reclamation.
+A released or expired allocation is not proof that its guest and provider data are gone.
+Follow the returned state and recovery guidance; the [errors guide](errors.md) covers failed
+Systems and the current limits of their cleanup path.
+
+Closing an Investigation records the outcome and schedules artifact cleanup. Its close
+contract also checks directly bound live Systems; it is not simply a label change or a
+promise to preserve every build indefinitely. Experiment records, uploaded builds, rootfs
+data, and VM snapshots have different retention rules. Consult the owning tool's contract
+before closing an Investigation or relying on a retained artifact.
+
+For implementation, read the [state definitions and transition table](../../src/kdive/domain/capacity/state.py).
+The [architecture](../design/top-level-design.md) explains the service structure; ADRs record
+the decisions and their later amendments.

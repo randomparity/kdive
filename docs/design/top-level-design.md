@@ -111,9 +111,10 @@ lists there rather than reproducing them in this overview.
 
 The pure domain layer owns models and rules. [Services](../../src/kdive/services/) compose
 transactions, repository calls, advisory locks, audit records, and admission accounting.
-A live System cannot outlast its Allocation; teardown retains experiment records for later
-inspection. Run build status and install/boot progress are separate contracts, as described
-in the [Run reference](../guide/reference/runs.md).
+Allocation leases govern capacity use; periodic reconciliation and provider cleanup have
+separate completion conditions. See [domain lifetimes](../guide/concepts.md#separate-lifetimes)
+before treating a terminal allocation as proof of reclamation. Run build status and install/boot
+progress are separate contracts, as described in the [Run reference](../guide/reference/runs.md).
 
 ## Provider model
 

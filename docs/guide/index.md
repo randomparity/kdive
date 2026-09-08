@@ -40,7 +40,7 @@ which operations your deployment can execute; see [platform support](../operatin
 | Page | What it covers |
 |---|---|
 | [Core reproduce/verify path](core-path.md) | The ~12-tool path from acquiring capacity to triaging a crash, and the curated MCP prompts |
-| [Concepts](concepts.md) | The six durable objects and their lifecycle ordering |
+| [Concepts](concepts.md) | Core objects, relationships, and lifetimes |
 | [Response envelope](response-envelope.md) | `ToolResponse` fields; the references-not-dumps rule |
 | [Async jobs](async-jobs.md) | The long-op pattern and the `jobs.*` polling tools |
 | [Safety and RBAC](safety-and-rbac.md) | Roles, the destructive-op gate, secrets, and redaction |
