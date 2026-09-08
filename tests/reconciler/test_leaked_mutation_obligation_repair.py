@@ -20,6 +20,8 @@ Two things these arms exist to hold in place:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
@@ -28,12 +30,14 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.reconciler import loop
+from kdive.reconciler.repairs import systems as repairs_systems
 from kdive.reconciler.repairs.systems import repair_leaked_mutation_obligations
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.db.external_boot_authority_support import (
@@ -231,7 +235,7 @@ def test_count_is_obligation_rows(migrated_url: str) -> None:
 
 
 def test_one_failing_candidate_does_not_starve_the_rest(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """An unordered, unbounded candidate set lets a poison row block every System behind it."""
 
@@ -260,8 +264,12 @@ def test_one_failing_candidate_does_not_starve_the_rest(
             flaky,
         )
 
-        assert await _run(migrated_url) == 1
+        with caplog.at_level("ERROR", logger="kdive.reconciler.repairs.systems"):
+            assert await _run(migrated_url) == 1
         assert calls["n"] == 2
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1
+        assert "1 of 2 leaked mutation obligation candidates failed" in errors[0].getMessage()
         await conn.close()
 
     asyncio.run(run())
@@ -326,7 +334,45 @@ def test_total_failure_is_not_reported_as_nothing_to_do(
 
         errors = [r for r in caplog.records if r.levelname == "ERROR"]
         assert len(errors) == 1
-        assert "does not mean there was nothing to repair" in errors[0].getMessage()
+        assert "2 of 2 leaked mutation obligation candidates failed" in errors[0].getMessage()
+        await conn.close()
+
+    asyncio.run(run())
+
+
+def test_teardown_job_appearing_under_the_lock_defers_the_candidate(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The locked re-read, not the candidate query, is what closes the selection race.
+
+    The candidate query runs in its own transaction and the lock is taken per System afterwards, so
+    a teardown can be enqueued in between. This drives that interleaving directly: the patched lock
+    helper inserts the teardown job after acquiring, which is the only way to reach the `continue`
+    on the re-read.
+    """
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        system_id = await _seed_open_obligation(conn)
+
+        real_lock = repairs_systems.advisory_xact_lock
+
+        @asynccontextmanager
+        async def racing_lock(
+            connection: psycopg.AsyncConnection, scope: LockScope, key: UUID | str
+        ) -> AsyncIterator[None]:
+            async with real_lock(connection, scope, key):
+                # A separate autocommit connection, so the insert is visible to the locked
+                # transaction's re-read under READ COMMITTED.
+                racer = await connect(migrated_url)
+                await _seed_teardown_job(racer, system_id, state=JobState.RUNNING.value)
+                await racer.close()
+                yield
+
+        monkeypatch.setattr(repairs_systems, "advisory_xact_lock", racing_lock)
+
+        assert await _run(migrated_url) == 0
+        assert await _discharges(conn, system_id) == [(None, None)]
         await conn.close()
 
     asyncio.run(run())

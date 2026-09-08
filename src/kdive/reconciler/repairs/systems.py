@@ -178,16 +178,19 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                 system_id,
                 discharged,
             )
-    if failures and not discharged_rows:
-        # Every candidate failed, so the count this lane returns is 0 — byte-identical to the
-        # resting state of a database with nothing to repair. A systematic cause (the reconciler's
-        # login losing its role membership, a statement or lock timeout, a dropped connection)
-        # would otherwise be the same silent failure #2326 was filed about, one level up.
+    if failures:
+        # Per-candidate isolation means a failure never reaches `ReconcileReport.failures`, and a
+        # pass that discharged nothing returns 0 — byte-identical to a database with nothing to
+        # repair. A systematic cause (the reconciler's login losing its role membership, a
+        # statement or lock timeout, a dropped connection) would otherwise be the same silent
+        # failure #2326 was filed about, one level up. Fires on any failure, not only a total one:
+        # a denial that begins mid-batch is the same defect caught earlier.
         _log.error(
-            "reconciler: every leaked mutation obligation candidate failed this pass (%d of %d); "
-            "the repair count of 0 does not mean there was nothing to repair",
+            "reconciler: %d of %d leaked mutation obligation candidates failed this pass; "
+            "the repair count of %d is a floor, not a measure of what needed repairing",
             failures,
             len(candidates),
+            discharged_rows,
         )
     return discharged_rows
 

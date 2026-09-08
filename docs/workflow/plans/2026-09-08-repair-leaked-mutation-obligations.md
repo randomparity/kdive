@@ -18,6 +18,12 @@ Postgres via testcontainers. Design record:
 Expected implementation size: 200–280 changed lines (M) — the file map below: ~65 added lines in
 `repairs/systems.py`, ~10 in `loop.py`, and one ~185-line test module; design artifacts excluded.
 
+**Shipped: 105 lines in `repairs/systems.py`, 8 in `loop.py`, a 341-line test module.** Two
+additions moved it past the estimate, both from adversarial review rather than from scope drift:
+the settle window on the teardown job's `updated_at` (a constant, a predicate disjunct, a locked
+re-read, and four test arms) and the whole-pass `ERROR` for a failed batch (one block and two
+test arms). The estimate is left as written so the delta stays visible.
+
 ## Global Constraints
 
 - Ruff line length **100**; lint set `E,F,I,UP,B,SIM`. `ty` runs with strict defaults over the
@@ -142,6 +148,19 @@ revert it, and re-run to green.
     leaves it green — but it must stay green, and it guards the separate property that no entry's
     factory returns `None` in a fully populated plan.
 
+11. **A pass whose candidates fail does not report as a pass with nothing to do.**
+    `::test_total_failure_is_not_reported_as_nothing_to_do`, and the ERROR assertion added to
+    `::test_one_failing_candidate_does_not_starve_the_rest`. Per-candidate isolation keeps a failure
+    out of `ReconcileReport.failures`, so the lane owes one `ERROR` naming the failure count
+    whenever any candidate failed. Red with the `if failures:` block removed: `assert 0 == 1` on the
+    captured ERROR records.
+
+12. **A teardown enqueued between the candidate read and the lock defers the candidate.**
+    `::test_teardown_job_appearing_under_the_lock_defers_the_candidate`, which patches the module's
+    `advisory_xact_lock` with a wrapper that inserts the teardown job after acquiring — the only way
+    to reach the `continue` on the locked re-read. Red with the re-read removed: `assert 1 == 0` on
+    the count, because the candidate query's own result is already stale by then.
+
 ### Steps
 
 **Step 1 — confirm ADR-0634 is already `Accepted`.** Read
@@ -166,8 +185,9 @@ Add these three module-level constants after `_ORPHANED_SYSTEM_TERMINAL_STATE_VA
 
 ```python
 # Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
-# job out of `queued`/`running` while its handler keeps running, so job state alone does not bound
-# the window; the teardown job's `updated_at` does, because nothing but that teardown writes it.
+# job out of `queued`/`running` while its handler keeps running to completion, so job state alone
+# does not bound the window; the teardown job's own `updated_at` does, because nothing but that
+# teardown writes it.
 _TEARDOWN_SETTLE = timedelta(minutes=15)
 # Both teardown families enqueue at `_teardown_dedup_key(system_id)`, and `jobs.dedup_key` is
 # UNIQUE, so one row carries a System's whole teardown history.
@@ -217,11 +237,17 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
         candidates: list[UUID] = [row["system_id"] for row in await cur.fetchall()]
     obligations = RemoteModuleAttemptObligationRepository()
     discharged_rows = 0
+    failures = 0
     for system_id in candidates:
         try:
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
                 # Only the job half is re-read: `torn_down` is terminal, so the state half cannot
-                # change between the candidate query and this lock.
+                # change between the candidate query and this lock. The repository method below
+                # takes this same key again; `pg_advisory_xact_lock` is reference-counted per
+                # transaction and released at commit, so the second acquisition is a no-op. It is
+                # taken here rather than left to that method because the re-read must happen under
+                # the lock, which is what 0152's "deliberately not retaken here" comment assumes of
+                # every caller.
                 async with conn.cursor() as cur:
                     await cur.execute(
                         _TEARDOWN_IN_FLIGHT_SQL,
@@ -237,6 +263,7 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                     conn, system_id
                 )
         except Exception:  # noqa: BLE001 - one System must not starve the rest of the batch
+            failures += 1
             _log.warning(
                 "reconciler: leaked mutation obligation discharge failed for system %s; "
                 "retrying next pass",
@@ -251,6 +278,20 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                 system_id,
                 discharged,
             )
+    if failures:
+        # Per-candidate isolation means a failure never reaches `ReconcileReport.failures`, and a
+        # pass that discharged nothing returns 0 — byte-identical to a database with nothing to
+        # repair. A systematic cause (the reconciler's login losing its role membership, a
+        # statement or lock timeout, a dropped connection) would otherwise be the same silent
+        # failure #2326 was filed about, one level up. Fires on any failure, not only a total one:
+        # a denial that begins mid-batch is the same defect caught earlier.
+        _log.error(
+            "reconciler: %d of %d leaked mutation obligation candidates failed this pass; "
+            "the repair count of %d is a floor, not a measure of what needed repairing",
+            failures,
+            len(candidates),
+            discharged_rows,
+        )
     return discharged_rows
 ```
 
