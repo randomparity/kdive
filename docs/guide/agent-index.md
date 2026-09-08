@@ -1,9 +1,7 @@
 # Driving a kdive investigation
 
-This is the entry point for an agent driving the kdive tool surface. It maps the typical
-session to the toolsets you call at each stage, then links a per-toolset guide. Each guide
-explains what its tools are for and when to reach for them; the exact parameters and return
-schema live in each tool's own description.
+Start here when driving KDIVE through MCP. This index maps an investigation to tools and
+served guides. Read a tool's current schema for its parameters and return fields.
 
 ## Reaching tools
 
@@ -19,191 +17,122 @@ in one call. `tools.search` and `tools.invoke` are always available. Both paths 
 same RBAC. If an operator enables the core-set gateway, only a small core set is listed
 directly, so reach everything else through `tools.search` / `tools.invoke`.
 
-The server negotiates MCP protocol revision 2025-11-25; a client offering an older supported
-revision negotiates down rather than failing.
+The verified operator CLI receives the direct catalog in either gateway mode. `tools.search` and `tools.invoke` remain
+available in either mode. Discovery is filtered by your roles, and both invocation paths
+enforce the same authorization and state checks. A listed tool is not permission to use it
+on every project or object.
 
 ## The typical session
 
-A reproduce-and-investigate session moves through these stages. Each names the toolset and
-the first tool to call.
+These stages describe the external-build investigation path. Debugging and crash capture
+are optional; select them for the question you are investigating.
 
-1. **Orient and discover** — start with `session.whoami` to see who you are and which
-   projects and roles you hold, then survey what you can provision: `resources.list` and
-   `resources.availability` for the registered hosts and their free capacity, `shapes.list`
-   for the named VM shapes, and `accounting.estimate` to price a shape × lease-window in KCU
-   before you spend. Then `investigations.open` to group the runs of one investigation.
+1. **Orient and discover** — `session.whoami` shows your projects and roles.
+   Use `resources.list`, `resources.availability`, and `shapes.list` to find capacity,
+   then `accounting.estimate` to estimate a shape and lease window in KCU.
+   Use `investigations.open` to group related Runs.
 2. **Acquire capacity** — `allocations.request`, then `allocations.wait` until granted.
-3. **Provision a system** — `images.describe` to pick a base image and check its
-   capabilities first. Then `systems.provision` with the profile inline — the one create
-   lane — and `jobs.wait` on the job it returns until the system is READY. To boot an
-   agent-uploaded rootfs instead of a catalog image, `artifacts.create_investigation_upload`
-   then `investigations.complete_rootfs_upload` into your open investigation, and reference it
-   by `checksum_sha256` in the profile with the system bound to that investigation — one upload
-   serves many systems. See the images guide.
-4. **Build** — `runs.create` on the external lane, then read
-   `resource://kdive/contracts/external-build` to see what is required,
-   call `artifacts.create_run_upload` per artifact to get a presigned PUT URL, and PUT each
-   object; once every expected artifact is uploaded, call `runs.complete_build`. See the runs guide and the build lane
-   (resource://kdive/docs/operating/external-build-upload.md). If you build for a non-x86 target,
-   read the per-arch build hints first (resource://kdive/docs/guide/kernel-build-per-arch.md):
-   the `boot/vmlinuz` member differs by arch (a bzImage on x86_64, a stripped ELF `vmlinux` on
-   ppc64le), and confusing the build-host arch with the target arch is a common way a build comes
-   out wrong.
-5. **Install and boot** — `runs.install` then `runs.boot`.
-6. **Reproduce in the guest** — `systems.authorize_ssh_key`, then `jobs.wait` until it
-   succeeds, then drive the reproducer over SSH (compile in-guest or cross-compile and `scp`,
-   then run or stress it). This is where most investigation time goes; see the
-   reproduce-and-capture loop below.
-7. **Observe evidence** — `runs.get` for status and console access: `refs.latest_console` jumps
-   to the newest console artifact, and `include_console_artifacts=true` returns the full
-   Run-scoped console manifest (`data.console_artifacts`). Use `artifacts.get` to read an artifact
-   and `artifacts.list` (keyset-paginated) for the System's other logs and files.
-8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools; or
-   `debug.start_session(transport="drgn-live")` followed by `introspect.run`/`introspect.script`
-   for non-halting drgn introspection against that session. See the debug and introspect guides.
-9. **Triage a crash** — induce one deliberately with `control.force_crash` if needed, then
-   `vmcore.fetch` and `postmortem.crash`. See the control and postmortem guides.
-10. **Wind down** — release everything you acquired, in order: `systems.teardown` to
-    destroy the provisioned guest (a completed teardown does not itself release the
-    allocation), then `allocations.release` to return the leased capacity, then
-    `investigations.close` to close out the investigation. Release the allocation and tear
-    down the system even if you leave the investigation open, so capacity is not held.
+   Inspect the returned state before provisioning; a wait response need not be a grant.
+3. **Provision a system** — `images.describe` checks the base image's capabilities; see
+   resource://kdive/docs/guide/toolsets/images.md and the checklist below. Call
+   `systems.provision` with the profile inline, poll its job with `jobs.wait`, and require
+   success. Use the returned `data.system_id` with `systems.get` to confirm readiness.
+4. **Build and upload** — `runs.create` starts an external-build Run. Read
+   resource://kdive/contracts/external-build and
+   resource://kdive/docs/operating/external-build-upload.md before building. Submit the
+   **complete artifact manifest in one** `artifacts.create_run_upload` call: another call
+   replaces that manifest. PUT every object using its returned URL and required headers,
+   then call `runs.complete_build` to validate the upload. This completion call is synchronous;
+   a succeeded Run means the build is complete, not that it has booted. For target-specific
+   packaging, read resource://kdive/docs/guide/kernel-build-per-arch.md.
+5. **Install and boot** — `runs.install`, wait for its job to succeed, then `runs.boot`
+   and wait for that job to succeed. Confirm the Run's boot result before using the guest.
+6. **Reproduce in the guest** — `systems.authorize_ssh_key`, then `jobs.wait` until its
+   job succeeds. Get connection details from `systems.ssh_info`; a `worker_loopback`
+   endpoint needs access through the worker host. Compile in-guest or cross-compile and
+   `scp` your reproducer, then run it over SSH. See the capture loop below.
+7. **Observe evidence** — `runs.get` exposes `refs.latest_console`; request
+   `include_console_artifacts=true` for `data.console_artifacts`. Use `artifacts.get`
+   to read evidence and `artifacts.list` to find other System artifacts.
+8. **Debug live** — `debug.start_session` opens a debugging session. For non-halting
+   introspection, explicitly select `transport="drgn-live"`, then pass that session to
+   `introspect.run` or `introspect.script`. End it with `debug.end_session` when done.
+   Read the debug and introspect guides for prerequisites.
+9. **Capture and triage** — `control.force_crash` is an optional, deliberate capture test,
+   requiring the admin role, profile opt-in, and a READY System. It is not evidence that
+   your reproducer triggered a bug. For a crashed guest, confirm the System is CRASHED
+   before `vmcore.fetch`; wait for capture success, then use `postmortem.crash` with the
+   Run ID. Do not force another crash to repair state or replace uncaptured evidence.
+   See the control and postmortem guides.
+10. **Wind down** — `systems.teardown`, wait for successful cleanup, then
+    `allocations.release`, then `investigations.close`. Teardown does not release the
+    Allocation. A FAILED System currently cannot take the ordinary teardown transition:
+    use the returned recovery guidance and involve the operator to confirm provider cleanup.
+    Releasing capacity alone does not prove the guest is gone.
 
-Long steps (provision, build, install, boot, capture) return a job handle; poll it with
-`jobs.wait`.
-
-## The guest is yours — you have root
-
-Once a system is ready, authorize your public key with `systems.authorize_ssh_key` and poll
-`jobs.wait` until it succeeds; only then do you have **root SSH into the guest** — kdive never
-holds the private key. From there the guest is yours to shape:
-
-- **The guest package manager is yours.** Install whatever the investigation needs at
-  runtime — `apt install trace-cmd`, a compiler toolchain, `stress-ng`, `bpftrace`. Do not
-  assume a capability is missing because a tool is absent; install it. Most "the platform
-  can't do that" conclusions are one package (or one config symbol) away. On
-  **local-libvirt**, installs need the operator to have enabled guest egress first (no
-  outbound network by default); see the systems guide's "Reaching the guest over SSH"
-  section if `dnf`/`apt install` can't resolve a host.
-- **Mind disk headroom.** Installing toolchains, building reproducers, and capturing traces
-  all consume guest disk; size the shape for the work or clean up as you go.
-
-## The reproduce-and-capture loop
-
-Most real investigation time is spent here, not in the setup stages. After
-`systems.authorize_ssh_key` succeeds (poll `jobs.wait`):
-
-1. **Get the reproducer into the guest.** Compile it in-guest with the toolchain you
-   installed, or cross-compile on the host and `scp` the binary in.
-2. **Run or stress it** over SSH — the reproducer itself, `stress-ng`, a fuzzer, whatever
-   provokes the bug.
-3. **Steer the kernel into the failure.** Fault injection (`failslab` / `fail_page_alloc`
-   via debugfs, if you built the kernel with `CONFIG_FAULT_INJECTION`), tracing (`ftrace`,
-   `bpftrace`), and stress are all in-guest-over-SSH activities using tools you installed
-   (see "The guest is yours" above). **To target one allocation site** instead of whatever
-   fires first, default to the *bounded* knob: write `1` to `/proc/self/fail-nth` so exactly
-   one eligible allocation fails and the injector then disarms — it cannot storm. Scope which
-   allocations count as eligible with `cache-filter` (pin it to the exact slab-cache name from
-   `/proc/slabinfo`) and boot `slab_nomerge` so SLUB doesn't merge same-size caches out from
-   under your filter. To reach a `GFP_KERNEL` site you must also set `ignore-gfp-wait=N` (`Y`,
-   the debugfs default, skips every `GFP_KERNEL` allocation before `cache-filter`/`fail-nth`
-   even run); with `fail-nth=1` that stays bounded. **Do not reach for `probability` on a
-   targeted reproducer:** `probability` together with `ignore-gfp-wait=N` fails `GFP_KERNEL`
-   allocations *persistently*, and when one such failure lands in the page-fault path the
-   kernel retries `handle_mm_fault` forever — a `VM_FAULT_OOM` retry storm that livelocks the
-   guest (nothing detects a livelock; it is worse than a crash). Reserve `probability` for
-   stress/soak runs, not surgical single-site reproducers. The old caveat that `fail-nth`
-   "trips on the first eligible call, not necessarily the one you're after" only holds when
-   you *cannot* scope — `cache-filter` scopes it. This is manual guest-side work today; a
-   debugfs-driven fault-injection tool surface may land in a future release.
-
-**A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
-whatever you were watching over SSH is gone. The **serial-console is the durable record** — it
-persists across the crash. For a repeat-until-crash race, start `control.watch_for_crash` on the
-system first, then run the loop over SSH: it watches the console out-of-band for the crash
-signature and returns on the first hit (`fired` with the matched slice + elapsed, or `not_fired`
-if none appeared). Poll it with `jobs.wait`. If your SSH loop dies but the watch says `not_fired`,
-the crash was outside the watched window — read the console directly with `runs.get` (console
-access) and the `artifacts` tools. Do not rely on SSH output as your capture of a panic; rely on
-the console.
-
-**Checkpoint a configured guest to restore between attempts.** When each reproducer attempt leaves
-the guest dirty (or crashes it), `systems.snapshot` a fully-configured guest once — packages
-installed, reproducer staged, kdump armed — then `systems.restore` back to that checkpoint in
-seconds between attempts instead of reprovisioning from scratch. `systems.get`'s
-`data.supports_snapshots` tells you whether the provider supports this. A memory checkpoint
-(`include_memory=true`) resumes the guest exactly where it was; `start_paused=true` lands it
-`paused` for a gdbstub `debug.start_session` before execution resumes, then
-`control.power(action="resume")` runs it. See the systems guide.
-
-**Scope resource-exhaustion reproducers to a throwaway uid.** Reproducing a per-uid or
-per-cgroup quota bug (inotify watches, file descriptors, pending signals, and the like) by
-running the workload as root exhausts *root's own* quota — starving root-owned services such as
-sshd's session setup and systemd, which hangs new SSH logins and looks exactly like a guest
-wedge. Run the reproducer under a throwaway unprivileged uid instead, e.g. `setpriv --reuid
-$(id -u nobody) --clear-groups ...`, so the exhaustion is scoped to that uid and your SSH/control
-channel stays reachable and recoverable.
+For a returned job handle, poll with `jobs.wait` and check its terminal status before
+starting dependent work. Observation jobs are different: run the reproducer while the
+watch is active. See resource://kdive/docs/guide/async-jobs.md for polling and recovery.
 
 ## Decide before you provision
 
-Several choices are bound at `systems.provision` and expensive to change — altering any of them
-means `systems.reprovision`, which rebuilds and reboots the system. Run down this list before
-your first provision so every irreversible choice is made up front:
+Choose the image, capacity, and debugging needs before spending the lease on setup:
 
-- **Base image** — pick it with `images.describe` and check its `kdump`, `direct_kernel`, and
-  `live_drgn` `capability_signals` first (see the images guide). A wrong image can burn the
-  allocation. An
-  `unverified` signal is normal for an externally-baked or operator-staged image no one has
-  characterized — not a defect; the check becomes actionable once the image is published or the
-  operator attests it (`basis` then reads `build_verified` or `operator_attested`).
-- **Shape and disk** — size vCPUs, memory, and disk for the work; toolchains, reproducer
-  builds, and captures all consume guest disk (see "The guest is yours").
-- **Kernel config** — the config is baked into the kernel you build and upload; enable the
-  debug options you need (KASAN / KCSAN / FAULT_INJECTION / …) before uploading (see the
-  external-build-upload doc).
-- **`debug.gdbstub: true`** — set it if you may want a live GDB session; without it
-  `debug.start_session` fails.
-- **`debug.preserve_on_crash: true`** — set it to hold a crashed guest (vCPUs stopped) for
-  post-panic inspection.
+- **Base image** — inspect `images.describe` and its `capability_signals` for the planned
+  boot, kdump, and live-introspection workflow. An `unverified` signal is not proof that a
+  capability works. The images guide owns image selection and uploaded-rootfs workflows.
+- **Shape and disk** — size CPU, memory, and guest disk for builds, reproducers, and captures
+  when requesting capacity. Package installation and traces also consume disk headroom.
+- **Kernel config** — enable the debugging options needed by your investigation in the
+  kernel you build and upload. Changing that config needs a new build and install/boot cycle;
+  it is not a provision-time switch.
 
-## Provisioning for debugging and live introspection
+### Provisioning for debugging
 
-Some debugging and live-introspection capabilities are bound at `systems.provision` and
-**cannot be turned on afterward** — a ready system has no knob to flip. If you decide to
-debug only after the run boots, the only remedy is `systems.reprovision`, which rebuilds
-and reboots the system (an expensive cycle). Decide these before you provision:
+For local-libvirt, start with `systems.profile_examples` and choose these profile flags
+before provisioning:
 
-- `provider.local-libvirt.debug.gdbstub: true` — provisions the QEMU gdb stub a live GDB
-  session attaches to. Without it, a `gdbstub` session cannot attach; you must reprovision.
-- `provider.local-libvirt.debug.preserve_on_crash: true` — holds a crashed guest (vCPUs
-  stopped) instead of destroying it, so you can attach and inspect the halted kernel after
-  a panic.
+- `provider.local-libvirt.debug.gdbstub: true` enables the stub for GDB attachment.
+- `provider.local-libvirt.debug.preserve_on_crash: true` configures the domain to remain
+  stopped after a reported panic for post-panic inspection.
 
-Live drgn introspection (`introspect.run`/`introspect.script`) is **not** provision-bound: the
-SSH forward is rendered on every domain and the drgn-over-SSH transport authenticates with the
-per-System bootstrap key, so a ready local system needs no credential knob. Its only image
-requirement is a drgn-capable guest (`introspect.run` reports `missing_dependency` if drgn is
-absent). It does, however, require a live session: call
-`debug.start_session(transport="drgn-live")` first and pass the returned `session_id` to
-`introspect.run`/`introspect.script` — a successful drgn-live attach suggests both as next
-actions. Use `debug.end_session` to release the session when you're done.
+Changing these flags requires `systems.reprovision`. Live drgn uses the session workflow
+above and does not require the gdbstub flag. Check the introspect guide for guest-tool and
+kernel requirements; an SSH endpoint alone does not establish readiness for introspection.
 
-For GDB or post-panic inspection, add the relevant `debug` flags to a starting-point profile
-from `systems.profile_examples` before provisioning. Live drgn uses the session workflow above.
+## Guest access and the reproduce-and-capture loop
+
+After your public-key authorization job succeeds, you can use root SSH into the guest.
+Your private key stays with you; KDIVE uses a separate bootstrap key for its own access.
+Use the guest package manager for tools supported by your image and kernel. Local-libvirt
+has no outbound guest egress by default, so fetching packages requires operator-enabled
+egress or a prepared image. See resource://kdive/docs/guide/toolsets/systems.md for access.
+
+A panic can drop SSH, including the reproducer process and any observation over that
+connection. Read the persisted serial-console evidence through `runs.get` and the artifact
+tools. For a repeat-until-crash loop, start `control.watch_for_crash` before running the
+reproducer and poll its job while the workload runs. The watch observes console output
+from worker pickup until its window ends; its `refs.result` reports `fired` or `not_fired`.
+Neither a successful job nor a dropped SSH connection proves a panic. `not_fired` means no
+matching signature was observed in that window: inspect the console and System state.
+The watch does not mark the System CRASHED; check state before attempting capture.
+
+A snapshot can help repeat experiments when the provider supports it, but `systems.restore`
+requires a READY System. It is not recovery for a CRASHED or FAILED System. See the systems
+guide for snapshot and restore requirements.
 
 ## Toolset guides
 
 | Toolset | What it is for | Guide |
 |---|---|---|
 | runs | Build, install, and boot lifecycle of a kernel test run | resource://kdive/docs/guide/toolsets/runs.md |
-| artifacts | Fetch run evidence (logs, console, vmlinux) and upload builds | resource://kdive/docs/guide/toolsets/artifacts.md |
-| debug | Live GDB kernel debugging — breakpoints, memory, registers, stacks | resource://kdive/docs/guide/toolsets/debug.md |
-| systems | Provision, reprovision, and reach the target system over SSH | resource://kdive/docs/guide/toolsets/systems.md |
-| images | Pick a base image and read its capabilities before provisioning | resource://kdive/docs/guide/toolsets/images.md |
-| introspect | Non-halting drgn introspection of a live guest or a captured vmcore | resource://kdive/docs/guide/toolsets/introspect.md |
-| control | Deliberately induce a crash, send a diagnostic SysRq, drive power | resource://kdive/docs/guide/toolsets/control.md |
-| postmortem | Capture a crashed kernel's vmcore, then triage or analyze it | resource://kdive/docs/guide/toolsets/postmortem.md |
+| artifacts | Fetch run evidence and upload builds | resource://kdive/docs/guide/toolsets/artifacts.md |
+| debug | GDB and live-introspection sessions | resource://kdive/docs/guide/toolsets/debug.md |
+| systems | Provision, reprovision, snapshot, and reach a system over SSH | resource://kdive/docs/guide/toolsets/systems.md |
+| images | Pick a base image and read its capabilities | resource://kdive/docs/guide/toolsets/images.md |
+| introspect | Non-halting live or offline drgn introspection | resource://kdive/docs/guide/toolsets/introspect.md |
+| control | Watch for crashes, induce a crash, send a SysRq, or drive power | resource://kdive/docs/guide/toolsets/control.md |
+| postmortem | Capture a vmcore, then triage or analyze it | resource://kdive/docs/guide/toolsets/postmortem.md |
 
-For the shape every tool result returns, read
-resource://kdive/docs/guide/response-envelope.md. Clients that list MCP prompts also have
-the `start_investigation`, `build_boot_debug`, and `triage_panic` lifecycle prompts.
+For tool results, read resource://kdive/docs/guide/response-envelope.md. Clients that list
+MCP prompts also have `start_investigation`, `build_boot_debug`, and `triage_panic`.

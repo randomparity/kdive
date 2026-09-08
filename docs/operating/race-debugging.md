@@ -60,10 +60,8 @@ guests):
   `trace` / `trace_pipe`.
 - Use `trace-cmd` or `bpftrace` for anything beyond raw sysfs writes.
 - Fault injection (`failslab` / `fail_page_alloc` via debugfs, with a `CONFIG_FAULT_INJECTION`
-  kernel) steers the kernel into the failure window — see the
-  reproduce-and-capture loop (resource://kdive/docs/guide/agent-index.md) in the
-  agent index for the debugfs knobs (`ignore-gfp-wait`, `cache-filter`, `probability` vs
-  `fail-nth`, `slab_nomerge`).
+  kernel) is guest-side work. Use the documentation for the kernel you built to choose
+  and scope the injection; the agent index covers KDIVE setup and evidence capture.
 
 None of this is an MCP tool, and it does not need to be — it runs entirely inside a guest you
 own. That is the point of the next section.
@@ -72,8 +70,8 @@ own. That is the point of the next section.
 
 Once a system is ready, authorize your public key with `systems.authorize_ssh_key` and poll
 `jobs.wait` until it succeeds; only then do you have **root SSH into the guest** — kdive never
-holds the private key. From there the guest is yours to shape (see
-The guest is yours (resource://kdive/docs/guide/agent-index.md) in the agent
+holds your private key; its own access uses a separate bootstrap key. From there the guest
+is yours to shape (see Guest access (resource://kdive/docs/guide/agent-index.md) in the agent
 index and the systems guide, resource://kdive/docs/guide/toolsets/systems.md):
 
 - **The guest package manager is yours.** Install whatever the investigation needs at runtime
@@ -115,10 +113,11 @@ matched console slice and elapsed-to-signal, or `not_fired` if no signature appe
 contributor-level and non-destructive; it earns a tool because it watches the console when SSH is
 gone, which your own loop structurally cannot. Poll it with `jobs.wait` and read the verdict from
 `refs.result`. The reproducer loop stays yours over SSH — the watch only catches the crash. You
-hold the authoritative liveness signal: if your reproducer's SSH drops but the watch returns
-`not_fired`, the crash landed outside the watched window (a pre-watch crash, or a very fast one) —
-read the full console with the `artifacts` tools rather than trusting `not_fired`. Do not rely on
-SSH output as your capture of a panic.
+should inspect the full console with the `artifacts` tools if SSH drops: `not_fired` means
+no matching signature was observed during the watch window, not that a crash occurred outside
+it. The window starts when the worker picks up the job. The watch does not mark the System
+CRASHED; check `systems.get` before attempting `vmcore.fetch`. Do not rely on SSH output as
+your capture of a panic.
 
 ## When you _do_ need an out-of-band tool: a dead or hung guest
 
@@ -149,7 +148,7 @@ routes above); anything that must work when SSH is gone is where a tool is warra
   (deterministic bugs).
 - control toolset (resource://kdive/docs/guide/toolsets/control.md) — `force_crash`,
   `diagnostic_sysrq`, `power`.
-- Agent index (resource://kdive/docs/guide/agent-index.md) — the guest-is-yours contract and
+- Agent index (resource://kdive/docs/guide/agent-index.md) — guest access and the
   reproduce-and-capture loop.
 - [Four-method live run](runbooks/four-method-live-run.md) — capture methods end to end.
 - [ADR-0366](../adr/0366-race-debugging-out-of-band.md) — resolving #986 as docs, not a code mode.
