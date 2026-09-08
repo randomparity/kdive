@@ -23,7 +23,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -39,6 +39,7 @@ from kdive.domain.capacity.state import JobState, SystemState
 from kdive.reconciler import loop
 from kdive.reconciler.repairs import systems as repairs_systems
 from kdive.reconciler.repairs.systems import repair_leaked_mutation_obligations
+from kdive.services.systems.authority_owned import _teardown_dedup_key
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
@@ -376,6 +377,18 @@ def test_teardown_job_appearing_under_the_lock_defers_the_candidate(
         await conn.close()
 
     asyncio.run(run())
+
+
+def test_the_deferral_key_matches_the_production_teardown_dedup_key() -> None:
+    """The lane rebuilds the teardown dedup key by hand, in Python and again in SQL.
+
+    Both spellings are `<system_id>:teardown`, which is what `enqueue_control_teardown` and
+    `enqueue_preactivation_teardown` actually enqueue at. Nothing else binds them, so a change to
+    the production convention would silently stop the lane deferring rather than fail a test.
+    """
+    system_id = uuid4()
+
+    assert _teardown_dedup_key(system_id) == f"{system_id}:teardown"
 
 
 def test_repair_runs_after_abandoned_jobs() -> None:

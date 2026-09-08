@@ -101,6 +101,12 @@ repairable at all: a teardown whose worker died keeps its job `running` with a l
   consumes these discharges, so a long first pass postpones by one interval exactly the work this
   repair exists to unblock. Self-limiting, because pass two sees an empty set; the bounded-batch
   idiom at `0149:939` is the remedy if an operator ever reports one.
+- The deferral is keyed on a teardown job existing. A torn-down System with no job row at that
+  dedup key is repaired on the first pass that sees it, and that is correct rather than a gap: the
+  one path that produces `torn_down` beside an open obligation always enqueues at
+  `<system_id>:teardown` first, so a candidate with no such row is one whose job row is already gone
+  — an old leak, not an in-flight teardown. An age floor on the obligation's own `created_at` would
+  not bound this: that column records when the attempt opened, not when its teardown ran.
 - The dead-letter that frees a stuck candidate also defers it once more. `repair_abandoned_jobs`
   moves a lease-lapsed teardown to `failed`, and that write stamps `jobs.updated_at`, so the System
   it frees is repaired a settle window later rather than in the pass that dead-lettered it. The
