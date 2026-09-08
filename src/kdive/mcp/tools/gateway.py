@@ -315,9 +315,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         (unknown/disabled tool) and a schema-validation failure on ``arguments`` are both
         caught and converted to ``configuration_error`` envelopes; the latter's
         ``data.field_errors`` names each offending argument and its failure kind — the same
-        detail a direct bind would raise. ``data.accepted_fields`` additionally lists the
-        tool's top-level keys, but only when you could already see that tool through
-        ``tools.search``; it is omitted otherwise.
+        detail a direct bind would raise — and ``data.accepted_fields`` additionally lists
+        the tool's top-level keys. Both are included only when you could already see that
+        tool through ``tools.search``; both are omitted otherwise.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)
@@ -367,11 +367,6 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                     )
                     for err in binding_cause.errors(include_url=False)[:_FIELD_ERROR_LIMIT]
                 ]
-                # Named field_errors, not ADR-0123's reserved `errors` key: that key is a
-                # closed `list[{loc, msg, type}]` contract (binding_errors.py's curated
-                # conversions are its only other producer), and this shape ({field, kind},
-                # no msg) would collide under the same name for callers of both paths.
-                data["field_errors"] = cast("JsonValue", field_errors)
                 try:
                     visible = tool_visible(name, current_context())
                 except AuthError:
@@ -379,8 +374,15 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 # Argument binding fails before a handler's own require_role check ever
                 # runs, so an unauthorized caller can reach this branch without the inner
                 # RBAC gate having fired. Withhold the schema tools.search would also
-                # withhold from them (ADR-0148).
+                # withhold from them (ADR-0148) — field_errors leaks a hidden tool's
+                # parameter names just like accepted_fields, so both are gated on the same
+                # visibility check (#2325).
                 if visible:
+                    # Named field_errors, not ADR-0123's reserved `errors` key: that key is a
+                    # closed `list[{loc, msg, type}]` contract (binding_errors.py's curated
+                    # conversions are its only other producer), and this shape ({field, kind},
+                    # no msg) would collide under the same name for callers of both paths.
+                    data["field_errors"] = cast("JsonValue", field_errors)
                     tool = next((t for t in registered_tools(app) if t.name == name), None)
                     if tool is not None:
                         properties = tool.parameters.get("properties")

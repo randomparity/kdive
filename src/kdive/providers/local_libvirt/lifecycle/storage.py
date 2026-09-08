@@ -14,6 +14,10 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
+    PROVIDER_TOOL_SEARCH_PATH,
+    resolve_provider_tool,
+)
 
 # ``ROOTFS_DIR``/``UPLOADS_DIR``/``overlay_name``/``overlay_path`` are re-exported here (the
 # explicit ``as`` aliases mark the re-export) for provider consumers (provisioning, tests). Their
@@ -54,12 +58,16 @@ def _real_remove_baseline(baseline: str) -> None:
 
 def _real_make_overlay(base: str, overlay: str) -> None:
     """Create a qcow2 overlay and make it writable by the shared session-libvirt group."""
-    qemu_img = shutil.which(_QEMU_IMG)
+    qemu_img = resolve_provider_tool(_QEMU_IMG)
     if qemu_img is None:
         raise CategorizedError(
-            "qemu-img is not installed; cannot create the per-System rootfs overlay",
+            "qemu-img is not installed; cannot create the per-System rootfs overlay; not found "
+            f"in any of {PROVIDER_TOOL_SEARCH_PATH}",
             category=ErrorCategory.MISSING_DEPENDENCY,
-            details=_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
+            details={
+                **_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
+                "searched": PROVIDER_TOOL_SEARCH_PATH,
+            },
         )
     try:
         result = subprocess.run(  # noqa: S603 - qemu-img argv; paths are data  # nosec B603
@@ -135,12 +143,13 @@ def _run_qemu_img(
             details.update(extra_details)
         return details
 
-    qemu_img = shutil.which(_QEMU_IMG)
+    qemu_img = resolve_provider_tool(_QEMU_IMG)
     if qemu_img is None:
         raise CategorizedError(
-            f"qemu-img is not installed; cannot {action}",
+            f"qemu-img is not installed; cannot {action}; not found in any of "
+            f"{PROVIDER_TOOL_SEARCH_PATH}",
             category=ErrorCategory.MISSING_DEPENDENCY,
-            details=_details(),
+            details={**_details(), "searched": PROVIDER_TOOL_SEARCH_PATH},
         )
     try:
         result = subprocess.run(  # noqa: S603 - qemu-img argv data, no shell  # nosec B603

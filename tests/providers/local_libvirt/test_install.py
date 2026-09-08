@@ -1724,7 +1724,7 @@ def test_domain_exited_treats_missing_kdive_domain_as_terminal(
             stderr="error: failed to get domain 'kdive-22222222-2222-2222-2222-222222222222'",
         )
 
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_missing)
 
     assert readiness_mod._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is True
@@ -1732,7 +1732,7 @@ def test_domain_exited_treats_missing_kdive_domain_as_terminal(
 
 def test_domain_exit_probe_uses_resolved_virsh_path(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
 
     def domstate_running(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -1808,7 +1808,7 @@ def test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload(
     def domstate_oserror(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
         raise OSError(13, "Permission denied", _SOCKET_PATH)
 
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_oserror)
 
     probe = readiness_mod._domain_exit_probe("kdive-abc")
@@ -1826,7 +1826,7 @@ def test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload(
 
 
 def test_missing_virsh_classifies_as_virsh_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(readiness_mod, "resolve_provider_tool", lambda tool: None)
 
     probe = readiness_mod._domain_exit_probe("kdive-abc")
 
@@ -1844,7 +1844,7 @@ def test_enoent_from_the_exec_classifies_as_virsh_missing_and_logs_the_path(
     def domstate_enoent(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError(2, "No such file or directory", _SOCKET_PATH)
 
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_enoent)
 
     with caplog.at_level(logging.WARNING, logger=readiness_mod.__name__):
@@ -1880,7 +1880,7 @@ def _capture_domstate(
 ) -> dict[str, object]:
     """Stub virsh + subprocess.run; return the recorded args/kwargs of the one call."""
     recorded: dict[str, object] = {}
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         recorded["args"] = args
@@ -2016,7 +2016,7 @@ def test_real_readiness_reports_domstate_probe_timeout(
 
     monkeypatch.setattr(readiness_mod, "read_console_log", lambda path: b"")
     monkeypatch.setattr(readiness_mod.time, "sleep", lambda _: None)
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_timeout)
 
     result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))

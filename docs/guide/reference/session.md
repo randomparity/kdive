@@ -7,3 +7,7 @@
 `implemented` · `read-only`
 
 Return the caller's own identity: principal, client, projects, roles, platform roles.
+
+`refs.agent_index` is the URI of the agent-index guide resource. Read that resource
+for the map from these grants to the toolsets they unlock; it is the same document
+the server instructions name.

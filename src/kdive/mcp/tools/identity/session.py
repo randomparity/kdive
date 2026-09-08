@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.auth import current_context
+from kdive.mcp.resources.registrar import AGENT_INDEX_DOC_URI
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.context import RequestContext
@@ -34,6 +35,10 @@ def whoami(ctx: RequestContext) -> ToolResponse:
     de-duplicated upstream), the ``roles`` map (role-bearing projects only — a role-less
     membership shows in ``projects`` but not ``roles``), and the sorted ``platform_roles``
     list. Every key is always present, so a caller reads them unconditionally.
+
+    ``refs`` carries ``agent_index``, the URI of the agent-index doc resource (ADR-0151), so
+    an agent that opens with ``whoami`` gets a readable link to the guide the server
+    instructions name rather than having to reconstruct the URI from that prose (#2342).
     """
     projects: list[JsonValue] = list(sorted(set(ctx.projects)))
     roles: dict[str, JsonValue] = {
@@ -44,6 +49,7 @@ def whoami(ctx: RequestContext) -> ToolResponse:
         ctx.principal,
         "ok",
         suggested_next_actions=["projects.list"],
+        refs={"agent_index": AGENT_INDEX_DOC_URI},
         data={
             "principal": ctx.principal,
             "client_id": ctx.client_id,
@@ -63,5 +69,10 @@ def register(app: FastMCP, _pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def session_whoami() -> ToolResponse:
-        """Return the caller's own identity: principal, client, projects, roles, platform roles."""
+        """Return the caller's own identity: principal, client, projects, roles, platform roles.
+
+        `refs.agent_index` is the URI of the agent-index guide resource. Read that resource
+        for the map from these grants to the toolsets they unlock; it is the same document
+        the server instructions name.
+        """
         return whoami(current_context())
