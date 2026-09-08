@@ -378,9 +378,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Script host preparation and guest-image build for local-libvirt
 - Add Ubuntu 24.04 and 26.04 LTS rootfs catalog rows
 - Customize the debian family through the customization boot
-- Add tools.search by-name lookup and a diagnosable query miss
 - Probe the gdbstub when a readiness failure meets the expectation
 - Admit a probed-live gdbstub on an expected crash
+- Add tools.search by-name lookup and a diagnosable query miss
 
 ### Changed
 
@@ -554,9 +554,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread baseline intent callback
 - Expose baseline pre-extraction intent seam
 - Share libvirt boot identity
+- Tighten the depmod search-list rationale
 - Inline the one-caller leaseholding-state tuple
 - Simplify tools.invoke's binding-failure classification
-- Tighten the depmod search-list rationale
 - Let a dict carry _select_named's de-duplication
 
 ### Documentation
@@ -1491,30 +1491,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make examples/local-libvirt the local-libvirt quick start
 - Catalogue the preflight and build-image example variables
 - Drop the retired virt-customize passt gap from the apt-host guidance
-- Design the allocation lease deadline disclosure
-- Apply design review to the lease disclosure spec
 - Document artifacts.get's request wrapper exception
 - Scope the artifacts.get wrapper claim to this surface
-- Record by-name tool lookup and diagnosable search miss
-- Fold scope-audit findings into the #2305 design set
-- Design the worker-granted mutation-obligation discharge
-- Correct the discharge caller inventory and split the worker path
-- Name an owner for the already-leaked obligations follow-up
-- Record the fence delta and cover every reclaim call shape
-- Pin the discharge to one System and correct the fence rationale
 - Design explicit depmod resolution for module staging
 - Carry depmod override across the live-worker gate
 - Name the depmod exec-failure category and validate scope
 - Record the drop-in override channel and validate home
 - Stop hand-listing the depmod search directories
 - State the worker's actual privilege level
-- State the measured names= payload span and drop a bad probe
-- Admit a reachable gdbstub on an expected crash (#2303)
-- Confine the expected-crash gdbstub probe to failed readiness
-- Amend 0233 and 0064 for the narrowed gdbstub rejection
+- Design the allocation lease deadline disclosure
+- Apply design review to the lease disclosure spec
 - Design CLI connection failure diagnostics
 - Harden CLI failure boundary design
 - Correct CLI diagnostic implementation estimate
+- Design the worker-granted mutation-obligation discharge
+- Correct the discharge caller inventory and split the worker path
+- Name an owner for the already-leaked obligations follow-up
+- Record the fence delta and cover every reclaim call shape
+- Pin the discharge to one System and correct the fence rationale
+- Admit a reachable gdbstub on an expected crash (#2303)
+- Confine the expected-crash gdbstub probe to failed readiness
+- Amend 0233 and 0064 for the narrowed gdbstub rejection
+- Record by-name tool lookup and diagnosable search miss
+- Fold scope-audit findings into the #2305 design set
+- State the measured names= payload span and drop a bad probe
 
 ### Fixed
 
@@ -2479,13 +2479,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run the local-libvirt example on the fixed live-worker lifecycle
 - Put uv's install directory on PATH for non-interactive shells
 - Make the checkout and kernel tree traversable by the worker accounts
-- Disclose the lease deadline and its reference clock
-- Bind tools.invoke's ValidationError to name field/kind detail
-- Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
-- Stop mislabeling a body-raised ValidationError as bad arguments
-- Couple suggested_next_actions to the same binding-failure flag
 - Accept all registered worker-vantage check ids
-- Discharge mutation obligations through a worker-granted path
 - Resolve depmod explicitly instead of through PATH
 - Keep spawn-pressure depmod failures retryable
 - Stop /usr/local shadowing the packaged depmod
@@ -2493,15 +2487,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the depmod search path root-owned
 - Drop the KDIVE_DEPMOD override, resolve by fixed list
 - Name the searched directories in the failure message
-- Bound each names= entry, and record the threat model
-- Make the names= leak assertion bite and correct four claims
+- Disclose the lease deadline and its reference clock
+- Bind tools.invoke's ValidationError to name field/kind detail
+- Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
+- Stop mislabeling a body-raised ValidationError as bad arguments
+- Couple suggested_next_actions to the same binding-failure flag
+- Report endpoint connection failures
+- Discharge mutation obligations through a worker-granted path
 - Guide boot pairing corrections
 - Complete pairing recovery hint
 - Agree the runs.get next action with the capture set
 - Drop the ADR ref from the start_session agent contract
 - Fail the expected-crash gdbstub probe closed on a fault
+- Bound each names= entry, and record the threat model
+- Make the names= leak assertion bite and correct four claims
+- Repoint stale ty override to retrieve/guestfs.py
 - Declare kmod in live_vm_host toolchain
-- Report endpoint connection failures
 
 ### Security
 
