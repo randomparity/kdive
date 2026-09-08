@@ -51,10 +51,11 @@ Verification:
   command:
   `uv run python -m pytest tests/cli/test_transport.py -q` with all tests passing.
 - Contract: CLI stderr/exit and secret safety. Mode: focused-test. Add a real parser-to-dispatch
-  case in `tests/cli/test_tool_error_handling.py` whose fake session raises FastMCP's wrapped shape;
-  before implementation it propagates `RuntimeError`, and after implementation it returns 1,
-  prints the fixed `KDIVE_SERVER_URL`/server-availability advice, omits traceback, and omits seeded
-  token, credentials, query value, and underlying message. Green command:
+  case in `tests/cli/test_tool_error_handling.py` that configures the real `Session.client` and
+  FastMCP client against a deterministically closed local port; before implementation it propagates
+  `RuntimeError`, and after implementation it returns 1, prints the fixed
+  `KDIVE_SERVER_URL`/server-availability advice, omits traceback, and omits seeded token,
+  credentials, query value, and underlying message. Green command:
   `uv run python -m pytest tests/cli/test_tool_error_handling.py -q` with all tests passing.
 - Contract: authentication distinction and secret safety. Mode: focused-test. Add a local one-shot
   HTTP server returning 401 and invoke the real `kdivectl` process with synthetic URL credentials

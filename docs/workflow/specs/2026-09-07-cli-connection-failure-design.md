@@ -71,8 +71,9 @@ credential instruction without being relabeled as a connection failure.
 
 - Add focused transport tests for direct and immediate FastMCP-wrapped `httpx.ConnectError`, deeper
   and cyclic cause chains, a non-connection `RuntimeError`, and HTTP authentication/status failures.
-- Add a CLI boundary test that calls the real parser/dispatch path with a connection-failing session
-  and asserts stderr, exit 1, no traceback, and absence of seeded token/URL secrets.
+- Add a CLI boundary test that calls the real parser, `Session.client`, and FastMCP client against a
+  deterministically closed local port and asserts stderr, exit 1, no traceback, and absence of
+  seeded token/URL secrets.
 - Add a real local HTTP 401 process-boundary test seeded with synthetic URL credentials and a query
   value; assert a distinct fixed diagnostic and no traceback or seeded secret on either stream.
 - Retain and run the existing no-token, `ToolError`, authorization-envelope, and exit-mapping tests.
