@@ -1,47 +1,10 @@
-# Runbook: M2.4 image & rootfs lifecycle
+# Image and rootfs lifecycle
 
-The operator guide to the image catalog: building and publishing public base images, registering
-project-private uploads, the half-published-state reconciliation the platform runs automatically,
-and the one capability CI cannot prove — a local-libvirt rootfs built through the in-process
-Python build plane on a real host.
+Build and publish base images, register project-private uploads, and manage image retention.
+Kernel compilation and packaging have a separate owner: the
+[external-build guide](../external-build-upload.md).
 
-See [ADR-0092](../../adr/0092-image-rootfs-lifecycle.md) (the `image_catalog` table, row-first
-publish, the `RootfsBuildPlane` port) and
-[ADR-0093](../../adr/0093-private-image-uploads.md) (project-private uploads, quota, reference-guard,
-extend-fence). The design spec is
-`docs/archive/superpowers/specs/2026-06-10-m24-image-rootfs-lifecycle-design.md`; its "Exit criteria"
-section is the source of truth this runbook tracks.
-
-## What CI already proves (and what it cannot)
-
-`tests/images/test_exit_criteria.py` drives criteria 2–4 through the **real** publish/upload
-services, the **real** reconciler sweeps, and the **real** async catalog resolver over the
-disposable-Postgres fixture; only the object store (no MinIO) and the libguestfs guest-contract
-`inspect` probe (no guestfish) are faked, the same way the M2.3 doctor proof fakes only its leaf
-probes. Criterion 1 is proven adjacent to each kernel build plane in
-`tests/providers/{local,remote}_libvirt/test_build.py`.
-
-| # | exit criterion | CI proof |
-|---|----------------|----------|
-| 1 | a no-op kernel patch **fails** patch-applied verification, both kernel build planes | `test_exit_criterion_noop_patch_fails_patch_applied_verification` in each plane's `test_build.py` (real `git apply` over a `.git`-less workspace) |
-| 2 | each half-published state is reconciled | `test_half_published_object_without_row_is_reconciled` (leaked-object sweep) / `test_half_published_row_without_object_is_reconciled` (dangling-row sweep; an object-less `defined` baseline is skipped) |
-| 3 | private isolation; expiry auto-prune; reference guard | `test_private_upload_resolves_only_within_owning_project`, `test_expired_private_image_is_auto_pruned`, `test_expired_private_referenced_by_live_system_is_not_pruned` |
-| 4 | non-conforming upload rejected (named reason) + over-quota denied, both audited | `test_non_conforming_upload_is_rejected_with_named_reason`, `test_over_quota_upload_is_denied` |
-| 5 | local-libvirt rootfs build through the Python plane, operator-run live stack | **this runbook** (env-gated, not CI) |
-
-What CI **cannot** prove: the local-libvirt `RootfsBuildPlane` runs `virt-builder` / `virt-tar-out`
-/ `virt-make-fs` / `guestfish` against a real qcow2 — minutes of libguestfs work that needs a host
-with KVM/libvirt and the virt tooling. CI exercises the plane's orchestration and provenance
-contract with those tools stubbed (`tests/images/planes/test_local_libvirt_plane.py`); the real
-libguestfs path is what this runbook adds. Running criterion 5 is band-gate evidence, not a CI
-check — a clean skip in CI is correct.
-
-## Criterion 5: build a real rootfs through the Python plane (operator-run)
-
-On a host with KVM/libvirt and the libguestfs virt tools installed, an operator who is **not** the
-author builds a kdive-ready rootfs through the in-process plane and records that it boots.
-
-### 1. Build the image
+## Build a local rootfs
 
 `build-fs` drives `LocalLibvirtRootfsBuildPlane` directly (the Python successor to the deleted
 bash rootfs builder): it customizes a base image (sshd + the kdive-managed authorized key + the
@@ -49,7 +12,7 @@ bash rootfs builder): it customizes a base image (sshd + the kdive-managed autho
 whole-disk ext4 qcow2, normalizes fstab/crypttab/guest-SELinux, and records the pinned inputs as
 provenance. On success it prints exactly one line to **stdout** — the `KDIVE_GUEST_IMAGE` wiring
 for the live spine — while the human summary (the destination path and the `sha256:` content
-digest) goes to **stderr** (the logger). That split makes the command's stdout `eval`-safe.
+digest) goes to **stderr** (the logger). Only use the printed export after the command succeeds.
 
 > **How the packages get installed (ADR-0345, #1147, #1167).** `build-fs` never runs the guest's
 > `dnf`/`apt-get` inside the host-arch libguestfs appliance — it repacks + normalizes the base
@@ -64,13 +27,13 @@ digest) goes to **stderr** (the logger). That split makes the command's stdout `
 >
 > The boot path extracts the base's baseline kernel with the libguestfs **Python binding**, so
 > `build-fs` needs `import guestfs` to work from the venv it runs in — for every family, not only
-> the kdump capture path that first required it. `scripts/check-setup-deps.sh -y` wires the distro
-> binding into the venv (the four-method runbook §4b has the manual form); a missing binding
+> the kdump capture path that first required it. Follow the [cross-platform prerequisites](../../development/cross-platform.md)
+> for the invoking interpreter; a missing binding
 > fails the build with `missing_dependency` before the boot starts.
 
 > **Building a foreign-arch image is slower (TCG).** When the target arch is not the build
 > host's arch (e.g. a `ppc64le` image on an `x86_64` host), the customization boot runs under
-> QEMU TCG emulation instead of KVM — roughly 10× slower. The host needs the foreign arch's QEMU
+> QEMU TCG emulation instead of KVM — slower than native execution. The host needs the foreign arch's QEMU
 > system emulator installed (`qemu-system-ppc` on Fedora/Debian, `qemu-ppc` on openSUSE; see the
 > [cross-architecture guests](../platform-support.md#cross-architecture-guests) table for every distro).
 > The completion poll waits `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` (default `1800`, the
@@ -94,7 +57,7 @@ Flags that shape the build:
 - `--image NAME` is required. It selects a row from
   `fixtures/local-libvirt/rootfs_catalog.toml`, which owns the image name, distro, release,
   architecture, kind, family customizer, and pinned base source.
-- `fedora-kdive-ready-44` is the kdump-capable debug rootfs. `fedora-kdive-build-44` is the
+- `fedora-kdive-ready-44` is a debug rootfs. `fedora-kdive-build-44` is the
   cataloged build-host toolchain image. Add new images to the catalog rather than passing
   ad hoc distro/release flags.
 - `--workspace DIR` (default `/var/lib/kdive/build/images`) is where the build stages and
@@ -118,16 +81,9 @@ python -m kdive build-fs \
   --dest /var/lib/kdive/rootfs/local/fedora-kdive-build-44.qcow2
 ```
 
-To build and export `KDIVE_GUEST_IMAGE` in one step, capture stdout with `eval` (the stderr
-summary still prints to your terminal):
-
-```bash
-eval "$(python -m kdive build-fs \
-  --image fedora-kdive-ready-44 \
-  --workspace ~/.local/share/kdive/build/images \
-  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2)"
-# KDIVE_GUEST_IMAGE is now exported, pointing at the --dest path above
-```
+After a successful build, copy the printed `export KDIVE_GUEST_IMAGE=...` line into the shell
+that will run the live proof. Do not evaluate an unchecked command substitution: a failed build
+could leave a previous image selected.
 
 Record the printed `sha256:` digest — it is the image identity (a rootfs image has no kernel
 `build_id`). For the default root-owned `--dest` an OS admin pre-creates the output directory once
@@ -136,45 +92,15 @@ unprivileged. Under SELinux the output file also needs the `virt_image_t` label 
 can read it under `qemu:///system` (a host-side file label, independent of the guest-internal
 SELinux the plane disables).
 
-### 2. Exercise it on the live stack
+## Verify the built image
 
-Point the live-stack suite's fixtures at the built image and the kernel tree, then run the spine —
-the booting `live_stack` tests provision a System on `local-libvirt` from this rootfs, so a
-successful spine run is the evidence the plane-built image boots and is debuggable. If you used
-the `eval` form above, `KDIVE_GUEST_IMAGE` is already exported; otherwise set it by hand — this is
-exactly the line `build-fs` prints on stdout:
+Follow [live-stack setup](live-stack.md) to configure and start the runtime, then the
+[live-testing guide](live-testing.md) to select a boot proof and its fixtures. Set
+`KDIVE_GUEST_IMAGE` to this successful build's destination in the proof environment and record
+its digest. Confirm that the intended proof executed with that image; a skipped test does not
+prove it boots. Building an image alone does not exercise provisioning, boot, or debugging.
 
-```bash
-export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
-export KDIVE_KERNEL_SRC="$(bash scripts/fetch-kernel-tree.sh)"
-export KDIVE_LIVE_SSH_TARGET=<host>          # the criterion-5 env gate
-just stack-up                                # bring up backends + migrate (see the live-stack runbook)
-just test-live-stack                         # runs the `live_stack` suite (skips cleanly if ungated)
-```
-
-Without `KDIVE_LIVE_SSH_TARGET` (and the guest image / kernel tree), the `live_stack` preflight
-skips with an actionable reason — which is the correct outcome in CI. Do **not** un-gate these
-tests to make a run pass: the gate is what keeps the libguestfs/KVM dependency out of normal CI.
-
-#### Live test tiers
-
-| Tier | Selector | Needs |
-|------|----------|-------|
-| native | `just test-live` (`-m "live_vm and not live_vm_tcg"`) | a KVM/libvirt host + kdump guest image |
-| emulated (TCG) | `just test-live-tcg` (`-m live_vm_tcg`) | the foreign qemu emulator (e.g. `qemu-system-ppc64`) **and** a running stack (`just stack-up` + fixtures) |
-| wire | `just test-live-stack` (`-m live_stack`) | a running kdive stack + OIDC issuer |
-
-The emulated tier (ADR-0353) runs the ppc64le provision→boot→force-crash→kdump-retrieve spine
-under TCG on an x86_64 host and **skips cleanly** when the foreign emulator is absent. Confirm the
-emulator is present with the per-arch guest-accel doctor check (ADR-0352), which reports KVM-native
-vs TCG-only per schedulable guest arch.
-
-The `live_vm_tcg` tier is a **strict subset** of `live_stack`: the four proofs carry both markers,
-so `just test-live-stack` already runs them and `just test-live-tcg` is the focused re-selection of
-just those four. Run one or the other — not both — to avoid double-executing the multi-minute TCG
-boots.
-
-### 3. (Optional) publish it to the catalog
+## Publish a catalog image
 
 The same plane runs inside the `IMAGE_BUILD` job behind the operator verb; publishing promotes the
 built image to a public, row-first catalog entry that the async resolver hands to provisioning:
@@ -191,59 +117,31 @@ the job already in flight. The build worker runs the same plane this runbook dro
 validates the guest contract (libguestfs inspection — a build missing agent/kdump/drgn/helpers is
 rejected, never published), and publishes row-first.
 
-## Local rootfs catalog entries and kdump capability (ADR-0251)
+## Catalog inputs and runtime capability
 
-`build-fs --image <name>` resolves a row from the file-authoritative
-`fixtures/local-libvirt/rootfs_catalog.toml`. Each row pins its base (a `virt-builder` template or
-a sha256-pinned cloud-image URL) and carries a `kdump_capable` flag. The RHEL-family entries
-(#823) reuse the `rhel` customizer; on EL 8/9 `makedumpfile`/`kdumpctl` come from `kexec-tools`
-(no standalone packages) and EL 8 pulls `drgn` from EPEL. The Debian entries (#824) and the
-Ubuntu LTS entries use the `debian` customizer (apt; `kdump-tools.service`; `ssh.service`;
-`python3-drgn`; AppArmor instead of SELinux, needing no relabel; cloud-init disabled via
-`/etc/cloud/cloud-init.disabled`). Ubuntu rows pin a dated `release-YYYYMMDD` serial under
-`cloud-images.ubuntu.com/releases/<codename>/`; the `.img` file is qcow2.
+[`fixtures/local-libvirt/rootfs_catalog.toml`](../../../fixtures/local-libvirt/rootfs_catalog.toml)
+owns local build inputs, pinned base sources, and curated guest-tool versions. Family customizers
+own package installation; avoid copying their package/version tables into another guide.
 
-`kdump_capable` is **kernel-relative** to the current default from-source target (a v7.0-class
-x86_64 kernel): it is `true` only when the makedumpfile the build installs from that release's
-repos is **≥ 1.7.9** (the first release that filters a v7.0 vmcore). It is a curated, dated
-snapshot of a mutable upstream, not live truth — when a release ships makedumpfile ≥ 1.7.9 a fresh
-build silently becomes capable while the flag lags until re-verified. The runtime
-`kdump_core_incomplete` remediation (raised on the actual harvest) is the ground truth.
-
-| catalog `--image` | base | makedumpfile (build-time) | `kdump_capable` (v7.0) | default `kdump` `vmcore.fetch` |
-|---|---|---|---|---|
-| `fedora-kdive-ready-44` | Fedora 44 | 1.7.9 | **yes** | complete filtered core |
-| `fedora-kdive-ready-43` | Fedora 43 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
-| `rocky-kdive-ready-8` | Rocky 8.10 | 1.7.2 (in `kexec-tools`) | no | `kdump_core_incomplete` → `host_dump` |
-| `rocky-kdive-ready-9` | Rocky 9.8 | 1.7.6 (in `kexec-tools`) | no | `kdump_core_incomplete` → `host_dump` |
-| `rocky-kdive-ready-10` | Rocky 10.2 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
-| `centos-stream-kdive-ready-9` | CentOS Stream 9 | 1.7.6 (in `kexec-tools`) | no | `kdump_core_incomplete` → `host_dump` |
-| `centos-stream-kdive-ready-10` | CentOS Stream 10 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
-| `debian-kdive-ready-12` | Debian 12 (bookworm) | 1.7.2 | no | `kdump_core_incomplete` → `host_dump` |
-| `debian-kdive-ready-13` | Debian 13 (trixie) | 1.7.6 | no | `kdump_core_incomplete` → `host_dump` |
-| `ubuntu-kdive-ready-24.04` | Ubuntu 24.04 LTS (noble) | 1.7.5 | no | `kdump_core_incomplete` → `host_dump` |
-| `ubuntu-kdive-ready-26.04` | Ubuntu 26.04 LTS (resolute) | 1.7.7 | no | `kdump_core_incomplete` → `host_dump` |
-
-Versions verified against distro package indexes on 2026-06-26 (Ubuntu rows: 2026-09-07; the guard test
-`tests/images/test_rootfs_catalog.py` asserts each row's flag matches its documented makedumpfile
-version). A `kdump_capable = no` entry still completes the rest of the lifecycle
-(provision/build/install/boot) and captures via the explicit `host_dump` method; only the default
-in-guest `kdump` filtered-core path is affected for a v7.0-class kernel.
+Runtime capture capability depends on the target kernel and available evidence. Use
+`images.describe` and the [images guide](../../guide/toolsets/images.md) to distinguish supported,
+unsupported, and unverified results. Catalog metadata does not prove that a particular guest's
+capture kernel is armed or that a capture succeeded.
 
 ## Operator verbs (`kdivectl images`)
 
 | verb | actor | authz | what it does |
 |------|-------|-------|--------------|
 | `images list` | member / operator | RBAC-filtered | public rows + the caller's project's private rows |
-| `images upload --project P --name N --arch A --quarantine-key K [--lifetime-seconds S]` | project member | per-project | register a quarantined upload as a project-private image |
-| `images delete <image_id>` | member / operator | project-scoped; operator cross-project via break-glass | delete an unreferenced private image |
+| `images upload --project P --name N --arch A --quarantine-key K [--lifetime-seconds S]` | project operator/admin | owning project | register a quarantined upload as a project-private image |
+| `images delete <image_id>` | project operator/admin | owning project; no cross-project force path | delete an unreferenced private image |
 | `images publish --provider P --name N [--packages PKG]...` | operator | `platform_operator` | enqueue `IMAGE_BUILD`, which builds, validates, and promotes to a public catalog row |
 | `images prune-expired --expired --reason R` | operator | `platform_admin` break-glass | force the expired-private sweep now |
 | `images extend <image_id> --seconds S --reason R` | operator | `platform_admin` break-glass | re-arm a private image's lifetime |
 
-`prune` is destructive and requires the explicit `--expired` flag. An unprivileged or
-cross-project invocation is denied **and audited** (the deny path writes the audit row before
-touching the pool).
+`prune-expired` requires the explicit `--expired` flag and an audited reason. Project-scoped
+image mutations require the owning project's role; a platform role does not grant a
+cross-project delete path.
 
 ### Project-private uploads
 
@@ -293,8 +191,7 @@ unless you opt in.
 To let a local-libvirt resource's guests install tools at runtime (ADR-0313, #1031):
 
 1. Set `guest_egress = true` on that resource's `[[local_libvirt]]` block in `systems.toml`. The
-   block's `name` must match the discovery-created resource name — read it from `kdive resources
-   list` (or the `resources` catalog); a mismatch is silently ignored and egress stays off.
+   block's `name` must match the discovery-created resource name — read it from `kdivectl resources list` (or the `resources` catalog); a mismatch is silently ignored and egress stays off.
 2. Reconcile (`kdive reconcile-systems`, the deploy `migrate` step, or the reconciler loop).
 3. **Re-provision** the System (the flag renders `restrict=off` into the domain XML at provision;
    it does not retrofit a running guest). New Systems pick it up on first boot.

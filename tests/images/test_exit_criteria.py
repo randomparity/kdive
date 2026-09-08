@@ -1,37 +1,12 @@
-"""The M2.4 milestone exit-criterion proof (issue #289; mirrors the M2.3 doctor proof).
+"""Image publish, private isolation, retention, and validation integration proofs.
 
-One focused test per spec exit criterion (the archived design spec
-``docs/archive/superpowers/specs/2026-06-10-m24-image-rootfs-lifecycle-design.md`` §"Exit
-criteria"), each driven through the **real merged** code — the
-real publish/upload services, the real reconciler sweeps, the real async catalog resolver — over
-the disposable-Postgres fixture. Only the leaf seams a CI host cannot run carry a fake: the
-object store (no MinIO) and the libguestfs guest-contract ``inspect`` probe (no guestfish),
-exactly as the doctor proof fakes only the TLS/ACL/egress leaf probes.
+Exercise real services, catalog resolution, and reconciler sweeps over disposable Postgres.
+The object store and guestfish inspection are controlled boundaries. Half-published objects,
+expired or referenced images, invalid guest contracts, and over-quota uploads drive the error
+paths; assertions inspect the resulting catalog, visibility, sweep counts, and audit rows.
 
-The criterion→test mapping:
-
-* **Criterion 1** (a no-op kernel patch fails patch-applied verification, both kernel build
-  planes) is proven adjacent to each plane's ``_apply_patch`` in
-  ``tests/providers/{local,remote}_libvirt/test_build.py`` (the real ``git apply`` over a
-  ``.git``-less workspace), so it is not duplicated here; a guard test below pins that the two
-  regressions exist and stay co-located with their plane.
-* **Criterion 2** — :func:`test_half_published_object_without_row_is_reconciled` /
-  :func:`test_half_published_row_without_object_is_reconciled` (inject each half-state, sweep).
-* **Criterion 3** — :func:`test_private_upload_resolves_only_within_owning_project` (isolation),
-  :func:`test_expired_private_image_is_auto_pruned`,
-  :func:`test_expired_private_referenced_by_live_system_is_not_pruned` (reference guard).
-* **Criterion 4** — :func:`test_non_conforming_upload_is_rejected_with_named_reason`,
-  :func:`test_over_quota_upload_is_denied` (both audited).
-* **Criterion 5** — the local-libvirt rootfs build through the Python plane on the operator-run
-  live-stack path is env-gated (``KDIVE_LIVE_SSH_TARGET``), so it is a runbook step, not a CI
-  check. :func:`test_exit_criterion_proof_is_ci_tier` pins that this file carries no live marker,
-  and ``docs/operating/runbooks/image-lifecycle.md`` records the operator-run criterion-5 evidence.
-
-Why this is not tautological: every criterion runs its production path over a broken/edge input
-(a half-published state injected straight into the catalog + object store; an expired row; a
-non-conforming image; an over-cap upload), not a hand-built result. The reconciler counts, the
-resolver visibility, and the audit rows are read back from the real implementation, so the proof
-cannot drift from the shipped behavior.
+Actual rootfs builds and guest boots require the separate live environment described in
+``docs/operating/runbooks/image-lifecycle.md``; these tests do not claim that proof.
 """
 
 from __future__ import annotations
@@ -625,14 +600,13 @@ def test_over_quota_upload_is_denied(migrated_url: str, monkeypatch: pytest.Monk
     asyncio.run(_run())
 
 
-# ---- exit criterion 1 + 5 meta-guards ----------------------------------------------
+# ---- CI selection guard ------------------------------------------------------------
 
 
 def test_exit_criterion_proof_is_ci_tier() -> None:
     # This proof is CI-tier: it carries no live_stack/live_vm marker, so it runs in normal CI
     # against the disposable-Postgres fixture (the store + libguestfs inspect are faked). The
-    # criterion-5 operator-run rootfs build through the Python plane on the live stack is
-    # env-gated (KDIVE_LIVE_SSH_TARGET) and recorded in docs/operating/runbooks/image-lifecycle.md.
+    # real rootfs build and boot require the environment in the image-lifecycle runbook.
     lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()
     decorators = [line.strip() for line in lines if line.lstrip().startswith("@")]
     assert not any("live_stack" in d or "live_vm" in d for d in decorators)

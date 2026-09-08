@@ -47,17 +47,17 @@ Elsewhere in the registry `=m` is accepted — a modular KASAN, ftrace, kcov or 
 feature you asked for. The machine-readable form of this is the `built_in` key on a clause in
 `resource://kdive/contracts/external-build`.
 
-**Start from the catalog image's own config, not a bare `defconfig`.** When you build against a
-catalog image, call `images.kernel_config(image_id)` (ADR-0317) and start from the `.config` it
-returns — `refs.download_uri` presigns a short-lived GET of that image's known-good
-`/boot/config-<ver>` (the version is in `data.default_kernel_version`). This is the recommended
-starting point: a stock `defconfig` commonly builds `VIRTIO_BLK` and `EXT4_FS` as modules rather
-than built-in, so the resulting kernel cannot mount the `/dev/vda` ext4 rootfs and never boots the
-direct-kernel guest — unless the build uploads an `initrd` artifact or the kernel embeds its own
-initramfs, either of which supplies the modules missing at root-mount time. The advisory check
-above recognizes an uploaded artifact and a `disk-image` target, but not an embedded initramfs, so
-on a direct-kernel target such a kernel still draws the advisory despite booting fine. Begin from
-the image's config, then layer on the debug symbols below.
+**Use the catalog image's config when available.** Check `images.describe.has_kernel_config`,
+then call `images.kernel_config(image_id)` to obtain `refs.download_uri` and
+`data.default_kernel_version`. The config is optional: an absent key or object returns
+`kernel_config_unavailable`. In that case obtain an operator-approved base configuration for
+the target image. Adjust it for your kernel version, root filesystem, and debug requirements;
+a baseline that boots its original kernel is not proof that your new kernel will boot.
+
+A stock `defconfig` can leave root-device or filesystem drivers as modules. Direct-kernel boot
+needs those built in unless an uploaded or embedded initramfs supplies them. The advisory
+recognizes an uploaded `initrd` and a `disk-image` target, but cannot establish whether an
+embedded initramfs supplies the drivers.
 
 A useful debug set to start from. Pick **one** memory-safety detector: `CONFIG_KCSAN` is built
 only when `CONFIG_KASAN` is off, so a config carrying both gives you KASAN and silently drops
@@ -76,7 +76,7 @@ CONFIG_FAIL_PAGE_ALLOC=y
 CONFIG_FAULT_INJECTION_DEBUG_FS=y # the interface every site above registers through
 CONFIG_DEBUG_FS=y                 # ... which in turn needs debugfs and sysfs
 CONFIG_SYSFS=y
-CONFIG_DEBUG_INFO_DWARF5=y  # DWARF/BTF: required for drgn to resolve any symbol (see below)
+CONFIG_DEBUG_INFO_DWARF5=y  # host-side DWARF symbols; also needed when generating BTF
 CONFIG_DEBUG_INFO_BTF=y     # BTF: what in-guest drgn-live reads
 CONFIG_PROVE_LOCKING=y      # lockdep
 CONFIG_DEBUG_ATOMIC_SLEEP=y # separate from lockdep: catches sleeping in atomic context
@@ -86,31 +86,26 @@ This is a starting point, not the whole menu. `resource://kdive/contracts/extern
 the per-feature `CONFIG_*` manifest — sanitizers, lock debugging, ftrace, BPF tracing, fault
 injection and coverage — each with what it finds and what it costs.
 
-**`drgn` needs debuginfo to resolve any symbol.** For `drgn-live` introspection
-(`introspect.run` / `introspect.script`), build with `CONFIG_DEBUG_INFO_BTF=y`: in-guest drgn reads
-BTF from `/sys/kernel/btf`, so a defconfig kernel without it resolves nothing. DWARF in the kernel
-`.config` alone does not help drgn-live — the DWARF `vmlinux` is not on the guest rootfs. For
-host-side DWARF introspection (offline `introspect.from_vmcore` and gdb), build with
-`CONFIG_DEBUG_INFO_DWARF5=y` and also upload `vmlinux`. A drgn-live session or introspect over a
-kernel with neither BTF nor an uploaded `vmlinux` returns a non-fatal `missing_debuginfo` warning.
+**Live and host-side debug information have different consumers.** Guest drgn needs usable BTF
+at `/sys/kernel/btf/vmlinux` or matching debug information already readable inside the guest.
+Building DWARF into the host's `vmlinux` does not place that file in the guest. For offline
+`introspect.from_vmcore` and host GDB, upload the matching unstripped `vmlinux` as described below.
 
 **DWARF has a cost — omit it when you do not need post-boot introspection.**
 `CONFIG_DEBUG_INFO_DWARF5=y` embeds DWARF tables in every `.ko`, which can grow the module tree
 10-50x (tens of MiB to a couple of GiB) and slows both upload and install proportionally — the
-worker decompresses and repacks the whole module tree. Enable it only for live drgn/gdb symbol
-resolution or offline vmcore analysis. For a boot-time crash reproducer or any investigation whose
+worker decompresses and repacks the whole module tree. Choose it for BTF generation, GDB symbol
+resolution, or offline vmcore analysis as needed. For a boot-time crash reproducer or any investigation whose
 evidence is the serial-console log (an oops/panic before userspace), omit it. The
 `resource://kdive/contracts/external-build` `debuginfo` entry states the same when/cost tradeoff.
 When you do build a DWARF-heavy kernel, an operator can point `KDIVE_INSTALL_SCRATCH` at a tmpfs
 mount to keep the large, short-lived install intermediates off the staging disk (mind the RAM
 tradeoff — see the config reference).
 
-`CONFIG_DEBUG_INFO_BTF=y` in the `.config` is necessary but not sufficient: BTF-only drgn-live
-introspection also depends on the guest image's drgn build being able to load that BTF at runtime
-(older in-guest drgn versions can fail to load a newer kernel's BTF). When the config advertises
-BTF but the in-guest drgn cannot actually resolve symbols, `introspect.run` / `introspect.script`
-return a non-fatal `debuginfo_unloadable` warning naming the likely cause; remediate by booting a
-BTF-capable guest image with a newer drgn, or by uploading a matching `vmlinux`.
+`CONFIG_DEBUG_INFO_BTF=y` also needs a guest drgn build that can load the resulting BTF.
+If live introspection reports `debuginfo_unloadable`, use a compatible guest image/drgn build.
+Uploading host `vmlinux` alone does not repair the guest helper's debug-info search. A missing
+warning is not proof of usable guest symbols; check the actual introspection result.
 
 **kdump on a RHEL-family guest needs more than the crash-capture symbols.** `CONFIG_KEXEC` (or
 `CONFIG_KEXEC_FILE`), `CONFIG_CRASH_DUMP`, `CONFIG_PROC_VMCORE`, `CONFIG_FW_CFG_SYSFS` and
@@ -219,8 +214,8 @@ ratio for speed.
 
 ### The recipe (x86_64)
 
-This is the exact `tar` invocation the platform's own build planes use. Run it from a built
-kernel tree, with `MODROOT` pointing at the staging root you passed to
+Run this external packaging recipe from a built kernel tree, with `MODROOT` pointing at the
+staging root you passed to
 `make modules_install INSTALL_MOD_PATH=…`:
 
 ```bash

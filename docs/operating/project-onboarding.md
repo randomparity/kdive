@@ -3,8 +3,7 @@
 A KDIVE *project* is the tenant boundary for budgets, quotas, allocations, and the
 audit trail. There is **no projects table and no "create project" step**: a project
 is derived from a verified OIDC token's `projects` and `roles` claims
-([Safety and RBAC](../guide/safety-and-rbac.md)). The only persisted per-project
-state is two rows keyed by the project name:
+([Safety and RBAC](../guide/safety-and-rbac.md)). The onboarding policy is stored in two rows keyed by the project name:
 
 - a **budget** row (`budgets`) — the spend ceiling `limit_kcu`;
 - a **quota** row (`quotas`) — the concurrency caps and pending-queue cap.
@@ -91,18 +90,15 @@ unless `KDIVE_PYTHON` selects another installed interpreter. It does not start a
 
 ## Relationship to `seed-project`
 
-`python -m kdive seed-project` writes the same `budgets` and `quotas` rows (and registers
-the local libvirt resource) for a project. It is the **token-less bootstrap path, not
-the audited production path**: it runs as an installed-package CLI at deploy time, before
-any request, so it has no OIDC token and no request context. It therefore writes the rows
-with raw idempotent `INSERT`s instead of calling `accounting.set_budget` /
-`accounting.set_quota`, which means those writes are **not role-gated and leave no
-audit row**.
+`python -m kdive seed-project` seeds budget and concurrency-policy rows and registers discovery
+for configured providers. This token-less bootstrap command writes directly to Postgres; it
+has no request context, project-role gate, or audit row.
 
-The end state is identical row content, so a project seeded this way behaves the
-same at run time. Use `seed-project` for local stacks and demos
-([live-stack onboarding](runbooks/live-stack.md#fund-the-demo-project--just-onboard));
-onboard real tenants with the audited admin tools above so every policy change is attributable.
+The seeder sets the same budget/allocation/system limit fields, but preserves an existing
+`max_pending_allocations` value. It does not accept that setting, whereas
+`accounting.set_quota` writes it. Use the audited tools above for attributable tenant-policy
+changes. The seeder remains the bootstrap path for local stacks and demos
+([live-stack onboarding](runbooks/live-stack.md#fund-the-demo-project--just-onboard)).
 
 > Renamed from `seed-demo` in #669. Accepted ADRs and archived plans that predate the
 > rename still refer to `seed-demo`; the command is now `seed-project`.
