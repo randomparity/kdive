@@ -173,7 +173,11 @@ or an assembled id the codec rejects, is not a shippable state.
 **Interfaces — consumed from Task 1:**
 
 ```python
-from kdive.providers.shared.module_staging_tools import DEPMOD, DEPMOD_SEARCH_DIRS, DEPMOD_SEARCH_PATH
+from kdive.providers.shared.module_staging_tools import (
+    DEPMOD,
+    DEPMOD_SEARCH_DIRS,
+    DEPMOD_SEARCH_PATH,
+)
 ```
 
 **Interfaces — defined here:** `DEPMOD_TOOLCHAIN_ID`, `DepmodToolchainProbe`,
@@ -349,9 +353,14 @@ DEPMOD_TOOLCHAIN_MISSING_FIX = (
    `run()` awaits the probe once and branches on `resolved is not None`. These are the parts the
    shape does not give you — the strings are asserted by the tests, so they are the contract:
 
-```python
+These are `CheckResult(...)` keyword arguments, not statements. The fence is `text` on purpose:
+`ruff format` rewrites Python inside Markdown fences under `docs/workflow/plans/`
+(`docs/solutions/2026-09-04-ruff-format-rewrites-python-in-markdown-fences.md`), and it turns a
+bare keyword-argument fragment into tuple assignments.
+
+```text
         # resolved is not None -> PASS, no fix, no failure_category
-        detail=f"module staging can index kernel modules with depmod at {resolved}"
+        detail=f"module staging can index kernel modules with depmod at {resolved}",
 
         # resolved is None -> FAIL
         detail=(
@@ -374,13 +383,17 @@ DEPMOD_TOOLCHAIN_MISSING_FIX = (
 class ToolResolver(Protocol):
     def __call__(self, cmd: str, *, path: str) -> str | None: ...
 
+
 def default_depmod_toolchain_probe(*, which: ToolResolver = shutil.which) -> DepmodToolchainProbe:
     async def _probe() -> str | None:
         return which(DEPMOD, path=DEPMOD_SEARCH_PATH)
+
     return _probe
+
 
 def depmod_toolchain_worker_check() -> Check:
     return DepmodToolchainCheck(provider=_LOCAL_PROVIDER, probe=default_depmod_toolchain_probe())
+
 
 def depmod_toolchain_worker_descriptor() -> WorkerVantageDescriptor:
     return WorkerVantageDescriptor(id=DEPMOD_TOOLCHAIN_ID, provider=_LOCAL_PROVIDER)
