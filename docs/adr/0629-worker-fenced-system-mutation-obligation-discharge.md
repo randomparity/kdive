@@ -72,9 +72,13 @@ only the teardown reclaim path switches to that method. The shared
 - **This function fences one level weaker than the 0134 precedent it follows, deliberately.**
   `commit_worker_remote_module_evidence` gates on the same `pg_has_role` check *plus* an active
   `worker_incarnations` row matched by credential hash and a `running` job row with a live
-  lease, bound to the exact attempt tuple. 0152 gates on role membership alone, because
-  `reclaim_system_core_after_provider_teardown` carries no job id, attempt, or incarnation
-  credential to fence on — the reconciler call site has none of them at all. So any process
+  lease, bound to the exact attempt tuple. 0152 gates on role membership alone because the
+  fence is not satisfiable at every call site: the two job-handler sites
+  (`jobs/handlers/systems.py:730`, `jobs/handlers/system_authority.py:223`) do hold a job and
+  attempt, but the reconciler repair site (`reconciler/repairs/jobs.py:98`) sweeps a batch of
+  candidate Systems with no job, attempt, or incarnation credential of its own. A fence only
+  two of the three could satisfy cannot be made mandatory in the function all three share. So
+  any process
   holding a worker or reconciler login can discharge any System's open mutation obligations,
   where 0134 requires that process to also hold a live lease on the matching job. The write is
   bounded to that one idempotent terminal-escape statement, which is why the residual is

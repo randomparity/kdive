@@ -84,8 +84,10 @@ which is the same fence ADR-0605 verification takes
 (`src/kdive/services/remote_module_attempt_preparation.py:80`).
 
 **Out of scope.** A compromised worker or reconciler role can discharge obligations for any
-System; bounding that further needs a per-System capability the callers do not carry, and both
-roles can already read every row. The raw-privilege-string leak into `failure_message` is
+System. Bounding that further would need a job-lease fence like migration 0134's, and the
+reconciler repair call site carries no job to fence on, so the fence could not be made
+mandatory in the shared function; ADR-0629 records that delta. Both roles can already read
+every row. The raw-privilege-string leak into `failure_message` is
 addressed only incidentally, by the call succeeding; the error-mapping fix is deferred.
 
 ## Validation

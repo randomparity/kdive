@@ -108,6 +108,10 @@ def test_role_teardown_reclaim_discharges(
 
     async def run() -> None:
         system_id = await _seed_open_obligation(migrated_url)
+        # A second System with its own open obligation pins the discharge to one System. The
+        # `WHERE system_id = p_system_id` bound is what the threat model rests on, and without
+        # a bystander here, dropping that predicate would leave every arm green.
+        bystander_id = await _seed_open_obligation(migrated_url)
         await _reclaim_as(
             authority_role_dsns(role),
             system_id,
@@ -116,6 +120,7 @@ def test_role_teardown_reclaim_discharges(
         discharged_at, reason = await _read_discharge(migrated_url, system_id)
         assert discharged_at is not None
         assert reason == "terminal_escape"
+        assert await _read_discharge(migrated_url, bystander_id) == (None, None)
 
     asyncio.run(run())
 
