@@ -116,10 +116,11 @@ DEPMOD_SEARCH_PATH = os.pathsep.join(DEPMOD_SEARCH_DIRS)
    into step 1's module verbatim. Leave `_DEPMOD_STDERR_MAX = 500` above and `_DEPMOD_EXEC_ERRNOS`
    below untouched.
 
-   **Rebase note.** Branch `feat/host-tool-resolve-2333` (unmerged) names `_DEPMOD_SEARCH_DIRS`
-   twice in `src/kdive/providers/local_libvirt/lifecycle/host_tool_search.py`'s docstring
-   (lines 9 and 12). Whichever of the two branches lands second repoints those two references at
-   `module_staging_tools.DEPMOD_SEARCH_DIRS`.
+   **Rebase note — decided in advance, do not re-decide at rebase time.** Branch
+   `feat/host-tool-resolve-2333` (unmerged) names `_DEPMOD_SEARCH_DIRS` twice in
+   `.../lifecycle/host_tool_search.py`'s docstring (lines 9, 12). **This run never edits that
+   file** — it is #2333's, a frozen exclusion. If a rebase brings it in, those two references
+   become stale prose inside a string, not a broken import, and stay a reported follow-up.
 3. In the same file, delete `import os` — the only `os.` use is the `os.pathsep.join` replaced in
    step 4, which the shared module now performs. Keep `import shutil` (`shutil.which` is still
    called). Add to the first-party imports:
@@ -484,14 +485,10 @@ Names borrowed rather than defined, each confirmed present with the assumed sign
   [`docs/debt/0012-shipped-worker-image-has-no-depmod.md`](../../debt/0012-shipped-worker-image-has-no-depmod.md).
   The check's `fail` on a container deployment is correct and must not be softened; the missing
   piece is a `Dockerfile` package, outside this surface.
-- **Four other literal copies of `"/usr/sbin:/usr/bin:/sbin:/bin"`** —
-  `src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py:23` (a `which` search path, the
-  closest sibling), and three subprocess-environment `PATH` assignments at
-  `src/kdive/__main__.py:281`, `src/kdive/jobs/capture_operations/launcher.py:292`, and
-  `scripts/generate/build-capture-bootstrap-manifest.py:28`. Consolidating them is outside #2339's
-  approved surface. Owner: unfiled follow-up candidate, reported in this run's completion report;
-  no tracker issue exists yet.
-- **`docs/operating/install.md` documents a `guest_arch_accel` `data` map that the inline codec
-  drops** — `serialize_results` never emits `data`, so a worker-vantage check's `data` is always
-  `{}` by the time `ops.diagnostics` projects it. Adjacent to this change. Owner: unfiled
-  follow-up candidate, reported in this run's completion report.
+Two adjacent gaps are unowned follow-up candidates rather than deferrals, carried in this run's
+completion report and PR body only: the four other literal copies of
+`"/usr/sbin:/usr/bin:/sbin:/bin"` (`bootstrap_elf.py:23` plus three subprocess `PATH` assignments
+at `__main__.py:281`, `jobs/capture_operations/launcher.py:292`,
+`scripts/generate/build-capture-bootstrap-manifest.py:28`), and `install.md:287`'s claim that
+`guest_arch_accel` carries a `data` map — `serialize_results` never emits `data`, so a
+worker-vantage check's `data` is always `{}` once `ops.diagnostics` projects it.

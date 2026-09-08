@@ -25,8 +25,10 @@ toolchain resolves under the contract the run path uses.
 
 1. **One contract, two readers** (ADR-0635 §2). `DEPMOD`, `DEPMOD_SEARCH_DIRS`, and
    `DEPMOD_SEARCH_PATH` move to a new `src/kdive/providers/shared/module_staging_tools.py`;
-   `_resolve_depmod` and the new contribution both import them. `_resolve_depmod`'s behaviour,
-   error, category, and message text are unchanged.
+   `_resolve_depmod` and the new contribution both import them, its behaviour, error, category, and
+   message text unchanged. Relocating rather than de-privatizing in place is forced:
+   `tests/providers/test_provider_boundaries.py` fails any `kdive.diagnostics` import of
+   `kdive.providers.local_libvirt.*` other than `.settings`.
 2. **The check.** `DEPMOD_TOOLCHAIN_ID = "depmod_toolchain"` in `diagnostics/checks.py`;
    `DepmodToolchainCheck` in `diagnostics/provider_checks.py` beside the seven existing classes.
    Vantage `WORKER`, provider `local-libvirt`. The probe returns the resolved absolute path or
@@ -69,8 +71,8 @@ The change moves a security-relevant constant and adds one read-only probe. It a
    `ops.diagnostics` entry point itself is unchanged — no new parameter, caller, or gate.
 2. **Actors.** The caller holds `platform_operator` (`require_platform_role` in
    `mcp/tools/ops/diagnostics.py`); the denial path is unchanged. The untrusted party that matters
-   is anyone who can write to a directory on the search path, since `depmod` is exec'd by the
-   worker slot account with authority over guest overlays. The design trusts the four root-owned
+   is anyone who can write to a directory on the search path, since `depmod` is exec'd by the worker
+   slot account with authority over guest overlays. The design trusts those four root-owned
    directories and nothing else.
 3. **Controls.** The search path is a module constant with no operator input and no environment
    read, so nothing untrusted reaches it; moving it preserves that byte-for-byte, including the

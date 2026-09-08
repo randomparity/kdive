@@ -89,10 +89,11 @@ actionable half of the verdict, so it goes in the prose fields that survive — 
   judgment: the test links the copies but nothing stops a reader trusting the wrong one, and a
   diagnostic whose only guarantee of fidelity is a same-repository test is the divergence this
   check exists to prevent.
-- **Importing `guest_kernel_writer` from `kdive.diagnostics`.** verified: both existing neutral
-  contributions state in their own module docstrings that they depend on no local-libvirt
-  internals (`src/kdive/diagnostics/contributions/multiarch_gdb.py` and `pseries_fadump.py`), and
-  the import would pull `tarfile`, `kernel_bundle`, and the overlay writer in for two constants.
+- **Importing `guest_kernel_writer` from `kdive.diagnostics`.** verified: red on arrival, not
+  merely against convention —
+  `tests/providers/test_provider_boundaries.py::test_only_composition_imports_local_libvirt_provider_implementation`
+  walks every module under `src/kdive` and fails any import of `kdive.providers.local_libvirt.*`
+  outside a four-path allowlist that excludes `kdive.diagnostics`, exempting only `.settings`.
 - **A second `DiagnosticProviderContribution`.** verified: `_worker_vantage_dispatch_mode` in
   `src/kdive/diagnostics/service.py` builds one `JobWorkerCheckDispatcher` per enabled
   contribution, so a second one naming `local-libvirt` dispatches a second diagnostics job.

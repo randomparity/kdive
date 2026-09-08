@@ -32,9 +32,8 @@ every container deployment installs — a provisioning decision with its own ima
 and supply-chain considerations that does not belong hidden inside a diagnostics change.
 
 The repository's own convention points the same way: `AGENTS.md` assigns a new host tool or system
-package to "the role that owns that layer", which for the container shape is `Dockerfile` and for
-the self-hosted KVM runner is `deploy/ansible/` (`libvirt_stack` / `live_vm_host`). Neither is a
-diagnostics file.
+package to "the role that owns that layer", which for the container shape is `Dockerfile`. That is
+not a diagnostics file.
 
 ## Non-regression boundary
 
@@ -52,11 +51,13 @@ diagnostics file.
 
 Decide whether the container shape is meant to stage modules.
 
-If it is: add `kmod` to the runtime `apt-get install` list in `Dockerfile`, add `depmod --version`
-to the worker-tool guard so a missing package fails the image build rather than the first install
-job, and confirm the same tool is declared for the self-hosted runner in the Ansible role that owns
-it (`live_vm_host` per `AGENTS.md`). Then confirm `ops.diagnostics` reports `depmod_toolchain` as
-`pass` on a freshly built image.
+If it is: add `kmod` to the runtime `apt-get install` list in `Dockerfile` and `depmod --version`
+to the worker-tool guard, so a missing package fails the image build rather than the first install
+job. Then confirm `ops.diagnostics` reports `depmod_toolchain` as `pass` on a freshly built image.
+
+The self-hosted KVM runner needs nothing: #2331 landed `kmod` in
+`deploy/ansible/roles/live_vm_host/defaults/main.yml:13`, so the Ansible shape already declares it.
+`Dockerfile` is the only remaining gap.
 
 If it is not: record that decision where an operator reads it — `docs/operating/install.md` beside
 the existing `guest_arch_accel` note — and state which deployment shapes are expected to fail this
