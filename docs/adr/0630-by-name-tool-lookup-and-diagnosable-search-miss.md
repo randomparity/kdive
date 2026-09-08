@@ -56,11 +56,13 @@ whatever `detail` says. It also ignores `limit`: truncating an explicit enumerat
 caller's stated intent rather than trimming a ranked tail, so `truncated` is always `false` here.
 
 Ignoring both payload levers is why the cardinality bound is 10, not the `_SEARCH_LIMIT_MAX` of
-50 that bounds `limit`. ADR-0472 measured a full-detail match at roughly 2.5 KB and a 54 KB
-response overflowing a client's context; 50 forced-full matches would reproduce the cost ADR-0472
-removed, on the path the new instructions teach first. Ten is `limit`'s default, so the mode's
-ceiling is the one a caller already gets. FastMCP serialises only `Field` text, so each of the
-three parameters says what the others do to it.
+50 that bounds `limit`. Measured per-name over the live registry, a full match spans 0.4 KB to
+15.9 KB with a median of 1.4 KB, so the ten largest come to 69 KB and fifty would be several
+times the 54 KB response ADR-0472 records overflowing a client's context — on the path the new
+instructions teach first. Ten is `limit`'s default, so the mode's ceiling is the one a caller
+already gets, and the span rather than the median is what the parameter descriptions state.
+FastMCP serialises only `Field` text, so each of the three parameters says what the others do
+to it.
 
 ### 3. Unknown and unauthorised names collapse into one `unknown_names` list
 
@@ -69,13 +71,20 @@ A requested name that is not in the caller's RBAC-visible candidate set is repor
 That list does not distinguish "no tool carries this name" from "a tool carries it and your
 grants do not reveal it".
 
-The reason is not disclosure: `tools.invoke` already draws that line on the next call, returning
-"No tool named X is registered or enabled" for an unregistered name and an `authorization_denied`
-envelope (ADR-0148) for a hidden one. The reason is that the split buys nothing here. `names`
-converts a name into a schema; an agent handed a name it cannot use needs a different tool, not a
-grant taxonomy, and `namespace` mode already returns `namespace_required_grants` for the plane
-that name belongs to. One list keeps the mode's response to one conditional key with one meaning
-— "you did not get this one back" — and names both recoveries in the docstring.
+The reason is not disclosure. An unregistered name is already distinguishable on the next call —
+`tools.invoke` answers it with "No tool named X is registered or enabled" — so a per-name split
+would confirm little the registry does not already concede.
+
+The reason is that the split buys nothing here. `names` converts a name into a schema; an agent
+handed a name it cannot use needs a different tool, not a grant taxonomy, and `namespace` mode
+already returns `namespace_required_grants` for the plane that name belongs to. One list keeps
+the mode's response to one conditional key with one meaning — "you did not get this one back".
+
+`tools.invoke` is deliberately *not* offered as the recovery for the hidden-tool half. Measured
+against a viewer token, `tools.invoke("control.force_crash", {})` returns a `configuration_error`
+naming a missing required argument rather than an authorization verdict, so the probe answers the
+wrong question — and recommending it would tell an agent to call a destructive tool to find out
+whether it may. The docstring names `namespace` mode instead.
 
 ### 4. A two-value `reason` on a zero-match query
 
@@ -111,7 +120,12 @@ session's context, so this is two sentences, not a transcription of the docstrin
   answered, arriving through `tools.invoke` as the `configuration_error` envelope whose
   `field_errors` name `names`.
 - A viewer who asks by name for a tool their grants hide is told the name is unresolved; the
-  recovery is one call away and named in the docstring.
+  recovery, `namespace` mode's grant signal, is one call away and named in the docstring.
+- `unknown_names` carries the normalised (stripped, lower-cased) form rather than the caller's
+  literal input, so two spellings of one name yield one entry. `_select_named` keys the
+  candidate map on `t.name.lower()`, which is unambiguous only while registered names are
+  themselves lower-case; a test pins that convention rather than leaving the lookup to shadow
+  silently if it ever changes.
 - A new `tool_search_names_miss` log carries requested and unresolved counts, not the names, so
   the mode's characteristic failure reaches vocabulary curation the way query and namespace
   misses already do. The existing `tool_search_miss` log gains the `reason` and stops firing for

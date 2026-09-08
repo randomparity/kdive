@@ -40,7 +40,9 @@ _SCHEMA_DEPTH_LIMIT = 8
 # different key but the same class of caller-sized list.
 _FIELD_ERROR_LIMIT = 20
 # `names` forces full detail and ignores `limit`, so its own bound is the only one left.
-# Ten is `limit`'s default, and ADR-0472 measured a full match at roughly 2.5 KB (ADR-0630 §2).
+# Ten is `limit`'s default. Measured over this registry, a full match spans 0.4-16 KB with a
+# median of 1.4 KB, so the ten largest come to roughly 69 KB — the ceiling this bounds
+# (ADR-0630 §2).
 _NAMES_MAX = 10
 
 
@@ -413,9 +415,12 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 description=(
                     "Exact tool names to fetch (1-10), e.g. ['runs.install']. Skips ranking and "
                     "returns those tools with their complete description and input_schema, in "
-                    "the order given: it overrides 'detail' and ignores 'limit', so expect a "
-                    "few KB per name. Names no visible tool carries come back in "
-                    "data.unknown_names. Takes precedence over 'namespace' and 'query'."
+                    "the order given: it overrides 'detail' and ignores 'limit'. A full match "
+                    "runs 0.4-16 KB (median 1.4 KB), so ten large ones can exceed 60 KB — name "
+                    "only what you need. Matching ignores case and surrounding whitespace, and "
+                    "a name you repeat is returned once. Names no visible tool carries come "
+                    "back lower-cased in data.unknown_names. Takes precedence over 'namespace' "
+                    "and 'query'."
                 ),
             ),
         ] = None,
@@ -453,8 +458,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
           ``detail`` says, in the order you gave, and ``limit`` does not apply. Use this for any
           name you were handed — a ``suggested_next_actions`` entry, a name from a summary
           result, a name from the guides. Names no visible tool carries come back in
-          ``data.unknown_names``; call ``tools.invoke`` on one to learn whether it is
-          unregistered or outside your grants.
+          ``data.unknown_names``, which deliberately does not say whether no tool carries the
+          name or your grants hide it; ``namespace`` mode answers the second for the plane
+          that name belongs to.
         - ``query``: lexical ranking over name, description, curated keywords, and bounded schema
           text (property names/descriptions, enum values, and discriminators); returns tools
           matching the query, highest-scoring first. A query that is exactly a tool name ranks
