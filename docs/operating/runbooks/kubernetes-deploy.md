@@ -198,6 +198,11 @@ mints tokens for any caller; reach MCP through port-forwarding and keep it off p
 The [chart reference](../../../deploy/helm/kdive/README.md#bundled-backends-demo-only) describes
 its defaults, versioning checks, and limits.
 
+The smoke test checks authenticated tool discovery and emits a CPU-feature hint for its own
+node. Its HTTP reachability probe accepts any status; a passing test does not establish database
+or object-store readiness, worker operations, or CPU compatibility on other nodes. Inspect the
+relevant backend pods when diagnosing those failures.
+
 ### Upgrading a release (config-default drift — ADR-0134)
 
 This section describes value merging for a release whose upgrade is supported. It does not bypass

@@ -26,8 +26,9 @@ workers on the host so they can access KVM and libvirt.
 - A KVM / nested-virt host with the provisioned libvirt daemon and socket for its distro.
   Use the installed session endpoint described below.
 - Docker with a reachable daemon and access to the Compose images and build dependencies.
-  The mock OIDC service builds the in-repo mirror by default; see the
-  [cross-platform image guidance](../../development/cross-platform.md#container-images).
+  The mock OIDC service uses the in-repo mirror, built locally or selected by
+  `KDIVE_OIDC_IMAGE`; the wrapper defaults to a pinned mirror on emulated POWER. See
+  [image selection](../../../deploy/mock-oidc/README.md#using-the-image).
 - The repo set up: `just setup` (or `uv sync --locked`).
 - For **local-libvirt `kdump`** capture, the worker venv additionally needs `drgn`
   (`uv sync --group live`) and the system `guestfs` binding wired in; this is a one-time step

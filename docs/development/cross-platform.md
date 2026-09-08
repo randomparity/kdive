@@ -67,7 +67,7 @@ worker lifecycle. The repository's configuration and publishing workflows define
 | Component | POWER behavior in this repository |
 |---|---|
 | Postgres, MinIO and MinIO client | Compose selects the images covered by the [container architecture policy](../adr/0356-cross-platform-dev-containers.md). |
-| Mock OIDC | Local build from `deploy/mock-oidc`; `KDIVE_OIDC_IMAGE` selects a prebuilt image. The publish workflow targets `linux/amd64,linux/ppc64le`. |
+| Mock OIDC | Compose supports a local build or `KDIVE_OIDC_IMAGE` override; the host wrapper can default to a pinned mirror on emulated POWER. See [image selection](../../deploy/mock-oidc/README.md#using-the-image). The publish workflow targets `linux/amd64,linux/ppc64le`. |
 | KDIVE app | Local build from the root Dockerfile; `KDIVE_IMAGE` selects a prebuilt image. Release builds target `linux/amd64,linux/ppc64le`; rolling `edge` builds target only `linux/amd64`. |
 | Observability | The host-stack script starts Prometheus separately and skips Grafana on ppc64le. `--skip-obs` skips both. |
 
