@@ -288,8 +288,8 @@ and constraint an agent must know, and does not invite a pattern the behavior di
 - **Releasing** — see [`docs/development/releasing.md`](docs/development/releasing.md) and
   [ADR-0041](docs/adr/0041-versioning-release-process.md) (SemVer, milestone→minor,
   tag-driven release).
-- **Doc-style guard** (no check enforces it, but the prose rule is
-  project-wide): use **Milestone**, never "Sprint"; keep prose plain and factual —
+- **Doc-style guard** (no check enforces it, but the prose rule is project-wide): use
+  **Milestone**, never "Sprint"; keep prose plain and factual —
   avoid "critical", "robust", "comprehensive", "elegant". This applies to ADRs, specs,
   commit messages, and code comments.
 - **Never pass a PR or issue body as a shell string.** Write the body to a file and use

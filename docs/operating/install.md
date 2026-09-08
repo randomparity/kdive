@@ -108,8 +108,8 @@ just setup
 ```
 
 The recipe checks host dependencies, syncs the locked environment, builds the capture-bootstrap
-manifest, and installs the development hooks and documentation-check dependencies. Choose a
-[run mode](#run-modes) below to configure backends and start the processes.
+manifest, and installs the development hooks. Choose a [run mode](#run-modes) below to configure
+backends and start the processes.
 
 ### Container image
 
