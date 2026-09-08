@@ -45,10 +45,12 @@ stream and is unchanged.
 An empty store response at a non-EOF cursor remains observable as `b""`; callers retain their
 existing truncated-input failures. A response larger than the requested fetch bound remains a
 `BUILD_FAILURE`. A short non-empty response is buffered exactly as returned and advances the
-logical cursor only by bytes delivered to the caller. If a read consumes buffered bytes and its
-follow-on fetch raises or returns an oversized response, the read returns no bytes and leaves the
-logical cursor at its call-entry position so retry cannot skip cached data. No speculative request
-crosses the recorded object size.
+logical cursor only by bytes delivered to the caller. When a cross-window follow-on fetch is empty,
+the read returns its cached suffix and advances only by those delivered bytes; the next read retries
+at the boundary. If a follow-on fetch instead raises or returns an oversized response, the read
+returns no bytes and leaves the logical cursor at its call-entry position so retry cannot skip
+cached data. A zero-length read returns no bytes, moves no cursor, and makes no request. No
+speculative request crosses the recorded object size.
 
 ## Threat model
 
@@ -76,8 +78,8 @@ does not alter timing budgets or transport recovery, which #2318 and #2319 own.
    1,049,287-byte fixture, so the ceiling is fixed before implementation and fails red.
 2. Buffer-boundary reads and seeks return the same byte sequence as a seekable in-memory file.
 3. EOF, seek-beyond-EOF, invalid seek, `read()` through recorded EOF, caller reads larger than the
-   retained window, empty/short/oversized responses, cross-window failure cursor atomicity, and
-   store exceptions retain explicit, tested behavior.
+   retained window, zero-length reads, empty/short/oversized responses, cross-window empty behavior,
+   cross-window failure cursor atomicity, and store exceptions retain explicit, tested behavior.
 4. Every underlying archive request remains pinned to the immutable version observed by `HEAD`.
 5. Existing external-build validation, archive limits, identity checks, and failure categories
    remain green on x86_64 and architecture-neutral code remains valid for ppc64le.
@@ -89,7 +91,9 @@ directly: sequential reads and request count, reads crossing a 4 MiB boundary, a
 than 4 MiB without retaining more than 4 MiB, `read()` through EOF, all supported seek modes,
 in-window seek reuse, out-of-window invalidation, EOF, seek beyond EOF, negative/invalid seek
 rejection, short and oversized responses, unchanged propagation of a store exception, and an
-unchanged cursor after a cross-window store exception or oversized response.
+unchanged cursor after a cross-window store exception or oversized response. It also proves that a
+cross-window empty response returns only the cached suffix and retries the boundary next, and that
+`read(0)` leaves cursor and request count unchanged.
 
 An integration-style validation regression in
 `tests/providers/local_libvirt/test_validate_external_artifacts.py` builds an incompressible

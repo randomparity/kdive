@@ -35,6 +35,9 @@ alongside the roughly 60-line reader change and roughly 30-line validator regres
 - A cross-window read commits its cursor only after the follow-on fetch succeeds and its response
   bound is validated. A propagated store exception or oversized response leaves the cursor at the
   read's call-entry position so retry cannot skip buffered bytes.
+- A cross-window empty response returns the staged cached suffix, advances only by that suffix, and
+  leaves the boundary for the next read to retry. `read(0)` returns `b""`, leaves `tell()` unchanged,
+  and performs no store request.
 - Scope is `src/kdive/build_artifacts/validation.py`, matching build-artifact tests, and these
   design artifacts. Durable completion and MCP behavior are excluded.
 - Guardrails: focused pytest commands below; `just lint`; `just type`; `just test-changed`; and
@@ -75,16 +78,19 @@ behavior that `gzip` may not exercise deterministically across Python versions.
 - **Contract: cursor, boundary, EOF, and invalid seek semantics match the spec.** Mode:
   `focused-test`. Tests in the same module cover `tell`, reads spanning the 4 MiB boundary,
   a caller read larger than 4 MiB without retaining more than 4 MiB, default `read()` through EOF,
-  supported whence values, beyond EOF, negative results, and invalid whence. Expected red: missing
-  cursor methods or retained state exceeding the cap. Same green command.
+  `read(0)` without a cursor or request change, supported whence values, beyond EOF, negative
+  results, and invalid whence. Expected red: missing cursor methods or retained state exceeding the
+  cap. Same green command.
 - **Contract: short, empty, and oversized range responses are not hidden.** Mode: `focused-test`.
   A configurable fake store returns each response shape or raises a selected categorized exception.
   One test primes the buffer, proves an in-window hit does not touch the failing store, then moves
   outside the window and proves the exact exception propagates unchanged. Two cross-window tests
   consume a cached suffix before an exception or oversized response and assert that `tell()` stays
-  at the call-entry position and retry returns the complete bytes. Expected red: the existing
-  reader has no buffer-aware boundary behavior; oversized response must retain `BUILD_FAILURE`.
-  Same green command.
+  at the call-entry position and retry returns the complete bytes. A third cross-window test makes
+  the follow-on response empty, asserts the cached suffix is returned and advances the cursor, then
+  proves the next read retries at the boundary. Expected red: the existing reader has no
+  buffer-aware boundary behavior; oversized response must retain `BUILD_FAILURE`. Same green
+  command.
 
 ### Steps
 

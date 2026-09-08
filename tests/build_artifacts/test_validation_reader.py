@@ -107,6 +107,9 @@ def test_ranged_reader_eof_and_invalid_seeks() -> None:
     store = _ReaderStore(blob)
     reader = validation._RangedReader(store, "kernel", len(blob))
 
+    assert reader.read(0) == b""
+    assert reader.tell() == 0
+    assert store.calls == []
     assert reader.seek(len(blob) + 10) == len(blob) + 10
     assert reader.read(1) == b""
     assert store.calls == []
@@ -193,3 +196,21 @@ def test_ranged_reader_cross_window_oversized_response_keeps_cursor_for_retry() 
 
     store.max_response_extra = 0
     assert reader.read(16) == blob[start : start + 16]
+
+
+def test_ranged_reader_cross_window_empty_response_returns_cached_suffix() -> None:
+    window = validation._RANGE_CHUNK_BYTES
+    blob = _pattern(window + 16)
+    store = _ReaderStore(blob)
+    reader = validation._RangedReader(store, "kernel", len(blob))
+    start = window - 8
+
+    assert reader.read(start) == blob[:start]
+    store.response_limit = 0
+    assert reader.read(16) == blob[start:window]
+    assert reader.tell() == window
+    assert store.calls[-1] == (window, 16)
+
+    store.response_limit = None
+    assert reader.read(8) == blob[window : window + 8]
+    assert store.calls[-1] == (window, 16)
