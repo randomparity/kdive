@@ -135,10 +135,10 @@ from Task 1. Provides two new `WriteFile`/`RunCommand` steps in `customize_steps
        assert "fadump-capture.service" in text
        assert "systemctl enable fadump-capture.service" in commands(steps)
 
-   def test_build_steps_omit_fadump_capture_service(tmp_path: Path) -> None:
-       steps = _steps(_build_ctx(_ctx(tmp_path, is_cloud_image=True)))
-       assert "fadump-capture.service" not in rendered(steps)
-   ```
+
+   Negative test dropped: the build context excludes `kexec-tools` so the guard
+   already prevents injection — a negative test over that set can't go red before the change
+   and gives no signal. The positive test is the discriminating assertion.
 
 4. Run `just lint && just type` and then the focused test.
 
@@ -188,7 +188,7 @@ from Task 1. Provides two new `WriteFile`/`RunCommand` steps in `customize_steps
    # The fadump-capture unit supersedes it on the capture-kernel boot
    # (ConditionPathExists=/proc/vmcore), invokes makedumpfile, and powers off.
    # Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
-   - name: Upload the fadump capture service for {{ image.name }}
+   - name: Upload and enable the fadump capture service for {{ image.name }}
      ansible.builtin.command:  # noqa: command-instead-of-module
        argv:
          - virt-customize
@@ -196,17 +196,6 @@ from Task 1. Provides two new `WriteFile`/`RunCommand` steps in `customize_steps
          - "{{ guest_base_image_qcow2 }}"
          - --upload
          - "{{ role_path }}/files/fadump-capture.service:/etc/systemd/system/fadump-capture.service"
-     when:
-       - guest_base_image_fadump_capture | bool
-       - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
-     changed_when: true
-
-   - name: Enable the fadump capture service for {{ image.name }}
-     ansible.builtin.command:  # noqa: command-instead-of-module
-       argv:
-         - virt-customize
-         - -a
-         - "{{ guest_base_image_qcow2 }}"
          - --run-command
          - systemctl enable fadump-capture.service
      when:
@@ -214,6 +203,8 @@ from Task 1. Provides two new `WriteFile`/`RunCommand` steps in `customize_steps
        - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
      changed_when: true
    ```
+   Note: merged into one `virt-customize` call (design review finding: two calls with same `when:`
+   guard leave a partial-failure window; one call is idempotent-on-retry).
 
 5. In `deploy/ansible/inventory/group_vars/all.yml`, add after the `kdump_service` line in
    `kdive_image_defaults`:

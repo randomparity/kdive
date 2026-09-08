@@ -334,7 +334,11 @@ The four drivers in `tests/integration/test_live_stack.py` need
 `KDIVE_GUEST_IMAGE_PPC64LE` pointing to a prepared ppc64le qcow2. The uploaded-kernel drivers
 also need `KDIVE_PPC64LE_BUNDLE`, a directory containing `kernel.tar.gz` and `initrd.img`.
 The tar contains the ppc64le ELF at `boot/vmlinuz` and matching `lib/modules/<version>/`;
-the initramfs must match that kernel. See the
+the initramfs must match that kernel. **When building the bundle from a Fedora ppc64le kernel
+RPM, exclude the duplicate `vmlinuz` under `lib/modules/<rel>/vmlinuz`:** that member (~63 MiB)
+and `boot/vmlinuz` (~63 MiB) together push the first `.ko.xz` past the 128 MiB module-scan cap,
+causing upload validation to reject the bundle. Pass `--exclude='lib/modules/*/vmlinuz'` to your
+`tar` invocation. See the
 [recorded bundle proof](../../design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md) for the
 artifact shape, and the [external-build contract](../external-build-upload.md) for current
 requirements. Image preparation belongs to [image lifecycle](image-lifecycle.md).
