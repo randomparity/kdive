@@ -5,7 +5,7 @@ Use GDB to halt and inspect a live kernel. `debug.start_session` takes a **Run I
 controlling, and ending a session require contributor access. Read each tool's schema for
 its limits and returned fields.
 
-Provision the System with `debug.gdbstub: true` before this workflow. Attach requires a
+Provision the System with `gdbstub: true` in the profile's `debug` mapping before this workflow. Attach requires a
 completed build, a successful boot result, and a bound System in READY or PAUSED state;
 a build's `succeeded` status alone is insufficient. A declared console-only crash is not a
 live-debug target. A `crashed_halted_live` boot can instead permit GDB attachment. Only one
