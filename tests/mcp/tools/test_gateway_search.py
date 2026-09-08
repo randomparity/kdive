@@ -1056,3 +1056,195 @@ def test_authorized_namespace_logs_no_miss(
         _search(app, {"namespace": "debug", "limit": 50})
 
     assert "tool_search_namespace_miss" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# names mode: a deterministic by-name lookup (#2305, ADR-0630 §§1-3)
+# ---------------------------------------------------------------------------
+
+
+def test_names_returns_exactly_those_tools_at_full_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """names= returns the named tools, in caller order, with description and input_schema."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"names": ["runs.install", "runs.boot"]})
+
+    data = content["data"]
+    assert _match_names(content) == ["runs.install", "runs.boot"]
+    assert data["truncated"] is False
+    assert "unknown_names" not in data
+    for match in data["matches"]:
+        assert match["description"], f"{match['name']} carried no description"
+        assert "input_schema" in match, f"{match['name']} carried no input_schema"
+
+
+def test_names_reports_unknown_and_hidden_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unregistered name and an RBAC-hidden one both land in unknown_names, sorted."""
+    app = _build(monkeypatch, _viewer_ctx)
+
+    content = _search(app, {"names": ["runs.get", "zzz.nope", "control.force_crash"]})
+
+    data = content["data"]
+    assert _match_names(content) == ["runs.get"]
+    assert data["unknown_names"] == ["control.force_crash", "zzz.nope"]
+
+
+def test_names_mode_is_rbac_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A viewer cannot reach control.force_crash's schema by naming it."""
+    app = _build(monkeypatch, _viewer_ctx)
+
+    content = _search(app, {"names": ["control.force_crash"]})
+
+    assert content["data"]["matches"] == []
+    assert "control.force_crash" not in json.dumps(content["data"]["matches"])
+
+
+def test_names_mode_ignores_summary_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """names= overrides detail='summary': the schema is the point of the mode."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"names": ["runs.get"], "detail": "summary"})
+
+    match = content["data"]["matches"][0]
+    assert "input_schema" in match
+    assert "run_id" in str(match["input_schema"])
+
+
+def test_names_mode_ignores_limit_and_carries_no_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """limit does not truncate an explicit enumeration, and names mode carries no reason."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"names": ["runs.get", "runs.list"], "limit": 1})
+
+    data = content["data"]
+    assert len(data["matches"]) == 2
+    assert data["truncated"] is False
+    assert "reason" not in data
+
+
+def test_names_takes_precedence_over_namespace_and_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """names wins over namespace, which wins over query; no namespace_status is emitted."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(
+        app, {"names": ["runs.get"], "namespace": "debug", "query": "boot a built kernel"}
+    )
+
+    data = content["data"]
+    assert _match_names(content) == ["runs.get"]
+    assert "namespace_status" not in data
+
+
+def test_names_normalises_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entries are stripped and lower-cased, and a repeat returns once in first position."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"names": [" Runs.Boot ", "runs.get", "runs.boot"]})
+
+    assert _match_names(content) == ["runs.boot", "runs.get"]
+    assert "unknown_names" not in content["data"]
+
+
+@pytest.mark.parametrize("names", [[], ["runs.get"] * 11])
+def test_names_cardinality_rejects_out_of_bounds(
+    monkeypatch: pytest.MonkeyPatch, names: list[str]
+) -> None:
+    """An empty list and an over-long list are both rejected by schema validation."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"names": names})
+
+    with pytest.raises(Exception, match="(?i)valid"):
+        asyncio.run(_run())
+
+
+def test_names_cardinality_accepts_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ten distinct names is the documented ceiling and is accepted, not rejected."""
+    app = _build(monkeypatch, _operator_ctx)
+    ten = [f"zzz.tool{index}" for index in range(10)]
+
+    content = _search(app, {"names": ten})
+
+    assert content["data"]["unknown_names"] == sorted(ten)
+
+
+def test_names_miss_is_logged_with_counts_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A names miss reaches vocabulary curation as counts, never as the caller's names."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
+        _search(app, {"names": ["runs.get", "zzz.nope"]})
+
+    record = next((r for r in caplog.records if r.getMessage() == "tool_search_names_miss"), None)
+    assert record is not None, f"no names-miss log: {caplog.text}"
+    assert record.__dict__["requested"] == 2
+    assert record.__dict__["unresolved"] == 1
+    assert "zzz.nope" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# reason: a zero-match query says why it missed (#2305, ADR-0630 §4)
+# ---------------------------------------------------------------------------
+
+
+def test_short_token_query_reports_no_usable_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A query whose every token is under two characters never reached the index."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "a b"})
+
+    assert content["data"]["matches"] == []
+    assert content["data"]["reason"] == "no_usable_tokens"
+
+
+def test_unsupported_operator_query_reports_no_token_matched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The issue's select: form ran and matched nothing, which is not 'no such tool'."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "select:images.describe,allocations.request"})
+
+    assert content["data"]["matches"] == []
+    assert content["data"]["reason"] == "no_token_matched"
+
+
+def test_successful_query_carries_no_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason key is absent whenever there are matches."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "boot a built kernel"})
+
+    assert content["data"]["matches"], "expected matches for a known-good query"
+    assert "reason" not in content["data"]
+
+
+def test_query_miss_log_carries_the_reason_and_skips_namespace_calls(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """tool_search_miss carries the reason, and a namespace+query call no longer emits it."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
+        _search(app, {"query": "select:images.describe"})
+
+    record = next((r for r in caplog.records if r.getMessage() == "tool_search_miss"), None)
+    assert record is not None, f"no query-miss log: {caplog.text}"
+    assert record.__dict__["reason"] == "no_token_matched"
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
+        _search(app, {"namespace": "debug", "query": "select:images.describe", "limit": 50})
+
+    assert "tool_search_miss" not in caplog.text, (
+        "namespace wins, so no query ran and no query-miss record is accurate"
+    )

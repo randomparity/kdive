@@ -37,9 +37,17 @@ tool's top-level keys, but only when you could already see that tool through
 
 `implemented` · `read-only`
 
-Find tools by capability phrase or namespace; returns compact summaries by default.
+Find tools by exact name, capability phrase, or namespace; compact summaries by default.
 
-Two modes:
+Three modes, most specific first — ``names`` wins over ``namespace``, which wins over
+``query``:
+- ``names``: fetch the tools you name, e.g. ``names=["runs.install"]`` (1-10 per call).
+  No ranking; each match carries its complete description and ``input_schema`` whatever
+  ``detail`` says, in the order you gave, and ``limit`` does not apply. Use this for any
+  name you were handed — a ``suggested_next_actions`` entry, a name from a summary
+  result, a name from the guides. Names no visible tool carries come back in
+  ``data.unknown_names``; call ``tools.invoke`` on one to learn whether it is
+  unregistered or outside your grants.
 - ``query``: lexical ranking over name, description, curated keywords, and bounded schema
   text (property names/descriptions, enum values, and discriminators); returns tools
   matching the query, highest-scoring first. A query that is exactly a tool name ranks
@@ -55,6 +63,14 @@ tool's safety tier before invoking it.
 
 ``truncated: true`` signals that more results exist beyond the returned ``limit``.
 
+``query`` takes plain words, not operators: there is no ``select:`` or ``+`` syntax, and
+an unrecognised token simply matches nothing. When a query returns no matches,
+``data.reason`` says which: ``"no_usable_tokens"`` (nothing in the query was long enough
+to search on — every word was under two characters, or the query was blank) or
+``"no_token_matched"`` (the words ran and none of them occurs in any tool you can see —
+try fewer, plainer words, ``namespace`` mode, or ``names`` if you already have one). The
+key is absent whenever there are matches.
+
 In ``namespace`` mode the response also carries ``namespace_status``: ``"ok"`` when the
 plane has tools you can see, ``"unauthorized"`` when it is live but every tool in it is
 filtered for your grants (with ``namespace_required_grants`` naming the grants that
@@ -64,7 +80,8 @@ for vocabulary curation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `detail` | `summary`, `full` | no | How much per-match metadata to return. 'summary' (the default) returns name, summary, annotations, and maturity — enough to choose a tool and judge its safety tier. 'full' additionally returns the complete description and the input_schema you need to build arguments; it is several times larger per match, so narrow the query or the limit first. |
-| `limit` | integer | no | Maximum matches to return (1-50). |
+| `detail` | `summary`, `full` | no | How much per-match metadata to return. 'summary' (the default) returns name, summary, annotations, and maturity — enough to choose a tool and judge its safety tier. 'full' additionally returns the complete description and the input_schema you need to build arguments; it is several times larger per match, so narrow the query or the limit first. 'names' mode always returns full detail whatever you pass here. |
+| `limit` | integer | no | Maximum matches to return (1-50). Not used in 'names' mode, which returns every name you list. |
+| `names` | array<string> (nullable) | no | Exact tool names to fetch (1-10), e.g. ['runs.install']. Skips ranking and returns those tools with their complete description and input_schema, in the order given: it overrides 'detail' and ignores 'limit', so expect a few KB per name. Names no visible tool carries come back in data.unknown_names. Takes precedence over 'namespace' and 'query'. |
 | `namespace` | string (nullable) | no | Browse one tool plane by prefix, e.g. 'debug' or 'runs'. |
 | `query` | string (nullable) | no | Capability phrase to search for (e.g. 'boot a built kernel'). |

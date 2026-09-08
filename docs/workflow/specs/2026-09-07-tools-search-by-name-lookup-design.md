@@ -103,7 +103,7 @@ retrieved at all.
 | `names` outranks `namespace` and `query` when both are supplied | `focused-test` | `…::test_names_takes_precedence_over_namespace_and_query` |
 | `names` sets `truncated` false, ignores `limit`, and carries no `reason` | `focused-test` | `…::test_names_mode_ignores_limit_and_carries_no_reason` |
 | `names` normalises case/whitespace and collapses duplicates in first position | `focused-test` | `…::test_names_normalises_and_deduplicates` |
-| `names` cardinality bounds reject `[]` and 11 entries | `focused-test` | `…::test_names_cardinality_is_bounded` |
+| `names` cardinality rejects `[]` and 11 entries, accepts 10 | `focused-test` | `…::test_names_cardinality_rejects_out_of_bounds`, `…::test_names_cardinality_accepts_the_ceiling` |
 | A names-mode miss is logged with counts, not names | `focused-test` | `…::test_names_miss_is_logged_with_counts_only` |
 | `reason` is `no_usable_tokens` when every token is filtered | `focused-test` | `…::test_short_token_query_reports_no_usable_tokens` |
 | `reason` is `no_token_matched` for the issue's `select:` form | `focused-test` | `…::test_unsupported_operator_query_reports_no_token_matched` |

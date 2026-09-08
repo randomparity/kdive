@@ -94,7 +94,9 @@ has no `names` parameter and binding the argument fails — and one green comman
 - **Contract:** entries are stripped and lower-cased, duplicates collapse into first position,
   and the 1–10 bound is enforced by schema validation. Tests
   `::test_names_normalises_and_deduplicates` (`names=[" Runs.Boot ", "runs.boot"]` yields one
-  match) and `::test_names_cardinality_is_bounded` (`[]` and an 11-element list both raise).
+  match), `::test_names_cardinality_rejects_out_of_bounds` (`[]` and an 11-element list both
+  raise), and `::test_names_cardinality_accepts_the_ceiling`, which pins the ten-name boundary as
+  accepted so the rejection test cannot pass merely because the parameter is unknown.
 - **Contract:** a names-mode miss is logged with counts, never the names. Test
   `::test_names_miss_is_logged_with_counts_only`, using `caplog` at `INFO` on
   `kdive.mcp.tools.gateway`; its expected red is instead that no `tool_search_names_miss` record
@@ -138,7 +140,7 @@ has no `names` parameter and binding the argument fails — and one green comman
 
 3. Add the `names` parameter to `tools_search`, between the `namespace` and `limit` parameters:
 
-   ```python
+   ```text
         names: Annotated[
             list[str] | None,
             Field(
@@ -163,7 +165,7 @@ has no `names` parameter and binding the argument fails — and one green comman
 5. Replace the three lines `candidates = …` / `ranked = _rank(...)` / `matches = ranked[:limit]`
    in the `tools_search` body with the mode split:
 
-   ```python
+   ```text
            candidates = [t for t in all_tools if tool_visible(t.name, ctx)]
            unresolved: list[str] = []
            if names is not None:
@@ -186,7 +188,7 @@ has no `names` parameter and binding the argument fails — and one green comman
    `bool(ranked)` for the `any_visible` argument. `describe_tool` is called with `match_detail`
    rather than `detail`, and `"truncated"` reads the new local:
 
-   ```python
+   ```text
            data: dict[str, JsonValue] = {
                "matches": cast(
                    "JsonValue", [describe_tool(t, kinds, detail=match_detail) for t in matches]
@@ -314,7 +316,7 @@ no other module calls `_rank`, so the only caller to update is `tools_search`.
 
 4. Replace Task 1's final `elif not matches and query is not None:` branch with:
 
-   ```python
+   ```text
            elif miss is not None:
                data["reason"] = miss.value
                _log.info(

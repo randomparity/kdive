@@ -117,6 +117,19 @@ def test_instructions_point_at_the_agent_index() -> None:
         assert "resource://kdive/docs/guide/agent-index.md" in build_instructions(enabled)
 
 
+def test_gateway_on_instructions_name_the_search_parameters() -> None:
+    """Gateway-on instructions carry the tools.search recipe (#2305, ADR-0630 §5).
+
+    A gateway-mode agent has not read the tools.search docstring when it makes its first
+    call, so a parameter named only there is a parameter it will not use.
+    """
+    from kdive.mcp.schema.tool_index import build_instructions
+
+    text = build_instructions(gateway_enabled=True)
+    for fragment in ("names=", "limit=", "detail=", "namespace=", "data.reason"):
+        assert fragment in text, f"gateway-on instructions do not name {fragment!r}"
+
+
 def test_instructions_both_modes_cover_namespaces_and_gateway_tools() -> None:
     """Every namespace and both gateway tools appear whether the gateway is on or off."""
     from kdive.mcp.schema.tool_index import NAMESPACE_TOC, build_instructions

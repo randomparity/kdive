@@ -39,6 +39,9 @@ _SCHEMA_DEPTH_LIMIT = 8
 # error count arbitrarily high (one entry per bad keyword argument), and this field is a
 # different key but the same class of caller-sized list.
 _FIELD_ERROR_LIMIT = 20
+# `names` forces full detail and ignores `limit`, so its own bound is the only one left.
+# Ten is `limit`'s default, and ADR-0472 measured a full match at roughly 2.5 KB (ADR-0630 §2).
+_NAMES_MAX = 10
 
 
 class SearchDetail(StrEnum):
@@ -54,6 +57,13 @@ class NamespaceStatus(StrEnum):
     OK = "ok"
     UNAUTHORIZED = "unauthorized"
     UNKNOWN = "unknown"
+
+
+class SearchMiss(StrEnum):
+    """Why a ``query`` returned no matches (ADR-0630 §4)."""
+
+    NO_USABLE_TOKENS = "no_usable_tokens"
+    NO_TOKEN_MATCHED = "no_token_matched"
 
 
 _SCHEMA_TEXT_KEYS = frozenset(
@@ -124,33 +134,63 @@ def _score(tool: Tool, tokens: list[str]) -> int:
     return sum(1 for tok in tokens if tok in haystack)
 
 
-def _rank(candidates: list[Tool], *, query: str | None, namespace: str | None) -> list[Tool]:
-    """Return the ordered candidate list for the given search mode.
+def _rank(
+    candidates: list[Tool], *, query: str | None, namespace: str | None
+) -> tuple[list[Tool], SearchMiss | None]:
+    """Return the ordered candidate list for the given search mode, and why it is empty.
 
     - Namespace mode: filter by ``"<namespace>."`` prefix, sort lexicographically.
     - Query mode: score by substring hits in name + description + curated keywords,
       keep only tools with score > 0, sort by (score DESC, name ASC).
     - Fallback (neither): all candidates sorted by name.
+
+    The second element is a :class:`SearchMiss` only for an empty query-mode result, and says
+    whether the query had no usable tokens or none of its tokens matched (ADR-0630 §4).
     """
     if namespace is not None:
         prefix = f"{namespace}."
         return sorted(
             (t for t in candidates if t.name.startswith(prefix)),
             key=lambda t: t.name,
-        )
+        ), None
     if query is not None:
         tokens = [tok for tok in query.lower().split() if len(tok) >= 2]
         if not tokens:
-            return []
+            return [], SearchMiss.NO_USABLE_TOKENS
         # A query that *is* a tool name outranks every other hit, so a caller who found a
         # name in a summary result can fetch exactly that tool's schema with limit=1 rather
         # than gambling on the score/name tiebreak (ADR-0472).
         exact = query.strip().lower()
         scored = [(t, _score(t, tokens)) for t in candidates]
         hits = [(t, s) for t, s in scored if s > 0]
+        if not hits:
+            return [], SearchMiss.NO_TOKEN_MATCHED
         hits.sort(key=lambda x: (x[0].name.lower() != exact, -x[1], x[0].name))
-        return [t for t, _ in hits]
-    return sorted(candidates, key=lambda t: t.name)
+        return [t for t, _ in hits], None
+    return sorted(candidates, key=lambda t: t.name), None
+
+
+def _select_named(candidates: list[Tool], names: list[str]) -> tuple[list[Tool], list[str]]:
+    """Return the visible tools for ``names`` in caller order, plus the unresolved names.
+
+    Each name is stripped and lower-cased, matching what query mode already does to its
+    tokens, and a name repeated after normalisation is returned once in its first position.
+    A name absent from ``candidates`` is unresolved whether no tool carries it or the
+    caller's grants hide it; the two are deliberately not distinguished (ADR-0630 §3).
+    """
+    by_name = {t.name.lower(): t for t in candidates}
+    selected: list[Tool] = []
+    seen: set[str] = set()
+    unresolved: set[str] = set()
+    for raw in names:
+        name = raw.strip().lower()
+        tool = by_name.get(name)
+        if tool is None:
+            unresolved.add(name)
+        elif name not in seen:
+            seen.add(name)
+            selected.append(tool)
+    return selected, sorted(unresolved)
 
 
 def _project_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:
@@ -365,9 +405,30 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
             str | None,
             Field(description="Browse one tool plane by prefix, e.g. 'debug' or 'runs'."),
         ] = None,
+        names: Annotated[
+            list[str] | None,
+            Field(
+                min_length=1,
+                max_length=_NAMES_MAX,
+                description=(
+                    "Exact tool names to fetch (1-10), e.g. ['runs.install']. Skips ranking and "
+                    "returns those tools with their complete description and input_schema, in "
+                    "the order given: it overrides 'detail' and ignores 'limit', so expect a "
+                    "few KB per name. Names no visible tool carries come back in "
+                    "data.unknown_names. Takes precedence over 'namespace' and 'query'."
+                ),
+            ),
+        ] = None,
         limit: Annotated[
             int,
-            Field(ge=1, le=_SEARCH_LIMIT_MAX, description="Maximum matches to return (1-50)."),
+            Field(
+                ge=1,
+                le=_SEARCH_LIMIT_MAX,
+                description=(
+                    "Maximum matches to return (1-50). Not used in 'names' mode, which returns "
+                    "every name you list."
+                ),
+            ),
         ] = 10,
         detail: Annotated[
             SearchDetail,
@@ -377,14 +438,23 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                     "name, summary, annotations, and maturity — enough to choose a tool and "
                     "judge its safety tier. 'full' additionally returns the complete "
                     "description and the input_schema you need to build arguments; it is "
-                    "several times larger per match, so narrow the query or the limit first."
+                    "several times larger per match, so narrow the query or the limit first. "
+                    "'names' mode always returns full detail whatever you pass here."
                 )
             ),
         ] = SearchDetail.SUMMARY,
     ) -> ToolResponse:
-        """Find tools by capability phrase or namespace; returns compact summaries by default.
+        """Find tools by exact name, capability phrase, or namespace; compact summaries by default.
 
-        Two modes:
+        Three modes, most specific first — ``names`` wins over ``namespace``, which wins over
+        ``query``:
+        - ``names``: fetch the tools you name, e.g. ``names=["runs.install"]`` (1-10 per call).
+          No ranking; each match carries its complete description and ``input_schema`` whatever
+          ``detail`` says, in the order you gave, and ``limit`` does not apply. Use this for any
+          name you were handed — a ``suggested_next_actions`` entry, a name from a summary
+          result, a name from the guides. Names no visible tool carries come back in
+          ``data.unknown_names``; call ``tools.invoke`` on one to learn whether it is
+          unregistered or outside your grants.
         - ``query``: lexical ranking over name, description, curated keywords, and bounded schema
           text (property names/descriptions, enum values, and discriminators); returns tools
           matching the query, highest-scoring first. A query that is exactly a tool name ranks
@@ -400,6 +470,14 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
 
         ``truncated: true`` signals that more results exist beyond the returned ``limit``.
 
+        ``query`` takes plain words, not operators: there is no ``select:`` or ``+`` syntax, and
+        an unrecognised token simply matches nothing. When a query returns no matches,
+        ``data.reason`` says which: ``"no_usable_tokens"`` (nothing in the query was long enough
+        to search on — every word was under two characters, or the query was blank) or
+        ``"no_token_matched"`` (the words ran and none of them occurs in any tool you can see —
+        try fewer, plainer words, ``namespace`` mode, or ``names`` if you already have one). The
+        key is absent whenever there are matches.
+
         In ``namespace`` mode the response also carries ``namespace_status``: ``"ok"`` when the
         plane has tools you can see, ``"unauthorized"`` when it is live but every tool in it is
         filtered for your grants (with ``namespace_required_grants`` naming the grants that
@@ -410,13 +488,17 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         ctx = current_context()
         all_tools = list(registered_tools(app))
         candidates = [t for t in all_tools if tool_visible(t.name, ctx)]
-        ranked = _rank(candidates, query=query, namespace=namespace)
-        matches = ranked[:limit]
-        if not matches and query is not None:
-            _log.info(
-                "tool_search_miss",
-                extra={"query": query, "count": 0},
-            )
+        miss: SearchMiss | None = None
+        unresolved: list[str] = []
+        if names is not None:
+            matches, unresolved = _select_named(candidates, names)
+            truncated = False
+            match_detail = SearchDetail.FULL
+        else:
+            ranked, miss = _rank(candidates, query=query, namespace=namespace)
+            matches = ranked[:limit]
+            truncated = len(ranked) > limit
+            match_detail = detail
         kinds: frozenset[ResourceKind] | None = None
         try:
             kinds = resolver.registered_kinds()
@@ -426,11 +508,23 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 exc_info=True,
             )
         data: dict[str, JsonValue] = {
-            "matches": cast("JsonValue", [describe_tool(t, kinds, detail=detail) for t in matches]),
-            "truncated": len(ranked) > limit,
+            "matches": cast(
+                "JsonValue", [describe_tool(t, kinds, detail=match_detail) for t in matches]
+            ),
+            "truncated": truncated,
         }
-        if namespace is not None:
-            status, grants = _namespace_signal(all_tools, namespace, any_visible=bool(ranked))
+        # Mode-ordered, most specific first, so each mode emits only its own signal.
+        if names is not None:
+            if unresolved:
+                data["unknown_names"] = cast("JsonValue", unresolved)
+                _log.info(
+                    "tool_search_names_miss",
+                    extra={"requested": len(names), "unresolved": len(unresolved)},
+                )
+        elif namespace is not None:
+            # ``matches`` is ``ranked[:limit]`` here and ``limit`` is at least 1, so it is
+            # empty exactly when ``ranked`` is.
+            status, grants = _namespace_signal(all_tools, namespace, any_visible=bool(matches))
             data["namespace_status"] = status.value
             if status is NamespaceStatus.UNAUTHORIZED:
                 data["namespace_required_grants"] = cast("JsonValue", grants)
@@ -439,4 +533,10 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                     "tool_search_namespace_miss",
                     extra={"namespace": namespace, "namespace_status": status.value},
                 )
+        elif miss is not None:
+            data["reason"] = miss.value
+            _log.info(
+                "tool_search_miss",
+                extra={"query": query, "count": 0, "reason": miss.value},
+            )
         return ToolResponse.success("tools.search", "ok", data=data)
