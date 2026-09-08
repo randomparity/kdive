@@ -80,7 +80,7 @@ The `--user` variant runs the same processes without root, reading the environme
 `~/.config/kdive/kdive.env` and the venv from `~/.local/share/kdive/.venv`:
 
 ```bash
-install -d ~/.config/kdive
+install -d ~/.config/kdive ~/.config/systemd/user
 install -m 0640 deploy/systemd/kdive.env.example ~/.config/kdive/kdive.env
 cp deploy/systemd/user/kdive-*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -88,8 +88,8 @@ systemctl --user enable --now kdive-server kdive-worker kdive-reconciler
 journalctl --user -u kdive-server -f
 ```
 
-A short install summary also lives next to the units in
-[`deploy/systemd/README.md`](../../deploy/systemd/README.md).
+The separate fixed live-worker lifecycle contract is documented next to its installer in
+[`deploy/systemd/README.md`](../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract).
 
 ## Debugging the MCP transport layer
 

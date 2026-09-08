@@ -6,7 +6,6 @@ _ROOT = Path(__file__).parents[2]
 _OPERATOR_DOCS = (
     "docs/operating/install.md",
     "docs/operating/runbooks/live-stack.md",
-    "docs/operating/local-stack.md",
     "docs/operating/docker-compose.md",
     "deploy/helm/kdive/README.md",
 )

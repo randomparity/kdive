@@ -18,7 +18,7 @@ directories, the guest image); this page is the operating manual for the scripts
 The scripts here are thin wrappers over the maintained host flow — `scripts/live-stack/up.sh`,
 `onboard.sh`, `down.sh` — plus the host preparation and the guest-image build that flow assumes
 already happened. For the underlying reference material see
-[`docs/operating/local-stack.md`](../../docs/operating/local-stack.md), the
+the [live-stack runbook](../../docs/operating/runbooks/live-stack.md), the
 [local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md),
 and the [four-method live run](../../docs/operating/runbooks/four-method-live-run.md).
 

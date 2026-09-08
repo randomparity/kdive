@@ -47,11 +47,17 @@ See the [accounting tool reference](../guide/reference/accounting.md) for the fu
 parameter list. Confirm the result with the read-only `accounting.usage`
 (`kdivectl accounting usage --project acme`).
 
-> **`kdivectl` cannot set budget or quota today.** The operator CLI's `tool call`
-> passthrough is fail-closed read-only, and `set_budget` / `set_quota` are mutating
-> tools with no curated break-glass verb, so they are unreachable from `kdivectl`.
-> Onboard a project from an MCP client that holds the project-`admin` token. See the
-> [kdivectl runbook](runbooks/kdivectl.md).
+With `kdivectl`, set the budget through the mutating tool passthrough and the quota
+through its generated verb. Both use the same server-side project permissions:
+
+```sh
+kdivectl tool call accounting.set_budget --allow-mutating \
+  --json '{"project":"acme","limit_kcu":"1000000"}'
+kdivectl accounting set-quota --project acme \
+  --max-concurrent-allocations 4 --max-concurrent-systems 4 --max-pending-allocations 0
+```
+
+See the [kdivectl runbook](runbooks/kdivectl.md) for authentication and argument discovery.
 
 ## Relationship to `seed-project`
 
@@ -65,8 +71,8 @@ audit row**.
 
 The end state is identical row content, so a project seeded this way behaves the
 same at run time. Use `seed-project` for local stacks and demos
-([Local stack administration](local-stack.md)); onboard real tenants with the audited
-admin tools above so every policy change is attributable.
+([live-stack onboarding](runbooks/live-stack.md#fund-the-demo-project--just-onboard));
+onboard real tenants with the audited admin tools above so every policy change is attributable.
 
 > Renamed from `seed-demo` in #669. Accepted ADRs and archived plans that predate the
 > rename still refer to `seed-demo`; the command is now `seed-project`.

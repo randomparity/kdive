@@ -16,13 +16,10 @@ not share a filesystem with — see [remote-live-stack.md](remote-live-stack.md)
 bring-up and adds worker→host TLS, the gdbstub ACL, and object-store reachability for the
 two-phase vmcore upload.
 
-The `just` recipes below are source-tree conveniences. Installed-package deployments use
-`python -m kdive migrate` and `python -m kdive seed-project`, then run the app tier from the
-compose reference (`just compose-up`); see
-[`docs/operating/local-stack.md`](../local-stack.md) and
-[`deploy/compose/README.md`](../../../deploy/compose/README.md). For a **Kubernetes / Helm**
-deployment (the production-shaped path), see
-[`kubernetes-deploy.md`](kubernetes-deploy.md).
+Run the `just` recipes below from the checkout. For an app-tier Compose deployment, follow
+[the Compose operating guide](../docker-compose.md); for Kubernetes, follow the
+[Helm deployment runbook](kubernetes-deploy.md). The local-libvirt flow on this page runs
+workers on the host so they can access KVM and libvirt.
 
 ## Prerequisites
 
