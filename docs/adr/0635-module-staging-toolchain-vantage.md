@@ -21,9 +21,12 @@ from the `MISSING_DEPENDENCY` error `_resolve_depmod` raises mid-install — aft
 allocated and a guest booted. #2339 is the deferred half of #2300, which left surfacing the
 requirement to a follow-up.
 
-The four directories are also written out as a string in
-`src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py` (`_TOOL_PATH`). A third copy written
-for the diagnostic is what this decision avoids.
+The same four directories appear as the literal `"/usr/sbin:/usr/bin:/sbin:/bin"` in four other
+places — `bootstrap_elf.py:23` (`_TOOL_PATH`, a `which` search path like this one) and three
+subprocess-environment `PATH` assignments (`__main__.py:281`,
+`jobs/capture_operations/launcher.py:292`, `scripts/generate/build-capture-bootstrap-manifest.py:28`).
+A sixth copy written for the diagnostic is what this decision avoids; consolidating the other five
+is out of #2339's surface.
 
 ## Decision
 
@@ -60,22 +63,28 @@ actionable half of the verdict, so it goes in the prose fields that survive — 
 
 - An operator whose `depmod` sits outside the four directories gets a `fail` naming the binary,
   the directories searched, and the package to install, before any System is allocated.
-- The verdict cannot drift from the run path: both readers import one tuple, so a one-sided change
-  is not expressible in source.
-- `ops.diagnostics` gains one item — additive and same-shaped, but externally read, so a caller
-  counting checks sees one more. A deployment that never stages modules now sees a `fail` for a
-  capability it does not use.
-- `guest_kernel_writer` loses its two module-level constants. #2340's ADR-0631 note about those
-  directories is written against the constant's old site and follows it to the new module on
-  whichever branch rebases second.
-- `bootstrap_elf._TOOL_PATH` remains a separate literal — a different tool set for a different job,
-  outside #2339's approved surface. Left as follow-up.
+- The verdict cannot drift from the run path: both readers import from one module, so a one-sided
+  change to the search set is not expressible in source. `ops.diagnostics` gains one item —
+  additive and same-shaped, but externally read, so a caller counting checks sees one more.
+- **The shipped container fails this check today.** `Dockerfile`'s runtime stage is
+  `python:3.14.6-slim-bookworm` (`:75`) and its package list (`:88-91`) omits `kmod`, so a worker
+  from that image has no `depmod` in any of the four directories and `kdivectl doctor` exits
+  nonzero. That is the check working — the image genuinely cannot stage modules, and the gap
+  previously surfaced only mid-install. Adding the package is a `Dockerfile` decision outside
+  #2339's surface, recorded as
+  [debt 0012](../debt/0012-shipped-worker-image-has-no-depmod.md).
+- A `pass` means `depmod` **resolves**, not that an install will succeed. The run path can still
+  fail at exec (`_DEPMOD_EXEC_ERRNOS` in `guest_kernel_writer`) or on a non-zero `depmod` exit. The
+  check deliberately does not exec the binary, so that residual stays.
+- `guest_kernel_writer` loses its two module-level constants, which collides with two unmerged
+  branches: #2340 inserts comment lines directly above `_DEPMOD_SEARCH_DIRS`, and #2333's
+  `host_tool_search.py` docstring refers to `_DEPMOD_SEARCH_DIRS` by name twice. Whichever branch
+  rebases second moves those comment lines into the new module and repoints those two references.
 
 ## Considered & rejected
 
 - **A worker-startup preflight that refuses to start.** judgment: it would take down jobs that
-  never stage modules, and the failure would be reachable only by restarting a worker and reading
-  its log — the opposite of the operator-visible surface #2339 asks for.
+  never stage modules, and the failure would be reachable only by restarting a worker.
 - **Duplicating the name and directories in the contribution, with a test asserting equality.**
   judgment: the test links the copies but nothing stops a reader trusting the wrong one, and a
   diagnostic whose only guarantee of fidelity is a same-repository test is the divergence this
@@ -96,6 +105,20 @@ actionable half of the verdict, so it goes in the prose fields that survive — 
   `src/kdive/providers/local_libvirt/lifecycle/host_tool_search.py` (branch
   `feat/host-tool-resolve-2333`) — a different search set for a different call site, and an
   operator-approved exclusion for #2339.
+- **Sharing `_resolve_depmod` itself, not just the constants.** judgment: the resolver raises a
+  `CategorizedError` whose message is written for a mid-run job failure, and a diagnostic needs a
+  `detail`/`fix` pair, so the check would have to catch the error and re-split its message —
+  coupling the verdict's wording to a job error string. The constants are the part that must not
+  diverge; the one `shutil.which` call each side makes is one line.
+- **One host-tool-search module carrying both this search set and #2333's.** verified: #2333's
+  `PROVIDER_TOOL_SEARCH_DIRS` is `("/usr/bin", "/bin")` — a different set for a different call
+  site — and lives on the unmerged branch `feat/host-tool-resolve-2333`. #2339 must not take a
+  source dependency on an unmerged branch; merging the two sets is for whoever owns both after
+  they land.
+- **Adding `kmod` to `Dockerfile` here so the shipped image passes.** judgment: a runtime package
+  changes what every container deployment installs, and `AGENTS.md` assigns that to the role owning
+  the layer, not to a diagnostics change. Recorded as
+  [debt 0012](../debt/0012-shipped-worker-image-has-no-depmod.md) instead.
 - **Doing nothing.** verified: `rg -n "depmod" src/kdive/diagnostics/` returns nothing on
   `origin/main` at 14f9f462b, so the only report today is the mid-install `MISSING_DEPENDENCY`
   failure, after allocation and boot.
