@@ -110,9 +110,9 @@ absolute path it finds:
 
 `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`
 
-`PATH` is never consulted, and there is no environment variable that changes the list, whose source
-of truth is `_DEPMOD_SEARCH_DIRS` in
-`src/kdive/providers/local_libvirt/lifecycle/boot/guest_kernel_writer.py`.
+`PATH` is never consulted, and there is no environment variable that changes the list.
+[ADR-0631](../adr/0631-no-operator-override-for-depmod-location.md) records that decision and holds
+those four directories as the contract for where a worker host's `depmod` must live.
 
 - **Scope** — worker hosts running the local-libvirt provider, for the host-side `depmod -b` that
   indexes an extracted kernel module tree while staging it into a guest. It applies per
@@ -123,27 +123,30 @@ of truth is `_DEPMOD_SEARCH_DIRS` in
   execute permission as well as presence, so a `depmod` that sits in one of those directories but
   is not executable by the account the worker runs as reads as unresolvable and produces that same
   message: check the mode bits and the mount options before concluding the binary is missing. A
-  binary that resolves and then cannot be run reports the same `missing_dependency` category with a
-  different message — that the resolved binary could not be executed — so read the message rather
-  than the category before concluding `depmod` is absent. Resolution is silent when it succeeds:
-  where a host carried a `depmod` both outside and inside the four directories, the one
-  inside now runs and the outside one is ignored, so a host that relied on a locally built `kmod`
-  or on a wrapper must confirm the binary now selected is the one it wants.
+  binary that resolves but then cannot be executed at all — not an executable format, or exec
+  denied — reports the same `missing_dependency` with a different message, that the resolved binary
+  could not be executed, so read the message rather than the category before concluding `depmod` is
+  absent. Resolution is silent when it succeeds: where a host carried a `depmod` both outside and
+  inside the four directories, the one inside now runs and the outside one is ignored, so a host
+  that relied on a locally built `kmod` or on a wrapper must confirm the binary now selected is the
+  one it wants.
 - **Recovery** — install the distribution's `kmod` package, which places `depmod` in `/usr/sbin`
   under a merged-`/usr` layout and `/sbin` under a split one. For a `depmod` built from source or
-  installed to a non-FHS location, copy the binary into `/usr/sbin`: the first of the four
-  directories holding an executable `depmod` wins, so a copy into a later one is silently shadowed
-  by a packaged binary in an earlier one. It must be executable by the account the worker runs as,
-  on a mount that permits execution. Do not link from one of those directories to a binary under
-  `/usr/local` or another group-writable path:
-  resolution follows the link and the target is what executes, so the link would reinstate the
-  exposure the list excludes. `/usr/local/sbin` and `/usr/local/bin` are left out deliberately:
-  `/usr/local` is group-writable by default on part of the Debian family, and a binary placed
-  there would run with the worker slot account's authority over guest overlays. Repairing the host
-  does not resume the install that already failed — issue the install again once `depmod` resolves.
-  That failure does not drive the System to `failed`, so the allocation survives.
+  installed to a non-FHS location, relocate or symlink it into `/usr/sbin`: the first of the four
+  directories holding an executable `depmod` wins, so putting it in a later one leaves it silently
+  shadowed by a packaged binary in an earlier one. It must be executable by the account the worker
+  runs as, on a mount that permits execution. A symlink is supported and carries one condition:
+  resolution follows the link and the target is what executes, so the target must be root-owned
+  too. A link in `/usr/sbin` pointing into `/usr/local` or another group-writable path satisfies
+  the search and reinstates the exposure the list excludes — `/usr/local/sbin` and
+  `/usr/local/bin` are left out deliberately, because `/usr/local` is group-writable by default on
+  part of the Debian family and a binary placed there would run with the worker slot account's
+  authority over guest overlays. Repairing the host does not resume the install that already
+  failed — issue the install again once `depmod` resolves. That failure does not drive the System
+  to `failed`, so the allocation survives.
 
-An operator whose only `depmod` comes from the distribution package sees no change.
+An operator whose `depmod` comes from the distribution package needs no action: on a worker exec'd
+without a `PATH`, that packaged `depmod` in `/usr/sbin` is what this release makes resolvable.
 
 ## Install paths
 
