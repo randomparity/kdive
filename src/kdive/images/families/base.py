@@ -37,6 +37,11 @@ class CustomizeContext:
         distro: The base-OS distro (e.g. ``fedora`` / ``rocky`` / ``centos-stream``); with
             ``version`` it drives the family's EL-major package and EPEL decisions (#823).
         version: The base-OS release (e.g. ``44`` / ``8`` / ``10``).
+        fadump_capture: The arch's resolved ``fadump_capture`` trait — True where the crash path
+            re-boots the real rootfs and so can run a unit from ``/etc/systemd/system`` (ppc64le
+            fadump), False where the capture kernel stays in its dracut initramfs (x86_64 kdump).
+            Resolved by the caller from ``kdive.domain.platform.arch_traits``, keeping the family
+            free of ``if arch == …`` branches the way ``console_device`` already is.
     """
 
     kind: RootfsImageKind
@@ -45,6 +50,7 @@ class CustomizeContext:
     is_cloud_image: bool
     distro: str
     version: str
+    fadump_capture: bool
 
 
 class FamilyCustomizer(Protocol):

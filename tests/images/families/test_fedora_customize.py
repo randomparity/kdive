@@ -106,6 +106,7 @@ def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
         is_cloud_image=is_cloud_image,
         distro="fedora",
         version="44",
+        fadump_capture=False,
     )
 
 

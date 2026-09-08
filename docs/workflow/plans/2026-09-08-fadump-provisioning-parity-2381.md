@@ -1,5 +1,13 @@
 # fadump provisioning parity — implementation plan (#2381)
 
+> **Point-in-time record.** Review found three defects in the approach below: a control-node
+> `role_path` the remote `virt-customize` cannot read, a flat `/var/crash/vmcore` the harvest's
+> `/var/crash/*/vmcore` glob never matches, and an unconditional install justified by an
+> x86_64 claim that does not hold. What shipped instead — one authoritative unit file, an
+> arch-trait gate, and a boot-ID-scoped `vmcore-incomplete` staging path — is in
+> [the spec](../specs/2026-09-08-fadump-provisioning-parity-2381-design.md). Read that for the
+> current design; the task breakdown here is kept only as the record of what was planned.
+
 ## Goal
 
 Declare the two operator-side fixes the native-POWER fadump proof required in the source code

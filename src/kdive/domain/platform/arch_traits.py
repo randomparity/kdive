@@ -28,6 +28,13 @@ class ArchTraits:
     kvm_cpu_mode: str
     emit_acpi_features: bool
     default_crashkernel: str
+    #: Whether the crash path re-boots the real rootfs, so a unit baked into
+    #: ``/etc/systemd/system`` is reached on the capture boot. True on ppc64le, where firmware
+    #: fadump boots the production kernel with ``/proc/vmcore`` present and kdumpctl cannot
+    #: rebuild the fadump initrd in the kdive-supplied initrd environment, so the image must
+    #: carry its own capture unit (#2381, proved in #2312). False on x86_64, where the kdump
+    #: capture kernel runs entirely inside its dracut initramfs and never mounts that unit.
+    fadump_capture: bool
 
 
 _TRAITS: dict[str, ArchTraits] = {
@@ -38,6 +45,7 @@ _TRAITS: dict[str, ArchTraits] = {
         kvm_cpu_mode="host-passthrough",
         emit_acpi_features=True,
         default_crashkernel="256M",
+        fadump_capture=False,
     ),
     "ppc64le": ArchTraits(
         machine="pseries",
@@ -46,6 +54,7 @@ _TRAITS: dict[str, ArchTraits] = {
         kvm_cpu_mode="host-model",
         emit_acpi_features=False,
         default_crashkernel="512M",
+        fadump_capture=True,
     ),
 }
 

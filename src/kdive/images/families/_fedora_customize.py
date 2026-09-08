@@ -191,34 +191,18 @@ KDUMP_FINAL_ACTION_CMD = (
     "sed -i '/^[[:space:]]*final_action[[:space:]]/d' /etc/kdump.conf && "
     "printf 'final_action poweroff\\n' >> /etc/kdump.conf"
 )
-# fadump capture service: installed on every kdump-capable debug image (Fedora + EL) by the
-# build-fs path (rhel.py kexec-tools block), and on fadump_capture: true images by the Ansible
-# guest_base_image role.  The unit runs makedumpfile directly and powers off; it fires on any
-# crash-kernel boot (fadump or ordinary kdump) because Before=kdump.service wins the ordering race
-# whenever /proc/vmcore exists.  This superseding behavior is intentional: makedumpfile -c -d 31
-# is sufficient without kdumpctl environment setup.
-# Authoritative copy kept in sync with:
-#   deploy/ansible/roles/guest_base_image/files/fadump-capture.service
+# fadump capture service. The unit supersedes kdump.service on the capture-kernel boot
+# (``Before=kdump.service`` + ``ConditionPathExists=/proc/vmcore``) and calls makedumpfile
+# directly, because kdumpctl cannot rebuild the fadump initrd in the kdive-supplied initrd
+# environment. Uploaded from the single authoritative copy in the source tree — the Ansible
+# guest_base_image role uploads that same file, so there is no second copy to keep in sync, and
+# the unit's own header documents the /var/crash layout it owes the host-side harvest.
 # Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
 FADUMP_CAPTURE_SERVICE_PATH = "/etc/systemd/system/fadump-capture.service"
-FADUMP_CAPTURE_SERVICE_CONTENT = (
-    "[Unit]\n"
-    "Description=fadump vmcore capture (kdive)\n"
-    "Documentation=https://github.com/randomparity/kdive\n"
-    "Before=kdump.service\n"
-    "ConditionPathExists=/proc/vmcore\n"
-    "DefaultDependencies=no\n"
-    "After=local-fs.target\n"
-    "\n"
-    "[Service]\n"
-    "Type=oneshot\n"
-    "RemainAfterExit=yes\n"
-    "ExecStart=/bin/bash -c"
-    " 'mkdir -p /var/crash && makedumpfile -c -d 31 /proc/vmcore /var/crash/vmcore"
-    " && poweroff -f'\n"
-    "\n"
-    "[Install]\n"
-    "WantedBy=basic.target\n"
+FADUMP_CAPTURE_UNIT_REPO_RELPATH = (
+    "deploy",
+    "remote-libvirt-guest-helpers",
+    "fadump-capture.service",
 )
 # The live ``introspect.run`` path (ADR-0219) SSH-execs this fixed-argv in-guest helper; the debug
 # image must carry the repo's reviewed reference implementation, made read-executable. ``build-fs``
@@ -255,6 +239,40 @@ def drgn_helper_steps() -> list[Step]:
             details={"helper": str(helper)},
         )
     return [UploadFile(helper, DRGN_HELPER_GUEST_PATH, mode="0755")]
+
+
+def fadump_capture_unit_source() -> Path:
+    """Resolve the one authoritative ``fadump-capture.service`` unit from the source tree."""
+    return Path(__file__).parents[4].joinpath(*FADUMP_CAPTURE_UNIT_REPO_RELPATH)
+
+
+def fadump_capture_steps() -> list[Step]:
+    """Stage and enable the fadump capture unit (#2381, proved in #2312).
+
+    Returns the steps that upload the unit ``0644`` and enable it. Emitted only for an arch whose
+    ``fadump_capture`` trait is set: on ppc64le fadump the production kernel re-boots the real
+    rootfs with ``/proc/vmcore`` present, so a unit in ``/etc/systemd/system`` is reached. An
+    x86_64 kdump capture kernel never leaves its dracut initramfs, so the same unit would never be
+    loaded there — installing it would be inert rather than harmful, but it would also be a
+    declaration the image cannot honor.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if the unit is not a readable file in the source
+            tree — fail loud here rather than ship a fadump-capable image whose capture kernel has
+            no capture unit, which surfaces only as an empty ``/var/crash`` after a live crash.
+    """
+    unit = fadump_capture_unit_source()
+    if not unit.is_file():
+        raise CategorizedError(
+            "the fadump-capture.service unit is missing from the source tree; cannot build a "
+            "fadump-capable rootfs that can capture a vmcore",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"unit": str(unit)},
+        )
+    return [
+        UploadFile(unit, FADUMP_CAPTURE_SERVICE_PATH, mode="0644"),
+        RunCommand("systemctl enable fadump-capture.service"),
+    ]
 
 
 def makedumpfile_version_marker_steps() -> list[Step]:
