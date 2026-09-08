@@ -9,7 +9,9 @@ appliance, which fails for a ppc64le module tree under an x86_64 appliance (``Ex
 
 from __future__ import annotations
 
+import errno
 import io
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -171,8 +173,22 @@ def test_index_modules_tar_fails_when_depmod_produces_no_dep(tmp_path: Path) -> 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_run_host_depmod_zero_exit_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_which(monkeypatch: pytest.MonkeyPatch, resolved: str | None) -> dict[str, object]:
+    """Point the fixed-list lookup at ``resolved``, capturing the name and search path it used."""
     captured: dict[str, object] = {}
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        captured["which"] = (name, path)
+        return resolved
+
+    monkeypatch.setattr(gkw.shutil, "which", fake_which)
+    return captured
+
+
+def test_run_host_depmod_runs_the_resolved_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_which(monkeypatch, "/usr/sbin/depmod")
 
     def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         captured["args"] = args
@@ -180,25 +196,91 @@ def test_run_host_depmod_zero_exit_passes(tmp_path: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(gkw.subprocess, "run", fake_run)
     gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
-    # depmod is pointed at the extracted tree with -b, not run against the host's own /lib/modules.
-    assert captured["args"] == ["depmod", "-b", str(tmp_path), _VERSION]
+    # The absolute path, never the bare name: the systemd worker gate execs without PATH, so a
+    # bare name resolves through os.defpath (/bin:/usr/bin), which omits /usr/sbin (#2300).
+    assert captured["args"] == ["/usr/sbin/depmod", "-b", str(tmp_path), _VERSION]
+    # The search is restricted to the fixed host-tool list, not the inherited environment, and
+    # every directory in it is root-owned, so no non-root principal can choose what the worker
+    # slot account executes here.
+    assert captured["which"] == (
+        "depmod",
+        "/usr/sbin:/usr/bin:/sbin:/bin",
+    )
 
 
-def test_run_host_depmod_missing_binary_is_missing_dependency(
+def test_run_host_depmod_unresolvable_names_searched_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def raise_fnf(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise FileNotFoundError("depmod")
-
-    monkeypatch.setattr(gkw.subprocess, "run", raise_fnf)
+    _stub_which(monkeypatch, None)
     with pytest.raises(CategorizedError) as exc:
         gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    # The searched set is in the envelope so the failure is diagnosable without host access, and
+    # it is a scalar because jobs/worker.py::_safe_detail drops a list before the operator sees it.
+    searched = exc.value.details.get("searched")
+    assert isinstance(searched, str)
+    assert searched == "/usr/sbin:/usr/bin:/sbin:/bin"
+    # The directories are in the message too, not only in details: failure_message is the one
+    # field every failure surface forwards, so an operator reading only that must still see where
+    # the worker looked rather than a bare "install kmod" — the #2300 defect.
+    assert searched in str(exc.value)
+    assert "kmod" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_errno"), [("vanished", errno.ENOENT), ("wrong-format", errno.ENOEXEC)]
+)
+def test_unexecutable_depmod_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, expected_errno: int
+) -> None:
+    if kind == "vanished":
+        # Resolved and then removed before the exec: the window which()-then-run() opens.
+        resolved = str(tmp_path / "gone")
+    else:
+        # A mode-0755 file with no shebang: execve fails ENOEXEC, which CPython raises as a bare
+        # OSError rather than FileNotFoundError, so catching only the latter lets it escape the
+        # envelope uncategorized.
+        script = tmp_path / "not-elf"
+        script.write_text("not an executable\n")
+        script.chmod(0o755)
+        resolved = str(script)
+    _stub_which(monkeypatch, resolved)
+    with pytest.raises(CategorizedError) as exc:
+        gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
+    # Non-retryable, matching the disposition a missing depmod has always had, so the job
+    # dead-letters instead of retrying a binary that will not become executable.
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert exc.value.details.get("depmod") == resolved
+    # errno rides along on both OSError branches, so ENOEXEC stays distinguishable from ENOENT
+    # instead of collapsing into a bare "OSError".
+    assert exc.value.details.get("errno") == expected_errno
+
+
+@pytest.mark.parametrize("spawn_errno", [errno.EMFILE, errno.EAGAIN, errno.ENOMEM])
+def test_spawn_pressure_stays_retryable_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_errno: int
+) -> None:
+    # subprocess.run raises OSError from pipe creation and fork too, not only from the exec. A
+    # worker host short of descriptors or processes must not have an in-flight install
+    # dead-lettered as a missing dependency — MISSING_DEPENDENCY is non-retryable, so catching
+    # OSError wholesale would turn "retry me" into "your depmod is broken".
+    _stub_which(monkeypatch, "/usr/sbin/depmod")
+
+    def raise_spawn_failure(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError(spawn_errno, os.strerror(spawn_errno))
+
+    monkeypatch.setattr(gkw.subprocess, "run", raise_spawn_failure)
+    with pytest.raises(CategorizedError) as exc:
+        gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details.get("errno") == spawn_errno
 
 
 def test_run_host_depmod_nonzero_surfaces_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _stub_which(monkeypatch, "/usr/sbin/depmod")
+
     def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args, returncode=1, stdout="", stderr="depmod: ERROR: bad module signature"
