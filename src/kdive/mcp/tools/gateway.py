@@ -64,9 +64,14 @@ _NAME_LEN_MAX = 128
 
 
 class SearchDetail(StrEnum):
-    """How much per-match metadata ``tools.search`` returns (ADR-0472)."""
+    """How much per-match metadata ``tools.search`` returns (ADR-0472, ADR-0632).
+
+    Declared in increasing order of cost. Each tier's key set is a superset of the tier
+    below it, so asking for more detail never drops a key (ADR-0632 §2).
+    """
 
     SUMMARY = "summary"
+    PARAMETERS = "parameters"
     FULL = "full"
 
 
@@ -236,19 +241,74 @@ def _summarize(description: str | None) -> str:
     return " ".join((description or "").strip().split("\n\n", 1)[0].split())
 
 
+def _type_name(schema: object, *, depth: int = 0) -> str:
+    """Render one schema property's type as a display string (ADR-0632 §1).
+
+    Not a schema grammar: the result is for an agent deciding what to pass, and
+    ``input_schema`` remains the machine contract. The depth bound is reused from the term
+    walk above — the recursion is over server-authored schemas, and the bound is what keeps a
+    cyclic or pathological one from recursing without end.
+    """
+    if not isinstance(schema, dict) or depth > _SCHEMA_DEPTH_LIMIT:
+        return "unknown"
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        return ref.rsplit("/", 1)[-1]
+    for union_key in ("anyOf", "oneOf"):
+        members = schema.get(union_key)
+        # Non-empty only: an empty list carries no members to render, so fall through to the
+        # checks below rather than returning an empty string.
+        if isinstance(members, list) and members:
+            rendered = dict.fromkeys(_type_name(m, depth=depth + 1) for m in members)
+            return "|".join(rendered)
+    raw = schema.get("type")
+    # Non-empty only, as above: an empty list falls through to the "unknown" return.
+    if isinstance(raw, list) and raw:
+        return "|".join(str(entry) for entry in raw)
+    if isinstance(raw, str):
+        if raw == "array":
+            return f"array[{_type_name(schema.get('items'), depth=depth + 1)}]"
+        return raw
+    return "unknown"
+
+
+def _parameter_digest(parameters: object) -> list[JsonValue]:
+    """The ordered ``name``/``type``/``required`` argument list for a schema (ADR-0632 §1).
+
+    Entries keep the schema's own property order, which is the tool's declaration order, so
+    the list reads as the signature rather than as an alphabetised set.
+    """
+    if not isinstance(parameters, dict):
+        return []
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    raw_required = parameters.get("required")
+    required = set(raw_required) if isinstance(raw_required, list) else set()
+    return cast(
+        "list[JsonValue]",
+        [
+            {"name": str(name), "type": _type_name(schema), "required": str(name) in required}
+            for name, schema in properties.items()
+        ],
+    )
+
+
 def describe_tool(
     tool: Tool, kinds: frozenset[ResourceKind] | None, *, detail: SearchDetail
 ) -> dict[str, JsonValue]:
-    """Serialise a Tool into the ``tools.search`` match shape (ADR-0472).
+    """Serialise a Tool into the ``tools.search`` match shape (ADR-0472, ADR-0632).
 
-    Both modes carry ``name``, ``summary``, ``annotations``, and ``maturity``, so a match is
-    always classifiable for safety. ``SearchDetail.FULL`` adds the complete ``description``
-    and the ``input_schema``, narrowed to the composed ``kinds`` (ADR-0269).
+    Every tier carries ``name``, ``summary``, ``annotations``, and ``maturity``, so a match is
+    always classifiable for safety. ``SearchDetail.PARAMETERS`` adds ``parameters``, the
+    ordered argument list. ``SearchDetail.FULL`` carries that same key plus the complete
+    ``description`` and the ``input_schema``, so the tiers stay monotone (ADR-0632 §2). Both
+    keys past the summary tier read the schema narrowed to the composed ``kinds`` (ADR-0269).
 
     Args:
         tool: The registered tool to describe.
         kinds: Provider resource kinds to narrow the schema to, or None to pass it through.
-        detail: Whether to include the complete description and the input schema.
+        detail: Which tier to serialise.
     """
     annotations = {}
     raw_annotations = getattr(tool, "annotations", None)
@@ -261,9 +321,14 @@ def describe_tool(
         "annotations": annotations,
         "maturity": meta.get("maturity"),
     }
-    if detail is SearchDetail.FULL:
-        described["description"] = tool.description or ""
-        described["input_schema"] = _project_or_passthrough(tool, kinds).parameters
+    if detail is not SearchDetail.SUMMARY:
+        # One projection for both keys: `full` already paid for this call, and the digest has
+        # to read the same schema `input_schema` reports.
+        projected = _project_or_passthrough(tool, kinds).parameters
+        described["parameters"] = _parameter_digest(projected)
+        if detail is SearchDetail.FULL:
+            described["description"] = tool.description or ""
+            described["input_schema"] = projected
     return cast("dict[str, JsonValue]", described)
 
 
@@ -460,12 +525,19 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
             SearchDetail,
             Field(
                 description=(
-                    "How much per-match metadata to return. 'summary' (the default) returns "
-                    "name, summary, annotations, and maturity — enough to choose a tool and "
-                    "judge its safety tier. 'full' additionally returns the complete "
-                    "description and the input_schema you need to build arguments; it is "
-                    "several times larger per match, so narrow the query or the limit first. "
-                    "'names' mode always returns full detail whatever you pass here."
+                    "How much per-match metadata to return, cheapest first. 'summary' (the "
+                    "default) returns name, summary, annotations, and maturity — enough to "
+                    "choose a tool and judge its safety tier. 'parameters' adds the argument "
+                    "list: each parameter's name, type, and whether it is required, at under "
+                    "a third of the schema's size for a typical tool. 'full' adds the complete "
+                    "description and the input_schema on top of that. Each tier is a superset "
+                    "of the one before it, so asking for more never drops a key. Two limits "
+                    "on 'parameters': it gives argument names and types but not their value "
+                    "constraints, so a parameter with an enum or a pattern still needs 'full'; "
+                    "and for a tool whose only argument is a payload object (17 tools, most of "
+                    "the .list family among them) it returns one entry naming that object, "
+                    "where 'full' is the call to make instead. 'names' mode always returns "
+                    "full detail whatever you pass here."
                 )
             ),
         ] = SearchDetail.SUMMARY,
@@ -490,10 +562,13 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
           sorted by name. Use this as a safety net when a query misses.
 
         Results are RBAC-filtered to only tools the caller could invoke. Search broadly first,
-        then fetch one schema: ``tools.search(query="runs.boot", detail="full", limit=1)``
-        returns exactly that tool with the ``input_schema`` ``tools.invoke`` needs. Every match
-        carries ``annotations`` and ``maturity`` in both modes, so you can always classify a
-        tool's safety tier before invoking it.
+        then fetch one tool: ``tools.search(query="runs.boot", detail="full", limit=1)``
+        returns exactly that tool with the ``input_schema`` ``tools.invoke`` needs. Where you
+        only need to know what arguments to pass, ``detail="parameters"`` answers that for a
+        fraction of the bytes — it returns each parameter's name, type, and required flag, and
+        ``detail`` is described in full on that parameter. Every match carries ``annotations``
+        and ``maturity`` at every tier, so you can always classify a tool's safety tier before
+        invoking it.
 
         ``truncated: true`` signals that more results exist beyond the returned ``limit``.
 

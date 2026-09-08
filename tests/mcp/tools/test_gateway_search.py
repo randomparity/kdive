@@ -7,6 +7,8 @@ Coverage:
 * RBAC filters: admin-only tools do not appear for a viewer-role caller.
 * Matches are summaries by default; ``detail="full"`` restores the ``input_schema``
   and the complete description so ``tools.invoke`` can be called (ADR-0472).
+* ``detail="parameters"`` returns the argument list — each parameter's name, type, and
+  required flag — and ``full`` carries that key too, so the tiers stay monotone (ADR-0632).
 * An exact tool-name query ranks that tool first, so a one-tool schema fetch is
   deterministic (ADR-0472).
 * Namespace mode distinguishes an unauthorized plane from a nonexistent one (ADR-0472).
@@ -17,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -910,6 +912,7 @@ def test_detail_full_adds_schema_and_complete_description(
             "summary",
             "annotations",
             "maturity",
+            "parameters",
             "description",
             "input_schema",
         }, f"unexpected full match keys for {match.get('name')}: {sorted(match)}"
@@ -1101,11 +1104,12 @@ def test_names_mode_is_rbac_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "control.force_crash" not in json.dumps(content["data"]["matches"])
 
 
-def test_names_mode_ignores_summary_detail(monkeypatch: pytest.MonkeyPatch) -> None:
-    """names= overrides detail='summary': the schema is the point of the mode."""
+@pytest.mark.parametrize("detail", ["summary", "parameters"])
+def test_names_mode_ignores_summary_detail(monkeypatch: pytest.MonkeyPatch, detail: str) -> None:
+    """names= overrides any cheaper detail tier: the schema is the point of the mode."""
     app = _build(monkeypatch, _operator_ctx)
 
-    content = _search(app, {"names": ["runs.get"], "detail": "summary"})
+    content = _search(app, {"names": ["runs.get"], "detail": detail})
 
     match = content["data"]["matches"][0]
     assert "input_schema" in match
@@ -1285,3 +1289,147 @@ def test_query_miss_log_bounds_the_caller_query(
     assert record.__dict__["query"] == at_bound, (
         "a query exactly at the bound is logged whole, with no marker"
     )
+
+
+# ---------------------------------------------------------------------------
+# The middle `parameters` detail tier (ADR-0632, #2341)
+# ---------------------------------------------------------------------------
+
+
+class _StubTool:
+    """A minimal Tool stand-in for exercising describe_tool's rendering directly.
+
+    No ``model_copy``: both callers below pass ``kinds=None``, so ``describe_tool`` passes the
+    schema through rather than projecting it.
+    """
+
+    def __init__(self, name: str, parameters: dict[str, Any]) -> None:
+        self.name = name
+        self.description = f"{name} does a thing.\n\nA second paragraph."
+        self.parameters = parameters
+
+
+def test_parameters_tier_returns_the_argument_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """detail='parameters' adds exactly one key to the summary set."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "boot a built kernel", "detail": "parameters"})
+
+    matches = content["data"]["matches"]
+    assert matches, "expected at least one match"
+    for match in matches:
+        assert set(match) == {"name", "summary", "annotations", "maturity", "parameters"}, (
+            f"unexpected parameters-tier keys for {match.get('name')}: {sorted(match)}"
+        )
+        for entry in match["parameters"]:
+            assert set(entry) == {"name", "type", "required"}, f"unexpected entry keys: {entry}"
+
+
+def test_parameters_entries_follow_declaration_order_and_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entries keep the schema's property order and mark exactly the required ones.
+
+    ``runs.install`` declares run_id, cmdline, crashkernel, idempotency_key in that order and
+    requires only run_id, so an alphabetised or set-ordered list cannot pass here.
+    """
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "runs.install", "detail": "parameters", "limit": 1})
+
+    match = content["data"]["matches"][0]
+    assert match["name"] == "runs.install"
+    entries = match["parameters"]
+    assert [e["name"] for e in entries] == [
+        "run_id",
+        "cmdline",
+        "crashkernel",
+        "idempotency_key",
+    ]
+    assert [e["name"] for e in entries if e["required"]] == ["run_id"]
+    assert entries[0]["type"] == "string"
+    assert entries[1]["type"] == "string|null"
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        ({"type": "string"}, "string"),
+        ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "string|null"),
+        ({"type": "array", "items": {"type": "string"}}, "array[string]"),
+        ({"$ref": "#/$defs/SearchDetail"}, "SearchDetail"),
+        ({"description": "no type at all"}, "unknown"),
+        ({"anyOf": [{"type": "string"}, {"type": "string"}]}, "string"),
+        ({"type": ["string", "null"]}, "string|null"),
+    ],
+    ids=["plain", "union", "array", "ref", "unknown", "union-dedup", "type-list"],
+)
+def test_type_rendering_covers_each_schema_shape(schema: dict[str, Any], expected: str) -> None:
+    """Each documented schema shape renders its stated display string."""
+    from kdive.mcp.tools.gateway import SearchDetail, describe_tool
+
+    tool = _StubTool("stub.tool", {"properties": {"p": schema}, "required": []})
+    described = describe_tool(
+        tool,  # ty: ignore[invalid-argument-type]
+        None,
+        detail=SearchDetail.PARAMETERS,
+    )
+
+    entries = cast("list[dict[str, Any]]", described["parameters"])
+    assert entries == [{"name": "p", "type": expected, "required": False}]
+
+
+def test_parameters_tier_handles_a_tool_with_no_parameters() -> None:
+    """A tool with no properties yields an empty list, not a missing key."""
+    from kdive.mcp.tools.gateway import SearchDetail, describe_tool
+
+    tool = _StubTool("stub.noargs", {"type": "object"})
+    described = describe_tool(
+        tool,  # ty: ignore[invalid-argument-type]
+        None,
+        detail=SearchDetail.PARAMETERS,
+    )
+
+    assert described["parameters"] == []
+
+
+def test_full_tier_still_carries_parameters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tiers are monotone: stepping up to full never drops the parameters key."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    query = {"query": "runs.install", "limit": 1}
+    mid = _search(app, {**query, "detail": "parameters"})["data"]["matches"][0]
+    full = _search(app, {**query, "detail": "full"})["data"]["matches"][0]
+
+    assert set(mid) < set(full), "parameters-tier keys must be a strict subset of full's"
+    assert full["parameters"] == mid["parameters"], (
+        "the same key must carry the same value in both tiers"
+    )
+
+
+def test_no_live_tool_renders_an_unknown_parameter_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No registered tool's schema reaches ``_type_name``'s ``unknown`` fallback.
+
+    ADR-0632 records that the fallback is defensive and that no live property reaches it.
+    That claim is otherwise unguarded: a dependency upgrade that changed the emitted schema
+    shape — pydantic wrapping a ``$ref`` in ``allOf``, say — would start advertising
+    ``unknown`` to agents with the whole suite still green.
+    """
+    from kdive.mcp.tools.gateway import _parameter_digest
+
+    app = _build(monkeypatch, _every_scope_ctx)
+
+    rendered: list[str] = []
+    offenders: list[str] = []
+    for tool in registered_tools(app):
+        for entry in cast("list[dict[str, Any]]", _parameter_digest(tool.parameters)):
+            rendered.append(entry["type"])
+            if entry["type"] == "unknown":
+                offenders.append(f"{tool.name}.{entry['name']}")
+
+    # Without this the assertion below passes vacuously on an empty registry walk, which is
+    # exactly how this guard would stop biting without anyone noticing.
+    assert len(rendered) > 200, f"expected the live catalogue's properties, walked {len(rendered)}"
+    assert not offenders, f"parameters tier renders an unknown type for: {offenders}"
