@@ -28,7 +28,7 @@ Start with [installation and run modes](operating/install.md), then choose a pro
 
 - [Local-libvirt walkthrough](operating/providers/local-libvirt-walkthrough.md): run KDIVE
   as host processes on a Linux KVM/libvirt host.
-- [Remote-libvirt walkthrough](operating/providers/remote-libvirt-walkthrough.md): prepare
+- [Remote-libvirt setup](operating/providers/remote-libvirt.md): prepare
   a separate libvirt host and connect it to the control plane.
 
 The [operating index](operating/index.md) maps deployment, project onboarding, maintenance,

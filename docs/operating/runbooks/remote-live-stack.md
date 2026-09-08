@@ -1,6 +1,6 @@
 # Runbook: remote live-stack end-to-end bring-up
 
-Operator guide for driving the kdive spine against a **genuinely remote** `qemu+tls://`
+Operator guide for driving the kdive spine against a remote `qemu+tls://`
 libvirt/QEMU host the server/worker tier does not share a filesystem with. It mirrors the
 [local live-stack runbook](live-stack.md) and runs the same `live_stack` suite
 (`tests/integration/test_remote_live_stack.py`), but adds what a remote host needs over the
@@ -13,13 +13,15 @@ two-phase KDUMP capture). The design is in
 [the spec](../../archive/superpowers/specs/2026-06-09-remote-live-stack-e2e-207.md).
 
 This is **operator-run, not CI**: the suite is `live_stack`-marked and CI deselects it. The
-preflight skips cleanly unless the inventory-backed remote provider config and every live-stack
-prerequisite below are present, so `just test-live-stack` is safe to run on any host.
+preflight skips when remote inventory, the base-volume test input, or the required stack
+services are absent. With those inputs present, the tests allocate Systems and intentionally
+crash guests; use a disposable test deployment. A preflight pass does not validate image contents
+or the built kernel tree.
 
 ## Prerequisites
 
 - A reachable libvirt/QEMU host exporting `qemu+tls://…/system`, with x509 mutual TLS configured
-  on `libvirtd` (server cert signed by a CA the worker trusts; `no_verify` is forbidden).
+  on `libvirtd` or `virtproxyd` (server cert signed by a CA the worker trusts; `no_verify` is forbidden).
 - An **operator-staged base-OS qcow2 volume** on the remote host's storage pool, carrying:
   qemu-guest-agent (enabled), a kdump-capable base OS, `drgn`, and a matching
   `vmlinux`/debuginfo. Provisioning verifies the volume **exists**, not its contents — these
@@ -29,6 +31,10 @@ prerequisite below are present, so `just test-live-stack` is safe to run on any 
   steps 1–4. The remote variant changes only the **target** of provisioning, not the control
   plane.
 - The repo set up (`just setup`).
+- An already-built **x86_64** kernel tree at `KDIVE_KERNEL_SRC` on the test client, including
+  the boot image, modules, and unstripped `vmlinux` with a GNU build ID. The tests package and
+  upload these artifacts; they do not compile the kernel. See the
+  [build and upload guide](../external-build-upload.md).
 
 ## 1. Worker → host TLS reachability
 
@@ -43,9 +49,9 @@ lives in a `[[remote_libvirt]]` instance in the `systems.toml` inventory (ADR-01
 [[remote_libvirt]]
 name = "host"
 uri = "qemu+tls://host.example/system"          # control transport
-gdb_addr = "10.0.0.5"                            # ACL'd gdbstub listen address (see §2)
+gdb_addr = "192.0.2.10"                            # ACL'd gdbstub listen address (see §2)
 gdbstub_range = "47000:47099"                    # per-System port range
-ssh_addr = "10.0.0.5"                            # optional: ACL'd SSH-forward addr (see §2.1)
+ssh_addr = "192.0.2.10"                            # optional: ACL'd SSH-forward addr (see §2.1)
 ssh_range = "47200:47299"                        # optional: per-System SSH-forward port range
 client_cert_ref = "clientcert.pem"               # mutual-TLS client cert (SecretBackend ref)
 client_key_ref = "clientkey.pem"                 # mutual-TLS client key  <!-- pragma: allowlist secret -->
@@ -76,7 +82,7 @@ port — `qemu+tls://` does not tunnel it. The gdbstub is unauthenticated and un
 unreachable by other tenants/guests. Each running System gets a distinct port the provisioning
 profile allocates and records in the domain XML; the Connect port reads it back.
 
-The `[[remote_libvirt]]` instance's `gdb_addr` is the ACL'd listen address (e.g. `10.0.0.5`) — the
+The `[[remote_libvirt]]` instance's `gdb_addr` is the ACL'd listen address (e.g. `192.0.2.10`) — the
 security boundary — and `gdbstub_range` (e.g. `47000:47099`) is the per-System port range. Both
 are required instance fields.
 
@@ -103,23 +109,18 @@ bootstrap key over the guest agent at provision, so `systems.ssh_info` returns a
 
 ## 3. Object-store reachability for the presigned PUT
 
-The object store is the only bulk artifact channel. The kernel flows **to** the target via a
-presigned **GET** the target pulls in-guest; the vmcore flows **back** in two phases (ADR-0084):
-on crash, kdump writes the core to the guest's local dump storage; on the **next normal boot**
-the in-guest agent uploads it to a presigned **PUT** URL whose lifetime covers the
-crash→reboot→upload window. So the **guest** (not just the worker) must reach the object-store
-endpoint. No standing object-store credential lives in any guest — every URL is time-boxed and
-scoped to a single object — and no host-side agent is deployed.
-
-Ensure the guest's network can reach `KDIVE_S3_ENDPOINT_URL` (the same value the host processes
-use, from the local runbook). If the guest cannot reach it, the capture phase fails at the
-in-guest upload with an `infrastructure_failure`.
+The guest downloads the installed kernel with a presigned GET and uploads a kdump vmcore
+with a presigned PUT. It must reach the endpoint embedded in those URLs, not only the worker.
+Follow the [host setup's object-store reachability requirements](remote-libvirt-host-setup.md#7-register-remote-libvirt-on-the-deployment),
+including the loopback restriction and guest-to-store firewall route. No standing object-store
+credential is installed in the guest.
 
 ## 4. The base-image volume (a test/runbook input)
 
 The operator-staged qcow2 base volume is declared as a `staged` `[[image]]` in `systems.toml` and
-referenced by the `[[remote_libvirt]]` instance's `base_image` field (ADR-0112); the spine feeds
-it into the provision profile's `base_image_volume`.
+referenced by the `[[remote_libvirt]]` instance's `base_image` field (ADR-0112). The test also
+requires `KDIVE_REMOTE_BASE_IMAGE_VOLUME`; it passes this value directly as the provision
+profile's `base_image_volume`. Set it to the same storage-pool volume:
 
 ```toml
 [[image]]
@@ -134,6 +135,10 @@ kind = "staged"
 volume = "kdive-base-fedora.qcow2"   # the operator-staged libvirt volume name
 ```
 
+```sh
+export KDIVE_REMOTE_BASE_IMAGE_VOLUME=kdive-base-fedora.qcow2
+```
+
 ## 5. Run the suite
 
 ```bash
@@ -142,7 +147,7 @@ just test-live-stack
 
 This runs `pytest -m live_stack`, which now collects both the local
 (`test_live_stack.py`) and the remote (`test_remote_live_stack.py`) spines. The remote spine
-drives allocate(`remote-libvirt`) → provision(disk-image) → build → install → boot →
+drives allocate(`remote-libvirt`) → provision(disk-image) → upload external build → install → boot →
 attach(gdb-MI direct TCP) → force-crash → two-phase KDUMP capture →
 introspect(`from_vmcore`) → release → reconciler teardown → accounting report, each step under a
 per-project role token.
@@ -163,9 +168,9 @@ Three operational notes:
   dir (`KDIVE_ARTIFACT_DIR`, or an out-of-tree temp default) — attach it as the record that the
   remote spine completed end-to-end.
 
-## 6. Four-method capture capstone (M2.5)
+## 6. Four-method capture capstone
 
-At the M2.5 exit the remote provider advertises four capture methods —
+The remote provider advertises four capture methods —
 `{console, host_dump, gdbstub, kdump}` — pinned by the drift guard in
 `tests/scripts/test_provider_capture_coverage.py`. The capstone exercise
 (`test_remote_four_method_capture_over_the_wire`) proves all four against the live remote spine.
@@ -195,26 +200,3 @@ Operator notes:
   leg additionally waits out the guest's crash→reboot→upload window.
 - **Record.** Attach the run log (the per-phase names identify any failing leg) as the recorded
   evidence that the remote spine reached 4/4.
-
-## `#198` disposition (M2.5 exit)
-
-**Local-libvirt is not deprecated.** With remote at 4/4, [#198](https://github.com/randomparity/kdive/issues/198)
-is reframed from "deprecate local" to the narrower **production default vs. opt-in
-dev/CI/reference provider** distinction. Local stays the in-tree default; remote is the opt-in
-production provider (gated on a declared `[[remote_libvirt]]` instance). The two providers' advertised capture
-sets are such that **neither contains the other**: remote adds `console` and `gdbstub`, while
-ADR-0208 narrowed local to the core-producing methods it can actually fetch a vmcore for, and
-ADR-0349 added `fadump`, which remote does not advertise. That two-way asymmetry — pinned by the
-`tests/scripts/test_provider_capture_coverage.py` drift guard against the real `build_*_runtime`
-sets — is the structural reason the two providers stay complementary rather than one
-superseding the other. `#198` stays **open**; its final disposition (keep-default vs. reclassify-as-opt-in) is
-decided post-parity, informed by this capstone.
-
-## Non-goals
-
-In-guest drgn-**live** MCP routing is a deferred follow-up (#215). The remote spine's introspect
-phase uses the **worker-side** vmcore postmortem (`introspect.from_vmcore`), which fetches the
-core from the object store and runs the report on the worker — no live in-guest reachability
-needed. That the remote provider added no provider-specific logic to core or `mcp/tools/*` was
-the ADR-0076 portability hypothesis; it held, and ADR-0543 records the verdict and retires the
-diff gate that measured it.

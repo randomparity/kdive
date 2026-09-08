@@ -1,58 +1,47 @@
-# remote-libvirt provider
+# Remote-libvirt provider
 
-The remote-libvirt provider drives QEMU/KVM guests on a separate target host over a
-TLS-secured libvirt connection, so the worker and the guests run on different machines.
+The remote-libvirt provider runs QEMU/KVM guests on a separate Linux host. The KDIVE worker
+connects over mutually authenticated libvirt TLS; it needs no local KVM. Remote-libvirt is
+opt-in through a `[[remote_libvirt]]` instance in the `systems.toml` inventory.
 
-> Setting up from scratch? See the [remote-libvirt walkthrough](remote-libvirt-walkthrough.md).
+## Setup path
 
-## What it needs
+1. [Prepare the target host](../runbooks/remote-libvirt-host-setup.md): configure virtualization,
+   TLS, storage, firewall rules, and the base guest image.
+2. Choose a control plane: the [Helm deployment runbook](../runbooks/kubernetes-deploy.md) covers
+   Kubernetes; the [live-stack runbook](../runbooks/live-stack.md) covers host processes for tests.
+3. [Register the target](../runbooks/remote-libvirt-host-setup.md#7-register-remote-libvirt-on-the-deployment)
+   through the inventory and mount the TLS secret files on the worker.
+4. [Onboard the project](../project-onboarding.md) with a budget and quota.
+5. For the host-process test stack, run the [remote lifecycle tests](../runbooks/remote-live-stack.md).
+   These tests intentionally crash disposable guests.
 
-- **TLS PKI.** libvirt's TLS transport authenticates both ends with X.509 certificates. The
-  target host serves a CA, server cert, and key; the worker presents a client cert the CA
-  signed. The connection URI is the TLS form (for example `qemu+tls://HOST/system`).
-- **virtproxyd.** The target runs the modular libvirt proxy daemon listening on the TLS
-  port (16514) and forwards to the QEMU driver. The host firewall must permit that port
-  from the worker.
-- **Guest helpers.** Remote build, install, capture, and in-target artifact transfer use a
-  guest agent and a small set of allowlisted in-guest helpers; the base guest image must
-  ship them (and the tools they call, such as `tar`, with an SELinux policy that does not
-  confine the agent).
+The [configuration reference](../../guide/reference/config.md) owns runtime settings. The
+host-setup runbook owns inventory examples and secret mounting instructions.
 
-All connection settings — the TLS URI, the gdbstub address, credentials — are in
-[the config reference](../../guide/reference/config.md).
+## Connection and image requirements
 
-## Preflight
+- **Mutual TLS:** the host presents a server certificate, and the worker presents a client
+  certificate, both verified against their trusted CA. Use a `qemu+tls://HOST/system` URI.
+  Distribute the CA certificate to the worker; keep the CA signing key outside the runtime.
+- **Libvirt listener:** the target exposes its TLS listener, usually port 16514, through
+  `libvirtd` or the modular `virtproxyd` daemon. Permit connections from the worker.
+- **Debug and optional SSH access:** these use separate ports, outside the TLS connection.
+  Follow the [remote stack's firewall requirements](../runbooks/remote-live-stack.md#2-the-gdbstub-port-acl).
+- **Guest image:** enable qemu-guest-agent and install the allowlisted helpers for kernel
+  installation, capture, and artifact transfer. The [host setup procedure](../runbooks/remote-libvirt-host-setup.md)
+  covers their packages and guest policy. Kernel compilation happens outside KDIVE;
+  follow the [external-build upload guide](../external-build-upload.md).
+- **Object store:** the guest must reach the endpoint used in presigned kernel-download and
+  vmcore-upload URLs. Worker-only reachability is insufficient.
 
-Check that the provider can reach a target before the first run:
+## Preflight and CPU expectations
 
-```bash
-just check-remote-libvirt HOST USER URI
-```
+From a checkout on the connecting host, run `just check-remote-libvirt HOST USER URI`. It checks
+SSH, local PKI/helper files, and a libvirt connection; it does not verify helpers inside a guest
+or prove the debug-port ACL. The SSH probe accepts new host keys into the local known-hosts file.
 
-The preflight reports reachability and TLS problems without changing either host.
-
-## Host setup
-
-The [remote-libvirt host setup runbook](../runbooks/remote-libvirt-host-setup.md) covers
-provisioning a target host end to end: the PKI, virtproxyd, the firewall ACL, and the guest
-image with its helpers.
-
-## Guest CPU advertisement
-
-Remote guests run with a `host-model` CPU (ADR-0297), so the guest ISA tracks the host each
-domain lands on. To make that visible before selection, discovery advertises each host's expected
-guest CPU as `host_cpu` on `resources.describe` — `{model, vendor, arch, baseline_level}`, where
-`baseline_level` is a normalized `x86-64-vN` level (ADR-0368). The CPU a specific System was minted
-against is echoed on `systems.get` as `resolved_cpu`.
-
-Two operational notes:
-
-- **Re-register to populate it.** The capabilities row refreshes only on registration, the same as
-  `vcpus`/`memory_mb`. A host registered before this feature shipped shows no `host_cpu` until it is
-  re-registered (`setup-remote-libvirt` / the reconcile pass over the config overlay); until then
-  `resources.describe` omits the field and a new System's `resolved_cpu` is null. This is expected —
-  the field degrades to absent, never to a wrong value.
-- **It is a registration-time snapshot.** If a host's CPU, microcode, or libvirt changes, re-register
-  the host so the advertised `host_cpu` tracks it. `baseline_level` is advisory: a present level is a
-  nominal upper bound, not a guaranteed floor, so confirm a hard instruction-set requirement against
-  the running guest.
+Remote guests use a `host-model` CPU (ADR-0297). Verify a hard instruction-set requirement in the
+running guest. The remote inventory path does not populate `host_cpu` through live discovery;
+`systems.get` can therefore return a null `resolved_cpu`. Neither inventory reconciliation nor
+`just setup-remote-libvirt` is a CPU-discovery refresh command.

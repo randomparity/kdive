@@ -72,7 +72,7 @@ If the System reaches `boot_timeout`, check the console artifact for boot messag
 
 The four methods require **two** Systems because `host_dump` and `kdump` are both vmcore methods
 and `ensure_method_match` (ADR-0050) binds the first captured method per System. Drive them as
-in the [M2.5 capstone](remote-live-stack.md#6-four-method-capture-capstone-m25):
+in the [capture capstone](remote-live-stack.md#6-four-method-capture-capstone):
 
 | method | System | how |
 |--------|--------|-----|

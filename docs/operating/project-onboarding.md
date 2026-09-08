@@ -59,6 +59,26 @@ kdivectl accounting set-quota --project acme \
 
 See the [kdivectl runbook](runbooks/kdivectl.md) for authentication and argument discovery.
 
+## Remote-libvirt demo helper
+
+For a remote-libvirt demo, `just setup-remote-libvirt HOST USER URI` combines the connection
+preflight with audited budget and quota writes. Run it from a checkout with its project venv,
+or set `KDIVE_PYTHON` to an interpreter with KDIVE's dependencies installed:
+
+```sh
+export KDIVE_MCP_BASE=http://127.0.0.1:8000/mcp
+just setup-remote-libvirt HOST USER qemu+tls://HOST/system
+```
+
+The endpoint must end in `/mcp` and be reachable from this shell; use the
+[Helm runbook's port-forward](runbooks/kubernetes-deploy.md#5-reach-the-mcp-endpoint)
+for a cluster-local server.
+Supply a project-admin `KDIVE_TOKEN` for your deployment. When it is absent, the helper invokes
+[`scripts/demo-token.sh`](../../scripts/demo-token.sh) against the in-cluster mock issuer
+(the script documents namespace, release-name, and context overrides). `KDIVE_PROJECT`
+defaults to `demo`; set it to match the token's project. The helper sets accounting policy; it does not register
+libvirt hosts or verify a guest lifecycle.
+
 ## Relationship to `seed-project`
 
 `python -m kdive seed-project` writes the same `budgets` and `quotas` rows (and registers

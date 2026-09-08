@@ -166,13 +166,6 @@ your first provision so every irreversible choice is made up front:
 - **`debug.preserve_on_crash: true`** — set it to hold a crashed guest (vCPUs stopped) for
   post-panic inspection.
 
-Live drgn introspection (`introspect.run`/`introspect.script`) needs **no** provisioning knob —
-any ready local system can attach (the SSH forward is rendered on every domain), and the only
-image requirement is a drgn-capable guest. But it is not provision-free at call time: both tools
-take a `session_id` and only resolve against a live **drgn-live** `DebugSession`, so you must
-first open one with `debug.start_session(transport="drgn-live")`. The two debug knobs above are
-detailed next.
-
 ## Provisioning for debugging and live introspection
 
 Some debugging and live-introspection capabilities are bound at `systems.provision` and
@@ -181,7 +174,7 @@ debug only after the run boots, the only remedy is `systems.reprovision`, which 
 and reboots the system (an expensive cycle). Decide these before you provision:
 
 - `provider.local-libvirt.debug.gdbstub: true` — provisions the QEMU gdb stub a live GDB
-  session attaches to. Without it, `debug.start_session` fails and you must reprovision.
+  session attaches to. Without it, a `gdbstub` session cannot attach; you must reprovision.
 - `provider.local-libvirt.debug.preserve_on_crash: true` — holds a crashed guest (vCPUs
   stopped) instead of destroying it, so you can attach and inspect the halted kernel after
   a panic.
@@ -195,10 +188,8 @@ absent). It does, however, require a live session: call
 `introspect.run`/`introspect.script` — a successful drgn-live attach suggests both as next
 actions. Use `debug.end_session` to release the session when you're done.
 
-These flags default off, so a plain profile provisions a system you can build, boot, and
-observe on but not live-debug. `systems.profile_examples` returns starting-point profiles;
-add the `debug` section and credential above before provisioning if the investigation
-needs them.
+For GDB or post-panic inspection, add the relevant `debug` flags to a starting-point profile
+from `systems.profile_examples` before provisioning. Live drgn uses the session workflow above.
 
 ## Toolset guides
 
