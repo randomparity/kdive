@@ -84,8 +84,9 @@ needed them. The control that remains is the protect-main ruleset itself, unchan
 **Out of scope, stated.** The secret and deploy key are not revoked here (repository owner), so
 between this merge and that removal a write bypass exists with no consumer. That is strictly
 narrower than today, where the same bypass exists *and* is exercised on every merge, but it is not
-zero. It needs an owner that outlives #2337, which this change closes: the removal is reported as
-a follow-up for separate tracking rather than deferred to the issue being resolved here.
+zero. It needs an owner that outlives #2337, which this change closes, so it is tracked by
+[deferral record 0012](../../debt/0012-changelog-write-deploy-key-and-bypass-have-no-consumer.md)
+rather than deferred to the issue being resolved here.
 
 ## Success
 
@@ -105,7 +106,8 @@ a follow-up for separate tracking rather than deferred to the issue being resolv
 
 - **Contract: the workflow set contains no push-to-default-branch job.**
   `Mode: focused-test` — `tests/guards/test_no_workflow_pushes_to_default_branch.py` parses every
-  file in `.github/workflows/` and asserts none carries a `git push` to the default branch.
+  file in `.github/workflows/`, and every shell script under `.github/scripts/` that a workflow
+  can invoke, and asserts none carries a `git push` to the default branch.
   Expected red before the deletion (`changelog-sync.yml` matches); green after. Focused command:
   `uv run python -m pytest tests/guards/test_no_workflow_pushes_to_default_branch.py -q`.
 - **Contract: the release procedure and the `just release` reminder describe the mechanism that

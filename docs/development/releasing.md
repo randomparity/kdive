@@ -126,8 +126,9 @@ release**, by `just changelog` in the post-release `chore(release): begin <next>
 (above). The new `vX.Y.Z` tag exists by then, so git-cliff rolls `[Unreleased]` into a dated
 `[X.Y.Z]` section.
 
-Between releases the committed `[Unreleased]` section is **deliberately stale** — it reflects the
-last release boundary, not the tip of `main`. Run `just changelog` locally for the current view.
+Between releases the committed `[Unreleased]` section is **deliberately stale** — it reflects
+whenever it was last regenerated, not the tip of `main`. Run `just changelog` locally for the
+current view.
 No automated consumer reads it: `release.yml` builds the GitHub Release notes with
 `git-cliff --latest` straight from git history and never opens the file, so a release never
 depends on the committed copy being current
@@ -143,7 +144,10 @@ through a base refresh and a full CI cycle, which cost more than the freshness w
 > `git bisect` history intact). Nothing in CI writes to `main`: every change arrives as a reviewed
 > PR. The `CHANGELOG_DEPLOY_KEY` Actions secret, the `changelog-sync (auto)` repository deploy
 > key, and the ruleset's `DeployKey` bypass that admitted it are left with **no consumer** —
-> removing all three is a repository-owner step, tracked separately from #2337.
+> removing all three is a repository-owner step in GitHub settings, which no pull request can
+> perform. It is tracked by
+> [deferral record 0012](../debt/0012-changelog-write-deploy-key-and-bypass-have-no-consumer.md),
+> not by #2337, which closes when this change merges.
 
 ## Version reporting
 

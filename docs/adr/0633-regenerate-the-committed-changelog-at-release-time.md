@@ -64,8 +64,10 @@ default branch per merge.
 
 - Merging a pull request moves the default branch once instead of twice. A base refresh is now
   provoked only by a genuine code change.
-- The committed `[Unreleased]` section reflects the last release boundary rather than the tip of
-  `main`. A reader who wants the current view runs `just changelog`.
+- The committed `[Unreleased]` section reflects whenever it was last regenerated rather than the
+  tip of `main` — the previous release boundary in the steady state, and until the first release
+  after this record lands, whatever the removed workflow last synced. A reader who wants the
+  current view runs `just changelog`.
 - Regeneration returns to a checklist step, in a pull request that is already mandatory. Skipping
   it, or running it in a clone without the new tag, leaves the previous release's entries sitting
   undated under `[Unreleased]`; the GitHub Release notes are generated separately and are
@@ -73,9 +75,10 @@ default branch per merge.
 - The `CHANGELOG_DEPLOY_KEY` Actions secret, the `changelog-sync (auto)` repository deploy key,
   and the protect-main ruleset's `DeployKey` bypass lose their only consumer. A write bypass on a
   protected branch that nothing uses is worth removing, but the ruleset and the credential are the
-  repository owner's to change and are outside this change's authority. That removal is tracked
-  separately; this record is not its owner, and the pull request implementing this decision does
-  not discharge it.
+  repository owner's to change and are outside this change's authority. That removal is tracked by
+  [deferral record 0012](../debt/0012-changelog-write-deploy-key-and-bypass-have-no-consumer.md);
+  this record is not its owner, and the pull request implementing this decision does not discharge
+  it.
 - No other workflow pushed to `main`, so nothing else changes. The bot commit carried
   `[skip ci]`, which suppressed every workflow on that push, so `release-image.yml` never ran on
   it; the number of pushes that trigger it is unchanged. What improves is that `main`'s tip is now
