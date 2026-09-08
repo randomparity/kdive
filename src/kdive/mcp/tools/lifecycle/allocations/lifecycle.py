@@ -15,7 +15,11 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
-from kdive.mcp.tools.lifecycle.allocations.common import allocation_next_actions
+from kdive.mcp.tools.lifecycle.allocations.common import (
+    allocation_next_actions,
+    lease_deadline_data,
+    lease_reference_clock,
+)
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.allocation.release import (
@@ -83,10 +87,23 @@ async def renew_allocation(
             outcome = await renew(
                 conn, ctx, allocation_id=uid, extend=extend, idempotency_key=idempotency_key
             )
-        return _renew_response(uid, outcome, ctx)
+            server_time = (
+                await lease_reference_clock(conn)
+                if outcome.allocation is not None and outcome.allocation.lease_expiry is not None
+                else None
+            )
+        return _renew_response(uid, outcome, ctx, server_time=server_time)
 
 
-def _renew_response(uid: UUID, outcome: RenewOutcome, ctx: RequestContext) -> ToolResponse:
+def _renew_response(
+    uid: UUID, outcome: RenewOutcome, ctx: RequestContext, *, server_time: str | None = None
+) -> ToolResponse:
+    """Render a renew outcome.
+
+    A successful renewal already holds the extended lease, so it states the new deadline rather
+    than only that the call succeeded (#2306): the absolute ``lease_expiry`` plus the
+    ``server_time`` it is measured against.
+    """
     if outcome.renewed and outcome.allocation is not None:
         return ToolResponse.success(
             str(uid),
@@ -96,7 +113,10 @@ def _renew_response(uid: UUID, outcome: RenewOutcome, ctx: RequestContext) -> To
                 ctx,
                 outcome.allocation.project,
             ),
-            data={"project": outcome.allocation.project},
+            data={
+                "project": outcome.allocation.project,
+                **lease_deadline_data(outcome.allocation, server_time),
+            },
         )
     category = outcome.category or ErrorCategory.ALLOCATION_DENIED
     data: dict[str, Any] = dict(outcome.details)
