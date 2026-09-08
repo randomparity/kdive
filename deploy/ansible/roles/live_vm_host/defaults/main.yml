@@ -10,6 +10,7 @@ live_vm_host_packages:
   - kexec-tools
   - kdump-tools        # Debian name for kdump-utils
   - gdb
+  - kmod               # depmod: host-side kernel module indexing (ADR-0346, #2300, #2331)
   - python3-guestfs    # the system libguestfs binding, built for Ubuntu 26.04's Python 3.14
   - elfutils           # eu-readelf: the live-vm store scripts read the kernel/debuginfo build-id (#1292)
   - debuginfod         # debuginfod-find: fetch matching vmlinux debuginfo by build-id (#1292)
