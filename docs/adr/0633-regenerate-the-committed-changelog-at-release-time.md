@@ -11,18 +11,17 @@ Accepted (2026-09-07)
 
 ## Context
 
-`changelog-sync.yml` regenerated `CHANGELOG.md` on every push to `main` and, when the result
-differed, pushed a `chore(changelog): sync [Unreleased] section [skip ci]` commit straight back
-to `main` over a write deploy key. It was added for convenience — the introducing commit says
-"so the `[Unreleased]` section stays current without a manual step" — and nothing measured what
-that push costs.
+`changelog-sync.yml` regenerated `CHANGELOG.md` on every push to `main` and pushed the delta back
+to `main` as a `chore(changelog): sync [Unreleased] section [skip ci]` commit over a write deploy
+key. It was added for convenience — the introducing commit says "so the `[Unreleased]` section
+stays current without a manual step" — and nothing measured what that push costs.
 
-Campaign `aec12381` measured it. Eight pull requests merged serially; of the four base-refresh
-cycles the batch required, three were caused by this bot commit alone. Any merge process that
-verifies the base is still an ancestor of the head immediately before merging — the only way to
-know what will land — has to refresh on these commits, and each refresh costs a merge, a full
-local guardrail run, a push, and a complete CI cycle. The tax is per open pull request and scales
-with merge frequency.
+Campaign `aec12381` measured it: across eight serially merged pull requests, three of the four
+base-refresh cycles the batch required were caused by this bot commit alone. Any merge process
+that verifies the base is still an ancestor of the head immediately before merging — the only way
+to know what will land — has to refresh on these commits, at a merge, a full local guardrail run,
+a push, and a complete CI cycle each. The tax is per open pull request and scales with merge
+frequency.
 
 The workflow also displaced a mechanism the repository already had.
 [ADR-0041](0041-versioning-release-process.md) states that the committed `CHANGELOG.md` "is
@@ -44,9 +43,14 @@ branch as a consequence of an ordinary merge.
 
 `just changelog` runs in the `chore(release): begin <next>-dev` pull request, which
 [ADR-0041](0041-versioning-release-process.md) decision 3 already makes mandatory after every
-tag. Because the new `vX.Y.Z` tag exists by then, git-cliff rolls `[Unreleased]` into a dated
-`[X.Y.Z]` section. The result reaches `main` through an ordinary reviewed pull request; nothing
-bypasses branch protection.
+tag. git-cliff rolls `[Unreleased]` into a dated `[X.Y.Z]` section **provided the new `vX.Y.Z`
+tag is present in the clone the regeneration runs in** — the deleted workflow guaranteed that
+with `fetch-depth: 0` and `fetch-tags: true` on a fresh runner, and a human clone does not. With
+the newest tag missing, git-cliff exits 0 and silently files the whole release under
+`[Unreleased]`; with no tags at all it rewrites the file and then exits 1. So
+`docs/development/releasing.md` fetches tags before regenerating and checks that a dated
+`## [X.Y.Z]` heading appeared. The result reaches `main` through an ordinary reviewed pull
+request; nothing bypasses branch protection.
 
 ### 3. `[Unreleased]` is stale between releases, and that is the accepted trade
 
@@ -61,24 +65,43 @@ it current is not worth a commit to the default branch per merge.
 - The committed `[Unreleased]` section reflects the last release boundary rather than the tip of
   `main`. A reader who wants the current view runs `just changelog`.
 - Regeneration returns to a checklist step, in a pull request that is already mandatory. Skipping
-  it leaves the previous release's section undated in the committed file; the GitHub Release notes
-  are generated separately and are unaffected.
+  it, or running it in a clone without the new tag, leaves the previous release's entries sitting
+  undated under `[Unreleased]`; the GitHub Release notes are generated separately and are
+  unaffected, and the next release with the tag present repairs the file.
 - The `CHANGELOG_DEPLOY_KEY` Actions secret, the `changelog-sync (auto)` repository deploy key,
   and the protect-main ruleset's `DeployKey` bypass lose their only consumer. A write bypass on a
   protected branch that nothing uses is worth removing, but the ruleset and the credential are the
   repository owner's to change and are outside this change's authority; #2337 carries the
   follow-up.
-- No other workflow pushed to `main`, so nothing else changes. `release-image.yml` still builds
-  `:edge` on every push; it simply sees one fewer push.
+- No other workflow pushed to `main`, so nothing else changes. The bot commit carried
+  `[skip ci]`, which suppressed every workflow on that push, so `release-image.yml` never ran on
+  it; the number of pushes that trigger it is unchanged. What improves is that `main`'s tip is now
+  always a commit that produced an `:edge` and `:sha-<short>` image, instead of a skipped bot
+  commit that produced neither.
 
 ## Considered & rejected
 
+- **Keep the workflow, but trigger it on a `v*` tag instead of every push to `main`.** The closest
+  competitor: it fires once per release, which removes the whole measured tax, and it cannot land
+  inside a serial merge batch. verified: rejected on ordering, not on cost — the tag is pushed
+  while `[project].version` still reads the released version, and ADR-0041 decision 3 requires
+  `main` to stay frozen until the post-release bump lands, so a deploy-key push between the two is
+  a bot commit landing in exactly the window that decision closes. It also keeps the write bypass
+  on the protected branch, which the bump PR needs no credential to do.
 - **Batch the sync onto a schedule.** judgment: a cron tick lowers the frequency of a commit that
   should not exist while keeping the deploy-key push, the bot commit on `main`, and a tick that
   can still land inside a serial merge batch.
 - **Keep the workflow on `workflow_dispatch` only.** judgment: a manual trigger for a
   regeneration `just changelog` already performs locally, retaining a write bypass on the
   protected branch to save one local command.
+- **Have the sync open a pull request instead of pushing.** judgment: removes the deploy key and
+  the bypass, but the merged commit still lands on `main`, so the base-refresh tax the Context
+  measures is unchanged — it pays a review round per merge to keep a section nothing reads.
+- **Fold `just changelog` into `just set-version`, so the bump PR cannot skip it.** verified:
+  rejected because `set-version` is also the Milestone-start bump, where no new tag exists and a
+  regen only churns `[Unreleased]`, and because `changelog` shells out to `uvx {{GIT_CLIFF}}`
+  (`justfile:406-407`) — folding it in turns an offline `pyproject.toml` + `uv.lock` edit into a
+  network-dependent one.
 - **Move the unreleased section where pull requests do not take it as their base** — a wiki page,
   a draft GitHub Release, an orphan branch. judgment: a second storage location and a second sync
   path, holding content git history already holds.

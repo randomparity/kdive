@@ -1,23 +1,19 @@
 # Implementation plan — regenerate the committed changelog at release time (#2337)
 
-**Goal.** Stop `changelog-sync.yml` pushing a `CHANGELOG.md` commit to `main` after every merge,
-move the committed changelog's regeneration into the post-release bump pull request that ADR-0041
-already makes mandatory, and add a guard so no workflow silently reacquires a write path to the
-default branch.
-
-**Architecture.** `CHANGELOG.md` is rendered by `git-cliff` from conventional-commit history
-(`cliff.toml`, `just changelog`). Two things consume that renderer: `release.yml`, which runs
-`uvx git-cliff --latest` at tag time for the GitHub Release notes and never reads the committed
-file, and — until this change — `changelog-sync.yml`. This change deletes the second consumer,
-leaves the first untouched, and relocates the committed file's refresh to the
-`chore(release): begin <next>-dev` pull request.
+**Goal, architecture, and rationale.** See
+`docs/workflow/specs/2026-09-07-changelog-release-time-regeneration-design.md` (Problem, Scope)
+and [ADR-0633](../../adr/0633-regenerate-the-committed-changelog-at-release-time.md) (Context,
+Decision). In one line: delete the workflow that pushed a regenerated `CHANGELOG.md` to `main`
+after every merge, move the regeneration into the post-release bump pull request, and add a
+standing guard for both halves of the regression.
 
 **Tech stack.** GitHub Actions workflows (YAML), `just` recipes, Python 3.14 + pytest for the
 guard, Markdown for the release documentation.
 
-Expected implementation size: 170–230 changed lines (M) — from the file map below: 91 deleted
-lines in `.github/workflows/changelog-sync.yml`, ~75 new lines in the guard test, ~30 changed
-lines in `docs/development/releasing.md`, and 2 in `justfile`.
+Expected implementation size: 230–290 changed lines (M) — implementation only; the 3 design
+artifacts listed in the file map (ADR, spec, this plan) are excluded from the range by design.
+From the file map: 91 deleted lines in `.github/workflows/changelog-sync.yml`, 133 new lines in
+the guard test, ~35 changed lines in `docs/development/releasing.md`, and 2 in `justfile`.
 
 ## Global Constraints
 
@@ -46,13 +42,18 @@ lines in `docs/development/releasing.md`, and 2 in `justfile`.
   written **Accepted** and this pull request fully implements it, per the ratification rule in
   `docs/adr/README.md`. There is no ADR index table to update.
 - Branch `feat/drop-per-merge-changelog-sync-2337`, base `main`. Deferrals carried in: none.
+- **Departure from the usual plan rule, recorded deliberately:** this plan states the guard's
+  contract rather than inlining its complete source. Two independent design-review passes found
+  that the inlined copy was ~28% of the plan and that the prose around it, written against a
+  mental model of the code rather than the code, carried two wrong predictions. The expected
+  outputs below were instead produced by executing the file. The file itself is the artifact.
 
 ## File map
 
 | Path | Created / changed | Answerable for |
 |---|---|---|
 | `.github/workflows/changelog-sync.yml` | deleted | The per-merge regeneration and its push to `main` |
-| `tests/guards/test_no_workflow_pushes_to_default_branch.py` | created | The standing guard that no workflow pushes to `main`, plus its own non-vacuity self-check |
+| `tests/guards/test_no_workflow_pushes_to_default_branch.py` | created | Two standing checks: no workflow pushes to `main`, and no operative file names a YAML file the repository lacks |
 | `docs/development/releasing.md` | changed | The post-release bump bullet, the changelog section, and the branch-protection note |
 | `justfile` | changed | The `release` recipe's closing operator reminder |
 | `docs/adr/0633-regenerate-the-committed-changelog-at-release-time.md` | created | The decision |
@@ -63,134 +64,103 @@ lines in `docs/development/releasing.md`, and 2 in `justfile`.
 **Creates:** `tests/guards/test_no_workflow_pushes_to_default_branch.py`.
 **Deletes:** `.github/workflows/changelog-sync.yml`.
 
-**Interfaces.** Consumes nothing from another task. Uses only the standard library (`re`,
-`pathlib.Path`) and pytest, matching the sibling guard
+**Interfaces.** Consumes nothing from another task. Standard library (`re`, `subprocess`,
+`pathlib.Path`) and pytest only, matching the sibling guard
 `tests/guards/test_workflow_action_pins.py`, which resolves the workflow directory as
 `Path(__file__).resolve().parents[2] / ".github" / "workflows"` and enumerates it with
 `sorted([*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml")])`. Both were confirmed present
-with those exact forms in that file. Provides nothing to Task 2.
+verbatim in that file. Provides to Task 2 the second check,
+`test_no_operative_file_names_a_missing_yaml_file`, which Task 2 must turn green.
 
-**Where it fits.** The whole of success criterion 1. The guard is written first so its red run
-demonstrates it detects the workflow this task then deletes; without that ordering the test would
-be committed already green and nothing would show it bites.
+**Where it fits.** The text-visible half of success criterion 1; the other half is the
+pull-request requirement in the protect-main ruleset, which this change does not touch. The guard
+is written first so its red run demonstrates it detects the workflow this task then deletes.
 
 ### Verification
 
 - **Contract: no workflow pushes a commit to the default branch.**
-  `Mode: focused-test` — `tests/guards/test_no_workflow_pushes_to_default_branch.py::test_no_workflow_pushes_to_the_default_branch`.
-  Expected red before the deletion, naming `changelog-sync.yml:87` and `:90`; green after.
-  Focused green command:
+  `Mode: focused-test` — `…::test_no_workflow_pushes_to_the_default_branch`. Expected red before
+  the deletion, green after. Focused command:
   `uv run python -m pytest tests/guards/test_no_workflow_pushes_to_default_branch.py -q`.
-- **Contract: the detector is not vacuous.**
-  `Mode: focused-test` — `…::test_the_detector_recognises_a_default_branch_push` asserts the
-  matcher fires on the three shapes the deleted workflow used and on a bare `git push`, and does
-  not fire on a tag push. It runs against literal strings, so it stays meaningful after the
-  workflow is gone. Expected red if the pattern is changed to something that no longer matches.
+- **Contract: neither detector is vacuous.**
+  `Mode: focused-test` — `…::test_workflow_files_are_discoverable` and
+  `…::test_the_detector_recognises_a_default_branch_push`. The second asserts the matcher fires on
+  the three shapes the deleted workflow used and stays silent on a tag push, a lookalike branch
+  name (`domain-work`), a bare `git push --tags`, and a comment. It runs against literal strings,
+  so it stays meaningful after the workflow is gone.
 
 ### Steps
 
-1. Create `tests/guards/test_no_workflow_pushes_to_default_branch.py` with exactly this content:
+1. Create `tests/guards/test_no_workflow_pushes_to_default_branch.py` to this contract. It is
+   stdlib + pytest, `from __future__ import annotations`, module constants then helpers then
+   tests, and it reads the tree rather than importing the project.
 
-```python
-"""Guard: no workflow pushes a commit to the default branch (ADR-0633).
+   **Module docstring** — why the property is held directly: the per-merge push cost was invisible
+   in the workflow that caused it because it landed on every *other* open pull request (#2337);
+   removing the workflow strands references to it, which is the second check's general form. State
+   plainly that both checks are text proxies, and name the case the first cannot see — a
+   marketplace commit-and-push action contains no `git push` text at all, and that is the shape a
+   reacquisition would most cheaply take for as long as the `DeployKey` bypass survives (#2337).
 
-`changelog-sync.yml` regenerated `CHANGELOG.md` on every push to `main` and pushed the delta
-straight back over a write deploy key. That moved the default branch a second time per merge, so
-every other open pull request had to refresh its base and pay a full CI cycle before it could
-merge — three of the four refreshes an eight-pull-request serial batch needed (#2337). ADR-0633
-removed the workflow and moved the regeneration into the post-release bump pull request. Nothing
-else stops a later workflow reacquiring that write path, and the cost is invisible in the workflow
-that causes it: it lands on every *other* open pull request.
+   **Constants.**
+   - `_ROOT = Path(__file__).resolve().parents[2]`, `_WORKFLOWS = _ROOT / ".github" / "workflows"`.
+   - `_DEFAULT_BRANCH = "main"`, named once so both patterns stay in step.
+   - `_PUSH = re.compile(r"git\s+push\b(?P<args>[^\n]*)")` — any `git push` wherever it sits on the
+     line, because the removed workflow's sat under `if !`.
+   - `_DEFAULT_REF = re.compile(rf"(?<![\w-]){re.escape(_DEFAULT_BRANCH)}(?![\w-])")` — `main` as a
+     whole ref component (`HEAD:main`, `origin/main`, `:main`, `main;`), not `domain` or
+     `maintenance`.
+   - `_YAML_REF = re.compile(r"(?<![\w./-])(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml)(?![\w-])")`.
+   - `_OPERATIVE = ("justfile", ".github/workflows", "docs/development")` — files that instruct or
+     execute, as opposed to records that describe what was removed. This is what keeps the ADR,
+     the spec, and this plan out of the second check: they name `changelog-sync.yml` by necessity.
 
-This reads command text, so it is a proxy, not a proof. A push whose refspec is built from a
-variable (`git push "$remote" "$ref"`) is invisible to it, and a workflow that reaches the branch
-through the REST API rather than git is out of its reach entirely. What it catches is the literal
-shape the removed workflow used and the shape anyone reintroducing it would write.
+   **Helpers.**
+   - `_workflow_files() -> list[Path]` — the sorted `*.yml` + `*.yaml` glob above.
+   - `_strip_comments(text: str) -> str` — blanks whole-line `#` comments, so prose about a push is
+     not read as one.
+   - `_default_branch_pushes(text: str) -> list[str]` — over `_strip_comments(text)`, for each
+     `_PUSH` match take the non-`-` operands and keep the match when any operand matches
+     `_DEFAULT_REF`. Return `match.group(0).strip()`. There is deliberately **no** operand-less
+     branch: flagging a bare `git push` would guess at a trigger the function does not read, and
+     would redden `git push --tags` and the standard idiom for pushing to a pull-request head.
+   - `_tracked_files() -> list[str]` — `git -C <root> ls-files` via
+     `subprocess.run(..., capture_output=True, text=True, check=True)`, split on lines. Tracked
+     files only, so an untracked scratch file cannot redden the guard.
 
-Stdlib + pytest only, matching `tests/guards/test_workflow_action_pins.py`: this reads the tree,
-not the project.
-"""
+   **Tests**, exactly these four names:
+   - `test_workflow_files_are_discoverable` — asserts `_workflow_files()` is non-empty.
+   - `test_the_detector_recognises_a_default_branch_push` — asserts `len(caught) == 3` for the
+     three removed-workflow shapes, and an empty result for the four negatives named above.
+   - `test_no_workflow_pushes_to_the_default_branch` — builds `dict[str, list[str]]` keyed by
+     `path.name` over `_workflow_files()` and asserts it is empty. Its message must name ADR-0633
+     and #2337, say the push forces a base refresh on every other open pull request, and give the
+     false-positive escape: if the push targets a pull-request head, use an explicit refspec
+     (`git push origin HEAD:$BRANCH`) so the guard can tell them apart.
+   - `test_no_operative_file_names_a_missing_yaml_file` — builds `known` as the basenames of every
+     tracked `*.yml` / `*.yaml`, asserts `known` is non-empty (else the check passes over
+     nothing), then for each tracked path starting with `_OPERATIVE` collects `_YAML_REF` names
+     not in `known`. Asserts the resulting dict is empty, with a message naming ADR-0633 and #2337
+     and saying to update the reference or move the text to a decision record.
 
-from __future__ import annotations
+2. Run the focused test and confirm it is **red**. Executed against the tree at this commit, the
+   exact result is `1 failed, 3 passed`, with
+   `test_no_workflow_pushes_to_the_default_branch` reporting
 
-import re
-from pathlib import Path
+   `Offenders: {'changelog-sync.yml': ['git push "$remote" HEAD:main; then', 'git push "$remote" HEAD:main']}`
 
-_WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
-
-#: The repository's default branch. `docs/development/releasing.md` and the protect-main ruleset
-#: both name it; it is spelled once here so the two patterns below stay in step.
-_DEFAULT_BRANCH = "main"
-
-#: Any `git push`, wherever it sits on the line — the removed workflow's was under `if !`.
-_PUSH = re.compile(r"git\s+push\b(?P<args>[^\n]*)")
-
-#: `main` as a whole ref component: `main`, `HEAD:main`, `origin/main`, `:main`, `main;`.
-#: Not `domain`, `maintenance`, or `main-line`.
-_DEFAULT_REF = re.compile(rf"(?<![\w-]){re.escape(_DEFAULT_BRANCH)}(?![\w-])")
-
-
-def _workflow_files() -> list[Path]:
-    return sorted([*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml")])
-
-
-def _default_branch_pushes(text: str) -> list[str]:
-    """Return each `git push` in *text* that targets the default branch, as matched."""
-    offenders: list[str] = []
-    for match in _PUSH.finditer(text):
-        operands = [token for token in match.group("args").split() if not token.startswith("-")]
-        # No operand at all means `git push` pushes the checked-out branch, which under a
-        # `push: branches: [main]` trigger is the default branch.
-        if not operands or any(_DEFAULT_REF.search(token) for token in operands):
-            offenders.append(match.group(0).strip())
-    return offenders
-
-
-def test_workflow_files_are_discoverable() -> None:
-    # A rename or a moved directory would make the assertion below pass over nothing.
-    assert _workflow_files(), f"no workflow files found under {_WORKFLOWS}"
-
-
-def test_the_detector_recognises_a_default_branch_push() -> None:
-    # The three shapes `changelog-sync.yml` used before ADR-0633 removed it, plus a bare push.
-    caught = _default_branch_pushes(
-        'if ! git push "$remote" HEAD:main; then\n'
-        '            git push "$remote" HEAD:main\n'
-        "          git push origin main\n"
-        "          git push\n"
-    )
-    assert len(caught) == 4, f"the detector stopped recognising a push to main: {caught}"
-    # A tag push and a feature-branch push are not this guard's business.
-    assert not _default_branch_pushes(
-        'git push origin "v{{VERSION}}"\n  git push origin HEAD:refs/heads/domain-work\n'
-    )
-
-
-def test_no_workflow_pushes_to_the_default_branch() -> None:
-    offenders: dict[str, list[str]] = {}
-    for path in _workflow_files():
-        found = _default_branch_pushes(path.read_text(encoding="utf-8"))
-        if found:
-            offenders[path.name] = found
-    assert not offenders, (
-        f"a workflow pushes to {_DEFAULT_BRANCH!r}. Every such push moves the default branch "
-        "outside a pull request, which forces every other open pull request through a base "
-        "refresh and a full CI cycle (ADR-0633, #2337). Route the change through a reviewed "
-        f"pull request instead. Offenders: {offenders}"
-    )
-```
-
-2. Run the focused test and confirm it is **red**, naming `changelog-sync.yml`:
+   The first offender carries `; then` because line 87 of the workflow is
+   `if ! git push "$remote" HEAD:main; then` and `_PUSH` captures to end of line. Match this
+   output, not a paraphrase of it; a different failure means the file was not written to contract.
 
    `uv run python -m pytest tests/guards/test_no_workflow_pushes_to_default_branch.py -q`
 
-   Expect `test_no_workflow_pushes_to_the_default_branch` to fail with
-   `{'changelog-sync.yml': ['git push "$remote" HEAD:main', 'git push "$remote" HEAD:main']}`,
-   and the other two tests to pass.
-
 3. Delete the workflow: `git rm .github/workflows/changelog-sync.yml`.
 
-4. Re-run the same command and expect `3 passed`.
+4. Re-run the same command. Expected: still `1 failed, 3 passed`, but now a *different* failure —
+   `test_no_operative_file_names_a_missing_yaml_file` reporting
+   `{'docs/development/releasing.md': ['changelog-sync.yml']}`. This is the red Task 2 clears, and
+   it is measured, not predicted. `test_no_workflow_pushes_to_the_default_branch` is now green.
 
 5. Run `just lint` and `just type`; expect both to exit 0 with no findings.
 
@@ -201,69 +171,80 @@ def test_no_workflow_pushes_to_the_default_branch() -> None:
 
 - `.github/workflows/changelog-sync.yml` no longer exists.
 - `rg -n 'git push' .github/workflows/` returns nothing.
-- The three tests in the new file pass, and the detector test fails if `_PUSH` or `_DEFAULT_REF`
-  is changed to something that no longer matches `git push "$remote" HEAD:main`.
+- `test_no_workflow_pushes_to_the_default_branch` and both non-vacuity tests pass;
+  `test_no_operative_file_names_a_missing_yaml_file` is red pending Task 2.
 - `just lint` and `just type` are clean.
 
-**Rollback.** `git revert` of this commit restores the workflow and reddens the guard, which is
-the intended coupling: the guard cannot be satisfied while the workflow exists.
+**Rollback.** Task 1 is one commit, so `git revert` restores the workflow **and removes the guard
+with it** — nothing goes red, and the write path returns undetected. The guard and the deletion
+are not independently revertible. A deliberate revert must therefore be paired with an explicit
+decision about whether to re-apply the guard.
 
 ## Task 2 — Move the regeneration step into the documented release procedure
 
 **Modifies:** `docs/development/releasing.md`, `justfile`.
 
-**Interfaces.** Consumes nothing from Task 1 in code; it documents the mechanism Task 1 left in
-place. The `justfile` symbol it edits is the `release VERSION:` recipe's final `echo`, confirmed
-present as
+**Interfaces.** Consumes from Task 1 the red
+`test_no_operative_file_names_a_missing_yaml_file`, which this task turns green by removing the
+last operative reference to the deleted workflow. The `justfile` symbol it edits is the
+`release VERSION:` recipe's final `echo`, confirmed present verbatim at `justfile:571` as
 `echo "(just set-version <next>) — CHANGELOG auto-syncs on merge; see docs/development/releasing.md."`.
 The recipe's other statements (tag creation and `git push origin "v{{VERSION}}"`) are not touched.
 
-**Where it fits.** Success criteria 2 and 3. Without it the repository ships two instructions that
-fail when followed.
+**Where it fits.** Success criteria 2, 3 and 4. Without it the repository ships two instructions
+that fail when followed, and Task 1's second guard stays red.
 
 ### Verification
 
-- **Contract: the documented release procedure names the regeneration step.**
-  `Mode: task-test-not-applicable` — the changed surface is release-procedure prose. No executable
-  consumer parses it; a test asserting particular sentences would assert wording rather than
-  behaviour, which this repository's plan rules forbid. The `docs-links`, `docs-paths`, and
-  `served-doc-links` gates in `just ci` cover the one machine-checkable property the prose has —
-  that every link it carries resolves.
-- **Contract: the `just release` operator reminder.**
-  `Mode: task-test-not-applicable` — one `echo` line in a `just` recipe whose surrounding
-  statements push a git tag to `origin`. Observing it requires cutting a release; any structural
-  observation would assert the string's wording.
+- **Contract: no operative file names a workflow that does not exist.**
+  `Mode: focused-test` — `…::test_no_operative_file_names_a_missing_yaml_file`, red at the end of
+  Task 1 (measured above), green when this task completes. Focused command:
+  `uv run python -m pytest tests/guards/test_no_workflow_pushes_to_default_branch.py -q`.
+- **Contract: the *wording* of the release procedure and the `just release` reminder.**
+  `Mode: task-test-not-applicable` — beyond the structural reference check above, what remains is
+  a few sentences of prose and one `echo` string. No executable consumer parses them, and
+  asserting their phrasing would pin wording rather than behaviour. This is a judgment, not a
+  repository rule: `tests/guards/test_commit_hook_guidance.py` shows the repository does sometimes
+  couple prose to a mechanism, and that coupling is left unenforced here because the surface is
+  small and the structural half is covered. `just docs-links` and `just docs-paths` cover link
+  resolution in the changed file. (`served-doc-links` does **not** — it polices only docs
+  registered in `DOC_RESOURCES`, and `releasing.md` is not one.)
 
 ### Steps
 
-1. In `docs/development/releasing.md`, replace the "Immediately after a release" bullet so it
-   runs both commands. It currently ends "You no longer run `just changelog` by hand: merging
-   this PR pushes to `main`, which triggers the changelog-sync workflow (see *Changelog
-   automation* below)." The replacement bullet reads:
+1. In `docs/development/releasing.md`, replace the "Immediately after a release" bullet. It
+   currently ends "You no longer run `just changelog` by hand: merging this PR pushes to `main`,
+   which triggers the changelog-sync workflow (see *Changelog automation* below)." The
+   replacement runs both commands and states the tag precondition:
 
    ```markdown
    - **Immediately after a release** — open a `chore(release): begin <next>-dev` PR that runs
-     `just set-version <next-patch>` **and** `just changelog`. This is **required**: the bump is
-     what keeps `X.Y.Z-dev` meaning "ahead of the last release", and the regen is the one place
-     the committed changelog is refreshed
-     ([ADR-0633](../adr/0633-regenerate-the-committed-changelog-at-release-time.md)). Because the
-     new `vX.Y.Z` tag exists by then, git-cliff rolls the `[Unreleased]` section into the dated
-     released section.
+     `just set-version <next-patch>`, then `git fetch --tags origin` and `just changelog`. This is
+     **required**: the bump keeps `X.Y.Z-dev` meaning "ahead of the last release", and the regen is
+     the one place the committed changelog is refreshed
+     (ADR-0633). Fetch the
+     tags first — git-cliff renders from the tags in *your* clone, and with the new `vX.Y.Z` tag
+     missing it exits 0 and silently files the whole release under `[Unreleased]`. Check the diff
+     shows a dated `## [X.Y.Z] - <date>` heading and an `[X.Y.Z]:` compare link in the footer; if
+     `[Unreleased]` still holds the release's entries, fetch the tag and rerun.
    ```
 
-2. Before renaming or rewriting the "## Changelog automation" heading, check for inbound anchor
-   links: `rg -n 'changelog-automation' -- docs README.md .github`. Keep the heading text as it
-   stands if anything outside the section links to it; otherwise the heading may be retitled.
-   Record which branch was taken in the commit message.
+   Render every `ADR-0633` mention in `releasing.md` as a markdown link to
+   `../adr/0633-regenerate-the-committed-changelog-at-release-time.md` — that relative path is
+   the correct one from `docs/development/`, and `just docs-links` resolves it.
+
+2. Before rewriting the "## Changelog automation" heading, check for inbound anchor links:
+   `rg -n 'changelog-automation' -- docs README.md .github`. Keep the heading text if anything
+   outside the section links to it; otherwise it may be retitled.
 
 3. Replace that section's body with the four facts the spec's Scope lists: the file stays
    git-cliff-generated and never hand-edited; `just changelog` in the post-release bump PR is the
    one place it is refreshed; the committed `[Unreleased]` section is deliberately stale between
    releases and `just changelog` renders the current view locally; and nothing reads the committed
    section, because `release.yml` builds the GitHub Release notes with `git-cliff --latest` from
-   git history. Add one paragraph saying a per-merge sync workflow used to do this and why it was
-   removed, citing
-   [ADR-0633](../adr/0633-regenerate-the-committed-changelog-at-release-time.md) and #2337.
+   git history. Add one sentence saying a per-merge sync workflow used to do this and why it was
+   removed, citing ADR-0633 (linked as in step 1) and #2337 — without naming the deleted workflow
+   file, which would keep Task 1's second guard red.
 
 4. Replace the section's "Branch protection" blockquote. Keep its first sentence (the ruleset:
    require-PR, required `lint · type · test`, no force-push or deletion, merge/rebase only with
@@ -275,23 +256,30 @@ fail when followed.
 5. In `justfile`, replace the `release` recipe's final `echo` with:
 
    ```
-   echo "(just set-version <next> + just changelog) — see docs/development/releasing.md."
+   echo "(just set-version <next>, then git fetch --tags && just changelog) — see docs/development/releasing.md."
    ```
 
-6. Run the documentation gates individually: `just docs-links`, `just docs-paths`,
-   `just served-doc-links`. Expect each to exit 0.
+6. Run the focused guard and the documentation gates: `uv run python -m pytest
+   tests/guards/test_no_workflow_pushes_to_default_branch.py -q` (expect `4 passed`), then
+   `just docs-links` and `just docs-paths` (expect exit 0 each).
 
 7. Stage, record the staged set, run `prek run`, re-add exactly those paths, and commit as
    `docs(releasing): regenerate the changelog in the post-release bump PR`.
 
 **Acceptance criteria.**
 
-- `rg -n 'changelog-sync' -- docs .github justfile` returns nothing.
-- `docs/development/releasing.md` names `just changelog` as a step of the post-release bump PR.
+- `rg -n 'changelog-sync' -- .github justfile docs/development` returns nothing. (The ADR, spec
+  and plan keep their mentions by design — they are the record of what was removed, and the
+  `records` gate holds a merged ADR append-only.)
+- `docs/development/releasing.md` names `just changelog` as a step of the post-release bump PR and
+  states the tag precondition.
 - `just release` prints a reminder naming `just changelog` and does not claim an automatic sync.
-- `just docs-links`, `just docs-paths`, and `just served-doc-links` pass.
+- All four tests in `tests/guards/test_no_workflow_pushes_to_default_branch.py` pass.
+- `just docs-links` and `just docs-paths` pass.
 
-**Rollback.** `git revert` of this commit restores the previous prose; it has no runtime effect.
+**Rollback.** `git revert` of this commit restores the previous prose and reddens Task 1's second
+guard, which is the correct coupling: the stale reference is exactly what that check exists to
+catch. It has no runtime effect.
 
 ## Final gate
 

@@ -28,11 +28,15 @@ records the file as cosmetic and assigns its regeneration to the post-release bu
 
 **In scope** — one pull request, three changes plus one consequential edit:
 
-- **Delete `.github/workflows/changelog-sync.yml`.** The whole file. Nothing else references it:
-  a repository-wide search for `changelog-sync` finds only that file and
-  `docs/development/releasing.md`. No test asserts its presence;
+- **Delete `.github/workflows/changelog-sync.yml`.** The whole file. Its only *operative*
+  references — text that instructs or executes, as opposed to the records below that describe the
+  removal — are the file itself and `docs/development/releasing.md`. No test asserts its presence;
   `tests/guards/test_workflow_action_pins.py` enumerates whatever workflows exist rather than a
   fixed list.
+- **Add `tests/guards/test_no_workflow_pushes_to_default_branch.py`.** Two standing structural
+  checks in one file: no workflow pushes to the default branch, and no operative file names a
+  workflow under `.github/workflows/` that does not exist. The second is what would have caught
+  the two stale references this change is fixing.
 - **Rewrite the "Changelog automation" section of `docs/development/releasing.md`** so it states
   the mechanism that now applies: `CHANGELOG.md` stays git-cliff-generated and never hand-edited,
   `just changelog` runs in the post-release bump pull request, and `[Unreleased]` is stale between
@@ -42,7 +46,11 @@ records the file as cosmetic and assigns its regeneration to the post-release bu
   owner to remove.
 - **Amend the post-release bump bullet of `docs/development/releasing.md`.** It currently reads
   "You no longer run `just changelog` by hand: merging this PR pushes to `main`, which triggers
-  the changelog-sync workflow." That becomes the explicit `just changelog` step.
+  the changelog-sync workflow." That becomes an explicit `git fetch --tags origin` then
+  `just changelog`, plus the check that a dated `## [X.Y.Z]` heading appeared. The tag must be in
+  the clone the regeneration runs in: the deleted workflow guaranteed that with `fetch-depth: 0`
+  and `fetch-tags: true`, and with the newest tag missing git-cliff exits 0 and silently files the
+  whole release under `[Unreleased]`.
 - **Correct the `just release` reminder in `justfile`** (the `release` recipe's closing `echo`),
   which prints "CHANGELOG auto-syncs on merge". Left alone it is an instruction that fails when
   followed. This is a necessary consequence of the success criterion below, not new scope: no
@@ -81,12 +89,14 @@ zero, and #2337 carries the follow-up.
    `.github/workflows/` pushes a commit to the default branch. Verifiable by inspecting the
    workflow set.
 2. `docs/development/releasing.md` names `just changelog` as a step of the post-release
-   `chore(release): begin <next>-dev` pull request, and describes no automatic per-merge sync.
+   `chore(release): begin <next>-dev` pull request, states the tag precondition, and describes no
+   automatic per-merge sync.
 3. `just release` prints a reminder consistent with (2) — it does not tell the operator the
    changelog syncs automatically on merge.
-4. `CHANGELOG.md` is unmodified by this change and remains git-cliff-generated.
-5. `just ci` passes, including `lint-workflows`, `docs-links`, `docs-paths`, `served-doc-links`,
-   `adr-status-check`, and `just test`.
+4. No operative file names a workflow under `.github/workflows/` that does not exist.
+5. `CHANGELOG.md` is unmodified by this change and remains git-cliff-generated.
+6. `just ci` passes, including `lint-workflows`, `docs-links`, `docs-paths`, `adr-status-check`,
+   and `just test`.
 
 ## Validation
 
@@ -95,15 +105,21 @@ zero, and #2337 carries the follow-up.
   file in `.github/workflows/` and asserts none carries a `git push` to the default branch.
   Expected red before the deletion (`changelog-sync.yml` matches); green after. Focused command:
   `uv run python -m pytest tests/guards/test_no_workflow_pushes_to_default_branch.py -q`.
-- **Contract: the documented release procedure names the regeneration step.**
-  `Mode: task-test-not-applicable` — the changed surface is release-procedure prose in
-  `docs/development/releasing.md`. Its content is read by a human, and no executable consumer
-  parses it; a test asserting the presence of particular sentences would assert wording rather
-  than behaviour, which this repository's plan rules forbid.
-- **Contract: `just release`'s operator reminder.**
-  `Mode: task-test-not-applicable` — the changed surface is one `echo` line in a `just` recipe
-  whose other statements push a git tag to `origin`. Observing the line requires running a
-  release; no structural observation of the string is meaningful beyond asserting its wording.
+- **Contract: no operative file names a workflow that does not exist.**
+  `Mode: focused-test` — `…::test_no_operative_file_names_a_missing_workflow` scans `justfile`,
+  `docs/development/`, and `.github/` for `<name>.yml` references resolving under
+  `.github/workflows/` and asserts each names a file that exists. Expected red while
+  `justfile`'s `release` reminder and `releasing.md` still name `changelog-sync.yml` after the
+  workflow is deleted; green once both are corrected. This is a structural reference check, not a
+  wording assertion, and it is the standing guard for the regression class this whole issue is an
+  instance of.
+- **Contract: the *wording* of the release procedure and the `just release` reminder.**
+  `Mode: task-test-not-applicable` — beyond the reference check above, what remains is three
+  sentences of prose and one `echo` string. No executable consumer parses them, and asserting
+  their phrasing would pin wording rather than behaviour. This is a judgment, not a repository
+  rule: `tests/guards/test_commit_hook_guidance.py` shows the repository does sometimes couple
+  prose to a mechanism, and the coupling is left unenforced here because the surface is small and
+  the structural half is already covered.
 - **Contract: the ADR is a well-formed, accepted record.**
   `Mode: focused-test` — the repository's `records` gate, which runs on the pull request rather
   than inside `just ci`. Expected red for a malformed record, green for a valid one. Focused
