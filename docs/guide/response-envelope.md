@@ -42,16 +42,15 @@ guidance.
 
 ## References, not log dumps
 
-The `refs` field carries object-store keys, not raw artifact bytes or console
-transcripts. The `data` field holds JSON values (`dict[str, JsonValue]`), checked
-by `validate_json_value` at construction. There is no field for inline log text —
-this is structural: a tool cannot accidentally return a raw transcript or vmcore
-dump in the envelope. Artifact bytes are fetched separately via `artifacts.get`
-after the agent inspects the reference.
+The `refs` field carries artifact identifiers, object-store keys, or download URLs, depending on
+the tool; it does not carry the artifact bytes. `data` holds JSON values and can include strings,
+such as the bounded `data.content` returned by `artifacts.get`. JSON validation does not redact
+those strings or structurally prevent inline logs.
 
-All guest output, gdb/SoL transcripts, and console logs pass through the redactor
-before persistence and before any response snippet. See the safety-and-RBAC guide
-(resource://kdive/docs/guide/safety-and-rbac.md) for the redaction contract.
+Use `artifacts.get` to read redacted artifact content and `artifacts.fetch_raw` for explicitly
+requested raw debug assets. Their role and sensitivity rules differ. See the safety-and-RBAC
+guide (resource://kdive/docs/guide/safety-and-rbac.md) for those access rules and the limits of
+redaction.
 
 ## Reading an open payload
 

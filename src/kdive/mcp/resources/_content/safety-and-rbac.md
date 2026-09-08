@@ -1,38 +1,54 @@
 # Safety and RBAC
 
+This guide explains KDIVE's permission boundaries, destructive-operation checks, and handling
+of credentials and artifacts. Use [project onboarding](../operating/project-onboarding.md) to
+configure grants and the [tool reference](reference/index.md) for each operation's contract.
+
 ## Roles
 
-KDIVE uses four project-scoped RBAC roles asserted by the identity provider
-([ADR-0020](../adr/0020-rbac-audit-gate-implementation.md),
-[ADR-0234](../adr/0234-external-build-default-and-contributor-role.md)). They form a total
-rank: a higher role satisfies every lower requirement.
+Project membership and roles come from verified token claims: `projects` lists memberships,
+and `roles` maps each project to a role. A role on one project does not grant access to another.
+The four project roles form a rank; each satisfies the requirements of the roles below it:
 
-| Role | Capabilities |
+| Role | Typical use |
 |---|---|
-| `viewer` | Read-only: `*.get`, `*.list`, read-only debug/introspection ops — accounting, audit, and activity review. |
-| `contributor` | All viewer capabilities plus the full crash-investigation loop over the resources it leases: create/bind/build runs, upload a built kernel (`artifacts.create_run_upload`), `complete_build`, install, boot, attach and drive debug sessions, run post-mortem/`vmcore.fetch`, request/hold allocations, open/close investigations, power-cycle the guest (`control.power`), and instantiate a System on a granted Allocation — `systems.provision`/`reprovision` and the investigation-scoped rootfs upload (`artifacts.create_investigation_upload`). |
-| `operator` | All contributor capabilities plus shared-resource management: manage project images (`images.upload`/`delete`). |
-| `admin` | All operator capabilities plus destructive ops (see below). |
+| `viewer` | Inspect project objects, accounting usage, and redacted artifacts. |
+| `contributor` | Manage leases and investigations; upload builds, install, boot, and debug guests. |
+| `operator` | Also manage project images. |
+| `admin` | Also set project budgets/quotas, read project audit records, and administer teardown. |
 
-The `contributor` role lets an agent build a kernel in its own checkout, upload it, and boot and
-debug it without the broader `operator` grant ([ADR-0234](../adr/0234-external-build-default-and-contributor-role.md));
-`viewer` stays a pure observer.
+These examples are not a rule inferred from a tool's name or read-only annotation. For example,
+`debug.read_memory` requires contributor, and the project form of `audit.query` requires admin.
+A tool can also require a particular object state or a profile opt-in after the role check.
 
-In addition, a **platform tier** (`platform_admin`, `platform_operator`,
-`platform_auditor`) provides cross-project authority for shared infrastructure
-management. The platform tier is orthogonal to per-project roles.
+Platform grants use the separate `platform_roles` claim. `platform_admin` satisfies
+`platform_auditor`, but does not satisfy `platform_operator`; platform operator grants neither
+of the other two roles. Platform grants do not supply project membership or project roles.
+Use the tool's explicit platform scope for cross-project oversight or administration.
 
-Authorization failures raise before any tool response is built. The M0 taxonomy
-maps a denial to `error_category: authorization_denied` on the wire.
+A member lacking the required role receives `authorization_denied`. Non-members can receive a
+not-found-shaped result for by-id tenant lookups, while named-project requests can return
+`authorization_denied`. This avoids confirming an ungranted object's existence. See the
+errors guide (resource://kdive/docs/guide/errors.md) for interpreting a denial.
 
 ## Tool visibility by role
 
-`list_tools` is filtered per connection so a caller is advertised only the tools its
-grants could invoke ([ADR-0148](../adr/0148-rbac-scoped-tool-exposure.md), #347): admin
-tools are not shown to non-admins. The filter is **advisory, not a boundary** — it never
-fails closed, and execution-time RBAC remains the only enforcement (a caller that already
-knows a hidden tool's name is still denied at call time). The matrix below is generated from
-the same classification (`kdive.mcp.exposure`) the middleware applies.
+The generated matrix below describes the **role filter**, using the union of the caller's
+project and platform grants. Seeing a tool means a grant could make it usable; it does not
+establish permission for every target object or parameter choice. Public entries still require
+an authenticated connection, and their results can be filtered by membership.
+
+The actual `list_tools` catalog also depends on the connection profile. With the tool gateway
+enabled, agent-profile connections receive a small core catalog and discover other tools through
+`tools.search`, then call them through `tools.invoke`. A verified client ID matching the
+configured operator CLI receives the direct catalog. Platform roles alone do not select that
+profile. See [tool discovery](reference/tools.md) and [CLI authentication](
+../operating/runbooks/kdivectl.md#authenticating).
+
+Listing and provider-schema filtering are advisory: failures can expose the full catalog or
+schema. Execution-time authorization remains the boundary on both direct and gateway calls.
+The matrix is generated from the classification in `kdive.mcp.exposure`; update it with
+`just rbac-matrix`, never by editing individual rows.
 
 <!-- BEGIN GENERATED: rbac-tool-matrix (just rbac-matrix) -->
 <!-- This table is generated by scripts/generate/gen_rbac_tool_matrix.py from
@@ -187,66 +203,84 @@ visible to every authenticated token regardless of grants.
 
 ## Destructive operations
 
-Destructive operations are protected at two tiers
-([ADR-0020](../adr/0020-rbac-audit-gate-implementation.md),
-[ADR-0028](../adr/0028-control-plane-power-force-crash.md),
-[ADR-0130](../adr/0130-destructive-gate-per-op-revision.md)).
-
 ### The two-check gate
 
-`control.force_crash` passes through the full `assert_destructive_allowed` gate,
-which evaluates two independent checks that must both pass (deny-by-default):
-
-1. **RBAC role** — `force_crash` requires `admin`. (`systems.reprovision` left
-   this gate in ADR-0326: re-staging your own granted System is contributor
-   leaseholder control, not destructive administration.)
-2. **Provisioning-profile opt-in** — the controlling provisioning profile
-   explicitly opts in to the operation (`destructive_ops: ["force_crash"]`).
-   The default is an empty list; an unmodified profile cannot force-crash.
-
-Both checks are evaluated and any missing check is reported. A denied
-attempt is audited with `transition="<op>:denied"`, so a refusal leaves a trail.
+`control.force_crash` requires both project `admin` and provisioning-profile opt-in. For local
+or remote libvirt, the matching provider block's `destructive_ops` must include `force_crash`;
+the default list is empty. The gate reports both missing factors when both are absent. A denial
+that reaches this gate is audited as `force_crash:denied`; earlier membership or input rejection
+is a different path. Passing the gate still leaves lifecycle and provider checks to satisfy.
 
 ### Admin-only destructive administration
 
-`systems.teardown` enforces a direct `require_role(..., admin)` check: no
-profile-opt-in factor applies.
+`systems.teardown` requires project `admin` without a profile opt-in. Platform break-glass
+operations have their own role requirements in the [operations reference](reference/ops.md).
+CLI confirmation behavior is described in the [CLI runbook](
+../operating/runbooks/kdivectl.md#break-glass-mutating-verbs); do not infer it from a tool's role.
 
 ### Leaseholder power control
 
-`control.power` (all actions `on`/`off`/`cycle`/`reset`) is contributor
-leaseholder lifecycle over a transient VM, not destructive administration — it
-requires only `contributor` and no profile opt-in, and is admitted only on a
-`READY` System (a `CRASHED` System holds crash evidence; use the crash workflow).
-Use `control.power reset` to recover a wedged but READY guest (ADR-0320).
+`control.power` requires project `contributor` without profile opt-in. Its `on`, `off`, `cycle`,
+and `reset` actions require a `READY` System; `resume` requires `PAUSED`. These actions are
+refused on `CRASHING` or `CRASHED` Systems. `systems.reprovision` also uses contributor authority
+without the force-crash gate. Follow the [control](reference/control.md) and
+[systems](reference/systems.md) references for lifecycle constraints and arguments.
 
 ## Secrets by reference
 
-Cloud credentials, BMC/IPMI passwords, SSH keys, and HMC tokens never appear in
-requests, state rows, or responses. The service stores only a reference
-(`(present, source-ref)`). The worker resolves the reference from a pluggable
-secret backend at the worker boundary — **and registers the resolved value into
-the redaction registry before the value is handed to any subprocess or transport**
-([ADR-0027](../adr/0027-safety-modules-secret-backend-impl.md)). This ordering is
-structural: the `FileRefBackend` registers before returning, so a caller cannot
-receive the value without it already being in the registry.
+Use provider credential reference fields instead of embedding secret values in provisioning
+requests. The file-reference backend resolves these references within `KDIVE_SECRETS_ROOT` and
+registers each resolved value with the shared redaction registry before returning it to
+its consumer. Reference metadata and secret-presence responses do not contain the resolved value.
+
+This does not remove deployment credentials: operators still configure authentication,
+database, and object-store credentials through the [configuration](reference/config.md) and
+[deployment](../operating/install.md#run-modes) interfaces. Do not paste those values into tool
+arguments, logs, or shared reports.
 
 ## Mandatory redaction
 
-All guest output, gdb/SoL transcripts, and console logs pass through the
-`Redactor` before persistence and before any response snippet. The redactor masks
-known secret values by exact-value replacement and `key=value` pairs whose key
-matches the secret-name pattern. The `ToolResponse` envelope has no field for
-inline log text — artifact bytes are accessed only via `artifacts.get` after the
-agent inspects the `refs` reference. Raw artifacts in the object store are marked
-sensitive and are fetched only by explicit request.
+Text-producing paths must apply redaction before exposing or persisting their output. The
+`Redactor` masks registered secret values by exact replacement and recognizes secret-like
+keys in mappings and `key=value` / `key: value` text. It is not a general detector of arbitrary
+credentials or personal information: unregistered values outside those patterns can remain.
+A new redactor takes a snapshot of the registry; later registration does not rewrite old output.
 
-Output produced before a secret is registered is quarantined in the object store
-(marked sensitive) until it can be redacted.
+For example, remote-console collection redacts parts before storage and the reader redacts
+assembled text again using the current registry. The fault-inject provider has a specific
+quarantine-and-redact exercise; it is not a production-wide quarantine service for output
+produced before registration.
+
+`ToolResponse.data` can contain strings, including inline artifact content. JSON validation does
+not perform redaction or prevent a producer from inserting a transcript. Redaction belongs at
+the producing and serving paths, not in an assumption about the envelope's shape.
+
+Artifact access has two distinct contracts:
+
+- `artifacts.get` requires project `viewer` and serves redacted artifacts, including bounded
+  inline text. Sensitive or quarantined IDs are not served through this path.
+- `artifacts.fetch_raw` requires project `contributor` and explicitly returns a download URL for
+  a Run's raw `vmcore`, `vmlinux`, or `pcap`. Those assets remain sensitive; they are not redacted
+  by downloading them.
+
+Use the [artifact reference](reference/artifacts.md) for byte limits, pagination, and download
+handling. Treat raw memory dumps and packet captures as sensitive when storing or sharing them.
 
 ## Audit log
 
-Every state transition and every destructive op writes an append-only audit row
-attributing `(principal, agent_session, tool, args-digest)`. The `args` are stored
-only as a SHA-256 digest, not in the clear, so the log provides tamper-evidence
-and correlation without persisting low-entropy secret material.
+Project audit records attribute events to a principal, agent session, tool, project, and
+transition. Transition handlers can write the state change and audit row in the same database
+transaction. Project-member role denials are recorded at the dispatch boundary; that denial
+write is best-effort, so an audit failure does not turn a refusal into an allowed operation.
+Platform events use a separate table and caller classification. Routine non-membership denials
+are excluded from these audit writers; the tables are not a record of every attempted call.
+
+The argument field stores a SHA-256 digest of canonical JSON instead of the raw arguments.
+This supports comparison without storing that argument payload, but is neither encryption nor
+proof that the audit record cannot be altered. Other event fields, such as scope and denial
+reason, remain readable. Secret values should not be supplied as arguments in the first place.
+
+Use [`audit.query`](reference/audit.md) for project or cross-project audit reads and
+[`ops.tool_trail`](reference/ops.md#opstool_trail) for the separate per-call trail. The
+[CLI runbook](../operating/runbooks/kdivectl.md#reading-the-audit-trail-by-actor) explains platform
+actor attribution.
