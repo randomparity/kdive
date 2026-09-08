@@ -33,6 +33,38 @@ def test_describe_narrows_allocation_kind_enum() -> None:
     assert schema["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
 
 
+def test_parameters_tier_reads_the_projected_schema(monkeypatch: Any) -> None:
+    """The ``parameters`` digest is taken from the projected schema, not the raw one.
+
+    The live projection narrows only nested ``$defs`` (ADR-0632 §1), so comparing real
+    projected against real unprojected output is byte-identical and could not fail. The stub
+    below drops a top-level property instead, which fails against any implementation that
+    digests ``tool.parameters`` directly.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    kept: dict[str, Any] = {"type": "string"}
+    raw: dict[str, Any] = {
+        "properties": {"kept": kept, "dropped": {"type": "string"}},
+        "required": ["kept"],
+    }
+
+    def _drop_one(tool: Any, kinds: Any) -> Any:
+        narrowed: dict[str, Any] = {"properties": {"kept": kept}, "required": ["kept"]}
+        return tool.model_copy(update={"parameters": narrowed})
+
+    monkeypatch.setattr(gateway_module, "project_listed_tool", _drop_one)
+
+    described = describe_tool(
+        _FakeTool("allocations.request", raw),  # ty: ignore[invalid-argument-type]
+        frozenset({ResourceKind.LOCAL_LIBVIRT}),
+        detail=SearchDetail.PARAMETERS,
+    )
+
+    names = [e["name"] for e in cast("list[dict[str, Any]]", described["parameters"])]
+    assert names == ["kept"], f"the projected-away property must not be advertised: {names}"
+
+
 def test_describe_narrows_systems_section_props() -> None:
     tool = _FakeTool("systems.provision", ProvisioningProfile.model_json_schema())
     described = describe_tool(

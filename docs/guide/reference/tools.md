@@ -57,10 +57,13 @@ Three modes, most specific first — ``names`` wins over ``namespace``, which wi
   sorted by name. Use this as a safety net when a query misses.
 
 Results are RBAC-filtered to only tools the caller could invoke. Search broadly first,
-then fetch one schema: ``tools.search(query="runs.boot", detail="full", limit=1)``
-returns exactly that tool with the ``input_schema`` ``tools.invoke`` needs. Every match
-carries ``annotations`` and ``maturity`` in both modes, so you can always classify a
-tool's safety tier before invoking it.
+then fetch one tool: ``tools.search(query="runs.boot", detail="full", limit=1)``
+returns exactly that tool with the ``input_schema`` ``tools.invoke`` needs. Where you
+only need to know what arguments to pass, ``detail="parameters"`` answers that for a
+fraction of the bytes — it returns each parameter's name, type, and required flag, and
+``detail`` is described in full on that parameter. Every match carries ``annotations``
+and ``maturity`` at every tier, so you can always classify a tool's safety tier before
+invoking it.
 
 ``truncated: true`` signals that more results exist beyond the returned ``limit``.
 
@@ -82,7 +85,7 @@ for vocabulary curation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `detail` | `summary`, `full` | no | How much per-match metadata to return. 'summary' (the default) returns name, summary, annotations, and maturity — enough to choose a tool and judge its safety tier. 'full' additionally returns the complete description and the input_schema you need to build arguments; it is several times larger per match, so narrow the query or the limit first. 'names' mode always returns full detail whatever you pass here. |
+| `detail` | `summary`, `parameters`, `full` | no | How much per-match metadata to return, cheapest first. 'summary' (the default) returns name, summary, annotations, and maturity — enough to choose a tool and judge its safety tier. 'parameters' adds the argument list: each parameter's name, type, and whether it is required, at roughly a seventh of the schema's size. 'full' adds the complete description and the input_schema on top of that. Each tier is a superset of the one before it, so asking for more never drops a key. Two limits on 'parameters': it gives argument names and types but not their value constraints, so a parameter with an enum or a pattern still needs 'full'; and for a tool whose only argument is a payload object (every .list tool, among others) it returns one entry naming that object, where 'full' is the call to make instead. 'names' mode always returns full detail whatever you pass here. |
 | `limit` | integer | no | Maximum matches to return (1-50). Not used in 'names' mode, which returns every name you list. |
 | `names` | array<string> (nullable) | no | Exact tool names to fetch (1-10), e.g. ['runs.install']. Skips ranking and returns those tools with their complete description and input_schema, in the order given: it overrides 'detail' and ignores 'limit'. A full match runs from under 1 KB to about 16 KB, so ten large ones can exceed 60 KB — name only what you need. Matching ignores case and surrounding whitespace, and a name you repeat is returned once. Names no visible tool carries come back lower-cased in data.unknown_names. Takes precedence over 'namespace' and 'query'. |
 | `namespace` | string (nullable) | no | Browse one tool plane by prefix, e.g. 'debug' or 'runs'. |
