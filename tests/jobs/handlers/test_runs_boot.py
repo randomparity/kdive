@@ -265,7 +265,7 @@ class _Pol:
 
 
 class _Connector:
-    """Fake Connector: open_transport raises when the stub is unreachable."""
+    """Fake Connector: open_transport raises when the stub is unreachable, and records calls."""
 
     def __init__(
         self,
@@ -275,8 +275,10 @@ class _Connector:
     ) -> None:
         self._raises = raises
         self._category = category
+        self.opened: list[object] = []
 
     def open_transport(self, _system: object, _kind: object) -> object:
+        self.opened.append(_kind)
         if self._raises:
             raise CategorizedError("no stub", category=self._category)
         return object()
@@ -459,6 +461,8 @@ def _record_expected(
     host_dump: bool,
     kdump: bool,
     system_present: bool,
+    console: bytes = _PANIC_CONSOLE,
+    connector: _Connector | None = None,
 ) -> tuple[BootStepResult | None, list[object]]:
     audits: list[object] = []
 
@@ -471,7 +475,7 @@ def _record_expected(
     monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _fake_get)
     monkeypatch.setattr(boot_evidence, "record_boot_audit", _fake_audit)
 
-    artifact = boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", _PANIC_CONSOLE)
+    artifact = boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", console)
 
     async def _run() -> BootStepResult | None:
         return await boot_evidence.record_expected_crash(
@@ -484,6 +488,7 @@ def _record_expected(
             ),
             artifact=artifact,
             matched_line="Kernel panic - not syncing: matched line",
+            connector=None if connector is None else cast(Connector, connector),
         )
 
     return asyncio.run(_run()), audits
@@ -492,6 +497,8 @@ def _record_expected(
 def test_record_expected_crash_discloses_console_and_inert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # No connector supplied: the ADR-0383 post-ready call site never probes, so a provisioned
+    # stub stays inert exactly as it did before ADR-0628.
     result, audits = _record_expected(
         monkeypatch, gdbstub=True, host_dump=True, kdump=False, system_present=True
     )
@@ -504,15 +511,98 @@ def test_record_expected_crash_discloses_console_and_inert(
     assert len(audits) == 1
 
 
+def test_record_expected_crash_admits_a_reachable_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR-0628: a readiness-failure crash on a provisioned, answering stub is live-debuggable.
+    conn_fake = _Connector(raises=False)
+    result, _ = _record_expected(
+        monkeypatch,
+        gdbstub=True,
+        host_dump=True,
+        kdump=False,
+        system_present=True,
+        connector=conn_fake,
+    )
+    assert result is not None
+    assert result["boot_outcome"] == "expected_crash_observed"
+    # Ordered like the crashed_halted_live path's available_capture() helper.
+    assert result["available_capture"] == ["gdbstub", "console"]
+    assert result["inert_capture"] == ["host_dump"]
+    assert conn_fake.opened == ["gdbstub"]
+
+
+def test_record_expected_crash_keeps_an_unreachable_stub_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn_fake = _Connector(raises=True)
+    result, _ = _record_expected(
+        monkeypatch,
+        gdbstub=True,
+        host_dump=True,
+        kdump=False,
+        system_present=True,
+        connector=conn_fake,
+    )
+    assert result is not None
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == ["gdbstub", "host_dump"]
+    assert conn_fake.opened == ["gdbstub"]
+
+
+def test_record_expected_crash_does_not_probe_an_unprovisioned_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn_fake = _Connector(raises=False)
+    result, _ = _record_expected(
+        monkeypatch,
+        gdbstub=False,
+        host_dump=True,
+        kdump=False,
+        system_present=True,
+        connector=conn_fake,
+    )
+    assert result is not None
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == ["host_dump"]
+    assert conn_fake.opened == []
+
+
+def test_record_expected_crash_does_not_probe_without_a_panic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0233 decision 3: an RSP connect stops the vCPU, and a declared expectation is a
+    # caller-supplied literal rather than a panic signature, so the panic gates the probe.
+    conn_fake = _Connector(raises=False)
+    result, _ = _record_expected(
+        monkeypatch,
+        gdbstub=True,
+        host_dump=True,
+        kdump=False,
+        system_present=True,
+        console=b"[ 2.0] dhash_entries=1 applied\n",
+        connector=conn_fake,
+    )
+    assert result is not None
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == ["gdbstub", "host_dump"]
+    assert conn_fake.opened == []
+
+
 def test_record_expected_crash_degrades_when_system_gone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    conn_fake = _Connector(raises=False)
     result, _ = _record_expected(
-        monkeypatch, gdbstub=True, host_dump=True, kdump=True, system_present=False
+        monkeypatch,
+        gdbstub=True,
+        host_dump=True,
+        kdump=True,
+        system_present=False,
+        connector=conn_fake,
     )
     assert result is not None
     assert result["available_capture"] == ["console"]
     assert result["inert_capture"] == []
+    assert conn_fake.opened == []
 
 
 def test_record_expected_crash_degrades_when_profile_unparseable(
@@ -524,13 +614,20 @@ def test_record_expected_crash_degrades_when_profile_unparseable(
     monkeypatch.setattr(boot_evidence.ProvisioningProfile, "parse", staticmethod(_raise))
     # System present + capture flags provisioned, but the profile fails to parse: the outcome is
     # still recorded (best-effort disclosure), inert set empty (ADR-0239).
+    conn_fake = _Connector(raises=False)
     result, audits = _record_expected(
-        monkeypatch, gdbstub=True, host_dump=True, kdump=True, system_present=True
+        monkeypatch,
+        gdbstub=True,
+        host_dump=True,
+        kdump=True,
+        system_present=True,
+        connector=conn_fake,
     )
     assert result is not None
     assert result["boot_outcome"] == "expected_crash_observed"
     assert result["available_capture"] == ["console"]
     assert result["inert_capture"] == []
+    assert conn_fake.opened == []
     assert len(audits) == 1
 
 
@@ -862,6 +959,8 @@ def _run_ready_path(
     *,
     expected: object,
     console: bytes,
+    connector: _Connector | None = None,
+    system_present: bool = False,
 ) -> tuple[BootStepResult, list[object]]:
     audits: list[object] = []
 
@@ -871,12 +970,16 @@ def _run_ready_path(
     async def _audit(_conn: object, _ctx: object, run: object) -> None:
         audits.append(run)
 
-    async def _system_gone(_conn: object, _sid: object) -> None:
-        return None
+    async def _system(_conn: object, _sid: object) -> _FakeSystem | None:
+        return _FakeSystem(_PROFILE_DICT) if system_present else None
 
     monkeypatch.setattr(boot_evidence, "capture_run_console", _cap)
     monkeypatch.setattr(boot_evidence, "record_boot_audit", _audit)
-    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _system_gone)
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _system)
+
+    policy: object = (
+        _Pol(gdbstub=True, host_dump=False) if system_present else cast(ProfilePolicy, object())
+    )
 
     async def _go() -> BootStepResult:
         return await runs_boot._run_boot_and_capture_outcome(
@@ -884,8 +987,8 @@ def _run_ready_path(
             cast(RequestContext, object()),
             cast(Run, _ExpectedFailureRun(uuid4(), expected)),
             cast(Booter, _ReadyBooter()),
-            cast(Connector, object()),
-            cast(ProfilePolicy, object()),
+            cast(Connector, object() if connector is None else connector),
+            cast(ProfilePolicy, policy),
             cast(SecretRegistry, object()),
             cast(ObjectStore, object()),
             None,
@@ -945,6 +1048,28 @@ def test_ready_boot_stays_ready_when_declared_signature_absent(
     )
     assert result["boot_outcome"] == "ready"
     assert len(audits) == 1
+
+
+def test_ready_boot_downgrade_never_probes_the_gdbstub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0628 decision 1: the post-ready downgrade path (ADR-0383) reaches record_expected_crash
+    # on a guest that already hit kdive-ready, so it may still be executing. An RSP connect stops
+    # a live vCPU (ADR-0233 decision 3), and a post-marker panic string does not establish a halt
+    # — so this path passes no connector and the stub stays inert even though it is provisioned
+    # and would answer.
+    conn_fake = _Connector(raises=False)
+    result, _ = _run_ready_path(
+        monkeypatch,
+        expected={"kind": "panic", "pattern": "Kernel panic"},
+        console=_MARKER_THEN_UBSAN_PANIC,
+        connector=conn_fake,
+        system_present=True,
+    )
+    assert result["boot_outcome"] == "expected_crash_observed"
+    assert conn_fake.opened == []
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == ["gdbstub"]
 
 
 def test_ready_boot_stays_ready_without_expectation_even_with_post_marker_panic(
@@ -1268,14 +1393,14 @@ def test_record_expected_crash_threads_args_and_pins_result(
     artifact = boot_evidence.ConsoleArtifact(uuid4(), "k", _PANIC_CONSOLE)
     seen: dict[str, object] = {}
 
-    async def _inert(c, s, p):
-        seen["inert"] = (c, s, p)
-        return ["gdbstub"]
+    async def _capture(c, s, p, *, connector, panicked):
+        seen["capture"] = (c, s, p, connector, panicked)
+        return ["console"], ["gdbstub"]
 
     async def _audit(c, x, r):
         seen["audit"] = (c, x, r)
 
-    monkeypatch.setattr(boot_evidence, "_expected_crash_inert_capture", _inert)
+    monkeypatch.setattr(boot_evidence, "_expected_crash_capture", _capture)
     monkeypatch.setattr(boot_evidence, "record_boot_audit", _audit)
 
     result = asyncio.run(
@@ -1299,11 +1424,13 @@ def test_record_expected_crash_threads_args_and_pins_result(
         "inert_capture": ["gdbstub"],
         "matched_line": "the panic line",
     }
-    assert seen["inert"] == (conn, sid, pol)
+    # The panic-signature gate is computed by record_expected_crash and threaded in, and the
+    # connector reaches the helper verbatim (ADR-0628).
+    assert seen["capture"] == (conn, sid, pol, None, True)
     assert seen["audit"] == (conn, ctx, run)
 
 
-def test_expected_crash_inert_capture_threads_args(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_expected_crash_capture_threads_args(monkeypatch: pytest.MonkeyPatch) -> None:
     conn, sid, profile = object(), uuid4(), object()
     profiles_seen: list[object] = []
     seen: dict[str, object] = {}
@@ -1329,16 +1456,20 @@ def test_expected_crash_inert_capture_threads_args(monkeypatch: pytest.MonkeyPat
         boot_evidence.ProvisioningProfile, "parse", staticmethod(lambda _pd: profile)
     )
     out = asyncio.run(
-        boot_evidence._expected_crash_inert_capture(
-            cast(AsyncConnection, conn), sid, cast(ProfilePolicy, _Pol3())
+        boot_evidence._expected_crash_capture(
+            cast(AsyncConnection, conn),
+            sid,
+            cast(ProfilePolicy, _Pol3()),
+            connector=None,
+            panicked=True,
         )
     )
-    assert out == ["gdbstub"]
+    assert out == (["console"], ["gdbstub"])
     assert seen["get"] == (conn, sid)
     assert None not in profiles_seen  # the parsed profile threads into inert_capture
 
 
-def test_expected_crash_inert_capture_omits_invalid_profile(
+def test_expected_crash_capture_omits_invalid_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _get(_conn: object, _system_id: UUID) -> _FakeSystem:
@@ -1354,15 +1485,19 @@ def test_expected_crash_inert_capture_omits_invalid_profile(
     monkeypatch.setattr(boot_evidence.ProvisioningProfile, "parse", staticmethod(_invalid))
 
     result = asyncio.run(
-        boot_evidence._expected_crash_inert_capture(
-            cast(AsyncConnection, object()), uuid4(), cast(ProfilePolicy, object())
+        boot_evidence._expected_crash_capture(
+            cast(AsyncConnection, object()),
+            uuid4(),
+            cast(ProfilePolicy, object()),
+            connector=None,
+            panicked=True,
         )
     )
 
-    assert result == []
+    assert result == (["console"], [])
 
 
-def test_expected_crash_inert_capture_propagates_unexpected_parser_fault(
+def test_expected_crash_capture_propagates_unexpected_parser_fault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _get(_conn: object, _system_id: UUID) -> _FakeSystem:
@@ -1376,8 +1511,12 @@ def test_expected_crash_inert_capture_propagates_unexpected_parser_fault(
 
     with pytest.raises(RuntimeError, match="parser fault"):
         asyncio.run(
-            boot_evidence._expected_crash_inert_capture(
-                cast(AsyncConnection, object()), uuid4(), cast(ProfilePolicy, object())
+            boot_evidence._expected_crash_capture(
+                cast(AsyncConnection, object()),
+                uuid4(),
+                cast(ProfilePolicy, object()),
+                connector=None,
+                panicked=True,
             )
         )
 

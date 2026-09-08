@@ -90,6 +90,10 @@ async def _run_boot_and_capture_outcome(
                 profile_policy=profile_policy,
                 artifact=artifact,
                 matched_line=matched_line,
+                # Only this call site probes the stub (ADR-0628): the boot raised
+                # READINESS_FAILURE, so the guest never reached the readiness marker. The
+                # ready-path downgrade below passes no connector.
+                connector=connector,
             )
         if exc.category is ErrorCategory.READINESS_FAILURE:
             crash = await boot_evidence.record_crash_halted_live(

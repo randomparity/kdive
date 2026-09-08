@@ -321,25 +321,23 @@ branch: `_GDBSTUB = "gdbstub"` (line 86), `_DRGN_LIVE = "drgn-live"` (line 87),
 7. Replace the `expected_crash_observed` branch (currently lines 613–624) with:
 
    ```python
-       if boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED and not (
-           transport == _GDBSTUB and _gdbstub_recorded_available(boot_result)
-       ):
-           # A declared expected crash leaves the System READY, so vmcore.fetch always rejects and
-           # postmortem.crash only self-corrects back to the console (#759): the non-gdbstub
-           # refusal reuses postmortem.crash's shared CONSOLE_CRASH_GUIDANCE so the two surfaces
-           # cannot drift. A gdbstub attach is refused only when the boot's probe found no stub
-           # (ADR-0628), and says so in gdbstub terms rather than kdump ones.
-           return ToolResponse.failure(
-               str(run.id),
-               ErrorCategory.CONFIGURATION_ERROR,
-               detail=(
-                   _EXPECTED_CRASH_GDBSTUB_DETAIL
-                   if transport == _GDBSTUB
-                   else CONSOLE_CRASH_GUIDANCE
-               ),
-               suggested_next_actions=["runs.get", "artifacts.list"],
-               data={"reason": "expected_crash_not_live_debuggable"},
-           )
+   if boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED and not (
+       transport == _GDBSTUB and _gdbstub_recorded_available(boot_result)
+   ):
+       # A declared expected crash leaves the System READY, so vmcore.fetch always rejects and
+       # postmortem.crash only self-corrects back to the console (#759): the non-gdbstub
+       # refusal reuses postmortem.crash's shared CONSOLE_CRASH_GUIDANCE so the two surfaces
+       # cannot drift. A gdbstub attach is refused only when the boot's probe found no stub
+       # (ADR-0628), and says so in gdbstub terms rather than kdump ones.
+       return ToolResponse.failure(
+           str(run.id),
+           ErrorCategory.CONFIGURATION_ERROR,
+           detail=(
+               _EXPECTED_CRASH_GDBSTUB_DETAIL if transport == _GDBSTUB else CONSOLE_CRASH_GUIDANCE
+           ),
+           suggested_next_actions=["runs.get", "artifacts.list"],
+           data={"reason": "expected_crash_not_live_debuggable"},
+       )
    ```
 
 8. In `src/kdive/mcp/tools/debug/sessions/registrar.py`, add one paragraph to the
