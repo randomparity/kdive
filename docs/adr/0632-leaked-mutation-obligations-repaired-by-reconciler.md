@@ -15,32 +15,56 @@ raises and nothing logs at a level an operator sees, and `systems.teardown` retu
 its terminal short-circuit (`../../src/kdive/mcp/tools/lifecycle/systems/admin.py:451-462`) without
 enqueueing a job, so no retry reaches the discharge.
 
-Only one code path can leave a System `torn_down` with an open mutation obligation. Every writer of
-that state was read:
+**Which paths can leave the pair.** verified: `rg -n TORN_DOWN 'src/kdive/**/*.py'` and
+`rg -n "torn_down" src/kdive/db/schema/*.sql` return five live writers of that state, plus
+`0080_retire_defined_system_state.sql:51`, which predates the obligations table (created at 0126)
+and cannot leak. Four of the five cannot produce the pair:
 
-- `../../src/kdive/jobs/handlers/systems.py:700-706` commits `torn_down` in its own transaction,
-  runs the provider teardown, and only then discharges through
-  `reclaim_system_core_after_provider_teardown(..., discharge_mutation_obligations=True)`. Anything
-  that ends the job between the two leaves the pair. This is the #2302 population and the ordering
-  defect's continuing source; fixing that ordering is separate work and out of scope here.
 - `../../src/kdive/db/schema/0147_external_boot_system_teardown.sql:440-443` discharges every open
   obligation for the System and sets `torn_down` in the same statement group of one
-  `SECURITY DEFINER` function, and the `retained_quarantine` disposition returns at lines 404-409
-  before either statement.
+  `SECURITY DEFINER` function; `retained_quarantine` returns at lines 404-409 before either.
+- `../../src/kdive/db/schema/0122_external_boot_authority.sql:1453` sets `torn_down` in
+  `commit_external_boot_authority_result`, which is still live because 0132 and 0147 patch it
+  through `pg_get_functiondef` + `replace` rather than redefining it;
+  `0132_external_boot_terminal_mutation_discharge.sql:16-22` splices the discharge in immediately
+  after that same `UPDATE`, in the same transaction.
 - `../../src/kdive/db/schema/0149_authority_owned_system_provisioning.sql:1154-1170` refuses with
-  `cleanup-required` while an undischarged obligation exists, so the reconciler's authority-teardown
-  finalizer cannot set `torn_down` over one. The worker receipt-consumption path at line 924 carries
-  no such gate, and does not need one: its caller
-  (`../../src/kdive/jobs/handlers/system_authority.py:222-229`) discharges before the finalizer runs
-  at all.
+  `cleanup-required` while an undischarged obligation exists.
+- The worker receipt-consumption path at `0149:924` carries no such gate and does not need one: its
+  caller (`../../src/kdive/jobs/handlers/system_authority.py:222-229`) discharges first.
 
-So the detection predicate needs one exclusion rather than the two #2326 proposes: a teardown in
-flight. There is no path that leaves an obligation legitimately open on a torn-down System.
+The fifth is `../../src/kdive/jobs/handlers/systems.py:700-706`, which commits `torn_down` in its
+own transaction, runs the provider teardown, and only then discharges through
+`reclaim_system_core_after_provider_teardown(..., discharge_mutation_obligations=True)`. Anything
+that ends the job between the two leaves the pair. This is the #2302 population and the ordering
+defect's continuing source; fixing that ordering is separate work and out of scope here.
 
-The window that needs excluding sits entirely inside a live `teardown` job. Both teardown families
-enqueue at the same key: `_teardown_dedup_key(system_id)` is `f"{system_id}:teardown"`, used by
-`enqueue_control_teardown` and by `enqueue_preactivation_teardown`
-(`../../src/kdive/services/systems/authority_owned.py:137-138,196-199,223-229`).
+**Why that inventory is not the whole claim.** It rules out a terminal transition committing over an
+open obligation. It says nothing about an obligation being *opened* on an already-terminal System,
+and the sole live opener does not close that gap itself: `public.open_external_boot_remote_module_attempt`
+(`../../src/kdive/db/schema/0146_external_boot_remote_module_attempt.sql:110-130`) fences on the
+authority, the worker incarnation, the job lease, the journal head, and an activation in `preparing`
+with `NOT cleanup_complete` — never on `systems.state`, and it takes no System advisory lock. So the
+property "no obligation is legitimately open on a torn-down System" is carried by those activation
+fences, which every terminal path clears in the transaction that writes `torn_down`, and by the
+ordinary teardown handler refusing to run under a restricting activation
+(`../../src/kdive/jobs/handlers/systems.py:684-696`). It is not a property of the obligations table.
+A change that lets an activation stay `preparing` across a terminal System transition moves this
+invariant, and this record is where a later reader should find that out.
+
+**The window that has to be excluded.** Both teardown families enqueue at the same key —
+`_teardown_dedup_key(system_id)` is `f"{system_id}:teardown"`, used by `enqueue_control_teardown`
+and `enqueue_preactivation_teardown`
+(`../../src/kdive/services/systems/authority_owned.py:137-138,196-199,223-229`) — and `jobs.dedup_key`
+is `NOT NULL UNIQUE` (`0001_init.sql:166,169`), so one row carries the whole history of a System's
+teardown. But job *state* alone does not bound the window. verified: `RUNNING -> CANCELED` is a legal
+transition (`../../src/kdive/domain/capacity/state.py:303-304`), `teardown` is not in
+`PLATFORM_INTERNAL_JOB_KINDS` (`../../src/kdive/domain/operations/jobs.py:95-97`), `jobs.cancel`
+fences only the authority-owned preactivation teardown
+(`../../src/kdive/mcp/tools/jobs.py:312-320`), and `rg -n 'canceled|CANCELED' src/kdive/jobs/worker.py`
+returns nothing — so an operator cancel writes `canceled` while the handler keeps running to
+completion through `provisioner.teardown`. A predicate reading only `queued`/`running` goes false for
+that entire remaining teardown.
 
 The affected-row count #2326 asks for cannot be taken from a development checkout, and the shape has
 to be chosen without it.
@@ -51,53 +75,65 @@ Repair the rows with a standing reconciler lane, `repair_leaked_mutation_obligat
 `../../src/kdive/reconciler/repairs/systems.py`, and write no data migration.
 
 The lane selects each System in `torn_down` carrying an obligation with
-`mutation_discharged_at IS NULL` and no `queued` or `running` job at that System's teardown dedup
-key, then discharges under the System advisory lock through
+`mutation_discharged_at IS NULL` and **no teardown job at that System's dedup key that is either
+`queued`/`running` or terminal within a settle window** (`_TEARDOWN_SETTLE`, 15 minutes), then
+discharges under the System advisory lock through
 `RemoteModuleAttemptObligationRepository.worker_discharge_system_mutation_obligations`, which is
-ADR-0629's `SECURITY DEFINER` function. It is registered in the reconciler's repair catalog after
-`abandoned_jobs`, which dead-letters a lease-lapsed teardown job and so is what makes a stranded
-candidate visible.
+ADR-0629's `SECURITY DEFINER` function. Each candidate is isolated so one failure does not starve
+the rest of the batch, matching `repair_orphaned_systems` in the same module. It is registered in
+the reconciler's repair catalog after `abandoned_jobs`.
 
 ## Consequences
 
 - The repair is idempotent and self-draining. It returns 0 against a database with no leaked rows,
   which is the resting state of every reconciler lane, and it repairs a leak created after deploy
   as readily as one created before it. That is the property a one-shot migration does not have while
-  the teardown ordering defect stands unfixed.
+  the teardown ordering defect stands unfixed. The first pass after deploy is unbounded and serial,
+  so its duration scales with a backlog nobody has measured, and it delays the lanes registered
+  after it for that one pass; the bounded-batch idiom at `0149:939` is the remedy if an operator
+  ever reports one.
+- **The settle window is pacing with a stated limit, not a fence.** It bounds the operator-cancel
+  window above, and it is measured on the teardown job's own `updated_at` — a row unrelated traffic
+  does not write, which is what makes it usable where a window on `systems.updated_at` is not. A
+  provider teardown that runs longer than 15 minutes after its job left `queued`/`running` is not
+  covered, and nothing serializes this lane against the handler in any case, because the handler
+  releases the System lock before its provider call. Underneath that, ADR-0588's sweep still refuses
+  to delete any volume whose path backs a live domain, so an early discharge does not by itself
+  reclaim storage a running teardown is using.
 - The lane's count reaches operators through the existing repairs counter, keyed by its
   repair-kind name, plus a per-System `INFO` log. That is the signal #2326 records as absent today.
-  No new `ReconcileReport` scalar field is added; the three sibling stalled-state repairs carry
-  their counts the same way.
+  The count is **obligation rows**, matching the kind name, not Systems. No new `ReconcileReport`
+  scalar field is added; the three sibling stalled-state repairs carry their counts the same way.
 - Migration `0153` was reserved for this change and is deliberately left unused, so the next
   migration takes it.
 - The reconciler discharges obligations for a System it did not tear down. It already holds the
   `EXECUTE` grant that permits exactly this write and nothing else (ADR-0629), and the write is the
   same fixed `terminal_escape` statement the teardown path itself would have run.
-- The exclusion is a predicate on job state, not a fence. The teardown handler releases the System
-  lock before its provider call, so nothing serializes this lane against the window; re-reading the
-  predicate inside the per-System locked transaction narrows it to the same width every other
-  reconciler repair carries, and no narrower.
-- A System in `failed` carrying an open obligation is not repaired. #2326's predicate is
-  `state = 'torn_down'` and this record keeps that boundary; whether `failed` strands obligations
-  the same way is unexamined follow-up work.
+- A System in `failed` carrying an open obligation is not repaired, and that is a permanent leak
+  rather than an open question: `retained_owners` filters only on the discharge columns and never on
+  System state, while `repair_orphaned_systems` treats `FAILED` as terminal
+  (`_ORPHANED_SYSTEM_TERMINAL_STATES`, `../../src/kdive/reconciler/repairs/systems.py:34`) and so
+  never enqueues a teardown for it. #2326's predicate is `state = 'torn_down'` and this record keeps
+  that boundary; the sized follow-up is reported to the campaign that dispatched this work.
 
 ## Considered & rejected
 
-- **A one-shot data migration, using the reserved number 0153.** verified: the teardown ordering
-  defect that produces the leak is explicitly out of scope for #2326 and no issue has been filed for
-  it, and `../../src/kdive/jobs/handlers/systems.py:700-706` still commits `torn_down` before the
-  discharge, so the population keeps growing after the migration runs. A migration also has to
-  encode the in-flight exclusion at deploy time, which is exactly when workers are most likely to be
-  mid-teardown.
-- **Ship the migration and the lane together.** judgment: the lane drains the historical backlog on
-  its first pass, so the migration would repair only rows the lane repairs seconds later, at the
-  cost of a second implementation of the same predicate.
-- **A settle window on `systems.updated_at` instead of the job predicate.** verified: the column and
-  its trigger exist (`../../src/kdive/db/schema/0001_init.sql:59-62`), so a window is
-  implementable. It makes correctness depend on a tuning constant that has to exceed the longest
-  provider teardown, and the trigger fires on any update to the row, so an unrelated write resets it.
-  The job predicate reads the actual condition instead, and it is the idiom
-  `repair_stalled_crashing_systems` already uses.
+- **A one-shot data migration, using the reserved number 0153 — alone or beside the lane.**
+  verified: the teardown ordering defect that produces the leak is explicitly out of scope for #2326
+  and no issue has been filed for it, and `../../src/kdive/jobs/handlers/systems.py:700-706` still
+  commits `torn_down` before the discharge, so the population keeps growing after the migration
+  runs. A migration also has to encode the in-flight exclusion at deploy time, which is exactly when
+  workers are most likely to be mid-teardown. Shipping both adds a second implementation of the same
+  predicate to repair rows the lane's first pass repairs seconds later.
+- **A settle window on `systems.updated_at` rather than on the teardown job's.** verified: the
+  column and its trigger exist (`../../src/kdive/db/schema/0001_init.sql:59-62`), but that trigger
+  fires on any update to the System row, so unrelated traffic resets the window. The job row has the
+  same trigger (`0001_init.sql:171-172`) and a `UNIQUE` `dedup_key`, and nothing but that System's
+  teardown writes it — so the window measures the thing it names.
+- **Job state alone, with no settle window.** verified: refuted by the cancel route in Context —
+  `RUNNING -> CANCELED` is legal, `jobs.cancel` does not fence the ordinary teardown, and the worker
+  never aborts the running handler, so the predicate goes false for the whole remaining teardown.
+  This was the first shape of this decision and the review that found it is why the window exists.
 - **Encode #2326's second exclusion, for Systems torn down through the external-boot lifecycle
   path.** verified: that caller does pass `discharge_mutation_obligations=False`
   (`../../src/kdive/jobs/handlers/external_boot/lifecycle.py:1078`), but
@@ -111,11 +147,9 @@ candidate visible.
   un-discharged durable obligation. Filtering by System state there would release the volumes while
   leaving the row saying the obligation is open, so the durable record and the sweep would disagree
   and no evidence of why the attempt stopped being retained would exist anywhere.
-- **A new operator tool that discharges one System's obligations.** judgment: it needs an operator
-  to notice a leak that produces no signal, which is the failure #2326 describes rather than a
-  remedy for it.
 - **Do nothing.** verified: no existing surface reaches the discharge for an already-torn-down
   System — `systems.teardown` short-circuits at
   `../../src/kdive/mcp/tools/lifecycle/systems/admin.py:451-462` without enqueueing a job, and the
-  three other terminal paths cannot produce the pair — so the rows stay open and their volumes stay
-  unreclaimable for the life of the row.
+  four other terminal paths above cannot produce the pair — so the rows stay open and their volumes
+  stay unreclaimable for the life of the row. An operator command instead of a lane fails the same
+  way, one step later: it needs an operator to notice a leak that produces no signal.
