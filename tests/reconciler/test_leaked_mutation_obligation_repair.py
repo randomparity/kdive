@@ -143,7 +143,10 @@ def test_active_teardown_job_defers_the_repair(migrated_url: str, job_state: str
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("job_state", [JobState.CANCELED.value, JobState.FAILED.value])
+@pytest.mark.parametrize(
+    "job_state",
+    [JobState.CANCELED.value, JobState.FAILED.value, JobState.SUCCEEDED.value],
+)
 def test_recently_terminal_teardown_job_defers_the_repair(
     migrated_url: str, job_state: str
 ) -> None:
@@ -290,8 +293,53 @@ def test_repair_runs_under_the_reconciler_role(
     asyncio.run(run())
 
 
+def test_total_failure_is_not_reported_as_nothing_to_do(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A pass whose candidates all fail returns 0 — the same count as a clean database.
+
+    Per-candidate isolation is what makes that possible, so the lane owes an ERROR when it
+    discharged nothing and something failed. Without it a systematic denial (the reconciler login
+    losing its role membership, a statement timeout) is the silent failure #2326 was filed about.
+    """
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        await _seed_open_obligation(conn)
+        await _seed_open_obligation(conn)
+
+        async def always_fails(
+            self: RemoteModuleAttemptObligationRepository,
+            connection: psycopg.AsyncConnection,
+            system_id: UUID,
+        ) -> int:
+            raise RuntimeError("systematic discharge failure")
+
+        monkeypatch.setattr(
+            RemoteModuleAttemptObligationRepository,
+            "worker_discharge_system_mutation_obligations",
+            always_fails,
+        )
+
+        with caplog.at_level("ERROR", logger="kdive.reconciler.repairs.systems"):
+            assert await _run(migrated_url) == 0
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1
+        assert "does not mean there was nothing to repair" in errors[0].getMessage()
+        await conn.close()
+
+    asyncio.run(run())
+
+
 def test_repair_runs_after_abandoned_jobs() -> None:
-    """abandoned_jobs dead-letters a lease-lapsed teardown, which is what exposes a candidate."""
+    """abandoned_jobs is what makes a stuck teardown repairable *at all*, not what exposes it.
+
+    A teardown whose worker died keeps its job `running` with a lapsed lease, and a `running` job
+    defers this repair's candidate forever. `repair_abandoned_jobs` moves it to `failed`, which
+    turns "deferred forever" into "deferred one settle window" — that write stamps
+    `jobs.updated_at`, so the dead-lettered System is repaired a later pass rather than this one.
+    """
     kinds = loop.ALL_REPAIR_KINDS
 
     assert "leaked_mutation_obligations" in kinds

@@ -86,7 +86,9 @@ discharges under the System advisory lock through
 `RemoteModuleAttemptObligationRepository.worker_discharge_system_mutation_obligations`, which is
 ADR-0629's `SECURITY DEFINER` function. Each candidate is isolated so one failure does not starve
 the rest of the batch, matching `repair_orphaned_systems` in the same module. It is registered in
-the reconciler's repair catalog after `abandoned_jobs`.
+the reconciler's repair catalog after `abandoned_jobs`, which is what makes a stuck teardown
+repairable at all: a teardown whose worker died keeps its job `running` with a lapsed lease, and a
+`running` job defers this repair's candidate indefinitely.
 
 ## Consequences
 
@@ -94,9 +96,15 @@ the reconciler's repair catalog after `abandoned_jobs`.
   which is the resting state of every reconciler lane, and it repairs a leak created after deploy
   as readily as one created before it. That is the property a one-shot migration does not have while
   the teardown ordering defect stands unfixed. The first pass after deploy is unbounded and serial,
-  so its duration scales with a backlog nobody has measured, and it delays the lanes registered
-  after it for that one pass; the bounded-batch idiom at `0149:939` is the remedy if an operator
-  ever reports one.
+  so its duration scales with a backlog nobody has measured. The lane it delays is worth naming:
+  `module_volume_reap_jobs_enqueued` sits about thirty catalog entries later and is the sweep that
+  consumes these discharges, so a long first pass postpones by one interval exactly the work this
+  repair exists to unblock. Self-limiting, because pass two sees an empty set; the bounded-batch
+  idiom at `0149:939` is the remedy if an operator ever reports one.
+- The dead-letter that frees a stuck candidate also defers it once more. `repair_abandoned_jobs`
+  moves a lease-lapsed teardown to `failed`, and that write stamps `jobs.updated_at`, so the System
+  it frees is repaired a settle window later rather than in the pass that dead-lettered it. The
+  catalog ordering buys eventual repairability, not same-pass repair.
 - **The settle window is pacing with a stated limit, not a fence.** It bounds the operator-cancel
   window above, and it is measured on the teardown job's own `updated_at` — a row unrelated traffic
   does not write, which is what makes it usable where a window on `systems.updated_at` is not. A
@@ -106,9 +114,14 @@ the reconciler's repair catalog after `abandoned_jobs`.
   to delete any volume whose path backs a live domain, so an early discharge does not by itself
   reclaim storage a running teardown is using.
 - The lane's count reaches operators through the existing repairs counter, keyed by its
-  repair-kind name, plus a per-System `INFO` log. That is the signal #2326 records as absent today.
-  The count is **obligation rows**, matching the kind name, not Systems. No new `ReconcileReport`
-  scalar field is added; the three sibling stalled-state repairs carry their counts the same way.
+  repair-kind name, plus a per-System `INFO` log. The count is **obligation rows**, matching the
+  kind name, not Systems. No new `ReconcileReport` scalar field is added; the three sibling
+  stalled-state repairs carry their counts the same way. That counter is a repair signal, not a
+  health signal: a pass whose candidates all failed also returns 0, which is byte-identical to a
+  pass with nothing to repair, so the lane emits one `ERROR` naming the failure count when it
+  discharged nothing and something failed. Per-candidate isolation would otherwise turn a
+  systematic denial — the reconciler login losing its role membership, a statement or lock
+  timeout — into exactly the silent failure #2326 was filed about, one level up.
 - Migration `0153` was reserved for this change and is deliberately left unused, so the next
   migration takes it.
 - The reconciler discharges obligations for a System it did not tear down. It already holds the

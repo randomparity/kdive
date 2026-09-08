@@ -137,11 +137,17 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
         candidates: list[UUID] = [row["system_id"] for row in await cur.fetchall()]
     obligations = RemoteModuleAttemptObligationRepository()
     discharged_rows = 0
+    failures = 0
     for system_id in candidates:
         try:
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
                 # Only the job half is re-read: `torn_down` is terminal, so the state half cannot
-                # change between the candidate query and this lock.
+                # change between the candidate query and this lock. The repository method below
+                # takes this same key again; `pg_advisory_xact_lock` is reference-counted per
+                # transaction and released at commit, so the second acquisition is a no-op. It is
+                # taken here rather than left to that method because the re-read must happen under
+                # the lock, which is what 0152's "deliberately not retaken here" comment assumes of
+                # every caller.
                 async with conn.cursor() as cur:
                     await cur.execute(
                         _TEARDOWN_IN_FLIGHT_SQL,
@@ -157,6 +163,7 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                     conn, system_id
                 )
         except Exception:  # noqa: BLE001 - one System must not starve the rest of the batch
+            failures += 1
             _log.warning(
                 "reconciler: leaked mutation obligation discharge failed for system %s; "
                 "retrying next pass",
@@ -171,6 +178,17 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                 system_id,
                 discharged,
             )
+    if failures and not discharged_rows:
+        # Every candidate failed, so the count this lane returns is 0 — byte-identical to the
+        # resting state of a database with nothing to repair. A systematic cause (the reconciler's
+        # login losing its role membership, a statement or lock timeout, a dropped connection)
+        # would otherwise be the same silent failure #2326 was filed about, one level up.
+        _log.error(
+            "reconciler: every leaked mutation obligation candidate failed this pass (%d of %d); "
+            "the repair count of 0 does not mean there was nothing to repair",
+            failures,
+            len(candidates),
+        )
     return discharged_rows
 
 
