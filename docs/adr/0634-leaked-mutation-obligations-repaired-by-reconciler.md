@@ -140,6 +140,24 @@ repairable at all: a teardown whose worker died keeps its job `running` with a l
   never enqueues a teardown for it. #2326's predicate is `state = 'torn_down'` and this record keeps
   that boundary; the sized follow-up is reported to the campaign that dispatched this work.
 
+### Amendment (2026-09-08): the pass is bounded at 100 candidates
+
+This is an amendment rather than an edit to the bullet above, because the record is merged and
+`## Consequences` is append-only. It qualifies one claim: that "the first pass after deploy is
+unbounded and serial", with the bounded-batch idiom named as the remedy "if an operator ever
+reports one".
+
+The bound is taken now instead. `_LEAKED_MUTATION_REPAIR_LIMIT` caps a pass at 100 candidates and
+`ORDER BY o.system_id` makes each pass a stable prefix, matching the two sibling repairs that
+already cap theirs (`../../src/kdive/reconciler/repairs/jobs.py:28`,
+`../../src/kdive/reconciler/repairs/external_boot.py:46`). Waiting for an operator report was the
+weaker half of the original reasoning: the lane is self-draining, so a bound costs passes rather
+than coverage, and the cost of not having one falls on `module_volume_reap_jobs_enqueued` — the
+sweep that consumes these discharges — in exactly the deployment that has a backlog to drain.
+
+The value is the siblings' 100 rather than a tuned number; nothing here has a measured backlog to
+tune against, and it only decides how many passes a drain takes.
+
 ## Considered & rejected
 
 - **A one-shot data migration, using the reserved number 0153 — alone or beside the lane.**

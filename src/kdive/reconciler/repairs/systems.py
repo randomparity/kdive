@@ -50,6 +50,12 @@ _TEARDOWN_SETTLE = timedelta(minutes=15)
 # `_teardown_dedup_key(system_id)` and `jobs.dedup_key` is UNIQUE, so the one row either query
 # matches carries that System's whole teardown history.
 _TEARDOWN_IN_FLIGHT = "(j.state = ANY(%s) OR j.updated_at > now() - %s)"
+# Candidates per pass, matching the sibling repairs' bound (`repairs/jobs.py:28`,
+# `repairs/external_boot.py:46`). The lane is self-draining, so a bound costs passes rather than
+# coverage, and it keeps a first pass over an unmeasured backlog from delaying the rest of the
+# catalog -- `module_volume_reap_jobs_enqueued`, the sweep that consumes these discharges, most of
+# all. `ORDER BY` is what makes each pass a stable prefix instead of an arbitrary subset.
+_LEAKED_MUTATION_REPAIR_LIMIT = 100
 _LEAKED_MUTATION_CANDIDATES_SQL = (
     "SELECT DISTINCT o.system_id "
     "FROM remote_module_attempt_obligations o "
@@ -60,7 +66,9 @@ _LEAKED_MUTATION_CANDIDATES_SQL = (
     "    SELECT 1 FROM jobs j "
     "    WHERE j.dedup_key = s.id::text || ':teardown' "
     f"      AND {_TEARDOWN_IN_FLIGHT} "
-    "  )"
+    "  ) "
+    "ORDER BY o.system_id "
+    "LIMIT %s"
 )
 
 
@@ -122,7 +130,8 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
 
     A candidate is deferred while its teardown job is active *or* terminal within
     `_TEARDOWN_SETTLE`; ADR-0634 carries why job state alone is not enough and what the window
-    does not cover.
+    does not cover. Bounded at `_LEAKED_MUTATION_REPAIR_LIMIT` candidates per pass, so a backlog
+    drains over several passes rather than holding up the rest of the catalog in one.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -131,6 +140,7 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                 SystemState.TORN_DOWN.value,
                 list(_ACTIVE_JOB_STATE_VALUES),
                 _TEARDOWN_SETTLE,
+                _LEAKED_MUTATION_REPAIR_LIMIT,
             ),
         )
         candidates: list[UUID] = [row["system_id"] for row in await cur.fetchall()]
