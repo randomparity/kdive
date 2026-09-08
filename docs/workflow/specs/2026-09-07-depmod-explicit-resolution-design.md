@@ -13,48 +13,48 @@ kmod puts it. `runs.install` then fails `MISSING_DEPENDENCY` naming a package th
 
 ## Scope
 
-Resolve `depmod` in `_run_host_depmod` and pass an absolute path to `subprocess.run`: a
-`KDIVE_DEPMOD` override, then the four root-owned dirs in `src/kdive/jobs/.../bootstrap_elf.py`.
-`/usr/local/{sbin,bin}` stay out — argv[0] runs privileged — so a kmod there sets the override.
-The override is a worker-only `Setting` with no default in `providers/local_libvirt/settings.py`,
-because `config_env_guard.py` forbids `KDIVE_*` reads outside `kdive.config`; its `parse` takes
-only an absolute path to an executable file, and that module's `KDIVE_LIBVIRT_*` docstring widens
-for it. `deploy/systemd/bin/kdive-live-worker-gate` rebuilds the worker environment strictly from
-`_WORKER_ENV_NAMES` before `execve`, so this adds that one name; else the override is stripped on
-the gated slot and `Registry.validate` never sees it. That slot's `worker.env` is generated, so
-the override goes in a drop-in there (`systemctl edit kdive-live-worker@N`), not a role template.
+Resolve `depmod` in `_run_host_depmod` with `shutil.which` restricted to the four root-owned
+directories `src/kdive/jobs/.../bootstrap_elf.py` already uses — `/usr/sbin`, `/usr/bin`, `/sbin`,
+`/bin` — and pass the resolved absolute path to `subprocess.run`. `PATH` is never consulted.
+`/usr/local/{sbin,bin}` stay out: this argv[0] runs under a privileged staging step and
+`/usr/local` is group-writable by default on part of the Debian family.
 
-Excluded, with owners: any other `_WORKER_ENV_NAMES` addition, `PATH` included (this change);
-guest-side depmod (ADR-0346); gate credential invariants (gate-hardening). Deferred to a
-follow-up issue: the `ops.diagnostics` startup preflight, because `src/kdive/diagnostics/` is
-owned by a concurrent run. No ADR — this applies ADR-0087 to one knob.
+A `KDIVE_DEPMOD` override was in the original scope and the operator **released** that clause
+rather than leaving it unbuilt. It could only reach the gated live-worker slot by widening
+`_WORKER_ENV_NAMES`, which the gate's exec environment excludes; the repository already declined
+that widening once, provisioning `KDIVE_LIBVIRT_RECOVERY_ROOT` to the provider-authority host
+instead, with a negative assertion in the gate tests as the durable record. No host has been seen
+with `depmod` outside the four directories, and the failure names them, so the gap is diagnosable
+without a knob. Reintroducing one is a follow-up, not a silent omission.
+
+Excluded, with owners: widening `_WORKER_ENV_NAMES` at all, `PATH` and any `KDIVE_*` name alike
+(this change); guest-side depmod (ADR-0346); gate credential invariants (gate-hardening).
+Deferred to a follow-up issue: the `ops.diagnostics` startup preflight, because
+`src/kdive/diagnostics/` is owned by a concurrent run. No ADR — no new decision is made here.
 
 ## Success
 
-1. `subprocess.run` gets an absolute `depmod` path, never a bare name.
-2. Unresolvable depmod raises `MISSING_DEPENDENCY` reporting that none was found in the
-   `details["searched"]` directories, offering both remedies: install kmod or set `KDIVE_DEPMOD`.
-3. A `KDIVE_DEPMOD` that is not an absolute path to an executable file raises
-   `CONFIGURATION_ERROR` naming the variable — misconfiguration, not a missing package.
-4. A resolved depmod that cannot be executed (vanished, unreadable, wrong format) raises
-   `MISSING_DEPENDENCY` — non-retryable, as today — with `details["depmod"]`; a spawn-side
-   `OSError` (spawn pressure) stays retryable `INFRASTRUCTURE_FAILURE`. Neither escapes.
-5. `KDIVE_DEPMOD` survives the gate's `execve`, so the override and its startup `validate` are
-   reachable on the fixed live-worker slot rather than silently inert.
+1. `subprocess.run` gets an absolute `depmod` path, never a bare name, so an absent or restricted
+   `PATH` cannot change the outcome.
+2. Unresolvable depmod raises `MISSING_DEPENDENCY`, keeping the "install kmod" remedy, with the
+   searched directories in `details["searched"]` as a scalar — the worker's failure context keeps
+   only scalar details, so a list never reaches the operator.
+3. A resolved depmod that cannot be executed (vanished, unreadable, wrong format) raises
+   `MISSING_DEPENDENCY` — non-retryable, as today — with `details["depmod"]` and `errno`; a
+   spawn-side `OSError` stays retryable `INFRASTRUCTURE_FAILURE`. Neither escapes uncategorized.
 
 ## Validation
 
-Cases are in `tests/providers/local_libvirt/lifecycle/boot/test_module_indexing.py` unless named,
-red first then green under `uv run python -m pytest <that file> -q`.
+Cases are in `tests/providers/local_libvirt/lifecycle/boot/test_module_indexing.py`, red first
+then green under `uv run python -m pytest <that file> -q`.
 
-- Absolute argv (1). focused-test — `test_run_host_depmod_runs_the_resolved_absolute_path`; red
-  against today's bare-name argv assertion.
+- Absolute argv and fixed search path (1). focused-test —
+  `test_run_host_depmod_runs_the_resolved_absolute_path`; red against today's bare-name argv
+  assertion.
 - Unresolvable envelope (2). focused-test —
   `test_run_host_depmod_unresolvable_names_searched_directories`; red, no `searched` detail.
-- Override honoured, and rejected when not absolute and executable (1, 3). focused-test —
-  `test_run_host_depmod_uses_the_override`, `test_override_must_be_absolute_executable`; red.
-- Exec-failure class (4). focused-test — `test_unexecutable_depmod_is_missing_dependency` and
-  `test_spawn_pressure_stays_retryable_infrastructure_failure`; red, `FileNotFoundError` only.
-- Gate crossing and startup validate (5); red, the frozenset omits the name. focused-test —
-  `test_live_worker_gate.py`: the gate assertion, plus a `Registry.validate("worker")` case there.
-- Config reference row. focused-test — `just config-docs-check`; red until `just config-docs` runs.
+- Exec-failure class (3). focused-test — `test_unexecutable_depmod_is_missing_dependency` over the
+  vanished and wrong-format cases; red, only `FileNotFoundError` is caught.
+- Spawn pressure stays retryable (3). focused-test —
+  `test_spawn_pressure_stays_retryable_infrastructure_failure` over EMFILE, EAGAIN and ENOMEM;
+  red, the blanket catch made them non-retryable.

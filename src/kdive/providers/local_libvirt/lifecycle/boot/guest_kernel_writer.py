@@ -14,9 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Protocol, cast
 
-from kdive import config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt import settings as provider_settings
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
     capped_tar_members,
     reject_oversize_member,
@@ -52,12 +50,12 @@ _DEPMOD = "depmod"
 # depmod is an sbin tool — /usr/sbin under merged-usr, /sbin under split-usr. Resolution never
 # consults PATH: the fixed live-worker gate execs the worker from an environment allowlist that
 # omits it, so a bare name falls back to os.defpath (/bin:/usr/bin) and misses /usr/sbin, which
-# reported a missing package on hosts that had one (#2300). The first four are the set
+# reported a missing package on hosts that had one (#2300). These are the set
 # ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
 # against, and every one is root-owned. /usr/local/{sbin,bin} are left out on purpose even though
 # an ungated worker reaches them through PATH today: this argv[0] runs under a privileged staging
-# step, and /usr/local is group-writable by default on part of the Debian family. A host with a
-# source-built kmod sets KDIVE_DEPMOD, which the resolution failure names explicitly.
+# step, and /usr/local is group-writable by default on part of the Debian family, so a binary
+# planted there must not be able to decide what that step executes.
 _DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 # These errnos mean the binary is absent or permanently unusable, so the job should dead-letter.
 # Every other errno stays retryable, whether it came from the spawn side — pipe creation
@@ -114,19 +112,14 @@ def _resolve_depmod() -> str:
     """Resolve ``depmod`` to an absolute path, explicitly rather than through ``PATH``.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` (from the registry) when ``KDIVE_DEPMOD`` is set
-            to something other than an absolute path to an executable file; ``MISSING_DEPENDENCY``
-            naming the searched directories when nothing resolves.
+        CategorizedError: ``MISSING_DEPENDENCY`` naming the searched directories when nothing
+            resolves.
     """
-    override = config.get(provider_settings.DEPMOD)
-    if override is not None:
-        return str(override)
     resolved = shutil.which(_DEPMOD, path=os.pathsep.join(_DEPMOD_SEARCH_DIRS))
     if resolved is None:
         raise CategorizedError(
-            "no depmod was found in the directories the worker searches, so kernel modules "
-            "cannot be indexed for staging; install kmod (provides depmod), or set KDIVE_DEPMOD "
-            "to its absolute path if depmod is installed somewhere else",
+            "depmod is required on the worker host to index kernel modules for staging, and was "
+            "not found in any of the directories searched; install kmod (provides depmod)",
             category=ErrorCategory.MISSING_DEPENDENCY,
             # A single string, not a list: the worker's failure context keeps only scalar details
             # (``_safe_detail`` in jobs/worker.py), so a list is dropped before it reaches the
@@ -140,11 +133,11 @@ def _run_host_depmod(*, basedir: Path, version: str) -> None:
     """Index ``basedir/lib/modules/<version>`` with host ``depmod`` (ADR-0346).
 
     Raises:
-        CategorizedError: the ``CONFIGURATION_ERROR`` and ``MISSING_DEPENDENCY`` cases
-            :func:`_resolve_depmod` raises; ``MISSING_DEPENDENCY`` carrying the resolved path when
-            that binary cannot be executed; ``INFRASTRUCTURE_FAILURE`` when the host cannot spawn
-            it at all, and on a non-zero exit, carrying the trimmed ``depmod`` stderr in
-            ``details`` so the cause is legible from the tool envelope (the #1146 note).
+        CategorizedError: the ``MISSING_DEPENDENCY`` case :func:`_resolve_depmod` raises, and
+            again carrying the resolved path when that binary cannot be executed;
+            ``INFRASTRUCTURE_FAILURE`` when the host cannot run it at all, and on a non-zero exit,
+            carrying the trimmed ``depmod`` stderr in ``details`` so the cause is legible from the
+            tool envelope (the #1146 note).
     """
     depmod = _resolve_depmod()
     try:

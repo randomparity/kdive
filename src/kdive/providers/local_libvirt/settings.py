@@ -1,9 +1,4 @@
-"""Co-located ``KDIVE_*`` settings for the local-libvirt provider (ADR-0087).
-
-Almost every name here is ``KDIVE_LIBVIRT_*``. ``KDIVE_DEPMOD`` is deliberately not: it names a
-host tool rather than anything libvirt-specific, and the local-libvirt module staging is simply
-its only caller today (#2300). It lives here because the provider consumes it and
-``scripts/guards/config_env_guard.py`` forbids reading a ``KDIVE_*`` key outside ``kdive.config``.
+"""Co-located ``KDIVE_LIBVIRT_*`` settings for the local-libvirt provider (ADR-0087).
 
 A dedicated, dependency-light module (the standard library plus :class:`Setting`, and no
 provider import) so aggregating it through the manifest never pulls the ``libvirt``
@@ -243,54 +238,6 @@ LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES = Setting(
     suggest="set a positive integer byte ceiling provisioned for this worker slot",
 )
 
-
-def _absolute_executable(raw: str) -> Path:
-    """Resolve an operator-named host tool: an absolute path to a file we can execute.
-
-    Checked at parse time so a stale or unusable override fails the worker's startup
-    ``validate`` rather than a first ``runs.install`` (#2300). This is a usability check, not a
-    security boundary: anyone who can set the variable already chooses what the worker runs.
-
-    Raises ``ValueError`` so the registry surfaces a ``CONFIGURATION_ERROR``.
-    """
-    if "\0" in raw:
-        raise ValueError("must not contain NUL bytes")
-    value = Path(raw)
-    if not value.is_absolute():
-        raise ValueError(f"must be an absolute path (got {raw!r})")
-    if not value.is_file():
-        raise ValueError("must be an existing file")
-    if not os.access(value, os.X_OK):
-        raise ValueError("must be executable by the running user")
-    return value
-
-
-# No default: absence means "search the fixed host-tool list", which is the ordinary case, so
-# the setting must resolve to None rather than to a path nobody chose.
-DEPMOD = Setting(
-    name="KDIVE_DEPMOD",
-    parse=_absolute_executable,
-    group="local-libvirt",
-    processes=frozenset({"worker"}),
-    help=(
-        "Absolute path to the depmod binary the worker uses to index kernel modules host-side "
-        "for staging (ADR-0346). Unset — the normal case — searches a fixed list of root-owned "
-        "directories covering merged-usr and split-usr, reported as details['searched'] when "
-        "nothing resolves; PATH is deliberately not consulted, because the fixed live-worker "
-        "gate execs without one. Set this when depmod lives outside that list, which a "
-        "source-built kmod under /usr/local does — those directories are left out on purpose, "
-        "since this binary is executed by a privileged step. "
-        "On a gated worker slot the value belongs in a systemd drop-in "
-        "(systemctl edit kdive-live-worker@N), since that slot's worker.env is generated."
-    ),
-    suggest=(
-        "set an absolute path to an executable depmod, e.g. /usr/sbin/depmod, or leave it "
-        "unset to search the fixed host-tool list reported as details['searched']. A value "
-        "that is not an executable file fails `kdive worker` at startup, not merely the next "
-        "install, so unset it rather than leaving a stale path behind"
-    ),
-)
-
 SETTINGS = [
     LIBVIRT_URI,
     LIBVIRT_ROOTFS_ROOT,
@@ -301,5 +248,4 @@ SETTINGS = [
     LIBVIRT_BOOT_WINDOW_S,
     LIBVIRT_RECOVERY_ROOT,
     LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
-    DEPMOD,
 ]

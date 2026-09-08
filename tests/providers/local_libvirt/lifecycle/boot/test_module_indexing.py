@@ -219,52 +219,9 @@ def test_run_host_depmod_unresolvable_names_searched_directories(
     searched = exc.value.details.get("searched")
     assert isinstance(searched, str)
     assert searched == "/usr/sbin:/usr/bin:/sbin:/bin"
-    # Both remedies, because the binary may be genuinely absent *or* merely outside the searched
-    # set — asserting "install kmod" alone is the false remedy #2300 was filed about.
+    # The "install kmod" remedy is retained for the absent case, which is the only one the fixed
+    # list can now report: an unresolvable depmod is one that is not in any searched directory.
     assert "kmod" in str(exc.value)
-    assert "KDIVE_DEPMOD" in str(exc.value)
-
-
-def test_run_host_depmod_uses_the_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    override = tmp_path / "depmod"
-    override.write_text("#!/bin/sh\nexit 0\n")
-    override.chmod(0o755)
-    captured: dict[str, object] = {}
-
-    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured["args"] = args
-        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
-
-    def unreachable_which(*_args: object, **_kwargs: object) -> str | None:
-        raise AssertionError("an explicit override must short-circuit the fixed-list search")
-
-    monkeypatch.setattr(gkw.subprocess, "run", fake_run)
-    monkeypatch.setattr(gkw.shutil, "which", unreachable_which)
-    monkeypatch.setenv("KDIVE_DEPMOD", str(override))
-    gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
-    assert captured["args"] == [str(override), "-b", str(tmp_path), _VERSION]
-
-
-@pytest.mark.parametrize("kind", ["relative", "missing", "not-executable"])
-def test_override_must_be_absolute_executable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
-) -> None:
-    if kind == "relative":
-        value = "usr/sbin/depmod"
-    elif kind == "missing":
-        value = str(tmp_path / "absent")
-    else:
-        plain = tmp_path / "plain"
-        plain.write_text("")
-        plain.chmod(0o644)
-        value = str(plain)
-    monkeypatch.setenv("KDIVE_DEPMOD", value)
-    with pytest.raises(CategorizedError) as exc:
-        gkw._run_host_depmod(basedir=tmp_path, version=_VERSION)
-    # The operator's own value being wrong is a misconfiguration, not a missing package — telling
-    # them to install kmod here would repeat the defect #2300 exists to remove.
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details.get("variable") == "KDIVE_DEPMOD"
 
 
 @pytest.mark.parametrize(

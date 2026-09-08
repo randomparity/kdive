@@ -15,8 +15,6 @@ from typing import cast
 
 import pytest
 
-from kdive import config
-from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.worker_lifecycle.worker_incarnation import worker_incarnation_credential
 
 GATE = Path(__file__).resolve().parents[2] / "deploy" / "systemd" / "bin" / "kdive-live-worker-gate"
@@ -58,7 +56,6 @@ def _gate_env(tmp_path: Path, python: Path) -> tuple[dict[str, str], Path]:
         "KDIVE_BUILD_USER": "builder",
         "KDIVE_BUILD_WORKSPACE": "/build",
         "KDIVE_DATABASE_URL": "postgresql://worker-member/db",
-        "KDIVE_DEPMOD": "/usr/sbin/depmod",
         "KDIVE_FIXTURE_CATALOG_PATH": "/fixtures/catalog.json",
         "KDIVE_HEALTH_BIND_ADDR": "127.0.0.1:9101",
         "KDIVE_INSTALL_STAGING": "/install",
@@ -217,9 +214,6 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         "KDIVE_BUILD_USER": env["KDIVE_BUILD_USER"],
         "KDIVE_BUILD_WORKSPACE": env["KDIVE_BUILD_WORKSPACE"],
         "KDIVE_DATABASE_URL": env["KDIVE_DATABASE_URL"],
-        # The host-tool override has to cross the exec or it is inert on exactly the slot whose
-        # missing PATH makes it necessary (#2300).
-        "KDIVE_DEPMOD": env["KDIVE_DEPMOD"],
         "KDIVE_FIXTURE_CATALOG_PATH": env["KDIVE_FIXTURE_CATALOG_PATH"],
         "KDIVE_HEALTH_BIND_ADDR": env["KDIVE_HEALTH_BIND_ADDR"],
         "KDIVE_INSTALL_STAGING": env["KDIVE_INSTALL_STAGING"],
@@ -284,22 +278,6 @@ def test_gate_refuses_empty_systemd_credential(tmp_path: Path, credential_body: 
     assert result.returncode != 0
     assert "slot 1" in result.stderr
     assert "credential" in result.stderr
-
-
-def test_worker_validate_rejects_a_malformed_depmod_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stale override fails the worker's startup validate rather than a first `runs.install`.
-
-    This is only reachable because the gate now carries `KDIVE_DEPMOD` across the exec: the
-    registry validates the names present in the environment it was handed, so a stripped name is
-    simply absent and nothing checks it (#2300).
-    """
-    monkeypatch.setenv("KDIVE_DEPMOD", "relative/depmod")
-    with pytest.raises(CategorizedError) as exc:
-        config.validate("worker")
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "KDIVE_DEPMOD" in str(exc.value)
 
 
 def test_gate_has_no_application_import_before_exec() -> None:
