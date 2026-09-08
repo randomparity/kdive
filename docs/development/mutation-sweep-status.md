@@ -22,6 +22,30 @@ profiles and timeouts leave behavior unproven. The explanations below are observ
 those selections, not exemptions from concurrency, resource, logging or error-path contracts.
 “Zero” results and completed follow-ups apply only to their recorded scope.
 
+## Initial tooling experiments (2026-06-21)
+
+The retired tooling design chose an ephemeral mutmut runner and explicit source/test selection
+instead of a session/database-based tool or manually edited retargeting config. Its implementation
+plan recorded the following mutmut 3.6.0 experiments on arm64 macOS. These are preserved reports,
+not fresh measurements or current platform, performance or coverage guarantees.
+
+- A single-file `source_paths` failed with `ModuleNotFoundError: No module named 'kdive.config'`.
+  Copying `src/kdive` and setting `only_mutate` to `domain/errors.py` produced 10 mutants at about
+  220 mutations/second; the plan's smoke expectation records 2 survivors from that experiment.
+  The copy also included `pyproject.toml` and `tests` for pytest configuration and cross-package
+  fixture imports. Selection used one token per indented config line to preserve the live-marker
+  expression as one argument.
+- The observed run exited 0 with survivors; a broken copied baseline exited non-zero. The final
+  `N/N` progress and result lines were on stdout, and `mutmut results` exited 0 in that check.
+  This does not establish that every results invocation succeeds; the current guide describes
+  the wrapper's error-reporting limits.
+- An edited test's marker appeared in the copied test after a rerun that kept the same target's
+  cache. The recorded `mutmut-stats.json` had no covered/total line counts, so the implementation
+  used the final progress count of mutants, not the coverage ratio proposed in the design.
+- The arm64 macOS install used a prebuilt `libcst` wheel without Rust. The plan did not record an
+  equivalent x86_64 macOS install experiment. Its Postgres/testcontainers leak experiment remained
+  unverified; the later container-backed sweep observations appear below.
+
 ## Tooling decision
 
 The campaign's manual import shim and shared-environment workaround were folded into the wrapper
