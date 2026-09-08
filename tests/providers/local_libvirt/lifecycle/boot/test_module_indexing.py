@@ -219,8 +219,10 @@ def test_run_host_depmod_unresolvable_names_searched_directories(
     searched = exc.value.details.get("searched")
     assert isinstance(searched, str)
     assert searched == "/usr/sbin:/usr/bin:/sbin:/bin"
-    # The "install kmod" remedy is retained for the absent case, which is the only one the fixed
-    # list can now report: an unresolvable depmod is one that is not in any searched directory.
+    # The directories are in the message too, not only in details: failure_message is the one
+    # field every failure surface forwards, so an operator reading only that must still see where
+    # the worker looked rather than a bare "install kmod" — the #2300 defect.
+    assert searched in str(exc.value)
     assert "kmod" in str(exc.value)
 
 

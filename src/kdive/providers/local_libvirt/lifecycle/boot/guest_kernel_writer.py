@@ -57,17 +57,19 @@ _DEPMOD = "depmod"
 # step, and /usr/local is group-writable by default on part of the Debian family, so a binary
 # planted there must not be able to decide what that step executes.
 _DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
-# These errnos mean the binary is absent or permanently unusable, so the job should dead-letter.
-# Every other errno stays retryable, whether it came from the spawn side — pipe creation
-# (EMFILE/ENFILE) or fork (EAGAIN/ENOMEM) — or from an exec that can succeed later (ETXTBSY).
-# Catching OSError wholesale would dead-letter an install that a retry would have completed.
+# The permanent exec-side returns: the binary vanished between which() and exec, sits on a
+# noexec mount or lacks the bit (EACCES/EPERM), or is not an executable format — a partially
+# written file gives ENOEXEC, which CPython raises as a bare OSError. These dead-letter, because
+# a retry cannot make them succeed. Everything else is retryable, which deliberately inverts the
+# usual default: the spawn side raises EMFILE/ENFILE from pipe creation and EAGAIN/ENOMEM from
+# fork, ETXTBSY clears once a writer closes, and none of those mean depmod is broken. Catching
+# OSError wholesale dead-lettered installs that a retry would have completed.
 _DEPMOD_EXEC_ERRNOS = frozenset(
     {
         errno.ENOENT,
         errno.EACCES,
         errno.EPERM,
         errno.ENOEXEC,
-        errno.EISDIR,
         errno.ELOOP,
         errno.ENOTDIR,
         errno.ENAMETOOLONG,
@@ -115,16 +117,22 @@ def _resolve_depmod() -> str:
         CategorizedError: ``MISSING_DEPENDENCY`` naming the searched directories when nothing
             resolves.
     """
-    resolved = shutil.which(_DEPMOD, path=os.pathsep.join(_DEPMOD_SEARCH_DIRS))
+    searched = os.pathsep.join(_DEPMOD_SEARCH_DIRS)
+    resolved = shutil.which(_DEPMOD, path=searched)
     if resolved is None:
         raise CategorizedError(
-            "depmod is required on the worker host to index kernel modules for staging, and was "
-            "not found in any of the directories searched; install kmod (provides depmod)",
+            # The directories are named in the message, not only in details: failure_message is
+            # the one field every failure surface forwards, and an operator who sees "install
+            # kmod" without them is back at the #2300 defect of being told to install a package
+            # they have.
+            f"depmod is required on the worker host to index kernel modules for staging, and was "
+            f"not found in any of {searched}; install kmod (provides depmod), or confirm depmod "
+            f"is in one of those directories",
             category=ErrorCategory.MISSING_DEPENDENCY,
             # A single string, not a list: the worker's failure context keeps only scalar details
             # (``_safe_detail`` in jobs/worker.py), so a list is dropped before it reaches the
             # operator — which is exactly the diagnosability this failure exists to provide.
-            details={"searched": os.pathsep.join(_DEPMOD_SEARCH_DIRS)},
+            details={"searched": searched},
         )
     return resolved
 
@@ -156,9 +164,9 @@ def _run_host_depmod(*, basedir: Path, version: str) -> None:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"depmod": depmod, "error": type(exc).__name__, "errno": exc.errno},
             ) from exc
-        # Every exec failure, not just FileNotFoundError: a resolved binary can vanish before the
-        # exec, and an operator-named override can be unreadable (EACCES) or not an executable
-        # format (ENOEXEC, a bare OSError). Uncaught, those escape the uniform envelope entirely.
+        # Every permanent exec failure, not just FileNotFoundError: a resolved binary can vanish
+        # between which() and exec, sit on a noexec mount, or be an unexecutable format — ENOEXEC
+        # arrives as a bare OSError. Uncaught, those escape the uniform envelope entirely.
         # MISSING_DEPENDENCY keeps the non-retryable disposition a missing depmod has always had,
         # so the job dead-letters instead of retrying a binary that will not become executable.
         raise CategorizedError(
