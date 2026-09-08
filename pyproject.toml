@@ -92,8 +92,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 include = [
   "src/kdive/providers/local_libvirt/lifecycle/rootfs/baseline_kernel.py",
   "src/kdive/providers/local_libvirt/lifecycle/boot/guest_kernel_writer.py",
+  "src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py",
   "src/kdive/providers/local_libvirt/lifecycle/install.py",
-  "src/kdive/providers/local_libvirt/retrieve.py",
+  "src/kdive/providers/local_libvirt/retrieve/guestfs.py",
   "src/kdive/providers/shared/debug_common/core_file.py",
   "src/kdive/providers/shared/debug_common/drgn_program.py",
   "src/kdive/providers/shared/runtime_paths.py",
