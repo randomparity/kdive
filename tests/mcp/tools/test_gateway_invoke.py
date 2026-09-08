@@ -9,9 +9,11 @@ Coverage:
   top-level keys, with ``tools.search`` in ``suggested_next_actions`` (#2304).
 * An unexpected keyword argument yields the same informative ``data`` shape,
   proving the parity holds across pydantic failure kinds, not just "missing" (#2304).
-* ``accepted_fields`` is withheld from a caller with no verified context and from an
-  authenticated caller who lacks the tool's required scope, matching ``tools.search``'s
-  RBAC gate; ``field_errors`` itself is unaffected by visibility (#2304).
+* ``accepted_fields`` and ``field_errors`` are both withheld from a caller with no verified
+  context and from an authenticated caller who lacks the tool's required scope, matching
+  ``tools.search``'s RBAC gate: argument binding fails before a handler's own ``require_role``
+  check runs, so ``field_errors`` would otherwise leak a hidden tool's parameter names (#2304,
+  #2325).
 * ``field_errors`` stays capped under an adversarial argument count (#2304).
 * A bare ``pydantic.ValidationError`` escaping a tool's own body (not an argument-binding
   failure) gets the pre-existing generic envelope, never fabricated field/schema detail
@@ -163,8 +165,13 @@ def test_bad_arguments_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -
 # ---------------------------------------------------------------------------
 
 
-def test_unexpected_argument_is_configuration_error() -> None:
-    """An unknown keyword argument yields the same field/kind detail, not just "missing"."""
+def test_unexpected_argument_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown keyword argument yields the same field/kind detail, not just "missing".
+
+    The caller holds VIEWER on runs.get's required scope, so field_errors is visible — see
+    test_bad_arguments_without_visibility_omits_accepted_fields for the withheld case (#2325).
+    """
+    monkeypatch.setattr(gateway, "current_context", _viewer_ctx)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
 
@@ -191,6 +198,7 @@ def test_bad_arguments_without_visibility_omits_accepted_fields() -> None:
 
     Argument binding fails before an inner handler's own require_role check ever runs, so a
     caller who could not see runs.get's schema through tools.search must not get it here either.
+    field_errors is withheld too (#2325): it names the same parameter as accepted_fields.
     """
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
@@ -202,13 +210,15 @@ def test_bad_arguments_without_visibility_omits_accepted_fields() -> None:
     content = _call_result(result)
     assert content["error_category"] == "configuration_error"
     assert "accepted_fields" not in content["data"]
+    assert "field_errors" not in content["data"]
 
 
 def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     """An authenticated caller with no project membership is also withheld the schema.
 
     Distinct from the no-token case above: tool_visible's own scope check must be what
-    denies it, not only the fail-closed AuthError branch.
+    denies it, not only the fail-closed AuthError branch. field_errors is withheld here too
+    (#2325): it would otherwise disclose a hidden tool's parameter name to this caller.
     """
     monkeypatch.setattr(gateway, "current_context", _no_grant_ctx)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
@@ -221,8 +231,7 @@ def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.Mo
     content = _call_result(result)
     assert content["error_category"] == "configuration_error"
     assert "accepted_fields" not in content["data"]
-    # The per-field detail is unaffected by visibility — only the schema list is gated.
-    assert {"field": "run_id", "kind": "missing_argument"} in content["data"]["field_errors"]
+    assert "field_errors" not in content["data"]
 
 
 # ---------------------------------------------------------------------------
