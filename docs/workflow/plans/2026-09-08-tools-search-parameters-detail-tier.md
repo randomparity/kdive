@@ -91,8 +91,10 @@ module-private. `SearchDetail.PARAMETERS` becomes part of the public tool schema
   Mode: focused-test. Test `tests/mcp/test_gateway_projection.py::
   test_parameters_tier_reads_the_projected_schema`. The live projection narrows only nested
   `$defs`, so real-projected against real-unprojected output is byte-identical and could not
-  fail; the test therefore monkeypatches `kdive.mcp.tools.gateway.project_listed_tool` (or
-  `_project_or_passthrough`'s callee, whichever the module binds) with a stub that returns a tool
+  fail; the test therefore monkeypatches `kdive.mcp.tools.gateway.project_listed_tool` — the
+  module binds that name at import (`gateway.py` imports it from
+  `kdive.mcp.schema.tool_projection`), so it is the correct patch target and no alternative is
+  needed — with a stub that returns a tool
   whose top-level `properties` has one entry removed, then asserts that name is absent from the
   match's `parameters`. Expected red: the dropped property is still listed, because the digest
   was taken from `tool.parameters`. Green:
@@ -142,7 +144,10 @@ module-private. `SearchDetail.PARAMETERS` becomes part of the public tool schema
    tier gives the argument list and not value constraints, so a constrained parameter still needs
    `full`; and a tool whose only parameter is a payload model (every `.list` tool among them)
    returns one entry naming that model, for which `full` is the call to make instead. Keep every
-   line within 100 characters.
+   line within 100 characters, and keep the whole description under roughly 120 words: this text
+   ships inside `tools.search`'s own published schema and is copied into two generated artifacts,
+   so it is read in every session that lists tools. State each tier and each limit in a clause;
+   leave the reasoning and the measurements to ADR-0632 §3.
 7. Update the `tools_search` wrapper docstring where it currently says matches carry safety
    metadata "in both modes" and where it teaches the two-step flow, so both read for three tiers.
 8. Run `just format`, then

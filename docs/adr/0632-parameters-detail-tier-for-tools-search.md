@@ -115,8 +115,12 @@ an agent facing one of those tools goes straight to `full`.
   (ADR-0177) writes the committed tool reference, where `tools.search.names` reads
   `array<string> (nullable)`; this tier writes the live response, where the same parameter reads
   `array[string]|null`. The divergence is deliberate but it is a maintenance cost: a reader
-  comparing the reference against a response sees two spellings of one type. The two cannot be
-  merged as things stand — see the rejected alternative below.
+  comparing the reference against a response sees two spellings of one type. This is accepted
+  permanently rather than tracked as work, because the rejected alternative below shows the two
+  cannot be merged without either inlining every schema on every search call or making an
+  accepted doc-generation decision fail-soft. One condition would reopen it: if the registry ever
+  advertises pre-inlined schemas at runtime, `render_schema_type` becomes reusable and this tier
+  should adopt it rather than keep a second grammar.
 - Rendering a `$ref` by its definition name surfaces private pydantic model names such as
   `_RunsListPayload` in the agent-facing response. Those names are already in the `full` tier's
   `$ref` targets and `$defs` keys, so this discloses nothing the schema did not, but it does put
