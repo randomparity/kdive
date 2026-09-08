@@ -116,3 +116,24 @@ state-machine change.
 - **Attach-before-boot / halt-at-start** (start the VM paused so breakpoints precede initcalls).
   Rejected from this change as a distinct capability (a provisioning/boot-sequencing feature),
   deferred to future work.
+
+### Amendment (2026-09-07): the declared expected-crash path admits a reachable gdbstub (#2303)
+
+This is an amendment rather than a new rejection because a later decision partly supersedes one
+claim made in this section, and the record stays append-only.
+[ADR-0628](0628-expected-crash-admits-a-reachable-gdbstub.md) narrows the bullet above that reads
+"Reverse the declared expected-crash (A/B) flow too. Rejected: …". That bullet bundled two
+separable changes — reversing the *routing* and admitting a *transport* — and only the routing
+half still holds.
+
+What ADR-0628 changes: a boot that fails readiness, declares an `expected_boot_failure`, matches
+it, and shows a generic kernel panic now probes its provisioned gdbstub, records a reachable stub
+in `available_capture`, and is admitted by `_attach_preconditions` for the gdbstub transport.
+What this record still governs unchanged: the routing itself. `boot_outcome` stays
+`expected_crash_observed`, the System stays `READY` and reusable for the next A/B Run, the console
+artifact stays the evidence of record, and `postmortem.crash` stays among the next actions — so
+this section's stated ground, that an A/B operator wants post-mortem routing, is preserved rather
+than reversed. Decisions 1 through 5 above are untouched, and ADR-0628 rests on decision 3's
+panic-signature gate and on this section's "Treat the RSP probe as the crash signal" rejection:
+those are why its probe is confined to the readiness-failure call site and never runs on the
+ADR-0383 post-ready downgrade path.

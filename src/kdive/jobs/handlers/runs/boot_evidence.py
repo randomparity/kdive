@@ -301,14 +301,27 @@ async def record_crash_halted_live(
     }
 
 
-async def _expected_crash_inert_capture(
+async def _expected_crash_capture(
     conn: AsyncConnection,
     system_id: UUID,
     profile_policy: ProfilePolicy,
-) -> list[str]:
+    *,
+    connector: Connector | None,
+    panicked: bool,
+) -> tuple[list[str], list[str]]:
+    """Return ``(available_capture, inert_capture)`` for an expected-crash boot (ADR-0628).
+
+    The gdbstub probe runs only when the readiness-failure call site supplied a connector, the
+    stub is provisioned, and the console shows a generic kernel panic. ADR-0233 decision 3 is why
+    both gates are needed: an RSP connect stops the vCPU, a readiness timeout can be a
+    slow-but-healthy boot, and a declared expectation is a caller-supplied literal rather than a
+    panic signature. ``evaluate_expected_failure_after_ready`` (ADR-0383) passes no connector,
+    because its guest reached the readiness marker and may still be executing.
+    """
+    available = [CaptureMethod.CONSOLE.value]
     system = await SYSTEMS.get(conn, system_id)
     if system is None:
-        return []
+        return available, []
     try:
         profile = ProvisioningProfile.parse(system.provisioning_profile)
     except CategorizedError:
@@ -317,8 +330,37 @@ async def _expected_crash_inert_capture(
             system_id,
             exc_info=True,
         )
-        return []
-    return inert_capture(profile_policy, profile)
+        return available, []
+    inert = inert_capture(profile_policy, profile)
+    if (
+        connector is not None
+        and panicked
+        and profile_policy.gdbstub_provisioned(profile)
+        and await _gdbstub_answered(connector, system_id)
+    ):
+        # gdbstub_provisioned gated the probe, so inert_capture listed it; a stub that answered
+        # on the halted guest is available, not inert.
+        inert.remove(CaptureMethod.GDBSTUB.value)
+        available.insert(0, CaptureMethod.GDBSTUB.value)
+    return available, inert
+
+
+async def _gdbstub_answered(connector: Connector, system_id: UUID) -> bool:
+    """Probe the stub, failing closed on any fault (ADR-0628).
+
+    ``gdbstub_reachable`` re-raises every ``CategorizedError`` that is not
+    ``DEBUG_ATTACH_FAILURE`` — a socket fault, an absent domain, an unresolvable endpoint. On
+    ``record_crash_halted_live`` that propagation is wanted: the caller is already unwinding a
+    failed boot. Here the caller is about to return a *succeeded* boot step, and the guest is a
+    panicked one whose QEMU may already be gone, so letting the fault out would turn a reproduced
+    expected crash into a failed boot. An unanswered probe is exactly the case where ``gdbstub``
+    stays inert, which is what an unknown answer must degrade to.
+    """
+    try:
+        return await asyncio.to_thread(gdbstub_reachable, connector, system_id)
+    except CategorizedError:
+        _log.warning("gdbstub probe failed for system %s; reporting the stub as inert", system_id)
+        return False
 
 
 async def record_expected_crash(
@@ -330,9 +372,20 @@ async def record_expected_crash(
     profile_policy: ProfilePolicy,
     artifact: ConsoleArtifact,
     matched_line: str,
+    connector: Connector | None = None,
 ) -> BootStepResult:
-    """Record ``expected_crash_observed`` with console evidence and inert capture disclosure."""
-    inert = await _expected_crash_inert_capture(conn, system_id, profile_policy)
+    """Record ``expected_crash_observed`` with console evidence and the probed capture sets.
+
+    ``connector`` is supplied only by the readiness-failure call site (ADR-0628); omitting it
+    skips the gdbstub probe entirely.
+    """
+    available, inert = await _expected_crash_capture(
+        conn,
+        system_id,
+        profile_policy,
+        connector=connector,
+        panicked=generic_panic_matches(artifact.data),
+    )
     await record_boot_audit(conn, job_ctx, run)
     return {
         "system_id": str(system_id),
@@ -340,7 +393,7 @@ async def record_expected_crash(
         "expectation_matched": True,
         "evidence_kind": "console",
         "evidence_artifact_id": str(artifact.id),
-        "available_capture": [CaptureMethod.CONSOLE.value],
+        "available_capture": available,
         "inert_capture": inert,
         "matched_line": matched_line,
     }

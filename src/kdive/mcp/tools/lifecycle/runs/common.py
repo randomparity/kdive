@@ -6,6 +6,7 @@ from typing import cast
 from uuid import UUID
 
 from kdive.domain.capacity.state import RunState
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
 from kdive.domain.lifecycle.records import Run
@@ -156,9 +157,12 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
 
     Keys the booted-run branch on the observed `boot_outcome` (from the boot step result),
     not the Run's create-time `expected_boot_failure`: a Run that expected a crash but booted
-    normally is live-debuggable. The `postmortem.crash` / `vmcore.fetch` pair matches the
-    failure `sessions_lifecycle.py` returns for a live attach on an `expected_crash_observed`
-    boot.
+    normally is live-debuggable. On an `expected_crash_observed` boot the `postmortem.crash` /
+    `vmcore.fetch` pair matches the failure `sessions_lifecycle.py` returns when the boot
+    recorded no reachable stub. When it did record one, that file admits the gdbstub attach
+    (ADR-0628), so this names `debug.start_session` instead — one envelope must not report an
+    attachable stub in `available_capture` while steering the agent at `vmcore.fetch`, which
+    always rejects on this outcome.
     """
     if run.system_id is None:
         return ["runs.bind"]
@@ -167,6 +171,8 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
     if progress.boot != RUN_STEP_SUCCEEDED:
         return ["runs.boot"]
     if progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
+        if CaptureMethod.GDBSTUB.value in (progress.available_capture or []):
+            return ["debug.start_session", "postmortem.crash"]
         return ["postmortem.crash", "vmcore.fetch"]
     return ["debug.start_session"]
 
@@ -268,8 +274,10 @@ def _capture_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
     if step_progress.inert_capture is not None:
         data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
         if step_progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
-            # Console-crash panic precedes kexec, so live attach/vmcore are impossible by design
-            # (#802). Reuse the same wording as debug.start_session/vmcore.fetch.
+            # Console-crash panic precedes kexec, so the vmcore tiers cannot fire by design
+            # (#802). A gdbstub the boot probed and found answering is not covered by this: it
+            # needs no capture kernel, and is reported in available_capture (ADR-0628). Reuse the
+            # same wording as vmcore.fetch so the surfaces cannot drift.
             data["inert_capture_reason"] = CONSOLE_CRASH_GUIDANCE
     return data
 
