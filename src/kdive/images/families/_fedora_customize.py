@@ -191,10 +191,14 @@ KDUMP_FINAL_ACTION_CMD = (
     "sed -i '/^[[:space:]]*final_action[[:space:]]/d' /etc/kdump.conf && "
     "printf 'final_action poweroff\\n' >> /etc/kdump.conf"
 )
-# fadump capture-kernel boot: kdump.service cannot rebuild the fadump initrd in the kdive
-# initrd environment.  This unit supersedes it on the capture-kernel second boot
-# (ConditionPathExists=/proc/vmcore), runs makedumpfile, and powers off.
-# Harmless on x86_64 where /proc/vmcore never appears outside a genuine kdump capture.
+# fadump capture service: installed on every kdump-capable debug image (Fedora + EL) by the
+# build-fs path (rhel.py kexec-tools block), and on fadump_capture: true images by the Ansible
+# guest_base_image role.  The unit runs makedumpfile directly and powers off; it fires on any
+# crash-kernel boot (fadump or ordinary kdump) because Before=kdump.service wins the ordering race
+# whenever /proc/vmcore exists.  This superseding behavior is intentional: makedumpfile -c -d 31
+# is sufficient without kdumpctl environment setup.
+# Authoritative copy kept in sync with:
+#   deploy/ansible/roles/guest_base_image/files/fadump-capture.service
 # Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
 FADUMP_CAPTURE_SERVICE_PATH = "/etc/systemd/system/fadump-capture.service"
 FADUMP_CAPTURE_SERVICE_CONTENT = (

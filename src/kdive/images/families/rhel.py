@@ -126,9 +126,16 @@ class RhelFamily:
             steps.append(RunCommand("systemctl enable kdump.service"))
             steps.append(WriteFile(KDUMP_SYSCTL_PATH, KDUMP_SYSCTL_CONTENT))
             steps.append(RunCommand(KDUMP_FINAL_ACTION_CMD))
-            # fadump capture: supersede kdump.service on the capture-kernel second boot.
-            # ConditionPathExists=/proc/vmcore makes this a no-op on normal boots.
+            # fadump capture: installed on every kdump-capable image (Fedora + EL).
+            # Before=kdump.service + ConditionPathExists=/proc/vmcore means this unit
+            # runs first on any crash-kernel boot (fadump or ordinary kdump) and calls
+            # makedumpfile directly, superseding kdump.service.  This is intentional:
+            # makedumpfile -c -d 31 is sufficient without kdumpctl environment setup.
+            # The Ansible guest_base_image path gates on fadump_capture | bool; the
+            # build-fs path installs unconditionally because every debug image is built
+            # fadump-capable on ppc64le and the unit is a no-op on all normal boots.
             # Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
+            # See also: deploy/ansible/roles/guest_base_image/files/fadump-capture.service
             steps.append(WriteFile(FADUMP_CAPTURE_SERVICE_PATH, FADUMP_CAPTURE_SERVICE_CONTENT))
             steps.append(RunCommand("systemctl enable fadump-capture.service"))
         steps += cloud_init_first_boot_steps(ctx)

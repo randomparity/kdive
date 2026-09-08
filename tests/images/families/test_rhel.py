@@ -103,6 +103,14 @@ def test_debug_steps_install_fadump_capture_service(tmp_path: Path) -> None:
     assert "systemctl enable fadump-capture.service" in commands(steps)
 
 
+def test_build_steps_omit_fadump_capture_service(tmp_path: Path) -> None:
+    # Build-host images lack kexec-tools so the fadump-capture injection guard never fires.
+    # This test pins that regression-safety: if the injection were moved outside the
+    # kexec-tools guard it would show up here.
+    steps = _steps(_build_ctx(_ctx(tmp_path, is_cloud_image=True)))
+    assert "fadump-capture.service" not in rendered(steps)
+
+
 def test_debug_steps_write_makedumpfile_version_marker(tmp_path: Path) -> None:
     steps = _steps(_ctx(tmp_path, is_cloud_image=True))
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in rendered(steps)
