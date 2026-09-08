@@ -84,20 +84,31 @@ parameter whose type renders as a definition name is telling the caller that the
 rather than discovering it through a validation failure.
 
 How often that happens is worth stating rather than leaving as a qualitative caveat, because it
-decides whether the tier helps. Of the 124 registered tools, 87 have an argument list that is
-entirely scalar, and for those the tier is the whole answer. 37 carry at least one entry whose
-type is a model or enum name, and **17 have no scalar parameter at all** — every `.list` tool
-plus `audit.query`, `artifacts.get`, `accounting.usage`, `accounting.report`, `reports.generate`,
-and `ops.tool_trail`. Those 17 collapse to a single `request` entry naming a payload model, so
-the tier costs a round trip and returns nothing the caller can build a call from. That is the
-tier's worst case, it is a seventh of the catalogue, and the `detail` contract text names it so
-an agent facing one of those tools goes straight to `full`.
+decides whether the tier helps. Call an entry *constructible* when its rendered type is built
+only from JSON primitives and arrays of them, and *opaque* when it names a definition or is a
+bare `object`. Across the 124 registered tools and their 272 top-level properties:
+
+- 81 tools have at least one parameter and every entry constructible. The tier is the whole
+  answer for them.
+- 9 tools take no arguments at all, for which the empty list is likewise the whole answer.
+- 34 tools carry at least one opaque entry, and **17 of those have no constructible entry at
+  all** — the `.list` family plus `accounting.report`, `accounting.usage`, `artifacts.get`,
+  `audit.query`, `ops.jobs_list`, `ops.tool_trail`, `reports.generate`, and
+  `resources.availability`.
+
+Those 17 collapse to a single entry naming a payload model, so the tier costs a round trip and
+returns nothing the caller can build a call from. That is the tier's worst case, it is under a
+seventh of the catalogue, and the `detail` contract text names it so an agent facing one of
+those tools goes straight to `full`.
 
 ## Consequences
 
-- An agent that knows which tool it wants gets the argument list at roughly a seventh of the
-  aggregate schema cost, and the two-step flow ADR-0472 teaches gains a cheaper second step — for
-  the 107 of 124 tools that have at least one scalar parameter.
+- An agent that knows which tool it wants gets the argument list at under a third of the schema
+  at the median tool and a seventh of it in aggregate, and the two-step flow ADR-0472 teaches
+  gains a cheaper second step — for the 90 of 124 tools the tier answers completely, and
+  partially for the 17 more that carry a mix. The contract text quotes the median rather than
+  the aggregate: the aggregate is pulled down by a handful of very large schemas, so it is not
+  the number that describes the one tool a caller is deciding about.
 - For the 17 tools whose only parameter is a payload model, the tier is a wasted round trip. It
   is not wrong there, only unhelpful, and §3 puts the incidence in the contract text so the cost
   is predictable rather than discovered.
@@ -127,11 +138,17 @@ an agent facing one of those tools goes straight to `full`.
   them on a cheaper and more frequently taken path.
 - A parameter whose schema matches none of the recognised shapes renders as `unknown` rather than
   being omitted, so the argument list stays complete and an unrenderable type is visible instead
-  of silent. No live property reaches it — all 253 top-level properties render through a
+  of silent. No live property reaches it — all 272 top-level properties render through a
   recognised shape — so it is a defensive branch, reachable only by a schema shape the catalogue
   does not currently contain. It is deliberately not the fail-loud `ValueError` ADR-0177 chose
   for the doc generator: a stale committed document should stop a build, but one unrenderable
   property should not fail a live discovery call that is otherwise answerable.
+- One level up, that visibility stops: an empty `parameters` list means either that the tool
+  takes no arguments — 9 tools today — or that the schema carried no readable `properties` map
+  at all, and the wire cannot tell those apart. No registered tool reaches the second case, and
+  both degraded projection paths fall back to a schema that still has `properties`. The
+  conflation is accepted rather than given a fourth wire state: `full` is the disambiguator, and
+  a tool whose arguments sit behind a root model would be the reason to revisit it.
 - `names` mode still forces `full` (ADR-0630 §2) and is untouched: a by-name lookup exists to
   obtain the schema, and the middle tier does not carry one.
 

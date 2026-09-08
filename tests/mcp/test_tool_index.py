@@ -145,6 +145,23 @@ def test_gateway_on_instructions_name_the_search_parameters() -> None:
         assert fragment in text, f"gateway-on instructions do not name {fragment!r}"
 
 
+def test_gateway_instructions_name_every_detail_tier() -> None:
+    """Every ``SearchDetail`` value appears in the gateway-on text (ADR-0632, #2341).
+
+    The enumeration of ``detail`` values drifted once already: a tier was added while this
+    string still offered two. Asserting the members rather than the literal `detail=` fragment
+    is what makes the next tier fail here instead of shipping an instruction that omits it.
+    """
+    from kdive.mcp.schema.tool_index import build_instructions
+    from kdive.mcp.tools.gateway import SearchDetail
+
+    text = build_instructions(gateway_enabled=True)
+    for tier in SearchDetail:
+        assert f'"{tier.value}"' in text, (
+            f"gateway-on instructions do not name the {tier.value!r} detail tier"
+        )
+
+
 def test_instructions_both_modes_cover_namespaces_and_gateway_tools() -> None:
     """Every namespace and both gateway tools appear whether the gateway is on or off."""
     from kdive.mcp.schema.tool_index import NAMESPACE_TOC, build_instructions

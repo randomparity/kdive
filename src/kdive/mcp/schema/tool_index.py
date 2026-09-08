@@ -58,9 +58,10 @@ tools.invoke(name, arguments) to execute it.
 tools.search takes plain words, not operators: query="..." to search, names=["runs.boot"]
 (1-10) to fetch named tools' full schemas with no ranking — use this for any name you were
 already handed, such as a suggested_next_actions entry — namespace="runs" to list one plane,
-limit=N (default 10, not used with names), and detail="summary" (the default) or "full" for
-the complete description and input_schema, which names always returns and which runs 0.4-16 KB
-per match. A query that matches nothing returns data.reason saying why."""
+limit=N (default 10, not used with names), and detail="summary" (the default), "parameters"
+for each argument's name, type and required flag, or "full" for the complete description and
+input_schema, which names always returns and which runs 0.4-16 KB per match. A query that
+matches nothing returns data.reason saying why."""
 
 _GATEWAY_OFF_SURFACE = """\
 This server exposes its full tool catalog directly: every capability is a first-class
