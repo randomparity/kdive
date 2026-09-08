@@ -183,18 +183,18 @@ def _select_named(candidates: list[Tool], names: list[str]) -> tuple[list[Tool],
     caller's grants hide it; the two are deliberately not distinguished (ADR-0630 §3).
     """
     by_name = {t.name.lower(): t for t in candidates}
-    selected: list[Tool] = []
-    seen: set[str] = set()
+    # Keyed by normalised name so the de-duplication is the dict's; insertion order is the
+    # caller's order, and ``setdefault`` keeps the first position of a repeat.
+    selected: dict[str, Tool] = {}
     unresolved: set[str] = set()
     for raw in names:
         name = raw.strip().lower()
         tool = by_name.get(name)
         if tool is None:
             unresolved.add(name)
-        elif name not in seen:
-            seen.add(name)
-            selected.append(tool)
-    return selected, sorted(unresolved)
+        else:
+            selected.setdefault(name, tool)
+    return list(selected.values()), sorted(unresolved)
 
 
 def _project_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:
@@ -412,7 +412,6 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         names: Annotated[
             # Bound each entry as well as the list: an unresolved name is echoed back in
             # data.unknown_names, so an unbounded string would be caller-sized response body.
-            # The longest registered name is 38 characters.
             list[Annotated[str, Field(min_length=1, max_length=_NAME_LEN_MAX)]] | None,
             Field(
                 min_length=1,
