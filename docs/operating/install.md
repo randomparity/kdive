@@ -99,6 +99,33 @@ processes and start only the new deployment afterward. Migration 0095 checks `pg
 refuses to run while another client remains connected to the KDIVE database. This release is not
 rolling-upgrade compatible; recover forward if migration has applied.
 
+### Worker-host `depmod` is resolved without `PATH`
+
+The release carrying explicit `depmod` resolution changes how a worker host finds `depmod`. Before
+it, module staging ran the bare name `depmod`, so resolution followed whatever search path the
+worker process inherited — and, where the process environment carried none, CPython's `os.defpath`
+fallback of `/bin:/usr/bin`. A `depmod` anywhere on that effective path resolved. The worker now
+looks in exactly four directories, in this order, and runs the absolute path it finds:
+
+`/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`
+
+`PATH` is never consulted, and there is no environment variable that changes the list.
+
+- **Scope** — worker hosts, for the host-side `depmod -b` that indexes an extracted kernel module
+  tree while staging it into a guest. It applies per `runs.install` operation. Indexing performed
+  inside a guest is unaffected.
+- **Consequence** — a `depmod` outside those four directories no longer resolves. The operation
+  fails with `missing_dependency`, which is not retried, and the failure message names the
+  directories that were searched.
+- **Recovery** — install the distribution's `kmod` package, which places `depmod` in `/usr/sbin`
+  under a merged-`/usr` layout and `/sbin` under a split one. For a `depmod` built from source or
+  installed to a non-FHS location, put it — or a symlink to it — in one of the four directories.
+  `/usr/local/sbin` and `/usr/local/bin` are left out deliberately: `/usr/local` is group-writable
+  by default on part of the Debian family, and a binary placed there would run with the worker
+  slot account's authority over guest overlays.
+
+An operator whose `depmod` comes from the distribution package sees no change.
+
 ## Install paths
 
 ### From source
