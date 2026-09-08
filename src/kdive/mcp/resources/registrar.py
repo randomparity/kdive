@@ -34,8 +34,7 @@ _CONTENT_DIR = Path(__file__).parent / "_content"
 _MARKDOWN = "text/markdown"
 _JSON = "application/json"
 
-# The agent-index doc resource, named because tool responses cite it in ``refs`` (#2342). Its
-# ``DOC_RESOURCES`` entry below is the registration; this is the one spelling both sides share.
+# Named so a tool response can cite this doc in ``refs`` without repeating the literal (#2342).
 AGENT_INDEX_DOC_URI = "resource://kdive/docs/guide/agent-index.md"
 
 
