@@ -85,34 +85,33 @@ async def _read_discharge(migrated_url: str, system_id: UUID) -> tuple[object, s
     return row[0], row[1]
 
 
-def test_worker_role_teardown_reclaim_discharges(
-    migrated_url: str, authority_role_dsns: _RoleDsns
+# The three shapes production actually passes. `reclaim_snapshot_ledger=True` additionally
+# runs `delete_snapshots_for_system`, so covering it under both roles keeps a later revocation
+# on that branch from reddening one role's arm while leaving the other's unproven.
+_RECLAIM_SHAPES = [
+    pytest.param("kdive_worker", False, id="worker-systems-teardown"),
+    pytest.param("kdive_worker", True, id="worker-authority-teardown"),
+    pytest.param("kdive_reconciler", True, id="reconciler-repair"),
+]
+
+
+@pytest.mark.parametrize(("role", "reclaim_snapshot_ledger"), _RECLAIM_SHAPES)
+def test_role_teardown_reclaim_discharges(
+    migrated_url: str, authority_role_dsns: _RoleDsns, role: str, reclaim_snapshot_ledger: bool
 ) -> None:
-    """The reported failure: `systems.teardown`'s reclaim under the real worker grants."""
+    """The reported failure, at each call site's role and flag combination.
 
-    async def run() -> None:
-        system_id = await _seed_open_obligation(migrated_url)
-        # `reclaim_snapshot_ledger=False` is what jobs/handlers/systems.py passes for an
-        # ordinary teardown.
-        await _reclaim_as(
-            authority_role_dsns("kdive_worker"), system_id, reclaim_snapshot_ledger=False
-        )
-        discharged_at, reason = await _read_discharge(migrated_url, system_id)
-        assert discharged_at is not None
-        assert reason == "terminal_escape"
-
-    asyncio.run(run())
-
-
-def test_reconciler_role_teardown_reclaim_discharges(
-    migrated_url: str, authority_role_dsns: _RoleDsns
-) -> None:
-    """The sibling call site: reconciler/repairs/jobs.py passes `reclaim_snapshot_ledger=True`."""
+    `jobs/handlers/systems.py:730` passes (`kdive_worker`, False),
+    `jobs/handlers/system_authority.py:223` passes (`kdive_worker`, True), and
+    `reconciler/repairs/jobs.py:98` passes (`kdive_reconciler`, True).
+    """
 
     async def run() -> None:
         system_id = await _seed_open_obligation(migrated_url)
         await _reclaim_as(
-            authority_role_dsns("kdive_reconciler"), system_id, reclaim_snapshot_ledger=True
+            authority_role_dsns(role),
+            system_id,
+            reclaim_snapshot_ledger=reclaim_snapshot_ledger,
         )
         discharged_at, reason = await _read_discharge(migrated_url, system_id)
         assert discharged_at is not None

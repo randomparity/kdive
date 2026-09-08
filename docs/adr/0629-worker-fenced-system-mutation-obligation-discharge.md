@@ -14,7 +14,11 @@ direct bulk `UPDATE` on that table, and it is reached from two role families:
 
 - `kdive_worker` and `kdive_reconciler`, through
   `../../src/kdive/jobs/handlers/system_reclaim.py:111` — the System-teardown reclaim path, and
-  the one #2302 reports failing with `permission denied for table`.
+  the one #2302 reports failing with `permission denied for table`. Three call sites reach it
+  with `discharge_mutation_obligations=True`: `jobs/handlers/systems.py:730`,
+  `jobs/handlers/system_authority.py:223`, and `reconciler/repairs/jobs.py:98`. A fourth,
+  `jobs/handlers/external_boot/lifecycle.py:1073`, passes `False` and discharges through 0147's
+  `finalize_external_boot_authority_teardown` instead, so it is unaffected.
 - `kdive_server`, through `../../src/kdive/db/external_boot_activations.py:552` and `:886`,
   which discharge on the `abandoned` and `recovery_failed` activation edges beside an `UPDATE`
   on `external_boot_activations`, a table granted to `kdive_server` alone. That role holds
@@ -65,6 +69,16 @@ only the teardown reclaim path switches to that method. The shared
   above shows cannot be built from a single grant.
 - The gate uses `pg_has_role(session_user, …)`, which is true for a superuser against every
   role, so every test arm needs a real `LOGIN` principal.
+- **This function fences one level weaker than the 0134 precedent it follows, deliberately.**
+  `commit_worker_remote_module_evidence` gates on the same `pg_has_role` check *plus* an active
+  `worker_incarnations` row matched by credential hash and a `running` job row with a live
+  lease, bound to the exact attempt tuple. 0152 gates on role membership alone, because
+  `reclaim_system_core_after_provider_teardown` carries no job id, attempt, or incarnation
+  credential to fence on — the reconciler call site has none of them at all. So any process
+  holding a worker or reconciler login can discharge any System's open mutation obligations,
+  where 0134 requires that process to also hold a live lease on the matching job. The write is
+  bounded to that one idempotent terminal-escape statement, which is why the residual is
+  accepted rather than closed with lease plumbing this path cannot supply.
 - Obligations already leaked by #2302 on live Systems are not repaired by this change. They
   stay open, and `retained_owners` (`remote_module_attempt_obligations.py:513-525`) keeps their
   volumes out of the reaper. Remediating those rows is separate follow-up work, owned by the

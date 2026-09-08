@@ -43,8 +43,10 @@ and repairs none.
 
 1. The teardown reclaim path completes under a connection holding the real `kdive_worker`
    grants, and the System's open mutation obligations carry reason `terminal_escape`.
-2. The same path completes under the real `kdive_reconciler` grants, with the
-   `reclaim_snapshot_ledger=True` its live call site passes.
+2. The same path completes for every role and flag combination production passes:
+   (`kdive_worker`, False) from `jobs/handlers/systems.py:730`, (`kdive_worker`, True) from
+   `jobs/handlers/system_authority.py:223`, and (`kdive_reconciler`, True) from
+   `reconciler/repairs/jobs.py:98`.
 3. Neither role can `UPDATE` the table directly: a direct `UPDATE` still raises
    `InsufficientPrivilege`, so the fix is proven to be the function and not a widened grant.
 4. A principal that is a member of neither role, and can execute the function, is refused with
@@ -91,7 +93,8 @@ addressed only incidentally, by the call succeeding; the error-mapping fix is de
 The plan's per-task Verification inventories name each test case, its expected red, and its
 green command. Every arm runs against disposable Postgres via testcontainers and needs a
 reachable Docker daemon; `KDIVE_REQUIRE_DOCKER=1` turns the skip into a hard failure and is how
-these are proven to have run rather than skipped. Success criteria 1-6 each map to one case in
-`tests/db/test_worker_system_mutation_discharge.py`; criterion 7 is the guardrail suite, whose
+these are proven to have run rather than skipped. Success criteria 1-6 each map to a case in
+`tests/db/test_worker_system_mutation_discharge.py`, criterion 2 to its three parametrized
+role/flag shapes; criterion 7 is the guardrail suite, whose
 migration-ordering and schema-immutability contracts are carried by
 `just migration-order-check` and `just schema-guard` rather than by a task-local test.
