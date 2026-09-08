@@ -1695,7 +1695,7 @@ def test_teardown_provider_failure_leaves_mutation_obligation_open(migrated_url:
 def test_teardown_discharge_rollback_keeps_mutation_obligation_open(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = RemoteModuleAttemptObligationRepository.discharge_system_mutation_obligations
+    original = RemoteModuleAttemptObligationRepository.worker_discharge_system_mutation_obligations
 
     async def fail_after_discharge(
         self: RemoteModuleAttemptObligationRepository, conn: object, system_id: object
@@ -1705,7 +1705,7 @@ def test_teardown_discharge_rollback_keeps_mutation_obligation_open(
 
     monkeypatch.setattr(
         RemoteModuleAttemptObligationRepository,
-        "discharge_system_mutation_obligations",
+        "worker_discharge_system_mutation_obligations",
         fail_after_discharge,
     )
 
