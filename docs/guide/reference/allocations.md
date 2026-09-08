@@ -46,6 +46,13 @@ short grace, so a release call after teardown may find it already released and r
 
 Extend an allocation lease window.
 
+Success returns the new absolute end in ``data.lease_expiry`` (ISO-8601 UTC) with
+``data.server_time`` as the reference clock, so the extension is verifiable rather than
+assumed — ``extend`` is added to the current expiry, not to now, and is clamped to the
+operator-configured maximum window. A long session keeps its allocation by calling
+`allocations.renew` again before that new deadline; once the lease lapses the reconciler
+sweeps the allocation to ``expired`` and renewing it returns ``stale_handle``.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `allocation_id` | string | yes | The Allocation to renew. |
@@ -72,6 +79,14 @@ holding a queue position instead of a live grant. A queued allocation is not
 usable yet; poll `allocations.wait` on its id until it leaves the ``requested``
 state before treating it as granted.
 
+A grant states its lease in full: ``data.lease_expiry`` is the absolute ISO-8601 UTC
+instant the lease ends and ``data.server_time`` is the server clock it is measured
+against — compare the two rather than assuming a wall clock, and re-read either from
+`allocations.wait`. The window is per allocation, not per call; once it lapses the
+reconciler sweeps the allocation to ``expired`` and reclaims it. Extend it before then
+with `allocations.renew`. A queued allocation holds no lease yet, so it carries neither
+field until it is granted.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `arch` | string (nullable) | no | Guest architecture to place and price for (e.g. 'ppc64le'); omit for an architecture-blind request. When set, only hosts that can boot it are candidates (a host advertising other guest arches is skipped; one advertising none is still eligible), and the reserved cost reflects the host's accelerator for this arch — an emulated (TCG) guest is priced above a native (KVM) one. The bill is finalized from the System's provisioned architecture. |
@@ -84,7 +99,7 @@ state before treating it as granted.
 | `resource` | object(mode=id) \| object(mode=kind) \| object(mode=pool) | no | Resource selector chosen by its 'mode': by kind (default), by id, or by pool. Omit to select any resource of the default kind. |
 | `shape` | string (nullable) | no | Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb (supply exactly one sizing source). |
 | `vcpus` | integer (nullable) | no | Guest vCPUs (part of the custom triple; omit when using a shape). |
-| `window` | number \| string \| null | no | Lease window length in hours, e.g. 24. |
+| `window` | number \| string \| null | no | Lease window length in hours, e.g. 24; omit for the operator-configured default. The window is per allocation, not per call: the grant returns its absolute end as data.lease_expiry (ISO-8601 UTC) with data.server_time as the reference clock, so compare those two rather than assuming a wall clock. Once the lease lapses the reconciler sweeps the allocation to expired and reclaims it; extend it before then with allocations.renew. |
 
 `resource` fields:
 

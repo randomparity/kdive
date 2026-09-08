@@ -551,6 +551,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread baseline intent callback
 - Expose baseline pre-extraction intent seam
 - Share libvirt boot identity
+- Inline the one-caller leaseholding-state tuple
 - Simplify tools.invoke's binding-failure classification
 
 ### Documentation
@@ -1485,6 +1486,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make examples/local-libvirt the local-libvirt quick start
 - Catalogue the preflight and build-image example variables
 - Drop the retired virt-customize passt gap from the apt-host guidance
+- Design the allocation lease deadline disclosure
+- Apply design review to the lease disclosure spec
 - Document artifacts.get's request wrapper exception
 - Scope the artifacts.get wrapper claim to this surface
 
@@ -2451,6 +2454,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run the local-libvirt example on the fixed live-worker lifecycle
 - Put uv's install directory on PATH for non-interactive shells
 - Make the checkout and kernel tree traversable by the worker accounts
+- Disclose the lease deadline and its reference clock
 - Bind tools.invoke's ValidationError to name field/kind detail
 - Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
 - Stop mislabeling a body-raised ValidationError as bad arguments
