@@ -1545,6 +1545,12 @@ def test_real_make_overlay_timeout_is_provisioning_failure(
 def test_real_make_overlay_missing_qemu_img_is_missing_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # This exercises the exec-time-vanished branch (resolved, then FileNotFoundError from the
+    # launch itself), not the unresolvable-tool branch below — resolution must be mocked to
+    # succeed, or an environment where qemu-img is not on the fixed search path would silently
+    # take the other branch and never reach subprocess.run at all.
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
+
     def _missing(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError("qemu-img")
 
