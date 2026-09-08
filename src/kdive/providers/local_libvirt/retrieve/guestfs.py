@@ -50,6 +50,7 @@ class _GuestfsHandle(Protocol):  # pragma: no cover - live_vm (libguestfs bindin
     def add_drive_opts(self, filename: str, *, readonly: bool) -> None: ...
     def launch(self) -> None: ...
     def inspect_os(self) -> list[str]: ...
+    def inspect_get_mountpoints(self, root: str) -> dict[str, str]: ...
     def mount_ro(self, root: str, mountpoint: str) -> None: ...
     def glob_expand(self, pattern: str) -> list[str]: ...
     def statns(self, path: str) -> dict[str, int]: ...
@@ -130,7 +131,7 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
             guest.launch()
             roots = guest.inspect_os()
             if roots:
-                guest.mount_ro(roots[0], "/")
+                _mount_guest_filesystems(guest, roots[0])
         except Exception as exc:
             _close_guestfs_handle(guest, "after failed read-only overlay open")
             raise CategorizedError(
@@ -146,6 +147,37 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
                 details={"overlay": overlay},
             )
         return guest
+
+
+def _mount_guest_filesystems(guest: _GuestfsHandle, root: str) -> None:
+    """Mount every filesystem the guest declares, not just its root.
+
+    Mounting only ``root`` loses any path that lives on a separate filesystem. Fedora Cloud
+    images — the ppc64le fadump images this harvest exists to read — put ``/var`` on its own
+    btrfs subvolume, so ``/var/crash`` is EMPTY under a root-only mount and a captured vmcore
+    is invisible to the globs above. Proved live on emulated POWER10: a real fadump capture
+    wrote /var/crash/<boot-id>/vmcore, and a root-only mount listed nothing (#2381).
+
+    Mountpoints are mounted shortest-path first so a parent is in place before its child.
+    The ROOT mount stays fatal — an overlay whose root will not mount is unreadable, and the
+    caller turns that into a typed INFRASTRUCTURE_FAILURE rather than an empty core list that
+    would read as "the guest never dumped". Every other filesystem is best-effort: one
+    unreadable /home must not deny a core sitting on a healthy /var.
+    """
+    mountpoints = guest.inspect_get_mountpoints(root)
+    guest.mount_ro(mountpoints.get("/", root), "/")
+    for mountpoint, device in sorted(mountpoints.items()):
+        if mountpoint == "/":
+            continue
+        try:
+            guest.mount_ro(device, mountpoint)
+        except Exception:
+            _log.warning(
+                "libguestfs could not mount %s (%s) read-only; continuing without it",
+                mountpoint,
+                device,
+                exc_info=True,
+            )
 
 
 def _close_guestfs_handle(guest: _GuestfsHandle, context: str) -> None:

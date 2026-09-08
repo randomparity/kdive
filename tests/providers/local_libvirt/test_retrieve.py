@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -29,6 +30,7 @@ from kdive.providers.local_libvirt.retrieve.guestfs import (
     _VAR_CRASH_GLOB,
     _VAR_CRASH_INCOMPLETE_GLOB,
     _LibguestfsCoreReader,
+    _mount_guest_filesystems,
 )
 from kdive.providers.local_libvirt.retrieve.kdump import HarvestOutcome
 from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
@@ -261,6 +263,9 @@ def test_libguestfs_reader_mount_failure_closes_handle_and_is_typed(
 
         def inspect_os(self) -> list[str]:
             return ["/dev/root"]
+
+        def inspect_get_mountpoints(self, _root: str) -> dict[str, str]:
+            return {"/": "/dev/root"}
 
         def mount_ro(self, _root: str, _mountpoint: str) -> None:
             raise self.mount_error
@@ -545,6 +550,54 @@ def test_fadump_capture_unit_writes_only_paths_the_harvest_globs_match() -> None
     assert any(fnmatch(t, _VAR_CRASH_GLOB) for t in files), (
         "the capture unit must rename to the final vmcore name on success"
     )
+
+
+def test_harvest_mounts_every_guest_filesystem_not_only_the_root() -> None:
+    # #2381, proved live on emulated POWER10: a real fadump capture wrote
+    # /var/crash/<boot-id>/vmcore into a Fedora Cloud image, and the harvest listed NOTHING —
+    # those images put /var on its own btrfs subvolume, so a root-only mount leaves /var/crash
+    # empty. The unit and the globs agreeing is not enough if /var is never mounted.
+    mounted: list[tuple[str, str]] = []
+
+    class _FakeGuest:
+        def inspect_get_mountpoints(self, root: str) -> dict[str, str]:
+            assert root == "btrfsvol:/dev/sda3/root"
+            return {
+                "/": "btrfsvol:/dev/sda3/root",
+                "/boot": "/dev/sda2",
+                "/home": "btrfsvol:/dev/sda3/home",
+                "/var": "btrfsvol:/dev/sda3/var",
+            }
+
+        def mount_ro(self, device: str, mountpoint: str) -> None:
+            mounted.append((mountpoint, device))
+
+    _mount_guest_filesystems(cast("Any", _FakeGuest()), "btrfsvol:/dev/sda3/root")
+
+    assert ("/var", "btrfsvol:/dev/sda3/var") in mounted, (
+        "/var was never mounted, so /var/crash is empty and every captured core is invisible"
+    )
+    # A parent must be mounted before its child, or the child is shadowed by the later mount.
+    assert mounted == sorted(mounted), f"mountpoints were not mounted parent-first: {mounted}"
+
+
+def test_harvest_survives_one_unmountable_filesystem() -> None:
+    # A core sitting on a healthy /var must still be found when an unrelated filesystem is
+    # unreadable, so a single bad mount is logged rather than fatal.
+    mounted: list[str] = []
+
+    class _FakeGuest:
+        def inspect_get_mountpoints(self, root: str) -> dict[str, str]:
+            return {"/": "/dev/sda3", "/home": "/dev/sda4", "/var": "/dev/sda5"}
+
+        def mount_ro(self, device: str, mountpoint: str) -> None:
+            if mountpoint == "/home":
+                raise RuntimeError("mount_ro: unsupported filesystem")
+            mounted.append(mountpoint)
+
+    _mount_guest_filesystems(cast("Any", _FakeGuest()), "/dev/sda3")
+
+    assert mounted == ["/", "/var"]
 
 
 def test_local_retrieve_from_env_wires_real_crash_runner() -> None:

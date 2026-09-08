@@ -53,6 +53,21 @@ images are unchanged.
 reason (the unit is never loaded at all), so an unconditional install bakes a declaration the
 image cannot honor. The arch trait is one table row, not a `RootfsCatalogEntry` schema change.
 
+## Fix 3 — the harvest must mount more than the root filesystem
+
+Found by running the arc live (see Proof below), not by review. `_LibguestfsCoreReader._mount`
+mounted only `inspect_os()[0]` at `/`. Fedora Cloud images — the ppc64le fadump images this
+harvest exists to read — put `/var` on its own btrfs subvolume, so `/var/crash` was EMPTY under
+a root-only mount and a real captured vmcore was invisible. Fixes 1 and 2 are necessary but not
+sufficient: the unit and the globs can agree perfectly and still yield `readiness_failure`.
+
+`inspect_get_mountpoints(root)` already reports the full layout
+(`/`, `/boot`, `/home`, `/var`); the harvest now mounts all of it, shortest path first so a
+parent precedes its child. The root mount stays fatal — an overlay whose root will not mount is
+unreadable, and that must remain a typed `INFRASTRUCTURE_FAILURE` rather than an empty core list
+reading as "the guest never dumped". Non-root mounts are best-effort and logged, so one
+unreadable `/home` cannot deny a core sitting on a healthy `/var`.
+
 ## Fix 2 — bundle layout
 
 Fedora 44 RPMs include `lib/modules/<rel>/vmlinuz` (~63 MiB). Together with `boot/vmlinuz`
@@ -70,3 +85,25 @@ is documentation: add `--exclude='lib/modules/*/vmlinuz'` to the bundle-build in
    `vmcore-incomplete` and unique per capture boot.
 4. `just lint`, `just type`, `just lint-ansible`, `just test-ansible` pass.
 5. Runbook documents `--exclude='lib/modules/*/vmlinuz'` for the ppc64le bundle.
+6. The offline harvest mounts every filesystem the guest declares, so a core on a separate
+   `/var` is listed; a root mount that fails still raises `INFRASTRUCTURE_FAILURE`.
+
+## Proof
+
+Run on emulated POWER10 (`qemu-system-ppc64 -machine pseries,accel=tcg`, Fedora 43 ppc64le),
+which exposes the `ibm,configure-kernel-dump` RTAS token, so firmware-assisted dump is real
+here: `fadump: Reserved 1024MB`, `rtas fadump: Registration is successful!`.
+
+`echo c > /proc/sysrq-trigger` → `Kernel panic - not syncing: sysrq triggered crash` →
+`rtas fadump: Firmware-assisted dump is active.` → `Reserving 7168MB of memory ... for
+preserving crash data` → the unit ran on the capture boot and `reboot: Power down`.
+
+The overlay then held `/var/crash/766aec1beea44559be54678d0f642503/vmcore` — the boot-ID
+directory, renamed from `vmcore-incomplete`, 43,707,444 bytes,
+`Kdump compressed dump v6 ... machine ppc64le`. The production `_LibguestfsCoreReader`
+listed it: one entry, `incomplete=False`. Before Fix 3 the same reader on the same overlay
+returned zero entries.
+
+Fix 1's install source was proved separately on a real remote build host: after the role's
+staging step, the post-fix source `/root/kdive-image-build/helpers/fadump-capture.service`
+exists there and the pre-fix `role_path` source does not.
