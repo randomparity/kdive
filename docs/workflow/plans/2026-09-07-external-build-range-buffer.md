@@ -32,6 +32,9 @@ change and roughly 30-line validator regression.
   returns all remaining recorded bytes, even beyond 4 MiB, without retaining more than 4 MiB. EOF
   returns `b""`. Seek supports `SEEK_SET`, `SEEK_CUR`, and `SEEK_END`, rejects unknown modes and
   negative results, and permits beyond-EOF.
+- A cross-window read commits its cursor only after the follow-on fetch succeeds and its response
+  bound is validated. A propagated store exception or oversized response leaves the cursor at the
+  read's call-entry position so retry cannot skip buffered bytes.
 - Scope is `src/kdive/build_artifacts/validation.py`, matching build-artifact tests, and these
   design artifacts. Durable completion and MCP behavior are excluded.
 - Guardrails: focused pytest commands below; `just lint`; `just type`; `just test-changed`; and
@@ -77,9 +80,11 @@ behavior that `gzip` may not exercise deterministically across Python versions.
 - **Contract: short, empty, and oversized range responses are not hidden.** Mode: `focused-test`.
   A configurable fake store returns each response shape or raises a selected categorized exception.
   One test primes the buffer, proves an in-window hit does not touch the failing store, then moves
-  outside the window and proves the exact exception propagates unchanged. Expected red: the
-  existing reader has no buffer-aware boundary behavior; oversized response must retain
-  `BUILD_FAILURE`. Same green command.
+  outside the window and proves the exact exception propagates unchanged. Two cross-window tests
+  consume a cached suffix before an exception or oversized response and assert that `tell()` stays
+  at the call-entry position and retry returns the complete bytes. Expected red: the existing
+  reader has no buffer-aware boundary behavior; oversized response must retain `BUILD_FAILURE`.
+  Same green command.
 
 ### Steps
 
@@ -119,9 +124,10 @@ boundary.
 
 1. Add buffer start/data fields to `_RangedReader`, with retained length capped at
    `_RANGE_CHUNK_BYTES`.
-2. Implement `read` so a cache hit slices bytes and advances only the logical cursor; a miss fetches
-   at least the requested length, reads at most recorded EOF, rejects oversized responses, and
-   retains no more than 4 MiB.
+2. Implement `read` so a cache hit is staged locally; a miss fetches at least the requested length,
+   reads at most recorded EOF, and validates the response bound before committing the staged cursor
+   and bytes. A fetch exception or oversized response leaves the entry cursor unchanged. Retain no
+   more than 4 MiB.
 3. Implement `tell`, `seekable`, and `seek`; preserve the buffer for positions it contains and
    invalidate it for positions outside it.
 4. Run the Task 1 focused command and require all tests to pass.

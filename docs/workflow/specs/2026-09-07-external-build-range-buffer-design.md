@@ -45,8 +45,10 @@ stream and is unchanged.
 An empty store response at a non-EOF cursor remains observable as `b""`; callers retain their
 existing truncated-input failures. A response larger than the requested fetch bound remains a
 `BUILD_FAILURE`. A short non-empty response is buffered exactly as returned and advances the
-logical cursor only by bytes delivered to the caller. No speculative request crosses the recorded
-object size.
+logical cursor only by bytes delivered to the caller. If a read consumes buffered bytes and its
+follow-on fetch raises or returns an oversized response, the read returns no bytes and leaves the
+logical cursor at its call-entry position so retry cannot skip cached data. No speculative request
+crosses the recorded object size.
 
 ## Threat model
 
@@ -74,8 +76,8 @@ does not alter timing budgets or transport recovery, which #2318 and #2319 own.
    1,049,287-byte fixture, so the ceiling is fixed before implementation and fails red.
 2. Buffer-boundary reads and seeks return the same byte sequence as a seekable in-memory file.
 3. EOF, seek-beyond-EOF, invalid seek, `read()` through recorded EOF, caller reads larger than the
-   retained window, empty/short/oversized responses, and store exceptions retain explicit, tested
-   behavior.
+   retained window, empty/short/oversized responses, cross-window failure cursor atomicity, and
+   store exceptions retain explicit, tested behavior.
 4. Every underlying archive request remains pinned to the immutable version observed by `HEAD`.
 5. Existing external-build validation, archive limits, identity checks, and failure categories
    remain green on x86_64 and architecture-neutral code remains valid for ppc64le.
@@ -86,7 +88,8 @@ Focused unit tests in `tests/build_artifacts/test_validation_reader.py` exercise
 directly: sequential reads and request count, reads crossing a 4 MiB boundary, a caller read larger
 than 4 MiB without retaining more than 4 MiB, `read()` through EOF, all supported seek modes,
 in-window seek reuse, out-of-window invalidation, EOF, seek beyond EOF, negative/invalid seek
-rejection, short and oversized responses, and unchanged propagation of a store exception.
+rejection, short and oversized responses, unchanged propagation of a store exception, and an
+unchanged cursor after a cross-window store exception or oversized response.
 
 An integration-style validation regression in
 `tests/providers/local_libvirt/test_validate_external_artifacts.py` builds an incompressible
