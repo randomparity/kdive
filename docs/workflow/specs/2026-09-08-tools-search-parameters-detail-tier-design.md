@@ -46,12 +46,28 @@ projection change beyond reusing `_project_or_passthrough`.
    and the `unknown` fallback.
 4. `detail="full"` carries `parameters` in addition to its existing keys, so each tier's key set
    is a superset of the tier below it.
-5. The tier is materially cheaper than `full` and dearer than `summary` on one query, measured on
-   serialized bytes.
-6. A `parameters` match never names a property the provider-kind projection removed.
-7. `names` mode still returns `full` matches whatever `detail` says.
-8. The wrapper docstring and `detail` `Field` text describe all three tiers, and the committed
-   generated artifacts match a fresh generation.
+5. The digest is built from the schema `_project_or_passthrough` returns, so a projection that
+   drops a top-level property drops it from `parameters` too.
+6. `names` mode still returns `full` matches whatever `detail` says.
+7. The wrapper docstring and `detail` `Field` text describe all three tiers — including the limit
+   in ADR-0632 §3, that the tier reports the argument list and not value constraints, and that a
+   tool whose only parameter is a payload model needs `full` — and the committed generated
+   artifacts match a fresh generation.
+
+Deliberately **not** a success criterion: "the tier is cheaper than `full`". The three key sets
+are strictly nested, so that ordering holds by construction for every tool and no implementation
+could violate it. Success 4 already fixes the containment that makes it true.
+
+## Edge cases
+
+- **A tool with no parameters** yields an empty `parameters` list, not a missing key.
+- **A tool whose only parameter is a payload model** — 17 of 124, every `.list` tool among them —
+  yields one entry naming that model, which is not enough to build a call. ADR-0632 §3 accepts
+  this and requires the `detail` contract text to name it, so the tier's worst case is documented
+  rather than discovered.
+- **A degraded projection** — `project_listed_tool` raising, or `registered_kinds()` failing —
+  falls back to the unprojected schema on the existing paths, exactly as `full` already does. The
+  tier inherits that behaviour and adds no new failure mode.
 
 ## Validation
 
@@ -68,13 +84,15 @@ projection change beyond reusing `_project_or_passthrough`.
 - **Tier monotonicity (Success 4).** Mode: focused-test —
   `test_full_tier_still_carries_parameters` plus the updated
   `test_detail_full_adds_schema_and_complete_description` key-set assertion.
-- **Relative cost (Success 5).** Mode: focused-test —
-  `test_parameters_tier_is_cheaper_than_full_and_dearer_than_summary`, on serialized bytes.
-- **Projection is applied (Success 6).** Mode: focused-test —
-  `tests/mcp/test_gateway_projection.py::test_parameters_tier_uses_the_projected_schema`.
-- **`names` mode override (Success 7).** Mode: focused-test — existing
+- **The digest follows the projection (Success 5).** Mode: focused-test —
+  `tests/mcp/test_gateway_projection.py::test_parameters_tier_reads_the_projected_schema`. The
+  live projection narrows only nested `$defs`, so a test comparing real projected against real
+  unprojected output cannot fail. The test instead stubs `project_listed_tool` with one that
+  drops a top-level property and asserts that property is absent from `parameters` — which fails
+  against an implementation that digests the unprojected schema.
+- **`names` mode override (Success 6).** Mode: focused-test — existing
   `test_names_mode_ignores_summary_detail`, extended to pass `detail="parameters"`.
-- **Agent-facing text and generated artifacts (Success 8).** Mode: task-test-not-applicable —
+- **Agent-facing text and generated artifacts (Success 7).** Mode: task-test-not-applicable —
   the docstring and `Field` prose have no executable consumer that could fail meaningfully on
   wording, and inventing a prose-snapshot assertion is explicitly disallowed. The generated
   half is covered by the repository's own gates, `just docs-check`, `just cli-verbs-check`, and

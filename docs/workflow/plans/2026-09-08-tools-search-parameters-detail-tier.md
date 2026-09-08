@@ -13,7 +13,12 @@ argument list; `describe_tool` gains one branch. The `tools_search` wrapper docs
 **Tech stack.** Python 3.14, `uv`, `pytest`, `ruff`, `ty`, `just`. FastMCP tool registration.
 
 **Expected implementation size: 190–240 changed lines (M) — derived from the file map below:
-one source module (~80), two test modules (~140 combined), plus regenerated artifacts.**
+one source module (~80: enum member, two helpers, one `describe_tool` branch, rewritten
+docstring and `Field` text) and two test modules (~140 combined: six new cases plus two amended).
+Regenerated artifacts are excluded from the range because their size is set by the generators,
+not by this plan; the `detail` enum gains one value and its description is rewritten, so the
+expected regenerated diff is tens of lines across `docs/guide/reference/tools.md`,
+`src/kdive/cli/commands/_generated_verbs.py`, and the packaged snapshots.**
 
 ## Global Constraints
 
@@ -82,15 +87,16 @@ module-private. `SearchDetail.PARAMETERS` becomes part of the public tool schema
   assertion in the existing `test_detail_full_adds_schema_and_complete_description`.
   Expected red: the new key is absent from a `full` match. Green:
   `uv run python -m pytest tests/mcp/tools/test_gateway_search.py -k "full_tier or detail_full" -q`.
-- **Contract: the tier is cheaper than `full` and dearer than `summary`.**
-  Mode: focused-test. Test `test_parameters_tier_is_cheaper_than_full_and_dearer_than_summary`,
-  asserting on `len(json.dumps(...))`. Expected red: `KeyError: 'parameters'`. Green:
-  `uv run python -m pytest tests/mcp/tools/test_gateway_search.py -k cheaper_than_full -q`.
-- **Contract: the tier reads the projected schema, not the raw one.**
+- **Contract: the digest is built from the projected schema, not the raw one.**
   Mode: focused-test. Test `tests/mcp/test_gateway_projection.py::
-  test_parameters_tier_uses_the_projected_schema`. Expected red: `AttributeError` on
-  `SearchDetail.PARAMETERS`. Green:
-  `uv run python -m pytest tests/mcp/test_gateway_projection.py -k parameters_tier -q`.
+  test_parameters_tier_reads_the_projected_schema`. The live projection narrows only nested
+  `$defs`, so real-projected against real-unprojected output is byte-identical and could not
+  fail; the test therefore monkeypatches `kdive.mcp.tools.gateway.project_listed_tool` (or
+  `_project_or_passthrough`'s callee, whichever the module binds) with a stub that returns a tool
+  whose top-level `properties` has one entry removed, then asserts that name is absent from the
+  match's `parameters`. Expected red: the dropped property is still listed, because the digest
+  was taken from `tool.parameters`. Green:
+  `uv run python -m pytest tests/mcp/test_gateway_projection.py -k projected_schema -q`.
 - **Contract: `names` mode still overrides the tier.**
   Mode: focused-test. The existing `test_names_mode_ignores_summary_detail`, extended to also
   pass `detail="parameters"` and assert the match still carries `input_schema`. Expected red:
@@ -112,12 +118,16 @@ module-private. `SearchDetail.PARAMETERS` becomes part of the public tool schema
 2. In `SearchDetail`, add `PARAMETERS = "parameters"` between `SUMMARY` and `FULL`, and update
    the class docstring to cite ADR-0472 and ADR-0632.
 3. Add a module-level `_type_name(schema: object, *, depth: int = 0) -> str` above
-   `describe_tool`. Return `"unknown"` for a non-`dict` or for `depth` past a small bound. For a
-   `str` `$ref`, return the segment after the last `/`. For a `list` under `anyOf` or `oneOf`,
-   render each member through `_type_name` at `depth + 1`, de-duplicate preserving order, and
-   join with `|`. For a `list` `type`, join its entries with `|`. For a `str` `type`, return it,
-   except `"array"`, which returns `f"array[{_type_name(schema.get('items'), depth=depth + 1)}]"`.
-   Otherwise return `"unknown"`. Carry a comment naming the bound's purpose: the recursion is over
+   `describe_tool`. Return `"unknown"` for a non-`dict` or for `depth > _SCHEMA_DEPTH_LIMIT` —
+   reuse the module's existing `_SCHEMA_DEPTH_LIMIT`, already defined at the top of
+   `gateway.py` for the other schema walk, rather than introducing a second bound. For a `str`
+   `$ref`, return the segment after the last `/`. For a **non-empty** `list` under `anyOf` or
+   `oneOf`, render each member through `_type_name` at `depth + 1`, de-duplicate preserving
+   order, and join with `|`; an empty list falls through to the checks below rather than
+   producing an empty string, matching the guard `render_schema_type` already carries. For a
+   `list` `type`, join its entries with `|`. For a `str` `type`, return it, except `"array"`,
+   which returns `f"array[{_type_name(schema.get('items'), depth=depth + 1)}]"`. Otherwise
+   return `"unknown"`. Carry a comment naming the bound's purpose: the recursion is over
    server-authored schemas, and the bound keeps a cyclic or pathological one from recursing.
 4. Add a module-level `_parameter_digest(parameters: object) -> list[JsonValue]` beside it. Read
    `properties` and `required` from the mapping, defaulting to an empty list and an empty set when
@@ -128,9 +138,11 @@ module-private. `SearchDetail.PARAMETERS` becomes part of the public tool schema
    `description` and `input_schema` on `FULL` alone. Update the function docstring to describe
    three tiers and cite ADR-0632.
 6. Rewrite the `detail` `Field` description to name all three tiers, what each returns, the fact
-   that `names` mode forces full whatever is passed, and the limit ADR-0632 §3 records — that the
-   tier gives the argument list, not value constraints, so a constrained parameter still needs
-   `full`. Keep every line within 100 characters.
+   that `names` mode forces full whatever is passed, and both limits ADR-0632 §3 records: the
+   tier gives the argument list and not value constraints, so a constrained parameter still needs
+   `full`; and a tool whose only parameter is a payload model (every `.list` tool among them)
+   returns one entry naming that model, for which `full` is the call to make instead. Keep every
+   line within 100 characters.
 7. Update the `tools_search` wrapper docstring where it currently says matches carry safety
    metadata "in both modes" and where it teaches the two-step flow, so both read for three tiers.
 8. Run `just format`, then

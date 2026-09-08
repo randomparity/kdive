@@ -20,10 +20,16 @@ tool. A `full` match adds the complete `description` and the projected `input_sc
 The two bracket the common case rather than covering it. An agent that has already chosen its
 tool, and needs only the argument list, has no tier that answers "what arguments does this take".
 It must take the whole schema to learn three things per parameter: the name, the type, and
-whether the parameter is required. Measured over the 124 registered tools, a full projected
-schema runs 67 B to 14,185 B with a median of 499 B, while those three facts for the same tool
-come to 2 B to 737 B with a median of 119 B — 28.9% of the schema at the median and 14.4% of it
-in aggregate. `runs.install` is 1,993 B of schema for a 257 B argument list.
+whether the parameter is required.
+
+Measured over the 124 tools returned by `registered_tools(app)` — the runtime path
+`describe_tool` reads, not the pre-inlined view `scripts/generate/gen_tool_reference.py`
+builds — a projected schema runs 67 B to 14,185 B with a median of 499 B, while those three
+facts for the same tool come to 2 B to 737 B with a median of 119 B: 28.9% of the schema at the
+median and 14.4% of it in aggregate. `runs.install` is 1,993 B of schema for a 257 B argument
+list. The figures come from building the app as `tests/mcp/tools/test_gateway_search.py` does,
+walking `registered_tools(app)`, and serialising each tool's `parameters` against the digest
+this ADR specifies.
 
 Over-fetching on the path an agent takes after it has already decided is the cost `tools.search`
 exists to control, and it is the cost ADR-0472 removed from the *choosing* half of the flow while
@@ -45,8 +51,15 @@ de-duplicated in member order (`string|null`), an array with its element type
 (`array[string]`), and a `$ref` rendered as the referenced definition's name (`SearchDetail`).
 `required` is membership of the schema's top-level `required` list.
 
-The tier is narrowed by the same provider-kind projection `full` already applies, so it can never
-advertise a parameter the projection removes.
+The tier reads the same projected schema `full` already reads, through the existing
+`_project_or_passthrough`. That is consistency rather than a safeguard, and the distinction is
+worth stating because it is easy to over-claim: `project_tool_schema` narrows only nested `$defs`
+entries, never the top-level `properties` or `required` lists, so the digest is byte-identical
+before and after projection for all 124 tools today. Applying it costs one call that `full`
+already makes and keeps the two tiers reading one schema if the projection ever narrows the
+property set. It is not a live guarantee that a removed parameter stays hidden, and the two
+existing degraded paths — a projection failure and a `registered_kinds()` failure, both of which
+fall back to the unprojected schema — mean no such absolute could be made here anyway.
 
 ### 2. `parameters` rides the `full` tier too
 
@@ -58,7 +71,9 @@ key set is a superset of the tier below it.
 
 That is the same trade ADR-0472 §1 made when it put `summary` in both modes, and it is redundant
 in the same way: `parameters` is derivable from `input_schema` by any caller that holds it. The
-measured cost is +14.4% on a full response in aggregate.
+measured cost, taken on the assembled full-match shape rather than on `input_schema` alone, is
++8.6% in aggregate and +10.6% at the median — 224,509 B to 243,841 B across the catalogue. That
+is the same order as the ~10% ADR-0472 §1 accepted for putting `summary` in both modes.
 
 ### 3. The tier reports the argument list, not the argument constraints
 
@@ -68,13 +83,27 @@ parameter whose type renders as a definition name is telling the caller that the
 `full`. The tier's contract text says this so an agent knows when the middle tier is not enough,
 rather than discovering it through a validation failure.
 
+How often that happens is worth stating rather than leaving as a qualitative caveat, because it
+decides whether the tier helps. Of the 124 registered tools, 87 have an argument list that is
+entirely scalar, and for those the tier is the whole answer. 37 carry at least one entry whose
+type is a model or enum name, and **17 have no scalar parameter at all** — every `.list` tool
+plus `audit.query`, `artifacts.get`, `accounting.usage`, `accounting.report`, `reports.generate`,
+and `ops.tool_trail`. Those 17 collapse to a single `request` entry naming a payload model, so
+the tier costs a round trip and returns nothing the caller can build a call from. That is the
+tier's worst case, it is a seventh of the catalogue, and the `detail` contract text names it so
+an agent facing one of those tools goes straight to `full`.
+
 ## Consequences
 
 - An agent that knows which tool it wants gets the argument list at roughly a seventh of the
-  aggregate schema cost, and the two-step flow ADR-0472 teaches gains a cheaper second step.
-- `full` responses grow 14.4% in aggregate (median +119 B per match). `full` is the tier a caller
-  opts into deliberately, and the tier added here is what a cost-sensitive caller uses instead, so
-  the growth lands on the path that was already the expensive one.
+  aggregate schema cost, and the two-step flow ADR-0472 teaches gains a cheaper second step — for
+  the 107 of 124 tools that have at least one scalar parameter.
+- For the 17 tools whose only parameter is a payload model, the tier is a wasted round trip. It
+  is not wrong there, only unhelpful, and §3 puts the incidence in the contract text so the cost
+  is predictable rather than discovered.
+- `full` responses grow 8.6% in aggregate and 10.6% at the median (+119 B per match). `full` is
+  the tier a caller opts into deliberately, and the tier added here is what a cost-sensitive
+  caller uses instead, so the growth lands on the path that was already the expensive one.
 - The three tiers are monotone, so "ask for more detail" can never remove a key. A client that
   already treats `input_schema` and `description` as optional treats `parameters` the same way,
   and every existing caller that passes no `detail` gets a byte-identical response.
@@ -82,13 +111,23 @@ rather than discovering it through a validation failure.
   pass, and a client must not parse it as a type expression; `input_schema` remains the machine
   contract. A union renders in member order, so `string|null` and `null|string` are both
   reachable renderings of different schemas.
+- KDIVE now renders parameter types in two grammars for two audiences. `render_schema_type`
+  (ADR-0177) writes the committed tool reference, where `tools.search.names` reads
+  `array<string> (nullable)`; this tier writes the live response, where the same parameter reads
+  `array[string]|null`. The divergence is deliberate but it is a maintenance cost: a reader
+  comparing the reference against a response sees two spellings of one type. The two cannot be
+  merged as things stand — see the rejected alternative below.
 - Rendering a `$ref` by its definition name surfaces private pydantic model names such as
   `_RunsListPayload` in the agent-facing response. Those names are already in the `full` tier's
   `$ref` targets and `$defs` keys, so this discloses nothing the schema did not, but it does put
   them on a cheaper and more frequently taken path.
 - A parameter whose schema matches none of the recognised shapes renders as `unknown` rather than
   being omitted, so the argument list stays complete and an unrenderable type is visible instead
-  of silent.
+  of silent. No live property reaches it — all 253 top-level properties render through a
+  recognised shape — so it is a defensive branch, reachable only by a schema shape the catalogue
+  does not currently contain. It is deliberately not the fail-loud `ValueError` ADR-0177 chose
+  for the doc generator: a stale committed document should stop a build, but one unrenderable
+  property should not fail a live discovery call that is otherwise answerable.
 - `names` mode still forces `full` (ADR-0630 §2) and is untouched: a by-name lookup exists to
   obtain the schema, and the middle tier does not carry one.
 
@@ -98,10 +137,19 @@ rather than discovering it through a validation failure.
   about what `input_schema` means while ADR-0472 §1 guarantees that no key changes meaning between
   modes (`docs/adr/0472-summary-first-tool-search.md` §1), and a client holding a pruned schema
   could not tell it from a complete one.
-- **A `parameters` key on the middle tier only, not on `full`.** verified: measured at +14.4%
-  aggregate, the saving is real, but it makes the tiers non-monotone — a caller stepping from
+- **A `parameters` key on the middle tier only, not on `full`.** verified: measured at +8.6%
+  aggregate on the full-match shape, the saving is real, but it makes the tiers non-monotone — a
+  caller stepping from
   `parameters` to `full` loses the `parameters` key and has to re-derive the list by walking
   `$defs`. ADR-0472 §1 paid the same class of cost for the same shape-stability reason.
+- **Reusing `render_schema_type` from the doc generator (ADR-0177).** verified: it raises
+  `ValueError("schema renderer cannot resolve $ref/$defs; inline the schema")` on any node
+  carrying `$ref` or `$defs` (`scripts/generate/gen_tool_reference.py`), and the runtime schemas
+  this tier reads carry both — 30 of 124 tools have top-level `$defs` and 10 properties are a
+  bare `$ref`, measured through `registered_tools(app)`. The generator only avoids that because
+  it renders a pre-inlined view. Reusing it would mean either inlining every schema on every
+  search call or making a doc-generation helper fail-soft, and the second changes an accepted
+  decision from outside its scope.
 - **Carrying inline `enum` values and other value constraints.** judgment: #2341 scopes the tier
   to names, types, and required flags; constraints are what `full` is for, and adding them here
   makes the middle tier a second schema format to keep in step with the first.
