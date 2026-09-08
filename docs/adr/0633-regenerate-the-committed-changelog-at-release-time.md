@@ -55,8 +55,10 @@ request; nothing bypasses branch protection.
 ### 3. `[Unreleased]` is stale between releases, and that is the accepted trade
 
 `just changelog` renders the current view locally at any time, and release notes are generated
-from git history at tag time. No consumer reads the committed `[Unreleased]` section, so keeping
-it current is not worth a commit to the default branch per merge.
+from git history at tag time. No *automated* consumer reads the committed `[Unreleased]` section
+— `pyproject.toml`'s `Changelog` project URL points a human at the file, and the released sections
+it lands on stay correct — so keeping the unreleased half current is not worth a commit to the
+default branch per merge.
 
 ## Consequences
 
@@ -71,8 +73,9 @@ it current is not worth a commit to the default branch per merge.
 - The `CHANGELOG_DEPLOY_KEY` Actions secret, the `changelog-sync (auto)` repository deploy key,
   and the protect-main ruleset's `DeployKey` bypass lose their only consumer. A write bypass on a
   protected branch that nothing uses is worth removing, but the ruleset and the credential are the
-  repository owner's to change and are outside this change's authority; #2337 carries the
-  follow-up.
+  repository owner's to change and are outside this change's authority. That removal is tracked
+  separately; this record is not its owner, and the pull request implementing this decision does
+  not discharge it.
 - No other workflow pushed to `main`, so nothing else changes. The bot commit carried
   `[skip ci]`, which suppressed every workflow on that push, so `release-image.yml` never ran on
   it; the number of pushes that trigger it is unchanged. What improves is that `main`'s tip is now

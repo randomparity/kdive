@@ -20,9 +20,12 @@ serial batch: three of the four base refreshes the batch required were caused by
 alone. The tax is per open pull request and scales with merge frequency. The tip of `main` at the
 time this change was branched (`1075983`) is itself one of these commits.
 
-Nothing reads the committed `[Unreleased]` section. `release.yml` generates release notes with
-`uvx git-cliff --latest` against git history and never opens `CHANGELOG.md`, and ADR-0041 already
+No automated consumer reads the committed `[Unreleased]` section. `release.yml` generates release
+notes with `uvx git-cliff --latest` against git history and never opens `CHANGELOG.md`, and
+ADR-0041 already
 records the file as cosmetic and assigns its regeneration to the post-release bump pull request.
+`pyproject.toml`'s `Changelog` project URL points a human at the file; the released sections that
+reader lands on stay correct either way.
 
 ## Scope
 
@@ -33,10 +36,10 @@ records the file as cosmetic and assigns its regeneration to the post-release bu
   removal — are the file itself and `docs/development/releasing.md`. No test asserts its presence;
   `tests/guards/test_workflow_action_pins.py` enumerates whatever workflows exist rather than a
   fixed list.
-- **Add `tests/guards/test_no_workflow_pushes_to_default_branch.py`.** Two standing structural
-  checks in one file: no workflow pushes to the default branch, and no operative file names a
-  workflow under `.github/workflows/` that does not exist. The second is what would have caught
-  the two stale references this change is fixing.
+- **Add `tests/guards/test_no_workflow_pushes_to_default_branch.py`.** One standing structural
+  check: no workflow pushes to the default branch. Nothing else holds that property, and the cost
+  of losing it is invisible in the workflow that causes it — it lands on every *other* open pull
+  request, which is why it went unnoticed for as long as it did.
 - **Rewrite the "Changelog automation" section of `docs/development/releasing.md`** so it states
   the mechanism that now applies: `CHANGELOG.md` stays git-cliff-generated and never hand-edited,
   `just changelog` runs in the post-release bump pull request, and `[Unreleased]` is stale between
@@ -81,7 +84,8 @@ needed them. The control that remains is the protect-main ruleset itself, unchan
 **Out of scope, stated.** The secret and deploy key are not revoked here (repository owner), so
 between this merge and that removal a write bypass exists with no consumer. That is strictly
 narrower than today, where the same bypass exists *and* is exercised on every merge, but it is not
-zero, and #2337 carries the follow-up.
+zero. It needs an owner that outlives #2337, which this change closes: the removal is reported as
+a follow-up for separate tracking rather than deferred to the issue being resolved here.
 
 ## Success
 
@@ -93,9 +97,8 @@ zero, and #2337 carries the follow-up.
    automatic per-merge sync.
 3. `just release` prints a reminder consistent with (2) — it does not tell the operator the
    changelog syncs automatically on merge.
-4. No operative file names a workflow under `.github/workflows/` that does not exist.
-5. `CHANGELOG.md` is unmodified by this change and remains git-cliff-generated.
-6. `just ci` passes, including `lint-workflows`, `docs-links`, `docs-paths`, `adr-status-check`,
+4. `CHANGELOG.md` is unmodified by this change and remains git-cliff-generated.
+5. `just ci` passes, including `lint-workflows`, `docs-links`, `docs-paths`, `adr-status-check`,
    and `just test`.
 
 ## Validation
@@ -105,21 +108,17 @@ zero, and #2337 carries the follow-up.
   file in `.github/workflows/` and asserts none carries a `git push` to the default branch.
   Expected red before the deletion (`changelog-sync.yml` matches); green after. Focused command:
   `uv run python -m pytest tests/guards/test_no_workflow_pushes_to_default_branch.py -q`.
-- **Contract: no operative file names a workflow that does not exist.**
-  `Mode: focused-test` — `…::test_no_operative_file_names_a_missing_workflow` scans `justfile`,
-  `docs/development/`, and `.github/` for `<name>.yml` references resolving under
-  `.github/workflows/` and asserts each names a file that exists. Expected red while
-  `justfile`'s `release` reminder and `releasing.md` still name `changelog-sync.yml` after the
-  workflow is deleted; green once both are corrected. This is a structural reference check, not a
-  wording assertion, and it is the standing guard for the regression class this whole issue is an
-  instance of.
-- **Contract: the *wording* of the release procedure and the `just release` reminder.**
-  `Mode: task-test-not-applicable` — beyond the reference check above, what remains is three
-  sentences of prose and one `echo` string. No executable consumer parses them, and asserting
-  their phrasing would pin wording rather than behaviour. This is a judgment, not a repository
-  rule: `tests/guards/test_commit_hook_guidance.py` shows the repository does sometimes couple
-  prose to a mechanism, and the coupling is left unenforced here because the surface is small and
-  the structural half is already covered.
+- **Contract: the release procedure and the `just release` reminder describe the mechanism that
+  now applies.**
+  `Mode: task-test-not-applicable` — the changed surface is a few sentences of prose in
+  `docs/development/releasing.md` and one `echo` string in a `just` recipe. No executable consumer
+  parses either, and asserting their phrasing would pin wording rather than behaviour. This is a
+  judgment, not a repository rule: `tests/guards/test_commit_hook_guidance.py` shows the
+  repository does sometimes couple prose to a mechanism, and that coupling is left unenforced
+  here. A structural check — no operative file may name a workflow the repository lacks — was
+  designed, measured against the tree, and cut: it is broader than any completion criterion
+  authorizes, so it is reported as a follow-up rather than smuggled in. `just docs-links` and
+  `just docs-paths` still cover link resolution in the changed file.
 - **Contract: the ADR is a well-formed, accepted record.**
   `Mode: focused-test` — the repository's `records` gate, which runs on the pull request rather
   than inside `just ci`. Expected red for a malformed record, green for a valid one. Focused
