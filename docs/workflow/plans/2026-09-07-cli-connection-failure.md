@@ -9,8 +9,8 @@ shape and emits a constant diagnostic, while all non-connection paths retain the
 
 Tech stack: Python 3.14, FastMCP 3.4.4, HTTPX 0.28.1, pytest.
 
-Expected implementation size: 60–100 changed lines (S) — derived from two classifiers, two dispatch
-branches, and focused CLI transport tests.
+Expected implementation size: 130–180 changed lines (S) — derived from two small classifiers, two
+dispatch branches, and test fixtures that exercise real FastMCP refusal plus secret-safe auth output.
 
 ## Global Constraints
 
