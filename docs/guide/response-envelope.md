@@ -1,44 +1,39 @@
 # Response envelope
 
-Every KDIVE tool returns a single `ToolResponse` defined in
-`src/kdive/mcp/responses.py`. The shape is fixed across all planes so an agent
-learns one envelope and one polling pattern
-([ADR-0019](../adr/0019-tool-response-envelope.md)).
+KDIVE tool results use `ToolResponse`, defined in `src/kdive/mcp/responses.py`. This guide owns
+its common fields and how clients interpret them. Each tool's description still owns the meaning
+of its payload and references; the [tool reference](reference/index.md) documents those contracts.
+Transport and MCP protocol failures can occur before a tool produces an envelope.
 
 ## Fields
 
 | Field | Type | Meaning |
 |---|---|---|
-| `object_id` | `str` | The primary object this response concerns — **polymorphic** by tool kind. On a job-returning tool (`runs.boot`, `runs.install`, `systems.provision`, …) it is the **job id**; the id of the entity the job creates or targets is separately available in `data.<entity>_id` (e.g. `data.run_id`, `data.system_id`) and/or `refs.result`. On an entity tool (`systems.get`) it is the **entity id** directly, with no job involved. Check `data.kind` to tell which case applies — see "Reading an open payload". |
-| `status` | `str` | The object's lifecycle status as a plain string (e.g. `running`, `ready`, `failed`). |
-| `suggested_next_actions` | `list[str]` | Literal next **tool names** the agent should consider (e.g. `["jobs.wait", "jobs.cancel"]`). No inference needed. |
-| `refs` | `dict[str, str]` | Artifact **references** keyed by role (e.g. `{"result": "<object-store-key>"}`). Never inline artifact bytes or log text. |
-| `error_category` | `str \| None` | Present if and only if `status` is a failure status (`error` or `failed`). Carries a value from the `ErrorCategory` taxonomy. `None` otherwise. |
-| `retryable` | `bool \| None` | Derived from `error_category` (ADR-0118): `True` if a bare re-invocation may succeed once a transient condition clears, `False` for a permanent failure. `None` on any non-failure response. |
-| `detail` | `str \| None` | Human-readable failure reason (ADR-0123). The redacted `CategorizedError` message on a failure; present-but-`null` on success and on job-handle envelopes. |
-| `data` | `dict[str, JsonValue]` | Plane-specific JSON values that are not one of the above (e.g. `{"kind": "provision"}` on a job response). Open per-tool; see "Reading an open payload". |
-| `items` | `list[ToolResponse]` | One nested envelope per element of a collection response. Empty on a non-collection response. See "List responses". |
+| `object_id` | `str` | Primary identifier or tool-defined label. A job handle uses the job ID; an entity read uses the entity ID. Failure and collection responses can use labels instead of UUIDs. |
+| `status` | `str` | Tool result or object state, such as `ok`, `running`, `ready`, `error`, or `failed`. Interpret it using the tool's contract. |
+| `suggested_next_actions` | `list[str]` | Suggested tool names. These are hints; each call still enforces its permissions and preconditions. |
+| `refs` | `dict[str, str]` | Named references. Their values can be artifact IDs, object-store keys, or URLs; use the producing tool's contract to choose how to consume them. |
+| `error_category` | `str` or `null` | An `ErrorCategory` value exactly when `status` is `error` or `failed`; otherwise `null`. |
+| `retryable` | `bool` or `null` | Derived from the error category. `true` identifies a potentially transient failure; `false` requires another recovery path. It does not make an arbitrary mutation safe to repeat. |
+| `detail` | `str` or `null` | Optional human-readable failure information. It can be absent or suppressed; do not parse it as a machine contract. |
+| `data` | JSON object | Tool-specific values, including nested objects, arrays, and strings. |
+| `items` | `list[ToolResponse]` | Nested result envelopes, for example the entries of a collection or diagnostic checks. |
+
+Optional fields have empty-container or `null` defaults. They may be omitted when response
+compaction is enabled; see [compact responses](#compact-responses-opt-in).
 
 ## The `error_category` invariant
 
-`error_category` is set **iff** the response reports a failure status. The model
-enforces this at construction time: a failure status without a category, or any
-non-failure status carrying one, raises at the tool boundary. This means a caller
-can safely check `error_category is None` to distinguish success from failure
-without parsing `status`.
+The model requires an error category for `error` and `failed`, and rejects one on other
+statuses. It derives `retryable` from the category. `failure()` produces `error`; a failed job
+rendered by `from_job()` carries `failed`. Inspect each envelope, including nested items.
 
-Two distinct statuses count as a failure, and they originate differently:
+No error category means **no classified failure in that envelope**, not that the requested work
+has completed. A job can be `queued` or `running`, and a `canceled` job also has no error category.
+An outer collection can be `ok` while a nested item reports a failure. Tool-specific results can
+also describe failed checks or intermediate steps inside `data`.
 
-- **`error`** is what a *direct tool failure* carries. The `failure()` factory
-  always sets `status="error"` plus the `error_category` — so a synchronous tool
-  rejection (bad input, authorization denied, sequencing error) is always `error`,
-  never `failed`.
-- **`failed`** is a *job terminal state*. It appears only on job-handle envelopes
-  built from a `Job` row (via `from_job`), surfaced through `jobs.wait`
-  when a long-running operation fails. A direct tool call never returns `failed`.
-
-See the errors guide (resource://kdive/docs/guide/errors.md) for the taxonomy and recovery
-guidance.
+See the errors guide (resource://kdive/docs/guide/errors.md) for categories and recovery.
 
 ## References, not log dumps
 
@@ -54,119 +49,77 @@ redaction.
 
 ## Reading an open payload
 
-The advertised tool `outputSchema` (`tools/list`) documents these envelope fields
-([ADR-0170](../adr/0170-fielded-tool-output-schema.md)), but it advertises `data`
-as a generic object and `items` as an array of generic objects on purpose: the
-per-tool shape of these two fields is intentionally open. Read them like this:
+The advertised `outputSchema` describes the common envelope fields. Its `data` object and
+`items` objects are intentionally open, so it does not enumerate every tool's returned keys.
+Clients need the producing tool's result description as well as the common schema.
 
-- **`data`** carries plane-specific scalars keyed by name. The keys depend on the
-  tool — `{"kind": "provision"}` on a job handle, `{"count": 3}` on a collection,
-  `{"current_status": "running"}` on a conflict. The per-plane tool docs name the
-  keys a given tool sets; the envelope does not enumerate them. `data.kind` also
-  disambiguates `object_id`: when it names a job kind (e.g. `"provision"`), `object_id`
-  is a job id and the created/target entity's id lives in `data.<entity>_id`; otherwise
-  `object_id` is the entity id itself.
-- **`items`** is populated only by collection-returning tools (`*.list`); each entry
-  is a full `ToolResponse` with the same fields described above. Recurse into an
-  entry exactly as you read the top-level envelope.
-- **`refs`** are object-store keys, never inline bytes. Resolve a reference with
-  `artifacts.get` after you decide you need the artifact.
+For a job handle, pass `object_id` as `job_id` to `jobs.wait`. `data.kind` describes the job kind;
+some producers additionally include target IDs such as `data.run_id` or `data.system_id`.
+Those extra IDs are not guaranteed by the common job renderer. Do not treat `data.kind` as a
+universal discriminator for every tool, or assume `refs.result` always names the target entity.
 
-A black-box agent therefore needs only this one envelope contract plus the per-tool
-input schema; it never has to special-case each tool's result shape.
+For a collection, read the outer envelope first and then each entry in `items`. Collections are
+not confined to `*.list`: diagnostics and accounting reports also return nested envelopes.
+The collection factory sets `data.count` to the number of items returned, not the total number
+of matching objects across all pages.
 
 ## Idempotent retries
 
-The transport-reset retry contract blesses re-invoking idempotent *reads* after a
-transient drop. For *mutations*, a blind retry of the initial create/enqueue could
-double-act. To make a mutation retry safe, every object-creating / job-enqueuing tool
-accepts an optional `idempotency_key` ([ADR-0193](../adr/0193-uniform-mutation-idempotency.md)):
-
-- **What it covers.** The create/enqueue mutations — `runs.create` /
-  `runs.install` / `runs.boot`, `systems.provision` / `systems.reprovision` /
-  `systems.teardown`,
-  `vmcore.fetch`, `control.power` / `control.force_crash`, `investigations.open`, and
-  `allocations.request` / `allocations.renew`. Pure state-transition mutations that act on
-  an existing object by id (e.g. `runs.cancel`, `allocations.release`,
-  `investigations.close`) are naturally idempotent and take no key.
-- **Replay, not re-action.** A repeated `idempotency_key` returns the **identical prior
-  envelope** — the same object/job, byte-for-byte the same fields — instead of creating a
-  second object or enqueuing a second job. A keyed retry after a transport drop is safe.
-- **Principal-scoped.** Keys are scoped to your principal; one tenant's key can never
-  resolve another's envelope.
-- **Success-only.** A key is recorded only when the mutation succeeds. A failed call (a
-  denial or a validation error) records nothing, so you may correct the input and retry the
-  same key.
-- **One key per logical operation.** Reusing one key across two different tools fails closed
-  with a `conflict` error — mint a fresh key per operation. A key is at most 200 characters.
-- **Window.** A key replays only within the retention window (see the async-jobs guide,
-  resource://kdive/docs/guide/async-jobs.md); after it is garbage-collected, a repeat is
-  treated as a fresh request.
+Response interpretation and safe retries are separate contracts. Poll a returned job handle to
+learn its current state; a replayed mutation result can describe an earlier state. See the
+async-jobs guide (resource://kdive/docs/guide/async-jobs.md) for initial-call retries,
+idempotency keys, and their retention boundary.
 
 ## List responses
 
-`*.list` tools return a sequence of `ToolResponse` objects, one envelope per item.
-Batch callers isolate construction per item so a single failed row does not blank
-the whole list.
+A collection response is one envelope with nested `items`, not a bare sequence of envelopes.
+Pagination support and request shape belong to the individual tool. For example, `jobs.list`
+supports a cursor, while `shapes.list` returns its catalog without pagination parameters.
 
 ### Pagination
 
-Every `*.list` tool is opt-in keyset-paginated
-([ADR-0192](../adr/0192-list-pagination-envelope.md)). The contract lives in `data`:
+For tools using the common keyset pagination contract:
 
-| Key | Type | Meaning |
-|---|---|---|
-| `truncated` | `bool` | `true` iff more rows match than were returned. Deterministic, never best-effort. |
-| `next_cursor` | `str \| None` | An opaque continuation token, present (non-`null`) **iff** `truncated` is `true`. Pass it back as the next call's `cursor` to read the next page. |
-| `count` | `int` | The per-page item count (always present on a collection). |
+| `data` field | Meaning |
+|---|---|
+| `count` | Items in this response. |
+| `truncated` | More matching results were observed beyond the returned page. |
+| `next_cursor` | Continuation token when the tool supports continuation and has another page; otherwise `null` or absent. |
 
-Paginated list tools take optional `cursor` and `limit` fields in their request
-payload; `limit` defaults to 50 and is capped at 200. To read a full result set,
-call the tool, then keep re-calling it with `cursor = data.next_cursor` until
-`data.truncated` is `false`:
+Read the tool's schema for its limit and cursor placement. This pseudocode shows `jobs.list`;
+process every page's items and keep any filters unchanged:
 
 ```text
-page = jobs.list(request={"limit": 50})
-while page.data.truncated:
-    page = jobs.list(request={"limit": 50, "cursor": page.data.next_cursor})
+request = {"limit": 50}
+loop:
+    page = jobs.list(request=request)
+    if page.get("error_category") is not null: handle failure and stop
+    process(page.get("items", []))
+    if not page.data.truncated: stop
+    request.cursor = page.data.next_cursor
 ```
 
-Rules:
+Treat a cursor as opaque and return it only to its producing tool. The common decoder rejects
+malformed or wrong-tool cursors with `configuration_error` and `data.reason = "invalid_cursor"`.
+A cursor describes a position, not an authorization grant or a snapshot: each request applies
+its own filters and permissions, and data can change between pages.
 
-- **Cursors are opaque.** Do not parse or construct one — only echo back a
-  `next_cursor` you received. The token encodes the page boundary, not a row offset.
-- **Cursors are tool-specific.** A cursor minted by one list is rejected by another
-  with a `configuration_error` (`data.reason = "invalid_cursor"`); a malformed cursor
-  is the same error. A bad cursor is never silently treated as "first page".
-- **Cursors are not security tokens.** Every page re-applies the caller's project/role
-  scoping, so a cursor only shifts the page boundary within rows the caller may see.
-- **Keyset, not offset.** Following a cursor is stable under concurrent inserts: a row
-  added at the head never makes a later page skip or repeat a row.
-- **`inventory.list` is the one non-continuable list.** It summarizes two independent
-  streams (allocations + systems), so it reports `truncated` but emits no `next_cursor`;
-  narrow it with the `project` / `resource_id` filters instead.
+A truncated result does not always support continuation. `inventory.list`, for example,
+summarizes separate allocation and system streams without a next cursor; narrow its filters
+instead. Follow each tool's truncation contract rather than applying the loop above to every list.
 
 ## Compact responses (opt-in)
 
-When an operator sets `KDIVE_COMPACT_RESPONSES=on` (default `off`), the server omits
-null/empty *defaulted* envelope fields from every tool response, recursively within `items`,
-to cut per-call tokens on token-heavy list tools
-([ADR-0314](../adr/0314-compact-response-envelope.md)). The default is unchanged and
-byte-identical.
+`KDIVE_COMPACT_RESPONSES=on` enables omission of defaulted envelope fields; the default is `off`.
+Compaction also applies to nested `items`. Clients should accept both forms:
 
-Under compaction:
+- `object_id` and `status` remain present.
+- Null `error_category`, `retryable`, and `detail` can be omitted. Failures keep their category
+  and retryability; a non-null detail remains present.
+- Empty `suggested_next_actions`, `refs`, `items`, and `data` can be omitted. A nonempty `data`
+  object retains its tool-specific contents; this is not a general cleanup of null payload values.
 
-- A field at its default is **omitted**: `error_category`/`retryable`/`detail` when null,
-  and `suggested_next_actions`/`refs`/`items`/`data` when empty. `object_id` and `status`
-  are always present.
-- A failure envelope always keeps `error_category` and `retryable`. `detail` is kept only
-  when non-null (a `not_found`/`authorization_denied` suppressed constant, or a reason the
-  tool set); a worker-plane job-handle failure whose `detail` is null omits it.
-- **Absent means default.** An omitted field is semantically identical to its documented
-  default (empty list/dict, or null). A consumer must not read key-absence as a distinct
-  "unknown" signal. This applies to first-party clients too — the `response.get("items", [])`
-  idiom is compaction-safe, and a *populated* collection's `items` is never dropped (only an
-  empty one is), so index access on a known-populated collection is unaffected.
-
-The advertised output schema types every omittable field as optional/nullable, so compact
-responses stay schema-valid.
+For these optional envelope fields, absence means the field's default. For example,
+`response.get("items", [])` handles an empty collection in either form. Do not interpret an
+omitted field as a new state. Compaction leaves non-envelope or invalid result shapes untouched;
+it is not a validator that repairs producer errors.

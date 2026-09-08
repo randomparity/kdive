@@ -101,21 +101,33 @@ short waits avoid it.
 
 ## Retrying the initial enqueue (idempotency)
 
-The read-retry contract above covers `jobs.wait` at any `timeout_s`. But a transport reset can also
-drop the **response to the enqueuing call itself** — `runs.install`, `vmcore.fetch`,
-`control.power`, `systems.provision`, and the rest of the create/enqueue surface. A blind
-retry of that call could enqueue a second job. To retry it safely, pass an `idempotency_key`
-([ADR-0193](../adr/0193-uniform-mutation-idempotency.md), and see
-the envelope guide, resource://kdive/docs/guide/response-envelope.md): a repeated key returns the
-**same job envelope** instead of enqueuing again.
+A dropped mutation response leaves its outcome uncertain. For a tool that accepts
+`idempotency_key`, choose a fresh key before the first call and reuse it only for the same
+logical operation with unchanged inputs. Check that tool's schema; key support is not implied
+by a create/enqueue name. Keys are associated with the calling principal, so do not recycle one
+across tools, targets, or projects. A key is not a substitute for the call's authorization and
+lifecycle preconditions.
 
-**Replay / GC window.** A recorded key replays only within the reconciler's retention window
-(default **7 days**, configurable). The reconciler garbage-collects keys past the window on
-its periodic pass. After a key is collected, repeating it is treated as a *fresh* enqueue —
-still safe at the job layer, because the job-enqueue tools derive their job `dedup_key` from
-the target object (e.g. `{run_id}:build`, `{system_id}:capture_vmcore:{method}`), so a
-same-target re-enqueue returns the existing job rather than a duplicate. The `idempotency_key`
-adds, on top of that, an identical-*envelope* replay for the bounded window.
+The stored-result path replays a recorded successful envelope, which can still say `queued`
+or `running` after the job has finished. Poll its job ID with `jobs.wait` for the current state.
+Allocation request/renewal uses a different path: the key identifies the allocation and the
+response is rebuilt from its current row. Do not depend on byte-identical responses across
+all keyed tools or transport settings. The envelope guide
+(resource://kdive/docs/guide/response-envelope.md) explains the returned fields.
+
+The shared stored-envelope path accepts keys of 1–200 characters and records results without
+an error category inside the mutation transaction. Failure and key-collision behavior can
+differ on other paths; follow the tool's contract rather than assuming a universal error code.
+Do not change the inputs under an existing key to request different work: stored-result lookup
+does not compare them with the original arguments.
+
+The reconciler deletes keys older than its retention interval (default seven days, measured
+from the record's creation time using the database clock). Cleanup occurs on a periodic pass,
+so this is not an exact expiration instant. Once the record is deleted, its stored response
+cannot be replayed. Repeating the call may create or recycle work according to that tool's
+job-deduplication policy; there is no blanket guarantee that a same-target retry is harmless.
+After an uncertain outcome or a long interruption, inspect known jobs and objects before
+issuing another mutation. Continue a known job with `jobs.wait` instead of repeating its enqueue.
 
 ## Durability and retries
 
