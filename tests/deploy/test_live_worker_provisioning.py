@@ -1392,6 +1392,15 @@ def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
     assert enable < start, "the unit enables unconditionally; only the start is stale-gated"
 
 
+def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
+    """`depmod` (from `kmod`) is a hard requirement for host-side module indexing (ADR-0346,
+    #2300); a genuinely fresh host provisioned from this role alone must have it (#2331)."""
+    defaults = _yaml(DEFAULTS)
+    packages = defaults["live_vm_host_packages"]
+    assert isinstance(packages, list)
+    assert "kmod" in packages
+
+
 def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)
