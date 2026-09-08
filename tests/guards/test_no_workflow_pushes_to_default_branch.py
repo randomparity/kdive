@@ -44,7 +44,7 @@ _GITHUB = _REPO_ROOT / ".github"
 _WORKFLOWS = _GITHUB / "workflows"
 _SCRIPTS = _GITHUB / "scripts"
 
-#: The repository's default branch, named once so both patterns below stay in step.
+#: The repository's default branch, named once so the check and its failure message agree.
 _DEFAULT_BRANCH = "main"
 
 #: Any `git push`, wherever it sits on the line — the removed workflow's sat under `if !`.
@@ -83,7 +83,8 @@ def _strip_comments(text: str) -> str:
 def _operands(args: str) -> list[str]:
     """The push's own non-flag operands: everything before a comment or the next command."""
     end = _OPERAND_END.search(args)
-    return [token for token in args[: end.start() if end else None].split() if token[:1] != "-"]
+    tokens = args[: end.start() if end else None].split()
+    return [token for token in tokens if not token.startswith("-")]
 
 
 def _destination(operand: str) -> str:
