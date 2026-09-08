@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.images.families._fedora_customize import FADUMP_CAPTURE_SERVICE_PATH
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.rhel import RhelFamily
 from kdive.images.families.steps import InstallPackages, RunCommand, Step
@@ -21,7 +22,13 @@ from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
 )
-from tests.support.customize_steps import baked_paths, commands, installed, rendered
+from tests.support.customize_steps import (
+    baked_paths,
+    commands,
+    installed,
+    rendered,
+    upload_source,
+)
 
 
 def _ctx(
@@ -30,6 +37,7 @@ def _ctx(
     is_cloud_image: bool,
     distro: str = "fedora",
     version: str = "44",
+    fadump_capture: bool = False,
 ) -> CustomizeContext:
     fam = RhelFamily()
     return CustomizeContext(
@@ -39,6 +47,7 @@ def _ctx(
         is_cloud_image=is_cloud_image,
         distro=distro,
         version=version,
+        fadump_capture=fadump_capture,
     )
 
 
@@ -93,22 +102,39 @@ def test_fedora_debug_steps_enable_kdump_and_sshd(tmp_path: Path) -> None:
     assert "final_action poweroff" in text
 
 
-def test_debug_steps_install_fadump_capture_service(tmp_path: Path) -> None:
-    # fadump-capture.service is written to the image and enabled on every debug image that carries
-    # kexec-tools (Fedora and all EL); ConditionPathExists=/proc/vmcore keeps it a no-op on normal
-    # boots so it is safe on x86_64 too.  Declared per AGENTS.md parity rule (#2381, proved #2312).
-    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
-    text = rendered(steps)
-    assert "fadump-capture.service" in text
+def test_fadump_arch_debug_steps_install_fadump_capture_service(tmp_path: Path) -> None:
+    # On a fadump arch (ppc64le) the crash path re-boots the real rootfs with /proc/vmcore
+    # present, so the image must carry its own capture unit: kdumpctl cannot rebuild the fadump
+    # initrd in the kdive-supplied initrd environment.  Per AGENTS.md parity rule (#2381, #2312).
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True, fadump_capture=True))
+    assert FADUMP_CAPTURE_SERVICE_PATH in baked_paths(steps)
     assert "systemctl enable fadump-capture.service" in commands(steps)
 
 
-def test_build_steps_omit_fadump_capture_service(tmp_path: Path) -> None:
-    # Build-host images lack kexec-tools so the fadump-capture injection guard never fires.
-    # This test pins that regression-safety: if the injection were moved outside the
-    # kexec-tools guard it would show up here.
-    steps = _steps(_build_ctx(_ctx(tmp_path, is_cloud_image=True)))
+def test_non_fadump_arch_debug_steps_omit_fadump_capture_service(tmp_path: Path) -> None:
+    # An x86_64 kdump capture kernel runs entirely inside its dracut initramfs and never loads
+    # /etc/systemd/system, so the unit could not fire there.  The build-fs path gates on the arch
+    # trait rather than baking a declaration the image cannot honor.
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True, fadump_capture=False))
     assert "fadump-capture.service" not in rendered(steps)
+
+
+def test_build_steps_omit_fadump_capture_service(tmp_path: Path) -> None:
+    # Build-host images lack kexec-tools so the fadump-capture injection guard never fires, even
+    # on a fadump arch.  This test pins that regression-safety: if the injection were moved
+    # outside the kexec-tools guard it would show up here.
+    steps = _steps(_build_ctx(_ctx(tmp_path, is_cloud_image=True, fadump_capture=True)))
+    assert "fadump-capture.service" not in rendered(steps)
+
+
+def test_fadump_capture_unit_supersedes_kdump_only_with_a_vmcore(tmp_path: Path) -> None:
+    # The two lines that make superseding kdump.service safe.  Without the condition the unit
+    # would run makedumpfile on every ordinary boot; without the ordering kdump.service could win
+    # the race and write through kdumpctl, which is what fails in the fadump initrd environment.
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True, fadump_capture=True))
+    unit = upload_source(steps, FADUMP_CAPTURE_SERVICE_PATH).read_text()
+    assert "ConditionPathExists=/proc/vmcore" in unit
+    assert "Before=kdump.service" in unit
 
 
 def test_debug_steps_write_makedumpfile_version_marker(tmp_path: Path) -> None:

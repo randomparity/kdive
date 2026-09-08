@@ -17,6 +17,20 @@ verify its userland before provisioning.
 The executable helpers in this directory own argv/stdout details and pass `just lint-shell`.
 When changing a helper protocol, update its provider consumer and tests together.
 
+## Baked-in units
+
+Not everything here is an entrypoint. `fadump-capture.service` is a systemd unit baked into
+fadump-capable (ppc64le) debug images, not a program a provider invokes. It fires on the fadump
+capture-kernel boot, where `kdumpctl` cannot rebuild the fadump initrd, and writes the vmcore
+itself. It lives in this directory because both provisioning paths need one authoritative copy:
+the [build-fs family customizer](../../src/kdive/images/families/rhel.py) uploads it from the
+source tree, and the
+[`guest_base_image` role](../ansible/roles/guest_base_image/tasks/build_one.yml) uploads the copy
+this directory is staged as on the remote build host. The unit's own header documents the
+`/var/crash` layout it owes the
+[offline harvest](../../src/kdive/providers/local_libvirt/retrieve/guestfs.py) — change one side
+and the `test_fadump_capture_unit_writes_only_paths_the_harvest_globs_match` test fails.
+
 `kdive-install-kernel install` fetches the kernel bundle and installs a deterministic GRUB
 entry; `boot` selects that entry for one boot and starts a detached reboot. `boot-id` reads
 the guest boot identity. `kdump-status` reports reserved crash memory and whether the capture

@@ -375,6 +375,19 @@ def test_customize_context_threads_cloud_image_flag(tmp_path: Path) -> None:
     assert rec2.customize_ctxs[0].is_cloud_image is False, "a virt-builder row is not a cloud image"
 
 
+def test_customize_context_threads_fadump_capture_from_the_arch_traits(tmp_path: Path) -> None:
+    # The plane (not the family) resolves the arch, so it owns turning spec.arch into the
+    # fadump_capture trait the family gates on. Guards the wiring: a family that read a
+    # hardcoded True/False would still pass the rhel step tests.
+    rec = _Recorder()
+    _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-44-ppc64le", arch="ppc64le"))
+    assert rec.customize_ctxs[0].fadump_capture is True
+
+    rec2 = _Recorder()
+    _plane(tmp_path, rec2).build(_spec(name="fedora-kdive-ready-44", arch="x86_64"))
+    assert rec2.customize_ctxs[0].fadump_capture is False
+
+
 def test_readiness_unit_is_rendered_with_the_family_kdump_unit(tmp_path: Path) -> None:
     # The plane (not the family) renders the kdive-ready unit; it must order After= the family's
     # kdump_unit so a non-rhel family closes the arm-vs-ready race (ADR-0251 point 6 / #824). This
@@ -778,6 +791,7 @@ def _rhel_steps(
         is_cloud_image=is_cloud_image,
         distro=distro,
         version=version,
+        fadump_capture=False,
     )
     return RhelFamily().customize_steps(ctx)
 

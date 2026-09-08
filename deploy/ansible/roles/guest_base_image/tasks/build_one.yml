@@ -178,6 +178,12 @@
 # The fadump-capture unit supersedes it on the capture-kernel boot
 # (ConditionPathExists=/proc/vmcore), invokes makedumpfile, and powers off.
 # Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
+#
+# The source is the staged copy under guest_base_image_helper_dir, not role_path: virt-customize
+# resolves --upload on the host it runs on (the remote), and role_path is a control-node path
+# that does not exist there. main.yml already stages helper_src -- which holds the one
+# authoritative fadump-capture.service -- onto every remote build host for exactly this reason.
+# That staging copies 0755; a systemd unit is 0644, so the mode is set in-guest after upload.
 - name: Upload and enable the fadump capture service for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module
     # No Ansible module wraps virt-customize; the command module is the only option.
@@ -186,7 +192,9 @@
       - -a
       - "{{ guest_base_image_qcow2 }}"
       - --upload
-      - "{{ role_path }}/files/fadump-capture.service:/etc/systemd/system/fadump-capture.service"
+      - "{{ guest_base_image_helper_dir }}/fadump-capture.service:/etc/systemd/system/fadump-capture.service"
+      - --run-command
+      - chmod 0644 /etc/systemd/system/fadump-capture.service
       - --run-command
       - systemctl enable fadump-capture.service
   when:

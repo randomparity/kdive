@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -22,7 +24,12 @@ from kdive.artifacts.storage import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.retrieve.guestfs import _LibguestfsCoreReader
+from kdive.images.families._fedora_customize import fadump_capture_unit_source
+from kdive.providers.local_libvirt.retrieve.guestfs import (
+    _VAR_CRASH_GLOB,
+    _VAR_CRASH_INCOMPLETE_GLOB,
+    _LibguestfsCoreReader,
+)
 from kdive.providers.local_libvirt.retrieve.kdump import HarvestOutcome
 from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.ports.retrieve import (
@@ -504,6 +511,40 @@ def test_capture_host_dump_verifies_stored_checksum(tmp_path: Path) -> None:
         )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not core.exists()
+
+
+def test_fadump_capture_unit_writes_only_paths_the_harvest_globs_match() -> None:
+    # The in-guest fadump capture unit and this harvest are two halves of one contract, held
+    # together by nothing but these globs: the unit picks the /var/crash layout, the reader
+    # decides what it can see. A flat /var/crash/vmcore is at depth 1 and matches neither glob,
+    # so a correctly captured core would be invisible and the run would report readiness_failure
+    # with a valid compressed dump sitting on the overlay (#2381).
+    exec_start = next(
+        line
+        for line in fadump_capture_unit_source().read_text().splitlines()
+        if line.startswith("ExecStart=")
+    )
+    # %b is the systemd boot-ID specifier, expanded before exec; stand in a plausible value so
+    # the assertion tests the path *shape* rather than the literal specifier. Shell
+    # metacharacters end a token, so a path is everything up to one of them.
+    targets = set(re.findall(r"/var/crash/[^\s'\";&|]+", exec_start.replace("%b", "0" * 32)))
+    # The mkdir target is the per-capture directory itself, which matches neither glob by design.
+    files = {target for target in targets if target.count("/") > 3}
+    assert files, f"the capture unit writes no file under /var/crash: {exec_start}"
+    for target in files:
+        assert fnmatch(target, _VAR_CRASH_GLOB) or fnmatch(target, _VAR_CRASH_INCOMPLETE_GLOB), (
+            f"{target} matches neither {_VAR_CRASH_GLOB} nor {_VAR_CRASH_INCOMPLETE_GLOB}, so "
+            "the offline harvest would never list the core the unit just wrote"
+        )
+    # The reader tells a truncated dump from a finished one only because kdump stages under
+    # -incomplete and renames on success (ADR-0251); a unit writing the final name directly
+    # would present a makedumpfile killed mid-write as a complete core.
+    assert any(fnmatch(t, _VAR_CRASH_INCOMPLETE_GLOB) for t in files), (
+        "the capture unit must stage to vmcore-incomplete, not write the final name directly"
+    )
+    assert any(fnmatch(t, _VAR_CRASH_GLOB) for t in files), (
+        "the capture unit must rename to the final vmcore name on success"
+    )
 
 
 def test_local_retrieve_from_env_wires_real_crash_runner() -> None:

@@ -18,8 +18,6 @@ from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
     DEFAULT_BUILD_FS_PACKAGES,
     DEFAULT_DEBUG_FS_PACKAGES,
-    FADUMP_CAPTURE_SERVICE_CONTENT,
-    FADUMP_CAPTURE_SERVICE_PATH,
     FSTAB,
     KDUMP_FINAL_ACTION_CMD,
     KDUMP_SYSCTL_CONTENT,
@@ -28,6 +26,7 @@ from kdive.images.families._fedora_customize import (
     cloud_init_first_boot_steps,
     debug_image_steps,
     drgn_version_marker_steps,
+    fadump_capture_steps,
     makedumpfile_version_marker_steps,
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
@@ -126,18 +125,17 @@ class RhelFamily:
             steps.append(RunCommand("systemctl enable kdump.service"))
             steps.append(WriteFile(KDUMP_SYSCTL_PATH, KDUMP_SYSCTL_CONTENT))
             steps.append(RunCommand(KDUMP_FINAL_ACTION_CMD))
-            # fadump capture: installed on every kdump-capable image (Fedora + EL).
-            # Before=kdump.service + ConditionPathExists=/proc/vmcore means this unit
-            # runs first on any crash-kernel boot (fadump or ordinary kdump) and calls
-            # makedumpfile directly, superseding kdump.service.  This is intentional:
-            # makedumpfile -c -d 31 is sufficient without kdumpctl environment setup.
-            # The Ansible guest_base_image path gates on fadump_capture | bool; the
-            # build-fs path installs unconditionally because every debug image is built
-            # fadump-capable on ppc64le and the unit is a no-op on all normal boots.
+            # fadump capture, on the arches whose crash path can reach it. The unit supersedes
+            # kdump.service on the capture-kernel boot and calls makedumpfile directly, which
+            # ppc64le fadump needs because kdumpctl cannot rebuild the fadump initrd in the
+            # kdive-supplied initrd environment. Gated on the arch trait rather than installed
+            # everywhere: an x86_64 kdump capture kernel stays in its dracut initramfs and never
+            # loads /etc/systemd/system, so the unit could not fire there. This mirrors the
+            # Ansible guest_base_image path's fadump_capture gate.
             # Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
-            # See also: deploy/ansible/roles/guest_base_image/files/fadump-capture.service
-            steps.append(WriteFile(FADUMP_CAPTURE_SERVICE_PATH, FADUMP_CAPTURE_SERVICE_CONTENT))
-            steps.append(RunCommand("systemctl enable fadump-capture.service"))
+            # See also: deploy/remote-libvirt-guest-helpers/fadump-capture.service
+            if ctx.fadump_capture:
+                steps += fadump_capture_steps()
         steps += cloud_init_first_boot_steps(ctx)
         steps += debug_image_steps(ctx.packages)
         if ctx.kind == "debug":

@@ -83,6 +83,7 @@ def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) 
                     is_cloud_image=True,
                     distro=name,
                     version=version,
+                    fadump_capture=False,
                 )
                 # Only file-creating steps count — a path merely referenced by a RunCommand is
                 # never materialized, and the validator does an exact ``exists <path>``.

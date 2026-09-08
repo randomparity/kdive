@@ -1,0 +1,37 @@
+# fadump vmcore capture (kdive) — the single authoritative copy of this unit.
+#
+# Baked into ppc64le debug images by both provisioning paths: the build-fs path
+# (src/kdive/images/families/rhel.py, gated on the arch's fadump_capture trait) and the
+# Ansible guest_base_image role (gated on guest_base_image_fadump_capture). Neither owns a
+# second copy — the role stages this directory onto the remote build host and uploads from
+# there, so a fix here reaches both.
+#
+# Why it supersedes kdump.service: on ppc64le fadump the production kernel re-boots the real
+# rootfs with /proc/vmcore present, and kdumpctl cannot rebuild the fadump initrd inside the
+# kdive-supplied initrd environment. Running makedumpfile directly needs none of that setup.
+#
+# The output path is a contract with the host-side harvest, not a free choice
+# (src/kdive/providers/local_libvirt/retrieve/guestfs.py):
+#   * /var/crash/<dir>/vmcore — one directory level, because the harvest globs
+#     /var/crash/*/vmcore. A flat /var/crash/vmcore is invisible to it.
+#   * <dir> is the systemd boot ID (%b), unique to this capture boot, so a second crash on the
+#     same overlay cannot overwrite or collide with the first.
+#   * makedumpfile writes vmcore-incomplete and is renamed to vmcore only on success, which is
+#     how the harvest tells a truncated dump from a finished one.
+#   * poweroff runs after a ';', not a '&&', so a failed capture still reaches SHUTOFF — the
+#     signal the harvest waits on — instead of burning its full settle timeout.
+[Unit]
+Description=fadump vmcore capture (kdive)
+Documentation=https://github.com/randomparity/kdive
+Before=kdump.service
+ConditionPathExists=/proc/vmcore
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'mkdir -p /var/crash/%b && makedumpfile -c -d 31 /proc/vmcore /var/crash/%b/vmcore-incomplete && mv /var/crash/%b/vmcore-incomplete /var/crash/%b/vmcore; poweroff -f'
+
+[Install]
+WantedBy=basic.target

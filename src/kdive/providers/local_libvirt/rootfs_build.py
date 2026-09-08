@@ -823,6 +823,7 @@ class LocalLibvirtRootfsBuildPlane:
             is_cloud_image=isinstance(entry.source, CloudImageSource),
             distro=entry.distro,
             version=entry.version,
+            fadump_capture=arch_traits(spec.arch).fadump_capture,
         )
 
 

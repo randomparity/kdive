@@ -45,6 +45,7 @@ def _ctx(
         is_cloud_image=is_cloud_image,
         distro=distro,
         version=version,
+        fadump_capture=False,
     )
 
 
