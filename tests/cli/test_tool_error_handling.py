@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import http.server
 import socket
+import socketserver
+import threading
 
-import httpx
 import pytest
 from fastmcp.exceptions import ToolError
 
@@ -79,25 +81,17 @@ class _RaisingSession:
         return _RaisingClient()
 
 
-class _EnteringClient:
-    def __init__(self, error: Exception) -> None:
-        self._error = error
+class _UnauthorizedHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
+        self.send_response(401)
+        self.end_headers()
 
-    async def __aenter__(self) -> _EnteringClient:
-        raise self._error
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
+        self.send_response(401)
+        self.end_headers()
 
-    async def __aexit__(self, *exc: object) -> None:
-        return None
-
-
-class _EnteringSession:
-    token = "token-secret"
-
-    def __init__(self, error: Exception) -> None:
-        self._error = error
-
-    def client(self) -> _EnteringClient:
-        return _EnteringClient(self._error)
+    def log_message(self, format: str, *args: object) -> None:
+        pass
 
 
 def test_membership_denial_envelope_exits_3(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,13 +150,19 @@ def test_refused_connection_exits_with_secret_safe_endpoint_guidance(
 def test_authentication_failure_stays_distinct_and_secret_safe(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    url = "https://url-user:url-password@example.invalid/mcp?sensitive=query-secret"  # noqa: E501  # pragma: allowlist secret
-    request = httpx.Request("GET", url)
-    response = httpx.Response(401, request=request)
-    error = httpx.HTTPStatusError("bearer-secret", request=request, response=response)
-    monkeypatch.setattr(reads, "_session_factory", lambda: _EnteringSession(error))
-
-    code = main(["resources", "list"])
+    with socketserver.TCPServer(("127.0.0.1", 0), _UnauthorizedHandler) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        port = server.server_address[1]
+        monkeypatch.setenv(TOKEN.name, "bearer-secret")
+        server_url = f"http://url-user:url-password@127.0.0.1:{port}/mcp?sensitive=query-secret"  # noqa: E501  # pragma: allowlist secret
+        monkeypatch.setenv(SERVER_URL.name, server_url)
+        config.load()
+        try:
+            code = main(["resources", "list"])
+        finally:
+            server.shutdown()
+            thread.join()
 
     captured = capsys.readouterr()
     assert code == 1
