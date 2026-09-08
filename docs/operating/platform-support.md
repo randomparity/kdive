@@ -24,7 +24,7 @@ from-scratch POWER box, see the
 | **x86_64 + KVM** | Primary — fully supported | Hardware virtualization (`/dev/kvm`). The default local-libvirt target; every spine step is proven here. |
 | **ppc64le + KVM-HV** (POWER9/POWER10) | Supported | Native KVM-HV on a real POWER host. Validated end-to-end for the kdump spine on POWER9/POWER10. |
 | **ppc64le + TCG** (on an x86_64 host) | CI-only / slow | Software-emulated foreign-arch guest. Boots and runs, but an order of magnitude slower than KVM; the boot-deadline multiplier applies (see below). Used to prove the ppc64le paths in CI without POWER hardware. |
-| x86_64 + TCG | not a target | No reason to emulate the native arch; use KVM. |
+| x86_64 + TCG | Mechanism available | Used for a foreign x86_64 guest on POWER or when native KVM is unavailable; this row does not claim a dedicated live proof. |
 
 ### The TCG boot-deadline multiplier
 
@@ -35,7 +35,36 @@ a single multiplier keyed off the System's persisted accelerator: `1.0` for KVM,
 and a configurable factor (`KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, **default
 `10.0`**) for TCG — and, deliberately, for an unknown/`NULL` accelerator, so an
 un-classified guest is never starved of boot time. This is why ppc64le-under-TCG
-runs are slow but do not spuriously fail readiness.
+runs receive a larger readiness budget. The configured multiplier must be at least `1.0`;
+set it to `1.0` to disable scaling.
+
+### Cross-architecture guests
+
+The local provider uses TCG for foreign-architecture guests. Native guests use KVM when it is
+available and can fall back to TCG; inspect the worker's diagnostic result rather than assuming
+hardware acceleration from the host architecture alone.
+
+To enable foreign-arch guests, install the foreign arch's QEMU system emulator. The package
+name is distro-specific (and matches what `scripts/check-setup-deps.sh` reports):
+
+| distro | ppc64le emulator (`qemu-system-ppc64`) | x86_64 emulator (`qemu-system-x86_64`) |
+|--------|----------------------------------------|----------------------------------------|
+| Fedora / RHEL / CentOS | `qemu-system-ppc` | `qemu-system-x86` |
+| Debian / Ubuntu | `qemu-system-ppc` | `qemu-system-x86` |
+| Arch | `qemu-system-ppc` | `qemu-system-x86` |
+| openSUSE | `qemu-ppc` | `qemu-x86` |
+
+For example, to enable ppc64le guests on an x86_64 Fedora host: `dnf install qemu-system-ppc`.
+
+Two diagnostics report the per-arch accelerator once the emulator is present:
+
+- `scripts/check-setup-deps.sh` prints a cross-arch line per foreign arch — "available via
+  TCG only" when its emulator is present, or the exact package to install when it is not.
+- The service `doctor` (`kdivectl doctor --json`) carries a `guest_arch_accel` check whose
+  `data` maps each schedulable arch to `kvm` or `tcg`, and which fails only when the host
+  lacks its own native-arch emulator.
+
+The [deadline multiplier](#the-tcg-boot-deadline-multiplier) applies to emulated guests.
 
 ## Distro customize-boot matrix
 

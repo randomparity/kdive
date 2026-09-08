@@ -45,19 +45,9 @@ For a worker-fence upgrade, use the deployment-specific authority sequence:
 
 - **Kubernetes:** follow the [staged worker-fence upgrade procedure](
   kubernetes-deploy.md#staged-worker-fence-upgrade).
-- **Compose:** this three-command path is local-bootstrap-only: with
-  `KDIVE_LOCAL_ROLE_BOOTSTRAP=1`, use `just compose-stop`, select the new image and
-  configuration, then `just compose-up`. It records old-worker termination and preserves named
-  volumes; the Compose graph runs the migrate one-shot and local role bootstrap before the
-  operator-side lifecycle wrapper registers the current worker. That bootstrap resets fixed local
-  development passwords and restores the intended runtime-role memberships.
-  `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` disables local mutation. An
-  externally provisioned Compose-derived deployment must supply an equivalent stop-old, migrate,
-  provision credentials and memberships, and start gate outside this reference workflow.
-  Do not invoke
-  `python -m kdive.processes.lifecycle.compose.compose_worker_lifecycle` directly or use raw
-  Docker/Compose commands;
-  they bypass the public lifecycle path. Compose has no persistent lifecycle-witness service.
+- **Compose:** follow the [worker-fence upgrade procedure](
+  ../../../deploy/compose/README.md#upgrading-worker-fence-authority), including its local
+  bootstrap boundary and release-compatibility check.
 
 Verify registered current incarnations and recovery-tool exposure before resuming queue processing.
 Rollback cannot restore old-worker claiming after the protocol migration, so recover forward with a

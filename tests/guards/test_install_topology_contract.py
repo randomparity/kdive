@@ -6,13 +6,11 @@ import shlex
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from kdive.config.registry import RUNNABLE
 
 _ROOT = Path(__file__).parents[2]
 _INSTALL = _ROOT / "docs/operating/install.md"
-_COMPOSE_DOC = _ROOT / "docs/operating/docker-compose.md"
+_COMPOSE_REDIRECT = _ROOT / "docs/operating/docker-compose.md"
 _COMPOSE_REFERENCE = _ROOT / "deploy/compose/README.md"
 _HELM_REFERENCE = _ROOT / "deploy/helm/kdive/README.md"
 _KUBERNETES_RUNBOOK = _ROOT / "docs/operating/runbooks/kubernetes-deploy.md"
@@ -51,42 +49,34 @@ def test_install_documents_the_five_image_commands_and_kubernetes_witness_topolo
 
 
 def test_compose_documents_its_operator_side_lifecycle_wrapper_not_a_witness_service() -> None:
-    for path in (_COMPOSE_DOC, _COMPOSE_REFERENCE):
-        text = path.read_text()
-        assert "operator-side lifecycle wrapper" in text, path
-        assert "start the lifecycle witness" not in text, path
-        assert "start the lifecycle witnesses" not in text, path
+    path = _COMPOSE_REFERENCE
+    text = path.read_text()
+    assert "operator-side lifecycle wrapper" in text, path
+    assert "start the lifecycle witness" not in text, path
+    assert "start the lifecycle witnesses" not in text, path
 
 
 def test_public_compose_guides_document_stop_and_destructive_teardown() -> None:
-    for path in (_COMPOSE_DOC, _COMPOSE_REFERENCE):
-        text = _normalized(path)
+    path = _COMPOSE_REFERENCE
+    text = _normalized(path)
 
-        assert "four supported worker lifecycle recipes" in text, path
-        for recipe in (
-            "`just compose-up`",
-            "`just compose-stop`",
-            "`just compose-recreate-worker`",
-            "`just compose-down`",
-        ):
-            assert recipe in text, (path, recipe)
-        assert "`just compose-stop` preserves named volumes" in text, path
-        assert "`just compose-down` removes named volumes" in text, path
+    assert "four supported worker lifecycle recipes" in text, path
+    for recipe in (
+        "`just compose-up`",
+        "`just compose-stop`",
+        "`just compose-recreate-worker`",
+        "`just compose-down`",
+    ):
+        assert recipe in text, (path, recipe)
+    assert "`just compose-stop` preserves named volumes" in text, path
+    assert "`just compose-down` removes named volumes" in text, path
 
 
-@pytest.mark.parametrize(
-    ("path", "start", "end"),
-    [
-        (_COMPOSE_DOC, "## Upgrading worker-fence authority", "The Compose-managed bucket"),
-        (_COMPOSE_REFERENCE, "## Upgrading worker-fence authority", "`docker compose up` resolves"),
-        (_INSTALL, "- **Compose:**", "Verify registered"),
-        (_BUILD_USE_RECOVERY, "- **Compose:**", "Verify registered"),
-    ],
-)
-def test_compose_worker_fence_guidance_uses_the_public_stop_workflow(
-    path: Path, start: str, end: str
-) -> None:
-    section = _section(path, start, end)
+def test_compose_worker_fence_guidance_uses_the_public_stop_workflow() -> None:
+    path = _COMPOSE_REFERENCE
+    section = _section(
+        path, "## Upgrading worker-fence authority", "## Startup ordering and recovery"
+    )
     ordered_steps = (
         "just compose-stop",
         "select the new image and configuration",
@@ -104,19 +94,11 @@ def test_compose_worker_fence_guidance_uses_the_public_stop_workflow(
     assert f"do not invoke `{lifecycle_command}` directly" in section, path
 
 
-@pytest.mark.parametrize(
-    ("path", "start", "end"),
-    [
-        (_COMPOSE_DOC, "## Upgrading worker-fence authority", "The Compose-managed bucket"),
-        (_COMPOSE_REFERENCE, "## Upgrading worker-fence authority", "`docker compose up` resolves"),
-        (_INSTALL, "- **Compose:**", "Verify registered"),
-        (_BUILD_USE_RECOVERY, "- **Compose:**", "Verify registered"),
-    ],
-)
-def test_compose_worker_fence_guidance_scopes_local_bootstrap(
-    path: Path, start: str, end: str
-) -> None:
-    section = _section(path, start, end)
+def test_compose_worker_fence_guidance_scopes_local_bootstrap() -> None:
+    path = _COMPOSE_REFERENCE
+    section = _section(
+        path, "## Upgrading worker-fence authority", "## Startup ordering and recovery"
+    )
 
     assert "local-bootstrap-only" in section, path
     assert "kdive_local_role_bootstrap=1" in section, path
@@ -185,17 +167,15 @@ def test_helm_podmonitor_explains_three_non_listening_ports() -> None:
 
 def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrapper() -> None:
     text = _normalized(_BUILD_USE_RECOVERY)
-    compose_guidance = text.split("**Compose:**", maxsplit=1)[1].split(
-        "Verify registered current incarnations", maxsplit=1
-    )[0]
-
     assert "**Kubernetes:**" in text
     assert "staged worker-fence upgrade procedure" in text
     assert "**Compose:**" in text
-    assert "operator-side lifecycle wrapper" in text
-    assert compose_guidance.lower().index("just compose-stop") < compose_guidance.lower().index(
-        "migrate one-shot"
-    )
+    assert "../../../deploy/compose/README.md#upgrading-worker-fence-authority" in text
+
+
+def test_compose_summaries_route_to_the_canonical_lifecycle_guide() -> None:
+    assert "../../deploy/compose/README.md" in _COMPOSE_REDIRECT.read_text()
+    assert "../../deploy/compose/README.md#upgrading-worker-fence-authority" in _INSTALL.read_text()
 
 
 _STAGED_UPGRADE_MARKERS = (

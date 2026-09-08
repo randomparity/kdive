@@ -30,29 +30,45 @@ requirement on `x86_64`.
   wheels and compiles against both, on every arch. `uv sync` fails without them.
 - **[`uv`](https://docs.astral.sh/uv/)** — the Python toolchain manager.
 - **`just` and `prek`** — install before `just setup`, which cannot bootstrap its
-  own runner: `uv tool install rust-just prek`.
+  own runner: `uv tool install rust-just` and `uv tool install prek`.
 
 ### ppc64le only
 
-PyPI publishes no `ppc64le` wheels for `pydantic-core`, and `just`/`prek` install
-from source too, so a **Rust toolchain must be on `PATH` first**
-([rustup](https://rustup.rs)):
+Install a Rust toolchain before the tools or project environment; source builds of dependencies
+and developer CLIs need `rustc` and `cargo`. `just check-deps` enforces both on wheel-less
+architectures ([ADR-0360](../adr/0360-arch-aware-rust-dep-check.md)).
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
 ```
 
-`just check-deps` requires `rustc` **and** `cargo` on a wheel-less arch and prints
-this exact rustup hint if either is missing
-([ADR-0360](../adr/0360-arch-aware-rust-dep-check.md)); on `x86_64` it requires
-neither. The runtime app image needs no Rust on either arch — `pydantic-core`
-ships a `ppc64le` wheel for the pinned CPython, so only the dev `uv sync` (which
-also builds the `just`/`prek` tools) pulls in the toolchain.
+For `grpcio` source builds, use the system OpenSSL and zlib rather than its bundled libraries.
+On Debian/Ubuntu, install their headers and export the flags before syncing the environment:
+
+```bash
+sudo apt install libssl-dev zlib1g-dev
+export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
+export GRPC_PYTHON_BUILD_SYSTEM_ZLIB=1
+```
+
+The workflow-lint recipe uses a PATH `actionlint` on ppc64le. Install Go and build the version
+pinned by the repository's workflow tooling:
+
+```bash
+sudo apt install golang-go
+go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+Source builds can make the first setup slow; later runs reuse cached artifacts. The runtime
+container's native dependency setup is maintained in the [Dockerfile](../../Dockerfile).
 
 ### The rest of setup is identical
 
 ```bash
-uv tool install rust-just prek
+uv tool install rust-just
+uv tool install prek
 just setup   # check host deps, sync the locked venv, install and run git hooks
 ```
 

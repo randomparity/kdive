@@ -77,6 +77,14 @@ clients and the chart needs an `imagePullSecret`.
 **Verify a release image** (not `:edge`, which floats):
 `cosign verify ghcr.io/randomparity/kdive:X.Y.Z --certificate-identity-regexp '^https://github\.com/randomparity/kdive/\.github/workflows/release-image\.yml@' --certificate-oidc-issuer https://token.actions.githubusercontent.com`
 
+The release SBOM and provenance are BuildKit in-toto attestations on the image index, separate
+from the cosign signature. Inspect them for the selected container tag:
+
+```bash
+docker buildx imagetools inspect ghcr.io/randomparity/kdive:X.Y.Z \
+  --format '{{ json .SBOM }}'        # or '{{ json .Provenance }}'
+```
+
 ## Mock-OIDC mirror publishing
 
 The developer compose stack (`docker-compose.yml`) needs an OpenID Connect issuer to validate

@@ -12,7 +12,7 @@ runbooks.
 | Page | What it covers |
 |---|---|
 | [Install](install.md) | Install paths, host prerequisites, and the run modes |
-| [Docker Compose](docker-compose.md) | App tier plus dev backends in one graph |
+| [Docker Compose](../../deploy/compose/README.md) | App tier plus dev backends in one graph |
 | [Kubernetes (Helm)](runbooks/kubernetes-deploy.md) | The chart for four long-running workloads and the migrate Job |
 | [systemd](systemd.md) | Running the processes as host services |
 | [Platform and architecture support](platform-support.md) | Supported arches, accelerators, and per-distro customize-boot tiers |

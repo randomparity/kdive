@@ -72,7 +72,7 @@ digest) goes to **stderr** (the logger). That split makes the command's stdout `
 > host's arch (e.g. a `ppc64le` image on an `x86_64` host), the customization boot runs under
 > QEMU TCG emulation instead of KVM — roughly 10× slower. The host needs the foreign arch's QEMU
 > system emulator installed (`qemu-system-ppc` on Fedora/Debian, `qemu-ppc` on openSUSE; see the
-> [cross-architecture guests](../install.md#cross-architecture-guests) table for every distro).
+> [cross-architecture guests](../platform-support.md#cross-architecture-guests) table for every distro).
 > The completion poll waits `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` (default `1800`, the
 > native-KVM base) scaled by `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`) for a TCG
 > build, so raise the window if a large foreign-arch package set does not finish in time.

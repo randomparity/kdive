@@ -17,7 +17,7 @@ bring-up and adds worker→host TLS, the gdbstub ACL, and object-store reachabil
 two-phase vmcore upload.
 
 Run the `just` recipes below from the checkout. For an app-tier Compose deployment, follow
-[the Compose operating guide](../docker-compose.md); for Kubernetes, follow the
+[the Compose operating guide](../../../deploy/compose/README.md); for Kubernetes, follow the
 [Helm deployment runbook](kubernetes-deploy.md). The local-libvirt flow on this page runs
 workers on the host so they can access KVM and libvirt.
 
