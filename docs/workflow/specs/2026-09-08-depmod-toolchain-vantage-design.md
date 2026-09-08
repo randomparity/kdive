@@ -81,9 +81,13 @@ The change moves a security-relevant constant and adds one read-only probe. It a
    discloses only fixed directory names and a resolved path under one of them. For boundary (b),
    the allowlist gains one module constant — no operator, config, or network input reaches it —
    `_reconstruct` still re-runs every `CheckResult` invariant on the admitted item, an unrecognised
-   id still degrades to a per-item `error` rather than poisoning the batch, and
+   **string** id still degrades to a per-item `error` rather than poisoning the batch, and
    `test_allowed_ids_matches_registered_worker_vantage_descriptors` fails if the allowlist and the
-   registered descriptors ever disagree.
+   registered descriptors ever disagree. The per-item degradation is stated for a string id
+   deliberately: `_reconstruct`'s `check_id not in _ALLOWED_IDS` test raises `TypeError` on an
+   unhashable id, which `_reconstruct_or_error` does not catch, so a `{"check_id": []}` item still
+   poisons the batch. That predates this change and is left to the owner of that file's structure
+   (#2344) rather than credited here as a control this change provides.
 4. **Out of scope.** A hostile `depmod` in a root-owned directory (that actor already has root);
    widening or overriding the search set (#2340); whether the resolved binary is genuinely
    `depmod` — the check reports resolution, not provenance, as the run path does.
