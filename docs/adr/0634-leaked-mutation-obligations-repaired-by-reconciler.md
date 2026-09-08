@@ -1,4 +1,4 @@
-# 0632 — Leaked System mutation obligations are repaired by a reconciler lane
+# 0634 — Leaked System mutation obligations are repaired by a reconciler lane
 
 ## Status
 
@@ -66,8 +66,13 @@ returns nothing — so an operator cancel writes `canceled` while the handler ke
 completion through `provisioner.teardown`. A predicate reading only `queued`/`running` goes false for
 that entire remaining teardown.
 
-The affected-row count #2326 asks for cannot be taken from a development checkout, and the shape has
-to be chosen without it.
+**There may be no backlog at all, and the lane is still worth having.** The affected-row count
+#2326 asks for cannot be taken from a development checkout, so the shape was chosen without it, by
+operator decision (#2326, 2026-09-08). Say plainly what that leaves: the only path that produces
+`torn_down` beside an open obligation is the ordering defect above, which is explicitly out of scope
+here, so against a database whose teardowns have all completed this lane discharges nothing and
+returns 0. Its justification is the leaks that defect keeps producing, not a backlog anyone has
+demonstrated. A repair that claimed a population it cannot show would be the worse record.
 
 ## Decision
 

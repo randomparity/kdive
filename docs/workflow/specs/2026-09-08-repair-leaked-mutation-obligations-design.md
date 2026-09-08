@@ -2,7 +2,7 @@
 
 Issue: [#2326](https://github.com/randomparity/kdive/issues/2326).
 Decision, with the path inventory and the rejected alternatives:
-[ADR-0632](../../adr/0632-leaked-mutation-obligations-repaired-by-reconciler.md).
+[ADR-0634](../../adr/0634-leaked-mutation-obligations-repaired-by-reconciler.md).
 Plan: [2026-09-08-repair-leaked-mutation-obligations.md](../plans/2026-09-08-repair-leaked-mutation-obligations.md).
 
 ## Problem
@@ -22,7 +22,7 @@ as separate work.
 
 One new reconciler repair function in `src/kdive/reconciler/repairs/systems.py`, one catalog entry
 in `src/kdive/reconciler/loop.py`, one ADR, and one test module. The plan holds the file map and the
-exact code. This change writes no migration; ADR-0632 records why the reconciler lane is the shape
+exact code. This change writes no migration; ADR-0634 records why the reconciler lane is the shape
 and a data migration is not, and releases the reserved number 0153.
 
 Out of scope, and unchanged: the teardown ordering defect that creates new leaks — committing
@@ -31,12 +31,19 @@ filed); the write-once trigger semantics and the discharge idempotency contract 
 ADR-0629); any widening of `kdive_worker` or `kdive_reconciler` privileges beyond ADR-0629's
 function, which ADR-0629 rejects explicitly; and a System in `failed` carrying an open obligation,
 which #2326's predicate does not select. That last one is a permanent leak with a known cause, not
-an open question — ADR-0632 Consequences records the evidence — and this run reports the sized
+an open question — ADR-0634 Consequences records the evidence — and this run reports the sized
 follow-up to the campaign that dispatched it.
 
 The affected-row count #2326 asks for before choosing a shape cannot be taken from a development
-checkout. The lane is the shape whose correctness does not depend on that number: it returns 0
-against a database with no leaked rows and drains whatever backlog exists on its first pass.
+checkout. The operator waived that criterion on 2026-09-08 (recorded on #2326) and accepted the
+shape on the argument that the count cannot change it: a small population is drained by the lane's
+first pass, which is the issue's one-shot branch, and a systematic one is drained over passes and
+keeps being drained, which the issue's migration branch cannot do while the ordering defect stands.
+
+**This repair is expected to be a no-op against a correct database today**, and that is stated
+rather than dressed up: the only path that produces `torn_down` beside an open obligation is the
+out-of-scope ordering defect, so a deployment whose teardowns have all completed has nothing here to
+repair. The lane earns its place on the leaks that defect keeps producing.
 
 ## Success
 
@@ -46,7 +53,7 @@ against a database with no leaked rows and drains whatever backlog exists on its
 2. The same System is left untouched, and the count is 0, while its teardown job at dedup key
    `'<system_id>:teardown'` is `queued`, `running`, **or terminal (`canceled`/`failed`/`succeeded`)
    within the settle window** — the in-flight exclusion #2326 requires. The terminal-and-recent arm
-   is what covers an operator `jobs.cancel` of a teardown whose handler keeps running (ADR-0632
+   is what covers an operator `jobs.cancel` of a teardown whose handler keeps running (ADR-0634
    Context).
 3. A System that is not `torn_down` is left untouched however its obligations stand.
 4. An obligation already discharged is left byte-identical: a second pass changes neither
@@ -81,7 +88,7 @@ literal reason. What this change adds is a new *caller*, and the control on it i
 predicate: `state = 'torn_down'` plus no active-or-recently-terminal teardown job, re-read inside the
 per-System locked transaction.
 
-**Out of scope.** ADR-0632 Consequences states the settle window's limit and the residual ADR-0629
+**Out of scope.** ADR-0634 Consequences states the settle window's limit and the residual ADR-0629
 already accepted; neither is narrowed or widened here.
 
 ## Validation

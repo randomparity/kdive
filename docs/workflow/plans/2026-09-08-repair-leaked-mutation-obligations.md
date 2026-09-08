@@ -12,7 +12,7 @@ it.
 
 **Tech stack.** Python 3.14, `uv`, `psycopg` (async) against PostgreSQL, `pytest` with disposable
 Postgres via testcontainers. Design record:
-`docs/adr/0632-leaked-mutation-obligations-repaired-by-reconciler.md`. Specification:
+`docs/adr/0634-leaked-mutation-obligations-repaired-by-reconciler.md`. Specification:
 `docs/workflow/specs/2026-09-08-repair-leaked-mutation-obligations-design.md`.
 
 Expected implementation size: 200–280 changed lines (M) — the file map below: ~65 added lines in
@@ -28,7 +28,7 @@ Expected implementation size: 200–280 changed lines (M) — the file map below
 - **No commit may cite a `Proposed` ADR from `src/` or `tests/`.**
   `scripts/guards/check_adr_status.py` fails any such commit, and no pre-commit hook runs it, so the
   failure appears only in CI or a bare `just ci`
-  (`docs/solutions/2026-09-04-adr-status-flip-must-share-the-first-citation-commit.md`). ADR-0632 is
+  (`docs/solutions/2026-09-04-adr-status-flip-must-share-the-first-citation-commit.md`). ADR-0634 is
   already committed as `Accepted (2026-09-08)` with no citation, so the implementation commit adds
   the first citations against an already-Accepted record. Never set it back to `Proposed`.
 - **Run guardrails bare.** No `| tail`, no `| head`, no `>/dev/null`, no `|| true`, and never a
@@ -53,7 +53,7 @@ Expected implementation size: 200–280 changed lines (M) — the file map below
 Creates: `tests/reconciler/test_leaked_mutation_obligation_repair.py`.
 Modifies: `src/kdive/reconciler/repairs/systems.py`, `src/kdive/reconciler/loop.py`.
 Reads, already committed by the design phase:
-`docs/adr/0632-leaked-mutation-obligations-repaired-by-reconciler.md`,
+`docs/adr/0634-leaked-mutation-obligations-repaired-by-reconciler.md`,
 `docs/workflow/specs/2026-09-08-repair-leaked-mutation-obligations-design.md`.
 
 **Where this fits.** This is the whole change. There is no earlier or later task; the repair
@@ -106,7 +106,7 @@ revert it, and re-run to green.
 2. **An active teardown job defers the repair.**
    `::test_active_teardown_job_defers_the_repair`, parametrized over `queued` and `running`. Red
    with the `j.state = ANY(%s)` term removed: `assert 0 == 1` on the count.
-3. **A terminal-but-recent teardown job defers the repair** — the operator-cancel window of ADR-0632
+3. **A terminal-but-recent teardown job defers the repair** — the operator-cancel window of ADR-0634
    Context. `::test_recently_terminal_teardown_job_defers_the_repair`, parametrized over `canceled`
    and `failed`, each inserted with a fresh `updated_at`. Red with the
    `j.updated_at > now() - %s` term removed: `assert 0 == 1` on the count, and the row's
@@ -144,8 +144,8 @@ revert it, and re-run to green.
 
 ### Steps
 
-**Step 1 — confirm ADR-0632 is already `Accepted`.** Read
-`docs/adr/0632-leaked-mutation-obligations-repaired-by-reconciler.md` and confirm its `## Status`
+**Step 1 — confirm ADR-0634 is already `Accepted`.** Read
+`docs/adr/0634-leaked-mutation-obligations-repaired-by-reconciler.md` and confirm its `## Status`
 body is exactly `Accepted (2026-09-08)` before writing a line of source. Then run, bare:
 
 ```
@@ -165,7 +165,7 @@ from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObliga
 Add these three module-level constants after `_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES`:
 
 ```python
-# Pacing with a stated limit, not a fence (ADR-0632). An operator `jobs.cancel` takes a teardown
+# Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
 # job out of `queued`/`running` while its handler keeps running, so job state alone does not bound
 # the window; the teardown job's `updated_at` does, because nothing but that teardown writes it.
 _TEARDOWN_SETTLE = timedelta(minutes=15)
@@ -194,7 +194,7 @@ Add this function after `repair_orphaned_systems`:
 
 ```python
 async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
-    """Discharge mutation obligations left open on a `torn_down` System (ADR-0632, #2326).
+    """Discharge mutation obligations left open on a `torn_down` System (ADR-0634, #2326).
 
     The teardown handler commits the terminal state before the discharge that follows it, and
     `systems.teardown` then short-circuits on `torn_down` without enqueueing a job, so nothing
@@ -202,7 +202,7 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
     module-volume sweep. Returns the number of obligation rows discharged.
 
     A candidate is deferred while its teardown job is active *or* terminal within
-    `_TEARDOWN_SETTLE`; ADR-0632 carries why job state alone is not enough and what the window
+    `_TEARDOWN_SETTLE`; ADR-0634 carries why job state alone is not enough and what the window
     does not cover.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
@@ -265,7 +265,7 @@ and insert this entry into `_REPAIR_CATALOG` immediately after the `"abandoned_j
 
 ```python
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed teardown job — and a teardown
-    # job that is active or recently terminal is what defers this repair's candidate (ADR-0632,
+    # job that is active or recently terminal is what defers this repair's candidate (ADR-0634,
     # #2326). No report field: the count reaches operators through repair_counts, as the
     # stalled-state repairs do.
     _RepairCatalogEntry(
@@ -352,7 +352,7 @@ missing-daemon skip into a failure and is how these are proven to have run.
 `src/kdive/reconciler/repairs/systems.py`, `src/kdive/reconciler/loop.py`, and
 `tests/reconciler/test_leaked_mutation_obligation_repair.py`. It is Python-only, so run
 `just format`, `git add --` those three paths, and commit. Run `just adr-status-check` bare once
-more: this commit adds the first citation of ADR-0632 from both trees.
+more: this commit adds the first citation of ADR-0634 from both trees.
 
 Suggested subject: `fix(reconciler): repair mutation obligations leaked on torn-down Systems`.
 
