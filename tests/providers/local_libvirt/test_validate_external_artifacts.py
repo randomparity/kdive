@@ -962,15 +962,42 @@ def test_ppc64le_elf_boot_member_validates() -> None:
 def test_ppc64le_elf_boot_member_validates_when_banner_is_past_chunk_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Real ppc64le kernels place "Linux version " well past the first chunk of the ELF (e.g.
-    # ~27 MiB into a 64 MiB stripped Fedora kernel — #1204).  Simulate that with a tiny
-    # chunk size and a banner_gap that pushes the banner beyond it.
-    # Call _boot_release directly: _validate_kernel_blob also runs _elf_kernel_metadata whose
-    # _BoundedElfReader uses the same monkeypatched limit and would fail before this check.
-    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES", 64)
-    # banner_gap=100 places "Linux version" at byte ~300 of the ELF — past the 64-byte window.
-    elf = _boot_elf(banner_gap=100)
+    # Real ppc64le kernels place "Linux version " well past the first chunk of the ELF (~27 MiB
+    # into a 64 MiB stripped Fedora kernel — #1204). Shrink the scan chunk and push the banner
+    # past it. The chunk size is its own constant, so the ELF metadata reader is unaffected and
+    # this runs through the real entry point rather than calling _boot_release directly.
+    monkeypatch.setattr(validation, "_BANNER_SCAN_CHUNK_BYTES", 64)
+    _validate_kernel_blob(_combined_kernel_tar(boot=_boot_elf(banner_gap=100)), arch="ppc64le")
+
+
+@pytest.mark.parametrize("banner_gap", range(0, 160))
+def test_ppc64le_elf_banner_release_is_whole_across_every_chunk_alignment(
+    monkeypatch: pytest.MonkeyPatch, banner_gap: int
+) -> None:
+    # Sweep the banner one byte at a time so it lands at every alignment against the scan's
+    # chunk boundaries, including the ones that cut the release token. A scan that accepts a
+    # cut token returns a truncated-but-canonical release ("6.9" for "6.9.0") rather than
+    # failing, so the defect is silent (#1204); only the whole release is correct. The range
+    # must span a full chunk plus the banner's offset in _boot_elf, or it tests no boundary
+    # at all — an earlier version of this sweep straddled none and passed against the bug.
+    monkeypatch.setattr(validation, "_BANNER_SCAN_CHUNK_BYTES", 64)
+    elf = _boot_elf(banner_gap=banner_gap, release="6.9.0")
     assert validation._boot_release(io.BytesIO(elf), "ppc64le") == "6.9.0"
+
+
+def test_optional_linux_release_is_none_when_the_buffer_ends_at_the_marker() -> None:
+    # The shared banner helper also reads bounded ELF segment slices, and a slice can end right
+    # after the marker with no release token behind it. It must report "nothing here" so the
+    # caller keeps its own control flow, not raise IndexError out of the taxonomy (#1204).
+    assert validation._optional_linux_release(b"\x00" * 8 + b"Linux version ") is None
+
+
+def test_ppc64le_elf_banner_marker_at_end_of_member_is_build_failure() -> None:
+    # A member whose bytes stop right after the marker leaves no release token. The scan must
+    # report a build failure, not raise IndexError out of the taxonomy (#1204).
+    with pytest.raises(CategorizedError) as e:
+        validation._boot_release(io.BytesIO(b"\x00" * 32 + b"Linux version "), "ppc64le")
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
 
 
 def test_x86_bzimage_under_ppc64le_is_build_failure() -> None:
