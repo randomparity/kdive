@@ -262,8 +262,9 @@ def _type_name(schema: object, *, depth: int = 0) -> str:
             rendered = dict.fromkeys(_type_name(m, depth=depth + 1) for m in members)
             return "|".join(rendered)
     raw = schema.get("type")
-    if isinstance(raw, list):
-        return "|".join(str(entry) for entry in raw) if raw else "unknown"
+    # Non-empty only, as above: an empty list falls through to the "unknown" return.
+    if isinstance(raw, list) and raw:
+        return "|".join(str(entry) for entry in raw)
     if isinstance(raw, str):
         if raw == "array":
             return f"array[{_type_name(schema.get('items'), depth=depth + 1)}]"
@@ -277,18 +278,20 @@ def _parameter_digest(parameters: object) -> list[JsonValue]:
     Entries keep the schema's own property order, which is the tool's declaration order, so
     the list reads as the signature rather than as an alphabetised set.
     """
-    properties = parameters.get("properties") if isinstance(parameters, dict) else None
+    if not isinstance(parameters, dict):
+        return []
+    properties = parameters.get("properties")
     if not isinstance(properties, dict):
         return []
-    raw_required = parameters.get("required") if isinstance(parameters, dict) else None
+    raw_required = parameters.get("required")
     required = set(raw_required) if isinstance(raw_required, list) else set()
-    return [
-        cast(
-            "JsonValue",
-            {"name": str(name), "type": _type_name(schema), "required": str(name) in required},
-        )
-        for name, schema in properties.items()
-    ]
+    return cast(
+        "list[JsonValue]",
+        [
+            {"name": str(name), "type": _type_name(schema), "required": str(name) in required}
+            for name, schema in properties.items()
+        ],
+    )
 
 
 def describe_tool(
@@ -534,8 +537,7 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                     "and for a tool whose only argument is a payload object (17 tools, most of "
                     "the .list family among them) it returns one entry naming that object, "
                     "where 'full' is the call to make instead. 'names' mode always returns "
-                    "full detail "
-                    "whatever you pass here."
+                    "full detail whatever you pass here."
                 )
             ),
         ] = SearchDetail.SUMMARY,

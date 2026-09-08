@@ -1297,15 +1297,16 @@ def test_query_miss_log_bounds_the_caller_query(
 
 
 class _StubTool:
-    """A minimal Tool stand-in for exercising describe_tool's rendering directly."""
+    """A minimal Tool stand-in for exercising describe_tool's rendering directly.
+
+    No ``model_copy``: both callers below pass ``kinds=None``, so ``describe_tool`` passes the
+    schema through rather than projecting it.
+    """
 
     def __init__(self, name: str, parameters: dict[str, Any]) -> None:
         self.name = name
         self.description = f"{name} does a thing.\n\nA second paragraph."
         self.parameters = parameters
-
-    def model_copy(self, *, update: dict[str, Any]) -> _StubTool:
-        return _StubTool(self.name, update["parameters"])
 
 
 def test_parameters_tier_returns_the_argument_list(monkeypatch: pytest.MonkeyPatch) -> None:
