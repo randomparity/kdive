@@ -56,6 +56,9 @@ _DEPMOD = "depmod"
 # an ungated worker reaches them through PATH today: /usr/local is group-writable by default on
 # part of the Debian family, and a binary planted there would run as the worker slot account
 # (User=kdive-worker-N, in kdive-live-libvirt), inheriting its authority over guest overlays.
+# These four are the contract, with no operator override for a depmod outside them (ADR-0631):
+# the value would have to reach the gated worker, and widening the gate's environment allowlist
+# to carry it is the boundary ADR-0621 narrowed.
 _DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 # The permanent exec-side returns: the binary vanished between which() and exec, sits on a
 # noexec mount or lacks the bit (EACCES/EPERM), or is not an executable format — a partially
