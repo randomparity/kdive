@@ -28,7 +28,7 @@ Three consumers the issue did not list, each compelled by the deletion:
 Deliberately unchanged: the generic `node_modules` filters at `.dockerignore:10`,
 `test_no_workflow_pushes_to_default_branch.py:71-74`, and `test_workflow_action_pins.py:19`; and
 the record locations `docs/archive/`, `docs/superpowers/`, `docs/design/`, `docs/workflow/plans/`,
-and `CHANGELOG.md`. Consequence: three 2026-09-08 plans keep a stale `install-mermaid-deps` line.
+and `CHANGELOG.md`. Consequence: nine merged plans keep a stale `install-mermaid-deps` line.
 No replacement validation, no ADR, no ruleset edit, no diagram edits (#2384 exclusions).
 
 ## Success
