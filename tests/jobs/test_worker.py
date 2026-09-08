@@ -693,6 +693,56 @@ def test_failed_job_persists_redacted_failure_context(
     asyncio.run(_run())
 
 
+def test_failed_job_maps_insufficient_privilege_to_configuration_error(
+    migrated_url: str,
+) -> None:
+    """A raw ``InsufficientPrivilege`` (#2329) is an operator-fixable grant problem, not an
+    infrastructure fault: it must dead-letter as ``CONFIGURATION_ERROR`` with an actionable
+    ``failure_context`` rather than retry forever as ``INFRASTRUCTURE_FAILURE``.
+    """
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+
+            async def raises_insufficient_privilege(conn: psycopg.AsyncConnection, job: Job) -> str:
+                # A genuine grant-based denial, not a hand-constructed exception: `kdive_worker`
+                # has no direct UPDATE grant on `jobs` (mutation goes through
+                # `fail_worker_job`/`complete_worker_job`), the same fence proven in
+                # tests/jobs/test_queue.py's old-style-update coverage.
+                async with await psycopg.AsyncConnection.connect(migrated_url) as priv_conn:
+                    await priv_conn.execute("SET SESSION AUTHORIZATION kdive_worker")
+                    await priv_conn.execute(
+                        "UPDATE jobs SET state = 'running' WHERE id = %s", (job.id,)
+                    )
+                raise AssertionError("unreachable: direct UPDATE should have been refused")
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.INSTALL, raises_insufficient_privilege)
+            worker = await _registered_worker(pool, reg, worker_id="w1")
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-insufficient-privilege",
+                )
+
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+            final = await _final_state(migrated_url, job.id)
+            assert final.state is JobState.FAILED
+            assert final.error_category is ErrorCategory.CONFIGURATION_ERROR
+            assert final.failure_context == {
+                "failure_message": "permission denied for table jobs",
+                "failure_detail_fix": (
+                    "grant the missing privilege named above to the role this worker "
+                    "incarnation runs as, then retry"
+                ),
+            }
+
+    asyncio.run(_run())
+
+
 def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
