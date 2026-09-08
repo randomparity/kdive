@@ -336,13 +336,31 @@ async def _expected_crash_capture(
         connector is not None
         and panicked
         and profile_policy.gdbstub_provisioned(profile)
-        and await asyncio.to_thread(gdbstub_reachable, connector, system_id)
+        and await _gdbstub_answered(connector, system_id)
     ):
         # gdbstub_provisioned gated the probe, so inert_capture listed it; a stub that answered
         # on the halted guest is available, not inert.
         inert.remove(CaptureMethod.GDBSTUB.value)
         available.insert(0, CaptureMethod.GDBSTUB.value)
     return available, inert
+
+
+async def _gdbstub_answered(connector: Connector, system_id: UUID) -> bool:
+    """Probe the stub, failing closed on any fault (ADR-0628).
+
+    ``gdbstub_reachable`` re-raises every ``CategorizedError`` that is not
+    ``DEBUG_ATTACH_FAILURE`` — a socket fault, an absent domain, an unresolvable endpoint. On
+    ``record_crash_halted_live`` that propagation is wanted: the caller is already unwinding a
+    failed boot. Here the caller is about to return a *succeeded* boot step, and the guest is a
+    panicked one whose QEMU may already be gone, so letting the fault out would turn a reproduced
+    expected crash into a failed boot. An unanswered probe is exactly the case where ``gdbstub``
+    stays inert, which is what an unknown answer must degrade to.
+    """
+    try:
+        return await asyncio.to_thread(gdbstub_reachable, connector, system_id)
+    except CategorizedError:
+        _log.warning("gdbstub probe failed for system %s; reporting the stub as inert", system_id)
+        return False
 
 
 async def record_expected_crash(

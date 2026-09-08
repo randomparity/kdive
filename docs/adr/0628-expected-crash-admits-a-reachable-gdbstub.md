@@ -93,6 +93,17 @@ state-machine change.
 - `host_dump` keeps its unprobed place in `inert_capture` on this path. Only `gdbstub` is in
   scope here, so the same "asserted without checking" criticism still applies to that entry and
   is left for separate work.
+- An admitted live session and a reusable System are now both true at once, and nothing on
+  `runs.boot` guards the pair. `_system_occupied` refuses only a second attach on the same
+  transport, so an operator can bind Run B to the still-`READY` System and boot it while Run A's
+  gdbstub session is open. That is a new reachable sequence rather than a broken invariant — it
+  needs a session check or detach on the boot path, which is outside this decision's surface and
+  is left to follow-up work. An A/B operator should end the session before reusing the System.
+- The probe fails closed. `gdbstub_reachable` re-raises any fault that is not
+  `DEBUG_ATTACH_FAILURE`, which suits `record_crash_halted_live` (already unwinding a failed
+  boot) but would turn a reproduced expected crash into a failed boot here, against a panicked
+  guest whose QEMU may be gone. This path catches the fault, logs it, and reports the stub as
+  inert, so an unknown answer degrades to the conservative one.
 - Boot steps recorded before this change carry `available_capture: ["console"]`, so a gdbstub
   attach against them is refused with the new detail rather than admitted — correct, because no
   probe ever ran for them.

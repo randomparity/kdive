@@ -548,6 +548,31 @@ def test_record_expected_crash_keeps_an_unreachable_stub_inert(
     assert conn_fake.opened == ["gdbstub"]
 
 
+def test_record_expected_crash_survives_a_non_attach_probe_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # gdbstub_reachable re-raises anything that is not DEBUG_ATTACH_FAILURE. On the
+    # crashed_halted_live path that is harmless — the caller is already unwinding a failed boot,
+    # and test_transport_failure_propagates_from_crashed_halted_probe pins it. Here the caller is
+    # about to return a successful BootStepResult, so a socket fault against a panicked guest
+    # whose QEMU has gone would destroy the reproduction verdict. The probe fails closed instead.
+    conn_fake = _Connector(raises=True, category=ErrorCategory.TRANSPORT_FAILURE)
+    result, audits = _record_expected(
+        monkeypatch,
+        gdbstub=True,
+        host_dump=True,
+        kdump=False,
+        system_present=True,
+        connector=conn_fake,
+    )
+    assert result is not None
+    assert result["boot_outcome"] == "expected_crash_observed"
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == ["gdbstub", "host_dump"]
+    assert conn_fake.opened == ["gdbstub"]
+    assert len(audits) == 1
+
+
 def test_record_expected_crash_does_not_probe_an_unprovisioned_stub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

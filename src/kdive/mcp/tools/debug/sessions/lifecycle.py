@@ -104,9 +104,10 @@ _CRASHED_HALTED_LIVE_DRGN_DETAIL = (
 # vmcore-worded CONSOLE_CRASH_GUIDANCE would be wrong here: a gdbstub attach needs no capture
 # kernel and produces no vmcore, so the refusal is about the stub, not about kdump.
 _EXPECTED_CRASH_GDBSTUB_DETAIL = (
-    "this run declared an early-boot console_crash and its gdbstub did not answer when the boot "
-    "recorded the crash, so there is no halted stub to attach to. Read the console artifact "
-    "instead — fetch its reference with runs.get"
+    "this run declared an early-boot console_crash and its boot recorded no reachable gdbstub — "
+    "the stub was not provisioned, did not answer, or was never probed because the run reached "
+    "readiness before the crash — so there is no halted stub to attach to. Read the console "
+    "artifact instead — fetch its reference with runs.get"
 )
 
 
