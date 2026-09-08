@@ -12,9 +12,14 @@ argument list; `describe_tool` gains one branch. The `tools_search` wrapper docs
 
 **Tech stack.** Python 3.14, `uv`, `pytest`, `ruff`, `ty`, `just`. FastMCP tool registration.
 
-**Expected implementation size: 190–240 changed lines (M) — derived from the file map below:
-one source module (~80: enum member, two helpers, one `describe_tool` branch, rewritten
-docstring and `Field` text) and two test modules (~140 combined: six new cases plus two amended).
+**Expected implementation size: 240–280 changed lines (M) — derived from the file map below:
+one source module (~110: enum member, two helpers, one `describe_tool` branch, rewritten
+docstring and `Field` text) and two test modules (~160 combined: seven new cases plus two
+amended). Revised up from an initial 190–240 after the build measured 269. The original range
+under-counted the `detail` `Field` rewrite, which is one long agent-facing string, and the
+seventh test case, which covers the spec's no-parameters edge case added during the design
+review. No unrequested work is in the diff; the frozen M complexity band of 250 changed lines is
+unchanged and the measured 269 sits in it.
 Regenerated artifacts are excluded from the range because their size is set by the generators,
 not by this plan; the `detail` enum gains one value and its description is rewritten, so the
 expected regenerated diff is tens of lines across `docs/guide/reference/tools.md`,
