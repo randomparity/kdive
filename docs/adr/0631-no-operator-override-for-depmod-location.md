@@ -13,8 +13,8 @@ resolves `depmod` against a fixed four-directory list — `/usr/sbin`, `/usr/bin
 `_WORKER_ENV_NAMES` and carries no `PATH`, so a bare-name lookup falls back to `os.defpath`
 (`/bin:/usr/bin`), misses `/usr/sbin`, and told operators to install a package they already had.
 
-An operator whose `depmod` sits outside those four directories has no supported way to say so.
-The only remaining answer is to relocate or symlink the binary into one of them. #2300 proposed
+An operator whose `depmod` sits outside those four directories has no way to tell kdive where it
+is; the only remaining answer is to move the binary. #2300 proposed
 a `KDIVE_DEPMOD` override for exactly that operator, an operator approved it on the evidence
 available at the time, and it was withdrawn the same day (`b0cefbedb`, in PR #2313) when the
 corrected evidence showed what shipping it would cost. This record settles the question the
@@ -42,11 +42,10 @@ admit a chooser who is not root, and that is what makes it a different kind of v
 setting. Note that kdive verifies none of this: the guarantee is the host's filesystem
 permissions on those four directories, not anything `_resolve_depmod` inspects.
 
-The four directories are not an arbitrary list. Every one is root-owned, they are the set
+The list is drawn to that requirement rather than to convenience: it is the set
 `bootstrap_elf.py` already resolves its own host tools against (`_TOOL_PATH`, line 23), and
 `/usr/local/{sbin,bin}` are excluded on purpose because `/usr/local` is group-writable by default
-on part of the Debian family. The list encodes "root-owned host tool directories", so the shape
-an override admits is not the shape the list was built to hold.
+on part of the Debian family.
 
 ## Decision
 
@@ -92,10 +91,10 @@ ADR so the list and its decision are one lookup apart.
 - **A `KDIVE_DEPMOD` environment override.** verified: the value cannot reach the worker without
   adding a name to `_WORKER_ENV_NAMES` in `deploy/systemd/bin/kdive-live-worker-gate`, whose
   child environment `_worker_environment` builds from that set alone and `os.execve` installs
-  wholesale, and what `tests/deploy/test_live_worker_gate.py:209-261` asserts as an exact
-  dictionary. The admitted value would be an
-  absolute path the worker slot account then executes, so the gate would be carrying an operator's
-  choice of binary rather than a setting. Built once and withdrawn in `b0cefbedb`.
+  wholesale — the dictionary `tests/deploy/test_live_worker_gate.py:209-261` asserts exactly. The
+  admitted value would be an absolute path the worker slot account then executes, so the gate
+  would be carrying an operator's choice of binary rather than a setting. Built once and withdrawn
+  in `b0cefbedb`.
 - **A configuration-file override read by the worker rather than an environment variable.**
   judgment: it reaches the same place by a different door. The worker would still execute an
   operator-named binary under the slot account, and the trust question is the same one — with the
