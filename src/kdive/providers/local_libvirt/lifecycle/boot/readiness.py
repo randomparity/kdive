@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import shutil
 import subprocess  # noqa: S404 - virsh domstate uses fixed argv, no shell  # nosec B404
 import time
 from collections.abc import Callable
@@ -16,6 +15,10 @@ from uuid import UUID
 
 import kdive.config as config
 from kdive.domain.lifecycle.crash_signatures import first_crash_signature
+from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
+    PROVIDER_TOOL_SEARCH_PATH,
+    resolve_provider_tool,
+)
 from kdive.providers.local_libvirt.lifecycle.storage import _open_validated_console_log
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
@@ -170,9 +173,13 @@ def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _Doma
 def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cover - live_vm
     """Return whether ``virsh domstate`` reports terminal state plus its classified failure."""
     uri = config.require(LIBVIRT_URI)
-    virsh = shutil.which(_VIRSH)
+    virsh = resolve_provider_tool(_VIRSH)
     if virsh is None:
-        return _probe_failed(domain_name, ProbeFailure.VIRSH_MISSING, "virsh executable not found")
+        return _probe_failed(
+            domain_name,
+            ProbeFailure.VIRSH_MISSING,
+            f"virsh executable not found in any of {PROVIDER_TOOL_SEARCH_PATH}",
+        )
     try:
         proc = subprocess.run(  # noqa: S603 - virsh argv; URI/domain are data  # nosec B603
             [virsh, "-c", uri, "domstate", domain_name],
