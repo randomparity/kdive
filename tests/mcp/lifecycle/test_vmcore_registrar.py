@@ -116,7 +116,9 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
     assert all((tool.meta or {}) == {"maturity": "implemented"} for tool in tools.values())
 
     fetch_descriptions = _property_descriptions(tools["vmcore.fetch"])
-    assert fetch_descriptions["run_id"] == "The crashed Run whose vmcore to capture."
+    assert fetch_descriptions["run_id"] == (
+        "The Run ID whose bound System is CRASHED; not a System or artifact ID."
+    )
     assert "Omit to resolve the System profile's method" in fetch_descriptions["method"]
     assert fetch_descriptions["idempotency_key"] == (
         "Replay-safe key; a repeated key returns the prior envelope."

@@ -37,12 +37,17 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def vmcore_fetch(
-        run_id: Annotated[str, Field(description="The crashed Run whose vmcore to capture.")],
+        run_id: Annotated[
+            str,
+            Field(
+                description="The Run ID whose bound System is CRASHED; not a System or artifact ID."
+            ),
+        ],
         method: Annotated[
             CaptureMethod | None,
             Field(
                 description=(
-                    "Core-producing capture method (KDUMP/FADUMP/HOST_DUMP) the bound provider "
+                    "Core-producing capture method (kdump/fadump/host_dump) the bound provider "
                     "must advertise. Omit to resolve the System profile's method; a profile with "
                     "no implicit core method requires an explicit one."
                 )
@@ -53,18 +58,28 @@ def register(
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Capture and persist a vmcore from a crashed Run's bound System (contributor).
+        """Capture a core from a Run's bound CRASHED System. Requires contributor.
 
-        Prerequisite: the Run's bound System must be in CRASHED state — induce a crash with
-        ``control.force_crash`` (or capture a spontaneous panic) first; a non-CRASHED System is
-        rejected with a configuration_error naming the current state. Async: this enqueues a
-        ``capture_vmcore`` job and returns a job handle — poll it with ``jobs.wait``.
-        On success the core lands as a redacted artifact and the completed job carries its
-        artifact id in ``refs.result``: read the bytes with ``artifacts.get`` or analyze the core
-        with ``postmortem.crash``. ``runs.get`` carries the same id as ``refs.vmcore`` if you no
-        longer hold the job id. The capture ``method``
-        resolves from the System profile when omitted; a kdump/fadump core also needs the guest
-        kernel's crash symbols and a capable rootfs (gated before the job is admitted).
+        Pass the Run ID, not a System or artifact ID. Check systems.get first: a watch verdict
+        or console signature does not mark the System CRASHED. A non-CRASHED System is refused.
+        Do not force another crash just to change state; preserve existing console evidence.
+        An active external boot requires the owning Run; other activation states can refuse
+        capture. The chosen core-producing method must be supported by the provider.
+
+        Omitting method resolves it from the System profile; a profile with no supported core
+        method needs an explicit choice. Kdump/fadump admission rejects known-negative kernel
+        and rootfs capability evidence; uncertainty can pass and is not proof of readiness.
+        Returns a capture_vmcore job handle: poll jobs.wait and require terminal success.
+        The same Run/method reuses its job, including terminal results; a new idempotency key
+        does not force recapture. Follow the existing job's failure guidance.
+
+        A fresh capture's completed job exposes the redacted artifact ID in refs.result;
+        runs.get exposes it as refs.vmcore for non-failed Runs. For failed Runs, use the job
+        reference. artifacts.get reads redacted log evidence (local-libvirt extracts dmesg
+        text, not a sanitized binary core). A replay may omit the reference if the redacted
+        sibling is gone while the raw core remains.
+        For analysis, pass the Run ID to postmortem.crash, which resolves the raw core itself.
+        For raw download use artifacts.fetch_raw(run_id, asset="vmcore") (contributor, URL-only).
         """
         return await handlers.fetch_vmcore(
             pool,
@@ -86,7 +101,7 @@ def register(
             Field(
                 description=(
                     "crash(8) commands to run over the captured core. Omit to run the standard "
-                    f"first-pass batch ({_DEFAULT_CRASH_BATCH}) — the fast first look at a crash. "
+                    f"first-pass batch ({_DEFAULT_CRASH_BATCH}). "
                     "Each command's first token must be one of the read-only allowlisted verbs: "
                     f"{_ALLOWED_CRASH_VERBS}. Shell metacharacters (| > < ` $( ; &), a leading '!' "
                     "shell escape, and control characters are rejected; a rejected command returns "
@@ -95,15 +110,22 @@ def register(
             ),
         ] = None,
     ) -> ToolResponse:
-        """Run crash(8) over a captured vmcore; returns a redacted report (contributor).
+        """Analyze a Run's captured core with server-side crash(8). Requires contributor.
 
-        Omit ``commands`` for the standard first-pass batch — the fast first look at a crash —
-        or pass your own allowlisted commands to go further. Prerequisite: a captured core for
-        the Run (see ``vmcore.fetch``; its completed job's ``refs.result`` — or ``runs.get``'s
-        ``refs.vmcore`` — confirms the core landed). Every command is
-        validated against the crash allowlist before the core is opened, and the transcript is
-        redacted before it is returned. For programmable drgn introspection use
-        ``introspect.from_vmcore``.
+        Pass the Run ID, not the artifact ID returned by vmcore.fetch. Prerequisites are the
+        captured raw core, recorded vmlinux debug information, and the Run's build ID. The
+        provider checks the core's build ID against that record before running commands.
+        Analysis runs in the MCP server process; missing crash/provider dependencies in that
+        environment produce a typed failure. Installing them only in the worker is insufficient.
+
+        Omit commands for the standard first-pass batch, or pass allowlisted commands; each
+        command is validated before opening the core. This call returns directly, not as a job:
+        data.transcript contains redacted output and data.truncated marks byte-capped output.
+        Inspect the transcript for per-command errors even on success; use a narrower batch
+        if truncated. Missing inputs report data.reason no_vmcore, no_debuginfo, or no_build.
+        A declared early-boot console_crash with no core instead reports expected_console_crash
+        and directs you to runs.get for console evidence. For drgn analysis of the same Run,
+        use introspect.from_vmcore.
         """
         return await handlers.postmortem_crash(
             pool, current_context(), run_id=run_id, commands=commands
