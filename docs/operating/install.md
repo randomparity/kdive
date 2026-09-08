@@ -118,21 +118,18 @@ of truth is `_DEPMOD_SEARCH_DIRS` in
   indexes an extracted kernel module tree while staging it into a guest. It applies per
   `runs.install` operation. Deployments that stage modules through the remote-libvirt guest helper
   index inside the guest and are unaffected.
-- **Consequence** — a `depmod` outside those four directories no longer resolves. The operation
-  fails with `missing_dependency`, which is not retried, and the failure message names the
-  directories that were searched. Resolution screens on execute permission, so a `depmod` that is
-  present in one of those directories but not executable by the account the worker runs as — no
-  execute bit, a `noexec` mount, a dangling or looping symlink — reads as absent and produces that
-  same message; check the mode bits and the mount options before concluding the binary is missing.
-  A copy that resolves and then fails to run — truncated, or not in an executable format — fails
-  with the same non-retried `missing_dependency`, but the resolved path and `errno` reach the
-  operator as `failure_detail_depmod` and `failure_detail_errno` on the run envelope rather than
-  in the message text. A transient exec fault is different again: replacing `depmod` while an
-  install is running raises `ETXTBSY`, which is categorised `infrastructure_failure` and is
-  retried rather than dead-lettered. Where a host carried a `depmod` both outside and inside the
-  four directories, the one inside now runs and the outside one is ignored. That substitution is
-  silent, so a host that relied on a locally built `kmod` or on a wrapper must confirm the binary
-  now selected is the one it wants.
+- **Consequence** — a `depmod` that does not resolve fails the operation with a non-retried
+  `missing_dependency` whose message names the four directories it searched. Resolution screens on
+  execute permission as well as presence, so a `depmod` that sits in one of those directories but
+  is not executable by the account the worker runs as reads as unresolvable and produces that same
+  message: check the mode bits and the mount options before concluding the binary is missing.
+  A `depmod` that resolves and then fails is reported through the run envelope rather than that
+  message — `error_category` and the `failure_detail_*` fields carry it, and whether the operation
+  is retried follows that category rather than the host state behind it. Read the category off the
+  run instead of inferring it from what you changed on the host. Resolution is silent when it
+  succeeds: where a host carried a `depmod` both outside and inside the four directories, the one
+  inside now runs and the outside one is ignored, so a host that relied on a locally built `kmod`
+  or on a wrapper must confirm the binary now selected is the one it wants.
 - **Recovery** — install the distribution's `kmod` package, which places `depmod` in `/usr/sbin`
   under a merged-`/usr` layout and `/sbin` under a split one. For a `depmod` built from source or
   installed to a non-FHS location, copy the binary into one of the four directories; it must be
