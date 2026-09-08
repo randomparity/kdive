@@ -1512,6 +1512,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admit a reachable gdbstub on an expected crash (#2303)
 - Confine the expected-crash gdbstub probe to failed readiness
 - Amend 0233 and 0064 for the narrowed gdbstub rejection
+- Drop stale index-sync claim from adr-status-check comment
+- Design CLI connection failure diagnostics
+- Harden CLI failure boundary design
+- Correct CLI diagnostic implementation estimate
 
 ### Fixed
 
@@ -2497,6 +2501,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agree the runs.get next action with the capture set
 - Drop the ADR ref from the start_session agent contract
 - Fail the expected-crash gdbstub probe closed on a fault
+- Report endpoint connection failures
+- Repoint stale ty override to retrieve/guestfs.py
+- Declare kmod in live_vm_host toolchain
 
 ### Security
 
