@@ -66,8 +66,10 @@ default branch per merge.
   provoked only by a genuine code change.
 - The committed `[Unreleased]` section reflects whenever it was last regenerated rather than the
   tip of `main` — the previous release boundary in the steady state, and until the first release
-  after this record lands, whatever the removed workflow last synced. A reader who wants the
-  current view runs `just changelog`.
+  after this record lands, whatever the removed workflow last synced. Straight after a
+  regeneration the section is absent rather than stale, because the only commit past the tag is
+  the `chore(release)` bump `cliff.toml` skips. A reader who wants the current view runs
+  `just changelog`.
 - Regeneration returns to a checklist step, in a pull request that is already mandatory. Skipping
   it, or running it in a clone without the new tag, leaves the previous release's entries sitting
   undated under `[Unreleased]`; the GitHub Release notes are generated separately and are

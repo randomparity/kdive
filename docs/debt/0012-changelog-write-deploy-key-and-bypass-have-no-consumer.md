@@ -36,9 +36,16 @@ must happen afterwards in a different system.
 
 ## Non-regression boundary
 
-- No workflow or workflow-invoked script pushes to the default branch. Held mechanically by
-  `tests/guards/test_no_workflow_pushes_to_default_branch.py`, which fails the `test` check on a
-  reintroduction, and by ADR-0633's decision 1.
+- No workflow or workflow-invoked script carries a literal `git push` whose refspec names the
+  default branch. That much is held mechanically by
+  `tests/guards/test_no_workflow_pushes_to_default_branch.py`, which fails the `test` check.
+  It is narrower than the property's name: a commit-and-push marketplace action contains no
+  `git push` text at all, and a variable refspec, a folded-scalar command, an indirect
+  `git -C <dir> push`, and a non-`.sh` script inside `.github/scripts/` are all outside what a
+  text proxy can see — the guard's own module docstring lists them. While this record is open,
+  those shapes are held by review and by ADR-0633 decision 1 only, and the marketplace action is
+  the cheapest reacquisition precisely because the bypass this record exists to remove is still
+  configured.
 - No new consumer of `CHANGELOG_DEPLOY_KEY`, of the `changelog-sync (auto)` deploy key, or of the
   `DeployKey` bypass is added while this record is open. A change that needs one supersedes
   ADR-0633 rather than quietly re-using the credential.

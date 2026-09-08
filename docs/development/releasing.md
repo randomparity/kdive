@@ -15,7 +15,11 @@ unreleased version** so a `-dev` build is never ambiguous across a release bound
   **Fetch the tags first** — git-cliff renders from the tags in *your* clone, and with the new
   `vX.Y.Z` tag missing it exits 0 and silently files the whole release under `[Unreleased]`.
   Check the diff shows a dated `## [X.Y.Z] - <date>` heading and an `[X.Y.Z]:` compare link in
-  the footer; if `[Unreleased]` still holds the release's entries, fetch the tag and rerun.
+  the footer. If neither appeared, confirm `git tag --list vX.Y.Z` lists the tag **and**
+  `git merge-base --is-ancestor vX.Y.Z HEAD` succeeds — git-cliff walks HEAD's history, so a bump
+  branch cut from an older `main` cannot see the tag and refetching will not help; rebase onto the
+  tagged commit. If both already hold, the release had no changelog-visible commits (`cliff.toml`
+  skips `chore`, `ci` and `test`) and the render is correct as it stands.
 
 Never hand-edit the version: editing `pyproject.toml` alone desyncs `uv.lock` and breaks
 `uv sync --locked` in CI. `just lock-check` (and CI) catch a stale lock.
@@ -126,9 +130,10 @@ release**, by `just changelog` in the post-release `chore(release): begin <next>
 (above). The new `vX.Y.Z` tag exists by then, so git-cliff rolls `[Unreleased]` into a dated
 `[X.Y.Z]` section.
 
-Between releases the committed `[Unreleased]` section is **deliberately stale** — it reflects
-whenever it was last regenerated, not the tip of `main`. Run `just changelog` locally for the
-current view.
+Between releases the committed `[Unreleased]` section is **deliberately absent or stale** — it
+reflects whenever it was last regenerated, not the tip of `main`. Straight after a release
+regeneration there is no `[Unreleased]` section at all: the only commit past the tag is the
+`chore(release)` bump, which `cliff.toml` skips. Run `just changelog` locally for the current view.
 No automated consumer reads it: `release.yml` builds the GitHub Release notes with
 `git-cliff --latest` straight from git history and never opens the file, so a release never
 depends on the committed copy being current
