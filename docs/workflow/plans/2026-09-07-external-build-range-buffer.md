@@ -13,9 +13,9 @@ version pinning.
 
 Spec: `docs/workflow/specs/2026-09-07-external-build-range-buffer-design.md`.
 
-Expected implementation size: 220–260 changed lines (M) — corrected after the focused contract
-inventory required a roughly 150-line reader test module, alongside the roughly 60-line reader
-change and roughly 30-line validator regression.
+Expected implementation size: 270–310 changed lines (M) — corrected after design review required
+two cross-window cursor-atomicity failure tests in the roughly 195-line reader test module,
+alongside the roughly 60-line reader change and roughly 30-line validator regression.
 
 ## Global Constraints
 
