@@ -122,8 +122,16 @@ mergeable.
 Use the [documentation index](docs/README.md) to find the guide that owns a topic. Update that
 guide when behavior changes, and link to it from other pages instead of copying its procedure.
 Keep exact tool parameters in the generated reference and architecture rationale in ADRs.
+During a cleanup, start each document with a proposed removal. Retain it only when it has a
+named audience, a distinct purpose, and claims verified against current source or recorded
+historical evidence. Merge useful content into the owning guide when that removes overlap;
+then remove the duplicate and repair its incoming references. A document's age or lack of
+incoming links alone does not establish that its content is obsolete.
+
 Completed task plans are working material; transfer still-useful knowledge to the owning guide
-before proposing their removal. Preserve decision records and unique verification evidence.
+before removing them. Preserve decision records and unique verification evidence. Historical
+records earn their place by explaining a decision or preserving evidence, and must be clearly
+separated from instructions for the current release.
 
 Edit generated documentation at its source: tool wrapper docstrings and parameter descriptions,
 the configuration registry, or the canonical Markdown named in

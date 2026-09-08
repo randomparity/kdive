@@ -2,7 +2,8 @@
 # Resolve relative markdown links in tracked *.md files against the filesystem.
 # Reports only; exits 1 if any relative link target is missing. External (scheme://,
 # mailto:) and pure-anchor (#...) links are ignored — only on-disk targets are checked.
-# NOT scanned: docs/archive/** (frozen history), docs/design/** (narrative specs), the
+# The current architecture, docs/design/top-level-design.md, is checked.
+# NOT scanned: docs/archive/** (frozen history), other docs/design/** (narrative specs), the
 # vendored agent-tooling dirs .claude/**, .agents/**, .codex/** (not project docs), and the
 # generated doc-resource snapshots src/kdive/mcp/resources/_content/** (mirrors of canonical
 # docs whose links are policed at the docs/ source; ADR-0151) — same exemptions as
@@ -18,16 +19,18 @@ cd "${ROOT}"
 # Collect markdown files: tracked files when in a git tree, else every *.md under ROOT
 # (the test harness passes a non-git tmp dir). NOT scanned: docs/archive/** (frozen
 # history — its links pointed at the tree as it was and must not be rewritten),
-# docs/design/** (design specs narrate moves and may show illustrative links), and the
+# other docs/design/** (specs narrate moves and may show illustrative links), and the
 # vendored agent-tooling dirs .claude/**, .agents/**, .codex/** (not project docs).
 mapfile -t files < <(
   { git ls-files '*.md' 2>/dev/null || true; } |
-    grep -vE '^docs/(design|archive)/|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/'
+    grep -vE '^docs/archive/|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/' |
+    awk '$0 !~ /^docs\/design\// || $0 == "docs/design/top-level-design.md"'
 )
 if ((${#files[@]} == 0)); then
   mapfile -t files < <(
     find . -type f -name '*.md' \
-      -not -path './docs/design/*' -not -path './docs/archive/*' \
+      \( -not -path './docs/design/*' -o -path './docs/design/top-level-design.md' \) \
+      -not -path './docs/archive/*' \
       -not -path './.claude/*' -not -path './.agents/*' -not -path './.codex/*' \
       -not -path './src/kdive/mcp/resources/_content/*' \
       -printf '%P\n'

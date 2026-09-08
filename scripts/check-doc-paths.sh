@@ -5,7 +5,8 @@
 # non-markdown rot (e.g. a justfile recipe's output path, AGENTS.md code spans, a docstring
 # that cites a moved spec). NOT scanned:
 #   - docs/design/** — design specs narrate path moves (e.g. specs/ -> design/), so their
-#     docs/... mentions are intentional and must not be policed here;
+#     docs/... mentions are intentional and must not be policed here. The current
+#     architecture, docs/design/top-level-design.md, is checked;
 #   - docs/archive/** — frozen dated design records reference paths as they were when written and
 #     are never edited after creation; unlike an ADR (a living decision log that is superseded,
 #     not excluded — see docs/adr/README.md), they carry no supersede mechanism, so their
@@ -30,17 +31,19 @@ set -euo pipefail
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
-readonly EXCLUDE='^docs/(design|archive)/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths\.py$'
+readonly EXCLUDE='^docs/archive/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths\.py$'
 
 mapfile -t files < <(
   { git ls-files 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' '*.py' 2>/dev/null || true; } |
-    grep -vE "${EXCLUDE}"
+    grep -vE "${EXCLUDE}" |
+    awk '$0 !~ /^docs\/design\// || $0 == "docs/design/top-level-design.md"'
 )
 if ((${#files[@]} == 0)); then
   mapfile -t files < <(
     find . -type f \( -name justfile -o -path './scripts/*' -o -name '*.yml' \
       -o -name '*.yaml' -o -name '*.md' -o -name '*.py' \) \
-      -not -path './docs/design/*' -not -path './docs/archive/*' \
+      \( -not -path './docs/design/*' -o -path './docs/design/top-level-design.md' \) \
+      -not -path './docs/archive/*' \
       -not -path './CHANGELOG.md' \
       -not -path './.claude/*' -not -path './.agents/*' -not -path './.codex/*' \
       -not -path './src/kdive/mcp/resources/_content/*' \
@@ -55,7 +58,7 @@ for f in "${files[@]}"; do
   # docs/ followed by path chars. Fenced code blocks are stripped first (the awk toggles on
   # triple-backtick fence lines; \140 is the octal for a backtick, so this script holds no
   # literal fence marker) so example paths in code samples are not policed; design/archive
-  # trees are already excluded from the file set above.
+  # records (except the current architecture) are excluded from the file set above.
   while IFS= read -r ref; do
     [[ -z "$ref" ]] && continue
     # Skip illustrative ellipses (ASCII ... or unicode …) and <placeholders>.
