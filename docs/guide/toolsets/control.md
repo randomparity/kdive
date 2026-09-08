@@ -17,17 +17,16 @@ each tool's own description.
 
 ## Catching a crash you provoke
 
-- `control.watch_for_crash` — watch a ready crash-watch-capable system's serial console **out of
-  band** for a kernel-crash signature (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until a
-  deadline, returning on the first hit. This is the primitive for a repeat-until-crash race
-  reproduction: you drive the reproducer loop over your own root SSH, and this watches the
-  console — which survives the panic that drops your SSH channel. It enqueues a job; poll
-  `jobs.wait`, then read the verdict from `refs.result`. The `outcome` is `fired` (with the
-  matched `signature`, a redacted `matched` slice, and `elapsed_s`) or `not_fired` (no signature
-  before the deadline). Start the watch before you begin the loop; if your reproducer's SSH drops
-  but the verdict is `not_fired`, the crash landed outside the watched window — read the full
-  console with the `artifacts` tools. Contributor-level, non-destructive. See the
-  race-debugging guide (resource://kdive/docs/operating/race-debugging.md).
+- `control.watch_for_crash` watches a READY System's console for a recognized kernel
+  diagnostic or crash signature. It requires contributor access and provider crash-watch
+  support; pass the owning `run_id` when an active external boot restricts the System.
+  It returns a job: run the reproducer while the watch is active, poll `jobs.wait`, then
+  parse `refs.result` for `outcome` (`fired` or `not_fired`). A successful job does not
+  itself mean a signature matched, and a match need not be fatal. The baseline starts at
+  worker pickup; `not_fired` plus an SSH disconnect does not prove a crash outside that
+  window. Read the console evidence and check System state before capture: the watch does
+  not mark it CRASHED. The full concurrent workflow is in
+  resource://kdive/docs/operating/race-debugging.md.
 
 ## Capturing guest traffic
 

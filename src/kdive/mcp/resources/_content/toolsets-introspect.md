@@ -1,32 +1,43 @@
 # introspect toolset
 
-These read kernel state with **drgn** — the programmable, non-halting introspection path.
-Unlike the `debug` toolset (which halts the CPU at a GDB stub), introspection reads a running
-or captured kernel without stopping it, so it is the race-friendly choice for inspecting live
-state or a vmcore. For exact parameters, types, and return schema, read each tool's own
-description.
-
-There are two modes: **live** (over SSH against a running guest) and **offline** (against a
-captured vmcore).
-
-**Live prerequisites.** Live introspection reaches the guest over the drgn-over-SSH transport,
-which needs **no** credential provisioning: the SSH forward is rendered on every domain and the
-transport authenticates with the per-System bootstrap key, so any ready local system qualifies.
-The only requirement is a drgn-capable guest image and a guest reachable over SSH — if drgn is
-absent, `introspect.run` reports `missing_dependency`. `introspect.run` and `introspect.script`
-take a live drgn-live `DebugSession`.
+Use drgn to inspect typed kernel state, either in a running guest or in a captured vmcore.
+Live reads do not stop the kernel, so state can change between reads; they are not an atomic
+snapshot. For parameters, limits, and return fields, read each tool's current schema.
 
 ## Live introspection
 
-- `introspect.run` — run an in-tree drgn helper (`tasks`, `modules`, `sysinfo`) against a
-  live drgn-live session. Start here for common questions.
-- `introspect.script` — run your own drgn script against a live session when a helper does not
-  cover what you need. This is the supported way to read a **struct field or array member by
-  name** (e.g. `some_struct->field[3].member`) on a live guest: drgn resolves typed kernel
-  objects by name — `prog["some_struct"].field[3].member` — which the halting `debug` gdbstub
-  path (`debug.resolve_symbol` resolves an address only) cannot.
+Live operations require contributor access and a live **drgn-live** DebugSession. Open it
+with `debug.start_session(transport="drgn-live")`; the default gdbstub session cannot be
+used with these tools. Live drgn does not require the local-libvirt `debug.gdbstub` flag.
+
+Check the execution path and guest prerequisites:
+
+- Local-libvirt invokes `/usr/local/sbin/kdive-drgn` over SSH using the System's bootstrap
+  key. Remote-libvirt invokes that helper through the guest agent. The provider must
+  support the requested live operation and its guest channel must be reachable.
+- The guest needs the KDIVE helper, drgn, access to its running kernel's `/proc/kcore`, and
+  usable matching debug information for typed lookups. The helper explicitly loads
+  `/sys/kernel/btf/vmlinux` when present, otherwise uses drgn's default debug-info search.
+  Live kernel access requires `CONFIG_PROC_KCORE=y`; see the
+  [drgn support matrix](https://drgn.readthedocs.io/en/stable/support_matrix.html#kernel-configuration).
+- Inspect any `data.missing_debuginfo` warning from attach or introspection. Successful
+  attachment alone does not prove symbols resolve. Missing helper packages, unreachable
+  guest services, and unusable debug information require different remedies; inspect the
+  returned error and details before retrying.
+
+Choose the operation for the question:
+
+- `introspect.run` runs a built-in `tasks`, `modules`, or `sysinfo` helper against the session.
+- `introspect.script` runs a drgn Python script with `prog` already bound to the live kernel.
+  For example, `print(prog["init_task"].pid)` prints one typed field. Each call starts a fresh
+  drgn process; put related work in one script and inspect returned stdout and truncation.
+
+End the session with `debug.end_session`. For a workload running alongside observations and
+console capture, read resource://kdive/docs/operating/race-debugging.md.
 
 ## Offline introspection
 
-- `introspect.from_vmcore` — run drgn introspection against a Run's captured vmcore, with no
-  live guest required. Capture the core first with `vmcore.fetch` (see the postmortem guide).
+`introspect.from_vmcore` takes a **Run ID** and requires viewer access. It reads that Run's
+captured core and matching recorded build/debug artifacts through the provider's offline
+drgn support; it does not need a live guest. Complete `vmcore.fetch` successfully first.
+See resource://kdive/docs/guide/toolsets/postmortem.md for capture and triage.
