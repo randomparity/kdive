@@ -499,8 +499,12 @@ async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt
         remote_module_host=cast(Any, Host()),
     )
 
+    # 10s, not a tight bound: this deadline exists to catch a deadlock in acknowledge_takeover,
+    # and the call writes through FileAuthorityJournal. The former 0.1s had ~10x headroom on an
+    # idle host and none under the gate's xdist worksteal beside a Postgres testcontainer, where
+    # it timed out on CI while passing every local run (#2339).
     acknowledgement = await asyncio.wait_for(
-        restarted.acknowledge_takeover(peer, successor), timeout=0.1
+        restarted.acknowledge_takeover(peer, successor), timeout=10
     )
 
     assert acknowledgement.generation == successor.generation
