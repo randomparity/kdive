@@ -70,7 +70,8 @@ an unrecognised token simply matches nothing. When a query returns no matches,
 to search on — every word was under two characters, or the query was blank) or
 ``"no_token_matched"`` (the words ran and none of them occurs in any tool you can see —
 try fewer, plainer words, ``namespace`` mode, or ``names`` if you already have one). The
-key is absent whenever there are matches.
+key is absent whenever there are matches, and absent in ``names`` and ``namespace``
+mode, which carry their own signals.
 
 In ``namespace`` mode the response also carries ``namespace_status``: ``"ok"`` when the
 plane has tools you can see, ``"unauthorized"`` when it is live but every tool in it is
@@ -83,6 +84,6 @@ for vocabulary curation.
 |---|---|---|---|
 | `detail` | `summary`, `full` | no | How much per-match metadata to return. 'summary' (the default) returns name, summary, annotations, and maturity — enough to choose a tool and judge its safety tier. 'full' additionally returns the complete description and the input_schema you need to build arguments; it is several times larger per match, so narrow the query or the limit first. 'names' mode always returns full detail whatever you pass here. |
 | `limit` | integer | no | Maximum matches to return (1-50). Not used in 'names' mode, which returns every name you list. |
-| `names` | array<string> (nullable) | no | Exact tool names to fetch (1-10), e.g. ['runs.install']. Skips ranking and returns those tools with their complete description and input_schema, in the order given: it overrides 'detail' and ignores 'limit'. A full match runs 0.4-16 KB (median 1.4 KB), so ten large ones can exceed 60 KB — name only what you need. Matching ignores case and surrounding whitespace, and a name you repeat is returned once. Names no visible tool carries come back lower-cased in data.unknown_names. Takes precedence over 'namespace' and 'query'. |
+| `names` | array<string> (nullable) | no | Exact tool names to fetch (1-10), e.g. ['runs.install']. Skips ranking and returns those tools with their complete description and input_schema, in the order given: it overrides 'detail' and ignores 'limit'. A full match runs from under 1 KB to about 16 KB, so ten large ones can exceed 60 KB — name only what you need. Matching ignores case and surrounding whitespace, and a name you repeat is returned once. Names no visible tool carries come back lower-cased in data.unknown_names. Takes precedence over 'namespace' and 'query'. |
 | `namespace` | string (nullable) | no | Browse one tool plane by prefix, e.g. 'debug' or 'runs'. |
 | `query` | string (nullable) | no | Capability phrase to search for (e.g. 'boot a built kernel'). |

@@ -74,13 +74,20 @@ retrieved at all.
 The change parses caller-supplied strings and reads through the RBAC filter, so it is
 security-relevant on two of the standard triggers.
 
-- **Boundary added:** the `names` argument. An authenticated MCP caller supplies up to 10
-  strings of at most 128 characters each (both bounds enforced by schema validation, before any
-  work); each is stripped, lower-cased, and used only as a dict key into the already-filtered
-  candidate map. Unresolved entries are echoed back normalised in `data.unknown_names`. No
-  caller value reaches a command, query, path, URL, or template.
-- **Boundary widened:** `tools.search`'s response. `names` mode returns full schemas that
-  `detail="full"` already returns, so it widens *how* a caller selects, not *what* it may reach.
+- **Boundary added:** the `names` argument. An authenticated MCP caller supplies 1–10 non-empty
+  strings of at most 128 characters each (every bound enforced by schema validation, before any
+  handler work); each is stripped, lower-cased, and used only as a dict key into the
+  already-filtered candidate map. Unresolved entries are echoed back normalised in
+  `data.unknown_names`. No caller value reaches a command, query, path, URL, or template.
+- **Boundary widened:** `tools.search`'s response, in two conditional keys. `data.unknown_names`
+  is the caller's own normalised request minus what it matched. `data.reason` is one of two
+  fixed tokens derived from the caller's tokens and the RBAC-filtered candidate set. `names`
+  mode returns full schemas that `detail="full"` already returns, so it widens *how* a caller
+  selects, not *what* it may reach.
+- **Boundary widened:** the log stream. The new `tool_search_names_miss` record carries counts
+  only, which matters because `extra` is not always dropped: with observability enabled,
+  `_bridge_root_logger` (`src/kdive/observability/facade.py`) replaces the stdout handler with
+  OTel's `LoggingHandler`, which carries record attributes into telemetry.
 - **Actor model:** every caller is authenticated — `current_context()` raises `AuthError`
   otherwise — and holds some project or platform role. The untrusted party is a caller whose
   grants are narrower than the tool it names.
@@ -92,7 +99,10 @@ security-relevant on two of the standard triggers.
 - **Explicitly out of scope:** distinguishing "unregistered" from "hidden by your grants" —
   ADR-0630 §3 decides against it. Response size beyond the 10 × 128 bounds: `detail="full"` with
   `limit=50` already returns strictly more, so this mode adds no amplification. `tools.invoke`'s
-  own envelope, which is a separate code path and a separate charter.
+  own envelope, which is a separate code path and a separate charter. The pre-existing
+  `tool_search_miss` record, whose `extra` carries the caller's unbounded `query` onto the same
+  telemetry path — this change adds the `reason` field beside it and narrows when the record
+  fires, but does not widen that exposure; reported as a follow-up.
 
 ## Success
 

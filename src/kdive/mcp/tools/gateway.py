@@ -40,11 +40,11 @@ _SCHEMA_DEPTH_LIMIT = 8
 # different key but the same class of caller-sized list.
 _FIELD_ERROR_LIMIT = 20
 # `names` forces full detail and ignores `limit`, so its own bound is the only one left.
-# Ten is `limit`'s default. Measured over this registry, a full match spans 0.4-16 KB with a
-# median of 1.4 KB, so the ten largest come to roughly 69 KB — the ceiling this bounds
-# (ADR-0630 §2).
+# Ten is `limit`'s default. Measured, a full match runs from under 1 KB to about 16 KB — the
+# exact spread depends on the caller's grants — so the ten largest come to roughly 68 KB, the
+# ceiling this bounds (ADR-0630 §2).
 _NAMES_MAX = 10
-# Per-entry ceiling, comfortably above the longest registered name (37 characters).
+# Per-entry ceiling, comfortably above the longest registered name (38 characters).
 _NAME_LEN_MAX = 128
 
 
@@ -412,8 +412,8 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         names: Annotated[
             # Bound each entry as well as the list: an unresolved name is echoed back in
             # data.unknown_names, so an unbounded string would be caller-sized response body.
-            # The longest registered name is 37 characters.
-            list[Annotated[str, Field(max_length=_NAME_LEN_MAX)]] | None,
+            # The longest registered name is 38 characters.
+            list[Annotated[str, Field(min_length=1, max_length=_NAME_LEN_MAX)]] | None,
             Field(
                 min_length=1,
                 max_length=_NAMES_MAX,
@@ -421,9 +421,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                     "Exact tool names to fetch (1-10), e.g. ['runs.install']. Skips ranking and "
                     "returns those tools with their complete description and input_schema, in "
                     "the order given: it overrides 'detail' and ignores 'limit'. A full match "
-                    "runs 0.4-16 KB (median 1.4 KB), so ten large ones can exceed 60 KB — name "
-                    "only what you need. Matching ignores case and surrounding whitespace, and "
-                    "a name you repeat is returned once. Names no visible tool carries come "
+                    "runs from under 1 KB to about 16 KB, so ten large ones can exceed 60 KB — "
+                    "name only what you need. Matching ignores case and surrounding whitespace, "
+                    "and a name you repeat is returned once. Names no visible tool carries come "
                     "back lower-cased in data.unknown_names. Takes precedence over 'namespace' "
                     "and 'query'."
                 ),
@@ -487,7 +487,8 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         to search on — every word was under two characters, or the query was blank) or
         ``"no_token_matched"`` (the words ran and none of them occurs in any tool you can see —
         try fewer, plainer words, ``namespace`` mode, or ``names`` if you already have one). The
-        key is absent whenever there are matches.
+        key is absent whenever there are matches, and absent in ``names`` and ``namespace``
+        mode, which carry their own signals.
 
         In ``namespace`` mode the response also carries ``namespace_status``: ``"ok"`` when the
         plane has tools you can see, ``"unauthorized"`` when it is live but every tool in it is
@@ -530,6 +531,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 data["unknown_names"] = cast("JsonValue", unresolved)
                 _log.info(
                     "tool_search_names_miss",
+                    # Counts only. Under the OTel bridge (kdive.observability.facade) `extra`
+                    # becomes telemetry attributes, so a caller-supplied name here would leave
+                    # the process unbounded and unredacted.
                     extra={"requested": len(names), "unresolved": len(unresolved)},
                 )
         elif namespace is not None:

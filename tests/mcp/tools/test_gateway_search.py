@@ -1151,11 +1151,11 @@ def test_names_normalises_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> N
     assert "unknown_names" not in content["data"]
 
 
-@pytest.mark.parametrize("names", [[], ["runs.get"] * 11, ["x" * 129]])
+@pytest.mark.parametrize("names", [[], ["runs.get"] * 11, ["x" * 129], [""]])
 def test_names_cardinality_rejects_out_of_bounds(
     monkeypatch: pytest.MonkeyPatch, names: list[str]
 ) -> None:
-    """An empty list, an over-long list, and an over-long entry are all rejected."""
+    """An empty list, an over-long list, an over-long entry, and a blank entry are rejected."""
     app = _build(monkeypatch, _operator_ctx)
 
     async def _run() -> Any:
@@ -1188,7 +1188,10 @@ def test_names_miss_is_logged_with_counts_only(
     assert record is not None, f"no names-miss log: {caplog.text}"
     assert record.__dict__["requested"] == 2
     assert record.__dict__["unresolved"] == 1
-    assert "zzz.nope" not in caplog.text
+    # Over the record's own attributes, not caplog.text: the text rendering never includes
+    # `extra`, so a leak asserted against it would pass while the name rode to telemetry.
+    emitted = json.dumps(record.__dict__, default=str)
+    assert "zzz.nope" not in emitted, f"caller name leaked into the record: {emitted}"
 
 
 # ---------------------------------------------------------------------------

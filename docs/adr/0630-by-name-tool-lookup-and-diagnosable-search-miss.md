@@ -127,11 +127,15 @@ session's context, so this is two sentences, not a transcription of the docstrin
   themselves lower-case; a test pins that convention rather than leaving the lookup to shadow
   silently if it ever changes.
 - A new `tool_search_names_miss` record carries requested and unresolved counts in `extra`, not
-  the names, matching the shape of the two miss records already there. It reaches production
-  logs only as far as those two do, which is not far: `JsonFormatter` (`src/kdive/log.py`)
-  renders a fixed field schema plus request context and copies no `extra`, so today only the
-  message survives. That gap is pre-existing and shared by all three records; this ADR keeps the
-  new record consistent with its siblings rather than diverging one of them around it.
+  the names, matching the shape of the two miss records already there. Where `extra` ends up
+  depends on the deployment: the stdout `JsonFormatter` (`src/kdive/log.py`) renders a fixed
+  field schema plus request context and copies no `extra`, so on that path only the message
+  survives; with observability enabled, `_bridge_root_logger`
+  (`src/kdive/observability/facade.py`) removes that handler and installs OTel's
+  `LoggingHandler`, which carries record attributes through as telemetry attributes. Counts are
+  safe on both paths, which is why this record carries no caller string — unlike the
+  pre-existing `tool_search_miss`, whose `extra` carries the caller's unbounded `query`. That is
+  outside this change's surface and is reported as a follow-up rather than fixed here.
 - The existing `tool_search_miss` record gains the `reason` and stops firing for a call that
   passed both `namespace` and `query`: `namespace` wins, so no query ran and the record was
   never accurate.
