@@ -19,8 +19,12 @@
   deployments.
 - **Surface:** `justfile`, `tests/compose/test_compose_lifecycle_recipe.py`,
   `docs/operating/docker-compose.md`, `deploy/compose/README.md`, `docs/operating/install.md`,
-  `docs/operating/runbooks/build-use-recovery.md`, and the topology documentation guard.
+  the now-retired `build-use-recovery.md` operating runbook, and the topology documentation guard.
 - **Ambiguities:** none. The existing wrapper behavior and upgrade order are already settled.
+
+The historical surface above includes a retired recovery runbook. Its current owners are the
+[build-use tool reference](../../guide/reference/ops.md#opsrecover_build_use) and the
+[Compose lifecycle guide](../../../deploy/compose/README.md#upgrading-worker-fence-authority).
 
 ## Problem
 

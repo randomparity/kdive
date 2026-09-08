@@ -14,7 +14,6 @@ _COMPOSE_REDIRECT = _ROOT / "docs/operating/docker-compose.md"
 _COMPOSE_REFERENCE = _ROOT / "deploy/compose/README.md"
 _HELM_REFERENCE = _ROOT / "deploy/helm/kdive/README.md"
 _KUBERNETES_RUNBOOK = _ROOT / "docs/operating/runbooks/kubernetes-deploy.md"
-_BUILD_USE_RECOVERY = _ROOT / "docs/operating/runbooks/build-use-recovery.md"
 _HELM_VALUES = _ROOT / "deploy/helm/kdive/values.yaml"
 
 _IMAGE_COMMAND_INVENTORY = re.compile(
@@ -163,14 +162,6 @@ def test_helm_podmonitor_explains_three_non_listening_ports() -> None:
     text = _normalized(_HELM_REFERENCE)
 
     assert "three ports a given pod does not listen on" in text
-
-
-def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrapper() -> None:
-    text = _normalized(_BUILD_USE_RECOVERY)
-    assert "**Kubernetes:**" in text
-    assert "staged worker-fence upgrade procedure" in text
-    assert "**Compose:**" in text
-    assert "../../../deploy/compose/README.md#upgrading-worker-fence-authority" in text
 
 
 def test_compose_summaries_route_to_the_canonical_lifecycle_guide() -> None:
@@ -1228,7 +1219,6 @@ def test_canonical_staged_helm_upgrade_bash_blocks_parse() -> None:
 
 def test_worker_fence_summaries_link_to_the_canonical_staged_runbook() -> None:
     assert "runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade" in _INSTALL.read_text()
-    assert "kubernetes-deploy.md#staged-worker-fence-upgrade" in _BUILD_USE_RECOVERY.read_text()
 
     assert (
         "../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade"
