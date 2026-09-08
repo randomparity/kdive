@@ -2,58 +2,59 @@
 
 ## Problem
 
-The mermaid parse gate costs more than it returns (#2384). `docs-mermaid.yml` runs a Node job on
-every pull request and push to main, `just setup` installs a 178 MB / 102-package `node_modules`
-tree, `.github/dependabot.yml` carries an npm ecosystem for the checker alone, and
-`tests/scripts/test_justfile_mermaid_recipe.py` exists only to keep the recipe's failure message
-usable. It has caught one parse error (`612f8f744`) and its two upkeep issues (#2156, #1965) each
-cost a fix. It guards four mermaid blocks in three files out of 1119 tracked Markdown files.
+The mermaid parse gate costs more than it returns (#2384): a Node CI job on every pull request and
+push, a `node_modules` tree in `just setup`, an npm Dependabot ecosystem, and a pytest module for
+its error message. It has caught one parse error (`612f8f744`) over three mermaid blocks in two of
+1119 tracked Markdown files.
 
 ## Scope
 
 Delete `.github/workflows/docs-mermaid.yml`, `.github/scripts/mermaid-check/`, and
-`tests/scripts/test_justfile_mermaid_recipe.py`. Drop `check-mermaid` from the `justfile` `ci`
-list and `install-mermaid-deps` from `setup`, with both recipes and their comments. Remove the npm
-ecosystem from `.github/dependabot.yml` and the Node entry from `.gitignore`. Keep the
-project-wide prose rule at `AGENTS.md:291` and drop its `check-mermaid` framing; update the gate
-summary at `AGENTS.md:34`.
+`tests/scripts/test_justfile_mermaid_recipe.py`. Edit `justfile` (drop `check-mermaid` from `ci`,
+`install-mermaid-deps` from `setup`, and both recipes with their comments),
+`.github/dependabot.yml` (npm ecosystem), `.gitignore:18-19`, `AGENTS.md:34` and `:291` (keep the
+project-wide prose rule, drop its `check-mermaid` framing), and `CONTRIBUTING.md:133`.
 
-Two consumers the issue did not list, both compelled by the deletion:
+Three consumers the issue did not list, each compelled by the deletion:
 
-- `CONTRIBUTING.md:133` instructs contributors to run `just check-mermaid`, which will name a
-  recipe that no longer exists.
-- `tests/guards/test_apt_install_is_bounded.py:255` floors the parsed job count at 17 across ten
-  workflows. Removing one job makes it 16 across nine; the assertion's own message directs
-  lowering the floor in the same change.
+- `scripts/check-setup-deps.sh:402-404` requires npm and recommends node; `:128-130` are their
+  package mappings. Left in place, `just setup` keeps demanding Node tooling nothing uses.
+- `tests/guards/test_apt_install_is_bounded.py:250-255` floors parsed jobs at 17 across ten
+  workflows; one job fewer makes it 16 across nine, as the assertion's own message directs.
+- `tests/guards/test_no_workflow_pushes_to_default_branch.py:23` illustrates its second limb with
+  `mermaid-check.mjs`. No non-`.sh` file survives under `.github/scripts/`, so the illustration
+  moves to the first limb and names `./scripts/apt-install.sh` (`ci.yml:44`).
 
-`tests/guards/test_no_workflow_pushes_to_default_branch.py:23` cites `mermaid-check.mjs` as its
-example of an unread non-`.sh` script and needs a surviving one.
-
+Deliberately unchanged: the generic `node_modules` filters at `.dockerignore:10`,
+`test_no_workflow_pushes_to_default_branch.py:71-74`, and `test_workflow_action_pins.py:19`; and
+the record locations `docs/archive/`, `docs/superpowers/`, `docs/design/`, `docs/workflow/plans/`,
+and `CHANGELOG.md`. Consequence: three 2026-09-08 plans keep a stale `install-mermaid-deps` line.
 No replacement validation, no ADR, no ruleset edit, no diagram edits (#2384 exclusions).
 
 ## Success
 
-1. `just ci` and `just setup` resolve with no mermaid recipe in either graph.
-2. No workflow, script, dependency manifest, or Dependabot ecosystem for the checker remains.
+1. `just ci` and `just setup` resolve with no mermaid recipe.
+2. No workflow, script, manifest, Dependabot ecosystem, or host-dep check for the checker remains.
 3. `just ci` is green, including both guards the deletion touches.
-4. No repository file names a mermaid recipe, script, or workflow that no longer exists.
+4. No file outside Scope's record locations names a removed recipe, script, or workflow.
 
 ## Validation
 
-- Contract: the `justfile` recipe graph after removing two recipes and their two references.
-  Mode: focused-test — `just --dry-run ci` and `just --dry-run setup`. Red with the recipes
-  deleted and the references left (`error: justfile does not contain recipe`), green after.
-- Contract: the workflow-job timeout floor in `tests/guards/test_apt_install_is_bounded.py`.
-  Mode: focused-test — `uv run python -m pytest tests/guards/test_apt_install_is_bounded.py -q`.
-  Red at floor 17 once `docs-mermaid.yml` is deleted, green at 16.
-- Contract: pytest collection after deleting `tests/scripts/test_justfile_mermaid_recipe.py`.
-  Mode: focused-test — `uv run python -m pytest tests/scripts tests/guards -q` collects and passes.
-- Contract: `.gitignore` no longer ignores `node_modules/`.
-  Mode: focused-test — `git check-ignore -q node_modules` exits 0 before the edit, 1 after.
-- Contract: the npm ecosystem entry in `.github/dependabot.yml`.
-  Mode: task-test-not-applicable — no in-repo consumer parses that file; GitHub validates it
-  server-side after merge, so the only local observation is reading back bytes just written.
-- Contract: prose in `AGENTS.md`, `CONTRIBUTING.md`, and the guard docstring.
-  Mode: task-test-not-applicable — the change deletes clause-level prose and adds no link, path,
-  or identifier an executable consumer reads. The only observation available is a repository text
-  search for the removed words, which this contract forbids inventing as a test.
+- Recipe graph — focused-test: `just --dry-run ci` and `just --dry-run setup`. Red while the
+  references outlive the recipes (exit 1, ``error: recipe `ci` has unknown dependency
+  `check-mermaid` ``, one global parse error shared by both); green after.
+- Artifacts absent — focused-test: `just --summary | tr ' ' '\n' | rg -c
+  '^(check-mermaid|install-mermaid-deps)$'` prints 2 then 0; `git ls-files
+  .github/scripts/mermaid-check | wc -l` prints 4 then 0.
+- Host dependencies — focused-test: `uv run python -m pytest tests/scripts/test_check_setup_deps.py
+  -q` green; `./scripts/check-setup-deps.sh` names neither node nor npm.
+- Workflow-job floor — focused-test: `uv run python -m pytest
+  tests/guards/test_apt_install_is_bounded.py -q`. Red at 17 once the workflow is gone, green at 16.
+- Collection — focused-test: `uv run python -m pytest tests/scripts tests/guards -q`.
+- Ignore pattern — focused-test: `git check-ignore -q node_modules/` exits 0 then 1. The trailing
+  slash is required; `.gitignore:19` is directory-only, so a bare path misses when absent.
+- Dependabot structure — focused-test: `uv run python -c "import yaml;assert not [u for u in
+  yaml.safe_load(open('.github/dependabot.yml'))['updates'] if u['package-ecosystem']=='npm']"`.
+- Prose in `AGENTS.md`, `CONTRIBUTING.md`, and the guard docstring — task-test-not-applicable: the
+  edits delete clause-level prose adding no link, path, or identifier an executable consumer reads;
+  the only observation is a text search for removed words, which this contract forbids.
