@@ -132,6 +132,8 @@ the configuration registry, or the canonical Markdown named in
 `just config-docs`, or `just resources-docs` recipe, then its `-check` counterpart.
 For prose changes run `just docs-links`, `just docs-paths`, and `just check-mermaid`;
 served documents also need `just served-doc-links` and `just resources-docs-check`.
-Check Markdown formatting explicitly with `uv run ruff format --check <changed-markdown-paths>`.
+Ruff formats Python inside Markdown fences outside `docs/adr`, but the pre-commit formatter
+selects Python files. Check Markdown explicitly with
+`uv run ruff format --check <changed-markdown-paths>` and run `just lint` after editing fences.
 Documented installation and recovery commands need verification on their supported host;
 record the environment and any untested path rather than treating a link check as a live proof.
