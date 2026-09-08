@@ -101,30 +101,43 @@ rolling-upgrade compatible; recover forward if migration has applied.
 
 ### Worker-host `depmod` is resolved without `PATH`
 
-The release carrying explicit `depmod` resolution changes how a worker host finds `depmod`. Before
-it, module staging ran the bare name `depmod`, so resolution followed whatever search path the
-worker process inherited — and, where the process environment carried none, CPython's `os.defpath`
-fallback of `/bin:/usr/bin`. A `depmod` anywhere on that effective path resolved. The worker now
-looks in exactly four directories, in this order, and runs the absolute path it finds:
+The release carrying explicit `depmod` resolution (#2300, shipped by PR #2313) changes how a worker
+host finds `depmod`. Before it, module staging ran the bare name `depmod`, so resolution followed
+whatever search path the worker process inherited — and, where the process environment carried
+none, CPython's `os.defpath` fallback of `/bin:/usr/bin`. A `depmod` anywhere on that effective
+path resolved. The worker now looks in exactly four directories, in this order, and runs the
+absolute path it finds:
 
 `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`
 
-`PATH` is never consulted, and there is no environment variable that changes the list.
+`PATH` is never consulted, and there is no environment variable that changes the list, whose source
+of truth is `_DEPMOD_SEARCH_DIRS` in
+`src/kdive/providers/local_libvirt/lifecycle/boot/guest_kernel_writer.py`.
 
-- **Scope** — worker hosts, for the host-side `depmod -b` that indexes an extracted kernel module
-  tree while staging it into a guest. It applies per `runs.install` operation. Indexing performed
-  inside a guest is unaffected.
+- **Scope** — worker hosts running the local-libvirt provider, for the host-side `depmod -b` that
+  indexes an extracted kernel module tree while staging it into a guest. It applies per
+  `runs.install` operation. Deployments that stage modules through the remote-libvirt guest helper
+  index inside the guest and are unaffected.
 - **Consequence** — a `depmod` outside those four directories no longer resolves. The operation
   fails with `missing_dependency`, which is not retried, and the failure message names the
-  directories that were searched.
+  directories that were searched. A `depmod` that resolves but cannot be executed — no execute
+  bit, a `noexec` mount, a truncated or wrong-architecture copy, a symlink whose target is gone —
+  fails with the same non-retried `missing_dependency`, but that message names the resolved path
+  and `errno` rather than the searched directories. Where a host carried a `depmod` both outside
+  and inside the four directories, the one inside now runs and the outside one is ignored. That
+  substitution is silent, so a host that relied on a locally built `kmod` or on a wrapper must
+  confirm the binary now selected is the one it wants.
 - **Recovery** — install the distribution's `kmod` package, which places `depmod` in `/usr/sbin`
   under a merged-`/usr` layout and `/sbin` under a split one. For a `depmod` built from source or
-  installed to a non-FHS location, put it — or a symlink to it — in one of the four directories.
+  installed to a non-FHS location, copy the binary into one of the four directories; it must be
+  executable by the account the worker runs as. Do not link from one of those directories to a
+  binary under `/usr/local` or another group-writable path: resolution follows the link and the
+  target is what executes, so the link would reinstate the exposure the list excludes.
   `/usr/local/sbin` and `/usr/local/bin` are left out deliberately: `/usr/local` is group-writable
   by default on part of the Debian family, and a binary placed there would run with the worker
   slot account's authority over guest overlays.
 
-An operator whose `depmod` comes from the distribution package sees no change.
+An operator whose only `depmod` comes from the distribution package sees no change.
 
 ## Install paths
 
