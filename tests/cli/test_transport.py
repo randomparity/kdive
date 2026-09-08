@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from httpx import ConnectError, HTTPStatusError, Request, Response
 
 import kdive.config as config
 from kdive.cli import transport
@@ -73,6 +74,47 @@ def test_session_from_env_without_token_exits(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(SystemExit) as excinfo:
         transport.Session.from_env()
     assert "KDIVE_TOKEN" in str(excinfo.value)
+
+
+def _wrapped_connection_error() -> RuntimeError:
+    request = Request("GET", "https://example.invalid/mcp")
+    try:
+        raise ConnectError("refused", request=request)
+    except ConnectError as exc:
+        try:
+            raise RuntimeError("Client failed to connect") from exc
+        except RuntimeError as wrapped:
+            return wrapped
+
+
+def test_connection_failure_matches_supported_client_shapes() -> None:
+    direct = ConnectError("refused", request=Request("GET", "https://example.invalid/mcp"))
+
+    assert transport.is_connection_failure(direct)
+    assert transport.is_connection_failure(_wrapped_connection_error())
+
+
+def test_connection_failure_rejects_unrelated_and_deeper_causes() -> None:
+    wrapped = _wrapped_connection_error()
+    translated = ValueError("translated")
+    translated.__cause__ = wrapped
+    first = RuntimeError("first")
+    second = ValueError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+
+    assert not transport.is_connection_failure(RuntimeError("unrelated"))
+    assert not transport.is_connection_failure(translated)
+    assert not transport.is_connection_failure(first)
+
+
+@pytest.mark.parametrize(("status", "expected"), [(401, True), (403, True), (500, False)])
+def test_authentication_failure_matches_only_auth_status(status: int, expected: bool) -> None:
+    request = Request("GET", "https://example.invalid/mcp")
+    response = Response(status, request=request)
+    error = HTTPStatusError("status failure", request=request, response=response)
+
+    assert transport.is_authentication_failure(error) is expected
 
 
 def test_tool_envelope_on_result_missing_attrs_raises_runtime_error() -> None:
