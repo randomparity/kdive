@@ -27,8 +27,10 @@ change, a focused roughly 80-line reader test module, and a roughly 30-line vali
 - Retained read-ahead is at most `_RANGE_CHUNK_BYTES` (4 MiB). Every request is bounded by recorded
   object size. A caller read larger than 4 MiB may be served directly without retaining more than
   4 MiB.
-- `read()` retains the existing short-read behavior. EOF returns `b""`. Seek supports `SEEK_SET`,
-  `SEEK_CUR`, and `SEEK_END`, rejects unknown modes and negative results, and permits beyond-EOF.
+- `read()` retains the existing short-read behavior; `read()` with its default size requests and
+  returns all remaining recorded bytes, even beyond 4 MiB, without retaining more than 4 MiB. EOF
+  returns `b""`. Seek supports `SEEK_SET`, `SEEK_CUR`, and `SEEK_END`, rejects unknown modes and
+  negative results, and permits beyond-EOF.
 - Scope is `src/kdive/build_artifacts/validation.py`, matching build-artifact tests, and these
   design artifacts. Durable completion and MCP behavior are excluded.
 - Guardrails: focused pytest commands below; `just lint`; `just type`; `just test-changed`; and
@@ -68,17 +70,20 @@ behavior that `gzip` may not exercise deterministically across Python versions.
   `seek`. Green command: `uv run python -m pytest tests/build_artifacts/test_validation_reader.py -q`.
 - **Contract: cursor, boundary, EOF, and invalid seek semantics match the spec.** Mode:
   `focused-test`. Tests in the same module cover `tell`, reads spanning the 4 MiB boundary,
+  a caller read larger than 4 MiB without retaining more than 4 MiB, default `read()` through EOF,
   supported whence values, beyond EOF, negative results, and invalid whence. Expected red: missing
-  cursor methods. Same green command.
+  cursor methods or retained state exceeding the cap. Same green command.
 - **Contract: short, empty, and oversized range responses are not hidden.** Mode: `focused-test`.
-  A configurable fake store returns each response shape. Expected red: the existing reader has no
-  buffer-aware boundary behavior; oversized response must retain `BUILD_FAILURE`. Same green
-  command.
+  A configurable fake store returns each response shape or raises a selected categorized exception.
+  One test primes the buffer, proves an in-window hit does not touch the failing store, then moves
+  outside the window and proves the exact exception propagates unchanged. Expected red: the
+  existing reader has no buffer-aware boundary behavior; oversized response must retain
+  `BUILD_FAILURE`. Same green command.
 
 ### Steps
 
 1. Create `tests/build_artifacts/test_validation_reader.py` with a byte-backed fake store that
-   records `(start, length, version_id)` and can truncate, empty, or enlarge a response.
+   records `(start, length, version_id)` and can truncate, empty, enlarge, or fail a selected call.
 2. Add the named tests with deterministic byte sequences around `_RANGE_CHUNK_BYTES`. Assert exact
    bytes, cursor positions, request arguments, and exception category/message where applicable.
 3. Run `uv run python -m pytest tests/build_artifacts/test_validation_reader.py -q`. Require a red
@@ -143,7 +148,9 @@ the real parser path materially reduces requests while all validation still succ
 - **Contract: real external-build validation materially reduces parser-driven requests and keeps
   version identity.** Mode: `focused-test`. Add
   `test_external_boot_archive_validation_buffers_range_reads`. Expected red: the pre-change reader
-  exceeds the asserted request-count bound. Green command: `uv run python -m pytest
+  makes 117 kernel range calls for the 1,049,341-byte fixture and exceeds the fixed ceiling of
+  eight. The count includes content checking, both independent archive readers, and checksumming.
+  Green command: `uv run python -m pytest
   tests/providers/local_libvirt/test_validate_external_artifacts.py::test_external_boot_archive_validation_buffers_range_reads -q`.
 - **Contract: existing archive validation and failure behavior remain unchanged.** Mode:
   `focused-test`. Green command: `uv run python -m pytest
@@ -151,11 +158,12 @@ the real parser path materially reduces requests while all validation still succ
 
 ### Steps
 
-1. Add an incompressible module payload to the existing combined-archive fixture so parser reads
-   cross multiple internal boundaries without allocating an oversized artifact.
+1. Add deterministic incompressible module payload to the existing combined-archive fixture and
+   assert its compressed size is from 1 MiB through 2 MiB, so it stays within one 4 MiB buffer while
+   parser reads cross many smaller boundaries.
 2. Add the named regression. Assert validation succeeds, every request carries `test-version`, and
-   kernel request count is bounded by a small multiple of the independent archive passes plus the
-   checksum pass rather than by parser read count.
+   total kernel range-call count is at most eight across content checking, both independent archive
+   passes, and the checksum pass.
 3. Run both focused commands and require pass.
 4. Run `just test-changed`; require pass.
 5. Run pre-ship `just ci > FILE 2>&1 < /dev/null`; require exit 0 and report its test totals.

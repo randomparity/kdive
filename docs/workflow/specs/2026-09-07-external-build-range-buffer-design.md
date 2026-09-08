@@ -67,12 +67,15 @@ does not alter timing budgets or transport recovery, which #2318 and #2319 own.
 
 ## Success
 
-1. Sequential small reads across a valid incompressible external-build archive require materially
-   fewer object-store range calls than the unbuffered reader, with a regression bound independent
-   of `gzip`/`tarfile`'s exact parser read sizes.
+1. Sequential small reads across a valid incompressible external-build archive whose compressed
+   size is from 1 MiB through 2 MiB require at most eight kernel range calls for the complete
+   `validate_external_artifacts` operation. This count includes the content check, both independent
+   archive readers, and the checksum pass. The pre-change implementation makes 117 calls on the
+   1,049,341-byte fixture, so the ceiling is fixed before implementation and fails red.
 2. Buffer-boundary reads and seeks return the same byte sequence as a seekable in-memory file.
-3. EOF, seek-beyond-EOF, invalid seek, empty/short responses, and oversized responses retain
-   explicit, tested behavior.
+3. EOF, seek-beyond-EOF, invalid seek, `read()` through recorded EOF, caller reads larger than the
+   retained window, empty/short/oversized responses, and store exceptions retain explicit, tested
+   behavior.
 4. Every underlying archive request remains pinned to the immutable version observed by `HEAD`.
 5. Existing external-build validation, archive limits, identity checks, and failure categories
    remain green on x86_64 and architecture-neutral code remains valid for ppc64le.
@@ -80,13 +83,15 @@ does not alter timing budgets or transport recovery, which #2318 and #2319 own.
 ## Validation
 
 Focused unit tests in `tests/build_artifacts/test_validation_reader.py` exercise `_RangedReader`
-directly: sequential reads and request count, reads crossing a 4 MiB boundary, all supported seek
-modes, in-window seek reuse, out-of-window invalidation, EOF, seek beyond EOF, negative/invalid
-seek rejection, short responses, and oversized responses.
+directly: sequential reads and request count, reads crossing a 4 MiB boundary, a caller read larger
+than 4 MiB without retaining more than 4 MiB, `read()` through EOF, all supported seek modes,
+in-window seek reuse, out-of-window invalidation, EOF, seek beyond EOF, negative/invalid seek
+rejection, short and oversized responses, and unchanged propagation of a store exception.
 
 An integration-style validation regression in
 `tests/providers/local_libvirt/test_validate_external_artifacts.py` builds an incompressible
 external-boot fixture, runs `validate_external_artifacts`, asserts success and immutable version ids,
-and bounds kernel range calls well below the historical parser-read count. The exact focused green
-commands are recorded in the implementation plan. Repository proof is `just lint`, `just type`,
-focused pytest, `just test-changed`, and `just ci > FILE 2>&1 < /dev/null`.
+and requires no more than eight total kernel range calls, counted across content checking, both
+archive readers, and checksumming. The exact focused green commands are recorded in the
+implementation plan. Repository proof is `just lint`, `just type`, focused pytest,
+`just test-changed`, and `just ci > FILE 2>&1 < /dev/null`.
