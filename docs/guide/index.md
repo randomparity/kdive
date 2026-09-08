@@ -1,12 +1,12 @@
 # KDIVE agent guide
 
-KDIVE is a multi-user service that gives agentic coding environments a complete
-Linux kernel development and debug lifecycle across heterogeneous resources: local
-VMs, remote libvirt hosts, bare metal (PXE/SoL/IPMI/Redfish), PowerVM LPARs, and
-cloud instances. The build→boot→debug premise is that a single service owns the
-full chain — claim a resource, provision a system, build and install a kernel,
-boot it, attach a debugger, crash it, and retrieve the vmcore — all through one
-uniform MCP tool surface.
+KDIVE manages kernel experiments on local and remote libvirt VMs. Build the kernel in your
+own environment, upload the artifacts, and use MCP tools to provision, install, boot, debug,
+and retrieve crash evidence. Cloud, bare-metal, and PowerVM providers remain future work.
+
+Start by [connecting a client](agents/index.md), then read the [domain concepts](concepts.md)
+and follow the [core reproduce/verify path](core-path.md). If you need to install the service,
+start with the [operating guide](../operating/index.md).
 
 An agent drives KDIVE by calling tools and reading the structured response
 envelope each tool returns. Every tool returns a [`ToolResponse`](response-envelope.md)
@@ -17,10 +17,9 @@ capturing a vmcore — it returns immediately with a job handle (`status: runnin
 the agent polls `jobs.wait` until the job reaches a terminal state.
 See [async jobs](async-jobs.md) for the full pattern.
 
-The six domain objects (Resource, Allocation, System, Investigation, Run,
-DebugSession) have independent lifecycles but a fixed nesting order. Understanding
-that nesting — and knowing that a lower layer outlives its dependents — is the
-foundation for driving the tools correctly. See [concepts](concepts.md).
+The domain objects separate leased VM capacity from the investigation and its experiment
+history. A Run may be created before a System is available and bound later. See
+[concepts](concepts.md) for the relationships and lifetime rules.
 
 Destructive operations are protected by explicit policy: `control.force_crash`
 uses the destructive-op gate (`admin` role plus provisioning-profile opt-in),
@@ -32,12 +31,9 @@ RBAC](safety-and-rbac.md).
 When a tool reports a failure, the `error_category` field carries a stable string
 from a closed taxonomy. See [errors](errors.md).
 
-Each tool carries a maturity marker (`implemented`, `partial`, or `planned`). The
-allocation, investigation, run-create, and jobs plumbing is `implemented`, but
-several provider paths — build → boot → crash → introspect — are `partial` and
-live-gated, so they need real infrastructure rather than a stock host. Check the
-maturity badges in the [tool reference](reference/index.md) before relying on a
-given tool.
+The [tool reference](reference/index.md) is generated from tool registration and carries
+maturity and parameter contracts. Provider capabilities and host prerequisites still determine
+which operations your deployment can execute; see [platform support](../operating/platform-support.md).
 
 ## Contents
 

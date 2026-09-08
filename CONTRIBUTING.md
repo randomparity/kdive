@@ -22,7 +22,7 @@ just setup   # check host deps, sync the locked venv, install and run git hooks
 `libvirt-python` has no prebuilt wheels and compiles against the system libvirt
 headers, so install `libvirt-dev` (or your distro's equivalent) before `just
 setup`; `just check-deps` reports any missing host packages. See the
-[README](README.md) for the full host-prerequisite list. On `ppc64le` (POWER),
+[installation guide](docs/operating/install.md) for the full host-prerequisite list. On `ppc64le` (POWER),
 `just check-deps` also requires a Rust toolchain — see the
 [cross-platform development guide](docs/development/cross-platform.md) for the
 per-arch prerequisites, container images, and POWER stack bring-up.
@@ -55,8 +55,13 @@ applies `.git-blame-ignore-revs` automatically.
 Run a single test:
 
 ```bash
-uv run python -m pytest tests/mcp/test_allocations_tools.py::test_name -q
+uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py::test_request_under_cap_grants -q
 ```
+
+This allocation test needs Docker for disposable Postgres; it skips when Docker is unavailable.
+Use `just test-changed` while iterating, `just test-lf` to rerun failures, and
+`just test-verbose <test-path>` when a failure needs full context. See the
+[live-testing runbook](docs/operating/runbooks/live-testing.md) for the infrastructure tiers.
 
 Run `just ci` before you push — it runs the same recipes CI runs, so a green
 local `just ci` is the baseline for a reviewable PR.
@@ -106,8 +111,26 @@ mergeable.
   listing is the index, ADR-0504). Don't change an
   accepted decision in place — write a new ADR that supersedes it. See
   [`docs/adr/README.md`](docs/adr/README.md) for the full lifecycle (including the
-  partial-supersession strikethrough convention).
+  partial-supersession amendment convention).
 - Read [`docs/design/top-level-design.md`](docs/design/top-level-design.md) for
   the authoritative architecture, summarized in [ARCHITECTURE.md](ARCHITECTURE.md).
 - The release process is documented in
   [`docs/development/releasing.md`](docs/development/releasing.md).
+
+## Documentation changes
+
+Use the [documentation index](docs/README.md) to find the guide that owns a topic. Update that
+guide when behavior changes, and link to it from other pages instead of copying its procedure.
+Keep exact tool parameters in the generated reference and architecture rationale in ADRs.
+Completed task plans are working material; transfer still-useful knowledge to the owning guide
+before proposing their removal. Preserve decision records and unique verification evidence.
+
+Edit generated documentation at its source: tool wrapper docstrings and parameter descriptions,
+the configuration registry, or the canonical Markdown named in
+[`DOC_RESOURCES`](src/kdive/mcp/resources/registrar.py). Run the corresponding `just docs`,
+`just config-docs`, or `just resources-docs` recipe, then its `-check` counterpart.
+For prose changes run `just docs-links`, `just docs-paths`, and `just check-mermaid`;
+served documents also need `just served-doc-links` and `just resources-docs-check`.
+Check Markdown formatting explicitly with `uv run ruff format --check <changed-markdown-paths>`.
+Documented installation and recovery commands need verification on their supported host;
+record the environment and any untested path rather than treating a link check as a live proof.

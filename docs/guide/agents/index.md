@@ -196,13 +196,14 @@ flow. Tool names below are the namespaced identifiers from the
 
 1. `investigations.open` — open an Investigation under your project. Keep the
    returned investigation id; later calls scope to it.
-2. `allocations.request` — request an allocation (size, lease window, resource
-   selector). This returns a job; allocation is asynchronous.
-3. `jobs.wait` — wait on the job id from the previous step until it reaches a
-   terminal state.
-4. `allocations.wait(timeout_s=0)` — read back the granted allocation once the job
-   succeeds.
+2. `allocations.request` — request capacity using a named shape or explicit sizing and a
+   resource selector. Success returns the allocation id and state: `granted` for an immediate
+   admission, or `requested` when capacity is queued with `on_capacity="queue"`.
+3. `allocations.wait` — if queued, wait on the **allocation id** until its state leaves
+   `requested`; proceed only with a usable grant. A `timeout_s=0` call reads its current state.
+   Allocation admission does not return a job id.
 
-From there, drive a run with the `runs.*` tools and read results with the
-`vmcore.*` and `debug.*` tools. The full surface is listed in the
+Continue with the [core reproduce/verify path](../core-path.md) to provision a System,
+upload a kernel, and inspect the result. Provisioning and other long operations return
+job handles to poll with `jobs.wait`. The full surface is listed in the
 [tool reference](../reference/index.md).

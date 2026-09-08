@@ -1,6 +1,6 @@
 # Async jobs
 
-Some KDIVE operations take 30 minutes or more. Provision, build, install, and
+Some KDIVE operations take 30 minutes or more. Provision, install, boot, and
 vmcore capture run as durable jobs in a Postgres-backed queue rather than blocking
 the tool call. This keeps the MCP transport responsive and makes long ops survive
 worker restarts ([ADR-0008](../adr/0008-async-worker-tier-job-queue.md),
@@ -31,11 +31,14 @@ contains an object-store reference (e.g. `{"result": "<key>"}`) for any produced
 artifact. When it returns `status: failed`, the `error_category` field names the
 failure. See the errors guide (resource://kdive/docs/guide/errors.md).
 
+Allocation admission is a separate state machine: `allocations.request` returns an
+allocation id and state. A queued allocation is followed with `allocations.wait`,
+not `jobs.wait`. Kernel compilation happens in the caller's environment before upload.
+
 ## Which operations are long-running
 
 | Plane | Long-running tools |
 |---|---|
-| Allocation | `allocations.request` (when admission control defers) |
 | Provisioning | `systems.provision`, `systems.reprovision`, `systems.teardown` |
 | Install | `runs.install` |
 | Boot | `runs.boot` |

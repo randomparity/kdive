@@ -1,66 +1,59 @@
 # Domain concepts
 
-KDIVE models the kernel development lifecycle as six durable objects, each backed
-by a Postgres row with an explicit state machine. Replacing the PoC's single
-run-centric object with six independent lifecycles makes leasing, reprovisioning,
-and multi-allocation investigations expressible without special cases
-([ADR-0003](../adr/0003-six-durable-objects.md)).
+KDIVE separates experiment history from leased VM capacity. Six domain objects connect a
+kernel experiment to its resources; their records live in Postgres and bulk artifacts live
+in the object store.
 
 ## The six objects
 
+```text
+Investigation ──< Run ──< DebugSession
+                  │
+                  └── System ── Allocation ── Resource
+                      (after binding)
 ```
-(principal / project) ──< Investigation ──┐
-                                          ├──< Run ──< DebugSession
-   Resource ──< Allocation ──< System ────┘
-```
 
-**Resource** is a bookable thing registered by a provider: a local libvirt host, a
-remote machine, a cloud instance type. Resources have capabilities (architecture,
-console transports, PCIe devices) and a health status. They are discovered or
-registered; the agent does not create them.
+**Resource** is bookable capacity registered or discovered by a provider. The implemented
+production providers use local and remote libvirt hosts. Resource descriptions expose
+capabilities and availability; use them to select a host that can run your target architecture.
 
-**Allocation** is a principal's claim on a Resource for a time window. It passes
-through admission control — capability match, RBAC check, quota/budget check, and
-capacity check — before transitioning from `requested` to `granted` to `active`.
-Accounting events emit on every transition. An Allocation carries a lease expiry;
-when it expires, in-flight jobs drain and then the owning Systems are torn down.
+**Allocation** is a project's capacity claim for a lease window. Admission checks permissions,
+quota, budget, and capacity. A successful request returns `granted`, or `requested` when queued;
+use `allocations.wait` to follow a queued request. The lease is per allocation: `lease_expiry`
+is an absolute ISO-8601 UTC deadline measured against `server_time`. Renew with
+`allocations.renew` before expiry; after expiry the reconciler reclaims the allocation and its
+Systems. See the [allocation reference](reference/allocations.md) for recovery and constraints.
 
-**System** is a provisioned, bootable instance produced by applying a provisioning
-profile to an Allocation. A System is `defined → provisioning → ready`. Installing
-a new kernel and rebooting does not make a new System — only an OS reprovision does.
-One Allocation can host sequential Systems (reprovision in place). A System never
-outlives its Allocation.
+**System** is a provisioned VM associated with an Allocation. `systems.provision` creates its
+row in `provisioning` and queues provider work; successful provisioning makes it `ready`.
+Installing another kernel reuses the System. Reprovisioning cycles the same System through
+`reprovisioning` back to `ready` or `failed`. Its live infrastructure is bounded by its
+Allocation's lifetime. See the [System reference](reference/systems.md).
 
-**Investigation** is a campaign grouping the sequence of Runs toward a goal — a
-bug fix or a feature. Its lifetime is independent of any single Allocation: an
-Investigation may span System reprovisions, multiple Allocations, and different
-resource kinds. It becomes `active` when its first Run is created and is closed
-explicitly by the agent. Closing or abandoning an Investigation does not cascade to
-its Runs; they stay queryable for narrative and cost audit.
+**Investigation** groups Runs toward a goal such as reproducing and fixing a bug. It is scoped
+to a principal and project and may span Systems, Allocations, and provider kinds. Closing an
+Investigation does not cascade to its Runs. See the [Investigation reference](reference/investigations.md).
 
-**Run** is the join point: it belongs to exactly one System (fixing its Allocation)
-and exactly one Investigation. A Run covers one build→install→boot attempt. The
-agent's main loop is many Runs against one persistent System, each run carrying at
-most one DebugSession. Allocation and provisioning happen once; iteration across
-Runs is cheap. A Run can only be created on a `ready` System whose Allocation is
-`active`.
+**Run** records one kernel-build attempt within an Investigation. Build the kernel externally
+and upload it, or reuse a compatible build from the same Investigation. Create a Run bound
+to a ready System, or omit `system_id` and supply `target_kind` to create it unbound; later use
+`runs.bind` to select the System. Binding determines the Run's Allocation.
 
-**DebugSession** is a sub-object of a Run, bounded by a single boot of a single
-kernel. Within one boot a session may detach and re-attach any number of times; the
-cycle ends only at reboot. A session is a durable row — not just worker-side state
-— so the reconciler can detect a `live` session whose transport has died and move it
-to `detached`. A reboot ends the session; the next attach after a reboot belongs to
-the next Run.
+A Run's `succeeded` state means its **build** succeeded. It does not establish that install or
+boot succeeded: inspect `runs.get`'s `data.steps` and `data.boot_readiness`, and follow the
+returned job's outcome. See the [Run reference](reference/runs.md) and [async jobs](async-jobs.md).
+
+**DebugSession** records a debug attachment to a Run and its current boot. Reboot or crash
+invalidates live transport state; inspect the session and establish a valid attachment before
+continuing. See the [debug reference](reference/debug.md) for supported transports and operations.
 
 ## Lifecycle ordering
 
-Within the `Resource → Allocation → System → Run` chain, **lower layers outlive
-higher ones**: a Run never outlives its System, a System never outlives its
-Allocation. The reconciler enforces this: a System whose Allocation is released or
-expired is torn down; a Run on a torn-down System is failed. Investigation sits
-outside this nesting — it is a cross-cutting grouping whose `(principal, project)`
-scope is independent of any one Allocation.
+A System's live resources cannot outlast its Allocation. The reconciler repairs orphaned
+infrastructure and affected Runs when leases expire or Systems are torn down. Teardown does
+not erase the Investigation's experiment history. Artifact retention and allocation leases
+are separate lifetimes; follow the deadlines and recovery actions returned by the tools.
 
-See [ADR-0003](../adr/0003-six-durable-objects.md) and
-[ADR-0026](../adr/0026-investigation-run-lifecycle.md) for the full state machines
-and concurrency decisions.
+For implementation, the [state definitions and transition table](../../src/kdive/domain/capacity/state.py)
+are the current state-machine contract. The [architecture](../design/top-level-design.md)
+explains how the service enforces it; ADRs record the decisions and their later amendments.

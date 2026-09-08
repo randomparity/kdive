@@ -11,9 +11,9 @@ operator-configured opt-in provider; cloud, bare-metal, and PowerVM remain futur
 It is a greenfield rewrite of a single-user stdio PoC into a multi-user HTTP service.
 Python 3.14, managed with `uv`.
 
-Read `docs/design/top-level-design.md` first — it is the authoritative architecture. The
-current milestone plans are `docs/archive/plans/m0-implementation.md` and
-`docs/archive/plans/m1-implementation.md`.
+Read `docs/design/top-level-design.md` first — it is the authoritative architecture. Use
+`docs/README.md` for current learning paths. The M0/M1 plans under `docs/archive/plans/`
+are historical implementation records, not the current work queue.
 
 ## Commands
 
@@ -186,7 +186,7 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 - **server** — the FastMCP streamable-HTTP app; owns state machines, authz, admission
   control. Thin and fast; never blocks on a long provision.
 - **worker** — pulls durable jobs from the Postgres-backed queue and runs provider
-  operations. Long ops (provision/build/install/capture-vmcore) are jobs; the tool returns
+  operations. Long ops (provision/install/boot/capture-vmcore) are jobs; the tool returns
   `{job_id, status: running}` and the agent polls `jobs.*`.
 - **reconciler** — periodic drift-repair loop (ADR-0021): tears down orphaned Systems,
   fails Runs on torn-down Systems, reclaims expired leases, detaches dead DebugSessions.
@@ -207,14 +207,15 @@ its Allocation. See the design doc's "Domain model" section for the precise life
 
 ### The provider runtime seam
 
-The active M0/M1 provider seam is `ProviderRuntime` typed ports (ADR-0063). Production
+The active provider seam is `ProviderRuntime` typed ports (ADR-0063). Production
 assembly happens in `providers/assembly/composition.py`, which builds a `ProviderResolver` over the
 registered runtimes. The default production resolver registers local-libvirt; fault-inject is
 a concrete test/failure-path opt-in provider; remote-libvirt is an operator-configured
 opt-in provider wired through the same resolver/runtime seam. A provider still implements
-narrow port protocols for the planes it supports (Discovery, Provisioning, Build, Install,
+narrow port protocols for the planes it supports (Discovery, Provisioning, Install,
 Connect, Debug, Control, Retrieve; Allocation is core, not a provider plane), but runtime
-code calls those typed ports directly.
+code calls those typed ports directly. Kernel compilation runs in the caller's environment;
+KDIVE consumes uploaded builds through `runs.complete_build` (ADR-0316).
 
 The old `CapabilityRegistry` / `OpContract` dispatch design now exists only in historical
 ADRs and planning records (ADR-0066 removed the in-tree prototype). It is not the current

@@ -29,8 +29,8 @@ outside the agent session.
 
 ## What KDIVE provides
 
-- **The full kernel loop through MCP.** Provision, build, install, boot, debug, introspect, capture,
-  retrieve, and clean up through a consistent tool surface.
+- **The kernel workflow through MCP.** Build a kernel in your own environment and upload it;
+  use KDIVE to provision, install, boot, debug, capture, retrieve, and clean up.
 - **Durable investigations.** Resources, allocations, systems, investigations, runs, and debug
   sessions have explicit lifecycles backed by Postgres; large artifacts live in an S3-compatible
   object store.
@@ -52,70 +52,19 @@ fault-injection provider is an opt-in test facility. Cloud, bare-metal, and Powe
 future targets, not installable provider paths today. See the
 [provider architecture](docs/design/top-level-design.md#provider-model) for the extension model.
 
-## Choose a provider
+## Start here
 
-| Provider | Best fit | Where KDIVE runs | Start here |
-|---|---|---|---|
-| **local-libvirt** | Development, dedicated lab hosts, and the shortest route to a live VM | The server, worker, and reconciler run as host processes on the KVM/libvirt host | [Local-libvirt quick start](#local-libvirt-quick-start) |
-| **remote-libvirt** | Shared labs and deployments where the control plane is separate from the VM hosts | A Kubernetes control plane drives an operator-prepared libvirt host over TLS | [Remote-libvirt walkthrough](docs/operating/providers/remote-libvirt-walkthrough.md) |
+| What you want to do | Read next |
+|---|---|
+| Connect to an existing KDIVE server | [Agent onboarding](docs/guide/agents/index.md), then the [core workflow](docs/guide/core-path.md) |
+| Run KDIVE on a local Linux KVM/libvirt host | [Local-libvirt walkthrough](docs/operating/providers/local-libvirt-walkthrough.md) |
+| Run a control plane with separate libvirt hosts | [Remote-libvirt walkthrough](docs/operating/providers/remote-libvirt-walkthrough.md) |
+| Change KDIVE itself | [Contributing](CONTRIBUTING.md), then the [architecture overview](ARCHITECTURE.md) |
 
-### Local-libvirt quick start
-
-You need a Linux host with KVM/libvirt, Docker for the development backends, and a kernel source
-tree to drive. There is no PyPI package yet: the checkout is the install. On a fresh
-Debian/Ubuntu host one script installs the packages, builds the venv, installs the fixed
-live-worker lifecycle contract (the root-owned witness that supervises workers, ADR-0574), and
-prepares the host; log out and back in afterwards for the group memberships. On other distros
-follow Step 1 of the walkthrough and the live-stack runbook's prerequisites:
-
-```bash
-git clone https://github.com/randomparity/kdive.git
-cd kdive
-examples/local-libvirt/install-host.sh          # Debian/Ubuntu; then log out and back in
-```
-
-Then bring the stack up and build a guest image. `up.sh` runs the preflight, brings up the
-backends (Postgres, MinIO, mock OIDC), migrates the database, starts the daemons and the lifecycle
-workers on the operator's session libvirt, funds the `demo` project, and installs a `.mcp.json`
-into your kernel tree (`~/src/linux` by default, or `KDIVE_KERNEL_SRC`); `build-image.sh` builds
-a catalog image and registers it so an agent can provision it by name:
-
-```bash
-examples/local-libvirt/up.sh
-examples/local-libvirt/build-image.sh fedora-kdive-ready-44   # once; other catalog names work too
-export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
-cd ~/src/linux && claude          # or any MCP client that reads .mcp.json
-examples/local-libvirt/down.sh    # stop the stack when you are done (state is kept)
-```
-
-The [example README](examples/local-libvirt/README.md) documents the scripts, their variables,
-and the token lifecycle; the [local-libvirt walkthrough](
-docs/operating/providers/local-libvirt-walkthrough.md) is the step-by-step reference for host
-packages, worker privileges, the guest-image build, and the first allocation.
-
-### Remote-libvirt quick start
-
-Prepare a target host with libvirt TLS, firewall policy, guest storage, and KDIVE's provider
-authority. From the machine that will connect to it, run the read-only preflight:
-
-```bash
-just check-remote-libvirt HOST USER qemu+tls://HOST/system
-```
-
-Deploy the control plane and verify the chart:
-
-```bash
-helm install kdive deploy/helm/kdive \
-  -n kdive-demo \
-  -f deploy/helm/kdive/values-demo.yaml
-helm test kdive -n kdive-demo
-```
-
-Start with the [remote-libvirt host setup runbook](
-docs/operating/runbooks/remote-libvirt-host-setup.md), then follow the
-[remote-libvirt walkthrough](docs/operating/providers/remote-libvirt-walkthrough.md) to attach the
-provider, onboard a project, and run the lifecycle. The remote path needs real target hardware; it
-is not a local Docker-only demo.
+The local walkthrough includes a Debian/Ubuntu setup script and the first-VM procedure.
+The remote walkthrough covers host preparation, control-plane deployment, and verification.
+See [platform support](docs/operating/platform-support.md) for x86_64 and ppc64le requirements
+and [installation](docs/operating/install.md) for packaging and deployment choices.
 
 ## How it fits together
 
@@ -138,35 +87,8 @@ deployments add a lifecycle witness for worker-termination evidence. Read the
 [architecture overview](ARCHITECTURE.md) for the concise model or the
 [top-level design](docs/design/top-level-design.md) for the authoritative design and rationale.
 
-## Connect an agent
-
-KDIVE serves MCP over streamable HTTP. An agent follows the `suggested_next_actions` returned in
-each structured response and uses `jobs.wait` for long-running operations.
-
-- [Agent onboarding and MCP client configuration](docs/guide/agents/index.md)
-- [Core reproduce and verify path](docs/guide/core-path.md)
-- [Tool reference](docs/guide/reference/index.md)
-- [Response envelope and recovery model](docs/guide/response-envelope.md)
-
-## Develop KDIVE
-
-KDIVE uses Python 3.14 and [`uv`](https://docs.astral.sh/uv/). Install the task runner and hook
-manager before running setup:
-
-```bash
-uv tool install rust-just prek
-just setup
-just test
-```
-
-`libvirt-python` builds against the system libvirt and Python headers, so install your
-distribution's `libvirt-dev` and `python3-dev` equivalents first. On `ppc64le`, Rust and several
-source-build prerequisites are also required. See the
-[installation guide](docs/operating/install.md) and
-[x86_64/ppc64le development guide](docs/development/cross-platform.md).
-
-Contributor workflow and guardrails live in [CONTRIBUTING.md](CONTRIBUTING.md). The complete
-documentation map is [docs/README.md](docs/README.md).
+The [documentation index](docs/README.md) gives ordered learning paths for users, operators,
+and contributors, and explains how current guidance differs from historical designs.
 
 ## Project links
 
