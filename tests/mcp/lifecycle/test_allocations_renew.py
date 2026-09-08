@@ -25,6 +25,7 @@ from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemS
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import renew_allocation
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.accounting import ledger as accounting
@@ -391,3 +392,24 @@ def test_idempotency_key_scoped_to_renew_kind(migrated_url: str) -> None:
             assert row is not None and row[0] == _RENEW_KIND
 
     asyncio.run(_run())
+
+
+def test_renew_discloses_extended_lease_deadline(migrated_url: str) -> None:
+    # #2306: renew held the freshly extended lease_expiry and emitted only {"project": ...}, so
+    # the caller was told the extension succeeded without being told what it extended *to*. The
+    # success envelope now carries the new absolute deadline and the clock it is measured
+    # against, both normalized to UTC, and names allocations.renew again as the next recovery.
+    async def _run() -> tuple[ToolResponse, datetime]:
+        async with _pool(migrated_url) as pool:
+            res_id = await _seed_resource(pool)
+            alloc_id, before = await _seed_metered_alloc(pool, res_id, lease_hours_from_now=2.0)
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=3)
+            return resp, before
+
+    resp, before = asyncio.run(_run())
+    assert resp.status == "granted"
+    expiry, server_time = resp.data["lease_expiry"], resp.data["server_time"]
+    assert isinstance(expiry, str) and isinstance(server_time, str)
+    assert expiry.endswith("+00:00") and server_time.endswith("+00:00")
+    assert datetime.fromisoformat(expiry) == before + timedelta(hours=3)
+    assert "allocations.renew" in resp.suggested_next_actions

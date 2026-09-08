@@ -145,7 +145,18 @@ def _register_allocations_request(
         ] = None,
         window: Annotated[
             Decimal | None,
-            Field(default=None, gt=0, description="Lease window length in hours, e.g. 24."),
+            Field(
+                default=None,
+                gt=0,
+                description=(
+                    "Lease window length in hours, e.g. 24; omit for the operator-configured "
+                    "default. The window is per allocation, not per call: the grant returns its "
+                    "absolute end as data.lease_expiry (ISO-8601 UTC) with data.server_time as "
+                    "the reference clock, so compare those two rather than assuming a wall "
+                    "clock. Once the lease lapses the reconciler sweeps the allocation to "
+                    "expired and reclaims it; extend it before then with allocations.renew."
+                ),
+            ),
         ] = None,
         resource: Annotated[
             ResourceSelector,
@@ -210,6 +221,14 @@ def _register_allocations_request(
         holding a queue position instead of a live grant. A queued allocation is not
         usable yet; poll `allocations.wait` on its id until it leaves the ``requested``
         state before treating it as granted.
+
+        A grant states its lease in full: ``data.lease_expiry`` is the absolute ISO-8601 UTC
+        instant the lease ends and ``data.server_time`` is the server clock it is measured
+        against — compare the two rather than assuming a wall clock, and re-read either from
+        `allocations.wait`. The window is per allocation, not per call; once it lapses the
+        reconciler sweeps the allocation to ``expired`` and reclaims it. Extend it before then
+        with `allocations.renew`. A queued allocation holds no lease yet, so it carries neither
+        field until it is granted.
         """
         request = AllocationRequestPayload(
             shape=shape,
@@ -274,7 +293,15 @@ def _register_allocations_renew(app: FastMCP, pool: AsyncConnectionPool) -> None
             Field(description="Replay-safe key; a repeated key returns the prior renewal."),
         ] = None,
     ) -> ToolResponse:
-        """Extend an allocation lease window."""
+        """Extend an allocation lease window.
+
+        Success returns the new absolute end in ``data.lease_expiry`` (ISO-8601 UTC) with
+        ``data.server_time`` as the reference clock, so the extension is verifiable rather than
+        assumed — ``extend`` is added to the current expiry, not to now, and is clamped to the
+        operator-configured maximum window. A long session keeps its allocation by calling
+        `allocations.renew` again before that new deadline; once the lease lapses the reconciler
+        sweeps the allocation to ``expired`` and renewing it returns ``stale_handle``.
+        """
         return await _renew_allocation(
             pool,
             current_context(),

@@ -629,6 +629,26 @@ def test_upload_tools_state_deadline_scope_and_non_constraint() -> None:
         assert "beat the clock" in description  # chunks are size, not time
 
 
+def test_allocation_tools_state_the_lease_deadline_contract() -> None:
+    # #1336 / #2306: an agent calling `allocations.request` reads only the wrapper docstring and
+    # the `window` Field text, so the lease contract has to be stated there — the absolute
+    # deadline, the reference clock it is measured against, and the recovery tool. The `window`
+    # description carries the same three so the parameter is not a bare relative duration; the
+    # figure it must *not* carry is the operator-configured default, which is env-overridable
+    # (`KDIVE_LEASE_DEFAULT`) and would go stale baked into the schema.
+    tools = {t.name: t for t in TOOLS}
+    window = tools["allocations.request"].parameters["properties"]["window"]["description"]
+    for text in (
+        window,
+        tools["allocations.request"].description or "",
+        tools["allocations.renew"].description or "",
+    ):
+        lowered = text.lower()
+        assert "lease_expiry" in lowered  # the absolute deadline
+        assert "server_time" in lowered  # the reference clock
+        assert "allocations.renew" in lowered  # the named recovery action
+
+
 def test_upload_tools_warn_extra_header_breaks_signature() -> None:
     # #1338 / ADR-0395: an agent calling the upload tools reads only the wrapper docstring, so the
     # extra-header footgun must be stated there — the PUT must send exactly required_headers, and
