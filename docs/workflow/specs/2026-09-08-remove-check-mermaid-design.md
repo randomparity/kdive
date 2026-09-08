@@ -36,7 +36,7 @@ No replacement validation, no ADR, no ruleset edit, no diagram edits (#2384 excl
 1. `just ci` and `just setup` resolve with no mermaid recipe.
 2. No workflow, script, manifest, Dependabot ecosystem, or host-dep check for the checker remains.
 3. `just ci` is green, including both guards the deletion touches.
-4. No file outside Scope's record locations names a removed recipe, script, or workflow.
+4. No file outside Scope's record locations names a removed recipe, script, workflow, or host tool.
 
 ## Validation
 

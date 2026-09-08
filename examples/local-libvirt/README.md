@@ -109,7 +109,7 @@ why, so you can audit or redo a step:
   system Python is 3.14, the same minor as the project's, so the script symlinks the distro
   `python3-guestfs` binding into the venv and the preflight's `import guestfs, drgn` check
   passes; on a host whose system Python differs it stays a `WARN` (kdump only) and
-  everything else works. Contributors who also want the dev tooling (shellcheck, prek, node)
+  everything else works. Contributors who also want the dev tooling (shellcheck, prek)
   run `./scripts/check-setup-deps.sh -y` separately.
 - **Lifecycle contract** — `deploy/systemd/install-live-worker-lifecycle.sh --operator $USER
   --source <checkout>` as root, with the witness-member DSN on its standard input (the fixed
