@@ -120,22 +120,30 @@ of truth is `_DEPMOD_SEARCH_DIRS` in
   index inside the guest and are unaffected.
 - **Consequence** — a `depmod` outside those four directories no longer resolves. The operation
   fails with `missing_dependency`, which is not retried, and the failure message names the
-  directories that were searched. A `depmod` that resolves but cannot be executed — no execute
-  bit, a `noexec` mount, a truncated or wrong-architecture copy, a symlink whose target is gone —
-  fails with the same non-retried `missing_dependency`, but that message names the resolved path
-  and `errno` rather than the searched directories. Where a host carried a `depmod` both outside
-  and inside the four directories, the one inside now runs and the outside one is ignored. That
-  substitution is silent, so a host that relied on a locally built `kmod` or on a wrapper must
-  confirm the binary now selected is the one it wants.
+  directories that were searched. Resolution screens on execute permission, so a `depmod` that is
+  present in one of those directories but not executable by the account the worker runs as — no
+  execute bit, a `noexec` mount, a dangling or looping symlink — reads as absent and produces that
+  same message; check the mode bits and the mount options before concluding the binary is missing.
+  A copy that resolves and then fails to run — truncated, or not in an executable format — fails
+  with the same non-retried `missing_dependency`, but the resolved path and `errno` reach the
+  operator as `failure_detail_depmod` and `failure_detail_errno` on the run envelope rather than
+  in the message text. A transient exec fault is different again: replacing `depmod` while an
+  install is running raises `ETXTBSY`, which is categorised `infrastructure_failure` and is
+  retried rather than dead-lettered. Where a host carried a `depmod` both outside and inside the
+  four directories, the one inside now runs and the outside one is ignored. That substitution is
+  silent, so a host that relied on a locally built `kmod` or on a wrapper must confirm the binary
+  now selected is the one it wants.
 - **Recovery** — install the distribution's `kmod` package, which places `depmod` in `/usr/sbin`
   under a merged-`/usr` layout and `/sbin` under a split one. For a `depmod` built from source or
   installed to a non-FHS location, copy the binary into one of the four directories; it must be
-  executable by the account the worker runs as. Do not link from one of those directories to a
-  binary under `/usr/local` or another group-writable path: resolution follows the link and the
-  target is what executes, so the link would reinstate the exposure the list excludes.
-  `/usr/local/sbin` and `/usr/local/bin` are left out deliberately: `/usr/local` is group-writable
-  by default on part of the Debian family, and a binary placed there would run with the worker
-  slot account's authority over guest overlays.
+  executable by the account the worker runs as, on a mount that permits execution. Do not link
+  from one of those directories to a binary under `/usr/local` or another group-writable path:
+  resolution follows the link and the target is what executes, so the link would reinstate the
+  exposure the list excludes. `/usr/local/sbin` and `/usr/local/bin` are left out deliberately:
+  `/usr/local` is group-writable by default on part of the Debian family, and a binary placed
+  there would run with the worker slot account's authority over guest overlays. Repairing the host
+  does not resume the install that already failed — issue a new one for the same System. That
+  failure does not drive the System to `failed`, so the allocation survives.
 
 An operator whose only `depmod` comes from the distribution package sees no change.
 
