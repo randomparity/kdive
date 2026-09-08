@@ -47,8 +47,9 @@ Worker startup proves conditional-create behavior against the configured store b
 ## Backends only — `just stack-up` (no sudo)
 
 Brings up only the compose backends (Postgres/MinIO/OIDC) and migrates the schema — for the
-`just test-live-stack` suite, or to run the app tier from the compose reference
-(`docker compose up -d migrate server worker reconciler`). Does NOT start host processes or libvirt.
+`just test-live-stack` suite. It does not start host processes or libvirt. For the container app
+tier, follow the [Compose operating guide](../../deploy/compose/README.md), including its worker
+lifecycle recipes.
 
 ## Fund a project — `just onboard` (#834)
 

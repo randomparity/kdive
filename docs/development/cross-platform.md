@@ -1,36 +1,17 @@
 # Cross-platform development (x86_64 and ppc64le)
 
-KDIVE develops and runs on `x86_64` and on `ppc64le` (POWER9/POWER10). The dev
-loop is the same page on both: install the host prerequisites, sync the venv,
-bring up the compose stack. This guide records the two places the arches diverge —
-a Rust toolchain requirement on `ppc64le`, and a handful of container images with
-no `ppc64le` manifest — and points at the POWER host bring-up runbook for a real
-KVM-HV box.
-
-Everything here matches what the tooling actually enforces: `just check-deps` is
-arch-aware ([ADR-0360](../adr/0360-arch-aware-rust-dep-check.md)), the compose
-image set is fenced against an arch-support matrix
-([ADR-0356](../adr/0356-cross-platform-dev-containers.md)), and the OIDC and app
-images are built or published multi-arch
-([ADR-0357](../adr/0357-multi-arch-mock-oidc-image.md),
-[ADR-0358](../adr/0358-publish-mock-oidc-image.md),
-[ADR-0359](../adr/0359-multiarch-app-image.md); for the app image that is the
-release tags — `:edge` is amd64-only, [ADR-0572](../adr/0572-edge-builds-amd64-only-releases-stay-multiarch.md)).
+This guide owns architecture-specific development prerequisites and POWER host integration.
+Use [installation](../operating/install.md#development-and-ci-toolchain) for the shared Linux
+requirements and [contributing](../../CONTRIBUTING.md) for the development loop. The
+[platform guide](../operating/platform-support.md) distinguishes implemented mechanisms from
+recorded live proofs.
 
 ## Host prerequisites
 
-Both arches need the same base tools; `ppc64le` adds a Rust toolchain. Let
-`just check-deps` report what is missing — it captures the host arch and only
-requires Rust on arches with no prebuilt wheels, so it never raises a false Rust
-requirement on `x86_64`.
-
-### Both arches
-
-- **`libvirt-dev` and `python3-dev`** system headers — `libvirt-python` has no
-  wheels and compiles against both, on every arch. `uv sync` fails without them.
-- **[`uv`](https://docs.astral.sh/uv/)** — the Python toolchain manager.
-- **`just` and `prek`** — install before `just setup`, which cannot bootstrap its
-  own runner: `uv tool install rust-just` and `uv tool install prek`.
+Complete the shared prerequisites on either architecture. On POWER, complete the additions below
+before installing `just`/`prek` or syncing the environment. `just check-deps` checks the host
+architecture and requires `rustc` and `cargo` on ppc64le; that is a developer-tool requirement,
+not a claim that every Python dependency needs a source build.
 
 ### ppc64le only
 
@@ -61,126 +42,107 @@ go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 export PATH="$(go env GOPATH)/bin:$PATH"
 ```
 
+For the optional `live` dependency group, install the native `drgn` build dependencies before
+`uv sync --locked --group live`. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install autoconf automake libtool autoconf-archive pkgconf make gawk \
+  libelf-dev libdw-dev libkdumpfile-dev
+```
+
+`libkdumpfile` must be present when `drgn` builds: an importable `drgn` without that support
+cannot read kdump-compressed vmcores. For the system `guestfs` binding, follow the
+[worker-venv instructions](../operating/runbooks/four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs),
+including the Python ABI match and Debian/Ubuntu `dist-packages` path. A successful import
+alone does not prove a real capture can be read.
+
 Source builds can make the first setup slow; later runs reuse cached artifacts. The runtime
 container's native dependency setup is maintained in the [Dockerfile](../../Dockerfile).
 
-### The rest of setup is identical
-
-```bash
-uv tool install rust-just
-uv tool install prek
-just setup   # check host deps, sync the locked venv, install and run git hooks
-```
-
-See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) for the full development loop and
-[`docs/operating/install.md`](../operating/install.md) for the host-prerequisite
-list. On a from-scratch POWER host, the
-[POWER host bring-up runbook](../operating/runbooks/power-host-bringup.md) lists
-the exact `apt-get` sets (including the `drgn`/kdump build headers and the
-`live`-group source builds).
-
 ## Container images
 
-`docker compose up` (the backend stack plus the app tier — see
-[`docker-compose.yml`](../../docker-compose.yml)) draws on the images below. Most
-publish `ppc64le` manifests and pull directly; two do not and are handled
-explicitly. The full arch-support matrix, and the CI guard that fences the compose
-file against it, live in [ADR-0356](../adr/0356-cross-platform-dev-containers.md).
+The [Compose operating guide](../../deploy/compose/README.md) owns container-stack bring-up and
+worker lifecycle. The repository's configuration and publishing workflows define these choices:
 
-| Image | ppc64le | How it is used |
-|---|---|---|
-| `postgres:17` | pulls | upstream multi-arch |
-| `minio/minio`, `minio/mc` | pulls | upstream multi-arch |
-| `prom/prometheus` | pulls | upstream multi-arch (`obs` profile) |
-| `grafana/grafana` | **no image** | opt-in `obs` profile only; dashboards unavailable on ppc64le |
-| mock OIDC issuer | builds/pulls | in-repo mirror (`deploy/mock-oidc`) — see below |
-| `kdive` app image | builds/pulls | repo `Dockerfile`; release tags publish multi-arch, `:edge` is amd64-only — see below |
+| Component | POWER behavior in this repository |
+|---|---|
+| Postgres, MinIO and MinIO client | Compose selects the images covered by the [container architecture policy](../adr/0356-cross-platform-dev-containers.md). |
+| Mock OIDC | Local build from `deploy/mock-oidc`; `KDIVE_OIDC_IMAGE` selects a prebuilt image. The publish workflow targets `linux/amd64,linux/ppc64le`. |
+| KDIVE app | Local build from the root Dockerfile; `KDIVE_IMAGE` selects a prebuilt image. Release builds target `linux/amd64,linux/ppc64le`; rolling `edge` builds target only `linux/amd64`. |
+| Observability | The host-stack script starts Prometheus separately and skips Grafana on ppc64le. `--skip-obs` skips both. |
 
-### The mock OIDC issuer
+The [release guide](releasing.md#container-image-publishing) owns published-image selection and
+verification. Git tags use `vX.Y.Z`; container tags use `X.Y.Z`. The ppc64le release build runs
+under QEMU emulation and compiles native dependencies; it is separate from native runtime proof.
+PR and rolling-edge app builds use amd64 only.
 
-The upstream `ghcr.io/navikt/mock-oauth2-server` publishes only `amd64`/`arm64`,
-so kdive mirrors it in-repo at `deploy/mock-oidc` on a multi-arch JRE base — the
-same jar version, byte-identical token contract, no Kotlin rebuild
-([ADR-0357](../adr/0357-multi-arch-mock-oidc-image.md), and the
-[mirror README](../../deploy/mock-oidc/README.md)). The compose `oidc` service is:
+The [mock issuer README](../../deploy/mock-oidc/README.md) owns its dependency pin and rebuild
+procedure. The mirror resolves architecture-neutral JVM dependencies on the build host and uses
+a target-native JRE. A first local build needs its base images and Maven dependencies; it does
+not work offline without those cached inputs. A published-image override needs registry access.
+There is no separate native-JVM issuer step in the POWER host flow.
 
-```yaml
-image: ${KDIVE_OIDC_IMAGE:-kdive-mock-oidc:dev}
-build: ./deploy/mock-oidc
+## Native POWER host integration
+
+Use the [live-stack runbook](../operating/runbooks/live-stack.md) for provisioning, fixtures,
+managed worker startup and teardown. Persistent hosts are provisioned through the repository
+Ansible roles; their installed worker contract publishes the session URI in
+`/etc/kdive/live-worker-libvirt.env`. Workers use fixed accounts and the installed lifecycle
+socket. Do not replace that path with direct root workers or `qemu:///system`.
+
+POWER-specific host checks:
+
+- Native acceleration requires usable `/dev/kvm` and KVM-HV; a foreign-architecture guest uses
+  TCG. See [platform support](../operating/platform-support.md#architecture-and-accelerator-tiers).
+- The `libvirt_stack` role selects the native QEMU package and the distro's daemon model:
+  monolithic libvirtd on Debian-family hosts, modular daemons on Red Hat-family hosts. SLIRP
+  guest networking does not require the libvirt `default` network.
+- On POWER, supermin may read `/boot/vmlinux-*` rather than x86's `/boot/vmlinuz-*`. The
+  `live_vm_host` role makes both patterns readable by the KVM group. Reapply provisioning after
+  a host kernel update; an operator-root readability check does not prove worker access.
+- Image customization needs a workspace traversable by its QEMU identity. Use the
+  [image-lifecycle permissions guidance](../operating/runbooks/image-lifecycle.md), and let
+  provisioning own worker staging, console and overlay directories.
+
+The [local preflight](../../scripts/operations/check-local-libvirt.sh) can diagnose host tools,
+imports and readable kernels, using `KDIVE_PYTHON` to select the worker interpreter. It also
+checks the older system connection and default network, so its success is not proof of the
+installed session authority or a working capture. The live-stack and live-testing checks own
+those deployment proofs.
+
+### Capture-child attestation
+
+Generate with the same target-native interpreter and installed source the worker will execute,
+then perform the separate privileged installation. Re-run both commands after any Python,
+loader, shared-library, or bootstrap-source update and before restarting workers. Workers only
+verify the root-owned manifest; a stale manifest makes readiness fail.
+
+For a runtime installed at the current checkout:
+
+```bash
+just build-capture-bootstrap-manifest \
+  "$PWD/.venv/bin/python" \
+  "$PWD/build/capture-bootstrap-manifest.json"
+sudo "$PWD/.venv/bin/python" scripts/generate/build-capture-bootstrap-manifest.py install \
+  --staged "$PWD/build/capture-bootstrap-manifest.json" \
+  --destination /usr/share/kdive/capture-bootstrap-manifest.json
+sudo test "$(stat -c '%u:%g:%a' /usr/share/kdive/capture-bootstrap-manifest.json)" = "0:0:644"
 ```
 
-- **`KDIVE_OIDC_IMAGE` unset (default)** — `build:` builds the mirror locally and
-  tags it `kdive-mock-oidc:dev`. Works offline and on any arch whose base images
-  publish (`amd64`/`arm64`/`ppc64le`). This is the working default on POWER today.
-- **`KDIVE_OIDC_IMAGE` set to the published digest** — compose pulls the prebuilt
-  `linux/amd64,linux/ppc64le` mirror instead of building it:
+For an Ansible deployment, reapply `libvirt_stack` after the final runtime exists, setting
+`libvirt_stack_capture_manifest_interpreter` to that runtime's Python and
+`libvirt_stack_capture_manifest_source_root` to its `src` directory. The role keeps generation
+and privileged installation separate. A manifest generated for a development checkout does
+not attest another installed runtime.
 
-  ```bash
-  export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:<digest>
-  ```
+Run the containment carrier on native POWER against the revision under test:
 
-  The [`publish-mock-oidc`](../../deploy/mock-oidc/README.md) workflow prints the
-  current digest in its run summary. A digest reference cannot also be a `build:`
-  target, so the pull is the override and the local build is the default — never
-  both ([ADR-0358](../adr/0358-publish-mock-oidc-image.md)).
+```bash
+uv run python -m pytest tests/jobs/capture_operations/test_sandbox.py \
+  tests/jobs/capture_operations/test_provider_child.py::test_child_real_provider_dispatch_writes_bounded_success_without_descendants -q
+```
 
-> The GHCR mirror package may still be **private**. Until a maintainer flips it
-> public in the GHCR package settings, an unauthenticated `docker pull` of the
-> digest fails — use the default local build (leave `KDIVE_OIDC_IMAGE` unset) or
-> an authenticated pull meanwhile.
-
-### The kdive app image
-
-`ghcr.io/randomparity/kdive` is published as a `linux/amd64,linux/ppc64le`
-manifest on a `vX.Y.Z` release tag
-([ADR-0359](../adr/0359-multiarch-app-image.md)); the rolling `:edge` built on
-every push to `main` is amd64-only
-([ADR-0572](../adr/0572-edge-builds-amd64-only-releases-stay-multiarch.md)).
-The `Dockerfile` guards its
-`ppc64le` source-build steps (`grpcio` against system OpenSSL/zlib, the
-autotools `drgn` build with `libkdumpfile`) behind `TARGETARCH`, so the `amd64`
-image is unchanged. A POWER operator can `docker pull` a release tag rather than
-build it. As with the OIDC mirror, `KDIVE_IMAGE` overrides the compose tag
-(`${KDIVE_IMAGE:-kdive:dev}`) to drive a pre-built image; unset, `build: .` builds
-`kdive:dev` from source and local dev is unchanged.
-
-## Stack bring-up on a POWER host
-
-For a clean `ppc64le` KVM-HV box — from OS install through a running local-libvirt
-provider and the full kdive spine — follow the
-[POWER host bring-up runbook](../operating/runbooks/power-host-bringup.md). It is
-POWER-generic (POWER9 or POWER10) and its exit criterion is a single
-`scripts/operations/check-local-libvirt.sh` invocation that names the fix for each gap.
-
-Two notes where the compose flow now differs from a hand-run stack:
-
-- **OIDC.** The runbook's manual native-JVM OIDC step predates the in-repo mirror.
-  With the mirror, `docker compose up` builds the OIDC issuer locally on `ppc64le`
-  ([ADR-0357](../adr/0357-multi-arch-mock-oidc-image.md)), so that manual
-  workaround is not needed for the compose flow.
-- **Observability.** Skip the `obs` profile on `ppc64le` — Grafana has no
-  `ppc64le` image. Prometheus does publish one, so run it alone if you need
-  metrics:
-
-  ```bash
-  docker compose up -d prometheus
-  ```
-
-## Known gaps and slow paths
-
-- **Grafana on ppc64le.** No upstream `ppc64le` image at any tag, so the opt-in
-  `obs` dashboard is unavailable on POWER. Prometheus (the metrics store) is
-  unaffected. Accepted gap, tracked in
-  [ADR-0356](../adr/0356-cross-platform-dev-containers.md).
-- **Emulated ppc64le app-image build is slow.** The release job builds the
-  `ppc64le` leg under QEMU emulation on an `amd64` runner, where `grpcio` and
-  `drgn` compile from source (minutes, not seconds). This is bounded to
-  `main` pushes and release tags — PR CI stays `amd64`-only — and buildx layer
-  caching amortizes it across runs
-  ([ADR-0359](../adr/0359-multiarch-app-image.md)).
-- **GHCR OIDC mirror visibility.** Documented above: pull requires the package to
-  be public; the local build works regardless.
-- **CI verification is buildx, not a POWER runner.** The epic proves the images
-  *build* for `ppc64le` under `docker buildx`; runtime validation on real POWER is
-  the separate live-hardware track
-  ([ADR-0355](../adr/0355-power-native-kvm-hv-validation.md), and the runbook).
+The fork/vfork/exec/clone/clone3 checks and empty child-process-tree check must pass on ppc64le;
+emulation or skipped tests do not establish native containment. The
+[live-testing guide](../operating/runbooks/live-testing.md#ppc64le-spine-on-native-power) owns the
+native guest spine and fixture requirements.

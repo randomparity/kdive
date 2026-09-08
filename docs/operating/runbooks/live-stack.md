@@ -23,10 +23,11 @@ workers on the host so they can access KVM and libvirt.
 
 ## Prerequisites
 
-- A KVM / nested-virt host with `libvirt` and a running `libvirtd`.
-- Docker with a reachable daemon and **pullable** compose images. The compose file pins
-  `ghcr.io/navikt/mock-oauth2-server:3.0.3`; if that tag no longer resolves on ghcr.io,
-  re-pin it to a current tag before `just stack-up`.
+- A KVM / nested-virt host with the provisioned libvirt daemon and socket for its distro.
+  Use the installed session endpoint described below.
+- Docker with a reachable daemon and access to the Compose images and build dependencies.
+  The mock OIDC service builds the in-repo mirror by default; see the
+  [cross-platform image guidance](../../development/cross-platform.md#container-images).
 - The repo set up: `just setup` (or `uv sync --locked`).
 - For **local-libvirt `kdump`** capture, the worker venv additionally needs `drgn`
   (`uv sync --group live`) and the system `guestfs` binding wired in; this is a one-time step
@@ -103,12 +104,13 @@ off, and no MinIO prefix/folder exclusions), and applies database migrations.
 > wait failure. `minio-init`'s exit code still propagates, so a bucket creation, version enable,
 > or version-policy verification failure fails `just stack-up` before any KDIVE process starts.
 
-For an external bucket, the runtime identity also needs `s3:GetObjectVersion`, `s3:GetBucketVersioning`,
-`s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. First adoption is stop-old-first: quiesce
-all old processes, grant and verify IAM, verify whole-bucket/no-exclusions/MFA-off policy, enable
-versioning, wait for activation, migrate, and start only the version-aware image. Suspending
-versioning and live rollback to a pre-ADR-0524 image are unsupported. The complete procedure is in
-[Installing KDIVE](../install.md).
+For an external bucket, the runtime identity needs `s3:GetObjectVersion`,
+`s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. Complete the
+[object-store preflight](../install.md#object-store-preflight) before starting processes.
+This checkout requires fresh protocol-4 resources; the
+[release-compatibility boundary](../install.md#release-compatibility) applies to this host stack
+as well. Historical versioning-adoption instructions are not a migration path for existing
+protocol-3 state.
 
 ### Required: abort-incomplete-multipart-upload lifecycle rule
 

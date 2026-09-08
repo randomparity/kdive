@@ -244,7 +244,8 @@ guest image, plus the per-family env above. Standing up the host reproducibly �
 including the short session-runtime paths, the warm image store, and both boot families under
 `qemu:///session` — is the
 [self-hosted KVM runner runbook](self-hosted-kvm-runner.md); the ppc64le
-(POWER) north-star host is the [POWER host bring-up runbook](power-host-bringup.md).
+(POWER) host prerequisites are in the
+[cross-platform guide](../../development/cross-platform.md#native-power-host-integration).
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host
 dependency for one of these: declare it in the owning Ansible role in the same
@@ -253,7 +254,7 @@ provisioning-parity notes in [AGENTS.md](../../../AGENTS.md)).
 
 The dormant external-boot authority host is not a fourth live-test tier and does not supply a
 provider adapter. Its one-shot readiness, journal-restoration, request-socket, and mutual-TLS
-diagnosis are owned by the [self-hosted KVM runner runbook](self-hosted-kvm-runner.md#dormant-external-boot-authority-diagnosis).
+diagnosis are owned by the [self-hosted KVM runner runbook](self-hosted-kvm-runner.md#external-boot-authority-diagnosis).
 Keep the current fixed-worker provider/KVM path for these tests; capability advertisement remains
 disabled until #2140.
 
@@ -319,6 +320,32 @@ stack; it skips cleanly (pytest exit 5 tolerated) without either. Because TCG
 needs no `/dev/kvm`, this is the tier that runs on a hosted `ubuntu-latest`
 runner. The ppc64le prerequisites and container images are in the
 [cross-platform guide](../../development/cross-platform.md).
+
+### ppc64le spine on native POWER
+
+The ppc64le proof drivers also run on a native POWER host: `expected_accel` selects KVM when
+native `/dev/kvm` is present, otherwise TCG. Bring up the managed host stack with the
+[live-stack runbook](live-stack.md), using the
+[POWER prerequisites](../../development/cross-platform.md#native-power-host-integration).
+Backends alone are insufficient; server, worker and reconciler must be running at the revision
+under test.
+
+The four drivers in `tests/integration/test_live_stack.py` need
+`KDIVE_GUEST_IMAGE_PPC64LE` pointing to a prepared ppc64le qcow2. The uploaded-kernel drivers
+also need `KDIVE_PPC64LE_BUNDLE`, a directory containing `kernel.tar.gz` and `initrd.img`.
+The tar contains the ppc64le ELF at `boot/vmlinuz` and matching `lib/modules/<version>/`;
+the initramfs must match that kernel. See the
+[recorded bundle proof](../../design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md) for the
+artifact shape, and the [external-build contract](../external-build-upload.md) for current
+requirements. Image preparation belongs to [image lifecycle](image-lifecycle.md).
+
+With these fixtures and the live-stack environment configured, run `just test-live-tcg`.
+The marker name does not force emulation; the expected accelerator is resolved from the host.
+Report which drivers passed or skipped. The fadump driver skips non-ppc64le hosts; for its
+intended native proof, also confirm KVM is selected and the fadump prerequisites are met.
+A skip is not capture evidence. The
+[platform support page](../platform-support.md#crash-capture-methods-by-arch) records the dated
+capture proofs and their limits.
 
 ## The shared harness
 
@@ -625,7 +652,7 @@ worker behind it is visible as a stale log rather than read as a graded process.
 - [ADR-0387 — self-hosted KVM runner host codification](../../adr/0387-selfhosted-kvm-runner-host-codification.md)
 - [ADR-0441 — investigation-scoped uploaded rootfs](../../adr/0441-investigation-scoped-uploaded-rootfs.md)
 - [ADR-0442 — reclaim the investigation rootfs via a worker job](../../adr/0442-rootfs-reclaim-worker-job.md)
-- [live-stack runbook](live-stack.md) · [self-hosted KVM runner](self-hosted-kvm-runner.md) · [POWER host bring-up](power-host-bringup.md) · [four-method live run](four-method-live-run.md)
+- [live-stack runbook](live-stack.md) · [self-hosted KVM runner](self-hosted-kvm-runner.md) · [POWER host integration](../../development/cross-platform.md#native-power-host-integration) · [four-method live run](four-method-live-run.md)
 # External-boot recovery capacity
 
 Each fixed worker has `KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES`, measured in bytes per

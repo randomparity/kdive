@@ -184,7 +184,7 @@ default. Do both once on the worker host:
    `libkdumpfile` to open kdump-**compressed** vmcores — without it, kdump capture fails
    `drgn was built without libkdumpfile support` even though ELF cores read. Install
    `libkdumpfile-dev` (Debian/Ubuntu) / `libkdumpfile-devel` (Fedora) **before** the build; see the
-   [POWER host bring-up runbook](power-host-bringup.md).
+   [POWER source-build prerequisites](../../development/cross-platform.md#ppc64le-only).
 
 2. Install the libguestfs Python binding as a system package:
 
@@ -233,33 +233,17 @@ default. Do both once on the worker host:
 
 #### Prepare the worker-host directories (install staging + console)
 
-`runs.install` stages the built kernel/initrd under `KDIVE_INSTALL_STAGING` (default
-`/var/lib/kdive/install`) before defining the domain, and `runs.boot` reads the guest serial
-console log libvirt writes under `/var/lib/kdive/console`. On `qemu:///system` the VM runs as the
-`qemu` user and `virtlogd` writes the console log as `root`, so both directories carry
-host-permission constraints a non-root worker must satisfy:
+The installed host contract owns the worker's staging, console and overlay directories and
+publishes its explicit session URI. Follow the
+[live-stack prerequisites](live-stack.md#prerequisites) before starting workers. Use the fixed
+worker accounts and lifecycle socket; direct root workers are not a supported substitute.
 
-- **Install staging** must be a directory the worker user can write **and** the `qemu` user can
-  traverse to read the staged kernel. Create it once under a world-traversable path — never under a
-  private `$HOME` (mode `0700` hides the staged kernel from `qemu`, and the VM fails to start with
-  `could not open kernel file … Permission denied`):
-
-  ```bash
-  sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install
-  ```
-
-  `scripts/operations/check-local-libvirt.sh` fails with this fix when the directory is missing or unwritable.
-  To stage elsewhere, set `KDIVE_INSTALL_STAGING` for the worker to another world-traversable,
-  worker-writable path (again, not `$HOME`).
-
-- **Console log** at `/var/lib/kdive/console/<system>.log` is created by `virtlogd` as `root:root`
-  mode `0600`; the boot job reads it to capture the redacted console artifact, so the worker user
-  must be able to read it. The simplest arrangement is to **run the worker as `root`** (the natural
-  identity for managing `qemu:///system` domains, libguestfs, and kexec). If the worker runs
-  unprivileged, a default POSIX ACL alone does **not** help — the `0600` create-mode zeroes the ACL
-  mask; instead pre-create each `…/console/<system>.log` as the worker user before boot (a
-  worker-owned file inherits the directory's `virt_log_t` SELinux type and stays worker-readable
-  while `virtlogd` appends to it), or grant the worker read access via your site's policy.
+QEMU must be able to traverse the image and boot-artifact paths, and the worker must be able
+to read the console and capture output. A path under a private `0700` home can prevent QEMU
+from starting. A `qemu:///system` console created by virtlogd as `root:root` mode `0600` cannot
+be made worker-readable merely by setting a default ACL: the create mode masks it. Repair the
+installed identity/path contract and verify access as the relevant identities. Do not widen
+private worker directories or switch to root to bypass a failed check.
 
 Fetching the core force-stops the domain. For a `crashed` System this is benign — kdive does
 not auto-recover a crashed System — but a guest that kdump-rebooted back to multi-user is

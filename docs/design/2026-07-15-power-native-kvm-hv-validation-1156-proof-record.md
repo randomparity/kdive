@@ -15,9 +15,10 @@ Issue: #1156 · Epic: #1139 · Design: `2026-07-13-ppc64le-full-support.md` deci
 
 Decision 3 of the ppc64le design gated native validation on hardware. #1156's acceptance:
 
-1. **Runbook reproducible from a clean host** — `docs/operating/runbooks/power-host-bringup.md`,
-   driven to the `check-local-libvirt.sh` "host is ready" exit criterion. Every step is a fix the
-   check emitted on a clean install.
+1. **Runbook reproducible from a clean host** — the POWER runbook used for this dated proof
+   was driven to the `check-local-libvirt.sh` "host is ready" exit criterion. That procedure
+   has since been retired; current [POWER host integration](../development/cross-platform.md#native-power-host-integration)
+   uses the installed worker contract. This does not change the proof's historical result.
 2. **Documented native run of the full spine, plus the x86_64-under-TCG direction** — below.
 3. **Any KVM-HV-vs-TCG behavioral difference folded back into code/ADRs** — the `accel=kvm`
    difference (§Results) is folded into the proofs (`expected_accel`, this branch); the ppc64le

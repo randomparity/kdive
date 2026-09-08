@@ -68,7 +68,10 @@ bootstrap not completed in this change.
 
 ## Repro to complete the capture (once the host is provisioned)
 
-Follow `docs/operating/runbooks/power-host-bringup.md` §0–§6 to a ready host, then §7:
+The original POWER setup procedure has been retired. For a new run, use the current
+[POWER host integration](../development/cross-platform.md#native-power-host-integration) and
+[native spine requirements](../operating/runbooks/live-testing.md#ppc64le-spine-on-native-power).
+The command below records the test selection proposed at the time of this proof:
 
 ```bash
 cd ~/src/kdive

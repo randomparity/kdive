@@ -101,7 +101,7 @@ Files:
   `just install-capture-bootstrap-manifest` for operators; it atomically installs the staged bytes
   root-owned mode 0644 and verifies byte identity. Keep `just setup` unprivileged and limited to
   the staged guard. Modify `Dockerfile`, `deploy/ansible/roles/libvirt_stack/`, and
-  `docs/operating/runbooks/power-host-bringup.md` to generate then install the manifest only after
+  `docs/development/cross-platform.md` to generate then install the manifest only after
   the final target-native interpreter/runtime. Compose and Helm consume the manifest baked into
   that same application image; host processes consume the explicit operator/Ansible installation.
 - Modify `src/kdive/__main__.py` to add the internal `capture-operation` process verb.
@@ -132,9 +132,8 @@ Steps:
    returns `EPERM`, thread
    creation succeeds, and the child process tree has no descendants on x86_64 and ppc64le. The
    ppc64le arm uses the native POWER carrier documented by
-   `docs/operating/runbooks/power-host-bringup.md`: after its environment setup, run
-   `uv run python -m pytest
-   tests/jobs/capture_operations/test_sandbox.py -q`. Success requires `EPERM` from `fork`,
+   `docs/development/cross-platform.md`: its capture-child attestation section carries the
+   syscall and provider-child containment test selections. Success requires `EPERM` from `fork`,
    `vfork`, both exec calls, and clone flag sets missing any required thread bit; `ENOSYS` from
    every `clone3`; success from the complete thread mask with ordinary and extra pthread flags;
    successful real provider-thread fallback; and an empty child process tree. The same matrix
