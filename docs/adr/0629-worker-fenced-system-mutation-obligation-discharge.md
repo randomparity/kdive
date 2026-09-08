@@ -65,9 +65,10 @@ only the teardown reclaim path switches to that method. The shared
   above shows cannot be built from a single grant.
 - The gate uses `pg_has_role(session_user, …)`, which is true for a superuser against every
   role, so every test arm needs a real `LOGIN` principal.
-- Obligations already leaked by #2302 on production Systems are not repaired by this change.
-  They stay open, and `retained_owners` (`remote_module_attempt_obligations.py:513`) keeps
-  their volumes out of the reaper. Remediating existing rows is separate work.
+- Obligations already leaked by #2302 on live Systems are not repaired by this change. They
+  stay open, and `retained_owners` (`remote_module_attempt_obligations.py:513-525`) keeps their
+  volumes out of the reaper. Remediating those rows is separate follow-up work, owned by the
+  campaign that dispatched this fix; this record stops new leaks and repairs none.
 
 ## Considered & rejected
 

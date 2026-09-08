@@ -29,9 +29,15 @@ the file map and the exact code.
 Out of scope, and unchanged: mapping `psycopg.errors.InsufficientPrivilege` to a platform error
 in the shared worker exception path (#2302 item 2, deferred by operator decision — owner: a
 separate follow-up); auditing other job handlers for the same pattern; the write-once trigger
-semantics and the discharge idempotency contract; the two `kdive_server` activation-edge call
-sites, which keep their direct write; and repairing obligations already leaked by this bug on
-production Systems.
+semantics and the discharge idempotency contract; and the two `kdive_server` activation-edge
+call sites, which keep their direct write.
+
+Repairing obligations already leaked by this bug on live Systems is also out of scope — owner:
+a separate follow-up, reported by this run to the campaign orchestrator that dispatched it.
+Each leaked row stays `mutation_discharged_at IS NULL`, so `retained_owners`
+(`src/kdive/db/remote_module_attempt_obligations.py:513-525`) keeps returning it and its
+volumes stay out of the reaper, with no later job to discharge it. This change stops new leaks
+and repairs none.
 
 ## Success
 
