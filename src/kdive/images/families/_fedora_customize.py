@@ -191,6 +191,35 @@ KDUMP_FINAL_ACTION_CMD = (
     "sed -i '/^[[:space:]]*final_action[[:space:]]/d' /etc/kdump.conf && "
     "printf 'final_action poweroff\\n' >> /etc/kdump.conf"
 )
+# fadump capture service: installed on every kdump-capable debug image (Fedora + EL) by the
+# build-fs path (rhel.py kexec-tools block), and on fadump_capture: true images by the Ansible
+# guest_base_image role.  The unit runs makedumpfile directly and powers off; it fires on any
+# crash-kernel boot (fadump or ordinary kdump) because Before=kdump.service wins the ordering race
+# whenever /proc/vmcore exists.  This superseding behavior is intentional: makedumpfile -c -d 31
+# is sufficient without kdumpctl environment setup.
+# Authoritative copy kept in sync with:
+#   deploy/ansible/roles/guest_base_image/files/fadump-capture.service
+# Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
+FADUMP_CAPTURE_SERVICE_PATH = "/etc/systemd/system/fadump-capture.service"
+FADUMP_CAPTURE_SERVICE_CONTENT = (
+    "[Unit]\n"
+    "Description=fadump vmcore capture (kdive)\n"
+    "Documentation=https://github.com/randomparity/kdive\n"
+    "Before=kdump.service\n"
+    "ConditionPathExists=/proc/vmcore\n"
+    "DefaultDependencies=no\n"
+    "After=local-fs.target\n"
+    "\n"
+    "[Service]\n"
+    "Type=oneshot\n"
+    "RemainAfterExit=yes\n"
+    "ExecStart=/bin/bash -c"
+    " 'mkdir -p /var/crash && makedumpfile -c -d 31 /proc/vmcore /var/crash/vmcore"
+    " && poweroff -f'\n"
+    "\n"
+    "[Install]\n"
+    "WantedBy=basic.target\n"
+)
 # The live ``introspect.run`` path (ADR-0219) SSH-execs this fixed-argv in-guest helper; the debug
 # image must carry the repo's reviewed reference implementation, made read-executable. ``build-fs``
 # runs ``python -m kdive`` from the source checkout, so the helper resolves relative to the source

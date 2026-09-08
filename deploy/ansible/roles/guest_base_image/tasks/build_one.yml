@@ -12,6 +12,8 @@
                 | default(kdive_image_defaults.include_kernel_debuginfo)) | bool
             else []) }}
     guest_base_image_helpers: "{{ image.helpers | default(kdive_image_defaults.helpers) }}"
+    guest_base_image_fadump_capture: >-
+      {{ image.fadump_capture | default(kdive_image_defaults.fadump_capture) }}
     guest_base_image_kdump_service: >-
       {{ image.kdump_service | default(kdive_image_defaults.kdump_service) }}
     guest_base_image_crashkernel: >-
@@ -169,6 +171,27 @@
         's/--allow-rpcs=/--allow-rpcs=guest-exec,guest-exec-status,/'
         /etc/sysconfig/qemu-ga; fi
   when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
+# --- Install the fadump capture service when the image is fadump-capable. ---
+# kdump.service cannot rebuild the fadump initrd in the kdive-supplied initrd environment.
+# The fadump-capture unit supersedes it on the capture-kernel boot
+# (ConditionPathExists=/proc/vmcore), invokes makedumpfile, and powers off.
+# Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
+- name: Upload and enable the fadump capture service for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --upload
+      - "{{ role_path }}/files/fadump-capture.service:/etc/systemd/system/fadump-capture.service"
+      - --run-command
+      - systemctl enable fadump-capture.service
+  when:
+    - guest_base_image_fadump_capture | bool
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
 # --- Set the crashkernel reservation when a debuginfo/kdump image is requested. ---

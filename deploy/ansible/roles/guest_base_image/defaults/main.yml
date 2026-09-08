@@ -3,3 +3,4 @@ guest_base_image_build_workdir: "{{ ansible_env.HOME }}/kdive-image-build"
 # Where the control node's helper_src scripts are staged ON THE REMOTE HOST, so that
 # virt-customize --copy-in (which runs there) has a source path it can actually read.
 guest_base_image_helper_dir: "{{ guest_base_image_build_workdir }}/helpers"
+guest_base_image_fadump_capture: false

@@ -38,6 +38,7 @@ kdive_image_defaults:
   crashkernel: "256M"  # applied only when include_kernel_debuginfo | bool
   arches: [x86_64]
   kdump_service: kdump.service  # Fedora/RHEL unit; the ubuntu entry overrides it
+  fadump_capture: false  # set true for fadump-capable images (installs fadump-capture.service)
   root_device: /dev/vda  # remote metadata only; the in-guest GRUB owns root (ADR-0183)
   arch_alias:  # ansible_architecture -> distro download vocabulary
     x86_64: amd64

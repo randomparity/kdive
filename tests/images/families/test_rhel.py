@@ -93,6 +93,24 @@ def test_fedora_debug_steps_enable_kdump_and_sshd(tmp_path: Path) -> None:
     assert "final_action poweroff" in text
 
 
+def test_debug_steps_install_fadump_capture_service(tmp_path: Path) -> None:
+    # fadump-capture.service is written to the image and enabled on every debug image that carries
+    # kexec-tools (Fedora and all EL); ConditionPathExists=/proc/vmcore keeps it a no-op on normal
+    # boots so it is safe on x86_64 too.  Declared per AGENTS.md parity rule (#2381, proved #2312).
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    text = rendered(steps)
+    assert "fadump-capture.service" in text
+    assert "systemctl enable fadump-capture.service" in commands(steps)
+
+
+def test_build_steps_omit_fadump_capture_service(tmp_path: Path) -> None:
+    # Build-host images lack kexec-tools so the fadump-capture injection guard never fires.
+    # This test pins that regression-safety: if the injection were moved outside the
+    # kexec-tools guard it would show up here.
+    steps = _steps(_build_ctx(_ctx(tmp_path, is_cloud_image=True)))
+    assert "fadump-capture.service" not in rendered(steps)
+
+
 def test_debug_steps_write_makedumpfile_version_marker(tmp_path: Path) -> None:
     steps = _steps(_ctx(tmp_path, is_cloud_image=True))
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in rendered(steps)
