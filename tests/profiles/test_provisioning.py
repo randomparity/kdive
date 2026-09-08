@@ -849,6 +849,31 @@ def test_disk_image_boot_requires_remote_section() -> None:
     assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+@pytest.mark.parametrize(
+    ("provider", "boot_method", "replacement"),
+    [
+        ("local-libvirt", "disk-image", "direct-kernel"),
+        ("fault-inject", "disk-image", "direct-kernel"),
+        ("remote-libvirt", "direct-kernel", "disk-image"),
+    ],
+)
+def test_pairing_error_names_valid_boot_method(
+    provider: str, boot_method: str, replacement: str
+) -> None:
+    data = _valid_remote() if provider == "remote-libvirt" else _valid()
+    data["boot_method"] = boot_method
+    if provider == "fault-inject":
+        data["provider"] = {"fault-inject": {}}
+
+    with pytest.raises(CategorizedError) as exc_info:
+        ProvisioningProfile.parse(data)
+
+    errors = cast(list[dict[str, str]], exc_info.value.details["errors"])
+    message = " ".join(error["msg"] for error in errors)
+    assert replacement in message
+    assert "ADR-" not in message
+
+
 def test_remote_profile_capture_method_kdump_with_crashkernel() -> None:
     assert (
         capture_method(_REMOTE_POLICY, ProvisioningProfile.parse(_valid_remote()))
