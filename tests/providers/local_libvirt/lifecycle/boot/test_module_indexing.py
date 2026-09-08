@@ -200,7 +200,8 @@ def test_run_host_depmod_runs_the_resolved_absolute_path(
     # bare name resolves through os.defpath (/bin:/usr/bin), which omits /usr/sbin (#2300).
     assert captured["args"] == ["/usr/sbin/depmod", "-b", str(tmp_path), _VERSION]
     # The search is restricted to the fixed host-tool list, not the inherited environment, and
-    # every directory in it is root-owned: this argv[0] is executed by a privileged staging step.
+    # every directory in it is root-owned, so no non-root principal can choose what the worker
+    # slot account executes here.
     assert captured["which"] == (
         "depmod",
         "/usr/sbin:/usr/bin:/sbin:/bin",

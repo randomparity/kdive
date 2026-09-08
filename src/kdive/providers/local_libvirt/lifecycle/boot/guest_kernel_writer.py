@@ -53,9 +53,9 @@ _DEPMOD = "depmod"
 # reported a missing package on hosts that had one (#2300). These are the set
 # ``src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`` resolves its own host tools
 # against, and every one is root-owned. /usr/local/{sbin,bin} are left out on purpose even though
-# an ungated worker reaches them through PATH today: this argv[0] runs under a privileged staging
-# step, and /usr/local is group-writable by default on part of the Debian family, so a binary
-# planted there must not be able to decide what that step executes.
+# an ungated worker reaches them through PATH today: /usr/local is group-writable by default on
+# part of the Debian family, and a binary planted there would run as the worker slot account
+# (User=kdive-worker-N, in kdive-live-libvirt), inheriting its authority over guest overlays.
 _DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 # The permanent exec-side returns: the binary vanished between which() and exec, sits on a
 # noexec mount or lacks the bit (EACCES/EPERM), or is not an executable format — a partially

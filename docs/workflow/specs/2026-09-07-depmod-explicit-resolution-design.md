@@ -16,8 +16,8 @@ kmod puts it. `runs.install` then fails `MISSING_DEPENDENCY` naming a package th
 Resolve `depmod` in `_run_host_depmod` with `shutil.which` restricted to the four root-owned
 directories `src/kdive/jobs/.../bootstrap_elf.py` already uses — `/usr/sbin`, `/usr/bin`, `/sbin`,
 `/bin` — and pass the resolved absolute path to `subprocess.run`. `PATH` is never consulted.
-`/usr/local/{sbin,bin}` stay out: this argv[0] runs under a privileged staging step and
-`/usr/local` is group-writable by default on part of the Debian family.
+`/usr/local/{sbin,bin}` stay out: `/usr/local` is group-writable by default on part of the Debian
+family, and a binary planted there would run as the worker slot account.
 
 A `KDIVE_DEPMOD` override was in the original scope and the operator **released** that clause
 rather than leaving it unbuilt. It could only reach the gated live-worker slot by widening
