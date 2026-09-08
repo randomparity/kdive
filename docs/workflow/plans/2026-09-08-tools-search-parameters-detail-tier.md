@@ -87,6 +87,12 @@ module-private. `SearchDetail.PARAMETERS` becomes part of the public tool schema
   the public function rather than importing the private helper, so it does not fail at collection
   and does not pin the helper's name. Expected red: `KeyError: 'parameters'`. Green:
   `uv run python -m pytest tests/mcp/tools/test_gateway_search.py -k type_rendering -q`.
+- **Contract: a tool with no properties yields an empty list, not a missing key.**
+  Mode: focused-test. Test `test_parameters_tier_handles_a_tool_with_no_parameters`, driving
+  `describe_tool` with a stub whose schema has no `properties`. Covers the spec's first edge
+  case, which the inventory omitted when the edge cases were added during the design review.
+  Expected red: `AttributeError` on `SearchDetail.PARAMETERS`. Green:
+  `uv run python -m pytest tests/mcp/tools/test_gateway_search.py -k no_parameters -q`.
 - **Contract: `full` still carries `parameters`, so the tiers stay monotone.**
   Mode: focused-test. Test `test_full_tier_still_carries_parameters`, plus the updated key-set
   assertion in the existing `test_detail_full_adds_schema_and_complete_description`.
