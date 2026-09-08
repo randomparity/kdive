@@ -39,6 +39,21 @@ _SCHEMA_DEPTH_LIMIT = 8
 # error count arbitrarily high (one entry per bad keyword argument), and this field is a
 # different key but the same class of caller-sized list.
 _FIELD_ERROR_LIMIT = 20
+# Bound on the caller-supplied `query` copied into the `tool_search_miss` record. The unit is
+# characters (code points), it applies only to that telemetry field — ranking still sees the whole
+# string, and the response carries no query at all — and a longer query is cut to the first
+# _QUERY_LOG_LEN_MAX characters with a trailing "…". Under the OTel bridge
+# (kdive.observability.facade) `extra` becomes telemetry attributes, so without this the field is
+# caller-sized. 128 matches `_NAME_LEN_MAX` and is far above the capability phrases the field
+# exists to curate (#2327).
+#
+# Two properties of the cut a reader needs. Length is what separates a truncated value from a
+# short one — anything longer than _QUERY_LOG_LEN_MAX was cut — while the trailing marker is a
+# human hint a caller can forge by ending a short query with U+2026. And the cut happens here, at
+# the emit site, ahead of the log pipeline's `RedactingLogProcessor`, so a registered secret
+# straddling the boundary survives as a prefix its exact-value replacement no longer matches:
+# bounding this field does not make it redacted.
+_QUERY_LOG_LEN_MAX = 128
 # `names` forces full detail and ignores `limit`, so its own bound is the only one left.
 # Ten is `limit`'s default. Measured, a full match runs from under 1 KB to about 16 KB — the
 # exact spread depends on the caller's grants — so the ten largest come to roughly 68 KB, the
@@ -551,8 +566,13 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 )
         elif miss is not None:
             data["reason"] = miss.value
+            # `_rank` returns a miss only in query mode, so `query` is set; `or ""` is the
+            # type-checker's guarantee, not a behavioural one.
+            logged_query = query or ""
+            if len(logged_query) > _QUERY_LOG_LEN_MAX:
+                logged_query = f"{logged_query[:_QUERY_LOG_LEN_MAX]}…"
             _log.info(
                 "tool_search_miss",
-                extra={"query": query, "count": 0, "reason": miss.value},
+                extra={"query": logged_query, "count": 0, "reason": miss.value},
             )
         return ToolResponse.success("tools.search", "ok", data=data)

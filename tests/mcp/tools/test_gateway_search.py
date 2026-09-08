@@ -1251,3 +1251,37 @@ def test_query_miss_log_carries_the_reason_and_skips_namespace_calls(
     assert "tool_search_miss" not in caplog.text, (
         "namespace wins, so no query ran and no query-miss record is accurate"
     )
+
+
+def test_query_miss_log_bounds_the_caller_query(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The logged query is cut at the bound with a marker; one at the bound is logged whole."""
+    from kdive.mcp.tools.gateway import _QUERY_LOG_LEN_MAX
+
+    app = _build(monkeypatch, _operator_ctx)
+    # One unbroken token, so it reaches the no_token_matched arm rather than being split.
+    oversized = "zz" + "q" * (4 * _QUERY_LOG_LEN_MAX)
+
+    with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
+        _search(app, {"query": oversized})
+
+    record = next((r for r in caplog.records if r.getMessage() == "tool_search_miss"), None)
+    assert record is not None, f"no query-miss log: {caplog.text}"
+    logged = record.__dict__["query"]
+    assert logged == f"{oversized[:_QUERY_LOG_LEN_MAX]}…", (
+        "an oversized query is cut at the bound and carries the truncation marker"
+    )
+    assert len(logged) == _QUERY_LOG_LEN_MAX + 1, "the marker is the only character past the bound"
+
+    caplog.clear()
+    at_bound = "zz" + "q" * (_QUERY_LOG_LEN_MAX - 2)
+
+    with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
+        _search(app, {"query": at_bound})
+
+    record = next((r for r in caplog.records if r.getMessage() == "tool_search_miss"), None)
+    assert record is not None, f"no query-miss log: {caplog.text}"
+    assert record.__dict__["query"] == at_bound, (
+        "a query exactly at the bound is logged whole, with no marker"
+    )
