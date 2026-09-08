@@ -1,6 +1,11 @@
 # Running KDIVE under systemd
 
-Run the three KDIVE processes as host services. The unit files live under
+The generic units below start the server and reconciler as host services. Worker startup
+also requires an authority-issued incarnation credential; the shared environment file alone
+is insufficient. Use the [fixed live-worker lifecycle contract](../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract)
+for the supported local worker handoff. These generic units are not a complete worker setup.
+
+The unit files live under
 [`deploy/systemd/`](../../deploy/systemd/): system-scope units in
 [`deploy/systemd/system/`](../../deploy/systemd/system/) and user-scope units in
 [`deploy/systemd/user/`](../../deploy/systemd/user/).
@@ -43,9 +48,10 @@ at mode 0640 owned by `kdive` so secrets are not world-readable.
 Install and enable the units:
 
 ```bash
-sudo cp deploy/systemd/system/kdive-*.service /etc/systemd/system/
+sudo cp deploy/systemd/system/kdive-server.service \
+  deploy/systemd/system/kdive-reconciler.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now kdive-server kdive-worker kdive-reconciler
+sudo systemctl enable --now kdive-server kdive-reconciler
 ```
 
 Follow the logs:
@@ -56,7 +62,7 @@ journalctl -u kdive-server -f
 
 ### Worker capacity: one in-flight job per dispatch lane (ADR-0550)
 
-`kdive-worker` runs **one in-flight job per accepted dispatch lane — two by default**, where it
+A configured worker runs **one in-flight job per accepted dispatch lane — two by default**, where it
 previously ran one in total. `KDIVE_WORKER_ACCEPTED_LANES` defaults to `default,state-fenced`: the
 `state-fenced` lane carries `restore`, `reprovision`, and `snapshot`, whose jobs fence a System or
 Snapshot from the moment they are enqueued, so they get a claim loop that unrelated long work
@@ -69,22 +75,23 @@ every poll interval whether or not work exists.
 Narrowing `KDIVE_WORKER_ACCEPTED_LANES` to one lane restores the old footprint and starves the
 omitted lane. Those jobs are never claimed, and the System or Snapshot they fence stays fenced with
 nothing to sweep it — the abandoned-job repair reaps only `running` rows. The worker logs a warning
-naming any routed lane it omits at startup. Before downgrading to a worker build that predates
-ADR-0550, drain the fenced lane first; the procedure is in the
-[Kubernetes runbook](runbooks/kubernetes-deploy.md#draining-the-state-fenced-lane-before-a-worker-downgrade-adr-0550)
-and the SQL applies unchanged here.
+naming any routed lane it omits at startup. Do not use a lane change to bypass the worker-fence
+compatibility contract. Use the
+[staged upgrade procedure](runbooks/kubernetes-deploy.md) for its supported deployment;
+old downgrade recipes do not establish compatibility with the current worker protocol.
 
 ## User scope
 
-The `--user` variant runs the same processes without root, reading the environment from
+The `--user` server/reconciler units run without root, reading the environment from
 `~/.config/kdive/kdive.env` and the venv from `~/.local/share/kdive/.venv`:
 
 ```bash
 install -d ~/.config/kdive ~/.config/systemd/user
 install -m 0640 deploy/systemd/kdive.env.example ~/.config/kdive/kdive.env
-cp deploy/systemd/user/kdive-*.service ~/.config/systemd/user/
+cp deploy/systemd/user/kdive-server.service \
+  deploy/systemd/user/kdive-reconciler.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now kdive-server kdive-worker kdive-reconciler
+systemctl --user enable --now kdive-server kdive-reconciler
 journalctl --user -u kdive-server -f
 ```
 

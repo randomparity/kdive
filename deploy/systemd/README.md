@@ -1,7 +1,9 @@
 # KDIVE systemd units
 
-Run the KDIVE processes (`server` / `worker` / `reconciler`) as host services. System-scope
-units are in [`system/`](system/); user-scope units are in [`user/`](user/). Backends
+The generic units cover server/reconciler host services. The generic worker units do not
+arrange the mandatory authority-issued incarnation credential; use the fixed live-worker
+contract below for that handoff. System-scope units are in [`system/`](system/); user-scope
+units are in [`user/`](user/). Backends
 (Postgres, S3, OIDC) are external and are not ordered by these units.
 
 For prerequisites, installation, configuration, and logs, follow the

@@ -2,7 +2,7 @@
 
 This directory is the versioned appliance contract selected by ADR-0585. The appliance is a
 transient direct-kernel domain. It has no network interface, persistent definition, graphics,
-host filesystem share, shell entry point, or caller-selected device. Future provider lifecycle
+host filesystem share, shell entry point, or caller-selected device. Provider lifecycle
 code supplies exactly three virtio disks (`vda` root read-write, `vdb` source read-only, and `vdc`
 scratch read-write) and the bounded console described by the two architecture-specific
 `domain-v1-*.xml` configurations.

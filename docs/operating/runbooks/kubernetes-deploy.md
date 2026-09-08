@@ -19,7 +19,7 @@ For other worker-fence releases, use the [staged procedure](#staged-worker-fence
 ## Prerequisites
 
 - A Kubernetes cluster and `kubectl`/`helm` (v3) configured against it. Tested on microk8s
-  v1.35; any conformant cluster works.
+  v1.35; the chart requires Kubernetes 1.27 or newer.
 - A cluster that can pull from `ghcr.io` (the default registry). The chart defaults to
   `ghcr.io/randomparity/kdive`; `:edge` (rolling, from `main`) and signed `:X.Y.Z` release
   tags are published there. From a source checkout pin `--set image.tag=edge` (the default
@@ -1567,7 +1567,7 @@ witness, then rerun the applicable forward stage with `RETRY_DIAGNOSTIC=1`. Its 
 the exact Job with a two-minute API timeout.
 
 Finally, from the authenticated operator workstation, use the real MCP session client to prove
-both recovery tools are exposed and make one bounded read call:
+both recovery tools are discoverable under the caller's grants and make one bounded read call:
 
 ```bash
 set -euo pipefail
@@ -1595,10 +1595,16 @@ async def main() -> None:
         os.environ["KDIVE_SERVER_URL"],
         auth=BearerAuth(os.environ["KDIVE_TOKEN"]),
     ) as client:
-        names = {tool.name for tool in await client.list_tools()}
-    missing = required - names
-    if missing:
-        raise SystemExit(f"recovery tools are not exposed: {sorted(missing)}")
+        for name in sorted(required):
+            result = await client.call_tool(
+                "tools.search", {"query": name, "detail": "full", "limit": 1}
+            )
+            envelope = result.structured_content
+            if result.is_error or not isinstance(envelope, dict):
+                raise SystemExit(f"tool discovery failed: {name}")
+            matches = envelope.get("data", {}).get("matches", [])
+            if not any(item.get("name") == name for item in matches):
+                raise SystemExit(f"recovery tool is not discoverable: {name}")
 
 
 asyncio.run(main())
@@ -1736,51 +1742,15 @@ kubectl get pods -l app.kubernetes.io/name=kdive
 
 ### Draining the state-fenced lane before a worker downgrade (ADR-0550)
 
-**This does not make a worker downgrade supported.** The staged worker-fence upgrade above stays
-stop-old-first and forward-only: do not restore an old worker image for a release carrying the
-fence protocol. What follows is a **prerequisite of a downgrade that is already permitted** — on a
-non-fence release, or on the systemd and Compose paths — and never a reason one becomes permitted.
-
-Since ADR-0550, `restore`, `reprovision`, and `snapshot` jobs are admitted onto the `state-fenced`
-dispatch lane. A worker built before that change accepts only the `default` lane, so after a
-downgrade it never claims those rows. They sit unclaimed indefinitely with their System pinned in
-`restoring`/`reprovisioning` or their Snapshot in `creating`, and nothing surfaces it: the
-abandoned-job repair reaps only `running` rows, and at attempt 1 of 3 it does not dead-letter those
-either — so a `running` fenced row is stranded harder than a queued one, its lease lapsing with no
-claimant left and no old worker willing to reclaim its lane.
-
-Run these in order. The ordering is the point: the `UPDATE` moves rows out from under any worker
-still claiming, so the new workers must be stopped first.
-
-1. Stop the new workers.
-
-   ```bash
-   kubectl -n "$NAMESPACE" scale statefulset "$RELEASE-worker" --replicas=0
-   kubectl -n "$NAMESPACE" rollout status statefulset "$RELEASE-worker" --timeout=5m
-   ```
-
-2. Move every **non-terminal** fenced row back to the default lane.
-
-   ```sql
-   UPDATE jobs
-      SET dispatch_lane = 'default'
-    WHERE dispatch_lane = 'state-fenced'
-      AND state IN ('queued', 'running');
-   ```
-
-3. Start the old workers, and confirm the lane is empty before declaring the downgrade complete.
-
-   ```sql
-   SELECT count(*) FROM jobs
-    WHERE dispatch_lane = 'state-fenced' AND state IN ('queued', 'running');
-   ```
-
-A non-zero count in step 3 means a worker admitted new fenced work between steps 1 and 2; repeat
-from step 1.
+The current worker-fence upgrade is stop-old-first and forward-only. An old procedure that
+moves jobs between dispatch lanes does not make a downgrade compatible with this protocol.
+Follow the staged upgrade above; consult the matching release tag only when operating an
+older, separately supported deployment. Do not apply historical lane-rewriting SQL to a
+current installation.
 
 ## 5. Reach the MCP endpoint
 
-The chart's only Service fronts the server's MCP port `8000` as a **ClusterIP** (the per-process
+The chart's MCP-facing Service fronts the server's MCP port `8000` as a **ClusterIP** (the per-process
 `/livez`/`/readyz`/`/metrics` aux ports are deliberately pod-local and not exposed). To reach MCP
 from outside the cluster, either port-forward:
 
@@ -1817,11 +1787,30 @@ the ports. These endpoints have no authentication: use a local port-forward for 
 # Ready = /readyz green (the aux listener is pod-local, not fronted by a Service):
 kubectl get pods -l app.kubernetes.io/name=kdive
 
-# An authenticated MCP call (needs a token from your OIDC issuer with audience `kdive`):
-curl -s -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  http://<mcp-host>/mcp | head
+# From a checkout with dependencies installed; initialize a real MCP session:
+export KDIVE_SERVER_URL="http://<mcp-host>/mcp"
+export KDIVE_TOKEN="<oidc-access-token>"
+uv run python - <<'PY'
+import asyncio
+import os
+
+from fastmcp import Client
+from fastmcp.client.auth import BearerAuth
+
+
+async def main() -> None:
+    async with Client(
+        os.environ["KDIVE_SERVER_URL"],
+        auth=BearerAuth(os.environ["KDIVE_TOKEN"]),
+    ) as client:
+        tools = await client.list_tools()
+        if not tools:
+            raise SystemExit("authenticated MCP catalog is empty")
+        print(f"authenticated MCP session lists {len(tools)} visible tools")
+
+
+asyncio.run(main())
+PY
 ```
 
 ### Startup and database reachability
@@ -1968,66 +1957,16 @@ at runtime, and `ops.export_systems_toml` serializes that live state back to a
 `systems.toml` document. By default the export only returns **text** — an operator copies it into
 the version-controlled file and re-applies the `kdive-systems` ConfigMap by hand.
 
-The opt-in **writeback** (M2.7 sub-issue D) lets `ops.export_systems_toml(persist=true)` write that
-document straight to the live source the reconciler re-reads, so a pod restart reproduces the running
-inventory. It is **off by default** and **not exercised by CI** — verify it on your cluster with the
-steps below.
+The runtime has opt-in ConfigMap writeback, but the stock chart does not wire its credentials:
+the server Pod disables service-account token automount and offers no ServiceAccount override.
+Setting `KDIVE_INVENTORY_WRITEBACK=configmap` alone is insufficient. Use the manual export path
+above with the stock chart.
 
-### Enable it
-
-Set the opt-in on the **server** component (where the `ops.*` tools run) via the chart's `config.*`
-ConfigMap, then apply the RBAC so the server's pod may patch the one inventory ConfigMap:
-
-```yaml
-# values overlay
-config:
-  KDIVE_INVENTORY_WRITEBACK: configmap          # off (default) | configmap | file
-  # KDIVE_INVENTORY_WRITEBACK_CONFIGMAP defaults to kdive-systems; set only to override the name
-```
-
-```yaml
-# rbac-writeback.yaml — least privilege: get+patch on the ONE named ConfigMap, nothing else
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kdive-writeback
-  namespace: <ns>
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: kdive-systems-writeback
-  namespace: <ns>
-rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["kdive-systems"]    # scoped to this one object — no list/watch, no other CM
-    verbs: ["get", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kdive-systems-writeback
-  namespace: <ns>
-subjects:
-  - kind: ServiceAccount
-    name: kdive-writeback
-    namespace: <ns>
-roleRef:
-  kind: Role
-  name: kdive-systems-writeback
-  apiGroup: rbac.authorization.k8s.io
-```
-
-Bind the server Deployment's pod to that ServiceAccount (`spec.template.spec.serviceAccountName:
-kdive-writeback`) so the in-cluster token the adapter reads carries the grant. Apply with
-`kubectl apply -f rbac-writeback.yaml -n <ns>`.
-
-The ConfigMap name (`kdive-systems` above, and `KDIVE_INVENTORY_WRITEBACK_CONFIGMAP`'s default)
-must match the inventory ConfigMap you created and pointed `systems.configMapName` at — set
-`KDIVE_INVENTORY_WRITEBACK_CONFIGMAP` and the Role's `resourceNames` to that name if you named it
-something else. This inventory ConfigMap is operator-created (the chart only mounts it; it is not
-templated by Helm), so a writeback patch does not drift from the Helm release.
+An operator-managed pod-template customization must supply token, namespace, and CA files at
+`/var/run/secrets/kubernetes.io/serviceaccount`, authorize only `get`/`patch` on the intended
+inventory ConfigMap, and keep that customization through Helm upgrades. The configured writeback
+ConfigMap name must match the mounted inventory source. This is separate deployment work, not
+an activation recipe provided by the stock chart.
 
 ### The `remote_libvirt` skeleton: complete it before persisting
 
@@ -2094,13 +2033,15 @@ kubectl delete secret kdive-remote-tls -n <ns>               # if created in ste
 **PVCs after uninstall.** From chart `0.5.0` the worker's build/install volumes come from the
 StatefulSet's `volumeClaimTemplates` with a `Delete` retention policy (ADR-0514), so deleting the
 StatefulSet garbage-collects them. These claims inherit the StatefulSet's *selector* labels, not
-the chart's, so `-l app.kubernetes.io/name=kdive` no longer selects them. Sweep any survivors by
-the release-scoped names instead:
+the chart's, so `-l app.kubernetes.io/name=kdive` no longer selects them. Inspect survivors for
+the release being removed before deleting its per-replica claims:
 
 ```bash
-kubectl delete pvc -l app.kubernetes.io/name=kdive -n <ns>       # pre-0.5.0 claims, if any linger
 kubectl delete pvc -l app=kdive-kdive-worker -n <ns>             # 0.5.0+ per-replica claims
 ```
+
+For a legacy release, inspect its exact build/install claim names and ownership separately;
+never delete claims by the namespace-wide `app.kubernetes.io/name=kdive` selector.
 
 `helm uninstall` does **not** garbage-collect the chart's hook resources (the migrate /
 validate-systems hook Jobs, the `helm test` smoke pod, and the `systems.toml`

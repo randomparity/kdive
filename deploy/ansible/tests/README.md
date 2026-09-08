@@ -131,17 +131,11 @@ assert rather than an unrelated error.
 
 ### `run-remote-libvirt-facts-render.sh`
 
-`kind = "staged"` claims the volume is already in the host's pool. The fixture here is just
-which `.qcow2` files exist, so the harness needs no fake binary: it points
-`storage_pool_target` at a temp dir, `touch`es some volumes, runs the real role, and asserts
-on the rendered artifact.
+This harness runs the real role and facts template against temporary staged-volume files.
+It places `fake-guestfish` on PATH and supplies sidecar inspection verdicts for conformant,
+missing, and broken image userland, including cache cases. The resulting TOML is parsed to
+check which images and omission/incomplete markers the role publishes.
 
-| Case | Asserts |
-|------|---------|
-| `both_staged` | both volumes present → both declared, no markers |
-| `bare_absent` | the #1629 shape — the skipped bare image is **not** declared, the rocky image still is, `# OMITTED` records the gap |
-| `default_absent` | the default image's volume missing → `# INCOMPLETE`, so the fragment is rejected at load rather than at provision |
-| `fresh_host` | nothing staged (site.yml before image.yml) → no `[[image]]` at all, and the render still exits 0 |
-
-The `[[image]]` declarations are read back out of the rendered TOML, so a template that
-re-widened its loop to the whole selection fails three of the four cases.
+See [the harness](run-remote-libvirt-facts-render.sh) for current cases. This proves role and
+template behavior under controlled inspection results; it does not prove that real guestfish
+can inspect an image or that a resulting guest boots.
