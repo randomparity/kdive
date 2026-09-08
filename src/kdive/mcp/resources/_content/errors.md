@@ -59,8 +59,14 @@ job able to finish it and no more specific retained failure category. The System
 guest. The category is non-retryable. Other failed restores can retain their original job
 category, so this is not the only error a restore can report.
 
-For this incomplete-restore case, inspect `systems.get` and any cited job, preserve needed
-evidence, then follow the [teardown contract](reference/systems.md#systemsteardown) and
-provision a replacement. Teardown is destructive and must satisfy its authorization and
-cleanup gates. System snapshots are removed with the System; they are not checkpoints
-that can be restored onto its replacement. Create new snapshots after rebuilding the guest.
+Inspect `systems.get`, any cited job, and the allocation with `allocations.wait`.
+The current System state machine has no outgoing transition from `failed`: retrying the
+restore cannot recover it, and ordinary `systems.teardown` cannot complete from that state.
+Failed-System responses instead suggest `allocations.release` and `allocations.request`;
+follow their [preconditions and returned state](reference/allocations.md) before provisioning
+a replacement. A terminal allocation may already be unavailable for release.
+
+Releasing the allocation does not establish that the failed guest or provider data was
+cleaned up. Preserve needed evidence and ask an operator to triage residual resources;
+do not assume they were reclaimed. Snapshots belong to the original System and cannot
+be restored onto its replacement. Create new snapshots after rebuilding the guest.
