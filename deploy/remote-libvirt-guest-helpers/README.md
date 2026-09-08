@@ -96,9 +96,9 @@ privileged system mutations through `guest-exec` (writes `/boot` + `/lib/modules
 `depmod`/`dracut`/`grubby`). Fedora confines the agent to `virt_qemu_ga_t`, which **cannot even
 read `/lib/modules`** — so an *enforcing* base image fails `runs.install` at the helper's
 privileged `/boot` + `/lib/modules` mutation steps right after the bundle extracts. Make the base
-image `SELINUX=permissive` (test image — the form verified end-to-end); a per-domain
-`semanage permissive -a virt_qemu_ga_t` keeps the rest enforcing but must be verified to cover the
-helper's `dracut`/`grubby` children. See the host-setup runbook §5.
+image `SELINUX=permissive`, as required by
+[ADR-0484](../../docs/adr/0484-guest-images-ship-selinux-permissive.md). A per-domain
+`semanage permissive` rule does not cover all helper child processes.
 
 ```bash
 HELPERS="kdive-install-kernel kdive-capture-vmcore kdive-drgn"
@@ -124,9 +124,8 @@ first step to fail without it (the coverage campaign hit exactly this — the fa
 - `kdive-drgn`: `drgn` plus the **running kernel's debuginfo** in-guest (drgn needs DWARF to
   attach to the live kernel).
 
-These map onto the host-setup runbook §5 `virt-builder --install` set
-(`qemu-guest-agent,drgn,kexec-tools,makedumpfile,kdump-utils,curl,tar,openssl,python3`); add
-`kernel-debuginfo` if you intend to drive live drgn.
+The [Ansible image catalog](../ansible/README.md#image-catalog-inventorygroup_varsallyml--host_vars)
+owns automated package and helper installation. Include matching kernel debuginfo for live drgn.
 
 ## Object-store reachability (F8)
 

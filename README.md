@@ -57,11 +57,11 @@ future targets, not installable provider paths today. See the
 | What you want to do | Read next |
 |---|---|
 | Connect to an existing KDIVE server | [Agent onboarding](docs/guide/agents/index.md), then the [core workflow](docs/guide/core-path.md) |
-| Run KDIVE on a local Linux KVM/libvirt host | [Local-libvirt walkthrough](docs/operating/providers/local-libvirt-walkthrough.md) |
+| Run KDIVE on a local Linux KVM/libvirt host | [Local-libvirt setup](examples/local-libvirt/README.md) |
 | Run a control plane with separate libvirt hosts | [Remote-libvirt setup](docs/operating/providers/remote-libvirt.md) |
 | Change KDIVE itself | [Contributing](CONTRIBUTING.md), then the [architecture overview](ARCHITECTURE.md) |
 
-The local walkthrough includes a Debian/Ubuntu setup script and the first-VM procedure.
+The local setup includes a Debian/Ubuntu setup script and the first-VM procedure.
 The remote setup guide links host preparation, deployment, onboarding, and lifecycle testing.
 See [platform support](docs/operating/platform-support.md) for x86_64 and ppc64le requirements
 and [installation](docs/operating/install.md) for packaging and deployment choices.

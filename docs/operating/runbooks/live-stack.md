@@ -222,8 +222,8 @@ python -m kdive seed-project --project demo
 
 ## 3. Build the VM fixtures
 
-The spine boots a real guest and builds a real kernel, so the suite needs an
-operator-provided guest image and kernel tree:
+The spine boots a real guest and uploads an already-built kernel. Prepare a guest image and
+build the kernel on the test client before running the suite:
 
 ```bash
 python -m kdive build-fs --image fedora-kdive-ready-44 \
@@ -233,31 +233,20 @@ export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
 export KDIVE_KERNEL_SRC="$(bash scripts/fetch-kernel-tree.sh /var/lib/kdive/build/linux)"
 ```
 
-The kernel-tree fetch helper lives under `scripts` (the `fetch-kernel-tree.sh` fixture script);
-clone the pinned source there and point `KDIVE_KERNEL_SRC` at it.
+The fetch helper only checks out source. Compile the kernel yourself using the configuration
+and artifact requirements in the [external-build guide](../external-build-upload.md), then
+keep `KDIVE_KERNEL_SRC` pointed at that built tree. The test harness stages modules and packages the
+boot image; debug exercises also need the unstripped `vmlinux` with a GNU build ID.
 
-`build-fs` drives the in-process `RootfsBuildPlane` (the Python successor to the removed
-bash rootfs builder): it runs the unprivileged libguestfs stages (`virt-builder` customize →
-`virt-make-fs` whole-disk ext4 qcow2 → fstab/crypttab/SELinux normalize), records the pinned
-inputs (distro, releasever, packages, source-image digest) as provenance, prints the qcow2 content
-digest, and moves the image to `--dest` (default
-`/var/lib/kdive/rootfs/local/<image>.qcow2`). `--image` selects a catalog row such as
-`fedora-kdive-ready-44` (debug guest) or `fedora-kdive-build-44` (build host); pass `--package`
-only to add packages on top of the catalog kind's default set, or `--workspace` to stage under a
-user-writable path (no privileged `mkdir`). See [the image-lifecycle runbook](image-lifecycle.md)
-for the full catalog list. For the default root-owned `--dest`
-an OS admin pre-prepares the output directory once and makes it writable by the build user; the
-per-build write and the final `chmod 0644` are unprivileged. The image is left `0644` so the
-separate `qemu` user can read it under `qemu:///system`. Under SELinux the file also needs the
-`virt_image_t` label (the standard label for libvirt-managed images); this is the host-side file
-label and is independent of the guest-internal SELinux the plane disables.
+`build-fs --image` selects an entry from the rootfs catalog and produces the guest qcow2 plus
+its provenance sidecar. The [image-lifecycle runbook](image-lifecycle.md) owns image selection,
+customization, output-directory permissions, and host labeling requirements. The
+[local example](../../../examples/local-libvirt/README.md) automates building and registering
+these images through `build-image.sh`.
 
-The RBAC-gated `kdivectl images publish` operator verb (M2.4/7) enqueues an
-`IMAGE_BUILD` job that runs the same plane and publishes the result to the catalog; this inline
-`build-fs` is the local-disk fixture path for the live-stack suite.
-
-Point `KDIVE_GUEST_IMAGE` and `KDIVE_KERNEL_SRC` at the build output and the kernel checkout.
-The `live_stack` preflight skips with an actionable reason when either is missing.
+Point `KDIVE_GUEST_IMAGE` at the resulting qcow2 and `KDIVE_KERNEL_SRC` at the built kernel tree.
+The presence of either path does not prove that the image or kernel is usable; read the failed
+phase's diagnostics if packaging, provisioning, or boot fails.
 
 ## 4. Start the host processes
 

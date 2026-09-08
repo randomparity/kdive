@@ -111,7 +111,7 @@ bootstrap key over the guest agent at provision, so `systems.ssh_info` returns a
 
 The guest downloads the installed kernel with a presigned GET and uploads a kdump vmcore
 with a presigned PUT. It must reach the endpoint embedded in those URLs, not only the worker.
-Follow the [host setup's object-store reachability requirements](remote-libvirt-host-setup.md#7-register-remote-libvirt-on-the-deployment),
+Follow the [host setup's object-store reachability requirements](remote-libvirt-host-setup.md#3-register-remote-libvirt-on-the-deployment),
 including the loopback restriction and guest-to-store firewall route. No standing object-store
 credential is installed in the guest.
 

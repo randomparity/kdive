@@ -139,6 +139,6 @@ the Helm chart sets `KDIVE_LOCAL_LIBVIRT_ENABLED=false` (ADR-0127) and the clust
 drives a *remote* libvirt host instead. Use the
 [cluster overview](cluster-architecture-overview.md) for that topology.
 
-The [local-libvirt provider doc](../operating/providers/local-libvirt.md) and the
+The [local-libvirt setup](../../examples/local-libvirt/README.md) and the
 [live-stack runbook](../operating/runbooks/live-stack.md) cover the full bring-up
 and a build → boot → verify cycle.

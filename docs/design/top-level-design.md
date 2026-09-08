@@ -154,7 +154,7 @@ serves requests.
 
 Provider-advertised capabilities determine supported operations. See
 [platform support](../operating/platform-support.md) and the
-[local](../operating/providers/local-libvirt.md) and
+[local](../../examples/local-libvirt/README.md) and
 [remote](../operating/providers/remote-libvirt.md) provider references for operational requirements.
 
 ### Artifact and catalog package ownership

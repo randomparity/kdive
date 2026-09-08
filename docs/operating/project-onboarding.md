@@ -79,6 +79,16 @@ Supply a project-admin `KDIVE_TOKEN` for your deployment. When it is absent, the
 defaults to `demo`; set it to match the token's project. The helper sets accounting policy; it does not register
 libvirt hosts or verify a guest lifecycle.
 
+## Local-libvirt demo helper
+
+The [local setup](../../examples/local-libvirt/README.md) funds the demo project during bring-up.
+For a standalone accounting/preflight step, `scripts/operations/setup-local-libvirt.sh` defaults
+to the token-less `seed-project` path below. Its audited mode requires `KDIVE_SETUP_AUDITED=1`,
+a reachable `KDIVE_MCP_BASE` ending in `/mcp`, and a project-admin `KDIVE_TOKEN`.
+`KDIVE_PROJECT` selects the project (default `demo`); `KDIVE_LIMIT_KCU`, `KDIVE_MAX_ALLOC`, and
+`KDIVE_MAX_SYS` set its budget and limits. Like the remote helper, it uses the checkout venv
+unless `KDIVE_PYTHON` selects another installed interpreter. It does not start a worker.
+
 ## Relationship to `seed-project`
 
 `python -m kdive seed-project` writes the same `budgets` and `quotas` rows (and registers

@@ -137,8 +137,8 @@ from this page. Two local specifics replace the stable URL and external IdP abov
    Approve the `kdive` server when prompted. If the token expires, re-run the export and
    reconnect the server (`/mcp` → reconnect).
 
-If you started the processes by hand instead (the
-[walkthrough](../../operating/providers/local-libvirt-walkthrough.md#connect-an-mcp-client)),
+For a custom client configuration after the
+[local setup](../../../examples/local-libvirt/README.md#usage),
 copy [`mcp.json`](mcp.json) yourself with `url` set to `http://127.0.0.1:8000/mcp` and mint
 the token with `KDIVE_PROJECT=<the project you seeded>`.
 

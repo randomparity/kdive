@@ -316,12 +316,12 @@ releases, and the `postgres` and `minio/minio` test images are multi-arch (they 
 `ppc64le`), so the standard Docker path and the disposable-container tests work unchanged.
 
 Before the first start, run the provider preflight for the libvirt backend you intend to
-use. The preflight reports what is missing without changing the host:
+use. The preflight reports missing prerequisites:
 
 - Local provider: run `just check-local-libvirt`.
 - Remote provider: run `just check-remote-libvirt HOST USER URI`.
 
-See [local-libvirt](providers/local-libvirt.md) and
+See the [local setup](../../examples/local-libvirt/README.md) and
 [remote-libvirt](providers/remote-libvirt.md) for what each provider needs.
 
 ### Cross-architecture guests
@@ -365,3 +365,30 @@ Pick one of the three deployment shapes:
 - [Kubernetes (Helm)](kubernetes.md) — the chart deploys the three core processes, a dedicated
   lifecycle witness, and the migrate Job against external backends.
 - [systemd](systemd.md) — run the processes as host services against external backends.
+
+## Optional fixture catalog override
+
+The filesystem fixture catalog contains provider-scoped profiles identified by `provider`,
+`name`, and `arch`. These profiles do not define kernel `CONFIG_*` or command-line policy;
+use the [external-build contract](external-build-upload.md) for kernel requirements. Baseline
+images are listed separately through `images.list`.
+
+To install an editable copy of the packaged catalog:
+
+```sh
+python -m kdive install-fixtures --dest "$HOME/.config/kdive/fixtures/local-libvirt"
+export KDIVE_FIXTURE_CATALOG_PATH="$HOME/.config/kdive/fixtures/local-libvirt"
+```
+
+Edit the manifest and referenced YAML files, and set `KDIVE_FIXTURE_CATALOG_PATH` consistently
+for the server, worker, and reconciler. The image does not overwrite an operator-owned catalog.
+
+For Helm, create a ConfigMap containing `manifest.yaml` and all files it references. ConfigMap
+keys cannot contain `/`: put those files at the top level and change manifest paths to bare
+filenames. Set `fixtures.configMapName` using the [deployment runbook](runbooks/kubernetes-deploy.md).
+The chart mounts this catalog and sets its path on server, worker, and reconciler; migrate does
+not load it.
+
+Call `fixtures.validate` after the change. It returns the resolved path and available profiles,
+or `configuration_error` for unusable catalog data. This checks the **server's** view; confirm
+that other processes use the same files and configuration.

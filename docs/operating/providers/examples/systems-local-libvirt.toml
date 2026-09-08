@@ -15,7 +15,7 @@
 #
 # `KDIVE_SYSTEMS_TOML` overrides the path. This is the *starting point*; the full multi-provider
 # reference (remote fleet, fault-inject, campaign knobs) is `systems.toml.example` at
-# the repo root. See docs/operating/providers/local-libvirt-walkthrough.md for the linear setup.
+# the repo root. See examples/local-libvirt/README.md for the setup sequence.
 
 schema_version = 2
 
@@ -23,13 +23,13 @@ schema_version = 2
 # IMAGE — the kdive-ready local baseline rootfs, reconciled into image_catalog.
 #
 # Declared `staged-path` (ADR-0228): the source is the qcow2 FILE on local disk (the path
-# `build-fs` writes to in Step 6), under the provider allowed_roots (`/var/lib/kdive/rootfs`). It
+# `build-fs` writes to), under the provider allowed_roots (`/var/lib/kdive/rootfs`). It
 # seeds `registered` (bootable) immediately — no object-store upload — so an MCP agent with no host
 # shell can DISCOVER it (`images.list` / `systems.profile_examples`) and provision with
 # `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}`. The
 # path must be absolute, under allowed_roots, and the image `public` (a private staged-path image is
 # rejected at load). The file need not exist yet at reconcile time (declared, not probed) —
-# provisioning re-validates it, so build it in Step 6 before you provision. Use an `s3` source
+# provisioning re-validates it, so build it before you provision. Use an `s3` source
 # instead only if you publish the qcow2 to the object store.
 # ---------------------------------------------------------------------------------------------
 [[image]]

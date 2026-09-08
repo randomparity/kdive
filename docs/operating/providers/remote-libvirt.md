@@ -10,7 +10,7 @@ opt-in through a `[[remote_libvirt]]` instance in the `systems.toml` inventory.
    TLS, storage, firewall rules, and the base guest image.
 2. Choose a control plane: the [Helm deployment runbook](../runbooks/kubernetes-deploy.md) covers
    Kubernetes; the [live-stack runbook](../runbooks/live-stack.md) covers host processes for tests.
-3. [Register the target](../runbooks/remote-libvirt-host-setup.md#7-register-remote-libvirt-on-the-deployment)
+3. [Register the target](../runbooks/remote-libvirt-host-setup.md#3-register-remote-libvirt-on-the-deployment)
    through the inventory and mount the TLS secret files on the worker.
 4. [Onboard the project](../project-onboarding.md) with a budget and quota.
 5. For the host-process test stack, run the [remote lifecycle tests](../runbooks/remote-live-stack.md).

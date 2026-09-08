@@ -21,8 +21,7 @@ runbooks.
 
 | Page | What it covers |
 |---|---|
-| [Local libvirt](providers/local-libvirt.md) | Single-host libvirt provider prerequisites |
-| [Local libvirt walkthrough](providers/local-libvirt-walkthrough.md) | End-to-end local-libvirt setup: prepare, install, onboard, test |
+| [Local libvirt](../../examples/local-libvirt/README.md) | Host preparation, lifecycle setup, guest images, and client connection |
 | [Remote libvirt](providers/remote-libvirt.md) | Setup sequence, connection requirements, and CPU expectations |
 | [Build lane](external-build-upload.md) | The build lane: build the kernel locally and upload it (no operator-staged source tree or build host) |
 

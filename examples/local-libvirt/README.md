@@ -10,17 +10,11 @@ by it), and all of them share one operator-owned **session libvirt daemon** the 
 publishes. The stack onboards a project named **`demo`**, and an MCP client opened in your
 kernel tree (`~/src/linux` by default) drives that very checkout.
 
-This is the supported first-run path for a local-libvirt install. The
-[local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md) is the
-step-by-step reference for what `up.sh` does and for the host preparation it expects (packages,
-directories, the guest image); this page is the operating manual for the scripts.
-
-The scripts here are thin wrappers over the maintained host flow — `scripts/live-stack/up.sh`,
-`onboard.sh`, `down.sh` — plus the host preparation and the guest-image build that flow assumes
-already happened. For the underlying reference material see
-the [live-stack runbook](../../docs/operating/runbooks/live-stack.md), the
-[local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md),
-and the [four-method live run](../../docs/operating/runbooks/four-method-live-run.md).
+This is the supported first-run path for a local-libvirt install. The scripts wrap the
+maintained [live-stack lifecycle](../../docs/operating/runbooks/live-stack.md), adding host
+preparation, project funding, guest-image registration, and MCP client configuration. Follow
+[this page's usage sequence](#usage) for first setup; use the live-stack runbook for service
+operation and diagnostics.
 
 ## Prerequisites
 
@@ -94,8 +88,8 @@ examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the buck
 
 ## Fresh Debian/Ubuntu host
 
-`install-host.sh` is the scripted form of the walkthrough's Step 1 for apt-based hosts
-(validated target: Ubuntu 26.04). What it does, and why, so you can audit or redo a step:
+`install-host.sh` prepares apt-based hosts (validated target: Ubuntu 26.04). What it does, and
+why, so you can audit or redo a step:
 
 - **Packages** — the operator set: libvirt + the arch's QEMU emulator (`qemu-system-x86` or
   `qemu-system-ppc`; there is no `qemu-kvm` package on Ubuntu 26.04), libguestfs and its
@@ -218,7 +212,23 @@ with. Declaring a `staged-path` `[[image]]` (below) registers that local file in
 so `images.list` / `systems.profile_examples` surface it and the agent provisions with a
 `catalog` reference — no host `ls` (ADR-0228).
 
-If you want to declaratively pin host config, prices, or build fragments, create
+`build-image.sh` derives image architecture and capabilities from the qcow2's provenance
+sidecar. When that sidecar contains an architecture-matched inspected root specification,
+inventory reconciliation also adopts its digest without hashing the image; provisioning verifies
+the actual bytes before use ([ADR-0624](../../docs/adr/0624-bind-staged-path-catalog-to-inspected-root.md)).
+A sidecarless path remains a declaration, validated when provisioned. For an exact image binding
+using a `local` rootfs reference, supply its `sha256` digest; a matching reconciled identity can
+bind the same root authority as the catalog form. Reconciliation does not replace provenance on
+an existing System.
+
+For guest CPU pins and instruction-set requirements, use the host's advertised capabilities
+in [the resources reference](../../docs/guide/reference/resources.md) and the provisioning
+profile contract in [the systems reference](../../docs/guide/reference/systems.md). The
+[platform guide](../../docs/operating/platform-support.md) covers native KVM and foreign-arch TCG.
+Optional filesystem fixture overrides are covered by
+[installation](../../docs/operating/install.md#optional-fixture-catalog-override).
+
+If you want to declaratively pin host configuration, images, or prices, create
 `~/.config/kdive/systems.toml`. The file must start with `schema_version = 2`. The
 sections relevant to this **local-libvirt** example are below; the repo-root
 [`systems.toml.example`](../../systems.toml.example) is the full annotated reference.

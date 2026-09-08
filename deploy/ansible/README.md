@@ -1,7 +1,7 @@
 # Ansible: remote-libvirt host bring-up
 
-Automates `docs/operating/runbooks/remote-libvirt-host-setup.md` steps 1–6 for a
-kdive **remote-libvirt** provider host (Ubuntu 26.04 / Fedora 44 / RHEL-Rocky 10,
+Owns host provisioning and guest-image builds for a
+KDIVE **remote-libvirt** provider host (Ubuntu 26.04 / Fedora 44 / RHEL-Rocky 10,
 x86_64 or ppc64le). Design: `docs/archive/superpowers/specs/2026-06-18-ansible-remote-libvirt-host-setup-design.md`.
 
 ## What it produces
@@ -51,6 +51,11 @@ drgn-live/kdump image.
 
 ## Usage
 
+Configure `inventory/hosts.yml`, `group_vars/all.yml`, and per-host vars first. Set the target
+FQDN, `gdb_addr`, worker network, capacity, and image selection for your hosts. After provisioning,
+use the [registration guide](../../docs/operating/runbooks/remote-libvirt-host-setup.md)
+to connect the emitted inventory and client secrets to the KDIVE deployment.
+
 ```bash
 cd deploy/ansible
 ansible-galaxy collection install -r requirements.yml
@@ -63,6 +68,9 @@ ansible-playbook site.yml
 
 # 3. Build + stage each host's selected catalog images (slow; opt-in).
 ansible-playbook playbooks/image.yml
+
+# 4. Refresh inventory fragments now that the selected image volumes exist.
+ansible-playbook site.yml
 ```
 
 ## Image catalog (`inventory/group_vars/all.yml` + `host_vars/`)
@@ -171,10 +179,8 @@ with a clear message if it is not set in `host_vars/`.
 - Off-CIDR ACL refusal: from a host **outside** `worker_cidr`, a TCP connect to `:16514`
   (and the gdbstub range) must be refused/timed out, while an in-CIDR worker connects.
   The role asserts enforcement in-play (firewalld drop-rules present on Fedora; ufw active
-  on Ubuntu). Then `just check-remote-libvirt <host>` and the runbook step-8 worker→host
-  TLS connect confirm the path end-to-end. (Verified on both distros 2026-06-19.)
-- Only **one** host's `[[remote_libvirt]]` block may be loaded into a given
-  `systems.toml` (the reconciler is singleton until multi-instance remote selection lands).
+  on Ubuntu). Then `just check-remote-libvirt <host>` and the [worker TLS probe](../../docs/operating/runbooks/remote-libvirt-host-setup.md#4-validate-the-deployment)
+  confirm worker-to-host connectivity; neither substitutes for the off-CIDR test. (Verified on both distros 2026-06-19.)
 
 ## Caveats
 
