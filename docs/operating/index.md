@@ -40,12 +40,10 @@ Step-by-step procedures for live runs and operational tasks.
 | [Live stack](runbooks/live-stack.md) | Bring up the HTTP live-stack against compose backends |
 | [Remote live stack](runbooks/remote-live-stack.md) | Live stack driving a remote libvirt host |
 | [Remote libvirt host setup](runbooks/remote-libvirt-host-setup.md) | Preparing a remote libvirt host |
-| [Four-method live run](runbooks/four-method-live-run.md) | Exercising all four crash-capture methods |
 | [Image lifecycle](runbooks/image-lifecycle.md) | Building, publishing, and pruning base images |
 | [kdivectl](runbooks/kdivectl.md) | Operating the admin CLI |
 | [Build-use recovery](../guide/reference/ops.md#opsrecover_build_use) | Pin listing and recovery after durable worker termination |
 | [Diagnostic verification](runbooks/doctor-exit-criterion.md) | Seeded-fault evidence and the limits of doctor checks |
-| [MCP coverage campaign rerun](runbooks/mcp-coverage-campaign-rerun.md) | Re-running the MCP tool coverage sweep |
 | [Live testing](runbooks/live-testing.md) | How to run each live test tier (`live_stack`, `live_vm`, `live_vm_tcg`) and its environment contract |
 
 ## Investigation

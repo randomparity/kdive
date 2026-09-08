@@ -35,9 +35,9 @@ On a fresh Debian/Ubuntu host, `install-host.sh` does all of the host preparatio
   registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
   backends up, so run it after `up.sh`.
 - A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
-- For the **kdump capture leg only**: the worker venv must `import guestfs, drgn`. The
-  preflight (`scripts/operations/check-local-libvirt.sh`) detects the gap and prints the one-time fix;
-  see the [four-method runbook §4b](../../docs/operating/runbooks/four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
+- Local kdump capture requires drgn/libguestfs in the installed lifecycle worker environment,
+  `/opt/kdive-live-worker-lifecycle/.venv`. The lifecycle installer/host role owns that environment.
+  The checkout preflight probes `KDIVE_PYTHON`; it does not certify the installed worker's imports.
 
 `up.sh` runs the preflight first and stops with an actionable message if anything is
 missing. The kdump-only `guestfs`/`drgn` check is the one exception: `up.sh` runs the preflight
@@ -65,6 +65,8 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 ## Usage
 
 ```bash
+KDIVE_CHECKOUT="$PWD"    # run this block from the KDIVE checkout
+
 # 0. Fresh Debian/Ubuntu host only: prepare it, then log out and back in for the groups.
 examples/local-libvirt/install-host.sh
 
@@ -81,7 +83,8 @@ export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 cd ~/src/linux            # the .mcp.json up.sh installed lives here
 # ...launch your MCP client (it connects to http://127.0.0.1:8000/mcp as Bearer $KDIVE_TOKEN)
 
-# 5. When finished, stop everything (data volumes and domains are kept):
+# 5. When finished, return to KDIVE and stop the stack (data is kept):
+cd "$KDIVE_CHECKOUT"
 examples/local-libvirt/down.sh
 examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the bucket, and kdive domains
 ```
@@ -180,7 +183,7 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `up.sh` refuses. |
-| `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for `python -m kdive` and the processes. |
+| `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for checkout commands, server, and reconciler; fixed workers use their installed lifecycle venv. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
 | `KDIVE_TOKEN_TTL` | `2592000` (30d) | Lifetime in seconds of the token `mint-token.sh` issues; inherited from `scripts/live-stack/env.sh`. Minimum `1`; no enforced maximum. |
 | `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack-logs` | Where the server and reconciler daemons log (workers log to their systemd units). |

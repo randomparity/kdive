@@ -9,25 +9,22 @@ later edit.
 The assertion reads the **served snapshot** an agent receives over MCP, so it also fails if
 the packaged snapshot falls out of sync with the source doc.
 
-The second guard here covers both that snapshot and the operator-facing four-method runbook, and
-keeps either from naming a symbol the reader cannot actually set (#1853):
+The second guard covers the served external-build owner, keeping it from naming a symbol
+the reader cannot actually set (#1853):
 ``FEATURE_REQUIREMENTS.advertised`` deliberately omits prompt-less and auto-``select``ed symbols
 such as ``VMCORE_INFO`` and ``KEXEC_CORE``, because ``make olddefconfig`` discards them out of a
 config fragment. Prose that keeps naming one contradicts the manifest served beside it at
 ``resource://kdive/contracts/external-build``.
 
-It matches only ``CONFIG_``-prefixed mentions on purpose. That prefix is how both docs say *build
-this in*; the bare backticked name is how they refer to a symbol the reader must not try to set,
+It matches only ``CONFIG_``-prefixed mentions on purpose. That prefix is how the build doc
+says *build this in*; the bare backticked name refers to a symbol the reader must not try to set,
 which is exactly what the fix for #1853 needed to keep saying.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from pathlib import Path
-
-import pytest
 
 from kdive.kernel_config.requirements import FEATURE_REQUIREMENTS
 from kdive.mcp.resources.registrar import DOC_RESOURCES
@@ -57,7 +54,7 @@ _UNSETTABLE: frozenset[str] = frozenset(UNSETTABLE_SYMBOLS)
 # fragment sets it fine; the manifest simply requires neither instrumentation form.
 _PROMPTED_BUT_UNREQUIRED: frozenset[str] = frozenset({"KASAN_INLINE"})
 
-# Symbols every crash-capture doc must keep naming: the load selectors an agent sets to get
+# Symbols the canonical build guide must keep naming: the load selectors an agent sets to get
 # KEXEC_CORE and VMCORE_INFO selected in turn, plus the /proc/vmcore the capture kernel reads.
 _REQUIRED_MENTIONS: frozenset[str] = frozenset({"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE"})
 
@@ -69,12 +66,6 @@ def _served(name: str) -> str:
 
 def _served_external_build() -> str:
     return _served("external-build-upload")
-
-
-def _four_method_runbook() -> str:
-    return (_REPO_ROOT / "docs/operating/runbooks/four-method-live-run.md").read_text(
-        encoding="utf-8"
-    )
 
 
 def test_external_build_doc_states_config_is_yours_to_choose() -> None:
@@ -92,15 +83,9 @@ def test_external_build_doc_states_config_is_yours_to_choose() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("label", "read"),
-    [
-        ("served external-build doc", _served_external_build),
-        ("four-method live-run runbook", _four_method_runbook),
-    ],
-)
-def test_crash_capture_docs_name_only_settable_symbols(label: str, read: Callable[[], str]) -> None:
-    body = read()
+def test_crash_capture_docs_name_only_settable_symbols() -> None:
+    label = "served external-build doc"
+    body = _served_external_build()
     named = set(_CONFIG_SYMBOL.findall(body))
 
     assert named, f"{label} names no CONFIG_* symbol at all, so this guard would pass vacuously"

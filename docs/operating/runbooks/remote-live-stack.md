@@ -177,14 +177,15 @@ The remote provider advertises four capture methods —
 It runs under the same `live_stack` gate as the spine above: configure the prerequisites in steps
 1–4, then `just test-live-stack` collects it.
 
-The exercise drives **two** Systems because `host_dump` and `kdump` are both *vmcore* methods that
-need a `crashed` System, and `ensure_method_match` (#118/[ADR-0050](../../adr/0050-vmcore-method-aware-storage.md))
-makes the **first captured method win per System** — a second vmcore method on the same System is
-rejected with `configuration_error`. So they cannot share a System:
+The test chooses two Systems with distinct bound Runs. Both vmcore methods require a CRASHED
+System, but `ensure_method_match` binds the stored capture method to the **Run**, not globally
+to the System. The topology below is this test's setup, not a requirement that every method
+use a different System. Use the Run ID for `vmcore.fetch`; see the
+[postmortem guide](../../guide/toolsets/postmortem.md).
 
 | method | System | what it proves |
 |--------|--------|----------------|
-| `host_dump` | **A** — provisioned to `ready`, then crashed | host-side `virDomainCoreDumpWithFormat` → storage-pool volume → stream-download ([ADR-0094](../../adr/0094-remote-host-dump-via-coredump-volume.md)); **no** in-guest kdump kernel needed |
+| `host_dump` | **A**, with a bound Run — provisioned to `ready`, then crashed | host-side `virDomainCoreDumpWithFormat` → storage-pool volume → stream-download ([ADR-0094](../../adr/0094-remote-host-dump-via-coredump-volume.md)); **no** in-guest kdump kernel needed |
 | `gdbstub` | **B** — booted | direct-TCP gdb-MI attach to a running System ([ADR-0083](../../adr/0083-remote-connect-debug-plane.md)) |
 | `kdump` | **B** — booted, then crashed | the two-phase in-guest capture kernel → presigned-PUT upload ([ADR-0084](../../adr/0084-remote-control-two-phase-vmcore-retrieve.md)) |
 | `console` | **B** — boot→crash lifetime | the reconciler-hosted `virDomainOpenConsole` collector ([ADR-0095](../../adr/0095-reconciler-remote-console-collector.md)); the single artifact assembles on teardown-finalize, so it is asserted **after** System B is `torn_down` |

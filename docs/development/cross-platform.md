@@ -51,10 +51,11 @@ sudo apt-get install autoconf automake libtool autoconf-archive pkgconf make gaw
 ```
 
 `libkdumpfile` must be present when `drgn` builds: an importable `drgn` without that support
-cannot read kdump-compressed vmcores. For the system `guestfs` binding, follow the
-[worker-venv instructions](../operating/runbooks/four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs),
-including the Python ABI match and Debian/Ubuntu `dist-packages` path. A successful import
-alone does not prove a real capture can be read.
+cannot read kdump-compressed vmcores. The system `guestfs` binding must match the consuming Python ABI. Fixed workers use the
+[installed lifecycle environment](../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract),
+which is separate from the checkout/test interpreter. Update the owning host provisioning
+when a native dependency is missing; copying an incompatible extension is not a repair.
+A successful import alone does not prove that a real capture can be read.
 
 Source builds can make the first setup slow; later runs reuse cached artifacts. The runtime
 container's native dependency setup is maintained in the [Dockerfile](../../Dockerfile).

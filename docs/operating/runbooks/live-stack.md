@@ -30,11 +30,9 @@ workers on the host so they can access KVM and libvirt.
   `KDIVE_OIDC_IMAGE`; the wrapper defaults to a pinned mirror on emulated POWER. See
   [image selection](../../../deploy/mock-oidc/README.md#using-the-image).
 - The repo set up: `just setup` (or `uv sync --locked`).
-- For **local-libvirt `kdump`** capture, the worker venv additionally needs `drgn`
-  (`uv sync --group live`) and the system `guestfs` binding wired in; this is a one-time step
-  documented in the
-  [four-method runbook §4b](four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
-  `scripts/operations/check-local-libvirt.sh` flags the gap with the fix.
+- Local-libvirt kdump capture needs drgn and libguestfs in the **installed worker environment**,
+  `/opt/kdive-live-worker-lifecycle/.venv`, supplied by the lifecycle host provisioning below.
+  The checkout preflight probes `KDIVE_PYTHON`; passing it does not verify that worker interpreter.
 - The fixed systemd worker contract must be installed. Persistent self-hosted runners get it from
   `deploy/ansible/roles/live_vm_host`; apply the runner playbook with the revision to install:
 
@@ -120,18 +118,27 @@ server-side with a multipart upload (ADR-0104). A `kdive` process that crashes b
 `CreateMultipartUpload` and `Complete`/`Abort` leaves one in-progress multipart upload that
 `ListObjectsV2` — and therefore the reconciler's prefix reaper — cannot see. Configure the
 bucket with an `AbortIncompleteMultipartUpload` lifecycle rule so the store reclaims such an
-orphan on its own. Run once after the bucket exists (1-day expiry shown):
+orphan on its own. Add this rule after the bucket exists (one-day incomplete-upload age shown). Preserve any
+existing bucket lifecycle rules; do not add noncurrent-version expiry, which can remove
+completed object versions still pinned by KDIVE records:
 
 ```bash
 # MinIO
-mc ilm rule add local/kdive-artifacts --expire-delete-marker --noncurrent-expire-days 1
 mc ilm rule add local/kdive-artifacts --incomplete-multipart-days 1
 
-# Real S3 (equivalent), via a lifecycle configuration with:
-#   AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
-aws s3api put-bucket-lifecycle-configuration --bucket "$KDIVE_S3_BUCKET" \
-  --lifecycle-configuration '{"Rules":[{"ID":"abort-incomplete-mpu","Status":"Enabled",
-  "Filter":{"Prefix":""},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}'
+```
+
+For S3, merge the following rule into the bucket's existing lifecycle configuration before
+applying the complete policy. `put-bucket-lifecycle-configuration` replaces the policy; a
+standalone rule must not discard existing retention settings.
+
+```json
+{
+  "ID": "abort-incomplete-mpu",
+  "Status": "Enabled",
+  "Filter": { "Prefix": "" },
+  "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+}
 ```
 
 ## Fund the demo project — `just onboard`
@@ -146,7 +153,7 @@ just onboard                 # project "demo" (override with KDIVE_PROJECT=acme)
 
 It runs an advisory provider preflight, then `migrate` → `seed-project` → `verify-project` (the
 hard funding gate — it fails loudly if the rows are absent and echoes the credential-redacted
-target DB), then mints a 24 h token and prints the **binding contract** (`projects`, `roles`, and
+target DB), then mints a token with the configured `KDIVE_TOKEN_TTL` lifetime and prints the **binding contract** (`projects`, `roles`, and
 the `project` arg, all the same string). Export the printed `KDIVE_TOKEN` and re-run when it
 expires. This is the dev/demo path; production onboards via the audited admin tools
 ([project onboarding](../project-onboarding.md)). It can run any time after the backends and
@@ -383,43 +390,10 @@ cleanly` and exits 0.
 
 ## 6. Kernel debugging demo smoke check
 
-The default installed-package flow is:
-
-```bash
-set -a
-. /etc/kdive/local.env
-set +a
-python -m kdive migrate
-python -m kdive seed-project --project demo
-just compose-up
-```
-
-Expected defaults:
-
-- MCP URL: `http://127.0.0.1:8000/mcp`
-- Kernel source: `~/src/linux` unless `KDIVE_KERNEL_SRC` is set
-- Build workspace: `/var/lib/kdive/build`
-- Component roots: `/var/lib/kdive/build/components:/etc/kdive/fixtures`
-- Fixture catalog: `/etc/kdive/fixtures/local-libvirt`
-- Fedora kdive-ready rootfs: `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2`
-- Busybox rootfs: `/var/lib/kdive/rootfs/local/busybox-bare.qcow2`
-
-After the stack is up, use the live-stack harness to call MCP tools for:
-
-- `accounting.set_budget`
-- `accounting.set_quota`
-- `resources.list`
-- `allocations.request`
-- `systems.provision` with
-  `rootfs: {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-44"}`
-- `runs.create`, then `artifacts.create_run_upload` + PUT your locally-built kernel, then
-  `runs.complete_build`
-- `runs.install`
-- `runs.boot`
-- `artifacts.list(system_id=...)`
-
-Vulnerable kernels should produce a console artifact instead of an empty `boot_timeout`.
-Patched kernels can boot and reach the readiness marker.
+Use the [local-libvirt example](../../../examples/local-libvirt/README.md) for guided host
+setup and client connection, then follow the [core workflow](../../guide/core-path.md).
+The Compose app tier described above does not provide local-libvirt guest access; do not
+use it as a substitute for that host setup.
 
 ## 7. Teardown
 
