@@ -15,16 +15,21 @@ from collections.abc import Callable
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
+    PROVIDER_TOOL_SEARCH_PATH,
+    resolve_provider_tool,
+)
 
 type OverlayCustomizer = Callable[[str], None]
 
 _VIRT_CUSTOMIZE_TIMEOUT_S = 5 * 60
+_VIRT_CUSTOMIZE = "virt-customize"
 
 
 def inject_authorized_key_argv(overlay_path: str, pubkey_file: str) -> list[str]:
     """Build the ``virt-customize --ssh-inject`` argv writing ``root``'s authorized_keys."""
     return [
-        "virt-customize",
+        _VIRT_CUSTOMIZE,
         "-a",
         overlay_path,
         "--ssh-inject",
@@ -40,11 +45,13 @@ def _real_inject_authorized_key(  # pragma: no cover - live_vm
     try:
         pub = scratch / "key.pub"
         pub.write_text(pubkey + "\n", encoding="utf-8")
-        executable = shutil.which("virt-customize")
+        executable = resolve_provider_tool(_VIRT_CUSTOMIZE)
         if executable is None:
             raise CategorizedError(
-                "virt-customize is not installed; cannot inject the per-System bootstrap key",
+                "virt-customize is not installed; cannot inject the per-System bootstrap key; "
+                f"not found in any of {PROVIDER_TOOL_SEARCH_PATH}",
                 category=ErrorCategory.MISSING_DEPENDENCY,
+                details={"searched": PROVIDER_TOOL_SEARCH_PATH},
             )
         result = subprocess.run(  # noqa: S603 - fixed argv, kdive-owned paths  # nosec B603
             [executable, *inject_authorized_key_argv(overlay_path, str(pub))[1:]],

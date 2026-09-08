@@ -1527,7 +1527,7 @@ def test_real_make_overlay_timeout_is_provisioning_failure(
         raise subprocess.TimeoutExpired(["qemu-img"], timeout=storage_module._QEMU_IMG_TIMEOUT_S)
 
     monkeypatch.setattr(storage_module.subprocess, "run", _timeout)
-    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
 
     with pytest.raises(CategorizedError) as caught:
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
@@ -1567,7 +1567,7 @@ def test_real_make_overlay_uses_resolved_qemu_img_path(
     calls: list[list[str]] = []
     kwargs_seen: list[dict[str, object]] = []
     chmods: list[tuple[str, int]] = []
-    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(storage_module.os, "chmod", lambda path, mode: chmods.append((path, mode)))
 
     def _record(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1611,7 +1611,7 @@ def test_real_make_overlay_chmod_oserror_is_infrastructure_failure(
     def _chmod_denied(_path: str, _mode: int) -> None:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(storage_module.subprocess, "run", _created)
     monkeypatch.setattr(storage_module.os, "chmod", _chmod_denied)
 
@@ -1634,7 +1634,7 @@ def test_real_make_overlay_unresolvable_qemu_img_is_missing_dependency(
 ) -> None:
     # When qemu-img is not on PATH (which returns None) the function fails fast with a
     # MISSING_DEPENDENCY before ever invoking subprocess.run.
-    monkeypatch.setattr(storage_module.shutil, "which", lambda _tool: None)
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda _tool: None)
 
     def _must_not_run(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
         raise AssertionError("subprocess.run must not be reached when qemu-img is unresolvable")
@@ -1646,12 +1646,14 @@ def test_real_make_overlay_unresolvable_qemu_img_is_missing_dependency(
 
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert str(caught.value) == (
-        "qemu-img is not installed; cannot create the per-System rootfs overlay"
+        "qemu-img is not installed; cannot create the per-System rootfs overlay; not found in "
+        f"any of {storage_module.PROVIDER_TOOL_SEARCH_PATH}"
     )
     assert caught.value.details == {
         "op": "create_overlay",
         "overlay": "overlay.qcow2",
         "tool": "qemu-img",
+        "searched": storage_module.PROVIDER_TOOL_SEARCH_PATH,
     }
 
 
@@ -1663,7 +1665,7 @@ def test_real_make_overlay_nonzero_return_is_provisioning_failure(
     def _failed(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr=stderr)
 
-    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(storage_module.subprocess, "run", _failed)
 
     with pytest.raises(CategorizedError) as caught:
@@ -1686,7 +1688,7 @@ def test_real_make_overlay_launch_oserror_is_infrastructure_failure(
         raise OSError("fork failed")
 
     monkeypatch.setattr(storage_module.subprocess, "run", _fork_failed)
-    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
 
     with pytest.raises(CategorizedError) as caught:
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
@@ -1733,7 +1735,7 @@ def test_real_overlay_virtual_size_unparseable_json_is_provisioning_failure(
     def _info(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=args, returncode=0, stdout='{"format": "qcow2"}')
 
-    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(storage_module.subprocess, "run", _info)
 
     with pytest.raises(CategorizedError) as caught:
@@ -1747,6 +1749,36 @@ def test_real_overlay_virtual_size_unparseable_json_is_provisioning_failure(
         "op": "overlay_info",
         "overlay": "overlay.qcow2",
         "tool": "qemu-img",
+    }
+
+
+def test_run_qemu_img_unresolvable_is_missing_dependency_naming_searched_dirs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `_run_qemu_img` resolves `qemu-img` independently of `_real_make_overlay` (storage.py
+    # duplicates the resolve/exec/error-mapping logic rather than sharing it), so its own
+    # unresolvable branch needs its own coverage alongside #2333's shared search-dir fix.
+    monkeypatch.setattr(storage_module, "resolve_provider_tool", lambda _tool: None)
+
+    def _must_not_run(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("subprocess.run must not be reached when qemu-img is unresolvable")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _must_not_run)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_resize_overlay("/overlay.qcow2", 10)
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == (
+        "qemu-img is not installed; cannot resize the per-System rootfs overlay; not found in "
+        f"any of {storage_module.PROVIDER_TOOL_SEARCH_PATH}"
+    )
+    assert caught.value.details == {
+        "op": "resize_overlay",
+        "overlay": "overlay.qcow2",
+        "tool": "qemu-img",
+        "disk_gb": 10,
+        "searched": storage_module.PROVIDER_TOOL_SEARCH_PATH,
     }
 
 
