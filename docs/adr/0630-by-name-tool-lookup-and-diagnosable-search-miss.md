@@ -4,7 +4,9 @@
 
 Accepted (2026-09-07)
 
-- **Amends:** [ADR-0472](0472-summary-first-tool-search.md) §2's single-tool fetch contract.
+- **Amends:** [ADR-0472](0472-summary-first-tool-search.md) §2's single-tool fetch contract — the
+  exact-name query is no longer the only way to reach one tool's schema. §2's ranking guarantee
+  itself is unchanged.
 - **Issue:** #2305
 
 ## Context
@@ -40,15 +42,12 @@ ranking runs. Each requested name is stripped and lower-cased before lookup, so 
 case-forgiving as `query` already is; a name repeated after normalisation is returned once, in
 its first position.
 
-ADR-0472 rejected a separate `tools.describe(name)` tool because it adds a third gateway tool for
-what an exact-name query already does, and epic #1576 spent thirteen issues removing tools whose
-whole body was a narrower call into an existing one. That reasoning is unchanged; a parameter on
-the tool that already owns discovery adds no tool, no new RBAC surface, and no second response
-shape. §2's exact-name ranking guarantee is untouched — `names` is a different mode reached by a
-different argument.
-
-Mode precedence is `names`, then `namespace`, then `query`, then the unfiltered fallback: most
-specific first, so a supplied name is never silently reinterpreted as search text.
+ADR-0472 rejected a separate `tools.describe(name)` tool, and that reasoning is unchanged: a
+parameter on the tool that already owns discovery adds no tool, no new RBAC surface, and no
+second response shape. §2's exact-name ranking guarantee is untouched — `names` is a different
+mode reached by a different argument. Mode precedence is `names`, then `namespace`, then `query`,
+then the unfiltered fallback: most specific first, so a supplied name is never silently
+reinterpreted as search text.
 
 ### 2. `names` mode always returns full detail, and its own cardinality bound replaces `limit`
 
@@ -57,11 +56,11 @@ whatever `detail` says. It also ignores `limit`: truncating an explicit enumerat
 caller's stated intent rather than trimming a ranked tail, so `truncated` is always `false` here.
 
 Ignoring both payload levers is why the cardinality bound is 10, not the `_SEARCH_LIMIT_MAX` of
-50 that bounds `limit`. ADR-0472 measured a full-detail match at roughly 2.5 KB and recorded a
-54 KB response overflowing a client's context; 50 forced-full matches would reproduce the cost
-ADR-0472 removed, on the one path the new instructions teach first. Ten is `limit`'s default, so
-the mode's ceiling is the one a caller already gets. Because FastMCP serialises only `Field` text,
-each of the three parameters says what the others do to it.
+50 that bounds `limit`. ADR-0472 measured a full-detail match at roughly 2.5 KB and a 54 KB
+response overflowing a client's context; 50 forced-full matches would reproduce the cost ADR-0472
+removed, on the path the new instructions teach first. Ten is `limit`'s default, so the mode's
+ceiling is the one a caller already gets. FastMCP serialises only `Field` text, so each of the
+three parameters says what the others do to it.
 
 ### 3. Unknown and unauthorised names collapse into one `unknown_names` list
 
@@ -90,12 +89,10 @@ When `query` mode returns no matches, `data.reason` carries one of:
 These are exhaustive and mutually exclusive for an empty query-mode result: a surviving token
 occurring in any visible tool's text gives that tool a non-zero score and therefore a hit, so an
 empty result means either no token survived or no surviving token hit anything. An empty visible
-candidate set falls under `no_token_matched`, which remains literally true.
-
-`no_token_matched` is the signal the unsupported-operator case was missing: the search ran
-against the caller's own words and none of them are vocabulary this server indexes. The key is
-absent whenever `matches` is non-empty, and absent in `namespace` and `names` modes, which carry
-their own signals.
+candidate set falls under `no_token_matched`, which remains literally true. `no_token_matched` is
+the signal the unsupported-operator case was missing: the search ran against the caller's own
+words and none of them are vocabulary this server indexes. The key is absent whenever `matches`
+is non-empty, and absent in `namespace` and `names` modes, which carry their own signals.
 
 ### 5. The gateway-on instructions carry the recipe
 

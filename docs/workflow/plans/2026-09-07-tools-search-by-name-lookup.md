@@ -13,9 +13,9 @@ miss reason out of `_rank`, and updates the two agent-facing texts: the wrapper 
 
 **Tech stack.** Python 3.14, `uv`, FastMCP, pydantic v2, pytest.
 
-Expected implementation size: 280–380 changed lines (M) — from the file map below: ~125 lines in
-`gateway.py`, ~8 in `tool_index.py`, ~200 in the two test files, and ~25 in the regenerated
-`docs/guide/reference/tools.md`.
+Expected implementation size: 300–420 changed lines (M) — from the file map below: ~125 lines in
+`gateway.py`, ~8 in `tool_index.py`, ~215 in the two test files, and ~45 across the two
+regenerated artifacts.
 
 ## Global Constraints
 
@@ -49,6 +49,7 @@ Expected implementation size: 280–380 changed lines (M) — from the file map 
 | `tests/mcp/tools/test_gateway_search.py` | changed | `names` mode, its edges, and `reason` behaviour |
 | `tests/mcp/test_tool_index.py` | changed | The gateway-on instructions naming the parameters |
 | `docs/guide/reference/tools.md` | regenerated | CI-gated snapshot of the live registry (`just docs`) |
+| `src/kdive/cli/commands/_generated_verbs.py` | regenerated | CI-gated `kdivectl` verb descriptors, which embed `tools.search`'s first docstring line and its `Field` help text (`just cli-verbs`) |
 
 ## Task 1 — `names` mode on `tools.search`
 
@@ -200,21 +201,17 @@ has no `names` parameter and binding the argument fails — and one green comman
                        extra={"requested": len(names), "unresolved": len(unresolved)},
                    )
            elif namespace is not None:
-               status, grants = _namespace_signal(all_tools, namespace, any_visible=bool(matches))
-               data["namespace_status"] = status.value
-               if status is NamespaceStatus.UNAUTHORIZED:
-                   data["namespace_required_grants"] = cast("JsonValue", grants)
-               if status is not NamespaceStatus.OK:
-                   _log.info(
-                       "tool_search_namespace_miss",
-                       extra={"namespace": namespace, "namespace_status": status.value},
-                   )
+               ...  # the existing five-statement namespace block, unchanged except that its
+               ...  # _namespace_signal call takes any_visible=bool(matches)
            elif not matches and query is not None:
                _log.info("tool_search_miss", extra={"query": query, "count": 0})
            return ToolResponse.success("tools.search", "ok", data=data)
    ```
 
-   The `kinds = resolver.registered_kinds()` block stays where it is, above this assembly.
+   The namespace block keeps its `data["namespace_status"]` assignment, its
+   `NamespaceStatus.UNAUTHORIZED` grants assignment, and its `tool_search_namespace_miss` log
+   exactly as they read today; only its indentation under the new `elif` and the `any_visible`
+   argument change. The `kinds = resolver.registered_kinds()` block stays above this assembly.
 
 7. Extend the `tools_search` docstring. Change the opening line to
    `"""Find tools by exact name, capability phrase, or namespace; compact summaries by default.`
@@ -275,6 +272,12 @@ no other module calls `_rank`, so the only caller to update is `tools_search`.
 - **Contract:** `reason` is absent when `matches` is non-empty. **Mode:** `focused-test`. Test
   `…::test_successful_query_carries_no_reason`. Expected red: none — it passes before and after,
   guarding the additive claim. Green: the command above.
+- **Contract:** `tool_search_miss` fires only for a query-mode miss and carries `reason`; a call
+  passing both `namespace` and `query` no longer emits it, since `namespace` wins and no query
+  ran. **Mode:** `focused-test`. Test
+  `…::test_query_miss_log_carries_the_reason_and_skips_namespace_calls`, using `caplog` at `INFO`
+  on `kdive.mcp.tools.gateway`. Expected red: the record exists but has no `reason` attribute, and
+  fires for the namespace+query call. Green: the command above.
 - **Contract:** ADR-0472 §2's exact-name ranking still holds.
   **Mode:** `focused-test`. The existing, unmodified
   `…::test_exact_tool_name_query_ranks_that_tool_first` and
@@ -294,23 +297,16 @@ no other module calls `_rank`, so the only caller to update is `tools_search`.
        NO_TOKEN_MATCHED = "no_token_matched"
    ```
 
-2. Change `_rank`'s signature to
-   `) -> tuple[list[Tool], SearchMiss | None]:` and make each of its four exits return a pair.
-   The namespace `return sorted(...)` and the trailing `return sorted(candidates, ...)` each gain
-   `, None`. In the query branch, `if not tokens: return []` becomes
-   `if not tokens: return [], SearchMiss.NO_USABLE_TOKENS`; a new guard goes between the `hits`
-   comprehension and `hits.sort(...)`:
-
-   ```python
-           if not hits:
-               return [], SearchMiss.NO_TOKEN_MATCHED
-   ```
-
-   and the branch's final `return [t for t, _ in hits]` gains `, None`. The scoring, the `exact`
-   tie-break, and the sort key are untouched — ADR-0472 §2 rides on that sort key. Add one
-   paragraph to the docstring: the second element is a `SearchMiss` only for an empty query-mode
-   result, and says whether the query had no usable tokens or none of its tokens matched
-   (ADR-0630 §4).
+2. Change `_rank`'s signature to `) -> tuple[list[Tool], SearchMiss | None]:` and make each of
+   its four exits return a pair. The namespace `return sorted(...)`, the trailing
+   `return sorted(candidates, ...)`, and the query branch's final `return [t for t, _ in hits]`
+   each gain `, None`; `if not tokens: return []` becomes
+   `if not tokens: return [], SearchMiss.NO_USABLE_TOKENS`; and a new
+   `if not hits: return [], SearchMiss.NO_TOKEN_MATCHED` goes between the `hits` comprehension
+   and `hits.sort(...)`. The scoring, the `exact` tie-break, and the sort key are untouched —
+   ADR-0472 §2 rides on that sort key. Add one docstring paragraph: the second element is a
+   `SearchMiss` only for an empty query-mode result, and says whether the query had no usable
+   tokens or none of its tokens matched (ADR-0630 §4).
 
 3. In `tools_search`, declare `miss: SearchMiss | None = None` beside Task 1's
    `unresolved: list[str] = []`, and change the `else` branch's rank call to
@@ -415,15 +411,15 @@ no other module calls `_rank`, so the only caller to update is `tools_search`.
 **Acceptance criteria.** `tests/mcp/test_tool_index.py` is green, including the pre-existing
 `_GATEWAY_PRIMARY_CLAIM` and `_MISSCOPED_CLAUSE` assertions.
 
-## Task 4 — Regenerate the reference and run the full gate
+## Task 4 — Regenerate both artifacts and run the full gate
 
-**Creates/modifies:** `docs/guide/reference/tools.md` (generated).
+**Creates/modifies:** `docs/guide/reference/tools.md` and
+`src/kdive/cli/commands/_generated_verbs.py`, both generated.
 **Tests:** the repository guardrail suite.
 
 **Interfaces.** Consumes the finished docstring and `Field` text from Tasks 1–3. Provides nothing.
-
-**Where it fits.** Last: `docs-check` diffs the committed reference against a fresh generation
-from the live registry, so it runs after the agent-facing text is final.
+Runs last: `docs-check` and `cli-verbs-check` each diff a committed artifact against a fresh
+generation from the live registry, so both need the agent-facing text final.
 
 ### Verification
 
@@ -431,6 +427,11 @@ from the live registry, so it runs after the agent-facing text is final.
   `focused-test`. `just docs` then `just docs-check`; expect no diff and exit 0. Expected red
   before `just docs`: a unified diff of `docs/guide/reference/tools.md` and exit 1 with
   `tool reference is stale — run 'just docs' and commit`.
+- **Contract:** the committed `kdivectl` verb descriptors match a fresh generation. **Mode:**
+  `focused-test`. `just cli-verbs` then `just cli-verbs-check`; expect exit 0. Expected red before
+  `just cli-verbs`: a non-zero exit naming `src/kdive/cli/commands/_generated_verbs.py` as stale,
+  because the file embeds `tools.search`'s first docstring line and the `names`, `limit`, and
+  `detail` help text this change rewrites.
 - **Contract:** ADR-0630's status keyword is valid and consistent with its citation from `src/`.
   **Mode:** `focused-test`. `just adr-status-check`; expect
   `ADR status guard: <n> ADRs, no shipped-but-Proposed drift.` and exit 0.
@@ -439,15 +440,17 @@ from the live registry, so it runs after the agent-facing text is final.
 
 ### Steps
 
-1. Move the two host-libguestfs symlinks aside immediately before any type-checking run —
-   `scripts/check-setup-deps.sh` re-links them during a run, which makes `just type` report
-   `unused-ignore-comment` on
+1. Move the two host-libguestfs symlinks aside immediately before any type-checking run:
+   `scripts/check-setup-deps.sh` re-links them during a run, which makes the *next* `just type`
+   report `unused-ignore-comment` on
    `src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py:564` and
-   `src/kdive/providers/local_libvirt/retrieve/guestfs.py:121` on the following run. Neither file
-   is in this change; do not edit them or `pyproject.toml`.
-2. `just docs`. Expect `docs/guide/reference/tools.md` to gain the `names` parameter and the
-   revised `tools.search` description, `limit` description, and `detail` description.
-3. `just docs-check`. Expect no diff, exit 0.
+   `.../retrieve/guestfs.py:121`. Neither file is in this change; do not edit them or
+   `pyproject.toml`.
+2. `just docs`, then `just cli-verbs`. Expect `docs/guide/reference/tools.md` to gain the `names`
+   parameter and the revised `tools.search`, `limit`, and `detail` descriptions, and
+   `src/kdive/cli/commands/_generated_verbs.py` to gain the matching help text and a
+   `kdivectl tools search --names` append flag.
+3. `just docs-check`, then `just cli-verbs-check`. Expect no diff and exit 0 from both.
 4. `just lint`, then `just type`, then
    `uv run python -m pytest tests/mcp/tools/test_gateway_search.py tests/mcp/test_tool_index.py -q`.
    Expect all green.
@@ -457,24 +460,18 @@ from the live registry, so it runs after the agent-facing text is final.
 
 **Acceptance criteria.** `just ci` exits 0 with the branch committed.
 
-**Rollback.** Every change is additive and confined to the five paths in the file map; reverting
-the branch restores the prior behaviour with no data or schema migration.
+**Rollback.** Every change is additive and confined to the file map; reverting the branch restores
+the prior behaviour with no data or schema migration.
 
 ## Self-review against the spec
 
 - Success 1 → Task 1 verification entry 1. Success 2 → entry 2. Success 3 → entry 3. Success 4 →
-  entries 4 and 6. Success 5 → Task 2 entries 1–3. Success 6 → Task 3 entry 1. Success 7 → Task 2
-  entry 4 plus the additive-only Global Constraint. Success 8 → Task 4 entry 1. The spec's
-  names-miss logging row → Task 1 entry 7. No task serves no requirement.
-- Names used across tasks are each defined in this plan (`_NAMES_MAX`, `_select_named`,
-  `SearchMiss` and its two members) or confirmed present at base `main` in the named source file
-  (`_rank`, `_namespace_signal`, `describe_tool`, `SearchDetail.FULL`, `build_instructions`,
-  `_GATEWAY_PRIMARY_CLAIM`, `_MISSCOPED_CLAUSE`).
-- Borrowed signatures confirmed against the checkout: `describe_tool(tool, kinds, *, detail)`,
-  `_namespace_signal(all_tools, namespace, *, any_visible)`, `tool_visible(name, ctx)`,
-  `registered_tools(app)`, `ToolResponse.success(object_id, status, *, data=...)`,
-  `build_instructions(gateway_enabled)`, and the test helpers `_operator_ctx`, `_viewer_ctx`,
-  `_call_result` in `tests/mcp/tools/test_gateway_search.py`. The pydantic constraint
-  `Annotated[list[str] | None, Field(min_length=1, max_length=10)]` was checked to validate
-  `None` and a one-element list, reject `[]` and an over-long list, and render `minItems` /
-  `maxItems` into the JSON schema.
+  entries 4–7. Success 5 → Task 2 entries 1–3. Success 6 → Task 3 entry 1. Success 7 → Task 2
+  entry 5 plus the additive-only Global Constraint. Success 8 → Task 4 entries 1 and 2. The
+  spec's names-miss row → Task 1 entry 8; its `tool_search_miss` row → Task 2 entry 4. No task
+  serves no requirement.
+- Every name used across tasks is defined in this plan (`_NAMES_MAX`, `_select_named`,
+  `SearchMiss` and its members) or confirmed at base `main` with the signature the task assumes —
+  the list is in each task's Interfaces block. `Annotated[list[str] | None,
+  Field(min_length=1, max_length=10)]` was checked to accept `None` and a one-element list,
+  reject `[]` and an over-long list, and render `minItems` / `maxItems` into the JSON schema.
