@@ -83,6 +83,7 @@ def _profile_pairing_validation_error() -> ValidationError:
                     "schema_version": 1,
                     "arch": "x86_64",
                     "boot_method": "disk-image",
+                    "kernel_source_ref": "linux-6.9",
                     "provider": {
                         "local-libvirt": {"rootfs": {"kind": "local", "path": "/tmp/rootfs.qcow2"}}
                     },
@@ -169,6 +170,7 @@ def test_pairing_binding_error_exposes_actionable_boot_method() -> None:
     assert isinstance(errors, list) and errors
     messages = " ".join(str(error["msg"]) for error in errors)
     assert "direct-kernel" in messages
+    assert "kernel_source_ref" in messages
     assert "ADR-" not in messages
 
 

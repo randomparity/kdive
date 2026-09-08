@@ -407,7 +407,8 @@ class ProvisioningProfile(_ProfileBase):
             else:
                 message = (
                     "boot_method 'disk-image' requires provider 'remote-libvirt'; "
-                    "use boot_method 'direct-kernel' with local-libvirt or fault-inject"
+                    "use boot_method 'direct-kernel' with local-libvirt or fault-inject "
+                    "and set kernel_source_ref"
                 )
             raise ValueError(message)
         return self
