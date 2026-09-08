@@ -122,25 +122,26 @@ of truth is `_DEPMOD_SEARCH_DIRS` in
   `missing_dependency` whose message names the four directories it searched. Resolution screens on
   execute permission as well as presence, so a `depmod` that sits in one of those directories but
   is not executable by the account the worker runs as reads as unresolvable and produces that same
-  message: check the mode bits and the mount options before concluding the binary is missing.
-  A `depmod` that resolves and then fails is reported through the run envelope rather than that
-  message — `error_category` and the `failure_detail_*` fields carry it, and whether the operation
-  is retried follows that category rather than the host state behind it. Read the category off the
-  run instead of inferring it from what you changed on the host. Resolution is silent when it
-  succeeds: where a host carried a `depmod` both outside and inside the four directories, the one
+  message: check the mode bits and the mount options before concluding the binary is missing. A
+  binary that resolves and then cannot be run reports the same `missing_dependency` category with a
+  different message — that the resolved binary could not be executed — so read the message rather
+  than the category before concluding `depmod` is absent. Resolution is silent when it succeeds:
+  where a host carried a `depmod` both outside and inside the four directories, the one
   inside now runs and the outside one is ignored, so a host that relied on a locally built `kmod`
   or on a wrapper must confirm the binary now selected is the one it wants.
 - **Recovery** — install the distribution's `kmod` package, which places `depmod` in `/usr/sbin`
   under a merged-`/usr` layout and `/sbin` under a split one. For a `depmod` built from source or
-  installed to a non-FHS location, copy the binary into one of the four directories; it must be
-  executable by the account the worker runs as, on a mount that permits execution. Do not link
-  from one of those directories to a binary under `/usr/local` or another group-writable path:
+  installed to a non-FHS location, copy the binary into `/usr/sbin`: the first of the four
+  directories holding an executable `depmod` wins, so a copy into a later one is silently shadowed
+  by a packaged binary in an earlier one. It must be executable by the account the worker runs as,
+  on a mount that permits execution. Do not link from one of those directories to a binary under
+  `/usr/local` or another group-writable path:
   resolution follows the link and the target is what executes, so the link would reinstate the
   exposure the list excludes. `/usr/local/sbin` and `/usr/local/bin` are left out deliberately:
   `/usr/local` is group-writable by default on part of the Debian family, and a binary placed
   there would run with the worker slot account's authority over guest overlays. Repairing the host
-  does not resume the install that already failed — issue a new one for the same System. That
-  failure does not drive the System to `failed`, so the allocation survives.
+  does not resume the install that already failed — issue the install again once `depmod` resolves.
+  That failure does not drive the System to `failed`, so the allocation survives.
 
 An operator whose only `depmod` comes from the distribution package sees no change.
 
