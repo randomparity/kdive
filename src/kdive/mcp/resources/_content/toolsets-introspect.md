@@ -29,7 +29,9 @@ Choose the operation for the question:
 
 - `introspect.run` runs a built-in `tasks`, `modules`, or `sysinfo` helper against the session.
 - `introspect.script` runs a drgn Python script with `prog` already bound to the live kernel.
-  For example, `print(prog["init_task"].pid)` prints one typed field. Each call starts a fresh
+  For a C expression such as `some_struct->field[3].member`, use the corresponding drgn
+  object access in the script. For example, `print(prog["init_task"].pid)` prints one typed
+  field. Each call starts a fresh
   drgn process; put related work in one script and inspect returned stdout and truncation.
 
 End the session with `debug.end_session`. For a workload running alongside observations and

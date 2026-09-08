@@ -47,7 +47,8 @@ requires viewer. These operations return jobs; poll them rather than assuming im
 3. `systems.authorize_ssh_key` installs your public key in the guest root account. It requires
    contributor; poll the job to success before connecting. KDIVE does not need your private key.
 
-After login, install tools as needed within guest disk and network limits. Local-libvirt has
+After login, use the guest package manager as root to install tools within guest disk and
+network limits. Local-libvirt has
 no outbound egress by default: the operator must enable `guest_egress = true` on the resource
 for direct mirror access. Remote networking is also operator configured. Use a prepared image
 when package mirrors are unavailable.

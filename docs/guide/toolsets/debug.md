@@ -15,6 +15,10 @@ If GDB support was omitted from the profile, reprovisioning a READY System with 
 profile rebuilds the guest; preserve needed evidence first. See
 resource://kdive/docs/guide/toolsets/systems.md for provision and snapshot constraints.
 
+GDB-stub boots add `nokaslr` to disable KASLR so symbols match the running kernel. The
+console line `Unknown kernel command line parameters "nokaslr", will be passed to user space`
+is benign: the early-boot handler has already consumed the option.
+
 ## Session lifecycle
 
 - `debug.start_session` — attach a GDB session to a booted system's stub.
