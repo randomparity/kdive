@@ -31,7 +31,7 @@ Transcribed from `AGENTS.md` and the frozen scope record:
 - `scripts/guards/check_adr_status.py` fails any ADR still `Proposed` while cited from `src/` or
   `tests/`, and CI runs per commit, so the `Accepted` status and the first citation from either
   tree must land in the **same commit**
-  (`docs/solutions/2026-09-04-adr-status-flip-must-share-the-first-citation-commit.md`).
+  (`docs/adr/README.md`).
   ADR-0628 is written `Accepted (2026-09-07)`; do not open it as `Proposed`.
 - `docs/adr/README.md` carries no index table (ADR-0504) and the guard has no index-sync
   invariant. Do not add a row; do not edit that file.

@@ -5,19 +5,14 @@ served guides. Read a tool's current schema for its parameters and return fields
 
 ## Reaching tools
 
-Calling tools **directly by name** (surfaced by lazy-loading hosts as `mcp__kdive__*`) is
-the canonical path — by default the server lists its full catalog. If a capability you need
-is not a callable tool in your client — including lazy-loading hosts that materialize only
-some of the ~130 tools and may never bind `tools.invoke` — reach it through the gateway:
-`tools.search` finds the name — matches are compact summaries, so pass `detail="full"` (with a
-small `limit`) to get the schema — and `tools.invoke(name, arguments)` executes any
-registered tool. When you already have the name, `tools.search(names=["runs.install"])` (1-10
-per call) skips the search and returns each named tool's full description and `input_schema`
-in one call. `tools.search` and `tools.invoke` are always available. Both paths enforce the
-same RBAC. If an operator enables the core-set gateway, only a small core set is listed
-directly, so reach everything else through `tools.search` / `tools.invoke`.
+By default, agent clients see a small core catalog. Use `tools.search` to discover other
+capabilities, then request the chosen tool's schema with `detail="full"` and a small `limit`.
+When you know the names, `tools.search(names=["runs.install"])` returns their full descriptions
+and input schemas directly (1–10 names per call). Call a tool through
+`tools.invoke(name, arguments)`, or directly when your client exposes it.
 
-The verified operator CLI receives the direct catalog in either gateway mode. `tools.search` and `tools.invoke` remain
+The verified operator CLI receives the direct catalog; disabling `KDIVE_MCP_TOOL_GATEWAY`
+also restores the direct catalog for agents. `tools.search` and `tools.invoke` remain
 available in either mode. Discovery is filtered by your roles, and both invocation paths
 enforce the same authorization and state checks. A listed tool is not permission to use it
 on every project or object.
