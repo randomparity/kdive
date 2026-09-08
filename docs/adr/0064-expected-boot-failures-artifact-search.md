@@ -92,6 +92,22 @@ over a large artifact because no regex engine is used. If the expectation is mal
 `configuration_error`; if the artifact cannot be read at boot-finalization time, the boot step
 does not claim a reproduced outcome.
 
+### Amendment (2026-09-07): decision 2's blanket `debug.start_session` rejection is scoped (#2303)
+
+This is an amendment rather than a rewrite because a later decision partly supersedes one claim in
+this section, and the record stays append-only. Decision 2 above ends "`debug.start_session`
+rejects Runs whose succeeded boot step has `boot_outcome = "expected_crash_observed"` because that
+Run is not a live-debuggable guest." [ADR-0233](0233-live-attach-halted-early-boot-crash.md)
+already narrowed the "not a live-debuggable guest" assertion for undeclared crashes;
+[ADR-0628](0628-expected-crash-admits-a-reachable-gdbstub.md) now narrows the rejection itself.
+
+The rejection still stands for every transport but `gdbstub`, and for `gdbstub` whenever the boot
+recorded no reachable stub. It no longer stands when a readiness-failure boot on a
+gdbstub-provisioned System matched its declared expectation, showed a generic kernel panic, and
+probed a stub that answered: that Run is admitted over `gdbstub`. Everything else in this decision
+is unchanged — the reproduction verdict, `expectation_matched`, the succeeded boot step, and the
+System staying reusable for the A/B pair rather than transitioning to `crashed`.
+
 ## Consequences
 
 - A deterministic crash-trigger Run can be a successful reproduction without treating all boot

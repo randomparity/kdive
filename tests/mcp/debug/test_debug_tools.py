@@ -31,6 +31,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.introspection import gate as introspect_gate
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_lifecycle
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
+from kdive.mcp.tools.debug.sessions.lifecycle import _EXPECTED_CRASH_GDBSTUB_DETAIL
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
@@ -585,7 +586,10 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
             run_id = await seed_run(
                 pool,
                 sys_id,
-                boot_result={"boot_outcome": "expected_crash_observed"},
+                boot_result={
+                    "boot_outcome": "expected_crash_observed",
+                    "available_capture": ["console"],
+                },
             )
             conn_fake = _FakeConnector()
             resp = await _start_session(
@@ -599,10 +603,9 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "expected_crash_not_live_debuggable"
-        # The envelope names no dead-end tool: after an expected console_crash the System stays
-        # READY, so vmcore.fetch always rejects (#759). It points straight at the console artifact
-        # and reuses postmortem.crash's shared guidance so the two surfaces cannot drift.
-        assert resp.detail == CONSOLE_CRASH_GUIDANCE
+        # The boot recorded no reachable stub, so the refusal is about the stub rather than about
+        # kdump: a gdbstub attach needs no capture kernel and produces no vmcore (ADR-0628).
+        assert resp.detail == _EXPECTED_CRASH_GDBSTUB_DETAIL
         assert "vmcore.fetch" not in resp.suggested_next_actions
         assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
         assert resp.suggested_next_actions[0] == "runs.get"
@@ -610,6 +613,99 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
         assert conn_fake.opened == []
 
     asyncio.run(_run())
+
+
+def test_start_session_admits_gdbstub_for_expected_crash_with_live_stub(
+    migrated_url: str,
+) -> None:
+    # ADR-0628: the boot probed the provisioned stub and it answered, so the declared
+    # expected-crash run is live-debuggable over gdbstub — the declaration no longer costs the
+    # caller the capability they provisioned for.
+    async def _run() -> tuple[Any, list[Any], int]:
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(
+                pool,
+                sys_id,
+                boot_result={
+                    "boot_outcome": "expected_crash_observed",
+                    "available_capture": ["gdbstub", "console"],
+                },
+            )
+            conn_fake = _FakeConnector()
+            resp = await _start_session(
+                pool,
+                request_context(),
+                run_id=run_id,
+                transport="gdbstub",
+                connector=conn_fake,
+            )
+            count = await _session_count(pool)
+        return resp, conn_fake.opened, count
+
+    resp, opened, count = asyncio.run(_run())
+    assert resp.status == "live"
+    assert opened == [("kdive-x", "gdbstub")]
+    assert count == 1
+
+
+def test_start_session_rejects_drgn_live_on_expected_crash(migrated_url: str) -> None:
+    # A recorded live stub admits gdbstub only. drgn-live reaches the guest over SSH (ADR-0218)
+    # and a halted guest has no running sshd, so it keeps the vmcore-worded guidance unchanged.
+    async def _run() -> tuple[Any, int]:
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(
+                pool,
+                sys_id,
+                boot_result={
+                    "boot_outcome": "expected_crash_observed",
+                    "available_capture": ["gdbstub", "console"],
+                },
+            )
+            resp = await _start_session(
+                pool,
+                request_context(),
+                run_id=run_id,
+                transport="drgn-live",
+                connector=_FakeConnector(),
+            )
+            count = await _session_count(pool)
+        return resp, count
+
+    resp, count = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.data["reason"] == "expected_crash_not_live_debuggable"
+    assert resp.detail == CONSOLE_CRASH_GUIDANCE
+    assert count == 0
+
+
+def test_start_session_refuses_gdbstub_on_a_pre_adr0628_boot_record(migrated_url: str) -> None:
+    # A boot step recorded before ADR-0628 carries no available_capture key at all. No probe ever
+    # ran for it, so the reader must treat the absent key as "no stub" rather than admitting it.
+    async def _run() -> tuple[Any, int]:
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(
+                pool, sys_id, boot_result={"boot_outcome": "expected_crash_observed"}
+            )
+            resp = await _start_session(
+                pool,
+                request_context(),
+                run_id=run_id,
+                transport="gdbstub",
+                connector=_FakeConnector(),
+            )
+            count = await _session_count(pool)
+        return resp, count
+
+    resp, count = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.detail == _EXPECTED_CRASH_GDBSTUB_DETAIL
+    assert count == 0
 
 
 def test_start_session_admits_gdbstub_for_crashed_halted_live(migrated_url: str) -> None:
