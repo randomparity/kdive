@@ -324,6 +324,24 @@ class RemoteModuleAttemptObligationRepository:
             )
             return cur.rowcount
 
+    async def worker_discharge_system_mutation_obligations(
+        self, conn: AsyncConnection, system_id: UUID
+    ) -> int:
+        """The worker/reconciler form of :meth:`discharge_system_mutation_obligations`.
+
+        Same write, same first-write-wins predicate, same System lock. It goes through the
+        SECURITY DEFINER function migration 0152 grants to ``kdive_worker`` and
+        ``kdive_reconciler`` (ADR-0629), because neither role holds ``UPDATE`` on the table and
+        the teardown reclaim path runs under one of them (#2302). The direct-write sibling
+        stays for the ``kdive_server`` activation edges that already hold it.
+        """
+        async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            row = await conn.execute(
+                "SELECT public.discharge_system_mutation_obligations(%s)", (system_id,)
+            )
+            value = await row.fetchone()
+        return 0 if value is None else int(value[0])
+
     async def record_terminal_evidence(
         self,
         conn: AsyncConnection,
