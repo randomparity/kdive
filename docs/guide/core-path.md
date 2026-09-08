@@ -5,8 +5,9 @@ Start with a [connected client](agents/index.md) and the [domain concepts](conce
 Read each tool's contract before calling it; the sequence below supplies the context
 that the individual [tool references](reference/index.md) do not.
 
-For every job-producing step, keep the job ID and poll `jobs.wait`. Advance after success;
-a terminal failure or cancellation needs recovery, not the next mutation in the table.
+For a job-producing prerequisite such as provision, install, or boot, keep the job ID and
+poll `jobs.wait`; advance after success. Failure or cancellation needs recovery. Observation
+jobs are different: run the workload during the watch, as described below.
 Use the [async-jobs guide](async-jobs.md) for polling and uncertain responses, and the
 [envelope guide](response-envelope.md) to distinguish job IDs from target-object IDs.
 
@@ -52,8 +53,10 @@ call `systems.authorize_ssh_key` and wait for its job to succeed. `systems.ssh_i
 connection coordinates; follow their host scope so a worker-local endpoint is reached from
 the right machine. The SSH workload runs through your client, outside the MCP tool call.
 
-For console-based observation, start `control.watch_for_crash` before the reproducer and
-follow its [watch contract](reference/control.md#controlwatch_for_crash). Both `fired` and
+For console-based observation, enqueue `control.watch_for_crash` before starting the
+reproducer, then run the workload without waiting for the watch to finish. Poll and read the
+verdict afterward; follow the [watch contract](reference/control.md#controlwatch_for_crash)
+for its timing limits. Both `fired` and
 `not_fired` are successful watch-job outcomes: read the JSON verdict in `refs.result`.
 A completed watch does not itself change the System to `crashed`, and a negative verdict
 only covers the watched window and signatures. A lost SSH connection alone is not a verdict.
