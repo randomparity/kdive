@@ -531,9 +531,10 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                     "of the one before it, so asking for more never drops a key. Two limits "
                     "on 'parameters': it gives argument names and types but not their value "
                     "constraints, so a parameter with an enum or a pattern still needs 'full'; "
-                    "and for a tool whose only argument is a payload object (every .list tool, "
-                    "among others) it returns one entry naming that object, where 'full' is "
-                    "the call to make instead. 'names' mode always returns full detail "
+                    "and for a tool whose only argument is a payload object (17 tools, most of "
+                    "the .list family among them) it returns one entry naming that object, "
+                    "where 'full' is the call to make instead. 'names' mode always returns "
+                    "full detail "
                     "whatever you pass here."
                 )
             ),

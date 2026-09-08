@@ -1404,3 +1404,31 @@ def test_full_tier_still_carries_parameters(monkeypatch: pytest.MonkeyPatch) -> 
     assert full["parameters"] == mid["parameters"], (
         "the same key must carry the same value in both tiers"
     )
+
+
+def test_no_live_tool_renders_an_unknown_parameter_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No registered tool's schema reaches ``_type_name``'s ``unknown`` fallback.
+
+    ADR-0632 records that the fallback is defensive and that no live property reaches it.
+    That claim is otherwise unguarded: a dependency upgrade that changed the emitted schema
+    shape — pydantic wrapping a ``$ref`` in ``allOf``, say — would start advertising
+    ``unknown`` to agents with the whole suite still green.
+    """
+    from kdive.mcp.tools.gateway import _parameter_digest
+
+    app = _build(monkeypatch, _every_scope_ctx)
+
+    rendered: list[str] = []
+    offenders: list[str] = []
+    for tool in registered_tools(app):
+        for entry in cast("list[dict[str, Any]]", _parameter_digest(tool.parameters)):
+            rendered.append(entry["type"])
+            if entry["type"] == "unknown":
+                offenders.append(f"{tool.name}.{entry['name']}")
+
+    # Without this the assertion below passes vacuously on an empty registry walk, which is
+    # exactly how this guard would stop biting without anyone noticing.
+    assert len(rendered) > 200, f"expected the live catalogue's properties, walked {len(rendered)}"
+    assert not offenders, f"parameters tier renders an unknown type for: {offenders}"

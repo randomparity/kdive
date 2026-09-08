@@ -86,7 +86,10 @@ rather than discovering it through a validation failure.
 How often that happens is worth stating rather than leaving as a qualitative caveat, because it
 decides whether the tier helps. Call an entry *constructible* when its rendered type is built
 only from JSON primitives and arrays of them, and *opaque* when it names a definition or is a
-bare `object`. Across the 124 registered tools and their 272 top-level properties:
+bare `object`. The one tie-break that moves a tool between the two columns: `array[object]`
+counts as opaque, because an array of unspecified objects tells the caller no more about what
+to pass than a bare `object` does. Across the 124 registered tools and their 272 top-level
+properties:
 
 - 81 tools have at least one parameter and every entry constructible. The tier is the whole
   answer for them.
