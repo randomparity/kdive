@@ -1,5 +1,9 @@
 # Install-time boot-cmdline iteration without a kernel rebuild (#988)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** #988 (`OPUS_REVIEW.md` §5, item I-8, Tier 3)
 - **ADR:** [ADR-0299](../../adr/0299-install-cmdline-iteration.md)
 - **Status:** Draft

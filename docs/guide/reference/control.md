@@ -6,18 +6,23 @@
 
 `implemented`
 
-Capture host-side network traffic from a Run's bound ready guest into a Run-owned pcap.
-The bound provider must support traffic capture (today local-libvirt); a provider that
-does not is refused with a `capability_unsupported` `configuration_error`. Only the guest's
-SSH-forward netdev is visible (the platform runs the guest on a restricted user-mode
-network), so this sees the traffic on that path, not arbitrary
-guest egress. Requires contributor; enqueues a fixed-duration job and returns
-`{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result` is the
-captured pcap's artifact id; the pcap is sensitive (packet bytes) and is fetched only with
-`artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<refs.result>)`, which presigns a
-download URL — `artifacts.get` will not serve it. A 24-byte pcap means the capture saw zero
-packets. An unbound Run, a non-ready System, a provider that does not support capture, or an
-invalid `capture_filter` is a `configuration_error`; no job is created.
+Capture traffic from a Run's bound READY guest into a Run-owned pcap.
+
+Requires contributor and provider traffic-capture support. Local-libvirt captures the
+SSH-forward netdev; remote-libvirt captures the first aliased guest interface. This is
+not an all-interface capture. External-boot admission checks the Run's ownership and
+activation state before a fresh enqueue.
+
+Returns a job handle. Run the workload during capture, then poll jobs.wait. Collection
+stops after the worker's duration window, an observed size threshold, or cancellation.
+The optional capture_filter is applied after collection. snaplen limits bytes per
+packet and can retain payloads. On success refs.result is the pcap artifact ID; fetch
+it with artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<refs.result>) for a
+presigned URL. artifacts.get does not serve these sensitive packet bytes inline.
+An empty pcap can be successful; cancellation does not promise a usable artifact.
+An unbound Run, non-READY System, or unsupported provider is refused before enqueue.
+Filter hygiene is checked before enqueue; invalid BPF syntax can instead fail the job
+when the worker validates it before starting capture.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -26,22 +31,20 @@ invalid `capture_filter` is a `configuration_error`; no job is created.
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `max_bytes` | integer | no | Stop early once the pcap reaches this many bytes (1048576-536870912). |
 | `run_id` | string | yes | The Run whose bound ready System's traffic to capture. The bound provider must support traffic capture. |
-| `snaplen` | integer | no | Bytes captured per packet (1-262144); the default 128 captures headers only. Raise it to keep payloads. |
+| `snaplen` | integer | no | Bytes captured per packet (1-262144); the default 128 can include payload bytes as well as headers. |
 
 ## `control.diagnostic_sysrq`
 
 `implemented`
 
-Inject one non-destructive diagnostic SysRq into a ready guest and capture the kernel's
-console dump. The bound provider must support diagnostic SysRq injection (today
-local-libvirt and remote-libvirt); a provider that does not is refused with a
-`capability_unsupported` `configuration_error`. Requires contributor (no destructive gate);
-enqueues a job and returns `{job_id, status: queued}` — poll `jobs.wait`. On success the
-job's `refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`.
-A guest that
-rejected the SysRq (`kernel.sysrq` restricts the operation) fails with a
-`configuration_error`, as does no console output at all (no keyboard driver); an
-unknown/destructive `command` or a non-ready System is also a `configuration_error`.
+Send an allowed diagnostic SysRq to a READY guest and collect its console output.
+
+Requires contributor and provider diagnostic-SysRq support (local-libvirt and
+remote-libvirt). A restricting external boot activation refuses the operation.
+Returns a job handle; poll jobs.wait. On success refs.result is the redacted console
+artifact ID; read it with artifacts.get. Guest rejection or absent output fails the
+job with configuration_error. An unknown/destructive command, non-READY System, or
+unsupported provider is refused before enqueue.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -53,10 +56,14 @@ unknown/destructive `command` or a non-ready System is also a `configuration_err
 
 `implemented` · `destructive`
 
-Inject an NMI to crash a ready System; drives ready->crashing->crashed.
+Request a deliberate panic through the provider; advance ready->crashing->crashed.
 
-Requires admin + gate. While an active external boot restricts the System, provide its
-owning `run_id`; another Run or no Run is refused.
+Requires the project's admin role and profile destructive-operation opt-in. While an
+active external boot restricts the System, provide its owning run_id; another Run or
+no Run is refused. Other restricting activation states can refuse the operation.
+Returns a job handle; poll jobs.wait. This operation does not capture a vmcore, and its
+success alone does not prove the guest produced one. Check systems.get and console
+evidence before vmcore.fetch, then wait for capture success before analysis.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -68,12 +75,13 @@ owning `run_id`; another Run or no Run is refused.
 
 `implemented`
 
-Power action on a System: on/off/cycle/reset (READY only) or resume (PAUSED only),
-all contributor-level leaseholder control. reset/cycle recover a wedged READY guest.
-resume returns a PAUSED System (left suspended by a start_paused systems.restore, for a
-gdbstub debug attach) to READY. on/off/cycle/reset are refused on a non-READY System (a
-CRASHED/CRASHING System holds crash evidence — use the crash workflow). Enqueues a power
-job.
+Power action on a System: on/off/cycle/reset (READY only) or resume (PAUSED only).
+
+Requires contributor. A restricting external boot activation refuses every power action.
+When admitted, reset/cycle can recover a hung READY guest, and resume returns a System
+paused by systems.restore to READY. Preserve needed evidence before changing power.
+Returns a job handle; poll jobs.wait. Job success confirms the provider operation,
+not guest boot or SSH readiness.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -85,27 +93,27 @@ job.
 
 `implemented`
 
-Watch a ready guest's serial console out-of-band for a kernel-crash signature
-(panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on the first
-hit. The bound provider must support out-of-band crash-watch (today local-libvirt and
-remote-libvirt); a provider that does not is refused with a `capability_unsupported`
-`configuration_error`. While an active external boot restricts the System, provide its
-owning `run_id`; another Run or no Run is refused. Use this to catch a crash your own
-reproducer provokes: drive the
-repeat-until-crash loop over your root SSH, and this watches the console — which survives
-the panic that drops SSH. Requires contributor; enqueues a job and returns
-`{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
-`refs.result`. The verdict's `outcome` is `fired` (a signature appeared: carries
-`signature`, a redacted matched `matched` slice, and `elapsed_s`) or `not_fired` (no
-signature before the deadline). Start the watch **before** you begin the reproducer loop
-so it does not miss an early crash; if your reproducer's SSH channel drops but the verdict
-is `not_fired`, the crash landed outside the watched window — read the full console with
-the `artifacts` tools. A non-ready System or a non-positive `deadline_s` is a
-`configuration_error`.
+Watch a READY guest's serial console, returning on the first recognized signature.
+
+Requires contributor and provider crash-watch support (local-libvirt and remote-libvirt).
+While an active external boot restricts the System, provide its owning run_id; another
+Run or no Run is refused. Other restricting activation states can refuse the operation.
+Returns a job handle. Submit before starting the reproducer, then run the workload and
+poll jobs.wait concurrently; do not wait for the watch to finish before starting it.
+The console baseline is taken at worker pickup, so queue delay can exclude early output.
+
+After job success, parse refs.result JSON: outcome is fired (with signature, redacted
+matched text, and elapsed_s) or not_fired (no match during the observed window).
+Both outcomes are successful jobs. A signature may be non-fatal; neither outcome nor
+an SSH disconnect establishes guest state. Read console evidence with runs.get and the
+artifact tools. The watch does not mark the System CRASHED; check systems.get before
+vmcore.fetch. Only one watch is queued or running per System. For another batch, let
+it finish and submit a fresh request; reusing an idempotency key replays its response.
+A non-positive or non-finite deadline_s is refused before enqueue.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `deadline_s` | number | no | Seconds to watch the guest's serial console before returning a 'not fired' verdict; defaults to 60 and is clamped to 300. Size it to the reproducer batch you are about to run; re-issue the watch for a longer campaign. |
+| `deadline_s` | number | no | Per-watch seconds measured by the worker monotonic clock after pickup. Defaults to 60; larger values are clamped to 300. Returns not_fired at expiry if no signature matched; submit a fresh watch request for another batch. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string (nullable) | no | Optional Run bound to this System. Required while an active external boot is owned by a Run; it must name that owner. |
 | `system_id` | string | yes | The ready System whose console to watch. The bound provider must support out-of-band crash-watch. |

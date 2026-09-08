@@ -1,7 +1,11 @@
 # Provision lane + reprovision are leaseholder control (#1081)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** [#1081](https://github.com/randomparity/kdive/issues/1081)
-- **ADR:** [ADR-0326](../../adr/0326-provision-lane-contributor-lifecycle.md)
+- **ADR:** [ADR-0326](../../../adr/0326-provision-lane-contributor-lifecycle.md)
 - **Status:** Design approved
 - **Date:** 2026-07-10
 

@@ -1,7 +1,10 @@
 # Proof record — cross-arch gdb attach to a ppc64le gdbstub (#1149)
 
+> Historical proof or design for the dated checkout below, not current operating instructions.
+> Use the [current documentation index](../README.md) for supported workflows.
+
 Date: 2026-07-14
-Issue: #1149 · Epic: #1139 · Spec: `2026-07-14-ppc64le-multiarch-gdb-1149.md` · ADR-0347
+Issue: #1149 · Epic: #1139 · ADR-0347
 
 This is the documented live proof required by #1149 AC5: a gdb attaches to a **ppc64le** guest's
 gdbstub from the **x86_64** host and reads registers, through the real arch-aware
@@ -13,7 +16,7 @@ gdbstub from the **x86_64** host and reads registers, through the real arch-awar
   package on Fedora), so `set architecture powerpc:common64` succeeds. `qemu-system-ppc64` present.
 - Target: a paused `pseries`/TCG guest exposing a gdbstub on `127.0.0.1:1234`, booted from the
   #1146 bundle's baseline ppc64le kernel
-  (`/home/dave/kdive-ppc-proof/bundle/vmlinuz-6.19.10-300.fc44.ppc64le`, an
+  (`<REDACTED-HOME>/kdive-ppc-proof/bundle/vmlinuz-6.19.10-300.fc44.ppc64le`, an
   `ELF 64-bit LSB executable, 64-bit PowerPC, OpenPOWER ELF V2 ABI` — powerpc has no bzImage; the
   bootable image is an ELF `vmlinux`).
 

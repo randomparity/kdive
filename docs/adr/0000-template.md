@@ -8,7 +8,7 @@ Proposed
 
 What forces are at play — technical, product, operational? What problem does this
 decision resolve, and what constraints bound it? Link the relevant section of
-`../specs/top-level-design.md`.
+[the current architecture](../design/top-level-design.md).
 
 ## Decision
 

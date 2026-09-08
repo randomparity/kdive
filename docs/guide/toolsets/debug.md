@@ -1,27 +1,23 @@
 # debug toolset
 
-These drive a live GDB-based kernel debugging session against a booted system. Reach for
-them to halt the kernel, inspect state, and step through code. Start a session, do the
-inspection, then end it. For exact parameters, types, and return schema, read each tool's
-own description.
+Use GDB to halt and inspect a live kernel. `debug.start_session` takes a **Run ID** and
+`transport="gdbstub"`; subsequent operations take the returned **DebugSession ID**. Starting,
+controlling, and ending a session require contributor access. Read each tool's schema for
+its limits and returned fields.
 
-**Provisioning prerequisite.** A live session needs the system to have been provisioned
-with the profile's `debug` section `gdbstub: true`. This is bound at provision — you
-cannot enable it on a ready system. If the system was not provisioned for it,
-`debug.start_session` fails with a configuration error telling you to reprovision with
-gdbstub set, and reprovisioning rebuilds and reboots the system. See the
-provisioning-for-debugging notes in the investigation index and decide up front.
+Provision the System with `gdbstub: true` in the profile's `debug` mapping before this workflow. Attach requires a
+completed build, a successful boot result, and a bound System in READY or PAUSED state;
+a build's `succeeded` status alone is insufficient. A declared console-only crash is not a
+live-debug target. A `crashed_halted_live` boot can instead permit GDB attachment. Only one
+session per transport can occupy a System at a time.
 
-**Expected console line — don't chase it.** gdbstub provisioning injects `nokaslr` into the
-kernel command line to disable KASLR, so a breakpoint set by symbol resolves against the
-fetched vmlinux's link-time addresses instead of a randomized base (without it, symbol
-breakpoints never fire). The kernel consumes `nokaslr` in early boot, so its later
-unknown-parameter check prints this on the console:
+If GDB support was omitted from the profile, reprovisioning a READY System with a changed
+profile rebuilds the guest; preserve needed evidence first. See
+resource://kdive/docs/guide/toolsets/systems.md for provision and snapshot constraints.
 
-> `Unknown kernel command line parameters "nokaslr", will be passed to user space.`
-
-That line is expected and harmless — KASLR is disabled as intended; it does not indicate a
-misconfiguration.
+GDB-stub boots add `nokaslr` to disable KASLR so symbols match the running kernel. The
+console line `Unknown kernel command line parameters "nokaslr", will be passed to user space`
+is benign: the early-boot handler has already consumed the option.
 
 ## Session lifecycle
 
@@ -32,13 +28,16 @@ misconfiguration.
 
 ## Run control
 
-- `debug.continue` — resume a halted kernel.
+- `debug.continue` — resume a halted kernel and wait for a stop event.
 - `debug.interrupt` — halt a running kernel to inspect it.
 - `debug.advance` — advance a stopped kernel by one step; `mode` picks the unit:
   - `into` — one source line, into called functions.
   - `over` — one source line, over called functions.
   - `instruction` — one machine instruction (works without debug symbols).
-  - `out` — resume until the current function returns.
+  - `out` — resume until the current function returns; it needs a frame that can return.
+
+Inspect the returned stop reason and `data.timed_out` before assuming the intended stop
+was reached. End the session with `debug.end_session` when inspection is complete.
 
 ## Breakpoints and watchpoints
 
@@ -58,12 +57,10 @@ misconfiguration.
 - `debug.read_frame` — select and read a single stack frame.
 - `debug.disassemble` — disassemble instructions around an address.
 
-`debug.resolve_symbol` yields a symbol's **address** only — the gdbstub path evaluates no
-member, array, or type-aware expressions. To read a **struct field or array member by name**
-(e.g. `some_struct->field[3].member`) on a live guest, use the drgn path — `introspect.script`
-in the introspect toolset — which reads typed kernel objects by name without halting the CPU.
-That path runs on a **separate drgn-live session** (which needs no credential provisioning,
-unlike gdbstub), not the debug session here — see the introspect guide's live prerequisites.
+`debug.resolve_symbol` yields an address; it does not evaluate member, array, or type-aware
+expressions. For typed reads such as a struct field, use `introspect.script` on a separate
+`drgn-live` session. That path requires a running guest and its own transport/debug-info
+prerequisites: resource://kdive/docs/guide/toolsets/introspect.md.
 
 ## Modules
 

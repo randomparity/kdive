@@ -1,8 +1,12 @@
 # Phase-structured spine driver — sub-issue D design (M1.2, #100)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Parent (umbrella) spec:** [`2026-06-04-live-stack-e2e-design.md`](2026-06-04-live-stack-e2e-design.md)
-(sub-issue D) · **Decisions:** [ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) §1/§4/§5
-(the cross-cutting decisions this driver realizes) + [ADR-0045](../../adr/0045-spine-driver-capability-grant-phase-naming.md)
+(sub-issue D) · **Decisions:** [ADR-0042](../../../adr/0042-live-stack-e2e-mcp-http.md) §1/§4/§5
+(the cross-cutting decisions this driver realizes) + [ADR-0045](../../../adr/0045-spine-driver-capability-grant-phase-naming.md)
 (the two driver-local decisions: out-of-band capability grant and the phase-failure naming
 contract) · **Depends on:** A ([#98](https://github.com/randomparity/kdive/issues/98), merged —
 `tests/integration/live_stack/harness.py`), C ([#99](https://github.com/randomparity/kdive/issues/99),
@@ -140,13 +144,13 @@ spend — it **never reads or mutates the System** and enqueues no teardown job 
 **reconciler** (`reconciler/loop.py`, `DEFAULT_INTERVAL = 30s`) finds every System whose
 Allocation is in `('released','failed','expired')` and not already terminal, and enqueues a
 `{system_id}:teardown` job; the **worker** then drains that job to `torn_down` (honoring the
-in-flight-job grace window). So after the `release` phase the System is torn down only after
-**≥1 reconciler interval (≥30s) + a worker drain**, not synchronously. The driver therefore:
+in-flight-job grace window). After `release`, teardown waits for a subsequent reconciler
+pass plus worker drain. Release can occur just before that pass; there is no full-interval
+minimum delay. The driver therefore:
 
-- **requires the reconciler to be running** (the runbook starts it as the third host process);
-- sets the teardown phase's deadline **explicitly above `reconciler_interval (30s floor) +
-  worker_drain`** — i.e. `_DRAIN_DEADLINE_S` is sized for this slowest phase, comfortably above
-  both the 30s reconciler floor and the 300s `MAX_WAIT_S` server cap.
+- **requires the reconciler to be running**;
+- gives teardown a deadline allowing the reconciler interval and worker drain, including
+  the server's 300s `MAX_WAIT_S` cap.
 
 `_DRAIN_DEADLINE_S` is set comfortably above the 300s `MAX_WAIT_S` server cap (a small multiple)
 so a single `jobs.wait` returning a non-terminal envelope is one tick of the retry loop, not the

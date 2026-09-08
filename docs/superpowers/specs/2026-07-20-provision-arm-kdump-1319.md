@@ -1,5 +1,8 @@
 # Spec — Arm kdump on a warm-provisioned local-libvirt System (#1319)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../../README.md).
+
 - **Issue:** [#1319](https://github.com/randomparity/kdive/issues/1319)
 - **ADR:** [ADR-0390](../../adr/0390-provision-time-kdump-arming.md)
 - **Date:** 2026-07-20
@@ -38,7 +41,7 @@ from such a warm rootfs arms kdump at boot with no operator step.
 `scripts/live-vm/mint-system.sh` mints the shared provisioned-family System; its profile
 now requests `crashkernel` (so `capture_method` resolves KDUMP and the cmdline reserves
 memory) and provisions at 4 GiB (2 GiB + crashkernel cannot reach the readiness marker on
-the x86 warm guest — proven live on runner-pdx).
+the x86 warm guest — proven live on runner-R1).
 
 ## Scope
 
@@ -61,4 +64,4 @@ bypasses. No DB migration. No payload/schema change.
    `... rw crashkernel=256M`; `fadump` adds `fadump=on`.
 2. A profile with no `crashkernel` renders the unchanged `root=/dev/vda console=<dev> rw`.
 3. The customization-boot cmdline is unchanged (never armed).
-4. `just ci` green. The runner-pdx native-gate kdump proof is operator-deferred.
+4. `just ci` green. The runner-R1 native-gate kdump proof is operator-deferred.

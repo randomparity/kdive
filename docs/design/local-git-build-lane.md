@@ -1,5 +1,9 @@
 # Local git-clone build lane (#530)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Accepted
 - **Date:** 2026-06-17
 - **ADR:** [ADR-0162](../adr/0162-local-git-build-lane.md)

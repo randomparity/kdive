@@ -1,5 +1,9 @@
 # Reconciler reachability probe for SSH build hosts — design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-13
 - **Issue:** [#359](https://github.com/randomparity/kdive/issues/359) (`status:needs-design`)
 - **ADR:** [ADR-0103](../../adr/0103-build-host-reachability-probe.md)

@@ -1,5 +1,8 @@
 # `session.whoami` — read-only identity / capability probe
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#752](https://github.com/randomparity/kdive/issues/752)
 - **ADR:** [`../adr/0232-session-whoami.md`](../adr/0232-session-whoami.md)
 - **Status:** Draft

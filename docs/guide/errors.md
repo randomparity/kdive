@@ -1,87 +1,72 @@
 # Errors
 
-When a KDIVE tool reports a failure, the `ToolResponse`
-(resource://kdive/docs/guide/response-envelope.md)
-`error_category` field carries a value from a closed taxonomy defined in
-`src/kdive/domain/errors.py` and referenced in
-[ADR-0019](../adr/0019-tool-response-envelope.md). The rule is: pick the most
-specific category; never invent strings. The taxonomy is stable across the rewrite —
-the same strings are comparable with PoC failure categories where the names overlap.
+Use the error category together with the producing tool's contract and the affected
+object's current state to choose recovery. `ErrorCategory` and `RETRYABLE_BY_CATEGORY` in
+`src/kdive/domain/errors.py` define the implemented category strings and retry classification.
+This guide explains recovery decisions; the [tool reference](reference/index.md) owns
+operation-specific reasons and preconditions.
 
-## Reading a failure envelope
+## Identify what failed
 
-A failed response has `status` equal to `failed` or `error`, and `error_category`
-set to one of the values below. The `suggested_next_actions` list in that envelope
-tells the agent what to call next (e.g. `["allocations.wait"]` on the `stale_handle`
-returned by releasing a lease that already expired — read the allocation's real state).
-The list may be empty when there is nothing useful to call: a terminal job envelope
-already carries the outcome, so re-reading the row it was just handed is not a next
-action. The
-`data` field may carry structured context such as `current_status` for sequencing
-errors.
+Read the envelope guide (resource://kdive/docs/guide/response-envelope.md) for failure fields
+and nested results. A request error does not necessarily mean the target object failed,
+and a failed job does not establish that its Allocation expired.
 
-## Category reference
+Use structured context such as `data.reason`, `data.current_status`, or `data.failing_job_id`
+when the producing tool documents it. These fields are not universal. A `current_status`
+value can describe a terminal state; it does not promise the object will advance if you wait.
+Human-readable `detail` is diagnostic text, not a stable field to parse. A lookup miss or
+permission denial can deliberately omit information about the target.
 
-| Category | When it applies |
+## Interpret `retryable`
+
+`retryable: true` means the category describes a potentially transient condition. It does
+not prove that the request had no effects, that repeating a mutation is safe, or that the
+job will receive another attempt. Check the affected objects and known job before deciding
+to retry. `retryable: false` means a bare retry is not the recovery path; input, permissions,
+capacity policy, or lifecycle state may need to change first.
+
+Workers use the same category classification on the ordinary job failure path, but a
+handler can explicitly mark an otherwise retryable failure terminal. Attempt exhaustion
+can also fail a job with `retryable: true`. Continue an existing job with `jobs.wait`;
+do not submit extra work to supply its retries. Tenant job envelopes do not expose attempt
+counts. The async-jobs guide (resource://kdive/docs/guide/async-jobs.md) owns worker recovery,
+transport resets, and retries after an uncertain mutation response.
+
+## Common recovery decisions
+
+These are examples, not a second copy of the taxonomy. For other categories, follow the
+producing tool's result description and recovery guidance.
+
+| Category | Recovery decision |
 |---|---|
-| `configuration_error` | Sequencing error or invalid input — e.g. calling `runs.create` on a System that is not yet `ready`. Recoverable by waiting or correcting the request. |
-| `missing_dependency` | A required upstream object or resource is absent. |
-| `build_failure` | The kernel build step failed. |
-| `boot_timeout` | The system did not reach a ready state within the allowed boot window. |
-| `readiness_failure` | A readiness preflight check failed after boot. |
-| `debug_attach_failure` | The debug transport could not be attached. |
-| `symbol_not_found` | `debug.resolve_symbol` could not resolve the name to an address — the symbol is inlined / optimized away, or is an addressless enum/macro constant. The attach is fine and retrying will not help; `data.hint` suggests disassembling the caller. |
-| `restore_incomplete` | A `systems.restore` stopped part-way through reverting the guest to its snapshot and can never resume — the worker died mid-revert, or the restore job dead-lettered or was canceled. The System is `failed` and its disk state is indeterminate, so retrying the restore cannot help; tear the System down and provision a new one. |
-| `infrastructure_failure` | An unclassified failure in the underlying infrastructure layer. The fallback when no more specific category applies. |
-| `stale_handle` | The referenced object (System, DebugSession) no longer exists or has been torn down. The handle is invalid; create a new object. |
-| `transport_conflict` | Two attaches contended for the same debug transport simultaneously. |
-| `not_implemented` | The requested operation has no registered handler for this provider or milestone. |
-| `allocation_denied` | Admission control denied the allocation (capability mismatch, capacity, or policy). |
-| `quota_exceeded` | The principal or project has exhausted their quota or budget. |
-| `lease_expired` | The allocation's lease expired while a job was in flight; the run was terminated. Distinct from `canceled` (an explicit abort). |
-| `queue_timeout` | A queued (`requested`) allocation was reaped after exceeding the max-wait window without ever being placeable. Distinct from `lease_expired` (a *granted* lease window elapsing) — a queued request never held a lease. |
-| `provisioning_failure` | The provisioning step failed to produce a ready System. |
-| `install_failure` | The kernel install step failed. |
-| `transport_failure` | A console or debug transport failed during an active session. |
-| `control_failure` | A power or crash control operation failed. |
-| `authorization_denied` | The caller's role or required provisioning-profile opt-in does not permit the requested operation. |
+| `configuration_error` or `conflict` | Check input and lifecycle preconditions. Read the relevant object or job to distinguish work still in progress from a terminal state or a conflicting request. Waiting alone may not resolve it. |
+| `not_found` | Verify the ID, project, and caller's access. The object may be absent or invisible to this caller; the error does not prove it was deleted. |
+| `missing_dependency` | Identify the upstream requirement from the tool's contract and diagnostic context before creating or replacing anything. |
+| `stale_handle` | Stop using the handle for the rejected operation and inspect its current state. For example, `allocations.release` can report a terminal allocation as stale and suggest `allocations.wait`; the row need not be gone. |
+| `authorization_denied` | Use `session.whoami` to inspect current grants, then follow the safety-and-RBAC guide (resource://kdive/docs/guide/safety-and-rbac.md). Report the unmet requirement to an operator; repeating the denied call does not add a grant or profile opt-in. |
+| `allocation_denied`, `quota_exceeded`, `capacity_exhausted`, or `queue_timeout` | Establish whether the blocker is policy, quota, compatible resources, or temporary capacity. Correct the relevant request or resolve the capacity constraint before requesting more work; see the [allocations reference](reference/allocations.md). |
+| `lease_expired` | Determine which lease expired. An abandoned job can carry this category because its worker lease expired and its attempts were exhausted. Read the job and allocation state before deciding a replacement allocation is needed. |
+| `transport_conflict` | Check the existing debug session and the attach tool's preconditions. Coordinate detachment with its owner before retrying; do not terminate another caller's session to clear contention. |
+| `transport_failure`, `infrastructure_failure`, or `provisioning_failure` | Inspect the failed operation and target state. A transient category alone does not authorize replaying a mutation or recovering a terminal System in place. |
+| `symbol_not_found` | Check the symbol and the returned hint. An inlined, optimized-away, or addressless symbol will not become resolvable by repeating the same lookup; see the [debug reference](reference/debug.md#debugresolve_symbol). |
 
-## Recovery patterns
+## An incomplete snapshot restore
 
-- **`configuration_error` with `data.current_status`** — the object is not yet in
-  the required state; call `jobs.wait` or `systems.get` / `runs.get` and retry when
-  the state advances.
-- **`stale_handle`** — the target object is gone; create a new Run or provision a
-  new System.
-- **`restore_incomplete`** — the guest was left part-way between its live state and the
-  snapshot, so no operation on it has a defined starting point (`retryable` is false, and
-  the System is `failed`, which fences every lifecycle op anyway). The System is not
-  recoverable: call `systems.teardown` and provision a replacement. Its snapshots do not
-  survive it — they are keyed to the System and removed with it — so the replacement starts
-  with none, and any checkpoint you need must be taken again with `systems.snapshot`.
-- **`transport_conflict`** — wait for the existing session to detach, then retry
-  `debug.start_session`.
-- **`transport_failure`** — a console/debug transport or held long-poll stream failed; it is
-  `retryable=true`. Retry the same call. A *raw* `socket connection was closed unexpectedly`
-  (no envelope, so no `transport_failure` category) from a held `jobs.wait` is the same
-  transient class — see the transport-reset retry contract in the async-jobs guide
-  (resource://kdive/docs/guide/async-jobs.md).
-- **`lease_expired`** — the allocation has expired; request a new allocation and
-  provision a new System.
-- **`queue_timeout`** — the queued request never became placeable within the max-wait
-  window; re-request once capacity frees, or relax the target (kind/PCIe) to widen the
-  candidate hosts.
-- **`authorization_denied`** — the caller needs a higher role or the provisioning
-  profile needs an opt-in. See the safety-and-RBAC guide
-  (resource://kdive/docs/guide/safety-and-rbac.md). Re-invoking the denied tool cannot
-  succeed (`retryable` is false), so a denial never names it in `suggested_next_actions`;
-  the breadcrumb is `session.whoami`, which reports the grants the caller actually holds so
-  the blocker can be reported to an operator ([ADR-0471](../adr/0471-denial-envelope-terminal-affordance.md)).
-- **`infrastructure_failure`** or **`provisioning_failure`** — retry if the job has
-  remaining attempts; otherwise triage via `jobs.list` and the audit log.
+`restore_incomplete` means the reconciler found a System stuck restoring with no restore
+job able to finish it and no more specific retained failure category. The System becomes
+`failed`; its disk state cannot be assumed to match either the snapshot or the pre-restore
+guest. The category is non-retryable. Other failed restores can retain their original job
+category, so this is not the only error a restore can report.
 
-`retryable` also governs the job queue, not just your own re-invocation (ADR-0483): a job whose
-handler fails with `retryable=false` dead-letters on its **first** attempt rather than consuming
-`max_attempts`. So a `failed` job with `attempt: 1` and a terminal category is not a job that was
-denied its retries — it is a permanent failure the queue declined to repeat. Only a retryable
-category is re-dispatched, and `jobs.wait` / `jobs.list` show the attempt it reached.
+Inspect `systems.get`, any cited job, and the allocation with `allocations.wait`.
+The current System state machine has no outgoing transition from `failed`: retrying the
+restore cannot recover it, and ordinary `systems.teardown` cannot complete from that state.
+Failed-System responses instead suggest `allocations.release` and `allocations.request`;
+follow their [preconditions and returned state](reference/allocations.md) before provisioning
+a replacement. A terminal allocation may already be unavailable for release.
+
+Releasing the allocation does not establish that the failed guest or provider data was
+cleaned up. Preserve needed evidence and ask an operator to triage residual resources;
+do not assume they were reclaimed. Snapshots belong to the original System and cannot
+be restored onto its replacement. Create new snapshots after rebuilding the guest.

@@ -34,8 +34,7 @@ class ErrorCategory(StrEnum):
 
     # Object-lookup categories (#338, ADR-0097). A syntactically valid id that resolves to no
     # visible row is ``not_found`` (distinct from a malformed id, which stays
-    # ``configuration_error``). ``conflict`` is reserved for a uniqueness/state conflict and is
-    # defined-but-unemitted until a concrete state-conflict seam needs it.
+    # ``configuration_error``). ``conflict`` denotes a uniqueness or state conflict.
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
 

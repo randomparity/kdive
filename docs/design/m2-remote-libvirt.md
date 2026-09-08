@@ -1,5 +1,9 @@
 # M2 — Remote libvirt (Integration Contract)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 > **Retired (2026-08-04).** This document describes the per-PR CI portability diff gate as an
 > operative check. It was one for its first three days — a CI job and a `just ci` member from
 > 2026-06-09 to 2026-06-12 — and hand-run-only after that. It is retired by

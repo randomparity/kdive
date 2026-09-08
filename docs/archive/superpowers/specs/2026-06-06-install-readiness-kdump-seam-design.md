@@ -1,5 +1,9 @@
 # Install readiness + kdump-check seam — design (issue #127, gap G4)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-06
 - **Issue:** [#127](https://github.com/randomparity/kdive/issues/127) (gap **G4** of

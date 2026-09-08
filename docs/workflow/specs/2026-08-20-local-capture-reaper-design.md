@@ -1,5 +1,9 @@
 # Local-libvirt orphaned-capture reaper — design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../README.md).
+
 Implements #1948 under ADR-0556 (sweep contract) and ADR-0567 (this entry's delegated
 decisions). Charter: `WORK:SCOPE` token `q1948-k7r2` on the issue.
 

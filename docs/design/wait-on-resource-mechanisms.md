@@ -1,5 +1,9 @@
 # Wait-on-resource mechanisms
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#430](https://github.com/randomparity/kdive/issues/430)
 - **ADR:** [`../adr/0118-wait-on-resource-mechanisms.md`](../adr/0118-wait-on-resource-mechanisms.md)
 - **Status:** Draft

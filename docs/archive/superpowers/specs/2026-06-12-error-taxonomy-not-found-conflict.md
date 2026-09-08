@@ -1,5 +1,9 @@
 # Spec — `not_found` / `conflict` error categories (issue #338, finding S1)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-12
 - **ADR:** [0097](../../adr/0097-not-found-conflict-error-categories.md)
 - **Issue:** #338

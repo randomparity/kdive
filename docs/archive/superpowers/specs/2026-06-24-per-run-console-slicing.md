@@ -1,5 +1,9 @@
 # Per-Run console slicing (one boot window)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-24
 - **ADR:** [ADR-0241](../../adr/0241-per-run-console-slicing.md)
 - **Issue:** #773 (refinement of #761 / [ADR-0235](../../adr/0235-per-run-console-evidence.md), epic #764)

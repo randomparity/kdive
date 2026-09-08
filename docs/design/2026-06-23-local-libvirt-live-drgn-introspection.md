@@ -1,5 +1,9 @@
 # Spec — local-libvirt live drgn introspection (`introspect.run`)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** #677 (M2.8 Epic B, B3)
 - **ADR:** [ADR-0219](../adr/0219-local-libvirt-live-drgn-introspection.md) (anchor; do not
   re-decide). Refines [ADR-0210](../adr/0210-local-libvirt-live-debug-introspection.md) (the

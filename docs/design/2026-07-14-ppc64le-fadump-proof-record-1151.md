@@ -1,5 +1,8 @@
 # Proof record — ppc64le fadump capture under TCG (#1151)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-14
 Issue: #1151 · Epic: #1139 · Spec: `2026-07-14-ppc64le-fadump-1151.md` · ADR-0349
 
@@ -55,7 +58,7 @@ recorded here.
 - **kdump-enabled ppc64le rootfs + ≥2 GB RAM** — reused from #1148: the
   `fedora-kdive-ready-44-ppc64le.qcow2` rootfs (kexec-tools + `kdump.service` + dracut kdump
   module — fadump reuses this userspace to save the core) and the 2048 MB fadump fixture. The
-  bundle + rootfs are staged at `/home/dave/kdive-ppc-proof/`.
+  bundle + rootfs are staged at `<REDACTED-HOME>/kdive-ppc-proof/`.
 
 ## Code proven by unit/service tests (CI-green)
 

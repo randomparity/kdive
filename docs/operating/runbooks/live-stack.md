@@ -1,10 +1,10 @@
 # Runbook: live-stack end-to-end bring-up
 
-Operator guide for standing up the M1.2 live stack and running the `live_stack` suite.
+Operator guide for standing up the live stack and running the `live_stack` suite.
 The suite drives the full kdive spine over the real MCP HTTP transport against a running
 `server`/`worker`/`reconciler` and the containerized backing services. See
-[ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) for the decision and
-[`docs/archive/plans/m1.2-implementation.md`](../../archive/plans/m1.2-implementation.md) for the epic.
+[ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) for the original decision and
+[the live-testing map](live-testing.md) for the test tiers and prerequisites.
 
 The `server` and `reconciler` run as ordinary operator-owned host processes. Workers run in the
 fixed `kdive-live-worker@1..8.service` units through the installed lifecycle socket. All use the
@@ -16,26 +16,23 @@ not share a filesystem with — see [remote-live-stack.md](remote-live-stack.md)
 bring-up and adds worker→host TLS, the gdbstub ACL, and object-store reachability for the
 two-phase vmcore upload.
 
-The `just` recipes below are source-tree conveniences. Installed-package deployments use
-`python -m kdive migrate` and `python -m kdive seed-project`, then run the app tier from the
-compose reference (`just compose-up`); see
-[`docs/operating/local-stack.md`](../local-stack.md) and
-[`deploy/compose/README.md`](../../../deploy/compose/README.md). For a **Kubernetes / Helm**
-deployment (the production-shaped path), see
-[`kubernetes-deploy.md`](kubernetes-deploy.md).
+Run the `just` recipes below from the checkout. For an app-tier Compose deployment, follow
+[the Compose operating guide](../../../deploy/compose/README.md); for Kubernetes, follow the
+[Helm deployment runbook](kubernetes-deploy.md). The local-libvirt flow on this page runs
+workers on the host so they can access KVM and libvirt.
 
 ## Prerequisites
 
-- A KVM / nested-virt host with `libvirt` and a running `libvirtd`.
-- Docker with a reachable daemon and **pullable** compose images. The compose file pins
-  `ghcr.io/navikt/mock-oauth2-server:3.0.3`; if that tag no longer resolves on ghcr.io,
-  re-pin it to a current tag before `just stack-up`.
+- A KVM / nested-virt host with the provisioned libvirt daemon and socket for its distro.
+  Use the installed session endpoint described below.
+- Docker with a reachable daemon and access to the Compose images and build dependencies.
+  The mock OIDC service uses the in-repo mirror, built locally or selected by
+  `KDIVE_OIDC_IMAGE`; the wrapper defaults to a pinned mirror on emulated POWER. See
+  [image selection](../../../deploy/mock-oidc/README.md#using-the-image).
 - The repo set up: `just setup` (or `uv sync --locked`).
-- For **local-libvirt `kdump`** capture, the worker venv additionally needs `drgn`
-  (`uv sync --group live`) and the system `guestfs` binding wired in; this is a one-time step
-  documented in the
-  [four-method runbook §4b](four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
-  `scripts/operations/check-local-libvirt.sh` flags the gap with the fix.
+- Local-libvirt kdump capture needs drgn and libguestfs in the **installed worker environment**,
+  `/opt/kdive-live-worker-lifecycle/.venv`, supplied by the lifecycle host provisioning below.
+  The checkout preflight probes `KDIVE_PYTHON`; passing it does not verify that worker interpreter.
 - The fixed systemd worker contract must be installed. Persistent self-hosted runners get it from
   `deploy/ansible/roles/live_vm_host`; apply the runner playbook with the revision to install:
 
@@ -106,12 +103,13 @@ off, and no MinIO prefix/folder exclusions), and applies database migrations.
 > wait failure. `minio-init`'s exit code still propagates, so a bucket creation, version enable,
 > or version-policy verification failure fails `just stack-up` before any KDIVE process starts.
 
-For an external bucket, the runtime identity also needs `s3:GetObjectVersion`, `s3:GetBucketVersioning`,
-`s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. First adoption is stop-old-first: quiesce
-all old processes, grant and verify IAM, verify whole-bucket/no-exclusions/MFA-off policy, enable
-versioning, wait for activation, migrate, and start only the version-aware image. Suspending
-versioning and live rollback to a pre-ADR-0524 image are unsupported. The complete procedure is in
-[Installing KDIVE](../install.md).
+For an external bucket, the runtime identity needs `s3:GetObjectVersion`,
+`s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. Complete the
+[object-store preflight](../install.md#object-store-preflight) before starting processes.
+This checkout requires fresh protocol-4 resources; the
+[release-compatibility boundary](../install.md#release-compatibility) applies to this host stack
+as well. Historical versioning-adoption instructions are not a migration path for existing
+protocol-3 state.
 
 ### Required: abort-incomplete-multipart-upload lifecycle rule
 
@@ -120,18 +118,27 @@ server-side with a multipart upload (ADR-0104). A `kdive` process that crashes b
 `CreateMultipartUpload` and `Complete`/`Abort` leaves one in-progress multipart upload that
 `ListObjectsV2` — and therefore the reconciler's prefix reaper — cannot see. Configure the
 bucket with an `AbortIncompleteMultipartUpload` lifecycle rule so the store reclaims such an
-orphan on its own. Run once after the bucket exists (1-day expiry shown):
+orphan on its own. Add this rule after the bucket exists (one-day incomplete-upload age shown). Preserve any
+existing bucket lifecycle rules; do not add noncurrent-version expiry, which can remove
+completed object versions still pinned by KDIVE records:
 
 ```bash
 # MinIO
-mc ilm rule add local/kdive-artifacts --expire-delete-marker --noncurrent-expire-days 1
 mc ilm rule add local/kdive-artifacts --incomplete-multipart-days 1
 
-# Real S3 (equivalent), via a lifecycle configuration with:
-#   AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
-aws s3api put-bucket-lifecycle-configuration --bucket "$KDIVE_S3_BUCKET" \
-  --lifecycle-configuration '{"Rules":[{"ID":"abort-incomplete-mpu","Status":"Enabled",
-  "Filter":{"Prefix":""},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}'
+```
+
+For S3, merge the following rule into the bucket's existing lifecycle configuration before
+applying the complete policy. `put-bucket-lifecycle-configuration` replaces the policy; a
+standalone rule must not discard existing retention settings.
+
+```json
+{
+  "ID": "abort-incomplete-mpu",
+  "Status": "Enabled",
+  "Filter": { "Prefix": "" },
+  "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+}
 ```
 
 ## Fund the demo project — `just onboard`
@@ -146,7 +153,7 @@ just onboard                 # project "demo" (override with KDIVE_PROJECT=acme)
 
 It runs an advisory provider preflight, then `migrate` → `seed-project` → `verify-project` (the
 hard funding gate — it fails loudly if the rows are absent and echoes the credential-redacted
-target DB), then mints a 24 h token and prints the **binding contract** (`projects`, `roles`, and
+target DB), then mints a token with the configured `KDIVE_TOKEN_TTL` lifetime and prints the **binding contract** (`projects`, `roles`, and
 the `project` arg, all the same string). Export the printed `KDIVE_TOKEN` and re-run when it
 expires. This is the dev/demo path; production onboards via the audited admin tools
 ([project onboarding](../project-onboarding.md)). It can run any time after the backends and
@@ -225,8 +232,8 @@ python -m kdive seed-project --project demo
 
 ## 3. Build the VM fixtures
 
-The spine boots a real guest and builds a real kernel, so the suite needs an
-operator-provided guest image and kernel tree:
+The spine boots a real guest and uploads an already-built kernel. Prepare a guest image and
+build the kernel on the test client before running the suite:
 
 ```bash
 python -m kdive build-fs --image fedora-kdive-ready-44 \
@@ -236,31 +243,20 @@ export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
 export KDIVE_KERNEL_SRC="$(bash scripts/fetch-kernel-tree.sh /var/lib/kdive/build/linux)"
 ```
 
-The kernel-tree fetch helper lives under `scripts` (the `fetch-kernel-tree.sh` fixture script);
-clone the pinned source there and point `KDIVE_KERNEL_SRC` at it.
+The fetch helper only checks out source. Compile the kernel yourself using the configuration
+and artifact requirements in the [external-build guide](../external-build-upload.md), then
+keep `KDIVE_KERNEL_SRC` pointed at that built tree. The test harness stages modules and packages the
+boot image; debug exercises also need the unstripped `vmlinux` with a GNU build ID.
 
-`build-fs` drives the in-process `RootfsBuildPlane` (the Python successor to the removed
-bash rootfs builder): it runs the unprivileged libguestfs stages (`virt-builder` customize →
-`virt-make-fs` whole-disk ext4 qcow2 → fstab/crypttab/SELinux normalize), records the pinned
-inputs (distro, releasever, packages, source-image digest) as provenance, prints the qcow2 content
-digest, and moves the image to `--dest` (default
-`/var/lib/kdive/rootfs/local/<image>.qcow2`). `--image` selects a catalog row such as
-`fedora-kdive-ready-44` (debug guest) or `fedora-kdive-build-44` (build host); pass `--package`
-only to add packages on top of the catalog kind's default set, or `--workspace` to stage under a
-user-writable path (no privileged `mkdir`). See [the image-lifecycle runbook](image-lifecycle.md)
-for the full catalog list. For the default root-owned `--dest`
-an OS admin pre-prepares the output directory once and makes it writable by the build user; the
-per-build write and the final `chmod 0644` are unprivileged. The image is left `0644` so the
-separate `qemu` user can read it under `qemu:///system`. Under SELinux the file also needs the
-`virt_image_t` label (the standard label for libvirt-managed images); this is the host-side file
-label and is independent of the guest-internal SELinux the plane disables.
+`build-fs --image` selects an entry from the rootfs catalog and produces the guest qcow2 plus
+its provenance sidecar. The [image-lifecycle runbook](image-lifecycle.md) owns image selection,
+customization, output-directory permissions, and host labeling requirements. The
+[local example](../../../examples/local-libvirt/README.md) automates building and registering
+these images through `build-image.sh`.
 
-The RBAC-gated `kdivectl images publish` operator verb (M2.4/7) enqueues an
-`IMAGE_BUILD` job that runs the same plane and publishes the result to the catalog; this inline
-`build-fs` is the local-disk fixture path for the live-stack suite.
-
-Point `KDIVE_GUEST_IMAGE` and `KDIVE_KERNEL_SRC` at the build output and the kernel checkout.
-The `live_stack` preflight skips with an actionable reason when either is missing.
+Point `KDIVE_GUEST_IMAGE` at the resulting qcow2 and `KDIVE_KERNEL_SRC` at the built kernel tree.
+The presence of either path does not prove that the image or kernel is usable; read the failed
+phase's diagnostics if packaging, provisioning, or boot fails.
 
 ## 4. Start the host processes
 
@@ -394,43 +390,10 @@ cleanly` and exits 0.
 
 ## 6. Kernel debugging demo smoke check
 
-The default installed-package flow is:
-
-```bash
-set -a
-. /etc/kdive/local.env
-set +a
-python -m kdive migrate
-python -m kdive seed-project --project demo
-just compose-up
-```
-
-Expected defaults:
-
-- MCP URL: `http://127.0.0.1:8000/mcp`
-- Kernel source: `~/src/linux` unless `KDIVE_KERNEL_SRC` is set
-- Build workspace: `/var/lib/kdive/build`
-- Component roots: `/var/lib/kdive/build/components:/etc/kdive/fixtures`
-- Fixture catalog: `/etc/kdive/fixtures/local-libvirt`
-- Fedora kdive-ready rootfs: `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2`
-- Busybox rootfs: `/var/lib/kdive/rootfs/local/busybox-bare.qcow2`
-
-After the stack is up, use the live-stack harness to call MCP tools for:
-
-- `accounting.set_budget`
-- `accounting.set_quota`
-- `resources.list`
-- `allocations.request`
-- `systems.provision` with
-  `rootfs: {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-44"}`
-- `runs.create`, then `artifacts.create_run_upload` + PUT your locally-built kernel, then
-  `runs.complete_build`
-- `runs.install`
-- `runs.boot`
-- `artifacts.list(system_id=...)`
-
-Vulnerable kernels should produce a console artifact instead of an empty `boot_timeout`.
-Patched kernels can boot and reach the readiness marker.
+Use the [local-libvirt example](../../../examples/local-libvirt/README.md) for guided host
+setup and client connection, then follow the [core workflow](../../guide/core-path.md).
+The Compose app tier described above does not provide local-libvirt guest access; do not
+use it as a substitute for that host setup.
 
 ## 7. Teardown
 

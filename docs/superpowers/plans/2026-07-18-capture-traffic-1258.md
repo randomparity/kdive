@@ -8,7 +8,6 @@
 
 **Tech Stack:** Python 3.14, `uv`, FastMCP, psycopg (async), `libvirt`/`libvirt_qemu`, boto3 object store, pytest.
 
-**Spec:** `docs/superpowers/specs/2026-07-18-capture-traffic-1258-design.md`
 **ADR:** `docs/adr/0385-host-side-traffic-capture.md`
 
 ## Global Constraints

@@ -1,5 +1,9 @@
 # Live-test framework — a reusable harness for exercising live local-libvirt setups
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Date:** 2026-07-18
 - **Status:** Draft
 - **Epic:** [#1289](https://github.com/randomparity/kdive/issues/1289) (sub-issues #1290–#1295)

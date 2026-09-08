@@ -1,127 +1,117 @@
 # Async jobs
 
-Some KDIVE operations take 30 minutes or more. Provision, build, install, and
-vmcore capture run as durable jobs in a Postgres-backed queue rather than blocking
-the tool call. This keeps the MCP transport responsive and makes long ops survive
-worker restarts ([ADR-0008](../adr/0008-async-worker-tier-job-queue.md),
-[ADR-0018](../adr/0018-job-queue-worker-execution.md)).
+Long-running operations such as provisioning, installation, boot, and vmcore capture
+use durable jobs in a Postgres-backed queue. The initiating tool returns a job handle;
+workers execute the operation separately. Use this guide for the shared polling and
+retry workflow, and the [tool reference](reference/tools.md) for each operation's contract.
 
-## The long-op pattern
+## Follow a job
 
-A tool that starts a long operation enqueues a job and returns immediately with a
-`ToolResponse` (resource://kdive/docs/guide/response-envelope.md) whose `status` is `running` (or `queued`)
-and whose `object_id` is the `job_id`. The `suggested_next_actions` field at this
-point contains `["jobs.wait", "jobs.cancel"]`.
+For a job-handle response, the envelope's `object_id` is the job ID. Pass that value as
+`job_id` to `jobs.wait`. A new job normally starts `queued` or `running`; an existing job
+returned by a repeated call may already be terminal. Check the returned status before
+choosing the next call. The envelope guide
+(resource://kdive/docs/guide/response-envelope.md) explains the common fields.
 
-The agent then polls:
+`jobs.wait` reads the job until it observes a terminal state or its polling window ends.
+The window is per call, in seconds, measured against the server process's monotonic clock:
+by default 30 seconds, capped at 300. It is not the operation's deadline. Database and
+transport latency can make the call take longer than that window. `timeout_s=0` performs
+one lookup without a polling sleep.
 
-- **`jobs.wait(job_id, timeout_s)`** — the single read/poll contract for a job.
-  With a positive `timeout_s` it blocks up to that many seconds (capped at 300),
-  then returns the current job envelope; use it in preference to a manual poll loop.
-  With **`timeout_s=0`** it does one lookup and returns the current state
-  immediately, never blocking — that is the plain point read, for when the agent has
-  other work to interleave.
-- **`jobs.cancel(job_id)`** — requests cancellation. The job's declared cleanup
-  contract runs; the outcome is `canceled` or `failed` depending on how far the op
-  progressed.
-- **`jobs.list`** — lists jobs visible to the caller, useful for triage.
-
-When `jobs.wait` returns `status: succeeded`, the `refs` field
-contains an object-store reference (e.g. `{"result": "<key>"}`) for any produced
-artifact. When it returns `status: failed`, the `error_category` field names the
-failure. See the errors guide (resource://kdive/docs/guide/errors.md).
-
-## Which operations are long-running
-
-| Plane | Long-running tools |
+| Returned job status | What to do |
 |---|---|
-| Allocation | `allocations.request` (when admission control defers) |
-| Provisioning | `systems.provision`, `systems.reprovision`, `systems.teardown` |
-| Install | `runs.install` |
-| Boot | `runs.boot` |
-| Control | `control.force_crash`, `control.power` |
-| Retrieve | `vmcore.fetch` |
+| `queued` or `running` | Continue with `jobs.wait` when ready; the polling window ending does not cancel or fail the job. |
+| `succeeded` | Read the operation's result. `refs.result`, when present, is a tool-specific identifier or key; some jobs produce no reference. |
+| `failed` | Inspect `error_category` and any failure details, then follow the errors guide (resource://kdive/docs/guide/errors.md) before retrying the operation. |
+| `canceled` | Stop polling for completion; check the affected objects before further mutations. Cancellation does not prove provider cleanup finished. |
 
-Fast operations — `debug.set_breakpoint`, `debug.read_memory`,
-`debug.list_breakpoints` — are synchronous and return a `ToolResponse` directly
-without a job. Note that `control.power` is **not** fast: every power action
-(including `on`) enqueues a `power` job and returns a job handle.
+A failed *lookup* can also return an error envelope: for example, a job outside the
+caller's readable scope appears not found. Do not interpret every `jobs.wait` error as
+proof that the underlying job failed. `suggested_next_actions` are guidance; they do not
+grant permission to execute the named tools.
 
-### Typical durations
+Use `jobs.list` to find jobs visible in your projects; follow its pagination cursor to
+read further pages. Platform-internal jobs are excluded from these tenant tools.
+Operators have a separate [ops reference](reference/ops.md#opsjobs_list) for queue triage.
 
-Rough, host-dependent figures for sizing `timeout_s` and a poll loop — not
-guarantees. Figures are for a native-KVM guest; a TCG-emulated (foreign-arch)
-guest scales by `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10`), so budget
-roughly 10x longer (see [platform support](../operating/platform-support.md)):
+Allocation admission has its own state machine: `allocations.request` returns an
+allocation ID and state. Follow a queued allocation with `allocations.wait`.
+Kernel compilation happens in the caller's environment before upload.
 
-- **`runs.boot`** — usually well under a minute once the guest is already
-  provisioned and just needs to reach the `kdive-ready` marker. The server's
-  ceiling (`KDIVE_LIBVIRT_BOOT_WINDOW_S`, default 900 s / 15 min — see
-  [config reference](reference/config.md)) absorbs slow hosts (e.g. POWER9) and
-  `kdump.service` arming; it is a ceiling, not a typical wait.
-- **`runs.install`** — includes a boot pass under the same
-  `KDIVE_LIBVIRT_BOOT_WINDOW_S` ceiling plus kernel/module install work; expect
-  low minutes on a warm host.
-- **`systems.provision`** (image customization / first boot) — several minutes
-  to tens of minutes; the customization boot ceiling
-  (`KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S`, default 1800 s / 30 min) absorbs
-  first-time mirror/network fetch variance.
-- **`vmcore.fetch`** (kdump capture) — the guest reboots out of the capture
-  kernel and uploads; budget on the order of 300 s for that readiness window.
-- **`control.force_crash` / `control.power`** — seconds, dominated by the
-  hypervisor call and a readiness poll.
+## Cancel a job
 
-For anything past the first minute, prefer several short `jobs.wait` calls
-(default `timeout_s` 30 s) over one long wait sized to the worst case — see
-[transport resets](#transport-resets-and-retries) below.
+`jobs.cancel` can transition an authorized, cancelable queued or running job to `canceled`.
+It records that state; it does not provide a universal rollback or wait for every provider
+operation to stop. Inspect the System or Run and follow the operation's cleanup contract
+before assuming its resources can be reused or released.
+
+The required role depends on the job kind. Some safety operations cannot be canceled:
+an authority-owned preactivation teardown returns a conflict with `jobs.wait` and
+`systems.get` as next actions. To check an already terminal job, use `jobs.wait` instead
+of `jobs.cancel`. See the [jobs reference](reference/jobs.md#jobscancel) for the
+cancellation role contract.
 
 ## Transport resets and retries
 
-A long `jobs.wait` holds one streamable-HTTP request open while it polls (up to the 300 s
-cap). An intermediary — a reverse proxy or load balancer in front of the server — may apply
-its own idle/read timeout and sever that held stream. When it does, the client sees a raw
-`socket connection was closed unexpectedly` transport error rather than a `ToolResponse`
-envelope: the connection that would carry the envelope is already gone, so the server cannot
-wrap that specific drop ([ADR-0138](../adr/0138-transport-reset-retry-contract.md)).
+A proxy or load balancer can close a held `jobs.wait` request before a response arrives.
+The client then sees a transport error, not a job envelope. This does not establish the
+job's outcome ([ADR-0138](../adr/0138-transport-reset-retry-contract.md)).
 
-**The contract:** a transport reset on `jobs.wait` (or any idempotent read such as
-`jobs.list`, `systems.get`, `runs.get`) is **transient and safe to retry unchanged**. Retry the
-same call.
-
-**The token-efficient pattern** is repeated **short** `jobs.wait` calls rather than one long
-hold. The default `timeout_s` is 30 s, well under any normal proxy timeout. A non-terminal
-`jobs.wait` returns the job's current (`running`/`queued`) envelope with `jobs.wait` in
-`suggested_next_actions` — that *is* the "still running, call again" signal; re-issue the wait
-while the returned envelope is non-terminal. Requesting a long explicit `timeout_s` (up to 300 s)
-holds the stream near the reset window and risks an intermediary cut; that drop is retryable, but
-short waits avoid it.
+Retrying an idempotent read such as `jobs.wait`, `jobs.list`, `systems.get`, or `runs.get`
+is safe. Continue polling the same job ID after a dropped wait; do not enqueue the
+operation again just to recover its status. Prefer repeated short waits, starting with
+the default window. Short waits reduce the time a request stays open but cannot guarantee
+that a proxy will keep it alive. If resets persist, check connectivity and the deployment's
+proxy settings instead of assuming each failure will resolve on retry.
 
 ## Retrying the initial enqueue (idempotency)
 
-The read-retry contract above covers `jobs.wait` at any `timeout_s`. But a transport reset can also
-drop the **response to the enqueuing call itself** — `runs.install`, `vmcore.fetch`,
-`control.power`, `systems.provision`, and the rest of the create/enqueue surface. A blind
-retry of that call could enqueue a second job. To retry it safely, pass an `idempotency_key`
-([ADR-0193](../adr/0193-uniform-mutation-idempotency.md), and see
-the envelope guide, resource://kdive/docs/guide/response-envelope.md): a repeated key returns the
-**same job envelope** instead of enqueuing again.
+A dropped mutation response leaves its outcome uncertain. For a tool that accepts
+`idempotency_key`, choose a fresh key before the first call and reuse it only for the same
+logical operation with unchanged inputs. Check that tool's schema; key support is not implied
+by a create/enqueue name. Keys are associated with the calling principal, so do not recycle one
+across tools, targets, or projects. A key is not a substitute for the call's authorization and
+lifecycle preconditions.
 
-**Replay / GC window.** A recorded key replays only within the reconciler's retention window
-(default **7 days**, configurable). The reconciler garbage-collects keys past the window on
-its periodic pass. After a key is collected, repeating it is treated as a *fresh* enqueue —
-still safe at the job layer, because the job-enqueue tools derive their job `dedup_key` from
-the target object (e.g. `{run_id}:build`, `{system_id}:capture_vmcore:{method}`), so a
-same-target re-enqueue returns the existing job rather than a duplicate. The `idempotency_key`
-adds, on top of that, an identical-*envelope* replay for the bounded window.
+The stored-result path replays a recorded successful envelope, which can still say `queued`
+or `running` after the job has finished. Poll its job ID with `jobs.wait` for the current state.
+Allocation request/renewal uses a different path: the key identifies the allocation and the
+response is rebuilt from its current row. Do not depend on byte-identical responses across
+all keyed tools or transport settings. The envelope guide
+(resource://kdive/docs/guide/response-envelope.md) explains the returned fields.
 
-## Durability and retries
+The shared stored-envelope path accepts keys of 1–200 characters and records results without
+an error category inside the mutation transaction. Failure and key-collision behavior can
+differ on other paths; follow the tool's contract rather than assuming a universal error code.
+Do not change the inputs under an existing key to request different work: stored-result lookup
+does not compare them with the original arguments.
 
-Jobs carry a worker heartbeat/lease. If a worker dies mid-run, the job is
-reclaimed by another worker for a remaining attempt. Attempt counts increment at
-claim (not at failure), so a worker that dies before recording a result still
-spends the attempt; jobs cannot loop forever. A job that exhausts `max_attempts`
-is dead-lettered to `failed` and surfaces in `jobs.list` for triage.
+The reconciler deletes keys older than its retention interval (default seven days, measured
+from the record's creation time using the database clock). Cleanup occurs on a periodic pass,
+so this is not an exact expiration instant. Once the record is deleted, its stored response
+cannot be replayed. Repeating the call may create or recycle work according to that tool's
+job-deduplication policy; there is no blanket guarantee that a same-target retry is harmless.
+After an uncertain outcome or a long interruption, inspect known jobs and objects before
+issuing another mutation. Continue a known job with `jobs.wait` instead of repeating its enqueue.
 
-Only object-store references and taxonomy categories are stored on the job row —
-never raw exception messages or console text, which could carry guest output or
-secret material.
+## Worker recovery and failure details
+
+A job row persists across worker restarts, but persistence does not guarantee that every
+operation resumes automatically. Workers claim eligible queued jobs or reclaim eligible
+running jobs after their database-clock lease expires. Each claim spends an attempt,
+including a claim whose worker dies before recording a result. A heartbeat renews the
+lease; the lease is not a total execution deadline.
+
+On the ordinary worker path, retryable failures can requeue the job while attempts remain;
+non-retryable failures or exhausted attempts fail it. The reconciler also fails ordinary
+abandoned jobs whose lease and attempts are exhausted. Capture jobs have additional
+process-stop checks before reclaim, and authority-managed System and boot jobs use
+separate completion and recovery rules. A stalled job therefore needs triage; elapsed
+time alone does not justify restarting the operation or bypassing its cleanup gates.
+
+The job row can contain failure context, including a redacted exception message and
+selected details. A failed job exposes that context in the envelope's `data`. This is
+not a full console log, and redaction is not proof that arbitrary output is safe to share.
+See the safety guide (resource://kdive/docs/guide/safety-and-rbac.md) before publishing
+troubleshooting evidence.

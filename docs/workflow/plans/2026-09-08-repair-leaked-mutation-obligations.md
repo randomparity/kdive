@@ -34,7 +34,7 @@ test arms). The estimate is left as written so the delta stays visible.
 - **No commit may cite a `Proposed` ADR from `src/` or `tests/`.**
   `scripts/guards/check_adr_status.py` fails any such commit, and no pre-commit hook runs it, so the
   failure appears only in CI or a bare `just ci`
-  (`docs/solutions/2026-09-04-adr-status-flip-must-share-the-first-citation-commit.md`). ADR-0634 is
+  (`docs/adr/README.md`). ADR-0634 is
   already committed as `Accepted (2026-09-08)` with no citation, so the implementation commit adds
   the first citations against an already-Accepted record. Never set it back to `Proposed`.
 - **Run guardrails bare.** No `| tail`, no `| head`, no `>/dev/null`, no `|| true`, and never a
@@ -315,7 +315,7 @@ _RepairCatalogEntry(
 The fence shows the entry at top level without its trailing comma because `ruff format` formats
 Python inside Markdown fences in this repo, and an indented `X(...),` fragment is not valid
 standalone Python — the formatter rewrites it into a one-element tuple, which is not what to paste
-(`docs/solutions/2026-09-04-ruff-format-rewrites-python-in-markdown-fences.md`).
+(the Markdown formatting guidance in `CONTRIBUTING.md`).
 
 **Step 4 — write the test module.** Create
 `tests/reconciler/test_leaked_mutation_obligation_repair.py` with the cases in the Verification

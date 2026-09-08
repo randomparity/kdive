@@ -134,8 +134,8 @@ def test_register_publishes_control_tool_contracts() -> None:
     }
     assert capture["properties"]["snaplen"] == {
         "default": 128,
-        "description": "Bytes captured per packet (1-262144); the default 128 captures headers "
-        "only. Raise it to keep payloads.",
+        "description": "Bytes captured per packet (1-262144); the default 128 can include payload "
+        "bytes as well as headers.",
         "maximum": 262144,
         "minimum": 1,
         "type": "integer",

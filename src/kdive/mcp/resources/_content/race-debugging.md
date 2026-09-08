@@ -1,155 +1,70 @@
 # Debugging a kernel race
 
-Race investigation — a data race, a use-after-free window, a lost wakeup — needs you to
-**watch a live kernel value without stopping it**. A halting debugger changes the timing that
-produces the bug: the moment you break at a GDB stub, every CPU freezes, the race window
-closes, and the failure stops reproducing. This guide routes race work to the tools that
-observe a running kernel **without halting it**, and documents the contract that makes those
-tools reachable: once a system is ready, the guest is yours as root over SSH.
+Use this workflow to run a reproducer while observing a live kernel and collecting console
+signals. For provisioning, build/upload, SSH access, and cleanup, start with
+resource://kdive/docs/guide/agent-index.md.
 
-This is the resolution of **#986** (a non-halting observation mode). kdive does **not** ship a
-non-stop gdbstub mode; the existing out-of-band primitives — drgn-live introspection and
-in-guest tracepoints — already answer "observe a kernel value under race load without
-halting the VM," and the reproducer loop that provokes the race is your own code run over root
-SSH. See [ADR-0366](../adr/0366-race-debugging-out-of-band.md) for that decision.
+## Choose an observation method
 
-## Why not a gdbstub break
+A GDB breakpoint stops execution and can change the interleaving you are investigating.
+KDIVE has no non-stop gdbstub mode. Use GDB when stopping and stepping helps answer the
+question; use live introspection or tracing when the workload must keep running.
 
-The `debug` toolset attaches a GDB session to the guest's stub and can set breakpoints and
-hardware watchpoints — but hitting one **halts every CPU** (see the debug toolset guide,
-resource://kdive/docs/guide/toolsets/debug.md). That is correct for a deterministic bug
-you can stop at and inspect. It is the wrong tool for a race: halting collapses the concurrent
-timing you are trying to observe, so the value you wanted to catch mid-flight never occurs
-under the debugger. Reach for the `debug` stub when you want to **stop and step**; reach for
-the tools below when you need to **watch without stopping**.
+- **Sample kernel state:** use `introspect.run` for the built-in `tasks`, `modules`, or
+  `sysinfo` helper, or `introspect.script` for a targeted drgn read. First open a session
+  with `debug.start_session(transport="drgn-live")`. Check the guest and kernel
+  prerequisites in resource://kdive/docs/guide/toolsets/introspect.md. Local-libvirt uses
+  SSH; remote-libvirt uses the guest agent. Neither provides an atomic snapshot of a
+  running kernel: state may change between reads.
+- **Record events:** configure the guest's tracing tools over your SSH connection. Select
+  the events or functions needed for the hypothesis and collect the trace around the
+  reproducer. Tracing adds overhead and can change timing; see the
+  [Linux ftrace documentation](https://docs.kernel.org/trace/ftrace.html) for filters and
+  collection controls appropriate to your kernel.
 
-## Route 1 — drgn-live: non-halting kernel introspection
+Non-halting observation is not a guarantee that the failure's timing is preserved. Compare
+runs with and without the chosen observation, and keep the observation narrow enough to
+interpret its effect.
 
-`drgn` reads a running kernel's memory and walks typed kernel structures **without stopping
-the CPU**, so it is the race-friendly way to inspect live state. It is the `introspect`
-toolset (see the introspect guide, resource://kdive/docs/guide/toolsets/introspect.md):
+## Run the reproducer with a console watch
 
-- `introspect.run` — run an in-tree helper (`tasks`, `modules`, `sysinfo`) against a live
-  drgn-live session. Start here for common questions.
-- `introspect.script` — run your own drgn script against a live session. This is the
-  supported way to read a **struct field or array member by name** on a live guest
-  (`prog["some_struct"].field[3].member`) — drgn resolves typed kernel objects that the
-  halting gdbstub path (which yields only an address) cannot.
+1. **Prepare the guest.** Complete the kernel install/boot and SSH-authorization jobs.
+   Stage the reproducer and any tracing tools, allowing guest disk space for their output.
+   For access and package-egress requirements, read
+   resource://kdive/docs/guide/toolsets/systems.md.
+2. **Submit the watch before the workload.** `control.watch_for_crash` requires contributor
+   access, a READY System, and provider crash-watch support. Supply the owning `run_id`
+   while an active external boot restricts the System. Choose `deadline_s` for one batch;
+   its unit is seconds measured by the worker's monotonic clock after pickup. The tool
+   clamps the requested duration to its advertised maximum. At expiry it returns
+   `not_fired` if no signature matched; submit another watch for a later batch.
+3. **Run and observe concurrently.** Drive the reproducer over SSH while tracing or sampling
+   through the drgn-live session. Poll the watch with `jobs.wait` while the workload runs.
+   Do not wait for the watch to finish before starting the reproducer. Its console baseline
+   is taken at worker pickup, so submission alone does not establish coverage: queue delay
+   can leave an early failure outside the watched window.
+4. **Read the evidence.** After the job succeeds, parse its `refs.result` JSON. `fired`
+   means a recognized console signature appeared; inspect `signature`, `matched`, and
+   `elapsed_s`. Signatures include non-halting diagnostics, so a match does not by itself
+   establish a fatal crash. `not_fired` means no match in the watched window. Neither
+   verdict, nor an SSH disconnect, establishes the guest's current state. Use `runs.get`
+   and the artifact tools to read persisted console evidence, especially if SSH drops.
+5. **Capture or repeat.** The watch does not mark the System CRASHED. Check `systems.get`
+   before `vmcore.fetch`, which requires that state; wait for capture success before
+   postmortem analysis. If evidence and state disagree, preserve the evidence and involve
+   the operator. Only one watch is queued or running per System. For another live attempt,
+   let the old watch finish, then submit a new request with a fresh idempotency key; reusing
+   the old key replays its response. Retain needed traces before changing the guest.
 
-Live introspection reaches the guest over the drgn-over-SSH transport and needs **no**
-credential provisioning: the SSH forward is rendered on every domain and the transport
-authenticates with the per-System bootstrap key, so any ready local system qualifies. The
-only requirement is a drgn-capable guest image. Start the session with
-`debug.start_session(transport="drgn-live")`, then call `introspect.run` / `introspect.script`
-against it. To sample a value repeatedly while the race is under load, run the reproducer (Route 3)
-and poll `introspect.script` in a loop — each read is non-halting, so the timing you are
-studying is preserved.
+A console watch observes output independently of guest SSH. Live drgn and guest tracing
+still need their guest execution channel. If the guest hangs, those observations may stop;
+use the control guide to choose diagnostics or recovery and check the operation's gates.
+`control.force_crash` deliberately changes the evidence: use it only when a forced capture
+is intended, not to make a spontaneous failure count as a crash.
 
-Unlike a gdbstub break, drgn-live does **not** require the system to have been provisioned with
-`debug.gdbstub` — no `nokaslr`, no reprovision. Any ready system with a drgn-capable image
-qualifies.
+End a live introspection session with `debug.end_session` when finished. Capture and triage
+are covered by resource://kdive/docs/guide/toolsets/postmortem.md; watch, diagnostic, and
+power operations by resource://kdive/docs/guide/toolsets/control.md.
 
-## Route 2 — tracepoints and ftrace over root SSH
-
-The kernel's own tracing infrastructure — static tracepoints, function tracing, kprobes,
-`bpftrace` — records events as they happen with low overhead and **no halt**. You drive it
-in-guest over SSH through `/sys/kernel/tracing` (and `/sys/kernel/debug/tracing` on older
-guests):
-
-- Enable a tracepoint or an ftrace function-graph over SSH, run the reproducer, then read
-  `trace` / `trace_pipe`.
-- Use `trace-cmd` or `bpftrace` for anything beyond raw sysfs writes.
-- Fault injection (`failslab` / `fail_page_alloc` via debugfs, with a `CONFIG_FAULT_INJECTION`
-  kernel) steers the kernel into the failure window — see the
-  reproduce-and-capture loop (resource://kdive/docs/guide/agent-index.md) in the
-  agent index for the debugfs knobs (`ignore-gfp-wait`, `cache-filter`, `probability` vs
-  `fail-nth`, `slab_nomerge`).
-
-None of this is an MCP tool, and it does not need to be — it runs entirely inside a guest you
-own. That is the point of the next section.
-
-## The contract: the guest is yours as root
-
-Once a system is ready, authorize your public key with `systems.authorize_ssh_key` and poll
-`jobs.wait` until it succeeds; only then do you have **root SSH into the guest** — kdive never
-holds the private key. From there the guest is yours to shape (see
-The guest is yours (resource://kdive/docs/guide/agent-index.md) in the agent
-index and the systems guide, resource://kdive/docs/guide/toolsets/systems.md):
-
-- **The guest package manager is yours.** Install whatever the investigation needs at runtime
-  — `apt install trace-cmd`, `bpftrace`, a compiler toolchain, `stress-ng`. Do not conclude a
-  capability is missing because a tool is absent; install it.
-- **Run commands and loop reproducers over SSH.** Compiling a reproducer, stressing it,
-  enabling a tracepoint, sampling `/proc`, or reading a drgn value on a loop are all
-  guest-side actions you drive over your own SSH channel — they need no dedicated tool.
-
-This contract is why race investigation needs no new MCP tools: every outcome the discarded
-SSH-equivalent tool proposals (the closed #998 set) would have provided is reachable as a
-prompt pattern over root SSH. A capability earns an MCP tool **only if it is out-of-band** —
-only if it works when SSH cannot reach the guest.
-
-On **local-libvirt** the guest has **no outbound egress by default**, so runtime `dnf`/`apt
-install` fails to resolve any mirror until the **operator** enables egress
-(`guest_egress = true` on the `[[local_libvirt]]` block in the operator's systems inventory —
-not a per-request knob), or you use an image that already bakes the toolchain. See the
-systems guide (resource://kdive/docs/guide/toolsets/systems.md).
-
-## Route 3 — the reproducer loop stays root SSH
-
-Provoking a race usually means running the reproducer many times, or under stress, until the
-window hits. That loop is your own code, run over root SSH — compile it in-guest or
-cross-compile and `scp` the binary in, then run it, `stress-ng`, or a fuzzer over SSH. See the
-reproduce-and-capture loop (resource://kdive/docs/guide/agent-index.md) in the
-agent index.
-
-**A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
-anything you were watching over SSH (a `trace_pipe` tail, a drgn poll) is gone — including the
-reproducer loop itself, so you never see which run crashed from inside the guest. The
-**serial-console is the durable, out-of-band record** — it survives the panic.
-
-`control.watch_for_crash` is the primitive that reads it for you: start the watch on the ready
-system **before** you begin the loop, then drive your reproducer over SSH; the watch polls the
-console for the crash signature (the same `panic`/`BUG`/`Oops`/`GPF`/`KASAN`/`KFENCE`/soft-lockup
-set boot readiness uses) until its deadline and returns on the first hit — `fired` with the
-matched console slice and elapsed-to-signal, or `not_fired` if no signature appeared. It is
-contributor-level and non-destructive; it earns a tool because it watches the console when SSH is
-gone, which your own loop structurally cannot. Poll it with `jobs.wait` and read the verdict from
-`refs.result`. The reproducer loop stays yours over SSH — the watch only catches the crash. You
-hold the authoritative liveness signal: if your reproducer's SSH drops but the watch returns
-`not_fired`, the crash landed outside the watched window (a pre-watch crash, or a very fast one) —
-read the full console with the `artifacts` tools rather than trusting `not_fired`. Do not rely on
-SSH output as your capture of a panic.
-
-## When you _do_ need an out-of-band tool: a dead or hung guest
-
-The tools above all assume a **live, reachable** guest — SSH answers, drgn can attach, the
-reproducer runs. When the guest is **dead or hung** and SSH cannot reach it, root SSH is no
-help, and that is exactly where an out-of-band MCP tool earns its place. These are the
-canonical positive examples of the out-of-band rule (see the `control` toolset guide and the
-[four-method live run](runbooks/four-method-live-run.md) runbook):
-
-- `control.force_crash` — forces a panic by injecting an **NMI via libvirt**, not
-  `echo c > /proc/sysrq-trigger` over SSH. It crashes a **hung** guest that SSH can no longer
-  reach, producing a vmcore you capture with `vmcore.fetch` and triage.
-- `control.diagnostic_sysrq` — sends a diagnostic SysRq key with libvirt **`sendKey`** to the
-  guest console, not through `/proc/sysrq-trigger`. It provokes a task-state or memory dump on
-  a guest whose SSH is wedged.
-- `control.power` (`reset`) — power-cycles a wedged-but-`READY` guest through libvirt when it
-  stops responding to SSH.
-
-Each of these does something SSH structurally cannot: act on a guest that is not answering.
-That is the line. Anything you can do over root SSH stays a documented prompt pattern (the
-routes above); anything that must work when SSH is gone is where a tool is warranted.
-
-## See also
-
-- introspect toolset (resource://kdive/docs/guide/toolsets/introspect.md) — drgn-live and offline
-  introspection.
-- debug toolset (resource://kdive/docs/guide/toolsets/debug.md) — the halting gdbstub path
-  (deterministic bugs).
-- control toolset (resource://kdive/docs/guide/toolsets/control.md) — `force_crash`,
-  `diagnostic_sysrq`, `power`.
-- Agent index (resource://kdive/docs/guide/agent-index.md) — the guest-is-yours contract and
-  reproduce-and-capture loop.
-- [Four-method live run](runbooks/four-method-live-run.md) — capture methods end to end.
-- [ADR-0366](../adr/0366-race-debugging-out-of-band.md) — resolving #986 as docs, not a code mode.
+The documentation-based race workflow is recorded in
+[ADR-0366](../adr/0366-race-debugging-out-of-band.md).

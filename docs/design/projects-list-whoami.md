@@ -1,5 +1,8 @@
 # `projects.list` — whoami discovery for granted projects
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#427](https://github.com/randomparity/kdive/issues/427)
 - **ADR:** [`../adr/0117-projects-list-whoami.md`](../adr/0117-projects-list-whoami.md)
 - **Status:** Draft

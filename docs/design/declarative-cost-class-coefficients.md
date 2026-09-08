@@ -1,5 +1,9 @@
 # Design — Declarative cost-class coefficients in `systems.toml`
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Proposed
 - **Date:** 2026-06-15
 - **Formal decision:** [ADR-0115](../adr/0115-declarative-cost-class-coefficients.md)

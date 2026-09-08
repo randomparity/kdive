@@ -10,45 +10,16 @@ follow [`docs/operating/runbooks/kubernetes-deploy.md`](../../../docs/operating/
 
 ## Install (external backends, production)
 
-> **Installing from a source checkout?** The chart's default image tag is `appVersion`,
-> which tracks the *next unreleased* version (ADR-0041) and has no published image until
-> that version is cut — a bare install would `ImagePullBackOff`. From a checkout, pin the
-> rolling image: add `--set image.tag=edge` **and `--set image.pullPolicy=Always`**. `:edge` is
-> mutable (overwritten on every push to `main`), so with the chart default `IfNotPresent` a node
-> that cached an older `edge` keeps serving stale code across `helm install`/`upgrade`; `Always`
-> forces a re-pull (`values-demo.yaml` sets it for you). A bare `appVersion` default is correct
-> only when you install a cut release / published chart.
+Use the [deployment runbook](../../../docs/operating/runbooks/kubernetes-deploy.md) for image
+selection, backend checks, required Secrets, installation, and verification. The complete
+value definitions and defaults are in [`values.yaml`](values.yaml); runtime environment settings
+are in the [configuration reference](../../../docs/guide/reference/config.md).
 
-```sh
-helm install kdive deploy/helm/kdive \
-  --values kdive-values.yaml \
-  --set config.KDIVE_OIDC_ISSUER=https://idp.example/realms/kdive \
-  --set config.KDIVE_OIDC_JWKS_URI=https://idp.example/realms/kdive/protocol/openid-connect/certs \
-  --set config.KDIVE_S3_ENDPOINT_URL=https://s3.example
-```
-
-The five `databaseCredentials.*` refs default to distinct keys in a `kdive-database` Secret;
-override them in `kdive-values.yaml` when the operator uses other names. See
-[Database credentials](#database-credentials). The chart never places a database DSN in the
-shared ConfigMap.
-
-The migrate Job runs as a `pre-install`/`pre-upgrade` hook — the external backend
-already exists, so migrations apply before the app rollout. Migrations must be
-backward-compatible (expand-contract); the runner is forward-only (ADR-0015), so
-rollback is image-only and the prior image must tolerate the newer schema.
-
-The external artifact bucket must have bucket-wide versioning `Enabled`, MFA Delete off, and no
-provider-specific prefix or folder exclusions. Grant the runtime identity its existing object
-permissions plus `s3:GetObjectVersion`, `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
-`s3:DeleteObjectVersion`. The standard S3 response cannot expose MinIO exclusions, so verify that
-provider policy separately.
-
-For the first ADR-0524 deployment, do not use an ordinary rolling upgrade. Quiesce and stop all old
-processes, grant and verify the IAM actions, verify the no-exclusions/MFA-off policy, enable
-versioning, wait for the provider activation barrier, run the migration, and start only the new
-version-aware image. Suspending versioning and live rollback to a pre-ADR-0524 image are
-unsupported; recovery is a forward deployment. Later upgrades between ADR-0524-aware images may
-use the normal rolling path.
+The external artifact bucket requires bucket-wide versioning `Enabled`, MFA Delete off, and no
+prefix/folder exclusions. Runtime permissions include `s3:GetObjectVersion`,
+`s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion` in addition to
+ordinary object access. Follow the [object-store preflight](../../../docs/operating/install.md#object-store-preflight)
+to prove exact-version reads before starting KDIVE.
 
 ## Upgrade
 
@@ -99,23 +70,9 @@ the lane they are never claimed at all — the System or Snapshot they fence sta
 nothing sweeps it, because the abandoned-job repair reaps only `running` rows. A worker that omits
 a routed lane logs a warning naming it at startup.
 
-**Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
-previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
-config default added in a newer chart (e.g. `config.KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`,
-ADR-0127) never reaches an already-installed release — the new image runs without it. Capture
-your current values and merge fresh defaults instead:
-
-```sh
-helm get values kdive -o yaml > kdive-values.yaml   # your overrides only (no chart defaults)
-helm upgrade kdive deploy/helm/kdive -f kdive-values.yaml \
-  --set image.tag=<new-tag>
-```
-
-Passing the captured file with `-f` preserves your overrides **and** layers the new chart's
-`values.yaml` defaults on top, so a new config default is not silently dropped. As a backstop
-the chart renders `KDIVE_LOCAL_LIBVIRT_ENABLED` from a defensive `default "false"`, so even a
-bare `--reuse-values` no longer reintroduces the local-libvirt reaper crash-loop — but
-`-f kdive-values.yaml` is the general fix for *any* future config-default drift, so prefer it.
+For value changes on an upgrade-compatible release, follow the runbook's
+[config-default handling](../../../docs/operating/runbooks/kubernetes-deploy.md#upgrading-a-release-config-default-drift--adr-0134).
+Apply captured overrides to the new defaults; do not use bare `--reuse-values`.
 
 A `helm upgrade` that changes a shared `config.*` value rolls server, worker, and reconciler
 workloads automatically (a `checksum/config` pod annotation, ADR-0134) — no manual
@@ -123,45 +80,27 @@ workloads automatically (a `checksum/config` pod annotation, ADR-0134) — no ma
 annotation, so a config change never rolls their `emptyDir` pods. The lifecycle witness consumes
 only explicit authority settings; changing its database Secret ref rolls that workload alone.
 
-### Migrating to chart 0.5.0 — the worker becomes a StatefulSet
+### Worker storage and capacity
 
-Chart `0.5.0` converts the worker from a Deployment to a **StatefulSet** so each replica gets
-its own build and install volume (ADR-0514). Before `0.5.0`, `worker.replicas > 1` multi-attached
-one pair of `ReadWriteOnce` claims and either wedged the extra pods in `Pending` or silently
-shared the scratch directories, depending on where the scheduler placed them.
+Each worker StatefulSet replica has its own build and install PVCs (ADR-0514).
+`worker.replicas` defaults to 2; `worker.persistence.build.size` and
+`worker.persistence.install.size` are **per replica**. The default requests
+2 × (10Gi + 5Gi) = 30Gi. Size replica count and storage together.
 
-**The old volumes are not carried forward.** A StatefulSet adopts only claims named
-`<template>-<statefulset>-<ordinal>`, so the release-scoped `<release>-kdive-build` and
-`<release>-kdive-install` claims are Deployment-era leftovers the new `volumeClaimTemplates` will
-never look for. That costs nothing here: both volumes are **disposable scratch**.
-`/var/lib/kdive/build` is the build workspace (a warm kernel tree plus uuid-scoped per-build
-directories) and `/var/lib/kdive/install` is install staging. State of record is Postgres and
-durable artifacts are in the object store, so discarding both costs a rebuild or a re-fetch on
-the next run, not data.
+These volumes are disposable scratch on this chart's remote-provider path. Postgres holds
+state of record and the object store holds durable artifacts. Discarding scratch requires
+rebuilding or fetching it again. Deployment-era release-scoped claims are not adopted by the
+StatefulSet's per-ordinal `volumeClaimTemplates`.
 
-For a worker-fence release, use the [staged worker-fence upgrade procedure](
-../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).
-It uses the current worker StatefulSet and preserves the stop-old-first authority boundary.
+`volumeClaimTemplates` is immutable, so changing a persistence size through an ordinary
+`helm upgrade` fails. Replacing the worker controller requires planned maintenance that
+preserves the [stop-old-first worker authority boundary](
+../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade); do not
+bypass it with force deletion.
 
-Two things change size after the migration:
-
-- **`worker.replicas` now defaults to 2** (it was 1). The queue is built for parallel workers
-  (`FOR UPDATE SKIP LOCKED`, ADR-0018); a one-worker default never exercises that path. Set it
-  back to 1 if you want the old footprint.
-- **`worker.persistence.*.size` is now per replica.** The shipped default requests
-  2 × (10Gi + 5Gi) = 30Gi rather than 15Gi. Lower the sizes or the replica count on a tight quota.
-
-**Changing a persistence size after install requires the same delete-and-recreate.**
-`volumeClaimTemplates` is immutable — Kubernetes rejects an update to any StatefulSet field
-outside `replicas`, `template`, `updateStrategy`, `minReadySeconds`, `ordinals` and the PVC
-retention policy — so a size change fails the upgrade rather than silently doing nothing.
-
-Scaling down or uninstalling now **deletes** the departing replicas' claims
-(`persistentVolumeClaimRetentionPolicy` is `Delete`/`Delete`), because they hold only scratch:
-the build tree rebuilds, and install staging is pushed into the guest and not read again. This
-is the one place the chart removes storage on your behalf, so `Chart.yaml` requires Kubernetes
-`>=1.27` — the field is gated behind `StatefulSetAutoDeletePVC`, off by default before then, and
-an older API server would prune it silently and leak the claims instead.
+Scaling down or uninstalling deletes the departing replicas' claims:
+`persistentVolumeClaimRetentionPolicy` is `Delete`/`Delete`. The chart requires Kubernetes
+`>=1.27` for that retention policy. This deletion is safe only under the scratch assumption.
 
 > The scratch claim does **not** hold on the local-libvirt path, where the staged
 > `kernel`/`initrd` are the domain XML's direct-boot files and durable for the System's
@@ -177,22 +116,14 @@ state by design.** The issuer mints valid `aud=kdive` tokens for any caller, so 
 forces `service.type=ClusterIP` on this path — reach MCP with `kubectl port-forward`, never
 expose it.
 
-Before installing the demo, create the two operator-owned Secrets named by
-`workerCredentialBroker`: the TLS Secret must contain `tls.crt`, `tls.key`, and `ca.crt`, with a
-certificate valid for the rendered `<fullname>-worker-credential-broker` Service; the envelope
-Secret must contain `envelope.key`. The chart mounts these authority credentials but does not
-generate them, including on the bundled path.
+The demo also requires the [worker credential-broker Secrets](
+../../../docs/operating/runbooks/kubernetes-deploy.md#worker-credential-broker-secrets).
+The chart mounts these authority credentials but does not generate them.
 
-```sh
-helm install kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml
-helm test kdive    # mints a token, asserts tools/list returns tools
-```
-
-Use the install command exactly without `--wait`. With `--wait`, Helm delays post-install hooks
-until ordinary resources are ready; on this bundled fresh-install topology, app workloads cannot
-become ready until the post-install migration creates their database roles. Follow hook progress
-directly, then use `helm test` as the readiness proof. This ordering does not affect upgrades,
-whose migration is a pre-upgrade hook.
+Follow the [bundled demo install procedure](
+../../../docs/operating/runbooks/kubernetes-deploy.md#bundled-demo-install).
+Fresh bundled installs must omit `--wait`: the post-install migration creates the database
+roles before app readiness can pass. Upgrades use a pre-upgrade migration hook.
 
 `values-demo.yaml` pins `image.tag=edge` (the rolling published image); without a published
 image the demo cannot pull. The demo migrate Job runs `post-install` behind a DB-readiness
@@ -210,28 +141,11 @@ validation described above.
 A deployment has **one** object store, and three parties use it over presigned URLs: the
 in-cluster worker, an external uploader (`runs.complete_build`), and the remote-libvirt guest
 (`install` fetch + `kdump` capture). The bundled MinIO defaults to **ClusterIP** with
-`KDIVE_S3_ENDPOINT_URL=http://<release>-minio:9000` — in-cluster only, so `host_dump` capture and
+`KDIVE_S3_ENDPOINT_URL=http://<release>-kdive-minio:9000` — in-cluster only, so `host_dump` capture and
 `introspect.from_vmcore` work but external uploads and remote-libvirt `install`/`kdump` capture do
-not. To use the bundled store off-cluster, expose it and point the endpoint at an address all three
-parties resolve to the same store:
-
-```sh
-helm get values kdive -o yaml > kdive-values.yaml
-helm upgrade kdive deploy/helm/kdive \
-  -f deploy/helm/kdive/values-demo.yaml -f kdive-values.yaml \
-  --set demo.minio.service.type=NodePort --set demo.minio.service.nodePort=30900 \
-  --set config.KDIVE_S3_ENDPOINT_URL=http://<node-ip>:30900
-```
-
-(Capture-and-`-f`, not `--reuse-values` — see [Upgrade](#upgrade). Later `-f` files and
-`--set` flags win, so your captured overrides and the new endpoint layer on top of the demo
-defaults.)
-
-`config.KDIVE_S3_ENDPOINT_URL` now overrides the bundled default in both modes (it previously could
-not). The cluster network/firewall must permit the chosen NodePort; a cluster that only admits
-`:6443` needs a node firewall change or an external S3 all parties reach. See the
-[Kubernetes deploy runbook §7](../../../docs/operating/runbooks/kubernetes-deploy.md) for the full
-topology (with a diagram).
+not. `config.KDIVE_S3_ENDPOINT_URL` overrides that default in both modes. Follow the
+[object-store exposure procedure](../../../docs/operating/runbooks/kubernetes-deploy.md#the-bundled-demos-object-store-is-in-cluster-only--expose-it-for-remote-libvirt)
+to configure an endpoint reachable by all three consumers and verify the network route.
 
 Exposing the store opens a companion NetworkPolicy on :9000 from `demo.minio.service.sourceRanges`
 (default `0.0.0.0/0`). That allowlist does **not** restrict by client IP: under the Service's
@@ -265,7 +179,7 @@ that port. Liveness tracks the loop being alive, readiness tracks the process's 
 backend set — a failing `/readyz` (a backend down) withdraws/gates the pod but does
 **not** trip liveness, so a live-but-not-ready pod is never killed.
 
-The aux listener binds `0.0.0.0:<port>` *inside* the pod (set per Deployment via
+The aux listener binds `0.0.0.0:<port>` *inside* the pod (set per workload via
 `KDIVE_HEALTH_BIND_ADDR`, overriding the loopback registry default) so the node kubelet
 and the scrape can reach it. **No Service fronts the aux port** — only the server's MCP
 `8000` is exposed — so the unauthenticated `/readyz`/`/metrics` stay pod-local. The
@@ -278,25 +192,12 @@ Ingress/LoadBalancer to expose it outside the cluster.
 
 ### Bundled Prometheus (opt-in — ADR-0189)
 
-Nothing scrapes the `/metrics` above by default. Set `bundledObservability=true` to deploy an
-in-cluster Prometheus that discovers all four components via the `prometheus.io/scrape`
-annotations and collects them:
-
-```sh
-helm upgrade --install kdive deploy/helm/kdive ... --set bundledObservability=true
-```
-
-It is independent of `bundledBackends` (the scrape targets are the app pods, present on both the
-demo and external-backend paths) and **off by default** — production installs are BYO (below).
-It renders a `ServiceAccount`, a **namespaced** `Role`/`RoleBinding` (only `get`/`list`/`watch`
-on `pods`, scoped to the release namespace), the scrape-config `ConfigMap`, the Prometheus
-`Deployment`, and a `ClusterIP` Service on `9090`. Reach the UI and confirm targets:
-
-```sh
-kubectl port-forward svc/<release>-kdive-prometheus 9090:9090
-# open http://localhost:9090/targets — server/worker/reconciler/witness all UP
-# then query e.g. kdive_job_queue_depth to confirm kdive_* series are present
-```
+Set `bundledObservability=true` to deploy Prometheus, which discovers all four components
+through their `prometheus.io/scrape` annotations. It is off by default and independent of
+`bundledBackends`. The chart creates namespaced Pod-discovery RBAC, a scrape ConfigMap,
+a Deployment, and a ClusterIP Service on port 9090. Follow the runbook's
+[metrics verification](../../../docs/operating/runbooks/kubernetes-deploy.md#collect-metrics-opt-in--adr-0189)
+to confirm target health and series collection.
 
 Defaults match the bundled demo posture: `emptyDir` storage (a Prometheus pod restart drops
 history) and short retention. Override `observability.retention`, `observability.scrapeInterval`,
@@ -351,16 +252,8 @@ owner needs the schema and role authority required by migrations; no runtime log
 On a new database, pre-create the exact capability roles and memberships or perform the equivalent
 two-stage migration and membership grant before allowing runtime Pods to start.
 
-Store the five DSNs in Kubernetes Secrets. One Secret with distinct keys is supported:
-
-```sh
-kubectl create secret generic kdive-database \
-  --from-file=migration-dsn=./migration.dsn \
-  --from-file=server-dsn=./server.dsn \
-  --from-file=worker-dsn=./worker.dsn \
-  --from-file=reconciler-dsn=./reconciler.dsn \
-  --from-file=lifecycle-witness-dsn=./lifecycle-witness.dsn
-```
+The [deployment runbook](../../../docs/operating/runbooks/kubernetes-deploy.md#4-install-the-chart)
+owns Secret creation. One Secret with five distinct keys is supported.
 
 Point `databaseCredentials.migration`, `.server`, `.worker`, `.reconciler`, and
 `.lifecycleWitness` at their respective Secret names and keys. The chart rejects missing refs and
@@ -372,51 +265,12 @@ dedicated lifecycle-witness workload. Ref changes roll only affected runtime wor
 
 The file-ref secret backend (ADR-0027/ADR-0088 decision 3) resolves credentials from
 files under `KDIVE_SECRETS_ROOT` — remote-libvirt TLS client cert/key/CA refs in
-`systems.toml` and debug-session secrets. Create a Secret whose keys are the credential
-filenames, then point `secrets.secretName` at it:
-
-```sh
-kubectl create secret generic kdive-remote-tls \
-  --from-file=clientcert.pem=client.pem \
-  --from-file=clientkey.pem=clientkey.pem \
-  --from-file=cacert.pem=ca.pem
-
-cat >systems.toml <<'EOF'
-schema_version = 2
-
-[[image]]
-provider = "remote-libvirt"
-name = "fedora-kdive-ready"
-arch = "x86_64"
-format = "qcow2"
-root_device = "/dev/vda"
-visibility = "private"
-[image.source]
-kind = "staged"
-volume = "fedora-kdive-ready.qcow2"
-
-[[remote_libvirt]]
-name = "lab-remote"
-uri = "qemu+tls://host.example/system"
-gdb_addr = "192.0.2.20"
-gdbstub_range = "47000:47099"
-client_cert_ref = "clientcert.pem"
-client_key_ref = "clientkey.pem" # pragma: allowlist secret
-ca_cert_ref = "cacert.pem"
-base_image = "fedora-kdive-ready"
-cost_class = "remote"
-concurrent_allocation_cap = 4
-EOF
-kubectl create configmap kdive-systems --from-file=systems.toml=systems.toml
-
-helm install kdive deploy/helm/kdive \
-  --set secrets.secretName=kdive-remote-tls \
-  --set systems.configMapName=kdive-systems \
-  --set config.KDIVE_REMOTE_LIBVIRT_STORAGE_POOL=default \
-  --set config.KDIVE_REMOTE_LIBVIRT_NETWORK=default \
-  --set config.KDIVE_REMOTE_LIBVIRT_MACHINE=pc \
-  --set config.KDIVE_OIDC_ISSUER=...
-```
+`systems.toml` and debug-session secrets. Set `secrets.secretName` to a pre-existing Secret
+whose keys match those refs. The [remote host registration guide](
+../../../docs/operating/runbooks/remote-libvirt-host-setup.md#3-register-remote-libvirt-on-the-deployment)
+owns inventory and TLS mapping; the [deployment runbook](
+../../../docs/operating/runbooks/kubernetes-deploy.md#3-create-the-file-ref-secret-if-using-remote-libvirt-or-debug-session-secrets)
+owns Secret installation.
 
 The chart mounts the Secret **read-only** (`defaultMode 0440`) at `secrets.mountPath`
 (default `/etc/kdive/secrets`) on the server, worker, and reconciler, and sets

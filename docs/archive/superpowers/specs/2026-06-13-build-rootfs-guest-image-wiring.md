@@ -93,12 +93,11 @@ line are identical. The line is correct regardless of the caller's cwd.
 
 ### Failure mode
 
-On a build failure the plane/command raises a `CategorizedError`, which propagates out
-of `run_build_rootfs` to `main()` and exits non-zero **before** any `export` line is
-printed — nothing is written to stdout. So `eval "$(python -m kdive build-rootfs ...)"`
-of a failed build exports nothing (it does not leave `KDIVE_GUEST_IMAGE` pointing at a
-half-written or stale image), and the non-zero exit is observable to the operator and
-to scripts.
+The original stdout decision printed no export on build failure. That does **not** make
+`eval "$(...)"` propagate the failing command's status: an empty substitution can make `eval`
+succeed and leave an earlier image variable unchanged. The old guarantee was incorrect.
+Check build success before selecting its output, using the
+[current image procedure](../../../operating/runbooks/image-lifecycle.md).
 
 ### Live-spine skip message
 

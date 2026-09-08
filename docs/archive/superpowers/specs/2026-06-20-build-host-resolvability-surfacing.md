@@ -12,7 +12,7 @@ instance by the build host's name at execution time
 `remote_config_for_resource(host.name)`), so a host with no backing instance is
 advertised as ready but fails at build time:
 
-> no [[remote_libvirt]] instance named 'ub24-big-build' is declared in systems.toml
+> no [[remote_libvirt]] instance named 'sys-R2-build' is declared in systems.toml
 
 ## Goal
 

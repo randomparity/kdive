@@ -1,5 +1,9 @@
 # Proof record — unified customization boot, x86_64 KVM + ppc64le TCG (#1147)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Date: 2026-07-14
 Issue: #1147 · Epic: #1139 · Spec: `2026-07-13-unified-customization-boot-1147.md` · ADR-0345
 

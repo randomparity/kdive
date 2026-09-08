@@ -1,5 +1,8 @@
 # Durable staging and a re-verified reuse path for the uploaded rootfs base (#1526)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#1526](https://github.com/randomparity/kdive/issues/1526)
 - **ADR:** [ADR-0443](../adr/0443-durable-rootfs-staging-and-reuse-recheck.md)
 - **Status:** implemented
@@ -43,8 +46,8 @@ Surfaced by the `/challenge` review on #1520, which flagged it as out of scope f
   runs on every System provision in the investigation.
 - **R5** — The re-verification never false-rejects a base the staging path itself produced, or it
   would re-download on every provision forever.
-- **R6** — The durability cost falls only on bases that are actually published — including bases
-  rejected by the format gate, which runs after the stager returns.
+- **R6** — The durability cost falls only on bases that are actually published; bases rejected
+  by the format gate do not pay that cost.
 - **R7** — An unreadable base is reported, not silently re-downloaded; a rejected one is logged.
 - **R8** — The reuse probe never blocks. It replaces a `stat` with an `open`, so a non-regular file
   at the staged path must be rejected without opening it.

@@ -1,5 +1,9 @@
 # Operator write-path for build-config fragments
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../README.md).
+
 - **Archived:** superseded by [ADR-0316](../../adr/0316-remove-server-build-lane.md), which
   removed the server-build lane, `kdive.build_configs`, `buildconfig.*` tools, and the
   build-config catalog. Current live ownership is described in
@@ -91,11 +95,10 @@ So this is **one tool + one provenance column**, not a new subsystem.
   `INFRASTRUCTURE_FAILURE` rather than serving mismatched bytes; neither ever serves wrong bytes.
   - **Transient (a healthy `set`):** between a successful PUT and the row commit (sub-second), a
     reader can fetch the new bytes against the still-old row sha and get
-    `INFRASTRUCTURE_FAILURE`. It clears the instant the `set` commits. The build path absorbs it
-    automatically: a build job requeues on a non-terminal `INFRASTRUCTURE_FAILURE` up to
-    `DEFAULT_MAX_ATTEMPTS` (3), and the window is gone by the next attempt; a direct
-    `buildconfig.get` caller re-issues the read. No build is terminally failed by an operator's
-    concurrent `set`.
+    `INFRASTRUCTURE_FAILURE`. It clears once the `set` commits. A build job can requeue on
+    non-terminal `INFRASTRUCTURE_FAILURE` up to `DEFAULT_MAX_ATTEMPTS` (3), which can recover
+    from a short window. If all attempts overlap that window, the build can still fail
+    terminally; a direct `buildconfig.get` caller re-issues the read.
   - **Persistent (a crashed `set`):** a process/DB failure between the PUT and the commit leaves
     the object holding new bytes and the row holding the old sha indefinitely; reads keep failing
     closed until a re-`set` re-PUTs and re-commits the matching sha. The prior bytes are not
@@ -197,7 +200,7 @@ row *and* the object layer.
 | `content` empty | `CONFIGURATION_ERROR` (`field=content`) |
 | `content` over the byte cap | `CONFIGURATION_ERROR` (`field=content`, `limit`, `actual`) |
 | Object store unconfigured | `CONFIGURATION_ERROR` from `object_store_from_env` (same as `buildconfig.get`) |
-| Reader races a *healthy* in-flight `set` (PUT done, row not yet committed) | Transient `INFRASTRUCTURE_FAILURE` via `verify_bytes` (fail-closed); clears on commit; build job requeues (≤ 3 attempts) and a direct `get` caller re-reads — no terminal build failure |
+| Reader races a *healthy* in-flight `set` (PUT done, row not yet committed) | Transient `INFRASTRUCTURE_FAILURE` via `verify_bytes` (fail-closed); clears on commit; build job requeues (≤ 3 attempts) and a direct `get` caller re-reads — all attempts can still overlap the window and exhaust retries |
 | Process/DB failure after PUT, before row commit | Object holds new bytes, row holds old sha256 *persistently*; `get`/build fetch fail closed (`INFRASTRUCTURE_FAILURE` via `verify_bytes`); remedy is re-`set`. A `set` error means "state unknown — re-`set`" |
 | Two concurrent `set` for the same name | Serialized by `advisory_xact_lock(BUILD_CONFIG, name)`; the second blocks until the first commits, so the committed sha256 always matches the bytes at the key |
 | Re-set identical bytes | Idempotent: same object key overwritten, sha256 unchanged, `source` stays `operator` |

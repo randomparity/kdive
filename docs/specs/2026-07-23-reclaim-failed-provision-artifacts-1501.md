@@ -1,5 +1,8 @@
 # Reclaim host + object-store artifacts on a provision that fails after materialization (#1501)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#1501](https://github.com/randomparity/kdive/issues/1501)
 - **ADR:** [ADR-0435](../adr/0435-reclaim-failed-provision-artifacts.md)
 - **Date:** 2026-07-23

@@ -1,148 +1,122 @@
 # Platform and architecture support
 
-KDIVE runs the local-libvirt kernel-debug loop on **x86_64** and on **ppc64le**
-(POWER9/POWER10). The two arches are not at the same tier: x86_64 with hardware
-KVM is the primary, fully validated target; ppc64le is supported natively on
-POWER and available — slowly — under cross-arch TCG emulation on an x86_64 host.
+KDIVE implements local-libvirt paths for `x86_64` and `ppc64le`. This page separates current
+catalog and runtime behavior from recorded live evidence. A dated proof establishes that tested
+configuration and revision; it does not certify every distro release or the current checkout.
 
-This page states what is actually supported and to what tier, and flags the two
-places where the matrix is *not* full parity: the EL9 customize-boot proof on
-ppc64le, and fadump on native POWER. It describes shipped reality — where a proof
-has been recorded it is cited; where a path rides a shared mechanism without its
-own end-to-end proof, it says so.
-
-For the development-side arch differences (the ppc64le Rust toolchain requirement,
-the container images with no ppc64le manifest, the multi-arch publish), see the
-[cross-platform development guide](../development/cross-platform.md). For a
-from-scratch POWER box, see the
-[POWER host bring-up runbook](runbooks/power-host-bringup.md).
+Use the [cross-platform guide](../development/cross-platform.md) for development prerequisites,
+container choices and native POWER host integration. Use [live testing](runbooks/live-testing.md)
+to validate a deployment.
 
 ## Architecture and accelerator tiers
 
-| Arch + accelerator | Tier | Notes |
-|---|---|---|
-| **x86_64 + KVM** | Primary — fully supported | Hardware virtualization (`/dev/kvm`). The default local-libvirt target; every spine step is proven here. |
-| **ppc64le + KVM-HV** (POWER9/POWER10) | Supported | Native KVM-HV on a real POWER host. Validated end-to-end for the kdump spine on POWER9/POWER10. |
-| **ppc64le + TCG** (on an x86_64 host) | CI-only / slow | Software-emulated foreign-arch guest. Boots and runs, but an order of magnitude slower than KVM; the boot-deadline multiplier applies (see below). Used to prove the ppc64le paths in CI without POWER hardware. |
-| x86_64 + TCG | not a target | No reason to emulate the native arch; use KVM. |
+| Guest and accelerator | Implementation and evidence |
+|---|---|
+| x86_64 + KVM | Primary local-libvirt target; exercised by the native live suite. |
+| ppc64le + KVM-HV | Native POWER path. The [July 2026 proof](../design/2026-07-15-power-native-kvm-hv-validation-1156-proof-record.md) records the kdump spine on POWER9. POWER10 shares the architecture; that record is not a POWER10 end-to-end result. |
+| ppc64le + TCG | Foreign-architecture path on x86_64, used by the hosted live tier. Recorded [uploaded boot](../design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md) and [kdump](../design/2026-07-13-ppc64le-kdump-proof-record-1148.md) proofs. |
+| x86_64 + TCG | Available for foreign x86_64 guests on POWER or native guests without KVM. Availability alone is not a dedicated end-to-end proof. |
 
 ### The TCG boot-deadline multiplier
 
-TCG (software emulation) executes a foreign-arch guest roughly an order of
-magnitude slower than hardware KVM, so a boot that is healthy on KVM would trip a
-KVM-tuned deadline under TCG. The provider scales every guest-execution deadline by
-a single multiplier keyed off the System's persisted accelerator: `1.0` for KVM,
-and a configurable factor (`KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, **default
-`10.0`**) for TCG — and, deliberately, for an unknown/`NULL` accelerator, so an
-un-classified guest is never starved of boot time. This is why ppc64le-under-TCG
-runs are slow but do not spuriously fail readiness.
+The local provider scales two guest waiting windows: ordinary boot readiness and image
+customization completion. KVM uses `1.0`; TCG and an unknown/`NULL` accelerator use
+`KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`, minimum `1.0`). Set `1.0` to disable
+scaling. This increases those windows; it does not scale every job, request or guest-operation
+timeout, or guarantee readiness on a slow host. The [configuration reference](../guide/reference/config.md)
+owns the base windows and setting contract.
+
+### Cross-architecture guests
+
+The local provider uses TCG for foreign-architecture guests. Native guests use KVM when it is
+available and can fall back to TCG; inspect the worker's diagnostic result rather than assuming
+hardware acceleration from the host architecture alone.
+
+To enable foreign-arch guests, install the foreign arch's QEMU system emulator. The package
+name is distro-specific (and matches what `scripts/check-setup-deps.sh` reports):
+
+| distro | ppc64le emulator (`qemu-system-ppc64`) | x86_64 emulator (`qemu-system-x86_64`) |
+|--------|----------------------------------------|----------------------------------------|
+| Fedora / RHEL / CentOS | `qemu-system-ppc` | `qemu-system-x86` |
+| Debian / Ubuntu | `qemu-system-ppc` | `qemu-system-x86` |
+| Arch | `qemu-system-ppc` | `qemu-system-x86` |
+| openSUSE | `qemu-ppc` | `qemu-x86` |
+
+For example, to enable ppc64le guests on an x86_64 Fedora host: `dnf install qemu-system-ppc`.
+
+For a local-libvirt worker, two diagnostics report the per-arch accelerator:
+
+- `scripts/check-setup-deps.sh` prints a cross-arch line per foreign arch — "available via
+  TCG only" when its emulator is present, or the exact package to install when it is not.
+- The service `doctor` (`kdivectl doctor --json`) carries a `guest_arch_accel` check whose
+  `data` maps each schedulable arch to `kvm` or `tcg`, and which fails only when the host
+  lacks its own native-arch emulator. This is a worker-local probe; a remote provider does not
+  require that worker to have the remote host's emulator.
+
+The [deadline multiplier](#the-tcg-boot-deadline-multiplier) applies to emulated guests.
 
 ## Distro customize-boot matrix
 
-"Customize-boot" is how KDIVE bakes a debug-ready base image: it boots the vendor
-cloud image once, runs the first-boot customization (install `drgn`, `kdump`,
-`openssh-server`, seal), and publishes the sealed image. Both families — rhel
-(Fedora, Rocky, CentOS Stream) and debian (Debian, Ubuntu) — customize via the same
-in-guest **boot** pass (ADR-0345, #1167): the guest runs its own package manager, so
-the build needs no libguestfs appliance network and is cross-arch capable.
+`build-fs` customizes catalog images by booting them and running their family package manager.
+The rhel family covers Fedora, Rocky and CentOS Stream; the debian family covers Debian and
+Ubuntu. Both use an in-guest boot pass, so package installation does not need the libguestfs
+appliance network. A shared family path and a catalog entry are not a completed live proof.
 
-The column that matters for a newcomer is whether a given distro has actually
-reached the `kdive-customize-ok` marker and published on a given arch.
+The current rootfs catalog contains these combinations:
 
-Legend: ✅ verified end-to-end (proof recorded) · ◐ supported via the shared
-family mechanism (no dedicated end-to-end proof) · ⚠️ known gap / gated · — not
-available.
+| Catalog releases | x86_64 | ppc64le |
+|---|---|---|
+| Fedora 43, 44 | Present | Present |
+| Rocky 9, 10; CentOS Stream 9, 10 | Present | Present |
+| Rocky 8 | Present | No entry |
+| Debian 12, 13 | Present | No entry |
+| Ubuntu 24.04, 26.04 | Present | No entry |
 
-| Distro | Family | x86_64 (KVM) | ppc64le (KVM on POWER / TCG) |
-|---|---|---|---|
-| Fedora 43, 44 | rhel (boot) | ✅ verified | ✅ verified (live under TCG) |
-| Rocky 9 / CentOS Stream 9 (EL9) | rhel (boot) | ✅ verified (Rocky 9) | ⚠️ **not verified — gated** (see below) |
-| Rocky 10 / CentOS Stream 10 (EL10) | rhel (boot) | ◐ shared EL boot path | ⚠️ **not verified — gated** (same as EL9) |
-| Rocky 8 (EL8) | rhel (boot) | ◐ shared EL boot path | — no ppc64le port (Rocky 8 is x86_64 + aarch64) |
-| Debian 12, 13 | debian (boot) | ◐ shared boot path | — no `genericcloud` ppc64el image (see below) |
-| Ubuntu 24.04, 26.04 LTS | debian (boot) | ◐ shared boot path | — no row yet (Ubuntu does publish `ppc64el`) |
+The [rootfs catalog](../../fixtures/local-libvirt/rootfs_catalog.toml) owns the entries. A missing row
+here makes no claim about what an upstream distributor currently publishes. Image-specific
+introspection readiness is reported by `images.describe` in `capability_signals.live_drgn`;
+see the [images reference](../guide/reference/images.md#imagesdescribe), rather than inferring
+it from the distro family.
 
-Notes on the matrix:
+Recorded customization evidence:
 
-- **Fedora** is the reference distro on both arches. The x86_64 path is the
-  baseline; the ppc64le path is proven live — a `fedora-kdive-ready-44-ppc64le`
-  image builds, reaches `kdive-customize-ok`, and publishes under TCG.
-- **EL9 x86_64** is proven end-to-end: a `rocky-kdive-ready-9` customize boot
-  reaches `kdive-customize-ok` and publishes on x86_64 KVM
-  ([#1174 proof record](../design/2026-07-15-el9-customize-boot-1174-proof-record.md)).
-  CentOS Stream 9 rides the identical rhel-family boot path.
-- **EL10 and Rocky 8 on x86_64** ship catalog- and loader-validated and ride the
-  same rhel-family boot mechanism as the proven EL9 path, but do not have their own
-  recorded end-to-end customize-boot proof — hence ◐, not ✅.
-- **Debian on x86_64** moved from the offline `virt-customize` path to the shared
-  customization boot in #1167 (the family emits an `apt-get update` and installs
-  with a non-interactive `apt-get`), so a Debian-family image no longer needs the
-  libguestfs appliance network (`passt`) on the build host — the failure seen on
-  Ubuntu 24.04 hosts (#694). Until a Debian customize boot is recorded reaching
-  `kdive-customize-ok` it is ◐, not ✅.
-- **Ubuntu 24.04 / 26.04 on x86_64** ship catalog- and loader-validated rows on the
-  same debian-family customization boot as the Debian rows, without their own
-  recorded end-to-end build proof — hence ◐. The 24.04 row's `python3-drgn` (0.0.25) is
-  below the live-introspection threshold, so `introspect.run` reports it `incapable`;
-  26.04 (0.0.33) is capable.
-- **Debian ppc64le** has no catalog row because Debian publishes only the
-  `generic`/`nocloud` ppc64el variant, not the `genericcloud` variant the x86_64
-  rows pin. The mechanism no longer blocks it: a debian-family row can now
-  customize-boot cross-arch under TCG like the rhel rows, once a suitable base and
-  its proof exist. Ubuntu does publish a `ppc64el` cloud image, so Ubuntu ppc64le
-  rows are the nearer candidate; none is added until a TCG proof is recorded.
+| Configuration | Result and source |
+|---|---|
+| Fedora 44 x86_64/KVM and ppc64le/TCG | Built and published in the [2026-07-14 unified customization proof](../design/2026-07-13-unified-customization-boot-proof-record-1147.md). This does not establish Fedora 43. |
+| Fedora 44 ppc64le/TCG with EL compatibility fixes | Built and published in the [catalog-parity proof](../design/2026-07-14-ppc64le-catalog-parity-1152-proof-record.md); component checks on EL images did not establish an EL completion. |
+| Rocky 9 x86_64/KVM | Reached the completion marker and published in the [2026-07-15 EL9 proof](../design/2026-07-15-el9-customize-boot-1174-proof-record.md). This does not establish CentOS Stream or EL10. |
 
-### Known gap — EL9 customize-boot on ppc64le (#1174)
+### Known gap — EL customize-boot on ppc64le
 
-An EL9 (Rocky 9 / CentOS Stream 9) customize boot has **not** reached
-`kdive-customize-ok` on ppc64le. The x86_64 proof above satisfies the composed-path
-acceptance ("on at least one arch"), but the ppc64le arch proof is gated on an
-**environmental** blocker, not kdive code: under the TCG/SLIRP emulated network the
-CentOS `dnf4` metadata download stalls at 0 B/s against the mirror CDN, so first-boot
-`dnf` exhausts its mirrors and exits before the install completes (Fedora's `dnf5`
-and CDN are reliable under the same SLIRP, which is why Fedora ppc64le passes). It is
-solvable only on native POWER (KVM-HV, real network), which is the separate
-live-hardware track. Until that proof lands, treat EL9 customize-boot on ppc64le as
-**unverified**, and use Fedora ppc64le for a customize-boot-verified ppc64le image.
-See the [#1174 proof record](../design/2026-07-15-el9-customize-boot-1174-proof-record.md).
+The cited EL9 proof records a CentOS Stream 9 package-download stall under TCG/SLIRP before
+customization completed. It does not establish an end-to-end ppc64le EL build or show that only
+native hardware can resolve the stall. Treat the EL ppc64le rows as available through the shared
+mechanism with no successful completion in these records. Fedora 44 has the recorded ppc64le
+customization proof above.
 
 ## Crash-capture methods by arch
 
-kdump is the supported crash-capture spine on both arches. fadump is a ppc64le-only,
-opt-in method with additional host and profile requirements.
+| Method | Architecture and evidence |
+|---|---|
+| kdump | Implemented on both arches. ppc64le capture is recorded under TCG and native POWER9 in the proofs above. |
+| host_dump | QEMU-side mechanism available on both arches; architecture-independent implementation does not establish a separate live result for every combination. |
+| fadump | Local-libvirt opt-in for ppc64le; admission requirements and live limitations below. |
 
-| Method | x86_64 | ppc64le | Notes |
-|---|---|---|---|
-| kdump | ✅ supported | ✅ supported | The default spine; validated natively on POWER (POWER9/POWER10) and under TCG. |
-| fadump | — (POWER-only mechanism) | ⚠️ opt-in, with limitations | See below. |
-| host_dump | ✅ supported | ✅ supported | QEMU-side dump; arch-agnostic. |
+### Known limitation — native POWER fadump capture
 
-### Known limitation — fadump on native POWER (#1181)
+A fadump profile must select `ppc64le`, opt in through `debug.fadump`, carry a `crashkernel`
+reservation, and resolve to at least **4096 MiB** guest memory. Admission also requires the
+host's `pseries_fadump` capability. The detector compares the discovered emulator's QEMU version
+with the repository's **10.2** floor and rejects missing or failed probes. These checks do not
+prove that the guest will complete a firmware-assisted capture.
 
-fadump (firmware-assisted dump) is **opt-in** and carries hard requirements:
+The [2026-07-14 TCG record](../design/2026-07-14-ppc64le-fadump-proof-record-1151.md) reached fadump
+registration and then a guest Oops. The current driver skips non-ppc64le hosts and is intended
+for native POWER/KVM validation. Neither that host-architecture check nor the production
+version detector enforces the accelerator; confirm KVM is actually selected for a native proof.
 
-- **QEMU ≥ 10.2** on the host — the pseries fadump RTAS floor. Under TCG the fadump
-  proof *skips* (RTAS unsupported), so fadump is a **native-POWER-only** path in
-  practice.
-- **Native KVM-HV** on a real POWER host.
-- **A 4 GiB guest-RAM floor**, enforced at admission. fadump reserves a boot-memory
-  region *on top of* `crashkernel`; at the default 2 GiB profile the reservation
-  leaves too little RAM for the guest to reach readiness, so a fadump profile below
-  4096 MiB is rejected at `systems.provision` / `systems.define` with a
-  `CONFIGURATION_ERROR` (before any capacity commit).
-
-The RAM-floor fix has landed, and a fadump-ready POWER10 host boots `fadump=on` under
-KVM-HV, but the **end-to-end native fadump crash→capture at the 4 GiB floor is not
-yet proven** — it awaits a fully-provisioned POWER live-stack. Until then, use
-**kdump** (the fully validated spine) on ppc64le. See the
-[#1181 proof record](../design/2026-07-15-power-native-fadump-ram-floor-1181-proof-record.md).
-
-## Summary
-
-- **x86_64 + KVM** is the primary, fully supported target — use it unless you
-  specifically need POWER.
-- **ppc64le + KVM-HV on POWER** is supported for the kdump spine; **ppc64le + TCG**
-  works for CI and cross-arch checks but is slow (10× boot-deadline multiplier).
-- For a customize-boot-verified ppc64le image, use **Fedora**; EL9 customize-boot on
-  ppc64le (#1174) and native-POWER fadump capture (#1181) are the two known gaps and
-  are flagged above rather than implied to be at parity.
+The [2026-07-15 RAM-floor record](../design/2026-07-15-power-native-fadump-ram-floor-1181-proof-record.md)
+confirms the admission fix and a POWER10 host's QEMU/KVM prerequisites. It explicitly leaves
+native crash-to-capture at 4 GiB unexecuted. It is not proof that the POWER10 guest booted or
+captured successfully. Use the recorded kdump path when a demonstrated capture is required,
+and report a new native fadump result with its exact runtime and fixture evidence.

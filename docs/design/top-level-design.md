@@ -1,4 +1,4 @@
-# KDIVE Production Architecture Design
+# KDIVE current architecture
 
 ## Purpose
 
@@ -11,39 +11,23 @@ KDIVE was implemented as a greenfield Python rewrite of a single-user, local,
 stdio proof of concept. Python provides native access to the kernel-tooling
 ecosystem (drgn, libvirt bindings, crash, and the MCP SDK).
 
-## What changes from the PoC
-
-| Concern | PoC | Production |
-|---|---|---|
-| Tenancy | single-user, local | multi-user hosted service |
-| Transport | stdio | MCP over streamable HTTP |
-| Central abstraction | run-centric (a run bundles build+boot+debug) | six durable objects with independent lifecycles |
-| State | per-run JSON + flock | Postgres (system-of-record) + S3-compatible object store |
-| Identity | implicit local user | OIDC/SSO + RBAC, with on-behalf-of agent attribution |
-| Accounting | none | metering ledger + enforced budgets/quotas (admission control) |
-| Long-running ops | inline | durable job queue + worker tier |
-| Resource scope | local x86_64 libvirt only | typed multi-provider runtime selected by resource kind |
+This page explains the architecture implemented by this checkout. Start with the
+[overview](../../ARCHITECTURE.md) for orientation and [domain concepts](../guide/concepts.md)
+for the reader-facing object model. The [tool reference](../guide/reference/index.md) owns exact
+MCP contracts; [ADRs](../adr/README.md) record decisions and subsequent amendments.
 
 ## Core decisions
 
-These decisions define the implemented architecture. Accepted decisions and
-their later amendments are recorded in the [ADR collection](../adr/).
-
-1. **Greenfield rewrite**, Python.
-2. **Multi-user service**; MCP over streamable HTTP.
-3. **Six durable objects** (Resource / Allocation / System / Investigation / Run /
-   DebugSession), replacing the run-centric model.
-4. **First slice targets local libvirt/QEMU** — proven infra, on the new
-   architecture, before remote/cloud/bare-metal.
-5. **Postgres + object store** for state; Postgres advisory locks replace flock.
-6. **OIDC/SSO + RBAC** with `(principal, agent_session)` attribution.
-7. **Metering + budgets/quotas** with an admission-control gate on allocation.
-8. **Async worker tier + durable job queue**; hard per-tenant sandboxing
-   designed-for but deferred.
-9. **Typed provider runtime ports** across narrow per-plane interfaces, with active
-   `ResourceKind`-based dispatch for local-libvirt, fault-inject, and configured remote-libvirt
-   providers; capability-registry dispatch and additional provider families remain future options
-   (ADR-0063).
+- **MCP over streamable HTTP** serves multiple projects and principals with OIDC and RBAC.
+- **Postgres** owns durable state, admission accounting, jobs, and audit records.
+  An **S3-compatible object store** owns bulk artifacts.
+- **Separate runtime roles** keep request handling independent of provider operations and
+  reconciliation. Kubernetes adds a lifecycle witness for worker identity and termination.
+- **Typed provider ports** keep local-libvirt, remote-libvirt, and the opt-in fault-inject
+  provider behind a common runtime seam.
+- **External kernel builds** keep compilation in the caller's environment. KDIVE consumes
+  uploaded artifacts through `runs.complete_build`, then installs and boots them
+  ([ADR-0316](../adr/0316-remove-server-build-lane.md)).
 
 ## System topology
 
@@ -61,7 +45,7 @@ their later amendments are recorded in the [ADR collection](../adr/).
                         ▼                           ▼
         ┌──────────────────────────┐    ┌──────────────────────────────┐
         │   Durable job queue       │    │  Postgres (system-of-record) │
-        │  (provision/build/install │    │  resources, allocations,     │
+        │  (provision/install/boot  │    │  resources, allocations,     │
         │   /debug-op/control jobs) │    │  systems, investigations,    │
         └───────────┬──────────────┘    │  runs, reservations,         │
                     ▼                    │  accounting ledger, audit    │
@@ -71,7 +55,7 @@ their later amendments are recorded in the [ADR collection](../adr/).
         │  operation dispatch lanes │    │  vmcores, build outputs,     │
         └───────────┬──────────────┘    │  console/gdb transcripts     │
                     ▼                    └──────────────────────────────┘
-   providers: local-libvirt │ fault-inject │ remote-libvirt │ cloud │ baremetal-bmc │ powervm …
+   providers: local-libvirt │ fault-inject (test opt-in) │ remote-libvirt (configured)
 
      Kubernetes API ── bounded Pod authority ──▶ lifecycle-witness ──▶ Postgres
        (Kubernetes-only)                                worker-incarnation state
@@ -116,117 +100,21 @@ and blocks new worker credential delivery rather than accepting unaudited cleanu
 
 ## Domain model
 
-Six durable objects. Within the Resource → Allocation → System → Run chain, lower
-layers outlive higher ones; **Investigation is a cross-cutting grouping** whose
-lifetime is independent of any single Allocation (see below). Each is a Postgres
-row with an explicit state machine.
+[Domain concepts](../guide/concepts.md) defines Resource, Allocation, System, Investigation,
+Run, and DebugSession and their relationships. An Investigation groups experiment history;
+Allocations lease capacity; Systems consume that capacity. A Run can hold an uploaded build
+before it is bound to a System. Binding establishes its Allocation through the System.
 
-```
-(principal / project) ──< Investigation ──┐
-                                          ├──< Run ──< DebugSession
-   Resource ──< Allocation ──< System ────┘
-```
+The [state definitions and transition table](../../src/kdive/domain/capacity/state.py) are the
+implementation contract. Repository writes enforce legal transitions. Keep detailed state
+lists there rather than reproducing them in this overview.
 
-A Run is the join point: it belongs to exactly one System (which fixes its
-Allocation) and exactly one Investigation (which may group Runs across many
-Allocations).
-
-### Resource
-
-A bookable thing, registered by a provider; long-lived, possibly shared.
-
-- Fields: `id`, `provider`, `kind` (local-libvirt / remote-libvirt / cloud /
-  baremetal-bmc / powervm), `capabilities` (arch, CPU model+count, memory, disk,
-  PCIe devices, console/control transports: SoL/IPMI/Redfish/HMC/gdbstub),
-  `pool`, `cost_class`, `status` (available / degraded / offline / draining).
-- Resources are discovered or registered, not created by a run. State is mostly
-  health/availability.
-
-### Allocation
-
-A user's claim on a Resource for a window. Authz, admission control, and
-accounting live here.
-
-- States: `requested → granted → active → releasing → released`, plus `denied`,
-  `expired`, `failed`.
-- `requested → granted` passes through **admission control**: selector/resource fit,
-  RBAC, quota/budget check, **and a capacity check against host headroom**.
-  Local-libvirt is "always-yes" only for *chargeback/reservation* — it is still
-  capacity-admitted (a concurrent-System cap or resource accounting) so M0/M1 fail
-  closed instead of thrashing the single host. Cloud/lab adds a real
-  reservation/lease with a chargeback estimate.
-- Carries `lease_expiry`, `(principal, agent_session)`; emits accounting events
-  on every transition.
-
-### System
-
-A provisioned, bootable instance produced by applying a provisioning profile to
-an Allocation.
-
-- States: `defined → provisioning → ready → reprovisioning → failed → torn_down`.
-- Identity = (allocation, provisioning profile, resulting OS/target fingerprint).
-- One Allocation can host sequential Systems (reprovision in place). A System
-  never outlives its Allocation.
-- **Installing a new kernel and rebooting does not make a new System** — only an
-  OS reprovision does.
-
-### Investigation
-
-A campaign that groups the Runs iterating toward a goal — a bug fix or a feature.
-
-- States: `open → active → closed`, plus `abandoned`. `investigations.open`
-  creates it `open`; it becomes `active` when its first Run is created. Closing is
-  explicit (the agent resolves the bug or gives up); the reconciler moves an
-  Investigation idle past a retention window to `abandoned`. Neither closing nor
-  abandoning cascades to its Runs — they stay queryable for narrative and cost
-  audit, and any still-in-flight Run keeps running under its own Allocation until
-  it reaches a terminal state (the Investigation is a grouping, not a resource
-  owner).
-- Scoped to a `(principal / project)`, **not** to a single Allocation. Groups the
-  sequence of Runs; carries narrative/notes, external references (e.g. Bugzilla/JIRA), and rolled-up cost attribution.
-- **May span System reprovisions, Allocations, and resource kinds**: if the chase
-  moves from a local VM to bare metal — a new Allocation on a different Resource —
-  the Investigation continues. Each Run records which System it used, and cost
-  attribution **rolls up across allocations and `cost_class` boundaries** in a
-  single normalized unit (reference cost-model units, not raw wall-clock), so a
-  local-VM Run and a cloud Run sum meaningfully. The cost-model coefficients and
-  how `cost_class` is assigned per Resource are an ADR-0007 concern.
-
-### Run
-
-One kernel-version attempt: build patch vN → install → boot that kernel → debug
-it.
-
-- States: `created → running → succeeded / failed / canceled`.
-- **Idempotent steps** keyed by `run_id` + step (the one PoC invariant kept).
-  One build per Run keeps this clean.
-- The agent's real loop is **many Runs against one persistent System**, each Run
-  carrying at most one DebugSession (per boot). Allocation and provisioning
-  happen once; iteration is cheap.
-
-### DebugSession
-
-A sub-object of a Run, bounded by a single boot of a single kernel.
-
-- States: `attach ↔ live ↔ detached` — within one boot the session may re-attach
-  after detaching (and interrupt/continue) any number of times; the cycle ends
-  only at reboot.
-- **A durable row**, not just worker-side state: persists `(state, transport
-  handle, worker heartbeat)` so the reconciler can detect a `live` session whose
-  transport has died and move it to `detached` (see Reconciliation & teardown).
-- A **reboot ends it**: the transport drops and, for a patched kernel, symbols
-  and addresses change. The next attach after a reboot is a new DebugSession
-  belonging to the next Run.
-
-### Carried invariants (generalized from the PoC)
-
-1. **Immutable request inputs** per object once created (the profiles that
-   defined it).
-2. **Idempotent, lock-guarded step execution** — Postgres row / advisory locks
-   replace flock; serialization is per-Allocation and per-System.
-3. **A Run's Allocation is determined by its System** (`run.system → allocation`).
-   The Investigation grouping a Run imposes no allocation constraint — it may
-   group Runs across different Allocations and resource kinds.
+The pure domain layer owns models and rules. [Services](../../src/kdive/services/) compose
+transactions, repository calls, advisory locks, audit records, and admission accounting.
+Allocation leases govern capacity use; periodic reconciliation and provider cleanup have
+separate completion conditions. See [domain lifetimes](../guide/concepts.md#separate-lifetimes)
+before treating a terminal allocation as proof of reclamation. Run build status and install/boot
+progress are separate contracts, as described in the [Run reference](../guide/reference/runs.md).
 
 ## Provider model
 
@@ -234,9 +122,9 @@ Providers are the extension seam.
 
 ### Current status
 
-In M0/M1 the production seam is
-`ProviderRuntime`: startup builds typed ports for each configured provider
-(`Provisioner`, `Builder`, `Installer`, `Controller`, `Retriever`, debug and
+The production seam is
+[`ProviderRuntime`](../../src/kdive/providers/core/runtime.py): startup builds typed ports for each configured provider
+(`Provisioner`, `Installer`, `Booter`, `Controller`, `Retriever`, debug and
 introspection ports) and passes those ports to MCP tool registrars and worker
 handlers. Production defaults to the local-libvirt runtime. Remote-libvirt is an implemented,
 operator-configured production provider that drives guests on separate libvirt hosts; fault-inject
@@ -248,27 +136,27 @@ PowerVM providers remain future work on this typed runtime seam. Composition is 
 
 The capability registry from ADR-0009/ADR-0022 is historical design context, not an
 in-tree prototype or the live dispatch path. It is not used for job routing,
-destructive-op gating, or reconciler behavior in M0/M1. ADR-0063 records this narrowing
+destructive-op gating, or reconciler behavior. ADR-0063 records this narrowing
 and ADR-0066 removed the prototype source so contributors extend the runtime that actually
 serves requests.
 
 ## Lifecycle planes
 
-| Plane | Responsibility | Implemented providers | Future providers |
-|---|---|---|---|
-| Discovery | register resources, advertise capabilities, report health | local host enumeration; configured remote-libvirt hosts | cloud regions, lab inventory, HMC frames |
-| Allocation | claim/lease/release; feeds admission control + accounting | core capacity-checked allocation for local and remote resources | cloud reserve API, lab reservation, LPAR activate |
-| Provisioning | apply a provisioning profile → a ready System | local and remote libvirt domain + rootfs provisioning | ISO+kickstart, image bake, NIM/PXE |
-| Build | produce a kernel from source + profile | local build; remote-libvirt in-guest build helper | cloud builders, hosted CI workflows |
-| Install | deploy a built kernel onto a System | local direct-kernel install; remote-libvirt guest helper | image bake, netboot |
-| Connect | establish a debug/console transport | local and remote libvirt gdbstub, SSH, and console paths | SoL, KGDB-over-serial, BMC console |
-| Debug | constrained debug ops over a transport | gdb-MI and drgn for local and remote-libvirt Systems | crash, KDB |
-| Control | power/reset/force-crash | local and remote libvirt control paths | IPMI/Redfish power, HMC, NMI |
-| Retrieve | pull debug artifacts | local and remote-libvirt vmcore retrieval | BMC SOL capture, cloud-native artifact retrieval |
+| Plane | Current responsibility |
+|---|---|
+| Discovery | Discover local hosts and register configured remote-libvirt resources and capabilities |
+| Allocation | Core capacity, lease, budget, and quota admission for either provider |
+| Provisioning | Create and customize a libvirt domain and rootfs |
+| Build input | Accept and validate caller-built kernel artifacts; kernel compilation is external |
+| Install and boot | Stage validated artifacts and boot the target through provider ports |
+| Connect and debug | Establish GDB, SSH, and console access; inspect live state with GDB or drgn |
+| Control | Power, reset, policy-gated force-crash, and supported diagnostic operations |
+| Retrieve and postmortem | Capture vmcores, retrieve artifacts, and analyze dumps with drgn or crash |
 
-**Ported from the PoC behind these interfaces:** redaction, path safety,
-constrained-debug allowlist, gdb-MI tier, drgn introspect/vmcore, crash
-postmortem, run-readiness preflight.
+Provider-advertised capabilities determine supported operations. See
+[platform support](../operating/platform-support.md) and the
+[local](../../examples/local-libvirt/README.md) and
+[remote](../operating/providers/remote-libvirt.md) provider references for operational requirements.
 
 ### Artifact and catalog package ownership
 
@@ -287,7 +175,7 @@ These packages are related but not interchangeable:
 | `kdive.images` / `kdive.inventory` | Image inventory, catalog reconcile, and TOML shape. |
 | `kdive.mcp.tools.catalog.artifacts` | Agent artifact tools and upload/download authz. |
 
-Provider build semantics, provider filenames, S3 upload mechanics, and MCP response shaping stay
+Provider lifecycle semantics, provider filenames, S3 upload mechanics, and MCP response shaping stay
 outside these data-owner packages unless the package above names that responsibility.
 
 Historical build-config catalog designs live under `docs/archive/design/`. They were superseded
@@ -296,84 +184,53 @@ and the build-config catalog are not part of the live architecture.
 
 ## MCP tool surface
 
-Atomic primitives mapped to planes. Every tool returns structured JSON with the
-relevant object id, status, `suggested_next_actions`, and artifact **references** —
-never log dumps.
+Tools return a [`ToolResponse`](../../src/kdive/mcp/responses.py) with object identity, status,
+next actions, artifact references, and categorized failures. See the
+[response envelope](../guide/response-envelope.md) for the wire contract.
 
-**Long-running operations use an explicit job model.** Provision, build, install,
-capture-vmcore can run 30+ minutes. Those tools enqueue a job and return
-`{job_id, status: "running"}`; the agent polls `jobs.get` (or `jobs.wait` with a
-timeout). Fast ops (set breakpoint, read memory, power state) return directly.
+Provisioning, install, boot, and capture operations enqueue durable jobs. Use `jobs.wait`
+with the returned job id to follow their outcomes; a Run's build status alone cannot establish
+boot success. Allocation admission instead returns an allocation state and uses
+`allocations.wait` when queued. The [async-job guide](../guide/async-jobs.md) owns these patterns.
 
-```
-Discovery / selection
-  resources.list(filter)              → resources + advertised capabilities
-  resources.describe(resource_id)     → full capability detail, health, cost_class
+The [core workflow](../guide/core-path.md) shows the user journey and the
+[generated tool reference](../guide/reference/index.md) lists exact names and parameters.
+Tool wrapper docstrings and parameter descriptions are the agent-visible contracts; update
+those sources when behavior changes, then regenerate the reference.
 
-Allocation                            (admission control + accounting)
-  allocations.request(selector, window, project)  → granted | denied | job
-  allocations.list / .get / .release
-  accounting.estimate(selector)       → cost estimate before committing
-  accounting.usage(project|principal) → ledger rollup, budget remaining
+### Where to change the code
 
-Provisioning
-  systems.provision(allocation_id, provisioning_profile)   → job → system_id
-  systems.define / .provision_defined
-  systems.get / .reprovision / .teardown
-
-Investigation + Run
-  investigations.open(project, title)         → investigation_id
-  runs.create(investigation_id, system_id, build_profile, …)
-  runs.build(run_id)    → job        runs.complete_build(run_id)
-  runs.install(run_id)  → job        runs.boot(run_id) → job
-  runs.get(run_id)
-
-Connect + Debug
-  debug.start_session(run_id, transport)   debug.end_session
-  debug.set_breakpoint / .clear / .list
-  debug.continue / .interrupt
-  debug.read_registers / .read_memory(≤4096)
-  introspect.run / .from_vmcore         postmortem.crash / .triage
-
-Control + Retrieve                    (destructive → policy gate)
-  control.power(system_id, on|off|cycle|reset)
-  control.force_crash(system_id)
-  artifacts.list(system_id) / .get(artifact_id) / .search_text(artifact_id, pattern)
-  artifacts.create_run_upload / .create_system_upload
-  vmcore.list(system_id) / .fetch(system_id) → job
-
-Jobs (long-running spine)
-  jobs.get(job_id) / jobs.wait(job_id, timeout) / jobs.cancel(job_id) / jobs.list
-```
-
-- Agents drive workflows plane-by-plane, which matches how they iterate on a patch.
-- `jobs.*` is the uniform async spine: every long-running tool returns the same
-  job-handle shape, so the agent learns one polling pattern.
-- `debug.read_memory` keeps the PoC's 4096-byte cap.
+| Concern | Entry point |
+|---|---|
+| Runtime roles | [`__main__.py`](../../src/kdive/__main__.py) |
+| MCP application assembly | [`mcp/assembly/app.py`](../../src/kdive/mcp/assembly/app.py) |
+| Tool registration | [`mcp/assembly/tool_registration.py`](../../src/kdive/mcp/assembly/tool_registration.py) |
+| Worker handler registration | [`jobs/assembly.py`](../../src/kdive/jobs/assembly.py) |
+| Provider composition | [`providers/assembly/composition.py`](../../src/kdive/providers/assembly/composition.py) |
+| Drift repair | [`reconciler/loop.py`](../../src/kdive/reconciler/loop.py) |
+| Packaged MCP documentation | [`mcp/resources/registrar.py`](../../src/kdive/mcp/resources/registrar.py) |
 
 ## Cross-cutting concerns
 
 Applied across every plane.
 
-- **Secrets by reference** — cloud creds, BMC/IPMI passwords, SSH keys, sudo,
-  HMC tokens never appear in requests, state rows, or responses. The service
-  resolves references from a pluggable secret backend at the worker boundary;
+- **Secrets by reference** — provider credentials are resolved at the worker boundary;
   only `(present, source-ref)` is persisted. When a worker resolves a reference,
   it **registers the resolved value into the process-owned redaction registry**
   passed through runtime composition (ADR-0327) for the op's lifetime, so any transcript or
   console output capturing the value is masked by **exact-value replacement**, not
   merely by the redactor's secret-name patterns. Output captured before
   registration completes is quarantined (object-store, sensitive) until redacted.
-- **Mandatory redaction** — all guest output, gdb/SoL transcripts, and console
+- **Mandatory redaction** — guest output, debugger transcripts, and console
   logs pass through the redactor before persistence and before any response
   snippet. Raw artifacts stay in the object store, marked sensitive, fetched only
-  by explicit `artifacts.get`.
-- **Audit log** — every state transition and every destructive op writes an
-  append-only audit row attributing `(principal, agent_session, tool,
-  args-digest)`.
+  through the authorized raw-artifact retrieval path (`artifacts.fetch_raw`).
+- **Audit log** — handlers record attributed operations in an append-only audit log
+  with `(principal, agent_session, tool, args-digest)`. Auditing is explicit at call sites;
+  a repository state update alone does not guarantee an audit row.
 - **Accounting ledger** — allocation transitions emit usage events; admission
-  control checks budget/quota on `allocations.request` and denies or requires
-  approval over budget. The budget/quota **check and the resulting ledger debit
+  control checks budget/quota on `allocations.request` and denies
+  requests that exceed them. The budget/quota **check and the resulting ledger debit
   are atomic** under a per-project lock (see Concurrency) — otherwise two
   concurrent requests can both pass the check and overspend.
 - **Service-layer boundary** — `kdive.domain` owns pure domain models, state
@@ -393,73 +250,30 @@ Applied across every plane.
 
 ### Reconciliation & teardown
 
-State in Postgres can drift from real infrastructure whenever a worker dies, a
-lease expires mid-operation, or a `jobs.cancel` lands on a half-applied op. A
-periodic **reconciler loop** in the core detects and repairs that drift:
+The reconciler repairs expired leases, orphaned provider resources, affected Runs, and dead
+debug sessions. Postgres advisory-lock release is not proof that provider work has stopped.
+State-fenced lifecycle work uses durable worker identity and termination evidence before
+recovery can release ownership or delete protected artifacts.
 
-- **Orphaned Systems** — a System whose Allocation is `released` / `expired` /
-  `failed` is torn down (a System never outlives its Allocation).
-- **Runs on torn-down Systems** — a Run whose System is torn down has its
-  in-flight job canceled and the Run marked `failed` (`lease_expired`). The Run
-  row is **retained, not deleted**, so the Investigation's cross-allocation
-  narrative and cost rollup stay intact even though the Run's Allocation is gone.
-- **Abandoned jobs** — each job carries a **worker heartbeat/lease**; when it
-  lapses the job is marked abandoned and the op's declared compensation runs.
-  (Advisory locks release on connection close and the PoC's `O_CREAT|O_EXCL` lock
-  releases on unlink — but neither cleans up *infrastructure*, only the lock.)
-- **Dead DebugSessions** — a session row in `live` whose transport is unreachable
-  is moved to `detached`.
-- **Leaked provider infra** — the reconciler reconciles against typed provider
-  inventory/reconcile operations to find, e.g., a libvirt domain with no owning
-  System row.
-- **Idle Investigations** — an Investigation in `open` / `active` whose last Run
-  was created beyond the retention window is moved to `abandoned`. Closure is
-  otherwise explicit, and abandoning never cascades to its Runs.
-
-**Lease-expiry policy.** On `lease_expiry`, in-flight jobs are drained within a
-grace window, then force-killed; the owning Run transitions to `failed`
-(`lease_expired`) — distinct from a `canceled` Run, which records an explicit
-`jobs.cancel` or agent abort, so audit and SLO tracking can tell an
-infrastructure kill from a deliberate one. The accounting ledger attributes the
-partial spend to the Allocation regardless of completion. **Cancel/abandon cleanup** is
-part of each typed worker operation's policy: each op declares in code whether cancel yields
-clean-rollback, best-effort, or orphan-flagged state — `jobs.cancel` on a half-done
-`provision` / `install` is never undefined. ADR-0063 narrows the M0/M1 provider seam to typed
-runtime ports; the historical capability-registry design does not drive this behavior.
+Deployment-specific termination and upgrade procedures live in the
+[installation guide](../operating/install.md) and its linked runbooks. Cancellation and failure
+recovery depend on the operation and its durable state; follow the tool's categorized error,
+next actions, and recovery contract instead of treating every failed job as safe to retry.
 
 ## Error taxonomy
 
-Keep the PoC's stable, agent-facing `ErrorCategory` taxonomy and extend it for
-the new planes: `configuration_error`, `missing_dependency`, `build_failure`,
-`boot_timeout`, `readiness_failure`, `test_failure`, `debug_attach_failure`,
-`infrastructure_failure`, `stale_handle`, `transport_conflict`, `not_implemented`,
-plus new categories — `allocation_denied` (admission/quota), `quota_exceeded`,
-`lease_expired`, `provisioning_failure`, `install_failure`, `transport_failure`,
-`control_failure`. Pick the most specific value; do not invent strings.
-
-`stale_handle` and `transport_conflict` carry over from the PoC and matter *more*
-in the distributed model: stale handles surface after a reprovision or reboot
-invalidates a System/DebugSession reference; transport conflicts surface when two
-attaches contend for one debug transport.
+[`ErrorCategory`](../../src/kdive/domain/errors.py) is the closed error vocabulary. Choose the
+most specific existing category when implementing a tool or provider operation. The
+[error guide](../guide/errors.md) explains recovery; individual tool contracts state
+operation-specific constraints. Do not infer a new error string from a historical design.
 
 ## Delivery status
 
-This document describes the live architecture. Historical milestone sequencing and exit criteria
-remain in the archived plans and designs rather than being repeated as future-tense requirements
-here.
+Local-libvirt and configured remote-libvirt are implemented production providers; fault-inject
+is an opt-in test provider. [Platform support](../operating/platform-support.md) distinguishes
+host/guest architectures and verified or incomplete paths. Cloud, bare-metal, PowerVM, hard
+per-tenant sandboxing, and a manager-backed secret backend remain future work.
 
-| Delivery band | Current status | Historical record |
-|---|---|---|
-| M0 walking skeleton | Implemented by the server, worker, reconciler, durable stores, and local-libvirt lifecycle | [M0 implementation plan](../archive/plans/m0-implementation.md) |
-| M1 platform depth | Implemented allocation, accounting, RBAC, scheduling, live-stack validation, and fault injection | [M1 implementation plan](../archive/plans/m1-implementation.md) |
-| M2 provider and operations | Implemented remote-libvirt, deployment packaging, `kdivectl`, observability, managed images, and remote capture paths | [M2 productionization design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md) |
-
-The provider-runtime hypothesis is now established by local-libvirt, fault-inject, and
-remote-libvirt: each provider supplies typed plane ports behind `ProviderRuntime`, while core
-lifecycle and MCP contracts remain provider-neutral. The current provider capabilities are listed
-in [Provider model](#provider-model) and [Lifecycle planes](#lifecycle-planes).
-
-Cloud, bare-metal, and PowerVM are future provider families. Each should extend the typed runtime
-seam unless an accepted ADR establishes a different dispatch model. Hard per-tenant sandboxing and
-a manager-backed secret backend also remain future work; their contracts must be decided before
-implementation rather than inferred from the completed milestone plans.
+Historical milestone plans and dated designs record delivery history. They do not describe
+the current backlog or authorize a new provider contract. See the
+[documentation index](../README.md#current-guidance-and-historical-records) for the reading order.

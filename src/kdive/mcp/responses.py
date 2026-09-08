@@ -2,9 +2,8 @@
 
 Every tool — across all planes — returns a :class:`ToolResponse` carrying the
 object id, a status, literal next tool names, artifact references, and (only for a
-failure) an error category. The shape is fixed surface-wide so an agent learns one
-envelope and one polling pattern, and so "references, never log dumps" is structural
-rather than per-plane discipline.
+failure) an error category. The common fields are shared across tools; each tool defines its
+payload and reference semantics. Producers remain responsible for redacting text.
 """
 
 from __future__ import annotations

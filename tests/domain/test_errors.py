@@ -46,7 +46,7 @@ M1_ADDED = {
 }
 # Object-lookup categories (#338, ADR-0097): a syntactically valid id that resolves to no
 # visible row is `not_found` (distinct from a malformed id, which stays `configuration_error`);
-# `conflict` is reserved for a uniqueness/state conflict and is defined-but-unemitted for now.
+# `conflict` denotes a uniqueness or state conflict.
 LOOKUP_ADDED = {
     "not_found",
     "conflict",

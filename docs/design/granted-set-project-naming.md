@@ -1,5 +1,8 @@
 # Granted-set report: name authorized projects, affirm the viewer floor
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#426](https://github.com/randomparity/kdive/issues/426)
 - **ADR:** [`../adr/0116-granted-set-project-naming.md`](../adr/0116-granted-set-project-naming.md)
 - **Status:** Draft

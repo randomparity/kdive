@@ -1,5 +1,8 @@
 # Ruff 0.16 formatter adoption — design
 
+> Historical proof or design for the dated checkout below, not current operating instructions.
+> Use the [current documentation index](../../README.md) for supported workflows.
+
 Implements #2003 under ADR-0569. Charter: `WORK:SCOPE` token `scope-2003-9d11`
 (supersedes `scope-2003-7c42`; see the superseding WORK:SCOPE block on the issue).
 

@@ -1,5 +1,9 @@
 # Local warm-tree build admission: reject empty/invalid `KDIVE_KERNEL_SRC` at the worker job boundary (#532)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-17
 - **ADR:** [0161](../adr/0161-local-warm-tree-build-admission.md)

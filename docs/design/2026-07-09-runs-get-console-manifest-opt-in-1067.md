@@ -1,5 +1,8 @@
 # Spec — `runs.get` console manifest opt-in (#1067)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-07-09
 - **Issue:** #1067 (`BLACK_BOX_REVIEW.md` pain point P7)

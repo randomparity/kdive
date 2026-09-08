@@ -1,10 +1,12 @@
 # Releasing
 
-This project follows [ADR-0041](../adr/0041-versioning-release-process.md): SemVer in the
-`0.y.z` phase, milestone→minor, with the **in-tree version always pointing at the next
-unreleased version** so a `-dev` build is never ambiguous across a release boundary.
+This guide owns version changes, release publication and published-image verification.
+[ADR-0041](../adr/0041-versioning-release-process.md) defines the versioned public contract:
+MCP tools and responses, error categories, and durable schema/state machines. In the `0.y.z`
+phase, Milestones and incompatible contract changes require a minor bump; compatible fixes
+and additions can use a patch bump.
 
-## Version bumps (each via `just set-version`, which runs `uv version` to update `pyproject.toml` + `uv.lock`)
+## Version bumps
 
 - **At a Milestone's start** — `just set-version <next-minor>` (e.g. `0.2.0` for M1), on a
   branch → PR → merge.
@@ -21,107 +23,122 @@ unreleased version** so a `-dev` build is never ambiguous across a release bound
   tagged commit. If both already hold, the release had no changelog-visible commits (`cliff.toml`
   skips `chore`, `ci` and `test`) and the render is correct as it stands.
 
-Never hand-edit the version: editing `pyproject.toml` alone desyncs `uv.lock` and breaks
-`uv sync --locked` in CI. `just lock-check` (and CI) catch a stale lock.
+Merge the post-release version PR before any other normal PR to `main`.
+
+The recipe updates `pyproject.toml`, `uv.lock` and the Helm chart's `appVersion` together,
+without syncing the environment. Check with `just lock-check` and `just chart-version-check`.
+The chart's own `version` is maintained separately when chart packaging changes; see
+[ADR-0365](../adr/0365-helm-chart-version-independent-of-appversion.md).
+
+The `release` and `chart-version-check` recipes currently require a checkout path without
+spaces: their version-helper command expands the path without shell quoting.
 
 ## Cutting a release
 
-1. Ensure `main` is green and `[project].version` already equals the version to release
-   (it was bumped at Milestone start or by the previous post-release bump — **the release
-   itself does not bump the version**).
-2. From an up-to-date, clean `main`: `just release <X.Y.Z>`. This verifies state and pushes
-   the annotated `vX.Y.Z` **tag only** (pushing a tag is not a commit to the protected
-   branch).
-3. `release.yml` triggers on the tag: it verifies tag == version, builds the wheel + sdist
-   (commit SHA baked, `RELEASE=true`), generates notes from git-cliff, and creates an
-   internal GitHub Release with the artifacts attached.
-4. Open the post-release "begin `<next>`-dev" bump PR (above) and **merge it before any
-   other PR to `main`**. Until it lands, `main` still reads the just-released version, so a
-   commit merged ahead of it would report `X.Y.Z-dev` meaning "after" the release —
-   reopening the ambiguity the scheme exists to prevent ([ADR-0041](../adr/0041-versioning-release-process.md)
-   decision 3). Treat `main` as frozen for normal merges until the bump is in.
+Prerequisites: the repository tools (`just`, `uv`, Git), permission to push release tags,
+and a clean, current `main` checkout at the intended release version.
+
+1. Confirm the release commit's CI checks are green. `just release` checks branch, cleanliness,
+   equality with freshly fetched `origin/main`, and version equality; it does not query CI.
+2. Run `just release X.Y.Z`. It creates and pushes an annotated `vX.Y.Z` tag. It does not bump
+   the version or run the test suite.
+3. Check both independent workflows for that tag:
+   [Release](../../.github/workflows/release.yml) builds the wheel and sdist with release/SHA
+   metadata, generates notes, and creates or updates the GitHub Release and its assets.
+   [release-image](../../.github/workflows/release-image.yml) publishes the container image.
+   Both check the tag against the project version; neither replaces the pre-release CI check.
+4. Merge the post-release version bump before other normal PRs. Its push triggers changelog
+   synchronization, which uses the new tag to create the dated release section.
+
+Check both publication results before treating the release as available: success in one workflow
+says nothing about the other. A rerun can overwrite GitHub Release assets or move image tags.
+Deleting a Git tag or GitHub Release does not withdraw the GHCR image or change a deployment.
+For deployment changes, follow the relevant [operating guide](../operating/index.md).
+The workflows do not publish to PyPI or a Helm chart registry.
 
 ## Container image publishing
 
-`release-image.yml` publishes the app image to `ghcr.io/randomparity/kdive`. It runs on the
-**same `vX.Y.Z` tag** that drives `release.yml` (above) — so a single `just release` push
-produces both the wheel/sdist GitHub Release and the release image — and also on every push to
-`main`:
+The [app-image workflow](../../.github/workflows/release-image.yml) publishes to
+`ghcr.io/randomparity/kdive` with these configured outputs:
 
-- **Every push to `main`** → a rolling `:edge` tag and an immutable `:sha-<short>`.
-- **Every `vX.Y.Z` tag** → `:X.Y.Z`, `:X.Y`, `:latest`, with an SBOM and max provenance.
-- **Sign before tag** ([ADR-0573](../adr/0573-publish-by-digest-sign-then-tag.md)): every
-  published digest gets a cosign keyless/OIDC signature on the immutable `@sha256`
-  ([ADR-0088](../adr/0088-deployment-packaging.md) decision 8) **before any tag points at
-  it**. The workflow pushes the built image by digest only, signs that digest, and applies
-  the tags to it as a final step — so a digest is reachable under `:X.Y.Z`/`:X.Y`/`:latest`
-  (or `:edge`/`:sha-<short>`) only once its signature exists, and an interrupted run strands
-  at most an untagged digest no release tag references. The SBOM and provenance are
-  release-only; the signature is not.
+| Trigger | Image tags | Platforms | Attestations |
+|---|---|---|---|
+| Push to `main` | `edge`, `sha-<short>` | `linux/amd64` | None |
+| Release tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `latest` | `linux/amd64`, `linux/ppc64le` | SBOM and max provenance |
 
-**Multi-arch.** A `vX.Y.Z` tag build produces a `linux/amd64,linux/ppc64le` manifest
-([ADR-0359](../adr/0359-multiarch-app-image.md)), so a POWER host pulls the same tag as an
-x86_64 host. A push to `main` builds **amd64 only** ([ADR-0572](../adr/0572-edge-builds-amd64-only-releases-stay-multiarch.md)):
-`:edge` and `:sha-<short>` are single-platform, and between releases a POWER host pins the
-newest `:X.Y.Z` instead. amd64 builds natively; the ppc64le leg builds under QEMU emulation on
-the amd64 runner (`docker/setup-qemu-action`), compiling the sdist-only deps (`grpcio`, `drgn`,
-`libvirt-python`) from source — this is the slow leg of the job, and no POWER runner is
-required. The cosign signature and SBOM cover the manifest digest.
+All these image tags can move, including commit-based tags on a rerun. `latest` follows the
+most recently published release, even a backport; it is not a highest-version selector.
+Select a digest for an exact build. POWER consumers need a multi-platform release image;
+`edge` has no ppc64le image. Release builds use QEMU for the ppc64le build leg on an amd64
+runner. The publishing job does not run the resulting image to prove runtime compatibility.
 
-**One-time setup — make the package public.** GHCR packages are created private on first
-push and visibility cannot be set from the workflow. After the first `main` push publishes
-`:edge`, set the package public once: GitHub → your profile → Packages → `kdive` → Package
-settings → Change visibility → Public. Until then `docker pull` returns 404 to anonymous
-clients and the chart needs an `imagePullSecret`.
+For both triggers, the job pushes by digest, signs that digest with keyless cosign/OIDC, then
+applies tags ([ADR-0573](../adr/0573-publish-by-digest-sign-then-tag.md)). An interruption before
+tag application can leave an untagged digest; the workflow never deliberately tags an unsigned
+build. The signature covers the image digest; release SBOM/provenance are BuildKit attestations
+attached to the index.
 
-**Verify a release image** (not `:edge`, which floats):
-`cosign verify ghcr.io/randomparity/kdive:X.Y.Z --certificate-identity-regexp '^https://github\.com/randomparity/kdive/\.github/workflows/release-image\.yml@' --certificate-oidc-issuer https://token.actions.githubusercontent.com`
+Consumers need registry access. If anonymous pulls are intended, the package administrator must
+allow public access; otherwise authenticate with access to the package. Publication by this
+workflow does not establish the package's visibility.
+
+### Verify a release image
+
+Use Docker Buildx and [Cosign](https://docs.sigstore.dev/cosign/verifying/verify/) with registry
+and verification-service access. Set `RELEASE_VERSION` to the intended version without `v`,
+then inspect its tag:
+
+```bash
+docker buildx imagetools inspect "ghcr.io/randomparity/kdive:${RELEASE_VERSION:?set release version}"
+```
+
+Set `IMAGE_DIGEST` to the top-level `sha256:...` digest shown above. Verify that exact image
+against the workflow identity for the intended release tag, and deploy the same digest:
+
+```bash
+IMAGE="ghcr.io/randomparity/kdive@${IMAGE_DIGEST:?set image digest}"
+cosign verify "$IMAGE" \
+  --certificate-identity "https://github.com/randomparity/kdive/.github/workflows/release-image.yml@refs/tags/v${RELEASE_VERSION:?set release version}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Inspect the release attestations on that same digest with
+[Buildx](https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/):
+
+```bash
+docker buildx imagetools inspect "$IMAGE" --format '{{ json .SBOM }}'
+docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}'
+```
+
+Signature verification establishes signer identity and digest integrity. Attestation inspection
+shows build metadata; neither check establishes that the image works in your deployment.
 
 ## Mock-OIDC mirror publishing
 
-The developer compose stack (`docker-compose.yml`) needs an OpenID Connect issuer to validate
-bearer tokens locally. The upstream `mock-oauth2-server` image ships only amd64/arm64, so kdive
-publishes an in-repo multi-arch **mirror** — the same `no.nav.security:mock-oauth2-server` jar
-on a multi-arch JRE base — to `ghcr.io/randomparity/mock-oauth2-server`
-([#1184](https://github.com/randomparity/kdive/issues/1184), [ADR-0358](../adr/0358-publish-mock-oidc-image.md);
-build in [ADR-0357](../adr/0357-multi-arch-mock-oidc-image.md)). This is **dev tooling, not a release
-artifact** — it is decoupled from the `vX.Y.Z` tag flow.
+The [mock-OIDC image](../../deploy/mock-oidc/README.md) is development tooling with its own
+publishing workflow, separate from KDIVE release tags. The
+[`publish-mock-oidc` workflow](../../.github/workflows/publish-mock-oidc.yml) runs on pushes to
+`main` that change `deploy/mock-oidc/**`, or on manual dispatch.
 
-- **Workflow:** `publish-mock-oidc.yml`, triggered only by a change under `deploy/mock-oidc/**`
-  (a jar-version or base bump — exactly when a new digest must be produced) or manual
-  `workflow_dispatch`. An unrelated push to `main` does **not** republish, so there is no digest
-  thrash. It does not run on release tags.
-- **Build:** a `linux/amd64,linux/ppc64le` buildx manifest published as `:<version>` and an
-  immutable `:<version>-<short-sha>`. No QEMU is needed — the jars are arch-neutral and only
-  copied onto a per-arch JRE base, so the ppc64le layer assembles natively on the amd64 runner
-  (contrast the app image above). The workflow asserts the pushed manifest lists both arches and
-  prints the `@sha256` digest in its run summary. No SBOM/provenance/signature — it is a
-  dev-tooling mirror.
-- **Consume:** the compose `oidc` service is `image: ${KDIVE_OIDC_IMAGE:-kdive-mock-oidc:dev}`
-  with a `build:` fallback. Unset, it builds the mirror locally (offline, any arch whose bases
-  publish); set to the published digest it pulls instead. After a republish, copy the digest
-  from the run summary into `KDIVE_OIDC_IMAGE` and pin it in `docker-compose.yml`:
+It publishes `linux/amd64,linux/ppc64le` to `ghcr.io/randomparity/mock-oauth2-server`, tagged
+`<issuer-version>` and `<issuer-version>-<12-character-commit>`. Both tags can be republished;
+select the `@sha256` digest from the workflow summary when pinning a particular build.
+The workflow checks that the published index contains both architectures. It does not execute
+the target runtime, sign the image, or attach SBOM/provenance attestations.
 
-  ```
-  export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:<digest>
-  ```
-
-  This parallels `KDIVE_IMAGE` for the app image. See `deploy/mock-oidc/README.md` for the
-  jar-pinning and version-bump procedure. The GHCR package needs the same one-time
-  public-visibility flip as the app image for an unauthenticated pull.
+The build resolves JVM dependencies on the builder architecture and copies them onto the target
+JRE; no QEMU build emulation is needed. The
+[image-maintenance guide](../../deploy/mock-oidc/README.md#updating-the-image) owns the version,
+checksum and base-index updates. Its [image-selection section](../../deploy/mock-oidc/README.md#using-the-image)
+explains `KDIVE_OIDC_IMAGE`, cached local builds and the emulated-POWER default. The consumer
+needs registry access for a published override. Authenticate as required by the package’s access policy.
 
 ## Commit conventions the changelog depends on
 
-git-cliff categorizes from the commit message, so two cases need an explicit marker or they
-are mis- or under-reported:
-
-- **Breaking changes** (a renamed/removed MCP tool, a changed `ToolResponse` shape, a
-  non-back-compatible migration — the contract in [ADR-0041](../adr/0041-versioning-release-process.md)
-  decision 1) **must** carry a `!` (`feat!: …`) or a `BREAKING CHANGE:` footer. Without it
-  the change lands only in its normal group and the `⚠ Breaking Changes` heading misses it —
-  and a breaking change forces a **minor** bump, so this is load-bearing.
-- **Security fixes** use a `(security)` scope, e.g. `fix(security): …`, which routes them to
-  the Keep-a-Changelog `Security` group (a plain `fix:` goes to `Fixed`).
+[cliff.toml](../../cliff.toml) groups conventional commits. Mark breaking changes with `!`
+(such as `feat!: …`) or a `BREAKING CHANGE:` footer so they appear under Breaking Changes.
+Use `fix(security): …` or `feat(security): …` for the Security group. Chore, test and CI
+commits are skipped, including ones with a security scope.
 
 ## Changelog generation
 
@@ -156,16 +173,9 @@ through a base refresh and a full CI cycle, which cost more than the freshness w
 
 ## Version reporting
 
-`python -m kdive --version` and the startup log show `X.Y.Z+g<sha>` for a release build and
-`X.Y.Z-dev+g<sha>` otherwise. The SHA/flag come from a baked `_buildinfo.py` in artifacts,
-or live git in a checkout.
-
-## Future toggles (not yet enabled)
-
-- **PyPI publish** — add a `uv publish` step to `release.yml` after the GitHub Release step.
-- **Signed tags / artifact attestation** — sign `vX.Y.Z` tags and attach provenance.
-
-## Rollback
-
-A release is a tag + a GitHub Release; it changes no `main` history. To withdraw one, delete
-the GitHub Release and the tag (`git push origin :vX.Y.Z`), fix forward, and re-tag.
+`python -m kdive --version` and the startup log report `X.Y.Z+g<sha>` for a release build and
+`X.Y.Z-dev+g<sha>` for a development build. Runtime resolution uses baked `_buildinfo.py`
+first, then live Git; without either it omits the SHA and reports a development build.
+A checkout counts as a release only when clean at the exact tag matching its installed version.
+`just build` bakes development metadata; the release workflow uses `just build true` and removes
+the temporary stamp afterwards.

@@ -1,5 +1,8 @@
 # Investigation-rootfs reclaim via a worker job (#1522)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#1522](https://github.com/randomparity/kdive/issues/1522) — P1 bug
 - **ADR:** [ADR-0442](../adr/0442-rootfs-reclaim-worker-job.md)
 - **Supersedes the execution model of:** [ADR-0441](../adr/0441-investigation-scoped-uploaded-rootfs.md) §6

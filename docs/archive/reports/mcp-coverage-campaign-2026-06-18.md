@@ -1,8 +1,11 @@
 # MCP Tool Coverage Campaign — Rerun 2026-06-18
 
-Rerun of the MCP tool coverage campaign per
-`docs/operating/runbooks/mcp-coverage-campaign-rerun.md`, against the **current 112-tool
-surface** (image `ghcr.io/randomparity/kdive:sha-b45aa02`, then `sha-56a3f16` after the
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../README.md).
+
+Historical rerun of the MCP tool coverage campaign against the **112-tool
+surface recorded on 2026-06-18** (image `ghcr.io/randomparity/kdive:sha-b45aa02`, then `sha-56a3f16` after the
 in-campaign #584 fix). Supersedes `mcp-coverage-campaign-2026-06-14.md` (older 91-tool surface).
 Campaign tracked by #572 (closed via PR #585); this revision records the post-#584 arc.
 
@@ -10,13 +13,13 @@ Campaign tracked by #572 (closed via PR #585); this revision records the post-#5
 
 | Deployment | Providers registered | Identity gate | Notes |
 |---|---|---|---|
-| D2 k8s (`kdive-demo`, k3s `kdive-dev`) | remote-libvirt | PASS (admin + 3 platform roles) | helm `kdive-0.4.0` / app `0.3.0`, image `sha-b45aa02`; bundled backends; MCP via `kubectl port-forward svc/kdive-kdive-server 8000`. **112 tools** advertised. |
+| D2 k8s (`cluster-R1`, k3s `cluster-R2`) | remote-libvirt | PASS (admin + 3 platform roles) | helm `kdive-0.4.0` / app `0.3.0`, image `sha-b45aa02`; bundled backends; MCP via `kubectl port-forward svc/kdive-kdive-server 8000`. **112 tools** advertised. |
 
 Only **remote-libvirt** is registered on this deployment (`KDIVE_LOCAL_LIBVIRT_ENABLED=false`,
-no `KDIVE_FAULT_INJECT`), matching the operator's single-host setup (`ub24-big`,
+no `KDIVE_FAULT_INJECT`), matching the operator's single-host setup (`sys-R2`,
 `qemu+tls://`). local-libvirt and fault-inject were out of scope for this environment and are
 shown blank in the grid. The remote host carries the ephemeral_libvirt build host
-(`ub24-big-build`) declared in `systems.toml`.
+(`sys-R2-build`) declared in `systems.toml`.
 
 Tokens were minted in-pod against the in-cluster demo issuer (so `iss` matches what the server
 validates) and presented over the port-forward; the committed `scripts/coverage_campaign/drive.py`
@@ -133,7 +136,8 @@ Full grid below (driven rows only; ★ = destructive-capable).
 
 ## Reproduce
 
-See `docs/operating/runbooks/mcp-coverage-campaign-rerun.md`. Census + grid:
+The original rerun procedure has been retired. For current setup, use the
+[live-testing map](../../operating/runbooks/live-testing.md). Census + grid:
 
 ```
 uv run python -c "from scripts.coverage_campaign.gridgen import generate_rows; print(len(generate_rows()))"

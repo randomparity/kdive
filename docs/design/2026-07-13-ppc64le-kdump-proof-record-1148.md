@@ -1,5 +1,8 @@
 # Proof record — ppc64le kdump capture under TCG (#1148)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-13
 Issue: #1148 · Epic: #1139 · Spec: `2026-07-13-ppc64le-kdump-crashkernel-1148.md` · ADR-0346
 
@@ -17,7 +20,7 @@ Issue: #1148 · Epic: #1139 · Spec: `2026-07-13-ppc64le-kdump-crashkernel-1148.
   published image** — no #1147 customization boot was needed for this run.
 - Guest: `memory_mb=2048` (≥2 GB precondition met), `arch=ppc64le`, `machine=pseries`, `accel=tcg`.
 - Uploaded bundle: the ADR-0343 combined tar (`boot/vmlinuz` = the ppc64le ELF,
-  `lib/modules/6.19.10-300.fc44.ppc64le/`) + the matching `initramfs`, from `/home/dave/kdive-ppc-proof`.
+  `lib/modules/6.19.10-300.fc44.ppc64le/`) + the matching `initramfs`, from `<REDACTED-HOME>/kdive-ppc-proof`.
 - Driver: `tests/integration/test_live_stack.py::test_ppc64le_kdump_captures_a_vmcore_under_tcg`
   (`1 passed in 218.58s`). System/Run `9359253e-017a-4740-bb2a-3f008bae520c`.
 

@@ -1,5 +1,9 @@
 # The reclaim-side staging sweep is `flock`-gated too (#1544)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#1544](https://github.com/randomparity/kdive/issues/1544) — P2 bug
 - **ADR:** [ADR-0452](../adr/0452-flock-guarded-reclaim-staging-sweep.md)
 - **Completes:** [ADR-0446](../adr/0446-flock-guarded-orphan-partial-sweep.md), which fixed the

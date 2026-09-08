@@ -1,5 +1,9 @@
 # Spec — Diagnostics ephemeral-libvirt build-host guest-agent check (#544, #531)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#544](https://github.com/randomparity/kdive/issues/544) (split from
   [#533](https://github.com/randomparity/kdive/issues/533))
 - **ADR:** [`0167`](../adr/0167-diagnostics-ephemeral-buildhost-agent-check.md)

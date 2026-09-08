@@ -47,34 +47,23 @@ Worker startup proves conditional-create behavior against the configured store b
 ## Backends only — `just stack-up` (no sudo)
 
 Brings up only the compose backends (Postgres/MinIO/OIDC) and migrates the schema — for the
-`just test-live-stack` suite, or to run the app tier from the compose reference
-(`docker compose up -d migrate server worker reconciler`). Does NOT start host processes or libvirt.
+`just test-live-stack` suite. It does not start host processes or libvirt. For the container app
+tier, follow the [Compose operating guide](../../deploy/compose/README.md), including its worker
+lifecycle recipes.
 
-## Fund a project — `just onboard` (#834)
+## Fund a demo project — `just onboard`
 
-After the stack is up (`up.sh` or `just stack-up`), `just onboard` funds a project so a fresh
-agent's first `allocations.request` is granted instead of hitting the zero-quota/zero-budget wall.
-It runs against the **same** `env.sh` DB the rest of the live-stack uses: advisory preflight →
-`migrate` → `seed-project` → `verify-project` (the hard funding gate) → mint a 24 h token + print
-the **binding contract** (the project string is threaded through the seed, the token claims, and
-the contract, so the seeded key, the JWT `projects`/`roles` claim, and the `project` arg match).
-
-```bash
-just onboard                 # project "demo"
-KDIVE_PROJECT=acme just onboard
-```
-
-The minted token expires in 24 h; re-run `just onboard` (or `examples/local-libvirt/mint-token.sh`)
-and reconnect your MCP client when it does. `verify-project` echoes the credential-redacted target
-DB — if that is not the DB your server reads (a server started with an overriding
-`KDIVE_DATABASE_URL` not present here), the project will be funded in the wrong place. Demo-only:
-the bundled mock issuer mints a valid token for any caller; production onboards via the audited
-admin tools (`docs/operating/project-onboarding.md`).
+Run `just onboard` after bring-up to seed and verify the selected project's budget/quota and
+mint its mock-issuer token. `KDIVE_PROJECT` and `KDIVE_TOKEN_TTL` come from `env.sh`; reconnect
+the client after refreshing an expired token. Confirm the helper and server use the same database.
+This is demo bootstrap; use [audited project onboarding](../../docs/operating/project-onboarding.md)
+for production tenants. The [live-stack runbook](../../docs/operating/runbooks/live-stack.md)
+owns the detailed setup and environment procedure.
 
 ## Shared
 
 `env.sh` and `lib.sh` are sourced (not run); `apply-migrations.sh` is the host migrator.
 
-> **Note:** `examples/local-libvirt/` has its own `up.sh` / `down.sh` — a guided onboarding
-> walkthrough that seeds a project, merges the MCP client config, and tracks processes via a pid
-> file. Those are distinct from the host-lifecycle scripts here.
+The [local-libvirt example](../../examples/local-libvirt/README.md) wraps these scripts with
+host preflight, demo funding, and client configuration. It delegates process and worker
+lifecycle management here; it has no separate worker or pid-file protocol.

@@ -1,5 +1,8 @@
 # Spec — self-correcting `bad_artifact_declaration` + upload-vocabulary discovery
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Date:** 2026-06-17
 - **Issue:** [#551](https://github.com/randomparity/kdive/issues/551)
 - **ADR:** [ADR-0166](../adr/0166-upload-artifact-error-detail.md)

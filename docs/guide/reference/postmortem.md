@@ -6,17 +6,24 @@
 
 `implemented` · `read-only`
 
-Run crash(8) over a captured vmcore; returns a redacted report (contributor).
+Analyze a Run's captured core with server-side crash(8). Requires contributor.
 
-Omit ``commands`` for the standard first-pass batch — the fast first look at a crash —
-or pass your own allowlisted commands to go further. Prerequisite: a captured core for
-the Run (see ``vmcore.fetch``; its completed job's ``refs.result`` — or ``runs.get``'s
-``refs.vmcore`` — confirms the core landed). Every command is
-validated against the crash allowlist before the core is opened, and the transcript is
-redacted before it is returned. For programmable drgn introspection use
-``introspect.from_vmcore``.
+Pass the Run ID, not the artifact ID returned by vmcore.fetch. Prerequisites are the
+captured raw core, recorded vmlinux debug information, and the Run's build ID. The
+provider checks the core's build ID against that record before running commands.
+Analysis runs in the MCP server process; missing crash/provider dependencies in that
+environment produce a typed failure. Installing them only in the worker is insufficient.
+
+Omit commands for the standard first-pass batch, or pass allowlisted commands; each
+command is validated before opening the core. This call returns directly, not as a job:
+data.transcript contains redacted output and data.truncated marks byte-capped output.
+Inspect the transcript for per-command errors even on success; use a narrower batch
+if truncated. Missing inputs report data.reason no_vmcore, no_debuginfo, or no_build.
+A declared early-boot console_crash with no core instead reports expected_console_crash
+and directs you to runs.get for console evidence. For drgn analysis of the same Run,
+use introspect.from_vmcore.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `commands` | array<string> (nullable) | no | crash(8) commands to run over the captured core. Omit to run the standard first-pass batch (log, bt) — the fast first look at a crash. Each command's first token must be one of the read-only allowlisted verbs: bt, dev, dis, files, foreach, help, irq, kmem, list, log, mach, mod, mount, net, p, ps, rd, runq, search, struct, swap, sym, sys, task, timer, tree, union, vm, vtop. Shell metacharacters (\| > < ` $( ; &), a leading '!' shell escape, and control characters are rejected; a rejected command returns a configuration_error whose detail names the offending command. |
+| `commands` | array<string> (nullable) | no | crash(8) commands to run over the captured core. Omit to run the standard first-pass batch (log, bt). Each command's first token must be one of the read-only allowlisted verbs: bt, dev, dis, files, foreach, help, irq, kmem, list, log, mach, mod, mount, net, p, ps, rd, runq, search, struct, swap, sym, sys, task, timer, tree, union, vm, vtop. Shell metacharacters (\| > < ` $( ; &), a leading '!' shell escape, and control characters are rejected; a rejected command returns a configuration_error whose detail names the offending command. |
 | `run_id` | string | yes | The Run whose captured core to analyze. |

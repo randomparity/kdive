@@ -1,5 +1,9 @@
 # Red-team threat model — concurrency / auth / supply-chain core (M0)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Date:** 2026-06-03 · **Scope:** the M0 concurrency core (provisioning/admission,
 job queue, reconciler), the auth boundary (JWT claims → context → RBAC → destructive
 gate), and supply-chain posture. **Method:** for each stated invariant, write a
@@ -20,7 +24,6 @@ This document is the durable artifact of the campaign. The tests live under
 | D | `reconciler/loop.py::_repair_abandoned_jobs` | Zombie job dead-lettered *and* its non-terminal run failed atomically; terminal run untouched; live lease never reaped | `test_reconciler_atomicity.py` | ✅ corroborated |
 | E | `domain/allocation_admission.py::admit` | Per-resource lock prevents cap overshoot under N concurrent admits on distinct connections | `test_admission_concurrency.py` | ✅ corroborated |
 | F | `mcp/auth.py`, `security/rbac.py` | `roles_from_claims`/`context_from_claims` fail closed on malformed claims; `require_role` is rank-monotone; membership and role are both required | `test_auth_properties.py` | ⚠️ **gap** — see Finding 2 |
-| G | `pyproject.toml`, `uv.lock` | Exact pinning; lockfile integrity; XML parsing routes through `defusedxml` | audit (below) | ✅ / note |
 
 ## Findings
 
@@ -84,17 +87,7 @@ guard the other getters use is now implementable.
 jobs.* read/cancel scoping under #11 now that the key exists. Filed as a surfaced risk
 rather than a fix because it contradicts a recorded design decision.
 
-## Supply-chain audit (G)
-
-- **Pinning:** every runtime and dev dependency is `==`-pinned in `pyproject.toml`;
-  `uv.lock` carries hashes. `hypothesis==6.142.4` added to the dev group, pinned.
-- **XML attack surface:** `defusedxml` is a dependency; provider libvirt-XML parsing
-  should route through it. Verify at each `fromstring`/`parse` site as the libvirt
-  planes land (follow-up — out of this pass's concurrency-core scope).
-- **CVE scan:** run `uv`-ecosystem `pip-audit` against the pinned set before release
-  (not run here; flagged as a release-gate step).
-
-## Residual risk / follow-up passes
+## Recorded residual limitations
 
 - **Auth depth:** the destructive-op gate (`security/gate.py`) three-check
   deny-by-default is covered by existing unit tests; a property-based pass over

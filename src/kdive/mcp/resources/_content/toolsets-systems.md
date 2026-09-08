@@ -1,93 +1,69 @@
 # systems toolset
 
-A system is the target machine a run builds, installs, and boots on. Reach for these after
-you hold an allocation (see the allocations stage in the index) to provision and reach the
-target. For exact parameters, types, and return schema, read each tool's own description.
+A System is the target guest onto which a Run installs and boots a kernel. Allocate capacity
+first, then provision the System. Read each tool's schema for exact parameters and provider gates.
 
-## Provisioning
+## Provision and inspect
 
-- `systems.provision` — describe the target (shape, image, profile) and provision it. This
-  is the one create lane: it mints the system and enqueues its provision job in a single
-  call, so poll the returned job with `jobs.wait` until the system is READY.
-- `systems.profile_examples` — fetch ready-made system-profile templates to start from.
-- `systems.reprovision` — rebuild a system back to a clean baseline (for example, to
-  refresh a local-libvirt rootfs).
-- `systems.teardown` — destroy a system and release its host resources.
-- `systems.resolve_external_boot_conflict` — put the recorded source state back on a system whose
-  external boot is in `recovery_conflict`. Supply the exact observed identity; the worker rechecks
-  it under current authority. Poll the returned job with `jobs.wait`. Reuse the idempotency key
-  to recover the same job without extending its server-clock deadline.
+`systems.profile_examples` returns starting profiles for configured providers. Select the image
+with resource://kdive/docs/guide/toolsets/images.md, then call `systems.provision` with a granted
+Allocation and a matching provider/architecture profile. Provisioning requires contributor;
+it creates the System and returns a job. Poll `jobs.wait`, then check `systems.get` for READY.
+There is one System per Allocation; repeating provision is not a way to create a second one.
 
-Some debug and live-introspection capabilities are bound at provision: the profile's
-`debug` flags (the gdb stub and crash-preserve) and the live-ssh credential cannot be
-added to a ready system. Set them in the profile before `systems.provision`, or use
-`systems.reprovision` (which rebuilds and reboots) to change them later. See the
-provisioning-for-debugging notes in the investigation index.
+Choose provision-time debug flags before creating the guest. Enable `debug.gdbstub` for GDB;
+follow resource://kdive/docs/guide/toolsets/introspect.md for live-introspection prerequisites.
+Local-libvirt manages its own bootstrap key; do not invent a profile credential to enable it.
 
-## Inspecting
+`systems.get` reports state, connection/capability details, accelerator, and recorded CPU data.
+`systems.list` provides filters and cursor pagination. Missing capability/CPU data is unknown,
+not proof of support. Check `data.supports_snapshots` before using checkpoints.
 
-- `systems.get` — read a system's status and connection details. `data.supports_snapshots`
-  tells you whether the backing provider can checkpoint/restore this system.
-- `systems.list` — list the systems you can see, with filters.
+## Checkpoint and restore
 
-## Snapshots and restore
+- `systems.snapshot` captures a READY System's disk and, by default, RAM/CPU. A live Run can
+  remain attached during capture; memory capture pauses the guest while RAM is written.
+  Poll the job before using the checkpoint.
+- `systems.list_snapshots` lists checkpoints newest first; only `available` ones can restore.
+- `systems.restore` requires a READY System, no Run holding it, no attached debug session,
+  and no conflicting snapshot operation. It is not a recovery route for a CRASHED System.
+- `systems.delete_snapshot` enqueues deletion and reclaims the checkpoint's storage.
+  A creating checkpoint or an in-progress restore can prevent deletion.
 
-Checkpoint a fully-configured guest and roll it back in seconds — the fast path for a
-panic-then-retry reproducer loop. Set up the guest once (packages, staged reproducer, armed
-kdump), snapshot it, and restore between attempts instead of reprovisioning from scratch.
+Memory checkpoints resume saved CPU/RAM state; disk-only restores reboot the guest. A memory
+restore with `start_paused=true` leaves the System PAUSED. If the Run's other debug prerequisites
+hold, attach GDB and set breakpoints before `control.power(action="resume")` returns it to READY.
+SSH and drgn-live need the guest executing. All snapshot mutations require contributor; listing
+requires viewer. These operations return jobs; poll them rather than assuming immediate completion.
 
-- `systems.snapshot` — checkpoint a READY system's disk and, by default (`include_memory=true`),
-  its live RAM+CPU, under an agent-chosen `name`. A worker job; poll `jobs.wait`. Allowed during a
-  live run (checkpointing mid-debug is the point). A memory capture briefly pauses the guest while
-  its RAM is written, so an in-flight SSH command stalls then resumes. The system stays READY.
-- `systems.list_snapshots` — list a system's checkpoints newest first, each with its `state`
-  (`creating`/`available`/`failed`), `include_memory`, and `created_at`. Only an `available`
-  checkpoint can be restored.
-- `systems.restore` — roll a READY system back to a named checkpoint (a worker job). Refused while
-  a run holds the system, while another snapshot capture/restore/delete is in progress, or while a
-  debug session is attached — end the session first, then attach a fresh one after the restore.
-- `systems.delete_snapshot` — delete a checkpoint, freeing its name and reclaiming disk before
-  teardown (a worker job — freeing a large memory checkpoint takes time).
+## Reach and customize the guest
 
-**Memory vs disk-only.** A RAM+CPU checkpoint (`include_memory=true`) resumes the guest exactly
-where it was. A disk-only checkpoint (`include_memory=false`) is smaller and faster to take, but
-restoring it rolls back the filesystem and **reboots** the guest — there is no saved CPU/RAM to
-resume, so it cannot be pause-restored.
+1. `systems.ssh_info` returns coordinates for a READY System with a provider SSH forward.
+   Respect `host_scope`: worker-loopback coordinates require access to that host, and are not
+   your remote client's loopback address. Remote-libvirt SSH needs operator-configured parity.
+2. `systems.check_ssh_reachable` runs a fresh worker probe. Poll its job and read `refs.result`.
+   A successful measurement can report `reachable=false`; `true` confirms an SSH banner, not
+   authorization to log in.
+3. `systems.authorize_ssh_key` installs your public key in the guest root account. It requires
+   contributor; poll the job to success before connecting. KDIVE does not need your private key.
 
-**Paused restore for a debugger.** `systems.restore(..., start_paused=true)` (a memory checkpoint
-only) reverts into a suspended guest and lands the system in `paused`. Attach a gdbstub
-`debug.start_session`, set breakpoints, then resume with `control.power(system_id,
-action="resume")` — the only action admitted on a `paused` system, which returns it to READY.
-drgn-live over SSH does not work on a paused guest (its kernel is not executing); use the gdbstub
-`debug.*` tools.
+After login, use the guest package manager as root to install tools within guest disk and
+network limits. Local-libvirt has
+no outbound egress by default: the operator must enable `guest_egress = true` on the resource
+for direct mirror access. Remote networking is also operator configured. Use a prepared image
+when package mirrors are unavailable.
 
-Snapshots are freed when the system is torn down or its allocation is released — they never
-outlive the system.
+## Rebuild and finish
 
-## Reaching the guest over SSH
+`systems.reprovision` rebuilds a READY System with a replacement profile and requires contributor.
+Preserve evidence first; this resets the guest and is not admitted on a CRASHED or FAILED System.
 
-- `systems.ssh_info` — get the SSH connection descriptor for a ready system.
-- `systems.check_ssh_reachable` — probe whether a ready system's guest sshd is answering
-  now (a worker job; poll `jobs.wait` and read `refs.result`).
-- `systems.authorize_ssh_key` — authorize your public key so you can run commands in the
-  guest over SSH.
+`systems.teardown` requires the project's admin role. Poll its job to success before releasing
+the Allocation with `allocations.release`: teardown does not itself release the Allocation.
+Do not treat allocation release as proof that provider resources or checkpoints were destroyed.
 
-`check_ssh_reachable` reports transport, not authorization: a `reachable=true` verdict means
-the guest's sshd is answering, not that your key is authorized. It is a banner-only probe that
-sends no handshake and attempts no login, so `reachable=true` is expected before you authorize a
-key. If a real SSH attempt is denied with `Permission denied (publickey)`, call
-`systems.authorize_ssh_key` — which both `check_ssh_reachable` and `ssh_info` point to as a next
-action.
-
-Once authorized you have **root** in the guest, and kdive never holds the private key. The
-guest is yours to customize: the guest package manager is your own — install tracers,
-compilers, and stress tools at runtime (`apt install trace-cmd`) rather than concluding a
-capability is missing. Mind disk headroom, since toolchains and captures consume guest disk.
-
-Runtime installs need the guest to reach its distro mirrors. On **local-libvirt** the guest
-has **no outbound egress by default** (the NIC is loopback-forwarded for SSH with QEMU
-`restrict=on`), so `dnf`/`apt install` fails to resolve any host until the **operator** enables
-egress for that resource (`guest_egress = true` on the `[[local_libvirt]]` block in the operator's
-systems inventory — not a per-request knob). Ask your operator to enable it, or use an image that
-already bakes the toolchain you need. On **remote-libvirt** the operator-staged base image and host
-network already provide egress.
+For an external boot in `recovery_conflict`, `systems.resolve_external_boot_conflict` requires
+admin and the exact observed identity. Its worker rechecks that identity before acting; poll the
+job and preserve failure evidence if it refuses. Read the owning Run with `runs.get` for the
+current recovery guidance. See resource://kdive/docs/guide/toolsets/runs.md for ordinary release
+of an active external boot.

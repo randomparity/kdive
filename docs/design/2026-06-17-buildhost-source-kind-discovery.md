@@ -1,5 +1,9 @@
 # Build-host source-kind discovery at the MCP boundary (#536)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-17
 - **ADR:** [0160](../adr/0160-buildhost-source-kind-discovery.md)

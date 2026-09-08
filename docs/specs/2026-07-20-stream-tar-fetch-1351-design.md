@@ -1,5 +1,9 @@
 # Stream the combined-tar fetch into the extractor (#1351)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Status: Draft
 Issue: #1351
 ADR: [0400](../adr/0400-streaming-object-read-for-combined-tar-extract.md)

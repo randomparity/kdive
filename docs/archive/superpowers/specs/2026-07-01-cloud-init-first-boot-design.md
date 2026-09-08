@@ -1,5 +1,9 @@
 # Embrace cloud-init for rootfs first-boot — design (#962)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 ## Problem
 
 kdive's local-libvirt rootfs build (`providers/local_libvirt/rootfs_build.py` +

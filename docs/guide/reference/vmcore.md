@@ -6,21 +6,31 @@
 
 `implemented`
 
-Capture and persist a vmcore from a crashed Run's bound System (contributor).
+Capture a core from a Run's bound CRASHED System. Requires contributor.
 
-Prerequisite: the Run's bound System must be in CRASHED state — induce a crash with
-``control.force_crash`` (or capture a spontaneous panic) first; a non-CRASHED System is
-rejected with a configuration_error naming the current state. Async: this enqueues a
-``capture_vmcore`` job and returns a job handle — poll it with ``jobs.wait``.
-On success the core lands as a redacted artifact and the completed job carries its
-artifact id in ``refs.result``: read the bytes with ``artifacts.get`` or analyze the core
-with ``postmortem.crash``. ``runs.get`` carries the same id as ``refs.vmcore`` if you no
-longer hold the job id. The capture ``method``
-resolves from the System profile when omitted; a kdump/fadump core also needs the guest
-kernel's crash symbols and a capable rootfs (gated before the job is admitted).
+Pass the Run ID, not a System or artifact ID. Check systems.get first: a watch verdict
+or console signature does not mark the System CRASHED. A non-CRASHED System is refused.
+Do not force another crash just to change state; preserve existing console evidence.
+An active external boot requires the owning Run; other activation states can refuse
+capture. The chosen core-producing method must be supported by the provider.
+
+Omitting method resolves it from the System profile; a profile with no supported core
+method needs an explicit choice. Kdump/fadump admission rejects known-negative kernel
+and rootfs capability evidence; uncertainty can pass and is not proof of readiness.
+Returns a capture_vmcore job handle: poll jobs.wait and require terminal success.
+The same Run/method reuses its job, including terminal results; a new idempotency key
+does not force recapture. Follow the existing job's failure guidance.
+
+A fresh capture's completed job exposes the redacted artifact ID in refs.result;
+runs.get exposes it as refs.vmcore for non-failed Runs. For failed Runs, use the job
+reference. artifacts.get reads redacted log evidence (local-libvirt extracts dmesg
+text, not a sanitized binary core). A replay may omit the reference if the redacted
+sibling is gone while the raw core remains.
+For analysis, pass the Run ID to postmortem.crash, which resolves the raw core itself.
+For raw download use artifacts.fetch_raw(run_id, asset="vmcore") (contributor, URL-only).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `method` | `console`, `host_dump`, `gdbstub`, `kdump`, `fadump` (nullable) | no | Core-producing capture method (KDUMP/FADUMP/HOST_DUMP) the bound provider must advertise. Omit to resolve the System profile's method; a profile with no implicit core method requires an explicit one. |
-| `run_id` | string | yes | The crashed Run whose vmcore to capture. |
+| `method` | `console`, `host_dump`, `gdbstub`, `kdump`, `fadump` (nullable) | no | Core-producing capture method (kdump/fadump/host_dump) the bound provider must advertise. Omit to resolve the System profile's method; a profile with no implicit core method requires an explicit one. |
+| `run_id` | string | yes | The Run ID whose bound System is CRASHED; not a System or artifact ID. |

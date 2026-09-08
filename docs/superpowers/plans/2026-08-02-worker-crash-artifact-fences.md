@@ -19,7 +19,7 @@
 - Only lifecycle authority creates/binds/activates an incarnation. Worker authenticates it and cannot terminate it.
 - Every protected lookup joins use → generation → investigation → project before mutation.
 - Unsupported host-root Docker, force-delete, and manual-finalizer paths fail closed and may strand pins.
-- ADR-0533 and `docs/superpowers/specs/2026-08-02-worker-crash-artifact-fences-design.md` govern implementation.
+- Decision record: ADR-0533.
 
 ---
 

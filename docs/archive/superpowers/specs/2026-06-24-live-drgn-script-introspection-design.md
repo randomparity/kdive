@@ -1,9 +1,13 @@
 # Live in-guest arbitrary drgn script introspection (#762)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Approved (design)
 - **Date:** 2026-06-24
 - **Issue:** [#762](https://github.com/randomparity/kdive/issues/762) (D4, part of epic #764)
-- **ADR:** [ADR-0240](../../adr/0240-live-drgn-script-introspection.md)
+- **ADR:** [ADR-0240](../../../adr/0240-live-drgn-script-introspection.md)
 - **Split from:** [#781](https://github.com/randomparity/kdive/issues/781) (the offline/captured-core half — make the raw vmcore + vmlinux fetchable and analyze locally)
 
 ## Problem
@@ -44,8 +48,8 @@ the ones that are *not* about protecting an owner from their own data (see Safet
 Add an MCP tool `introspect.script(session_id, script, timeout_sec?)` that runs a
 caller-supplied drgn script against the **live** guest kernel over the existing drgn-live
 `DebugSession`, returning the script's stdout. Like `introspect.run` / `introspect.from_vmcore`,
-it is a **synchronous server-side read** (a `_PLANE_REGISTRARS` tool run via `asyncio.to_thread`,
-not a worker job; ADR-0033 §1). The script executes **in the guest** (disposable blast radius);
+it is a **synchronous server-side call** (a `_PLANE_REGISTRARS` tool run via `asyncio.to_thread`,
+not a worker job; ADR-0033 §1). The mutating script executes **in the guest**;
 the server process only opens the transport and relays bytes. Every "thread-pool slot" and "shared
 credentialed process" below therefore refers to the **server** process, not the job worker.
 

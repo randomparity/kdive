@@ -1,5 +1,8 @@
 # Bound the rootfs orphan-partial sweep away from live partials (#1524)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Issue:** [#1524](https://github.com/randomparity/kdive/issues/1524)
 - **ADR:** [ADR-0446](../adr/0446-flock-guarded-orphan-partial-sweep.md)
 - **Date:** 2026-07-24

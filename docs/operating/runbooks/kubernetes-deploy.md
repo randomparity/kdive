@@ -1,7 +1,7 @@
 # Runbook: Kubernetes / Helm deployment
 
-Operator guide for deploying the kdive control plane — `server`, `worker`, `reconciler`, and the
-dedicated `lifecycle-witness`, plus a migrate one-shot — on Kubernetes with the
+Operator guide for deploying four long-running Kubernetes workloads — `server`, `worker`,
+`reconciler`, and the dedicated `lifecycle-witness` — plus a migrate one-shot with the
 [Helm chart](../../../deploy/helm/kdive/README.md)
 (ADR-0088). This is the **production-shaped** path; the
 [live-stack runbook](live-stack.md) covers the source-tree (`just`) and `docker compose`
@@ -11,10 +11,15 @@ up, see [remote-live-stack.md](remote-live-stack.md).
 It was written from a real microk8s bring-up; commands that are microk8s-specific are called out,
 and the generic-cluster equivalent is given alongside.
 
+**Read the release boundary before installing or upgrading.** Capture publication protocol 4
+requires a new empty database and new versioned object-store bucket or namespace; existing
+protocol-3 state has no upgrade path. See the [protocol-4 boundary](#capture-publication-protocol-4-migration-0113).
+For other worker-fence releases, use the [staged procedure](#staged-worker-fence-upgrade).
+
 ## Prerequisites
 
 - A Kubernetes cluster and `kubectl`/`helm` (v3) configured against it. Tested on microk8s
-  v1.35; any conformant cluster works.
+  v1.35; the chart requires Kubernetes 1.27 or newer.
 - A cluster that can pull from `ghcr.io` (the default registry). The chart defaults to
   `ghcr.io/randomparity/kdive`; `:edge` (rolling, from `main`) and signed `:X.Y.Z` release
   tags are published there. From a source checkout pin `--set image.tag=edge` (the default
@@ -74,6 +79,11 @@ reachable first.
 > (a Secret you `envFrom`, IRSA/workload identity, or — for a throwaway store — `config.AWS_*`,
 > which the ConfigMap `range` emits). `KDIVE_S3_*` carries only the endpoint, bucket, and region.
 
+Before starting KDIVE, complete the [object-store preflight](../install.md#object-store-preflight): bucket-wide
+versioning must be `Enabled`, MFA Delete off, and prefix/folder exclusions absent. Verify the
+required version-specific permissions and an exact-version read; a reachable bucket alone is
+insufficient.
+
 ## 3. Create the file-ref Secret (if using remote-libvirt or debug-session secrets)
 
 The remote-libvirt TLS materials (and debug-session secrets) are resolved **by file** under
@@ -116,21 +126,87 @@ kubectl create secret generic kdive-database \
   --from-file=lifecycle-witness-dsn=./lifecycle-witness.dsn
 ```
 
+### Worker credential-broker Secrets
+
+Both external-backend and bundled installs require two operator-owned Secrets. With the default
+chart values, create them in the release namespace from protected files:
+
 ```bash
-helm install kdive deploy/helm/kdive \
-  --set image.repository=localhost:32000/kdive --set image.tag=$SHA \
-  --set config.KDIVE_OIDC_ISSUER='https://idp.example/realms/kdive' \
-  --set config.KDIVE_OIDC_JWKS_URI='https://idp.example/realms/kdive/protocol/openid-connect/certs' \
-  --set config.KDIVE_S3_ENDPOINT_URL='https://s3.example' \
-  --set secrets.secretName=kdive-remote-tls
+kubectl create secret generic kdive-worker-credential-broker-tls \
+  --from-file=tls.crt=./broker.crt \
+  --from-file=tls.key=./broker.key \
+  --from-file=ca.crt=./broker-ca.crt
+kubectl create secret generic kdive-worker-credential-broker-envelope \
+  --from-file=envelope.key=./envelope.key
 ```
+
+The certificate must validate for the rendered `<release>-kdive-worker-credential-broker`
+Service hostname; the CA must verify it. `envelope.key` must contain a Fernet key (a URL-safe
+base64-encoded 32-byte key). The chart does not generate these files. Override names and keys
+through `workerCredentialBroker.tls.*` and `workerCredentialBroker.envelopeKey.*` when needed.
+Only the lifecycle witness receives the private key and envelope key; worker init containers
+receive the public CA. Keep these credentials separate from the remote-libvirt client bundle.
+
+### Install with external backends
+
+Prepare `kdive-values.yaml` with your endpoints and image selection. For an amd64 source-checkout
+install using the rolling image:
+
+```yaml
+image:
+  tag: edge
+  pullPolicy: Always
+config:
+  KDIVE_OIDC_ISSUER: https://idp.example/realms/kdive
+  KDIVE_OIDC_JWKS_URI: https://idp.example/realms/kdive/protocol/openid-connect/certs
+  KDIVE_S3_ENDPOINT_URL: https://s3.example
+```
+
+For ppc64le, select a published multi-arch release tag as described in the prerequisites. For the
+offline build in step 1, set `image.repository` and `image.tag` to the repository and SHA you
+pushed. Use the same namespace for the release and all its Secrets and ConfigMaps; the examples
+use your current kubectl namespace. For a different namespace, pass `-n` consistently to kubectl
+and Helm.
 
 To enable the remote-libvirt provider, declare a `[[remote_libvirt]]` instance in the mounted
 `systems.toml` ConfigMap (`KDIVE_SYSTEMS_TOML`) — uri, gdb addr, gdbstub range, and the TLS
 cert/key/CA refs live there now, not in `config.KDIVE_REMOTE_LIBVIRT_*` (#395). See the
-remote-libvirt host-setup runbook for the instance block.
+[remote host registration guide](remote-libvirt-host-setup.md#3-register-remote-libvirt-on-the-deployment)
+for the inventory and TLS mapping. Set `systems.configMapName` and `secrets.secretName` in
+`kdive-values.yaml` to mount those existing resources.
+
+```bash
+helm install kdive deploy/helm/kdive --values kdive-values.yaml
+```
+
+### Bundled demo install
+
+Use a fresh database and object-store state for the protocol-4 release. Prepare the
+[broker Secrets](#worker-credential-broker-secrets) first; bundled Postgres creates its own
+fixed demo database logins. For an amd64 cluster:
+
+```bash
+helm install kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml
+helm test kdive
+```
+
+For ppc64le, override the demo's `edge` tag with a published multi-arch release. Do not add
+`--wait` to the fresh install: Helm would wait for app readiness before running the post-install
+migration that creates their database roles. Follow hook progress, then use `helm test` to
+check authenticated tool discovery. This is disposable `emptyDir` storage with an issuer that
+mints tokens for any caller; reach MCP through port-forwarding and keep it off public networks.
+The [chart reference](../../../deploy/helm/kdive/README.md#bundled-backends-demo-only) describes
+its defaults, versioning checks, and limits.
+
+The smoke test checks authenticated tool discovery and emits a CPU-feature hint for its own
+node. Its HTTP reachability probe accepts any status; a passing test does not establish database
+or object-store readiness, worker operations, or CPU compatibility on other nodes. Inspect the
+relevant backend pods when diagnosing those failures.
 
 ### Upgrading a release (config-default drift — ADR-0134)
+
+This section describes value merging for a release whose upgrade is supported. It does not bypass
+the [protocol-4 fresh-install requirement or staged worker-fence procedure](#staged-worker-fence-upgrade).
 
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the previous
 release's merged values and *ignores the new chart's `values.yaml` defaults*, so a config default
@@ -141,7 +217,7 @@ top of the fresh defaults instead:
 
 ```bash
 helm get values kdive -o yaml > kdive-values.yaml   # your overrides only (no chart defaults)
-helm upgrade kdive deploy/helm/kdive -f kdive-values.yaml --set image.tag=$SHA
+helm upgrade kdive deploy/helm/kdive -f kdive-values.yaml --set image.tag="${IMAGE_TAG:?set the target image tag}"
 ```
 
 `-f kdive-values.yaml` preserves your overrides **and** layers the new chart's defaults on top, so
@@ -1491,7 +1567,7 @@ witness, then rerun the applicable forward stage with `RETRY_DIAGNOSTIC=1`. Its 
 the exact Job with a two-minute API timeout.
 
 Finally, from the authenticated operator workstation, use the real MCP session client to prove
-both recovery tools are exposed and make one bounded read call:
+both recovery tools are discoverable under the caller's grants and make one bounded read call:
 
 ```bash
 set -euo pipefail
@@ -1519,10 +1595,16 @@ async def main() -> None:
         os.environ["KDIVE_SERVER_URL"],
         auth=BearerAuth(os.environ["KDIVE_TOKEN"]),
     ) as client:
-        names = {tool.name for tool in await client.list_tools()}
-    missing = required - names
-    if missing:
-        raise SystemExit(f"recovery tools are not exposed: {sorted(missing)}")
+        for name in sorted(required):
+            result = await client.call_tool(
+                "tools.search", {"query": name, "detail": "full", "limit": 1}
+            )
+            envelope = result.structured_content
+            if result.is_error or not isinstance(envelope, dict):
+                raise SystemExit(f"tool discovery failed: {name}")
+            matches = envelope.get("data", {}).get("matches", [])
+            if not any(item.get("name") == name for item in matches):
+                raise SystemExit(f"recovery tool is not discoverable: {name}")
 
 
 asyncio.run(main())
@@ -1660,51 +1742,15 @@ kubectl get pods -l app.kubernetes.io/name=kdive
 
 ### Draining the state-fenced lane before a worker downgrade (ADR-0550)
 
-**This does not make a worker downgrade supported.** The staged worker-fence upgrade above stays
-stop-old-first and forward-only: do not restore an old worker image for a release carrying the
-fence protocol. What follows is a **prerequisite of a downgrade that is already permitted** — on a
-non-fence release, or on the systemd and Compose paths — and never a reason one becomes permitted.
-
-Since ADR-0550, `restore`, `reprovision`, and `snapshot` jobs are admitted onto the `state-fenced`
-dispatch lane. A worker built before that change accepts only the `default` lane, so after a
-downgrade it never claims those rows. They sit unclaimed indefinitely with their System pinned in
-`restoring`/`reprovisioning` or their Snapshot in `creating`, and nothing surfaces it: the
-abandoned-job repair reaps only `running` rows, and at attempt 1 of 3 it does not dead-letter those
-either — so a `running` fenced row is stranded harder than a queued one, its lease lapsing with no
-claimant left and no old worker willing to reclaim its lane.
-
-Run these in order. The ordering is the point: the `UPDATE` moves rows out from under any worker
-still claiming, so the new workers must be stopped first.
-
-1. Stop the new workers.
-
-   ```bash
-   kubectl -n "$NAMESPACE" scale statefulset "$RELEASE-worker" --replicas=0
-   kubectl -n "$NAMESPACE" rollout status statefulset "$RELEASE-worker" --timeout=5m
-   ```
-
-2. Move every **non-terminal** fenced row back to the default lane.
-
-   ```sql
-   UPDATE jobs
-      SET dispatch_lane = 'default'
-    WHERE dispatch_lane = 'state-fenced'
-      AND state IN ('queued', 'running');
-   ```
-
-3. Start the old workers, and confirm the lane is empty before declaring the downgrade complete.
-
-   ```sql
-   SELECT count(*) FROM jobs
-    WHERE dispatch_lane = 'state-fenced' AND state IN ('queued', 'running');
-   ```
-
-A non-zero count in step 3 means a worker admitted new fenced work between steps 1 and 2; repeat
-from step 1.
+The current worker-fence upgrade is stop-old-first and forward-only. An old procedure that
+moves jobs between dispatch lanes does not make a downgrade compatible with this protocol.
+Follow the staged upgrade above; consult the matching release tag only when operating an
+older, separately supported deployment. Do not apply historical lane-rewriting SQL to a
+current installation.
 
 ## 5. Reach the MCP endpoint
 
-The chart's only Service fronts the server's MCP port `8000` as a **ClusterIP** (the per-process
+The chart's MCP-facing Service fronts the server's MCP port `8000` as a **ClusterIP** (the per-process
 `/livez`/`/readyz`/`/metrics` aux ports are deliberately pod-local and not exposed). To reach MCP
 from outside the cluster, either port-forward:
 
@@ -1731,21 +1777,60 @@ must end in `/mcp`.
 
 ## 6. Verify
 
-Each Deployment carries a readiness probe against its `/readyz` aux endpoint, so the kubelet
-already evaluates health — a `Ready` pod has a passing `/readyz` (its backend set: DB, object
-store, OIDC). A pod stuck `0/1 Running` is failing readiness; `kubectl describe pod` shows which
-backend, which you fix via the corresponding `config.*`/Secret.
+Each app workload carries a readiness probe against its `/readyz` aux endpoint. A failed
+readiness probe keeps the Pod unready. Inspect Pod events and logs, then the `/readyz` response
+on that process's aux port for its named checks; the dependency set differs by process. The
+[chart reference](../../../deploy/helm/kdive/README.md#health-probes--scrape-adr-0090-5) lists
+the ports. These endpoints have no authentication: use a local port-forward for diagnosis.
 
 ```bash
 # Ready = /readyz green (the aux listener is pod-local, not fronted by a Service):
 kubectl get pods -l app.kubernetes.io/name=kdive
 
-# An authenticated MCP call (needs a token from your OIDC issuer with audience `kdive`):
-curl -s -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  http://<mcp-host>/mcp | head
+# From a checkout with dependencies installed; initialize a real MCP session:
+export KDIVE_SERVER_URL="http://<mcp-host>/mcp"
+export KDIVE_TOKEN="<oidc-access-token>"
+uv run python - <<'PY'
+import asyncio
+import os
+
+from fastmcp import Client
+from fastmcp.client.auth import BearerAuth
+
+
+async def main() -> None:
+    async with Client(
+        os.environ["KDIVE_SERVER_URL"],
+        auth=BearerAuth(os.environ["KDIVE_TOKEN"]),
+    ) as client:
+        tools = await client.list_tools()
+        if not tools:
+            raise SystemExit("authenticated MCP catalog is empty")
+        print(f"authenticated MCP session lists {len(tools)} visible tools")
+
+
+asyncio.run(main())
+PY
 ```
+
+### Startup and database reachability
+
+All four processes acquire one database connection before starting their aux listener and
+process body. The acquisition has a ten-second timeout; it starts after configuration and
+other startup work, so it is not a deadline for total process startup. On timeout the process
+exits with `no database connection within 10s of process start` in its error message.
+
+Read the preceding `psycopg.pool` warning for the underlying cause. The timeout alone cannot
+distinguish unreachable Postgres, invalid credentials, a missing database, or connection
+pressure. Fix the database, the process's database Secret, or the network path and allow the
+Pod to retry. Inspect restart events for the cluster's backoff behavior. The worker is a
+StatefulSet; the other three processes are Deployments. Avoid a broad rollout restart: the
+same release can include disposable backend Pods whose restart loses demo data.
+
+The aux endpoints are unavailable during database acquisition. The chart starts liveness
+checks after five seconds, then checks every ten seconds. The restart budget includes the
+failure threshold, not just the first probe: if you change probes, allow for startup work,
+the connection wait, and cleanup before terminating a slow-starting process.
 
 ### Collect metrics (opt-in — ADR-0189)
 
@@ -1764,6 +1849,26 @@ kubectl port-forward svc/<release>-kdive-prometheus 9090:9090
 It is off by default (production is BYO — the chart README documents a `PodMonitor` for
 Operator clusters and the existing-Prometheus annotation path), runs on `emptyDir` with short
 retention, and its Service is `9090`-only (the aux `/metrics` is never re-exposed off-cluster).
+
+### Dropped usage records
+
+The server records tool usage on a best-effort basis. `tools.search` is deliberately unrecorded,
+and `tools.invoke` is counted through its inner call rather than twice. Recording happens after
+the tool executes and is awaited before returning its result. Its one-second timeout bounds
+**pool acquisition**, not the whole database write or response delay. A recording failure does
+not change the tool's result.
+
+`kdive_mcp_usage_recording_failures` on the server's `/metrics` counts lost rows and may be
+absent until the first failure. An increasing counter means usage data is incomplete. Inspect
+its `reason` label and the accompanying `usage recording failed for tool` warning:
+
+- `pool_timeout`: no connection was available within the acquisition timeout; investigate
+  database reachability and connection pressure.
+- `other`: another recording error, such as a database or schema failure; use the warning's
+  exception to identify the cause.
+
+Pool sizes are set in code; there is no operator pool-size setting. Preserve the error and
+load evidence when reporting persistent drops rather than assuming a larger pool is the fix.
 
 ## 7. Architecture: one object store, three consumers
 
@@ -1809,9 +1914,9 @@ parties touch it.
 
 ### The bundled demo's object store is in-cluster only — expose it for remote-libvirt
 
-`bundledBackends=true` runs MinIO as a **ClusterIP** Service and forces
-`KDIVE_S3_ENDPOINT_URL=http://<release>-minio:9000` — a name only in-cluster pods resolve. With
-that default, `host_dump` capture and `introspect.from_vmcore` work (worker-side, in-cluster), but
+`bundledBackends=true` defaults MinIO to a **ClusterIP** Service and sets
+`KDIVE_S3_ENDPOINT_URL=http://<release>-kdive-minio:9000` unless explicitly overridden. Only
+in-cluster pods resolve that name. With that default, `host_dump` capture and `introspect.from_vmcore` work (worker-side, in-cluster), but
 **external uploads and any remote-libvirt `install`/`kdump` capture fail**: the uploader and the
 guest cannot reach a cluster-internal name. To use the bundled store off-cluster, expose it and
 point the endpoint at a node-routable address all three parties reach:
@@ -1834,8 +1939,9 @@ helm upgrade kdive deploy/helm/kdive \
 > (e.g. a MinIO/S3 on a host on a shared network). `host_dump`-only capture of the base-image
 > kernel still works without any of this.
 
-If you expose OIDC similarly, set `config.KDIVE_OIDC_ISSUER` to the externally routable URL too —
-again, not a cluster-internal name only the pods resolve.
+Bundled OIDC uses the chart's internal issuer and JWKS URLs; `config.KDIVE_OIDC_ISSUER` does
+not override them in bundled mode. Use the documented demo token flow with MCP port-forwarding.
+For an external IdP, use the external-backend deployment and configure its issuer and JWKS URLs.
 
 ## 8. Remote-libvirt host prerequisites
 
@@ -1851,66 +1957,16 @@ at runtime, and `ops.export_systems_toml` serializes that live state back to a
 `systems.toml` document. By default the export only returns **text** — an operator copies it into
 the version-controlled file and re-applies the `kdive-systems` ConfigMap by hand.
 
-The opt-in **writeback** (M2.7 sub-issue D) lets `ops.export_systems_toml(persist=true)` write that
-document straight to the live source the reconciler re-reads, so a pod restart reproduces the running
-inventory. It is **off by default** and **not exercised by CI** — verify it on your cluster with the
-steps below.
+The runtime has opt-in ConfigMap writeback, but the stock chart does not wire its credentials:
+the server Pod disables service-account token automount and offers no ServiceAccount override.
+Setting `KDIVE_INVENTORY_WRITEBACK=configmap` alone is insufficient. Use the manual export path
+above with the stock chart.
 
-### Enable it
-
-Set the opt-in on the **server** component (where the `ops.*` tools run) via the chart's `config.*`
-ConfigMap, then apply the RBAC so the server's pod may patch the one inventory ConfigMap:
-
-```yaml
-# values overlay
-config:
-  KDIVE_INVENTORY_WRITEBACK: configmap          # off (default) | configmap | file
-  # KDIVE_INVENTORY_WRITEBACK_CONFIGMAP defaults to kdive-systems; set only to override the name
-```
-
-```yaml
-# rbac-writeback.yaml — least privilege: get+patch on the ONE named ConfigMap, nothing else
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kdive-writeback
-  namespace: <ns>
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: kdive-systems-writeback
-  namespace: <ns>
-rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["kdive-systems"]    # scoped to this one object — no list/watch, no other CM
-    verbs: ["get", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kdive-systems-writeback
-  namespace: <ns>
-subjects:
-  - kind: ServiceAccount
-    name: kdive-writeback
-    namespace: <ns>
-roleRef:
-  kind: Role
-  name: kdive-systems-writeback
-  apiGroup: rbac.authorization.k8s.io
-```
-
-Bind the server Deployment's pod to that ServiceAccount (`spec.template.spec.serviceAccountName:
-kdive-writeback`) so the in-cluster token the adapter reads carries the grant. Apply with
-`kubectl apply -f rbac-writeback.yaml -n <ns>`.
-
-The ConfigMap name (`kdive-systems` above, and `KDIVE_INVENTORY_WRITEBACK_CONFIGMAP`'s default)
-must match the inventory ConfigMap you created and pointed `systems.configMapName` at — set
-`KDIVE_INVENTORY_WRITEBACK_CONFIGMAP` and the Role's `resourceNames` to that name if you named it
-something else. This inventory ConfigMap is operator-created (the chart only mounts it; it is not
-templated by Helm), so a writeback patch does not drift from the Helm release.
+An operator-managed pod-template customization must supply token, namespace, and CA files at
+`/var/run/secrets/kubernetes.io/serviceaccount`, authorize only `get`/`patch` on the intended
+inventory ConfigMap, and keep that customization through Helm upgrades. The configured writeback
+ConfigMap name must match the mounted inventory source. This is separate deployment work, not
+an activation recipe provided by the stock chart.
 
 ### The `remote_libvirt` skeleton: complete it before persisting
 
@@ -1977,13 +2033,15 @@ kubectl delete secret kdive-remote-tls -n <ns>               # if created in ste
 **PVCs after uninstall.** From chart `0.5.0` the worker's build/install volumes come from the
 StatefulSet's `volumeClaimTemplates` with a `Delete` retention policy (ADR-0514), so deleting the
 StatefulSet garbage-collects them. These claims inherit the StatefulSet's *selector* labels, not
-the chart's, so `-l app.kubernetes.io/name=kdive` no longer selects them. Sweep any survivors by
-the release-scoped names instead:
+the chart's, so `-l app.kubernetes.io/name=kdive` no longer selects them. Inspect survivors for
+the release being removed before deleting its per-replica claims:
 
 ```bash
-kubectl delete pvc -l app.kubernetes.io/name=kdive -n <ns>       # pre-0.5.0 claims, if any linger
 kubectl delete pvc -l app=kdive-kdive-worker -n <ns>             # 0.5.0+ per-replica claims
 ```
+
+For a legacy release, inspect its exact build/install claim names and ownership separately;
+never delete claims by the namespace-wide `app.kubernetes.io/name=kdive` selector.
 
 `helm uninstall` does **not** garbage-collect the chart's hook resources (the migrate /
 validate-systems hook Jobs, the `helm test` smoke pod, and the `systems.toml`

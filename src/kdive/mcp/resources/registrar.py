@@ -132,9 +132,8 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         name="safety-and-rbac",
         title="Safety, RBAC, and redaction",
         description=(
-            "The role model (viewer/contributor/operator), the destructive-ops gate, and the "
-            "redaction contract every transcript and console snippet passes through. Cited by the "
-            "response-envelope guide."
+            "Project and platform roles, destructive-operation checks, credential references, "
+            "redaction limits, and artifact access rules. Cited by the response-envelope guide."
         ),
     ),
     DocResource(

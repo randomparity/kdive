@@ -1,5 +1,9 @@
 # Per-System SSH bootstrap key — design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Issue:** #963 · **ADR:** 0289 · **Migration:** 0056 · **Supersedes:** ADR-0052 · **Revises:**
 ADR-0271 (`authorize_ssh_key`), the drgn-live transport (#762/#697), and the ADR-0288 "managed
 key stays on `--ssh-inject`" bullet.
@@ -17,7 +21,7 @@ the #962 live proof:
    Rotating it requires re-baking the whole catalog, and the stored S3 image is itself a
    root-granting artifact.
 2. **Build/worker key divergence.** `prereqs/managed_ssh_key.py` lazily generates the keypair
-   per-host under XDG (`~/.local/share/kdive/ssh`). Build as one principal (`dave`) and worker as
+   per-host under XDG (`~/.local/share/kdive/ssh`). Build as one principal (`builder-user`) and worker as
    another (`root`) yields different keypairs, so `authorize_ssh_key` fails `Permission denied`
    (exit 255) — the exact agent path an agent would use is broken.
 
@@ -141,10 +145,10 @@ type OverlayCustomizer = Callable[[str], None]  # (overlay_path) -> None
 
 ### 5. Re-sourcing the two SSH consumers
 
-Both consumers materialize the loaded private key to a **0700 dir + 0600 file** (ssh refuses a
-group/world-readable key) via a context manager that guarantees `unlink` on every path (a crash
-between write and use must not leak a per-System private key — a window strictly shorter than
-today's persistent managed-key file, but still closed explicitly).
+Both consumers materialize the loaded private key to a **0700 dir + 0600 file** through a
+context manager. Cleanup runs on normal exit and Python exception unwinding. Abrupt process
+death can leave the protected temporary directory; a context manager cannot guarantee
+cleanup after such a death.
 
 - `jobs/handlers/ssh_authorize.py`: `build_authorize_argv(port)` →
   `build_authorize_argv(port, key_path)`; the handler loads the key
@@ -214,8 +218,8 @@ today's persistent managed-key file, but still closed explicitly).
 - **Ordering invariant:** a test that a provision-transaction rollback *after* the key row is
   committed leaves the row intact (so a retry reuses the same key), pinning the commit-before-
   overlay-creation contract.
-- **Migration:** apply/rollback 0056; `ON DELETE CASCADE` removes the key when a `systems` row is
-  deleted.
+- **Migration:** apply/idempotency and constraint checks for 0056; `ON DELETE CASCADE`
+  removes the key when a `systems` row is deleted. Application rollback keeps the schema.
 - **Live e2e (operator-run, behind live-VM markers):** rebuild the two dev images keyless,
   provision a System, `systems.authorize_ssh_key` succeeds, an agent SSHes in as root and runs an
   in-guest command — the full agent path that #962's proof left blocked.

@@ -10,17 +10,11 @@ by it), and all of them share one operator-owned **session libvirt daemon** the 
 publishes. The stack onboards a project named **`demo`**, and an MCP client opened in your
 kernel tree (`~/src/linux` by default) drives that very checkout.
 
-This is the supported first-run path for a local-libvirt install. The
-[local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md) is the
-step-by-step reference for what `up.sh` does and for the host preparation it expects (packages,
-directories, the guest image); this page is the operating manual for the scripts.
-
-The scripts here are thin wrappers over the maintained host flow — `scripts/live-stack/up.sh`,
-`onboard.sh`, `down.sh` — plus the host preparation and the guest-image build that flow assumes
-already happened. For the underlying reference material see
-[`docs/operating/local-stack.md`](../../docs/operating/local-stack.md), the
-[local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md),
-and the [four-method live run](../../docs/operating/runbooks/four-method-live-run.md).
+This is the supported first-run path for a local-libvirt install. The scripts wrap the
+maintained [live-stack lifecycle](../../docs/operating/runbooks/live-stack.md), adding host
+preparation, project funding, guest-image registration, and MCP client configuration. Follow
+[this page's usage sequence](#usage) for first setup; use the live-stack runbook for service
+operation and diagnostics.
 
 ## Prerequisites
 
@@ -41,9 +35,9 @@ On a fresh Debian/Ubuntu host, `install-host.sh` does all of the host preparatio
   registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
   backends up, so run it after `up.sh`.
 - A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
-- For the **kdump capture leg only**: the worker venv must `import guestfs, drgn`. The
-  preflight (`scripts/operations/check-local-libvirt.sh`) detects the gap and prints the one-time fix;
-  see the [four-method runbook §4b](../../docs/operating/runbooks/four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
+- Local kdump capture requires drgn/libguestfs in the installed lifecycle worker environment,
+  `/opt/kdive-live-worker-lifecycle/.venv`. The lifecycle installer/host role owns that environment.
+  The checkout preflight probes `KDIVE_PYTHON`; it does not certify the installed worker's imports.
 
 `up.sh` runs the preflight first and stops with an actionable message if anything is
 missing. The kdump-only `guestfs`/`drgn` check is the one exception: `up.sh` runs the preflight
@@ -71,6 +65,8 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 ## Usage
 
 ```bash
+KDIVE_CHECKOUT="$PWD"    # run this block from the KDIVE checkout
+
 # 0. Fresh Debian/Ubuntu host only: prepare it, then log out and back in for the groups.
 examples/local-libvirt/install-host.sh
 
@@ -87,15 +83,16 @@ export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 cd ~/src/linux            # the .mcp.json up.sh installed lives here
 # ...launch your MCP client (it connects to http://127.0.0.1:8000/mcp as Bearer $KDIVE_TOKEN)
 
-# 5. When finished, stop everything (data volumes and domains are kept):
+# 5. When finished, return to KDIVE and stop the stack (data is kept):
+cd "$KDIVE_CHECKOUT"
 examples/local-libvirt/down.sh
 examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the bucket, and kdive domains
 ```
 
 ## Fresh Debian/Ubuntu host
 
-`install-host.sh` is the scripted form of the walkthrough's Step 1 for apt-based hosts
-(validated target: Ubuntu 26.04). What it does, and why, so you can audit or redo a step:
+`install-host.sh` prepares apt-based hosts (validated target: Ubuntu 26.04). What it does, and
+why, so you can audit or redo a step:
 
 - **Packages** — the operator set: libvirt + the arch's QEMU emulator (`qemu-system-x86` or
   `qemu-system-ppc`; there is no `qemu-kvm` package on Ubuntu 26.04), libguestfs and its
@@ -186,7 +183,7 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `up.sh` refuses. |
-| `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for `python -m kdive` and the processes. |
+| `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for checkout commands, server, and reconciler; fixed workers use their installed lifecycle venv. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
 | `KDIVE_TOKEN_TTL` | `2592000` (30d) | Lifetime in seconds of the token `mint-token.sh` issues; inherited from `scripts/live-stack/env.sh`. Minimum `1`; no enforced maximum. |
 | `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack-logs` | Where the server and reconciler daemons log (workers log to their systemd units). |
@@ -218,7 +215,23 @@ with. Declaring a `staged-path` `[[image]]` (below) registers that local file in
 so `images.list` / `systems.profile_examples` surface it and the agent provisions with a
 `catalog` reference — no host `ls` (ADR-0228).
 
-If you want to declaratively pin host config, prices, or build fragments, create
+`build-image.sh` derives image architecture and capabilities from the qcow2's provenance
+sidecar. When that sidecar contains an architecture-matched inspected root specification,
+inventory reconciliation also adopts its digest without hashing the image; provisioning verifies
+the actual bytes before use ([ADR-0624](../../docs/adr/0624-bind-staged-path-catalog-to-inspected-root.md)).
+A sidecarless path remains a declaration, validated when provisioned. For an exact image binding
+using a `local` rootfs reference, supply its `sha256` digest; a matching reconciled identity can
+bind the same root authority as the catalog form. Reconciliation does not replace provenance on
+an existing System.
+
+For guest CPU pins and instruction-set requirements, use the host's advertised capabilities
+in [the resources reference](../../docs/guide/reference/resources.md) and the provisioning
+profile contract in [the systems reference](../../docs/guide/reference/systems.md). The
+[platform guide](../../docs/operating/platform-support.md) covers native KVM and foreign-arch TCG.
+Optional filesystem fixture overrides are covered by
+[installation](../../docs/operating/install.md#optional-fixture-catalog-override).
+
+If you want to declaratively pin host configuration, images, or prices, create
 `~/.config/kdive/systems.toml`. The file must start with `schema_version = 2`. The
 sections relevant to this **local-libvirt** example are below; the repo-root
 [`systems.toml.example`](../../systems.toml.example) is the full annotated reference.

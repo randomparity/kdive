@@ -1,5 +1,9 @@
 # Capability Registry, Dispatch & Plane Interfaces (M0) — Design
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 **Issue:** #13 (M0) · **Depends on:** #5 (domain models & error taxonomy —
 merged), #7 (repository layer — merged) · **Decisions:**
 [ADR-0022](../../adr/0022-capability-registry-dispatch-impl.md), refining

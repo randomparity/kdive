@@ -1,5 +1,9 @@
 # Design: System pools — first-available allocation across interchangeable resources (#561)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-19
 - **Issue:** [#561](https://github.com/randomparity/kdive/issues/561) (status:needs-design)
 - **Related:** [#395](https://github.com/randomparity/kdive/issues/395) (remote-libvirt per-op
@@ -18,7 +22,7 @@ remote boxes" vs. "the small CI box") and let an agent target one group without 
 member.
 
 The motivating case (issue comment): three already-provisioned, interchangeable remote-libvirt
-hosts (`ub26-big`, `fed44-big`, `rock10-big`) cannot even be *registered* together — the
+hosts (`sys-R3`, `sys-R4`, `sys-R5`) cannot even be *registered* together — the
 remote-libvirt provider is hard-singleton: the inventory parser rejects more than one
 `[[remote_libvirt]]` block, and the per-op connection resolver fails closed on more than one
 instance because **the per-op call path carries no resource identity** and cannot pick which

@@ -1,5 +1,9 @@
 # A reliable `just onboard` target that seeds funding and binds the project (#834)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** [#834](https://github.com/randomparity/kdive/issues/834) (Black-box review follow-up,
   `status:needs-design`).
 - **ADR:** [ADR-0256](../../adr/0256-onboard-target.md).

@@ -1,5 +1,9 @@
 # Spec — Remove dead profile-requirements + BUILD_HOST inventory/lock vestiges (#1055)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Issue:** [#1055](https://github.com/randomparity/kdive/issues/1055)
 - **ADR:** [ADR-0319](../../adr/0319-remove-dead-profile-requirements-buildhost-vestiges.md)
 - **Type:** refactor (dead-code removal), priority:low

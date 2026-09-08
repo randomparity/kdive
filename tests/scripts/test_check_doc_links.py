@@ -12,6 +12,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.host_capabilities import requires_bash
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-doc-links.sh"
@@ -90,3 +92,18 @@ def test_vendored_tool_dirs_not_link_checked(tmp_path: Path) -> None:
     skill.write_text("[x](nope.md)\n")
     result = _run(tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["filesystem", "git"])
+def test_current_architecture_is_checked(tmp_path: Path, tracked: bool) -> None:
+    architecture = tmp_path / "docs" / "design" / "top-level-design.md"
+    architecture.parent.mkdir(parents=True)
+    architecture.write_text("[missing](missing.md)\n")
+    (tmp_path / "README.md").write_text("Current project documentation.\n")
+    if tracked:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    result = _run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "top-level-design.md" in result.stderr
+    assert "missing.md" in result.stderr

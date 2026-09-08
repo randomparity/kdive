@@ -1,5 +1,9 @@
 # MCP onboarding & error-ergonomics findings
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Epic:** [#449](https://github.com/randomparity/kdive/issues/449)
 - **Work items:** [#450](https://github.com/randomparity/kdive/issues/450) (B, error detail) ·
   [#451](https://github.com/randomparity/kdive/issues/451) (A, profile discoverability) ·

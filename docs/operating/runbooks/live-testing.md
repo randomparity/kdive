@@ -97,10 +97,10 @@ into `boot_throwaway_domain(mode=…)`.
   `qemu:///session` (unprivileged, dodges the `qemu:///system` root-readback
   wall) while a snapshot test uses `qemu:///system` (the product default). The
   harness carries each test's mode rather than forcing one.
-- **Environment variables** are read in one place per family (the table above),
-  never per module. S3 *credentials* for the provisioned family are **not** env
-  vars — they are file-based under `KDIVE_SECRETS_ROOT`; the resolver checks
-  only that the endpoint + bucket env is present.
+- **Environment variables** are read in one place per family (the table above).
+  The provisioned-family fixture gate checks endpoint and bucket presence, not authentication.
+  The object-store client uses the standard boto3 credential chain, including `AWS_*` variables;
+  `KDIVE_SECRETS_ROOT` belongs to a separate secret backend. Use the [live-stack environment](live-stack.md).
 - **The session-mode QMP socket path is length-limited (108 bytes), and the
   lever is `XDG_CONFIG_HOME`.** Session-mode libvirt derives each domain's QMP
   monitor socket under `$XDG_CONFIG_HOME`, so a deep pytest tmp path overflows
@@ -109,8 +109,9 @@ into `boot_throwaway_domain(mode=…)`.
   (`prepare_session_runtime`) — a test that boots through the harness need not
   manage it. (Separately, the self-hosted runner keeps `XDG_RUNTIME_DIR` short
   for the session libvirt daemon's own socket; see its runbook.)
-- **libvirt runs as modular daemons** (`virtqemud` / `virtnetworkd`), not the
-  monolithic `libvirtd`.
+- **Daemon layout follows the host distro.** The supported Debian/Ubuntu lifecycle host
+  uses monolithic `libvirtd`; Red Hat-family hosts use modular `virtqemud`. Use the
+  endpoint published by host provisioning rather than assuming either layout.
 - **Guest confinement is named per environment.** Under **system mode** on the
   RHEL-family self-hosted runner, staged images must be relabeled SELinux
   `virt_image_t`; under system mode on an Ubuntu host, AppArmor's `libvirt-qemu`
@@ -244,18 +245,18 @@ guest image, plus the per-family env above. Standing up the host reproducibly �
 including the short session-runtime paths, the warm image store, and both boot families under
 `qemu:///session` — is the
 [self-hosted KVM runner runbook](self-hosted-kvm-runner.md); the ppc64le
-(POWER) north-star host is the [POWER host bring-up runbook](power-host-bringup.md).
+(POWER) host prerequisites are in the
+[cross-platform guide](../../development/cross-platform.md#native-power-host-integration).
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host
 dependency for one of these: declare it in the owning Ansible role in the same
 change, or the next clean runner reprovision breaks (see the cross-platform and
 provisioning-parity notes in [AGENTS.md](../../../AGENTS.md)).
 
-The dormant external-boot authority host is not a fourth live-test tier and does not supply a
-provider adapter. Its one-shot readiness, journal-restoration, request-socket, and mutual-TLS
-diagnosis are owned by the [self-hosted KVM runner runbook](self-hosted-kvm-runner.md#dormant-external-boot-authority-diagnosis).
-Keep the current fixed-worker provider/KVM path for these tests; capability advertisement remains
-disabled until #2140.
+External-boot authority operations are an opt-in provider path, not another live-test tier.
+Read the [authority setup and diagnosis](self-hosted-kvm-runner.md#external-boot-authority-diagnosis)
+for its local mutation enablement, readiness, journal, socket, and mutual-TLS prerequisites.
+Use the applicable carrier below only after its authority and fixture contract is configured.
 
 ### `live_vm_remote` — direct provider ops against a remote `qemu+tls://` host
 
@@ -319,6 +320,32 @@ stack; it skips cleanly (pytest exit 5 tolerated) without either. Because TCG
 needs no `/dev/kvm`, this is the tier that runs on a hosted `ubuntu-latest`
 runner. The ppc64le prerequisites and container images are in the
 [cross-platform guide](../../development/cross-platform.md).
+
+### ppc64le spine on native POWER
+
+The ppc64le proof drivers also run on a native POWER host: `expected_accel` selects KVM when
+native `/dev/kvm` is present, otherwise TCG. Bring up the managed host stack with the
+[live-stack runbook](live-stack.md), using the
+[POWER prerequisites](../../development/cross-platform.md#native-power-host-integration).
+Backends alone are insufficient; server, worker and reconciler must be running at the revision
+under test.
+
+The four drivers in `tests/integration/test_live_stack.py` need
+`KDIVE_GUEST_IMAGE_PPC64LE` pointing to a prepared ppc64le qcow2. The uploaded-kernel drivers
+also need `KDIVE_PPC64LE_BUNDLE`, a directory containing `kernel.tar.gz` and `initrd.img`.
+The tar contains the ppc64le ELF at `boot/vmlinuz` and matching `lib/modules/<version>/`;
+the initramfs must match that kernel. See the
+[recorded bundle proof](../../design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md) for the
+artifact shape, and the [external-build contract](../external-build-upload.md) for current
+requirements. Image preparation belongs to [image lifecycle](image-lifecycle.md).
+
+With these fixtures and the live-stack environment configured, run `just test-live-tcg`.
+The marker name does not force emulation; the expected accelerator is resolved from the host.
+Report which drivers passed or skipped. The fadump driver skips non-ppc64le hosts; for its
+intended native proof, also confirm KVM is selected and the fadump prerequisites are met.
+A skip is not capture evidence. The
+[platform support page](../platform-support.md#crash-capture-methods-by-arch) records the dated
+capture proofs and their limits.
 
 ## The shared harness
 
@@ -394,11 +421,11 @@ Traps this run hit, in the order they bite:
   holds. Each needs a second fetcher that exists at the same moment. To reach
   them, run the [fetch-lock contention arm](#fetch-lock-contention-needs-two-workers)
   below, which needs a second worker process.
-- **The catalog images are too big to upload as-is.** They are 6 GiB virtual,
-  over the 5 GiB single-PUT cap, so a declaration is rejected at
-  `artifacts.create_investigation_upload`. `qemu-img convert -O qcow2 <src> <dst>`
-  yields a ~1.9 GiB compact copy that exercises the identity lane. Uploading the
-  original requires the gzip transport lane instead.
+- **Compare the uploaded file's byte size with the single-PUT cap.** A qcow2's virtual
+  disk capacity is not its stored file size. Measure the file you will PUT; if it exceeds
+  the limit, use the gzip transport described by `artifacts.create_investigation_upload`.
+  A compressed upload must itself fit the PUT limit. See the
+  [artifact guide](../../guide/toolsets/artifacts.md).
 - **A multi-kernel rootfs needs a `baseline_kernel` hint.** `fedora-kdive-ready-43`
   carries two kernels, so direct-kernel boot is `not_provisionable` until the
   profile names one (bare version, e.g. `6.18.5-200.fc43.x86_64`).
@@ -573,7 +600,7 @@ build-stamped identically): all three rows pass.
 
 | | Observed |
 |---|---|
-| Claim | Both provision jobs held by different workers — `jobs.worker_id` read `homer…:1194523` and `homer…:1194534`, the two live worker pids. (Their `heartbeat_at` was read after both jobs had finished, so it is a last-heartbeat time, not a claim time; the distinct `worker_id` values are the assertion, and the lock timings below are what bound the overlap.) |
+| Claim | Both provision jobs held by different workers — `jobs.worker_id` read `sys-R1…:1194523` and `sys-R1…:1194534`, the two live worker pids. (Their `heartbeat_at` was read after both jobs had finished, so it is a last-heartbeat time, not a claim time; the distinct `worker_id` values are the assertion, and the lock timings below are what bound the overlap.) |
 | Lock | `18:13:37.009654` pid 244 takes `(classid, objid) = (486701297, 24917193)`, `granted=t`; 237 µs later pid 245 blocks on the same key, `granted=f`, `wait_event_type=Lock`, `wait_event=advisory` |
 | Download | One `s3.GetObject` for the rootfs key, `18:13:37.015`→`18:13:39.545`, `200 OK`, ↓ 1.4 GiB in 2.53 s. The whole trace holds exactly one `GetObject` and one `HeadObject` for that key |
 | Teardown | `investigations.close` with `force`, then the sweep at `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS=0`: `reclaim_investigation_rootfs` reached `succeeded`, and the staging dir, the object, and the `artifacts` row are gone with `rootfs_cleanup_pending_at` cleared |
@@ -588,9 +615,13 @@ One limit to record: the ADR-0482 skew preflight probes one worker. Its URL set 
 built from the registered per-process ports, so workers 2..N are outside it and a
 `fresh` verdict grades only worker 1 — tracked in
 [deferral record 0002](../../debt/0002-skew-preflight-probes-one-worker.md). On a
-multi-worker stack, read the `=== build stamps ===` block instead: it prints a row
-per worker log and a live worker count in its header, so a row without a live
-worker behind it is visible as a stale log rather than read as a graded process.
+multi-worker stack, run `scripts/live-stack/worker-lifecycle.sh diagnostics` from the
+configured KDIVE checkout and inspect each retained slot's invocation. See the
+[lifecycle command limits](../../../scripts/live-stack/README.md) and the
+[installed host contract](../../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract).
+The host script's build-stamps block grades only server/reconciler logs; it is not a
+per-worker freshness proof. The measurements above describe that dated experiment's
+workers and logs, not the current slot identity contract.
 
 ## Hard-won quirks
 
@@ -625,7 +656,7 @@ worker behind it is visible as a stale log rather than read as a graded process.
 - [ADR-0387 — self-hosted KVM runner host codification](../../adr/0387-selfhosted-kvm-runner-host-codification.md)
 - [ADR-0441 — investigation-scoped uploaded rootfs](../../adr/0441-investigation-scoped-uploaded-rootfs.md)
 - [ADR-0442 — reclaim the investigation rootfs via a worker job](../../adr/0442-rootfs-reclaim-worker-job.md)
-- [live-stack runbook](live-stack.md) · [self-hosted KVM runner](self-hosted-kvm-runner.md) · [POWER host bring-up](power-host-bringup.md) · [four-method live run](four-method-live-run.md)
+- [live-stack runbook](live-stack.md) · [self-hosted KVM runner](self-hosted-kvm-runner.md) · [POWER host integration](../../development/cross-platform.md#native-power-host-integration) · [four-method live run](four-method-live-run.md)
 # External-boot recovery capacity
 
 Each fixed worker has `KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES`, measured in bytes per

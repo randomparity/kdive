@@ -1,12 +1,16 @@
 # Design — M2.1 Deployment & packaging
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-10
-- **Owner:** D. Christensen (single accountable owner for the milestone, per the band design)
+- **Owner:** KDIVE maintainer (single accountable owner for the milestone, per the band design)
 - **Milestone:** [#13 — M2.1 Deployment & packaging](https://github.com/randomparity/kdive/milestone/13)
 - **Band:** Productionization & operability (M2.1–M2.4), see
   [the band design](2026-06-10-m2x-productionization-band-design.md)
-- **ADRs:** [0087](../../adr/0087-config-registry.md) (central config registry),
-  [0088](../../adr/0088-deployment-packaging.md) (deployment & packaging)
+- **ADRs:** [0087](../../../adr/0087-config-registry.md) (central config registry),
+  [0088](../../../adr/0088-deployment-packaging.md) (deployment & packaging)
 - **Status:** approved for planning
 
 ## Problem

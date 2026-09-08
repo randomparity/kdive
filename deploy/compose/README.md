@@ -1,4 +1,4 @@
-# Reference compose — app tier (ADR-0088)
+# Running KDIVE with Docker Compose
 
 The repo-root [`docker-compose.yml`](../../docker-compose.yml) brings up the three kdive
 processes (`server` / `worker` / `reconciler`) plus a `migrate` one-shot, on top of the
@@ -6,16 +6,35 @@ existing dev backends (Postgres, MinIO, mock OIDC). Everything is wired purely t
 `KDIVE_*` (see the [config reference](../../docs/guide/reference/config.md)); the shared
 backend env is declared once as the `x-backends` anchor and merged into each service.
 
-This is a dev/demo reference, not a production deployment. It runs the app tier from the
-image built by the repo [`Dockerfile`](../../Dockerfile) (`image: kdive:dev`).
+This is a dev/demo deployment with fixed local credentials. The default app image is built
+from the repo [Dockerfile](../../Dockerfile) (`kdive:dev`). Before first use, complete the
+[source setup](../../docs/operating/install.md#from-source); the lifecycle recipes need the
+checkout's Python environment as well as Docker Compose.
+
+## Capture publication protocol 4
+
+Start this release with a new empty Postgres database and a new versioned object-store bucket
+or namespace. Migration 0113 refuses existing worker, job, capture-operation, or artifact rows.
+KDIVE has no migration, cutover, rollback, preservation, inspection, or cleanup path for
+protocol-3 state or objects. Do not copy an old anonymous-volume database into this deployment.
+Use a separate Compose project for a fresh stack, with non-conflicting published ports; retain
+old state separately if it is needed.
+
+Before readiness and job claims, each worker probes the store with concurrent conditional
+creates, verifies one winner and one precondition failure, deletes the exact probe version,
+and confirms absence. Correct store versioning or conditional-create behavior if the probe
+fails; use `just compose-recreate-worker` to retry after correcting the cause.
 
 ## Bring-up
 
 The dependency graph is self-contained, so a single `up` brings the whole stack. The checked-in
 passwords below are allowlisted for local development only; never reuse them in a
 production deployment. Postgres, MinIO, and the mock OIDC issuer bind `127.0.0.1` by default
-(ADR-0554), so they are reachable on `localhost` only. Use a full `ADDR:PORT` override
-(e.g. `KDIVE_POSTGRES_PORT=0.0.0.0:5432`) to expose a backend on another interface.
+(ADR-0554), so they are reachable on `localhost` only. The backend port variables accept an
+`ADDR:PORT` host mapping. Exposing the fixed-credential backends is an explicit operator choice. If `KDIVE_POSTGRES_PORT` includes an address, also set
+`KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` to a valid witness DSN with a reachable host and numeric
+port: the recipe's default DSN interpolates the port variable and cannot parse `ADDR:PORT` there.
+The MCP host port is selected separately by `KDIVE_HTTP_PORT` and is not loopback-only by default.
 
 ```bash
 just compose-up   # builds the image, runs the backends + migrate, then gates the worker
@@ -27,8 +46,7 @@ volumes after recording worker termination; `just compose-down` removes named vo
 destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
 artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
 Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
-`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too. Those
-are the only supported paths that do. Their operator-side lifecycle wrapper binds the exact full container ID to a
+The operator-side lifecycle wrapper binds the exact full container ID to a
 random nonce in Postgres before start and records retained terminal inspect evidence before removal.
 Compose does not run a persistent lifecycle-witness service. Raw Compose/Docker lifecycle commands
 and host-launched workers bypass that chain and are unsupported. On a database failure, the wrapper
@@ -65,6 +83,9 @@ heartbeat begins another bounded lease, so the ceiling is not a total job-runtim
 
 ## Upgrading worker-fence authority
 
+This sequence applies only when the target release supports an upgrade. It does not bypass
+[protocol 4's fresh-resource requirement](#capture-publication-protocol-4).
+
 This three-command path is local-bootstrap-only: with `KDIVE_LOCAL_ROLE_BOOTSTRAP=1`, use
 `just compose-stop`, select the new image and configuration, then `just compose-up`. It records
 old-worker termination and preserves named volumes; the Compose graph runs the migrate one-shot and
@@ -81,7 +102,9 @@ claiming after the protocol migration, so recover forward with a current worker 
 Docker/Compose commands;
 they bypass the public lifecycle path and retain pins.
 
-`docker compose up` resolves the graph rather than relying on the operator to order it:
+## Startup ordering and recovery
+
+The lifecycle wrapper resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
 (which itself waits for a healthy MinIO), the OIDC issuer, and the `migrate` one-shot. They
 declare `depends_on: migrate` with `condition: service_completed_successfully`, so they
@@ -89,8 +112,19 @@ never reach the database before the schema is rolled forward (ADR-0088 decision 
 non-zero `migrate` exit blocks app start. The bucket-creation one-shot completes before any
 app process starts, so the worker's first artifact write never races a missing bucket.
 
-The image is built once from the repo `Dockerfile` via the `migrate` service's `build: .`
-and reused by the others. Pre-build it explicitly if you prefer:
+The bucket initializer enables bucket-wide versioning and requires `Enabled`, MFA Delete off,
+and no prefix/folder exclusions. An external replacement needs the same policy and runtime
+permissions, including `s3:GetObjectVersion`; follow the
+[object-store preflight](../../docs/operating/install.md#object-store-preflight).
+
+The three app processes acquire their first database connection with a ten-second timeout after
+startup initialization. If acquisition fails, read the error and preceding `psycopg.pool` warning
+for the database, credential, or network cause. App services and backends use `restart: on-failure`
+to retry failures; `migrate`, `role-bootstrap`, and `minio-init` are one-shots. After a Docker daemon
+restart, explicitly run `just compose-up`; `on-failure` does not bring the stack back on reboot.
+
+The `migrate` service defines the shared app image build; `KDIVE_IMAGE` selects an alternative
+image reference. To pre-build the default image:
 
 ```bash
 docker build -t kdive:dev .
@@ -144,6 +178,9 @@ volume on every `up`), so stopping the container drops the history.
 
 ## Driving an authenticated request
 
+Connect the client to `http://localhost:8000/mcp` (adjust the mapped host/port), and send
+`Authorization: Bearer <token>`. A bare token without the `Bearer ` prefix is rejected.
+
 The mock OIDC issuer derives a token's `iss` claim from the URL it is minted through. The
 in-network server validates against `KDIVE_OIDC_ISSUER=http://oidc:8080/default` (the
 issuer's address *inside* the compose network), so a token minted from the host via the
@@ -166,57 +203,39 @@ just compose-down   # records worker termination, then removes named volumes
 
 ## Image provenance — verify before you run a published image
 
-This reference builds the image locally (`image: kdive:dev`). When you instead pull a
-**published** image from `ghcr.io/randomparity/kdive`, verify its signature first. The
-[`release-image`](../../.github/workflows/release-image.yml) workflow signs each released
-digest keyless/OIDC on a SemVer tag and attaches an SBOM (ADR-0088 decision 8), so a
-consumer can confirm the image was built by this repo's release workflow before trusting it.
+The default image is built locally. Before using a published image, follow the
+[release-image verification instructions](../../docs/development/releasing.md#container-image-publishing).
+They own signature identity, image tags, SBOM, and provenance checks. Git release tags use
+`vX.Y.Z`; the corresponding container tag is `X.Y.Z`.
 
-Install [cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then verify
-the tag you intend to run:
+## Using the stack as a test backend
 
-```bash
-cosign verify ghcr.io/randomparity/kdive:vX.Y.Z \
-  --certificate-identity-regexp '^https://github.com/randomparity/kdive/' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
-
-The identity regexp pins the signer to a workflow in this repository and the issuer pins it
-to GitHub's OIDC provider; a signature from any other identity or issuer fails the check.
-
-The SBOM and provenance are attached by BuildKit (`docker/build-push-action` `sbom: true`,
-`provenance: mode=max`) as in-toto **attestations** referring to the image index — distinct
-from the image signature `cosign verify` checks. Inspect them with `buildx imagetools`:
+Tests can use the Compose Postgres and MinIO through explicit overrides:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/randomparity/kdive:vX.Y.Z \
-  --format '{{ json .SBOM }}'        # or '{{ json .Provenance }}'
+export KDIVE_TEST_PG_URL=postgresql://kdive:kdive@localhost:5432/kdive  # pragma: allowlist secret
+export KDIVE_TEST_S3_URL=http://localhost:9000
 ```
 
-## Local lifecycle scripts (this dev host)
+Those are the checked-in local admin credentials. For another server, provide a dedicated test
+admin DSN that can create/drop test databases and run their migrations. S3 credentials default
+to local `minioadmin`; override `KDIVE_TEST_S3_ACCESS_KEY` and `KDIVE_TEST_S3_SECRET_KEY` when needed.
+Adjust endpoints to the published ports. Never point test overrides at a production backend.
 
-For a hand-rolled local stack (host-run server/reconciler/worker against compose backends),
-use the lifecycle scripts under `scripts/live-stack/`. They self-elevate with `sudo` for the
-root worker and libvirt, so run them via the `!` prefix in the agent or directly in a shell:
+Each worker gets a unique `kdive_test_<worker>_<token>` database and
+`kdive-test-<worker>-<token>` bucket. A crashed run can leave both on this persistent backend.
+Once no test runs use it, remove only the identified abandoned test databases and buckets, or
+use `just compose-down` if the entire Compose project's state is disposable. Do not apply a
+wildcard force-drop while other runs may own matching names. Named volumes preserve leftovers
+across `just compose-stop`; that command does not reclaim them.
 
-- `up.sh` — full bring-up in order: backends → host migrations → libvirt → host processes →
-  status. `--skip-obs` omits prometheus/grafana; `--reset-db` runs a full `down.sh --wipe` first
-  (drops the compose data volumes AND reaps all `kdive-*` libvirt domains/overlays — live VMs
-  are destroyed); recovery from migration drift — see below.
-- `down.sh` — stop host processes + compose backends, keeping state. `--wipe` is a full reset:
-  drops the compose data volumes (`kdive-pgdata`, `kdive-minio-data`) and
-  reaps `kdive-*` libvirt domains + their `/var/lib/kdive/rootfs` overlays.
-- `status.sh` — read-only per-layer health (backends, host daemons + build stamps, server,
-  database, libvirt + provision prereqs).
+Without overrides, the fixtures share one disposable Postgres and one MinIO container per run.
+They stop on normal teardown; a later run can reap a killed run's containers using their liveness
+locks. The [fixture coordination source](../../tests/support/xdist_backend.py) owns those rules.
 
-The scripts never start the compose `kdive:dev` app tier (`migrate`/`server`/`worker`/
-`reconciler`); the host processes own that tier and `apply-migrations.sh` (current checkout) is
-the authoritative migrator.
+## Host-process local stack
 
-**Migration drift:** the ADR-0015 immutable-migration guard fires when the persisted DB's
-applied-migration history diverges from your checkout (e.g. after switching branches). `up.sh`
-aborts at the migrations step with a clear message; recover with `up.sh --reset-db`.
-
-**Grafana:** `up.sh` brings up Grafana (obs profile) at http://localhost:3000 with the
-kdive-overview dashboard auto-provisioned against Prometheus. Anonymous access is enabled for
-local convenience only.
+For host processes against Compose backends, use the
+[live-stack runbook](../../docs/operating/runbooks/live-stack.md). It owns the lifecycle scripts,
+worker accounts, migrations, diagnostics, and reset behavior for that deployment. Keep one app
+tier active against a given database; do not mix it with this container app tier.

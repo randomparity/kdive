@@ -67,8 +67,8 @@ enforcement path. The behavior stays demo-only and clearly non-production.
     ⇒ `frozenset()`.
   - `aud` must include `kdive` (config `KDIVE_OIDC_AUDIENCE: kdive`, asserted today by
     `test_bundled_oidc_pins_audience_kdive`). `sub` must be a non-empty string.
-  - A project granted in `roles` / referenced in `projects` is only *useful* (passes
-    `require_role`, not just membership) if the project has a budget/quota row. The
+  - Project membership and the required role authorize project actions. Allocation
+    admission additionally requires budget/quota rows. The
     demo project seeded by `kdive seed-demo` defaults to **`demo`**
     (`__main__.py:_add_seed_demo_arguments`), so the default token's project must be
     `demo` to align the grant with the seeded budget/quota.

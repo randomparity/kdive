@@ -1,9 +1,13 @@
 # Agent-facing tool guide: layered docs generated from the registry
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-05
 - **Status:** Proposed
-- **ADR:** [`../../adr/0047-agent-facing-tool-guide-generation.md`](../../adr/0047-agent-facing-tool-guide-generation.md)
-- **Top-level design:** [`../../specs/top-level-design.md`](../../specs/top-level-design.md)
+- **ADR:** [`../../adr/0047-agent-facing-tool-guide-generation.md`](../../../adr/0047-agent-facing-tool-guide-generation.md)
+- **Top-level design:** [`../../specs/top-level-design.md`](../../../design/top-level-design.md)
 
 ## Problem
 

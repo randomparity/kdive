@@ -860,7 +860,7 @@ def _ppc64le_reachability_preflight() -> tuple[OidcIssuer, str, str, str]:
     if not image or not Path(image).exists():
         pytest.skip(
             f"{_PPC64LE_IMAGE_ENV} unset or points at a missing file; publish the Fedora ppc64le "
-            "rootfs (see docs/design/2026-07-13-ppc64le-fixture-live-proof-1144.md §4) and set "
+            "rootfs (see docs/operating/runbooks/image-lifecycle.md) and set "
             f"{_PPC64LE_IMAGE_ENV} to its path"
         )
     tree = os.environ.get(_KERNEL_TREE_ENV)

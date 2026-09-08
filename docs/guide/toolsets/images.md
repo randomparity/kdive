@@ -1,87 +1,52 @@
 # images toolset
 
-A system provisions from a base **image** — the guest rootfs (and its baked toolchain). The
-image you pick decides what the guest can do out of the box, so choose it before you
-provision: a multi-kernel or non-kdump image can burn an allocation on a capability the run
-needs. A capability signal that reads `unverified` is not a failure — it is the honest state for
-an externally-baked image no one has characterized yet (see the `direct_kernel` note below).
-Reach for these to pick an image and read its capabilities first. For exact parameters,
-types, and return schema, read each tool's own description.
+Choose the guest rootfs before provisioning. Catalog metadata helps select a suitable image;
+it does not prove that your kernel, guest, and provider will support an operation together.
+Read each tool's schema for arguments and returned fields.
 
-## Picking an image
+## Choose and inspect
 
-- `images.list` — the RBAC-filtered catalog view. Each row carries enough to **compare images
-  on merit in one call**, so you rarely need an `images.describe` per candidate:
-  - `capabilities` — the build-fact tags baked into the image. Match the tag to the job:
-    `kdump` for crash/vmcore work, `drgn`/`agent` for live introspection, `ssh` for guest
-    access, `build` for a kernel-build host. A tag means the tooling is present, not that a
-    feature is live end to end (that is what the signals below verify).
-  - `os` — the verified base OS identity (`id`, and `version_id` when known), read from the
-    built image itself. Use it to match the target distro/release.
-  - `default_kernel_version` — the kernel the image ships and boots by default (`""` when
-    unknown). Use it to know what version you are starting from before building your own.
-  - `has_kernel_config` — `true` when the image offers a downloadable `/boot/config-<ver>`
-    starting point, `false` when it has none. Check it before calling `images.kernel_config`:
-    a `false` row has no config to fetch, so that call would fail.
-  - `description` — an optional operator-attested hint about what an image is for. Advisory
-    context only, never a capability guarantee — verify with the signals below.
-  Do not just reuse the image named in a `systems.profile_examples` example: that one is picked
-  by declaration order, and the example's `selection_note`/`available_images` say so.
-- `images.describe` — the full detail for one image: boot layout, `package_versions`, `os`,
-  `description`, and the computed `capability_signals`. **Call this before `systems.provision`.**
-  Three signals matter most:
-  - `kdump` — whether the image can capture a vmcore for a target kernel (the crash-triage
-    path depends on it).
-  - `direct_kernel` — `provisionable` only when `/boot` holds exactly one non-rescue kernel;
-    a multi-kernel image reads `not_provisionable`, so a direct-kernel provision would fail
-    closed. Read it first so a multi-kernel image does not waste an allocation.
-  - `live_drgn` — `capable` only when the image's shipped drgn is new enough to introspect a
-    booted kernel from the guest's own in-guest BTF (`/sys/kernel/btf`); an image on an older
-    drgn reads `incapable`. Read it before provisioning for live introspection so an image whose
-    drgn cannot see the kernel does not waste an allocation.
+Use `images.list` to compare visible images by architecture, capability tags, OS, default
+kernel, description, and `has_kernel_config`. Profile examples select an image by declaration
+order; inspect their `selection_note` and `available_images` before adopting the example.
 
-  A signal reads `unverified` when its operand was never recorded — the **normal, honest state**
-  for an externally-baked (`s3`) or operator-staged image that no one has characterized. It is not
-  a defect and does not block provisioning; it just means the pre-check cannot answer yet. The
-  check becomes actionable once the operand is recorded — either KDIVE built/published the image,
-  or the operator **attested** it in `systems.toml` (`[image.attested]`). When an operand is
-  present, `basis` says how it is known: `build_verified` (a KDIVE build) or `operator_attested`
-  (an operator claim kdive did not verify, also flagged by `provenance_attested`).
-- `images.kernel_config` — a short-lived download URL for the image's own `/boot/config-<ver>`.
-  Use it as a **known-good starting `.config`** when you build a kernel locally: it already
-  boots this image. kdive never validates the config you build from it. Call it only for an image
-  whose `has_kernel_config` is `true`; an image with no offered config returns
-  `kernel_config_unavailable`.
+Use `images.describe` for the selected image's package versions, boot layout, and computed
+`capability_signals`:
 
-## debug vs build images
+| Signal | What the recorded evidence establishes |
+| --- | --- |
+| `kdump` | Whether the recorded makedumpfile version and tooling support the target kernel. Guest crash-capture configuration is still required. |
+| `direct_kernel` | Whether the recorded non-rescue kernel count is exactly one, so direct-kernel provisioning can select a baseline kernel. |
+| `live_drgn` | Whether the shipped drgn supports introspection from guest BTF. The running kernel must still provide usable type information. |
 
-The families ship two rootfs flavors for different jobs:
+`unverified` means the signal lacks usable evidence; it neither proves readiness nor diagnoses
+a broken image. A present operand's `basis` distinguishes `build_verified` from
+`operator_attested`; an operator claim is not a KDIVE verification. Read each signal's status
+and note rather than treating a capability tag as an end-to-end guarantee.
 
-- a **debug/guest** image carries the in-target crash and introspection toolchain — `crash`,
-  drgn, `kdump-tools`/`makedumpfile`, and `openssh-server` — for booting the kernel under test
-  and inspecting it.
-- a **build-host** image carries the kernel-build toolchain (compiler, `make`, headers,
-  `pahole`). You build kernels locally and upload them (see
-  the build lane, resource://kdive/docs/operating/external-build-upload.md), so this flavor is
-  only useful as a
-  ready-made toolchain guest, never as a platform build target.
+When `has_kernel_config` is true, `images.kernel_config` returns a download URL for the image's
+recorded kernel config. Use it as a starting point for your own build, then check the requirements
+of your target kernel and boot method at resource://kdive/docs/operating/external-build-upload.md.
+Without an offered config, the tool returns `kernel_config_unavailable`.
 
-`images.describe`'s `package_versions` shows what a given image actually baked in.
+## Guest tools and catalog management
 
-## Extending an image at runtime
+Debug/guest and build-host images serve different purposes; inspect `package_versions` for
+what the selected image contains. KDIVE consumes externally built kernels. A build-host image
+can provide your build environment, but it does not enable a platform build service.
 
-You do **not** need a bespoke image for every missing tool. Once a system is ready you have
-root in the guest and the guest package manager is yours — install what the run needs at
-runtime (`apt install trace-cmd`). See "The guest is yours" in the investigation index. Pick
-the closest base image, then extend it live.
+For additional guest packages, first establish SSH access and check network and disk availability.
+Local-libvirt guests have no outbound egress by default; remote guest networking is operator
+configured. Follow resource://kdive/docs/guide/toolsets/systems.md instead of assuming package
+installation is available. Live introspection prerequisites are at
+resource://kdive/docs/guide/toolsets/introspect.md.
 
-## Managing the catalog (operator)
+Catalog mutations have different roles:
 
-These change the catalog and are gated to operators/admins:
-
-- `images.upload` — register a quarantined upload as a project-private image.
-- `images.publish` — enqueue an image build job that publishes the built image to the catalog.
-- `images.delete` — delete a project-private image.
-- `images.extend` — re-arm a private image's retention `expires_at` (break-glass); this
-  extends the image's *lifetime in the catalog*, not its installed packages.
-- `images.prune_expired` — force the expired-private-image retention sweep now.
+- `images.upload` registers a quarantined project-private image; `images.delete` removes one.
+  Both require the owning project's operator role.
+- `images.publish` builds and publishes a public base image through a job; it requires
+  `platform_operator`.
+- `images.extend` changes a private image's retention deadline; `images.prune_expired` runs
+  the expired-private-image sweep. Both require `platform_admin`. Extending retention does
+  not install packages or extend an Allocation.

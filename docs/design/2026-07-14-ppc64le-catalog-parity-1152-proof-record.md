@@ -1,5 +1,9 @@
 # Proof record — ppc64le catalog parity + customization-boot hardening (#1152)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 Date: 2026-07-14
 Issue: #1152 · Epic: #1139 · Spec: `2026-07-14-ppc64le-catalog-parity-1152.md`
 ADRs: 0350 (catalog parity), 0351 (repack ext4 fsck-compat)

@@ -35,17 +35,8 @@ When the build host and the target differ you are **cross-compiling**: set `ARCH
 match, a native build needs neither. Either way, the `boot/vmlinuz` format is decided by the
 **target** arch, not the build host.
 
-## What differs by architecture
-
-| `arch` | `boot/vmlinuz` must be |
-|---|---|
-| `x86_64` | the **bzImage** (`arch/x86/boot/bzImage`), renamed |
-| `ppc64le` | the **stripped ELF `vmlinux`** (powerpc has no bzImage) |
-
-The per-install kdump `crashkernel` defaults, when a System gives no override, are
-`512M on ppc64le, 256M on x86_64` (each arch's value is also stated in its section below).
-Everything else about the upload — one combined gzip tar, the module tree, member order — is the
-same across arches (see the last section).
+The per-install kdump defaults, unless the System overrides them, are
+`512M on ppc64le, 256M on x86_64`.
 
 ## x86_64
 
@@ -83,21 +74,3 @@ kernel debugging or offline vmcore analysis. It just does not go in the boot mem
 - kdump `crashkernel` default: `512M` (POWER's kdump floor is roughly double x86, so the kdump
   kernel does not OOM before `makedumpfile` runs).
 - Cross-building from x86 uses `ARCH=powerpc CROSS_COMPILE=powerpc64le-linux-gnu-`.
-
-## Same for every architecture
-
-These rules do not vary by arch — only the `boot/vmlinuz` payload above does:
-
-- **One combined artifact named `kernel`:** a single gzip tar holding `boot/vmlinuz` plus the
-  `lib/modules/<release>/` tree. There is no separate `modules` upload.
-- **gzip specifically** — a plain `.tar`, `.tar.xz`, or `.tar.zst` is rejected.
-- **`boot/vmlinuz` first** — validation scans at most the first 128 MiB of *decompressed*
-  output (a gzip-bomb guard), so the `lib/modules` header must fall within it; list the boot
-  image before the module tree.
-- **At least one real module** — a `*.ko`, `.ko.xz`, `.ko.gz`, or `.ko.zst` under
-  `lib/modules/<release>/`; a bare directory or a lone `modules.dep` is rejected.
-- **Drop the back-reference symlinks** — exclude the `build` and `source` symlinks
-  `make modules_install` plants under `lib/modules/<release>/`.
-
-The exact `tar` recipe that produces this layout for each arch, plus the `pigz` fast path and
-the upload flow, is in resource://kdive/docs/operating/external-build-upload.md.

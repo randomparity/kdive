@@ -1,5 +1,8 @@
 # Release-readiness: cross-platform + local-libvirt hardening — design spec
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Status: approved (brainstorming) · Date: 2026-07-15 · Target release: **v0.3.0**
 
 ## Goal

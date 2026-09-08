@@ -1,7 +1,11 @@
 # Kdump kernel-config fragment provisioning
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Date:** 2026-06-11
-- **ADR:** [`../../adr/0096-kdump-config-fragment-build-input.md`](../../adr/0096-kdump-config-fragment-build-input.md)
+- **ADR:** [`../../adr/0096-kdump-config-fragment-build-input.md`](../../../adr/0096-kdump-config-fragment-build-input.md)
 - **Milestone:** kernel-build-config provisioning
 - **Status:** Proposed
 
@@ -192,8 +196,8 @@ Unit:
   `CONFIGURATION_ERROR` naming the dropped symbol.
 - Resolver: catalog fetch returns bytes, sha256 verified; mismatch → `INFRASTRUCTURE_FAILURE`;
   unknown name → `CONFIGURATION_ERROR`.
-- Seed idempotency: re-seed identical bytes = no put, no row change; edited bytes = new
-  object_key + updated row.
+- Seed idempotency: re-seed identical bytes = no put, no row change; edited bytes overwrite
+  the same object key with new bytes/hash and update the row.
 - Both providers' `_resolve_config_ref`: accept `catalog`, accept `local`, reject other kinds;
   implicit default resolves `kdump` when config omitted.
 - `buildconfig.get`: inline content + sha256 match the seeded artifact.

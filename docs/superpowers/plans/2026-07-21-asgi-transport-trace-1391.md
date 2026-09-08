@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.14, FastMCP/Starlette ASGI, stdlib `logging`, `pytest`, `httpx.ASGITransport`.
 
-Spec: `docs/specs/2026-07-21-asgi-transport-trace-1391-design.md`. ADR: `docs/adr/0417-opt-in-asgi-transport-trace.md`.
+ADR: `docs/adr/0417-opt-in-asgi-transport-trace.md`.
 
 ## Global Constraints
 
@@ -778,7 +778,7 @@ git commit -m "docs(operating): document KDIVE_MCP_TRACE transport tracing"
 Run: `just ci`
 Expected: green. In particular `config-docs-check` (Task 1 regen), `docs-check`, and `test` must pass.
 
-- [ ] **Confirm acceptance criteria** against `docs/specs/2026-07-21-asgi-transport-trace-1391-design.md` — AC1-AC7 each map to a committed test or the config-reference regen.
+- [ ] **Confirm verification** against `docs/adr/0417-opt-in-asgi-transport-trace.md` and the committed tests, including the config-reference regeneration.
 
 ## Self-review notes
 

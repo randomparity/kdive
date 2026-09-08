@@ -1,137 +1,58 @@
-# remote-libvirt in-guest helpers (operator-provided)
+# Remote-libvirt guest helpers
 
-ADR-0082/0084/0085 specify that a remote-libvirt **base image carries operator-provided**
-in-guest helpers that the worker invokes over the qemu-guest-agent with fixed argv (never a
-shell string). kdive deliberately does **not** ship these in the running image — they are a trust
-boundary the operator owns. This directory holds **reference implementations** so a from-repo
-operator can produce a working base image with all required helpers (the MCP coverage campaign
-found the staged images and the repo both lacked them — see
-`docs/archive/reports/mcp-coverage-campaign-2026-06-13.md` F7).
+Remote-libvirt invokes these fixed guest programs through qemu-guest-agent. The operator
+installs them in the base image; KDIVE does not inject them into an already-running guest.
+The [Ansible image catalog](../ansible/README.md#image-catalog-inventorygroup_varsallyml--host_vars)
+owns automated package/helper installation. Build the image from the matching checkout and
+verify its userland before provisioning.
 
-| helper | in-guest path | plane | ADR |
-|---|---|---|---|
-| `kdive-install-kernel` | `/usr/local/sbin/kdive-install-kernel` | Install/Boot | 0082 |
-| `kdive-capture-vmcore` | `/usr/local/sbin/kdive-capture-vmcore` | Retrieve (vmcore) | 0084 |
-| `kdive-drgn` | `/usr/local/sbin/kdive-drgn` | live drgn debug | 0085/0079 |
+## Entrypoints and source owners
 
-Each helper's argv and stdout contract is matched **exactly** to the program the provider
-invokes (`lifecycle/install.py`, `retrieve/{common,kdump_capture}.py`, `debug/introspect.py`).
-All three pass `shellcheck` + `shfmt -i 2 -d` and are guarded in CI by `just lint-shell`.
+| Installed program | Operations | Provider consumer |
+| --- | --- | --- |
+| `/usr/local/sbin/kdive-install-kernel` | `install`, `boot-id`, `boot`, `kdump-status` | [remote install/boot](../../src/kdive/providers/remote_libvirt/lifecycle/install.py) |
+| `/usr/local/sbin/kdive-capture-vmcore` | `inspect`, `upload` | [remote retrieve](../../src/kdive/providers/remote_libvirt/retrieve/) |
+| `/usr/local/sbin/kdive-drgn` | `tasks`, `modules`, `sysinfo`, `run-script` | [remote introspection](../../src/kdive/providers/remote_libvirt/debug/introspect.py) |
 
-## Contracts
+The executable helpers in this directory own argv/stdout details and pass `just lint-shell`.
+When changing a helper protocol, update its provider consumer and tests together.
 
-### `kdive-install-kernel` (ADR-0082 §1)
+`kdive-install-kernel install` fetches the kernel bundle and installs a deterministic GRUB
+entry; `boot` selects that entry for one boot and starts a detached reboot. `boot-id` reads
+the guest boot identity. `kdump-status` reports reserved crash memory and whether the capture
+kernel is loaded. The provider skips that arming check for older helpers returning nonzero
+or unparseable status; absence of the check is not proof that crash capture is ready.
 
-- `install --url <presigned-get> --cmdline <cmdline> --method <method>` — curl the ADR-0081
-  gzip bundle (`boot/vmlinuz` + `lib/modules/<ver>`), install it, and **add-or-replace one
-  deterministic grub slot** ("kdive") whose kernel cmdline is `<cmdline>` verbatim. Does NOT
-  change the boot selection. `--method kdump` also enables the kdump service. Idempotent
-  (replace, not append). Exit non-zero on any failure, with the code naming whether the failure
-  is transient (below).
-- `boot-id` — print `/proc/sys/kernel/random/boot_id`.
-- `boot` — select the "kdive" slot for the **next boot only** (grub one-shot) and trigger a
-  **detached** reboot into it, atomically.
+Install exit `75` identifies a fetch failure the worker may retry with a fresh signed URL;
+missing executables, invalid input, and other failures map to `install_failure`. Older helpers
+that return `1` for every failure retain that non-retryable classification. Rebuild the image
+to update the helper behavior. See [ADR-0489](../../docs/adr/0489-guest-helper-exit-code-names-transience.md)
+for the decision history.
 
-**Exit codes (ADR-0489).** The worker maps the helper's exit code onto a failure category, and
-since ADR-0483 that category decides whether the job may be retried at all — so the code is a
-contract, not a detail:
+The capture helper's `inspect` reports core presence, checksum, size, build ID, and bounded
+dmesg evidence; `upload` sends the raw core using the signed PUT and required headers.
+A missing core is different from a failed transfer. Follow the
+[postmortem guide](../../docs/guide/toolsets/postmortem.md) for the user-facing capture flow.
 
-| exit | condition | worker category | retryable |
-|---|---|---|---|
-| `0` | success | — | — |
-| `75` (`EX_TEMPFAIL`) | `curl` **ran** and did not get the bundle — object store down, guest network unsettled, or the presigned URL expired | `infrastructure_failure` | yes — attempt 2 mints a fresh URL |
-| `1` | every `die` site: bad argv or subcommand, **curl missing or unexecutable**, `tar` extract failure, bundle contents wrong, `dracut`, `grubby`, `grub2-reboot` | `install_failure` | no |
-| any other | the exit status of an unguarded command `set -e` propagated — `install`, `rm -rf`, `cp -a`, `depmod` carry no `\|\| die` | `install_failure` | no |
+The drgn fixed reports produce JSON. `run-script <timeout>` consumes the caller's script
+from stdin and runs it under the supplied timeout. The helper explicitly selects readable
+`/sys/kernel/btf/vmlinux`; otherwise it falls back to drgn's debug-info search. Live analysis
+needs a working drgn with usable BTF or matching kernel debug information, plus the guest
+access prerequisites in the [introspection guide](../../docs/guide/toolsets/introspect.md).
+Shared report producers live under
+[`providers/shared/debug_common`](../../src/kdive/providers/shared/debug_common/).
 
-A missing `curl` is checked **before** the fetch and a shell `126`/`127` is discriminated from
-curl's own statuses, so "curl could not run" can never be reported as the retryable code. One case
-does still land on `75` while being permanent: an SELinux-**enforcing** base image confines the
-agent to `virt_qemu_ga_t`, which cannot `connect()`, and curl reports that as exit `7` exactly like
-a real connect blip. Such an install is retried and still fails — build the image permissive
-(ADR-0484); the cost is disclosed in ADR-0489's Consequences.
+## Image and network prerequisites
 
-The codes are **additive**: a worker that has learned them still meets base images built before
-this contract, which exit `1` for everything. Unrecognised codes map to `install_failure`, so an
-old image degrades to the pre-ADR-0489 behaviour rather than being misclassified — and a code the
-worker has never heard of is never assumed retryable. **A guest image must be rebuilt to carry
-the new codes**; until then its installs are classified exactly as they were before.
+Use the image-building roles to install executables, their system packages, ownership, modes,
+and labels. The install path needs fetch/archive, module, initramfs, and GRUB tools; capture
+needs its checksum/build-ID tools and configured kdump support. The actual role package lists
+and helper programs define the requirements for the selected image family.
 
-### `kdive-capture-vmcore` (ADR-0084 §2)
+Guest images use SELinux permissive mode under
+[ADR-0484](../../docs/adr/0484-guest-images-ship-selinux-permissive.md); a per-domain permissive
+rule is insufficient for all helper children. Preserve the host's separate confinement policy.
 
-- `inspect` — print **one JSON object** for the local kdump core:
-  `{"present":bool,"sha256":"<base64>","size_bytes":int,"build_id":"<hex>","dmesg_b64":"<base64>"}`.
-  `sha256` is the **base64** SHA-256 of the raw core (the value S3 signs into the presigned PUT).
-  `dmesg_b64` is byte-capped in-guest (`KDIVE_DMESG_CAP_BYTES`, default 1 MiB) so an oversized
-  ring buffer cannot exceed the guest-agent reply ceiling. `present=false` (no core) is a clean
-  exit-0 reply the worker maps to `READINESS_FAILURE`. The core is the newest
-  `/var/crash/*/vmcore` (kdump-utils default), overridable via `KDIVE_VMCORE_PATH`.
-- `upload --url <presigned-put> --header <k:v> …` — `curl --upload-file` the same core to the
-  presigned PUT, passing each `--header` through verbatim (the signed-checksum + metadata
-  headers). Non-zero exit on any curl failure → `INFRASTRUCTURE_FAILURE`.
-
-### `kdive-drgn` (ADR-0085 §5 / ADR-0079)
-
-- `tasks` | `modules` | `sysinfo` — run drgn against the **live kernel** (`drgn -k`) and print
-  **one JSON object** that the worker passes straight to
-  `debug_common.introspect.assemble_report` as the matching section. The shapes mirror the
-  worker-side `helper_tasks`/`helper_modules`/`helper_sysinfo` producers field-for-field
-  (D-state tasks bounded at 200; module name/size/refcount/used_by/state; uts +
-  boot_cmdline + online-cpu/total-page counters). A non-zero exit (drgn cannot attach — e.g. no
-  kernel debuginfo in the guest) → `DEBUG_ATTACH_FAILURE`; undecodable stdout →
-  `INFRASTRUCTURE_FAILURE`.
-
-  The embedded drgn script is kept in sync with
-  `src/kdive/providers/debug_common/{drgn_program,introspect}.py`; change them together.
-
-## Installing into a Fedora base image (gotchas the campaign hit)
-
-Copy the **whole directory** in, then for **each** helper set root ownership, mode, and SELinux
-label — `--copy-in` preserves the source file's uid/gid and a generic SELinux type, so on an
-SELinux-enforcing guest `guest-exec` then fails with a misleading `No such file or directory`
-(ENOENT, not EACCES) until you chown + relabel. `chmod` alone does not fix it. See
-`docs/archive/solutions/2026-06-13-virt-customize-copyin-selinux-guest-exec-enoent.md`.
-
-**Beyond the file label, the agent *domain* must not be confined.** The install helper does
-privileged system mutations through `guest-exec` (writes `/boot` + `/lib/modules`, runs
-`depmod`/`dracut`/`grubby`). Fedora confines the agent to `virt_qemu_ga_t`, which **cannot even
-read `/lib/modules`** — so an *enforcing* base image fails `runs.install` at the helper's
-privileged `/boot` + `/lib/modules` mutation steps right after the bundle extracts. Make the base
-image `SELINUX=permissive` (test image — the form verified end-to-end); a per-domain
-`semanage permissive -a virt_qemu_ga_t` keeps the rest enforcing but must be verified to cover the
-helper's `dracut`/`grubby` children. See the host-setup runbook §5.
-
-```bash
-HELPERS="kdive-install-kernel kdive-capture-vmcore kdive-drgn"
-args=(--copy-in deploy/remote-libvirt-guest-helpers/kdive-install-kernel:/usr/local/sbin/
-  --copy-in deploy/remote-libvirt-guest-helpers/kdive-capture-vmcore:/usr/local/sbin/
-  --copy-in deploy/remote-libvirt-guest-helpers/kdive-drgn:/usr/local/sbin/)
-for h in $HELPERS; do
-  args+=(--run-command "chown root:root /usr/local/sbin/$h"
-    --run-command "chmod 0755 /usr/local/sbin/$h"
-    --run-command "restorecon -v /usr/local/sbin/$h")
-done
-virt-customize -a fedora-kdive-remote-base-43.qcow2 "${args[@]}"
-```
-
-Base-image package prerequisites — **verify these are present; a virt-builder Fedora image does
-NOT carry `tar` by default**, and the install helper's `tar xzf` of the ADR-0081 bundle is the
-first step to fail without it (the coverage campaign hit exactly this — the failure surfaces as
-`bundle extract failed` once #386's transcript is in the `install_failure` details):
-
-- `kdive-install-kernel`: `curl`, `tar`, `depmod`, `dracut`, `grubby`, `grub2-reboot`.
-- `kdive-capture-vmcore`: `curl`, `openssl`, `python3` (the build-id note reader), and a
-  configured `kdump`/`kdump-utils` so a panic writes `/var/crash/*/vmcore`.
-- `kdive-drgn`: `drgn` plus the **running kernel's debuginfo** in-guest (drgn needs DWARF to
-  attach to the live kernel).
-
-These map onto the host-setup runbook §5 `virt-builder --install` set
-(`qemu-guest-agent,drgn,kexec-tools,makedumpfile,kdump-utils,curl,tar,openssl,python3`); add
-`kernel-debuginfo` if you intend to drive live drgn.
-
-## Object-store reachability (F8)
-
-The `install` helper curls the bundle from a presigned URL the worker mints against
-`KDIVE_S3_ENDPOINT_URL`; the `upload` step of `kdive-capture-vmcore` PUTs to a presigned URL
-minted the same way. Both URLs must be reachable **from the guest** — `http://localhost:9000`
-(the dev default) is the guest's own loopback. Set `KDIVE_S3_ENDPOINT_URL` to a control-plane
-address routable from the remote guest network, and ensure the guest can reach it.
+Signed bundle GET and core PUT URLs must be reachable from the guest. A loopback object-store
+address points back into that guest, not to the control plane. Configure the endpoint and guest
+network using the [remote-libvirt setup](../../docs/operating/providers/remote-libvirt.md).

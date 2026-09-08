@@ -1,9 +1,8 @@
 # kdive — Grafana metrics dashboard
 
-`kdive-overview.json` is a portable Grafana dashboard (Grafana 10+, schema v36) showing all 29
-operational metrics kdive emits, grouped into nine collapsible subsystem rows. It uses only
-features stable since Grafana 9 (timeseries, bar gauge, datasource templating); newer Grafana
-versions up-migrate the schema on import.
+`kdive-overview.json` is the generated operational dashboard. It groups emitted metrics by
+subsystem and uses a selectable Prometheus datasource. The generator and its coverage test
+own the panel and instrument inventory; this page owns import and scrape setup.
 
 ## Import
 
@@ -13,9 +12,9 @@ versions up-migrate the schema on import.
 
 ## What Prometheus must scrape
 
-kdive runs three processes (server, worker, reconciler), each exposing its own
-`/metrics` aux endpoint (ADR-0090 §5). Point Prometheus at **all three** — the reference
-compose stack does this under the `obs` profile:
+The portable core has server, worker, and reconciler processes, each with its own `/metrics`
+aux endpoint. Kubernetes also runs lifecycle-witness. Scrape each deployed role; the
+reference Compose stack configures its core processes under the `obs` profile:
 
     docker compose --profile obs up -d prometheus
 

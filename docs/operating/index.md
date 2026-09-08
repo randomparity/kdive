@@ -12,8 +12,8 @@ runbooks.
 | Page | What it covers |
 |---|---|
 | [Install](install.md) | Install paths, host prerequisites, and the run modes |
-| [Docker Compose](docker-compose.md) | App tier plus dev backends in one graph |
-| [Kubernetes (Helm)](kubernetes.md) | The chart for four long-running workloads and the migrate Job |
+| [Docker Compose](../../deploy/compose/README.md) | App tier plus dev backends in one graph |
+| [Kubernetes (Helm)](runbooks/kubernetes-deploy.md) | The chart for four long-running workloads and the migrate Job |
 | [systemd](systemd.md) | Running the processes as host services |
 | [Platform and architecture support](platform-support.md) | Supported arches, accelerators, and per-distro customize-boot tiers |
 
@@ -21,10 +21,8 @@ runbooks.
 
 | Page | What it covers |
 |---|---|
-| [Local libvirt](providers/local-libvirt.md) | Single-host libvirt provider prerequisites |
-| [Local libvirt walkthrough](providers/local-libvirt-walkthrough.md) | End-to-end local-libvirt setup: prepare, install, onboard, test |
-| [Remote libvirt](providers/remote-libvirt.md) | Remote libvirt host wiring and prerequisites |
-| [Remote libvirt walkthrough](providers/remote-libvirt-walkthrough.md) | End-to-end remote-libvirt setup: prepare, install, onboard, test |
+| [Local libvirt](../../examples/local-libvirt/README.md) | Host preparation, lifecycle setup, guest images, and client connection |
+| [Remote libvirt](providers/remote-libvirt.md) | Setup sequence, connection requirements, and CPU expectations |
 | [Build lane](external-build-upload.md) | The build lane: build the kernel locally and upload it (no operator-staged source tree or build host) |
 
 ## Tenancy
@@ -42,12 +40,10 @@ Step-by-step procedures for live runs and operational tasks.
 | [Live stack](runbooks/live-stack.md) | Bring up the HTTP live-stack against compose backends |
 | [Remote live stack](runbooks/remote-live-stack.md) | Live stack driving a remote libvirt host |
 | [Remote libvirt host setup](runbooks/remote-libvirt-host-setup.md) | Preparing a remote libvirt host |
-| [Four-method live run](runbooks/four-method-live-run.md) | Exercising all four crash-capture methods |
 | [Image lifecycle](runbooks/image-lifecycle.md) | Building, publishing, and pruning base images |
-| [Kubernetes deploy](runbooks/kubernetes-deploy.md) | Deploying the Helm chart to a cluster |
 | [kdivectl](runbooks/kdivectl.md) | Operating the admin CLI |
-| [Doctor exit criterion](runbooks/doctor-exit-criterion.md) | The doctor readiness check |
-| [MCP coverage campaign rerun](runbooks/mcp-coverage-campaign-rerun.md) | Re-running the MCP tool coverage sweep |
+| [Build-use recovery](../guide/reference/ops.md#opsrecover_build_use) | Pin listing and recovery after durable worker termination |
+| [Diagnostic verification](runbooks/doctor-exit-criterion.md) | Seeded-fault evidence and the limits of doctor checks |
 | [Live testing](runbooks/live-testing.md) | How to run each live test tier (`live_stack`, `live_vm`, `live_vm_tcg`) and its environment contract |
 
 ## Investigation

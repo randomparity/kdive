@@ -1,5 +1,9 @@
 # Spec — local-libvirt gdb-MI debuginfo resolver (`debug.set_breakpoint` and the symbol ops)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** #702 (M2.8 Epic B, B1 follow-up)
 - **ADR:** [ADR-0210](../adr/0210-local-libvirt-live-debug-introspection.md) §1 (anchor;
   do not re-decide — the gdbstub transport resolution and the "session-bound `debug.*` ops run

@@ -1017,6 +1017,8 @@ _JOB_HANDLE_TOOLS = frozenset(
     {
         "control.capture_traffic",
         "control.diagnostic_sysrq",
+        "control.force_crash",
+        "control.power",
         "control.watch_for_crash",
         "ops.resolve_recovery_orphan",
         "runs.release_external_boot",

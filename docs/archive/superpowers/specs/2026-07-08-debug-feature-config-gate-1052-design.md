@@ -1,9 +1,13 @@
 # Advertise debug-feature kernel-config requirements; arm only supported features — design (Spec 3 of 3)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-07-08
 - **Issue:** #1052
-- **ADR:** [0318](../../adr/0318-debug-feature-config-gate.md)
+- **ADR:** [0318](../../../adr/0318-debug-feature-config-gate.md)
 - **Scope:** Spec 3 of the three-spec build/config redesign
   ([spec 1](2026-07-08-remove-server-build-lane-design.md),
   [spec 2](2026-07-08-image-kernel-config-offer-1051-design.md)). Specs 1 and 2 are
@@ -129,9 +133,9 @@ would only duplicate what it can compute).
 
   These failures are logged (warning) but do not gate. The gate refuses **only** on a
   successfully-read, non-degenerate config whose `gate_required` clauses are provably unmet.
-  kdive does not (and per the no-validation rule cannot) verify that the uploaded `.config`
-  corresponds to the uploaded `kernel`; the fail-open bias keeps a stale/mismatched config
-  from blocking a working kernel.
+  kdive does not verify that the uploaded `.config` corresponds to the uploaded `kernel`.
+  Absent, unreadable or degenerate input does not gate. A readable, non-degenerate but
+  mismatched config can still refuse a working kernel when its required clauses are unmet.
 
 ### 4. Gate two Run-addressed seams with the config pre-check
 

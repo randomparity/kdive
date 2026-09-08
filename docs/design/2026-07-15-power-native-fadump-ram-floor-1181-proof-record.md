@@ -1,5 +1,8 @@
 # Proof record — native-POWER fadump RAM floor (#1181)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-15
 Issue: #1181 · Epic: #1139 · ADR-0363 · Prior: #1156 / ADR-0355 (native KVM-HV validation),
 #1151 / ADR-0349 (fadump opt-in)
@@ -43,7 +46,7 @@ green.
 
 ## Target host — fadump readiness confirmed live
 
-Probed 2026-07-15 over `ssh -p 2223 dave@192.168.2.8`:
+Probed 2026-07-15 over `ssh -p 2223 <REDACTED-USER>@<REDACTED-HOST-IP>`:
 
 | | |
 |---|---|
@@ -68,7 +71,10 @@ bootstrap not completed in this change.
 
 ## Repro to complete the capture (once the host is provisioned)
 
-Follow `docs/operating/runbooks/power-host-bringup.md` §0–§6 to a ready host, then §7:
+The original POWER setup procedure has been retired. For a new run, use the current
+[POWER host integration](../development/cross-platform.md#native-power-host-integration) and
+[native spine requirements](../operating/runbooks/live-testing.md#ppc64le-spine-on-native-power).
+The command below records the test selection proposed at the time of this proof:
 
 ```bash
 cd ~/src/kdive

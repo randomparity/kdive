@@ -1,5 +1,9 @@
 # Discoverable base-image volume + per-resource staged status
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#511](https://github.com/randomparity/kdive/issues/511) (feature)
 - **ADR:** [`0156`](../adr/0156-discoverable-base-image-volume.md)
 - **Companion (merged):** [#513](https://github.com/randomparity/kdive/issues/513) /

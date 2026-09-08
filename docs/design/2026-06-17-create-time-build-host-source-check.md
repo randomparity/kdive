@@ -1,5 +1,8 @@
 # Create-time build-host ↔ kernel-source compatibility check (#534)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **Status:** Draft
 - **Date:** 2026-06-17
 - **ADR:** [0157](../adr/0157-create-time-build-host-source-check.md)

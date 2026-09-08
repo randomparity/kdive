@@ -1,5 +1,9 @@
 # Reconcile the checksum-mismatch error category across the rootfs staging paths (#1523)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../README.md).
+
 - **Issue:** [#1523](https://github.com/randomparity/kdive/issues/1523) — P3 bug
 - **ADR:** [ADR-0445](../adr/0445-reconcile-checksum-mismatch-error-category.md)
 - **Amends:** [ADR-0438](../adr/0438-rootfs-transport-strip-streaming-fetch.md) §2 (the gzip

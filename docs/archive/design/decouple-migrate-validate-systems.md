@@ -1,5 +1,9 @@
 # Decouple `migrate()` + deploy-time `systems.toml` validation (#440)
 
+> **Historical record.** This preserves the original decision or dated evidence.
+> Commands, status, paths and capabilities below describe that context; they are not
+> current operating guidance. Start with the [current documentation](../../README.md).
+
 - **Archived:** the SQL-only migrate and validate-systems pieces remain relevant historical
   context, but the `seed-build-configs` hook/CLI path was removed by
   [ADR-0316](../../adr/0316-remove-server-build-lane.md) with the server-build lane and

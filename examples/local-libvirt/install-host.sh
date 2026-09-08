@@ -8,9 +8,9 @@
 #   examples/local-libvirt/install-host.sh
 #
 # Then log out and back in (the new group memberships take effect on a new login shell) and
-# continue with examples/local-libvirt/up.sh. The Fedora path is the manual Step 1 of the
-# local-libvirt walkthrough (docs/operating/providers/local-libvirt-walkthrough.md); this script
-# covers only apt-based hosts.
+# continue with examples/local-libvirt/up.sh. This script covers only apt-based hosts; other
+# hosts need the prerequisites in docs/operating/install.md and the lifecycle setup described
+# in examples/local-libvirt/README.md.
 set -euo pipefail
 
 example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,8 +32,7 @@ case " ${distro_id} ${distro_like} " in
 *" debian "* | *" ubuntu "*) ;;
 *)
   echo "install-host.sh covers Debian/Ubuntu (apt) hosts; this host reports ID=${distro_id:-?}." >&2
-  echo "Follow Step 1 of docs/operating/providers/local-libvirt-walkthrough.md instead, then" >&2
-  echo "run ./scripts/check-setup-deps.sh -y for the venv wiring." >&2
+  echo "See docs/operating/install.md for prerequisites and examples/local-libvirt/README.md for setup." >&2
   exit 2
   ;;
 esac

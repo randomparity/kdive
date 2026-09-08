@@ -17,7 +17,7 @@ driving the script via `subprocess` with PATH stubs (and `pty` for the one inter
 
 ## Global Constraints
 
-- Spec: `docs/superpowers/specs/2026-07-20-check-setup-deps-autofix-design.md`; ADR-0393.
+- Decision record: ADR-0393.
 - Guardrails (all must pass before each commit): `shellcheck scripts/check-setup-deps.sh`,
   `shfmt -i 2 -d scripts/check-setup-deps.sh`, `uv run ruff check tests/scripts/test_check_setup_deps.py`,
   `uv run ruff format --check …`, `uv run ty check`, `uv run python -m pytest tests/scripts/ -q`.

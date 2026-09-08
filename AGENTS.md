@@ -11,9 +11,9 @@ operator-configured opt-in provider; cloud, bare-metal, and PowerVM remain futur
 It is a greenfield rewrite of a single-user stdio PoC into a multi-user HTTP service.
 Python 3.14, managed with `uv`.
 
-Read `docs/design/top-level-design.md` first — it is the authoritative architecture. The
-current milestone plans are `docs/archive/plans/m0-implementation.md` and
-`docs/archive/plans/m1-implementation.md`.
+Read `docs/design/top-level-design.md` first — it is the authoritative architecture. Use
+`docs/README.md` for current learning paths. The M0/M1 plans under `docs/archive/plans/`
+are historical implementation records, not the current work queue.
 
 ## Commands
 
@@ -27,7 +27,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just lint` | `ruff check` + `ruff format --check` |
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
-| `just test` | the suite, excluding the gated `live_vm` marker |
+| `just test` | the suite, excluding `live_vm`, `live_stack`, and `agent_smoke` |
 | `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
@@ -118,16 +118,12 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 
 ## Host prerequisites
 
-- `libvirt-dev` and `python3-dev` system headers — `libvirt-python` has no wheels and
-  compiles against both the libvirt and Python headers; `uv sync` fails without them. CI
-  apt-installs them; the README lists the distro command. `drgn` and `psycopg[binary]`
-  need nothing extra.
-- `just` and `prek` must be installed before `just setup` (it can't bootstrap its own
-  runner): `uv tool install rust-just && uv tool install prek`. On arches without prebuilt
-  wheels/binaries (e.g. `ppc64le`), these plus `pydantic-core` build from source, so a
-  Rust toolchain ([rustup](https://rustup.rs)) must be on `PATH` first. `just check-deps`
-  enforces this per-arch; the [cross-platform guide](docs/development/cross-platform.md)
-  covers the `ppc64le` prerequisites, container images, and POWER stack bring-up.
+Follow the [installation prerequisites](docs/operating/install.md) and
+[cross-platform guide](docs/development/cross-platform.md) before installing `just`/`prek`
+or syncing dependencies. Normal development and the optional `live` group have different
+native requirements; POWER also needs Rust and the documented source-build prerequisites.
+`just check-deps` checks the host; it cannot install the runner that invokes it.
+
 - The db/integration tests need a reachable Docker daemon (disposable Postgres via
   testcontainers). They **skip** when Docker is absent — unless `KDIVE_REQUIRE_DOCKER=1`
   (set in CI), which turns the skip into a hard failure so a broken runner can't mask the
@@ -186,7 +182,7 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 - **server** — the FastMCP streamable-HTTP app; owns state machines, authz, admission
   control. Thin and fast; never blocks on a long provision.
 - **worker** — pulls durable jobs from the Postgres-backed queue and runs provider
-  operations. Long ops (provision/build/install/capture-vmcore) are jobs; the tool returns
+  operations. Long ops (provision/install/boot/capture-vmcore) are jobs; the tool returns
   `{job_id, status: running}` and the agent polls `jobs.*`.
 - **reconciler** — periodic drift-repair loop (ADR-0021): tears down orphaned Systems,
   fails Runs on torn-down Systems, reclaims expired leases, detaches dead DebugSessions.
@@ -200,21 +196,23 @@ PoC's flock.
 
 ### Six durable objects
 
-`Resource ──< Allocation ──< System ──< Run ──< DebugSession`, plus a cross-cutting
-`Investigation` that groups Runs across Allocations/resource kinds. Each is a Postgres row
-with an explicit state machine. Lower layers outlive higher ones; a System never outlives
-its Allocation. See the design doc's "Domain model" section for the precise lifecycles.
+Use the [domain concepts](docs/guide/concepts.md) for Resource, Allocation, System,
+Investigation, Run, and DebugSession relationships. Runs can be unbound; durable experiment
+records, leased capacity, and provider cleanup have separate lifetimes. Allocation expiry
+or release does not prove that provider cleanup has finished. The
+[current architecture](docs/design/top-level-design.md) maps these concepts to code.
 
 ### The provider runtime seam
 
-The active M0/M1 provider seam is `ProviderRuntime` typed ports (ADR-0063). Production
+The active provider seam is `ProviderRuntime` typed ports (ADR-0063). Production
 assembly happens in `providers/assembly/composition.py`, which builds a `ProviderResolver` over the
 registered runtimes. The default production resolver registers local-libvirt; fault-inject is
 a concrete test/failure-path opt-in provider; remote-libvirt is an operator-configured
 opt-in provider wired through the same resolver/runtime seam. A provider still implements
-narrow port protocols for the planes it supports (Discovery, Provisioning, Build, Install,
+narrow port protocols for the planes it supports (Discovery, Provisioning, Install,
 Connect, Debug, Control, Retrieve; Allocation is core, not a provider plane), but runtime
-code calls those typed ports directly.
+code calls those typed ports directly. Kernel compilation runs in the caller's environment;
+KDIVE consumes uploaded builds through `runs.complete_build` (ADR-0316).
 
 The old `CapabilityRegistry` / `OpContract` dispatch design now exists only in historical
 ADRs and planning records (ADR-0066 removed the in-tree prototype). It is not the current

@@ -355,7 +355,7 @@ DEPMOD_TOOLCHAIN_MISSING_FIX = (
 
 These are `CheckResult(...)` keyword arguments, not statements. The fence is `text` on purpose:
 `ruff format` rewrites Python inside Markdown fences under `docs/workflow/plans/`
-(`docs/solutions/2026-09-04-ruff-format-rewrites-python-in-markdown-fences.md`), and it turns a
+(the Markdown formatting guidance in `CONTRIBUTING.md`), and it turns a
 bare keyword-argument fragment into tuple assignments.
 
 ```text

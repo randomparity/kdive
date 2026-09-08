@@ -1,9 +1,12 @@
 # Proof record — POWER native KVM-HV validation (#1156)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 Date: 2026-07-15
 Issue: #1156 · Epic: #1139 · Design: `2026-07-13-ppc64le-full-support.md` decision 3 · ADR-0355
 
-> **Status: NATIVE KVM-HV CONFIRMED on real POWER hardware.** On a POWER9 host (`ltcwspoon18`,
+> **Status: NATIVE KVM-HV CONFIRMED on real POWER hardware.** On a POWER9 host (`sys-P1`,
 > Ubuntu 26.04 ppc64el, `qemu-system-ppc64` 10.2, `/dev/kvm` present), a Fedora 44 ppc64le guest
 > boots end-to-end under **native KVM-HV** and the full crash→kdump→retrieve spine completes with a
 > real kdump-compressed vmcore read by drgn. This un-gates the "POWER-native proof" that the design
@@ -15,9 +18,10 @@ Issue: #1156 · Epic: #1139 · Design: `2026-07-13-ppc64le-full-support.md` deci
 
 Decision 3 of the ppc64le design gated native validation on hardware. #1156's acceptance:
 
-1. **Runbook reproducible from a clean host** — `docs/operating/runbooks/power-host-bringup.md`,
-   driven to the `check-local-libvirt.sh` "host is ready" exit criterion. Every step is a fix the
-   check emitted on a clean install.
+1. **Runbook reproducible from a clean host** — the POWER runbook used for this dated proof
+   was driven to the `check-local-libvirt.sh` "host is ready" exit criterion. That procedure
+   has since been retired; current [POWER host integration](../development/cross-platform.md#native-power-host-integration)
+   uses the installed worker contract. This does not change the proof's historical result.
 2. **Documented native run of the full spine, plus the x86_64-under-TCG direction** — below.
 3. **Any KVM-HV-vs-TCG behavioral difference folded back into code/ADRs** — the `accel=kvm`
    difference (§Results) is folded into the proofs (`expected_accel`, this branch); the ppc64le
@@ -88,6 +92,7 @@ shared four-method §4b and new POWER-specific dependencies:
 
 ## Re-proof trigger
 
-Re-run §7 of the runbook after a QEMU/libvirt/drgn bump on a POWER host, or when the fixture is
-re-captured (update the digest above and the runbook). The kdump-capture pass is the regression
-signal for native KVM-HV; a native fadump pass closes the follow-up.
+For a new proof after toolchain changes, follow the
+[current POWER development prerequisites](../development/cross-platform.md) and
+[live-testing guide](../operating/runbooks/live-testing.md). Record a new dated result with its
+own environment and fixture digest; preserve this record's original digest and outcome.

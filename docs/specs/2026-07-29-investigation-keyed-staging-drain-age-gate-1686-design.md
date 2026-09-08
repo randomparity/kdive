@@ -1,5 +1,8 @@
 # Investigation-keyed staging-drain age gate (#1686)
 
+> Historical design or proof for the dated change below. It is retained as decision evidence,
+> not as current setup or API guidance. Use the [current documentation index](../README.md).
+
 - **ADR:** [`../adr/0501-investigation-keyed-staging-drain-age-gate.md`](../adr/0501-investigation-keyed-staging-drain-age-gate.md)
 - **Issue:** #1686 — *staging-drain lane's `systems.created_at` age gate leaves a reused long-staged
   checksum unretried for up to 30 days*

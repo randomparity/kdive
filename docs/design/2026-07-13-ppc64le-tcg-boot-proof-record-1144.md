@@ -1,5 +1,8 @@
 # Proof record — live TCG boot of the Fedora ppc64le row (#1144)
 
+> Historical proof or design for the dated checkout below, not current operating instructions.
+> Use the [current documentation index](../README.md) for supported workflows.
+
 Date: 2026-07-13
 Issue: #1144 · Epic: #1139 · Spec: `2026-07-13-ppc64le-fixture-live-proof-1144.md` · ADR-0342
 
@@ -9,7 +12,7 @@ is SSH-reachable — retiring PR #1070's unverified pseries defaults.
 
 ## Environment
 
-- Host: x86_64 (`homer`), `qemu-system-ppc64` present; libvirt advertises `ppc64le` as a bootable
+- Host: x86_64 (`sys-R1`), `qemu-system-ppc64` present; libvirt advertises `ppc64le` as a bootable
   guest arch with `accel=tcg`, `emulator=/usr/bin/qemu-system-ppc64` (ADR-0338 discovery parser
   verified live).
 - Guest image: the file-injection scaffold (spec §4) of the sha256-pinned Fedora ppc64le
