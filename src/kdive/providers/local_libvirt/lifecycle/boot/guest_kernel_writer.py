@@ -57,8 +57,9 @@ _DEPMOD = "depmod"
 # part of the Debian family, and a binary planted there would run as the worker slot account
 # (User=kdive-worker-N, in kdive-live-libvirt), inheriting its authority over guest overlays.
 # These four are the contract, with no operator override for a depmod outside them (ADR-0631):
-# the value would have to reach the gated worker, and widening the gate's environment allowlist
-# to carry it is the boundary ADR-0621 narrowed.
+# the gate's allowlist admits worker settings, and an override would admit an operator-chosen
+# path the gated child then executes. A symlink into one of these is the supported answer, and
+# its target must be root-owned too -- which() takes the link and the exec follows it.
 _DEPMOD_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 # The permanent exec-side returns: the binary vanished between which() and exec, sits on a
 # noexec mount or lacks the bit (EACCES/EPERM), or is not an executable format — a partially

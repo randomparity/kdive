@@ -6,8 +6,7 @@ Accepted (2026-09-07)
 
 ## Context
 
-`_resolve_depmod`
-(`../../src/kdive/providers/local_libvirt/lifecycle/boot/guest_kernel_writer.py:113-137`)
+`_resolve_depmod` (`../../src/kdive/providers/local_libvirt/lifecycle/boot/guest_kernel_writer.py`)
 resolves `depmod` against a fixed four-directory list — `/usr/sbin`, `/usr/bin`, `/sbin`,
 `/bin` — and never through `PATH`. #2300 established that list: the live worker is exec'd by
 `deploy/systemd/bin/kdive-live-worker-gate`, which builds the child environment wholesale from
@@ -22,13 +21,20 @@ corrected evidence showed what shipping it would cost. This record settles the q
 withdrawal left open rather than leaving it as an omission (#2340).
 
 What the override would cost is a boundary, not a parameter. The value has to reach the worker
-process, and the gate exists to stop ambient values from doing that. ADR-0621 narrowed that
-boundary deliberately: a worker receives only the names the gate hands it, and
-`tests/deploy/test_live_worker_gate.py:209-261` pins the result as an exact dictionary with an
-ambient control entry (`KDIVE_LIBVIRT_RECOVERY_ROOT`) proving nothing else crosses the exec.
-Admitting a `depmod`-location name means widening `_WORKER_ENV_NAMES`, and the gated child would
-then take an operator-supplied absolute path and execute it as the worker slot account
-(`User=kdive-worker-N`), which holds authority over guest overlays.
+process, and the gate is what stops ambient values from doing that: `_worker_environment` builds
+the child environment from `_WORKER_ENV_NAMES` alone and `os.execve` installs it wholesale, so
+nothing an operator exports survives the exec. `tests/deploy/test_live_worker_gate.py:209-261`
+pins that as an exact dictionary, with an ambient control entry (`KDIVE_LIBVIRT_RECOVERY_ROOT`)
+that does not appear in it.
+
+That set is not frozen, and this record does not claim it is. ADR-0621 removed
+`KDIVE_LIBVIRT_RECOVERY_ROOT` from it and routed the setting to the authority host instead, which
+is the precedent for declining a widening rather than a rule against every one; `d4b130d5a` added
+four names the same day. What the allowlist admits is worker *settings*, whose values the worker
+reads. An override admits something different in kind: an operator-chosen absolute path that the
+gated child then executes, as the worker slot account (`User=kdive-worker-%i`) that holds
+authority over guest overlays. That difference, not the size of the set, is why this one is
+declined where those were not.
 
 The four directories are not an arbitrary list. Every one is root-owned, they are the set
 `bootstrap_elf.py` already resolves its own host tools against (`_TOOL_PATH`, line 23), and
@@ -42,6 +48,12 @@ We will not add an operator override for a `depmod` outside `/usr/sbin`, `/usr/b
 `/bin`. Those four directories are the contract for where the worker host's `depmod` must live.
 An operator whose `depmod` sits elsewhere relocates or symlinks it into one of them; that is the
 supported answer, not a workaround pending a feature.
+
+A symlink carries one condition, because the contract is root ownership rather than the path
+string: `shutil.which` accepts a link sitting in a search directory and the exec follows it, so
+the binary that runs is the target's, not the link's. The target must be root-owned too. A link
+in `/usr/sbin` pointing into a group-writable directory satisfies the search and reinstates
+exactly the exposure the four-directory list was drawn to exclude.
 
 The worker gate's environment allowlist is not widened to carry a `depmod` location, and this
 record is the reason to cite when the question is raised again. `_DEPMOD_SEARCH_DIRS` cites this
@@ -60,9 +72,11 @@ ADR so the list and its decision are one lookup apart.
   from local-libvirt module indexing until they relocate or symlink it. No such distribution is
   known to us; the failure message is what surfaces one if it exists, and a report of a real host
   that cannot satisfy the contract reopens this decision with the evidence it needs.
-- The list stays the same shape as the one `bootstrap_elf.py` uses and the one #2333 is extending
-  to `virsh`, `qemu-img`, and `virt-customize`. A per-tool override would have made this tool the
-  exception to a convention the codebase is otherwise converging on.
+- The list stays the same shape as the one `bootstrap_elf.py` uses. #2333 carries the same
+  bare-name problem for `virsh`, `qemu-img`, and `virt-customize`, and explicitly leaves open
+  whether those provider tools take this list or one of their own; nothing here decides that for
+  it. What this record fixes is that `depmod` does not get a per-tool override, whichever way
+  #2333 goes.
 - Nothing here preflights or diagnoses a missing host toolchain at worker startup (#2339), and
   nothing here declares `kmod` as a host package (#2331) — this record decides only the override
   question, and the install-time answer is owned elsewhere.
@@ -90,7 +104,10 @@ ADR so the list and its decision are one lookup apart.
   `PATH` to fall back to, so the fallback would be dead on the deployment it is meant to serve
   and live only on an ungated worker — where it would reintroduce the ambient-value path the gate
   exists to close, on the hosts least likely to notice.
-- **Leaving the question open.** judgment: the withdrawal in #2300 left the constraint in the
-  code with its reasoning spread across a comment, a test's control entry, and an abandoned
-  branch. The next operator to hit it, or the next agent asked for an override, would re-derive
-  the same argument. The cost of the record is one file.
+- **Leaving the question open, on the design spec already in the tree.** verified:
+  `../workflow/specs/2026-09-07-depmod-explicit-resolution-design.md` states the withdrawal and
+  most of the reasoning above, so the argument is not lost. It is the wrong artifact to leave it
+  in: a dated design spec records what one change decided at the time, is not what
+  `_DEPMOD_SEARCH_DIRS` can cite, and carries none of an ADR's supersede-only guarantee — which
+  is what makes "may an override be added now" answerable rather than re-arguable. The cost of
+  moving it here is one file.
