@@ -2501,6 +2501,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fail the expected-crash gdbstub probe closed on a fault
 - Bound each names= entry, and record the threat model
 - Make the names= leak assertion bite and correct four claims
+- Repoint stale ty override to retrieve/guestfs.py
+- Declare kmod in live_vm_host toolchain
 
 ### Security
 
