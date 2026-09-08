@@ -88,6 +88,7 @@ def _combined_kernel_tar(
     with_modules: bool = True,
     real_module: bool = True,
     version: str = "6.9.0",
+    module_data: bytes = b"\x7fELFmod",
 ) -> bytes:
     """A gzip combined tar: boot/vmlinuz (optional) + lib/modules/<ver>/ (optional).
 
@@ -102,7 +103,7 @@ def _combined_kernel_tar(
         if with_modules:
             _tar_add(tar, f"lib/modules/{version}/modules.dep", b"")
             if real_module:
-                _tar_add(tar, f"lib/modules/{version}/kernel/drivers/foo.ko", b"\x7fELFmod")
+                _tar_add(tar, f"lib/modules/{version}/kernel/drivers/foo.ko", module_data)
     return buf.getvalue()
 
 
@@ -608,6 +609,34 @@ def test_happy_path_kernel_only_returns_build_output() -> None:
     assert set(out.heads) == {"kernel"}
     assert store.range_calls
     assert {call[3] for call in store.range_calls} == {"test-version"}
+
+
+def test_external_boot_archive_validation_buffers_range_reads() -> None:
+    module_data = b"".join(
+        hashlib.sha256(index.to_bytes(4, "big")).digest() for index in range(32 * 1024)
+    )
+    kernel = _combined_kernel_tar(module_data=module_data)
+    assert 1024 * 1024 <= len(kernel) <= 2 * 1024 * 1024
+    store = _FakeStore(
+        {"k": kernel},
+        {
+            "k": HeadResult(
+                len(kernel), "csum", "e", last_modified=STORE_MTIME, version_id="test-version"
+            )
+        },
+    )
+
+    out = validate_external_artifacts(
+        store,
+        manifest=[ManifestEntry("kernel", "csum", len(kernel))],
+        keys={"kernel": "k"},
+        declared_build_id=None,
+    )
+
+    kernel_calls = [call for call in store.range_calls if call[0] == "k"]
+    assert out.output.kernel_ref == "k"
+    assert len(kernel_calls) <= 8
+    assert {call[3] for call in kernel_calls} == {"test-version"}
 
 
 def test_build_id_mismatch_is_build_failure() -> None:

@@ -468,18 +468,68 @@ class _RangedReader:
         self._key = key
         self._size = size
         self._offset = 0
+        self._buffer_start = 0
+        self._buffer = b""
 
     def read(self, size: int = -1) -> bytes:
-        if self._offset >= self._size:
+        if size == 0 or self._offset >= self._size:
             return b""
         length = self._size - self._offset if size < 0 else min(size, self._size - self._offset)
-        data = self._store.get_range(self._key, start=self._offset, length=length)
+        output = bytearray()
+        cursor = self._offset
+        buffer_offset = cursor - self._buffer_start
+        if 0 <= buffer_offset < len(self._buffer):
+            buffered = self._buffer[buffer_offset : buffer_offset + length]
+            output.extend(buffered)
+            cursor += len(buffered)
+        remaining = length - len(output)
+        if remaining == 0 or cursor >= self._size:
+            self._offset = cursor
+            return bytes(output)
+
+        fetch_length = (
+            remaining
+            if remaining > _RANGE_CHUNK_BYTES
+            else min(_RANGE_CHUNK_BYTES, self._size - cursor)
+        )
+        data = self._store.get_range(self._key, start=cursor, length=fetch_length)
         if not data:
-            return b""
-        if len(data) > length:
+            self._offset = cursor
+            return bytes(output)
+        if len(data) > fetch_length:
             raise _build_failure("object store range response exceeded the requested bound")
-        self._offset += len(data)
-        return data
+        if fetch_length <= _RANGE_CHUNK_BYTES:
+            self._buffer_start = cursor
+            self._buffer = data
+            data = data[:remaining]
+        else:
+            self._buffer = b""
+        output.extend(data)
+        self._offset = cursor + len(data)
+        return bytes(output)
+
+    def tell(self) -> int:
+        return self._offset
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_SET:
+            position = offset
+        elif whence == io.SEEK_CUR:
+            position = self._offset + offset
+        elif whence == io.SEEK_END:
+            position = self._size + offset
+        else:
+            raise ValueError(f"unsupported whence: {whence}")
+        if position < 0:
+            raise ValueError(f"negative seek position: {position}")
+        buffer_end = self._buffer_start + len(self._buffer)
+        if not self._buffer_start <= position <= buffer_end:
+            self._buffer = b""
+        self._offset = position
+        return position
 
 
 def _scan_external_boot_archive(
