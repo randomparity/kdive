@@ -34,6 +34,9 @@ _CONTENT_DIR = Path(__file__).parent / "_content"
 _MARKDOWN = "text/markdown"
 _JSON = "application/json"
 
+# Named so a tool response can cite this doc in ``refs`` without repeating the literal (#2342).
+AGENT_INDEX_DOC_URI = "resource://kdive/docs/guide/agent-index.md"
+
 
 @dataclass(frozen=True, slots=True)
 class DocResource:
@@ -159,7 +162,7 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         ),
     ),
     DocResource(
-        uri="resource://kdive/docs/guide/agent-index.md",
+        uri=AGENT_INDEX_DOC_URI,
         source="docs/guide/agent-index.md",
         content_file="agent-index.md",
         name="agent-index",
