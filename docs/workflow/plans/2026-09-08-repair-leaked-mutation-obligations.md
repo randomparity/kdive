@@ -18,10 +18,10 @@ Postgres via testcontainers. Design record:
 Expected implementation size: 200–280 changed lines (M) — the file map below: ~65 added lines in
 `repairs/systems.py`, ~10 in `loop.py`, and one ~185-line test module; design artifacts excluded.
 
-**Shipped: 105 lines in `repairs/systems.py`, 8 in `loop.py`, a 341-line test module.** Two
+**Shipped: 104 lines in `repairs/systems.py`, 8 in `loop.py`, a 397-line test module.** Two
 additions moved it past the estimate, both from adversarial review rather than from scope drift:
-the settle window on the teardown job's `updated_at` (a constant, a predicate disjunct, a locked
-re-read, and four test arms) and the whole-pass `ERROR` for a failed batch (one block and two
+the settle window on the teardown job's `updated_at` (a constant, a shared predicate disjunct, a
+locked re-read, and four test arms) and the whole-pass `ERROR` for a failed batch (one block and two
 test arms). The estimate is left as written so the delta stays visible.
 
 ## Global Constraints
@@ -82,8 +82,8 @@ Consumed from the existing codebase, each confirmed to exist with this signature
   is exactly what `src/kdive/jobs/handlers/system_reclaim.py:107-115` already does.
 - `kdive.domain.capacity.state.SystemState.TORN_DOWN` — value `"torn_down"`, and terminal: it has an
   empty outgoing edge set, which is why the locked re-read below checks only the job half.
-- `_ACTIVE_JOB_STATE_VALUES` — module-private tuple already defined at
-  `src/kdive/reconciler/repairs/systems.py:27`, equal to
+- `_ACTIVE_JOB_STATE_VALUES` — module-private tuple already defined near the top of
+  `src/kdive/reconciler/repairs/systems.py`, equal to
   `(JobState.QUEUED.value, JobState.RUNNING.value)`.
 - `jobs.dedup_key` is `NOT NULL UNIQUE` (`src/kdive/db/schema/0001_init.sql:166,169`) and the table
   carries the `jobs_set_updated_at` trigger (`:171-172`), so one row holds a System's whole teardown
@@ -113,8 +113,8 @@ revert it, and re-run to green.
    `::test_active_teardown_job_defers_the_repair`, parametrized over `queued` and `running`. Red
    with the `j.state = ANY(%s)` term removed: `assert 0 == 1` on the count.
 3. **A terminal-but-recent teardown job defers the repair** — the operator-cancel window of ADR-0634
-   Context. `::test_recently_terminal_teardown_job_defers_the_repair`, parametrized over `canceled`
-   and `failed`, each inserted with a fresh `updated_at`. Red with the
+   Context. `::test_recently_terminal_teardown_job_defers_the_repair`, parametrized over `canceled`,
+   `failed`, and `succeeded`, each inserted with a fresh `updated_at`. Red with the
    `j.updated_at > now() - %s` term removed: `assert 0 == 1` on the count, and the row's
    `mutation_discharged_at` is not `None`.
 4. **A teardown job terminal for longer than the settle window does not defer it.**
@@ -181,7 +181,9 @@ Expect exit 0 and no output.
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 ```
 
-Add these three module-level constants after `_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES`:
+Add these three module-level constants after `_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES`. The
+in-flight disjunct is a shared fragment rather than a second copy, because the candidate query and
+the locked re-read have to defer on the same thing:
 
 ```python
 # Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
@@ -189,15 +191,14 @@ Add these three module-level constants after `_ORPHANED_SYSTEM_TERMINAL_STATE_VA
 # does not bound the window; the teardown job's own `updated_at` does, because nothing but that
 # teardown writes it.
 _TEARDOWN_SETTLE = timedelta(minutes=15)
-# Both teardown families enqueue at `_teardown_dedup_key(system_id)`, and `jobs.dedup_key` is
-# UNIQUE, so one row carries a System's whole teardown history.
-_TEARDOWN_IN_FLIGHT_SQL = (
-    "SELECT 1 FROM jobs j "
-    "WHERE j.dedup_key = %s "
-    "  AND (j.state = ANY(%s) OR j.updated_at > now() - %s)"
-)
+# Shared, because the candidate query and the locked re-read have to defer on the same thing. It
+# contributes the active-state list and the settle window, in that order, as the last two
+# parameters of whichever query embeds it. Both teardown families enqueue at
+# `_teardown_dedup_key(system_id)` and `jobs.dedup_key` is UNIQUE, so the one row either query
+# matches carries that System's whole teardown history.
+_TEARDOWN_IN_FLIGHT = "(j.state = ANY(%s) OR j.updated_at > now() - %s)"
 _LEAKED_MUTATION_CANDIDATES_SQL = (
-    "SELECT DISTINCT o.system_id AS system_id "
+    "SELECT DISTINCT o.system_id "
     "FROM remote_module_attempt_obligations o "
     "JOIN systems s ON s.id = o.system_id "
     "WHERE o.mutation_discharged_at IS NULL "
@@ -205,7 +206,7 @@ _LEAKED_MUTATION_CANDIDATES_SQL = (
     "  AND NOT EXISTS ( "
     "    SELECT 1 FROM jobs j "
     "    WHERE j.dedup_key = s.id::text || ':teardown' "
-    "      AND (j.state = ANY(%s) OR j.updated_at > now() - %s) "
+    f"      AND {_TEARDOWN_IN_FLIGHT} "
     "  )"
 )
 ```
@@ -242,15 +243,13 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
         try:
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
                 # Only the job half is re-read: `torn_down` is terminal, so the state half cannot
-                # change between the candidate query and this lock. The repository method below
-                # takes this same key again; `pg_advisory_xact_lock` is reference-counted per
-                # transaction and released at commit, so the second acquisition is a no-op. It is
-                # taken here rather than left to that method because the re-read must happen under
-                # the lock, which is what 0152's "deliberately not retaken here" comment assumes of
-                # every caller.
+                # change between the candidate query and this lock. The lock is taken here, rather
+                # than left to the repository method below, because the re-read has to happen
+                # under it; the method retaking the same key is a no-op, since
+                # `pg_advisory_xact_lock` is reference-counted per transaction (0152:28).
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        _TEARDOWN_IN_FLIGHT_SQL,
+                        f"SELECT 1 FROM jobs j WHERE j.dedup_key = %s AND {_TEARDOWN_IN_FLIGHT}",
                         (
                             f"{system_id}:teardown",
                             list(_ACTIVE_JOB_STATE_VALUES),
@@ -279,12 +278,10 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                 discharged,
             )
     if failures:
-        # Per-candidate isolation means a failure never reaches `ReconcileReport.failures`, and a
-        # pass that discharged nothing returns 0 — byte-identical to a database with nothing to
-        # repair. A systematic cause (the reconciler's login losing its role membership, a
-        # statement or lock timeout, a dropped connection) would otherwise be the same silent
-        # failure #2326 was filed about, one level up. Fires on any failure, not only a total one:
-        # a denial that begins mid-batch is the same defect caught earlier.
+        # Per-candidate isolation keeps a failure out of `ReconcileReport.failures`, and a pass
+        # that discharged nothing returns 0 — byte-identical to a database with nothing to repair,
+        # so without this line a systematic cause is silent (ADR-0634). Fires on any failure, not
+        # only a total one: a denial that begins mid-batch is the same defect caught earlier.
         _log.error(
             "reconciler: %d of %d leaked mutation obligation candidates failed this pass; "
             "the repair count of %d is a floor, not a measure of what needed repairing",
@@ -321,7 +318,7 @@ standalone Python — the formatter rewrites it into a one-element tuple, which 
 (`docs/solutions/2026-09-04-ruff-format-rewrites-python-in-markdown-fences.md`).
 
 **Step 4 — write the test module.** Create
-`tests/reconciler/test_leaked_mutation_obligation_repair.py` with the ten cases in the Verification
+`tests/reconciler/test_leaked_mutation_obligation_repair.py` with the cases in the Verification
 inventory, following `tests/reconciler/test_stalled_crashing_recovery.py`: seed on an autocommit
 connection, run the repair through a real pool, assert on the autocommit connection.
 
@@ -349,6 +346,10 @@ assigns `NEW.updated_at := now()` unconditionally (`src/kdive/db/schema/0001_ini
 `jobs_set_updated_at` is `BEFORE UPDATE` only (`:171-172`), so an `UPDATE` that backdates the column
 is silently overwritten while an `INSERT` that supplies it is not.
 
+Key the row through the production `_teardown_dedup_key`, not a hand-written literal: the lane
+rebuilds that key by hand in Python and again in SQL, so binding the seed to the production
+function is what makes a change to the convention fail the deferral arms.
+
 ```python
 async def _seed_teardown_job(
     conn: psycopg.AsyncConnection, system_id: UUID, *, state: str, age_seconds: int = 0
@@ -366,7 +367,7 @@ async def _seed_teardown_job(
             Jsonb({"system_id": str(system_id)}),
             state,
             Jsonb({"principal": "alice", "project": "proj"}),
-            f"{system_id}:teardown",
+            _teardown_dedup_key(system_id),
             age_seconds,
         ),
     )

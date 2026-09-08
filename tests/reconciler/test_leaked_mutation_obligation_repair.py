@@ -23,7 +23,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -48,10 +48,6 @@ from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
 
 _NONCE = "0" * 32
 _SECOND_NONCE = "1" * 32
-_READ_DISCHARGE = (
-    "SELECT mutation_discharged_at, mutation_discharge_reason "
-    "FROM remote_module_attempt_obligations WHERE system_id = %s ORDER BY operation_nonce"
-)
 
 
 async def _seed_open_obligation(
@@ -76,6 +72,10 @@ async def _seed_teardown_job(
 ) -> None:
     """A teardown job at the dedup key both teardown families use, in ``state``.
 
+    Keyed through the production `_teardown_dedup_key`, which the lane rebuilds by hand in Python
+    and again in SQL: a change to that convention then fails the deferral arms below rather than
+    silently stopping the lane from deferring.
+
     ``age_seconds`` backdates ``updated_at`` so an arm can put a terminal job outside the settle
     window. It goes in the INSERT because `jobs_set_updated_at` is a BEFORE UPDATE trigger that
     reassigns the column unconditionally, so a later UPDATE that backdates it is overwritten.
@@ -88,15 +88,19 @@ async def _seed_teardown_job(
             Jsonb({"system_id": str(system_id)}),
             state,
             Jsonb({"principal": "alice", "project": "proj"}),
-            f"{system_id}:teardown",
+            _teardown_dedup_key(system_id),
             age_seconds,
         ),
     )
 
 
 async def _discharges(conn: psycopg.AsyncConnection, system_id: UUID) -> list[tuple[Any, Any]]:
-    rows = await (await conn.execute(_READ_DISCHARGE, (system_id,))).fetchall()
-    return [(row[0], row[1]) for row in rows]
+    cursor = await conn.execute(
+        "SELECT mutation_discharged_at, mutation_discharge_reason "
+        "FROM remote_module_attempt_obligations WHERE system_id = %s ORDER BY operation_nonce",
+        (system_id,),
+    )
+    return [(row[0], row[1]) for row in await cursor.fetchall()]
 
 
 async def _run(url: str) -> int:
@@ -377,18 +381,6 @@ def test_teardown_job_appearing_under_the_lock_defers_the_candidate(
         await conn.close()
 
     asyncio.run(run())
-
-
-def test_the_deferral_key_matches_the_production_teardown_dedup_key() -> None:
-    """The lane rebuilds the teardown dedup key by hand, in Python and again in SQL.
-
-    Both spellings are `<system_id>:teardown`, which is what `enqueue_control_teardown` and
-    `enqueue_preactivation_teardown` actually enqueue at. Nothing else binds them, so a change to
-    the production convention would silently stop the lane deferring rather than fail a test.
-    """
-    system_id = uuid4()
-
-    assert _teardown_dedup_key(system_id) == f"{system_id}:teardown"
 
 
 def test_repair_runs_after_abandoned_jobs() -> None:

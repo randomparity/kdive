@@ -136,7 +136,7 @@ repairable at all: a teardown whose worker died keeps its job `running` with a l
 - A System in `failed` carrying an open obligation is not repaired, and that is a permanent leak
   rather than an open question: `retained_owners` filters only on the discharge columns and never on
   System state, while `repair_orphaned_systems` treats `FAILED` as terminal
-  (`_ORPHANED_SYSTEM_TERMINAL_STATES`, `../../src/kdive/reconciler/repairs/systems.py:34`) and so
+  (`_ORPHANED_SYSTEM_TERMINAL_STATES`, `../../src/kdive/reconciler/repairs/systems.py:36`) and so
   never enqueues a teardown for it. #2326's predicate is `state = 'torn_down'` and this record keeps
   that boundary; the sized follow-up is reported to the campaign that dispatched this work.
 

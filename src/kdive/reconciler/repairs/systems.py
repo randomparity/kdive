@@ -44,15 +44,14 @@ _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
 # does not bound the window; the teardown job's own `updated_at` does, because nothing but that
 # teardown writes it.
 _TEARDOWN_SETTLE = timedelta(minutes=15)
-# Both teardown families enqueue at `_teardown_dedup_key(system_id)`, and `jobs.dedup_key` is
-# UNIQUE, so one row carries a System's whole teardown history.
-_TEARDOWN_IN_FLIGHT_SQL = (
-    "SELECT 1 FROM jobs j "
-    "WHERE j.dedup_key = %s "
-    "  AND (j.state = ANY(%s) OR j.updated_at > now() - %s)"
-)
+# Shared, because the candidate query and the locked re-read have to defer on the same thing. It
+# contributes the active-state list and the settle window, in that order, as the last two
+# parameters of whichever query embeds it. Both teardown families enqueue at
+# `_teardown_dedup_key(system_id)` and `jobs.dedup_key` is UNIQUE, so the one row either query
+# matches carries that System's whole teardown history.
+_TEARDOWN_IN_FLIGHT = "(j.state = ANY(%s) OR j.updated_at > now() - %s)"
 _LEAKED_MUTATION_CANDIDATES_SQL = (
-    "SELECT DISTINCT o.system_id AS system_id "
+    "SELECT DISTINCT o.system_id "
     "FROM remote_module_attempt_obligations o "
     "JOIN systems s ON s.id = o.system_id "
     "WHERE o.mutation_discharged_at IS NULL "
@@ -60,7 +59,7 @@ _LEAKED_MUTATION_CANDIDATES_SQL = (
     "  AND NOT EXISTS ( "
     "    SELECT 1 FROM jobs j "
     "    WHERE j.dedup_key = s.id::text || ':teardown' "
-    "      AND (j.state = ANY(%s) OR j.updated_at > now() - %s) "
+    f"      AND {_TEARDOWN_IN_FLIGHT} "
     "  )"
 )
 
@@ -142,15 +141,13 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
         try:
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
                 # Only the job half is re-read: `torn_down` is terminal, so the state half cannot
-                # change between the candidate query and this lock. The repository method below
-                # takes this same key again; `pg_advisory_xact_lock` is reference-counted per
-                # transaction and released at commit, so the second acquisition is a no-op. It is
-                # taken here rather than left to that method because the re-read must happen under
-                # the lock, which is what 0152's "deliberately not retaken here" comment assumes of
-                # every caller.
+                # change between the candidate query and this lock. The lock is taken here, rather
+                # than left to the repository method below, because the re-read has to happen
+                # under it; the method retaking the same key is a no-op, since
+                # `pg_advisory_xact_lock` is reference-counted per transaction (0152:28).
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        _TEARDOWN_IN_FLIGHT_SQL,
+                        f"SELECT 1 FROM jobs j WHERE j.dedup_key = %s AND {_TEARDOWN_IN_FLIGHT}",
                         (
                             f"{system_id}:teardown",
                             list(_ACTIVE_JOB_STATE_VALUES),
@@ -179,12 +176,10 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
                 discharged,
             )
     if failures:
-        # Per-candidate isolation means a failure never reaches `ReconcileReport.failures`, and a
-        # pass that discharged nothing returns 0 — byte-identical to a database with nothing to
-        # repair. A systematic cause (the reconciler's login losing its role membership, a
-        # statement or lock timeout, a dropped connection) would otherwise be the same silent
-        # failure #2326 was filed about, one level up. Fires on any failure, not only a total one:
-        # a denial that begins mid-batch is the same defect caught earlier.
+        # Per-candidate isolation keeps a failure out of `ReconcileReport.failures`, and a pass
+        # that discharged nothing returns 0 — byte-identical to a database with nothing to repair,
+        # so without this line a systematic cause is silent (ADR-0634). Fires on any failure, not
+        # only a total one: a denial that begins mid-batch is the same defect caught earlier.
         _log.error(
             "reconciler: %d of %d leaked mutation obligation candidates failed this pass; "
             "the repair count of %d is a floor, not a measure of what needed repairing",
