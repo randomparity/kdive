@@ -22,6 +22,10 @@ available in either mode. Discovery is filtered by your roles, and both invocati
 enforce the same authorization and state checks. A listed tool is not permission to use it
 on every project or object.
 
+The full catalog contains ~130 tools; your visible subset depends on your roles and client.
+The server negotiates MCP protocol revision 2025-11-25; clients offering an older supported
+revision negotiate that revision.
+
 ## The typical session
 
 These stages describe the external-build investigation path. Debugging and crash capture
