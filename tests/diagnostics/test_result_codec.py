@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.diagnostics.checks import (
+    DEPMOD_TOOLCHAIN_ID,
     GDBSTUB_ACL_ID,
     GUEST_ARCH_ACCEL_ID,
     MULTIARCH_GDB_ID,
@@ -13,6 +14,7 @@ from kdive.diagnostics.checks import (
     CheckResult,
     CheckStatus,
 )
+from kdive.diagnostics.contributions.depmod_toolchain import depmod_toolchain_worker_descriptor
 from kdive.diagnostics.contributions.guest_arch_accel import guest_arch_accel_worker_descriptor
 from kdive.diagnostics.contributions.pseries_fadump import pseries_fadump_worker_descriptor
 from kdive.diagnostics.result_codec import (
@@ -96,6 +98,24 @@ def test_guest_arch_accel_id_survives_roundtrip() -> None:
     assert result.status is CheckStatus.PASS
 
 
+def test_depmod_toolchain_id_survives_roundtrip() -> None:
+    src = [
+        CheckResult(
+            DEPMOD_TOOLCHAIN_ID,
+            CheckStatus.FAIL,
+            "depmod was not found in any of /usr/sbin:/usr/bin:/sbin:/bin",
+            fix="install kmod",
+            provider="local-libvirt",
+            failure_category=ErrorCategory.MISSING_DEPENDENCY,
+        )
+    ]
+    [result] = deserialize_results(serialize_results(src))
+    assert result.check_id == DEPMOD_TOOLCHAIN_ID
+    assert result.status is CheckStatus.FAIL
+    assert result.failure_category is ErrorCategory.MISSING_DEPENDENCY
+    assert result.fix == "install kmod"
+
+
 def test_allowed_ids_matches_registered_worker_vantage_descriptors() -> None:
     """`_ALLOWED_IDS` must track every worker-vantage id the diagnostics contributions register.
 
@@ -111,6 +131,7 @@ def test_allowed_ids_matches_registered_worker_vantage_descriptors() -> None:
         MULTIARCH_GDB_ID,
         pseries_fadump_worker_descriptor().id,
         guest_arch_accel_worker_descriptor().id,
+        depmod_toolchain_worker_descriptor().id,
     }
     assert expected_ids == _ALLOWED_IDS
 

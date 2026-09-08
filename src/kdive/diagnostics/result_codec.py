@@ -16,6 +16,7 @@ import json
 from typing import Any
 
 from kdive.diagnostics.checks import (
+    DEPMOD_TOOLCHAIN_ID,
     GDBSTUB_ACL_ID,
     GUEST_ARCH_ACCEL_ID,
     MULTIARCH_GDB_ID,
@@ -33,6 +34,7 @@ _ALLOWED_IDS = frozenset(
         MULTIARCH_GDB_ID,
         PSERIES_FADUMP_ID,
         GUEST_ARCH_ACCEL_ID,
+        DEPMOD_TOOLCHAIN_ID,
     }
 )
 

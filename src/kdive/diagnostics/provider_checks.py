@@ -8,6 +8,7 @@ from enum import StrEnum
 
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
+    DEPMOD_TOOLCHAIN_ID,
     GDBSTUB_ACL_ID,
     GUEST_ARCH_ACCEL_ID,
     MULTIARCH_GDB_ID,
@@ -20,6 +21,7 @@ from kdive.diagnostics.checks import (
     Vantage,
 )
 from kdive.domain.errors import ErrorCategory
+from kdive.providers.shared.module_staging_tools import DEPMOD_SEARCH_PATH
 
 BASE_VOLUME_NOT_STAGED_FIX = (
     "base image volume is not staged on the remote host's storage pool; stage the "
@@ -29,6 +31,12 @@ BASE_VOLUME_NOT_STAGED_FIX = (
 MULTIARCH_GDB_MISSING_FIX = (
     "no gdb on this host can target a supported foreign architecture; install gdb-multiarch "
     "(Debian/Ubuntu) or a multiarch-capable gdb build so cross-arch debug sessions can attach"
+)
+
+DEPMOD_TOOLCHAIN_MISSING_FIX = (
+    "install kmod (which provides depmod) on this worker host, or confirm depmod is in one of "
+    f"the searched directories. Resolution is deliberately not PATH-based ({DEPMOD_SEARCH_PATH}), "
+    "so a depmod elsewhere on the host will not be found (ADR-0635)"
 )
 
 PSERIES_FADUMP_UNSUPPORTED_FIX = (
@@ -511,4 +519,49 @@ class GuestArchAccelCheck(Check):
             detail=_describe_accel(report),
             provider=self._provider,
             data=data,
+        )
+
+
+DepmodToolchainProbe = Callable[[], Awaitable[str | None]]
+
+
+class DepmodToolchainCheck(Check):
+    """Worker-vantage: the module-staging host toolchain resolves on this worker (ADR-0635).
+
+    A host laying ``depmod`` outside the four explicit directories (#2300) fails mid-install; this
+    reports the same requirement at diagnostics time, naming the directories searched because
+    "install kmod" is not actionable for an operator who already has it.
+    """
+
+    def __init__(self, *, provider: str, probe: DepmodToolchainProbe) -> None:
+        self._provider = provider
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return DEPMOD_TOOLCHAIN_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.WORKER
+
+    async def run(self) -> CheckResult:
+        resolved = await self._probe()
+        if resolved is not None:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail=f"module staging can index kernel modules with depmod at {resolved}",
+                provider=self._provider,
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.FAIL,
+            detail=(
+                "depmod is required on this worker host to index kernel modules for staging, "
+                f"and was not found in any of {DEPMOD_SEARCH_PATH}"
+            ),
+            fix=DEPMOD_TOOLCHAIN_MISSING_FIX,
+            provider=self._provider,
+            failure_category=_MISSING_DEPENDENCY,
         )

@@ -395,6 +395,7 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
     from psycopg_pool import AsyncConnectionPool
 
     from kdive.diagnostics.checks import (
+        DEPMOD_TOOLCHAIN_ID,
         GDBSTUB_ACL_ID,
         GUEST_ARCH_ACCEL_ID,
         MULTIARCH_GDB_ID,
@@ -431,4 +432,5 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
         MULTIARCH_GDB_ID,
         PSERIES_FADUMP_ID,
         GUEST_ARCH_ACCEL_ID,
+        DEPMOD_TOOLCHAIN_ID,
     }

@@ -138,6 +138,15 @@ its default, and whether it is required is listed in
 [the config reference](../guide/reference/config.md). At minimum the processes need a
 Postgres DSN, S3 endpoint and credentials, and the three OIDC values.
 
+### Module staging (worker hosts)
+
+Installing a built kernel indexes its modules with the host's `depmod` (ADR-0346), so a
+worker host needs `kmod` — `apt install kmod` on Debian/Ubuntu, `dnf install kmod` on
+Fedora. Resolution is **not** `PATH`-based: `depmod` is looked for in `/usr/sbin`,
+`/usr/bin`, `/sbin`, and `/bin` only, so a copy installed elsewhere will not be found.
+The service `doctor` (`kdivectl doctor --json`) carries a `depmod_toolchain` check that
+fails with the package name and those four directories when it cannot resolve one.
+
 ### Development and CI toolchain
 
 Running the code from source, and reproducing the `just ci` gate, needs a build
