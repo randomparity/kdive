@@ -18,6 +18,8 @@ from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
     DEFAULT_BUILD_FS_PACKAGES,
     DEFAULT_DEBUG_FS_PACKAGES,
+    FADUMP_CAPTURE_SERVICE_CONTENT,
+    FADUMP_CAPTURE_SERVICE_PATH,
     FSTAB,
     KDUMP_FINAL_ACTION_CMD,
     KDUMP_SYSCTL_CONTENT,
@@ -124,6 +126,11 @@ class RhelFamily:
             steps.append(RunCommand("systemctl enable kdump.service"))
             steps.append(WriteFile(KDUMP_SYSCTL_PATH, KDUMP_SYSCTL_CONTENT))
             steps.append(RunCommand(KDUMP_FINAL_ACTION_CMD))
+            # fadump capture: supersede kdump.service on the capture-kernel second boot.
+            # ConditionPathExists=/proc/vmcore makes this a no-op on normal boots.
+            # Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
+            steps.append(WriteFile(FADUMP_CAPTURE_SERVICE_PATH, FADUMP_CAPTURE_SERVICE_CONTENT))
+            steps.append(RunCommand("systemctl enable fadump-capture.service"))
         steps += cloud_init_first_boot_steps(ctx)
         steps += debug_image_steps(ctx.packages)
         if ctx.kind == "debug":

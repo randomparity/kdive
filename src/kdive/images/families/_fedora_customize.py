@@ -191,6 +191,31 @@ KDUMP_FINAL_ACTION_CMD = (
     "sed -i '/^[[:space:]]*final_action[[:space:]]/d' /etc/kdump.conf && "
     "printf 'final_action poweroff\\n' >> /etc/kdump.conf"
 )
+# fadump capture-kernel boot: kdump.service cannot rebuild the fadump initrd in the kdive
+# initrd environment.  This unit supersedes it on the capture-kernel second boot
+# (ConditionPathExists=/proc/vmcore), runs makedumpfile, and powers off.
+# Harmless on x86_64 where /proc/vmcore never appears outside a genuine kdump capture.
+# Declared per AGENTS.md provisioning-parity rule (#2381, proved in #2312).
+FADUMP_CAPTURE_SERVICE_PATH = "/etc/systemd/system/fadump-capture.service"
+FADUMP_CAPTURE_SERVICE_CONTENT = (
+    "[Unit]\n"
+    "Description=fadump vmcore capture (kdive)\n"
+    "Documentation=https://github.com/randomparity/kdive\n"
+    "Before=kdump.service\n"
+    "ConditionPathExists=/proc/vmcore\n"
+    "DefaultDependencies=no\n"
+    "After=local-fs.target\n"
+    "\n"
+    "[Service]\n"
+    "Type=oneshot\n"
+    "RemainAfterExit=yes\n"
+    "ExecStart=/bin/bash -c"
+    " 'mkdir -p /var/crash && makedumpfile -c -d 31 /proc/vmcore /var/crash/vmcore"
+    " && poweroff -f'\n"
+    "\n"
+    "[Install]\n"
+    "WantedBy=basic.target\n"
+)
 # The live ``introspect.run`` path (ADR-0219) SSH-execs this fixed-argv in-guest helper; the debug
 # image must carry the repo's reviewed reference implementation, made read-executable. ``build-fs``
 # runs ``python -m kdive`` from the source checkout, so the helper resolves relative to the source
