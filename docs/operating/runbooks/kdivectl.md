@@ -77,6 +77,14 @@ kdivectl allocations list --project example-project --json
 kdivectl accounting usage --project example-project --json
 ```
 
+For `accounting report --scope granted-set`, `--projects` takes comma-separated project names.
+Omit it to report across all your granted projects; a named subset must contain only projects
+you can view:
+
+```bash
+kdivectl accounting report --scope granted-set --projects project-a,project-b --json
+```
+
 The role and scope of the underlying tool apply equally to CLI calls. A by-id tenant lookup
 can return a not-found-shaped result for an ungranted object; supplying a project name can
 instead produce authorization denied. Use the tool reference and permissions guide to resolve
