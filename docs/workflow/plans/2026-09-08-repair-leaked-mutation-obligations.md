@@ -261,17 +261,23 @@ alias beside `_repair_orphaned_systems`:
 _repair_leaked_mutation_obligations = system_repairs.repair_leaked_mutation_obligations
 ```
 
-and insert this entry into `_REPAIR_CATALOG` immediately after the `"abandoned_jobs"` entry:
+and insert this entry — the comment, the call, and a trailing comma — into `_REPAIR_CATALOG`
+immediately after the `"abandoned_jobs"` entry, indented one level to match its siblings:
 
 ```python
-    # Runs after abandoned_jobs, which dead-letters a lease-lapsed teardown job — and a teardown
-    # job that is active or recently terminal is what defers this repair's candidate (ADR-0634,
-    # #2326). No report field: the count reaches operators through repair_counts, as the
-    # stalled-state repairs do.
-    _RepairCatalogEntry(
-        "leaked_mutation_obligations", lambda _r, _c, _g: _repair_leaked_mutation_obligations
-    ),
+# Runs after abandoned_jobs, which dead-letters a lease-lapsed teardown job — and a teardown
+# job that is active or recently terminal is what defers this repair's candidate (ADR-0634,
+# #2326). No report field: the count reaches operators through repair_counts, as the
+# stalled-state repairs do.
+_RepairCatalogEntry(
+    "leaked_mutation_obligations", lambda _r, _c, _g: _repair_leaked_mutation_obligations
+)
 ```
+
+The fence shows the entry at top level without its trailing comma because `ruff format` formats
+Python inside Markdown fences in this repo, and an indented `X(...),` fragment is not valid
+standalone Python — the formatter rewrites it into a one-element tuple, which is not what to paste
+(`docs/solutions/2026-09-04-ruff-format-rewrites-python-in-markdown-fences.md`).
 
 **Step 4 — write the test module.** Create
 `tests/reconciler/test_leaked_mutation_obligation_repair.py` with the ten cases in the Verification
