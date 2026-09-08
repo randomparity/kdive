@@ -60,7 +60,7 @@ For an unrestricted READY System, `control.power(action="reset")` can recover a 
 `resume` returns a PAUSED System to READY after a paused restore. Preserve needed evidence
 before either action. Power job success alone does not prove guest boot or SSH readiness.
 
-For a CRASHED System, capture evidence before teardown or reprovisioning. For other states,
+For a CRASHED System, capture evidence before teardown. For other states,
 inspect `systems.get` and the failed job's recovery guidance. Reinstalling and booting is not
 a universal recovery path; state and external-boot gates still apply. A FAILED System cannot
 use ordinary teardown today and needs operator confirmation of provider cleanup. See
