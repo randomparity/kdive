@@ -44,6 +44,8 @@ _FIELD_ERROR_LIMIT = 20
 # median of 1.4 KB, so the ten largest come to roughly 69 KB — the ceiling this bounds
 # (ADR-0630 §2).
 _NAMES_MAX = 10
+# Per-entry ceiling, comfortably above the longest registered name (37 characters).
+_NAME_LEN_MAX = 128
 
 
 class SearchDetail(StrEnum):
@@ -408,7 +410,10 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
             Field(description="Browse one tool plane by prefix, e.g. 'debug' or 'runs'."),
         ] = None,
         names: Annotated[
-            list[str] | None,
+            # Bound each entry as well as the list: an unresolved name is echoed back in
+            # data.unknown_names, so an unbounded string would be caller-sized response body.
+            # The longest registered name is 37 characters.
+            list[Annotated[str, Field(max_length=_NAME_LEN_MAX)]] | None,
             Field(
                 min_length=1,
                 max_length=_NAMES_MAX,

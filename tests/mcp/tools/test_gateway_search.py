@@ -1151,11 +1151,11 @@ def test_names_normalises_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> N
     assert "unknown_names" not in content["data"]
 
 
-@pytest.mark.parametrize("names", [[], ["runs.get"] * 11])
+@pytest.mark.parametrize("names", [[], ["runs.get"] * 11, ["x" * 129]])
 def test_names_cardinality_rejects_out_of_bounds(
     monkeypatch: pytest.MonkeyPatch, names: list[str]
 ) -> None:
-    """An empty list and an over-long list are both rejected by schema validation."""
+    """An empty list, an over-long list, and an over-long entry are all rejected."""
     app = _build(monkeypatch, _operator_ctx)
 
     async def _run() -> Any:

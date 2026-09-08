@@ -126,11 +126,15 @@ session's context, so this is two sentences, not a transcription of the docstrin
   candidate map on `t.name.lower()`, which is unambiguous only while registered names are
   themselves lower-case; a test pins that convention rather than leaving the lookup to shadow
   silently if it ever changes.
-- A new `tool_search_names_miss` log carries requested and unresolved counts, not the names, so
-  the mode's characteristic failure reaches vocabulary curation the way query and namespace
-  misses already do. The existing `tool_search_miss` log gains the `reason` and stops firing for
-  a call that passed both `namespace` and `query`: `namespace` wins, so no query ran and the
-  record was never accurate.
+- A new `tool_search_names_miss` record carries requested and unresolved counts in `extra`, not
+  the names, matching the shape of the two miss records already there. It reaches production
+  logs only as far as those two do, which is not far: `JsonFormatter` (`src/kdive/log.py`)
+  renders a fixed field schema plus request context and copies no `extra`, so today only the
+  message survives. That gap is pre-existing and shared by all three records; this ADR keeps the
+  new record consistent with its siblings rather than diverging one of them around it.
+- The existing `tool_search_miss` record gains the `reason` and stops firing for a call that
+  passed both `namespace` and `query`: `namespace` wins, so no query ran and the record was
+  never accurate.
 - Teaching `query` an operator grammar stays unbuilt, and `reason` makes its absence legible
   rather than silent.
 

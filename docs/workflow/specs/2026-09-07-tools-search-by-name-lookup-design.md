@@ -69,6 +69,31 @@ retrieved at all.
 
 **Deferrals carried into implementation:** none.
 
+## Threat model
+
+The change parses caller-supplied strings and reads through the RBAC filter, so it is
+security-relevant on two of the standard triggers.
+
+- **Boundary added:** the `names` argument. An authenticated MCP caller supplies up to 10
+  strings of at most 128 characters each (both bounds enforced by schema validation, before any
+  work); each is stripped, lower-cased, and used only as a dict key into the already-filtered
+  candidate map. Unresolved entries are echoed back normalised in `data.unknown_names`. No
+  caller value reaches a command, query, path, URL, or template.
+- **Boundary widened:** `tools.search`'s response. `names` mode returns full schemas that
+  `detail="full"` already returns, so it widens *how* a caller selects, not *what* it may reach.
+- **Actor model:** every caller is authenticated — `current_context()` raises `AuthError`
+  otherwise — and holds some project or platform role. The untrusted party is a caller whose
+  grants are narrower than the tool it names.
+- **Control per boundary:** authorization is the existing `tool_visible(t.name, ctx)` filter,
+  applied to `candidates` before `_select_named` sees them, so an excluded tool is absent from
+  the lookup map rather than filtered out of the result. `unknown_names` is a pure function of
+  the caller's own request minus what it matched, so it carries no bit the caller did not
+  supply. The miss log records counts, never names.
+- **Explicitly out of scope:** distinguishing "unregistered" from "hidden by your grants" —
+  ADR-0630 §3 decides against it. Response size beyond the 10 × 128 bounds: `detail="full"` with
+  `limit=50` already returns strictly more, so this mode adds no amplification. `tools.invoke`'s
+  own envelope, which is a separate code path and a separate charter.
+
 ## Success
 
 1. `tools.search(names=["runs.install", "runs.boot"])` returns both tools with `description` and
