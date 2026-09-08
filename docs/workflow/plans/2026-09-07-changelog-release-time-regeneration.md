@@ -114,9 +114,8 @@ is written first so its red run demonstrates it detects the workflow this task t
      push to a pull-request head.
    - `_CONTINUATION = re.compile(r"\\\n[ \t]*")` — a `\`-continued command, joined as the shell
      joins it, so wrapping a long push over two lines does not hide the refspec.
-   - `_DEFAULT_REF = re.compile(rf"(?<![\w-]){re.escape(_DEFAULT_BRANCH)}(?![\w-])")` — `main` as a
-     whole ref component (`HEAD:main`, `origin/main`, `:main`, `main;`), not `domain` or
-     `maintenance`.
+   - `_BRANCH_PREFIX = "refs/heads/"` — the prefix a refspec may spell out, so `HEAD:main` and
+     `HEAD:refs/heads/main` normalise to one ref.
 
    **Helpers.**
    - `_scanned_files() -> list[Path]` — the sorted `*.yml` + `*.yaml` glob above, **plus**
@@ -126,9 +125,15 @@ is written first so its red run demonstrates it detects the workflow this task t
    - `_strip_comments(text: str) -> str` — blanks whole-line `#` comments, so prose about a push is
      not read as one.
    - `_operands(args: str) -> list[str]` — the non-flag tokens before `_OPERAND_END`.
+   - `_destination(operand: str) -> str` — the branch an operand would write: strip quotes, take
+     the half after the last `:`, drop a leading `+`, drop `_BRANCH_PREFIX`. Comparing that to
+     `_DEFAULT_BRANCH` for equality is what keeps `HEAD:feat/main` and `release/main` out while
+     keeping `main`, `:main`, `main:main`, `+main` and `HEAD:refs/heads/main` in; a substring
+     match on `main` reddened the feature branches.
    - `_default_branch_pushes(text: str) -> list[str]` — over `_strip_comments(text)` with
-     `_CONTINUATION` joined, keep each `_PUSH` match whose `_operands` include one matching
-     `_DEFAULT_REF`. Return `match.group(0).strip()` — the whole matched line, so the reported
+     `_CONTINUATION` joined, keep each `_PUSH` match one of whose `_operands` has a
+     `_destination` equal to `_DEFAULT_BRANCH`. Return `match.group(0).strip()` — the whole
+     matched line, so the reported
      offender is what the author wrote even though operand extraction stopped earlier. There is
      deliberately **no** operand-less branch: flagging a bare `git push` would guess at a trigger
      the function does not read, and would redden `git push --tags` and the standard idiom for
@@ -138,9 +143,10 @@ is written first so its red run demonstrates it detects the workflow this task t
    - `test_workflow_files_are_discoverable` — asserts both scan roots are non-empty, since scripts
      alone would keep `_scanned_files()` non-empty with every workflow gone.
    - `test_the_detector_recognises_a_default_branch_push` — asserts `len(caught) == 4` for the
-     three removed-workflow shapes plus the same push wrapped over a `\` continuation, and an
-     empty result for the negatives named above (tag push, `domain-work`, `--tags`, a whole-line
-     comment, a trailing comment, and quoted prose after `&&`).
+     three removed-workflow shapes plus the same push wrapped over a `\` continuation, a
+     non-empty result for `HEAD:refs/heads/main`, and an empty result for the negatives named
+     above (tag push, `domain-work`, `feat/main`, `main-line`, `--tags`, a whole-line comment, a
+     trailing comment, and quoted prose after `&&`).
    - `test_no_workflow_pushes_to_the_default_branch` — builds `dict[str, list[str]]` keyed by the
      repository-relative path over `_scanned_files()` and asserts it is empty. Its message must
      name ADR-0633 and #2337, say the push forces a base refresh on every other open pull request,

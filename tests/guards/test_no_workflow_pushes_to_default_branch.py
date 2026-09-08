@@ -18,11 +18,16 @@ This reads command text, so it is a proxy, not a proof. It cannot see:
   ruleset survives (#2337);
 - a command a YAML *folded* scalar (`run: >`) joins out of several lines, since the join happens
   in the runner, not here;
-- an indirect invocation — `git -C <dir> push`, or a wrapper script living outside the two
-  directories scanned below;
+- an indirect invocation — `git -C <dir> push`, or a script the scan does not read: anything
+  outside `.github/workflows/` and `.github/scripts/`, and any non-`.sh` file inside
+  `.github/scripts/`, such as the `mermaid-check.mjs` that `docs-mermaid.yml` invokes;
 - a bare `git push` in a block that has already run `git checkout main`. Flagging every
   operand-less push would redden `git push --tags` and the ordinary idiom for pushing to a
   pull-request head, so the trade is deliberate; see `_default_branch_pushes`.
+
+It also over-reads in one direction, which is loud rather than silent: a `git push origin main`
+quoted *inside* a string — an `echo` of this rule, a `grep` for it — is flagged, because nothing
+here distinguishes a command from prose about one. The failure message says so.
 
 Stdlib + pytest only, matching `tests/guards/test_workflow_action_pins.py`: this reads the tree,
 not the project.
@@ -54,9 +59,8 @@ _OPERAND_END = re.compile(r"\s#|[;&|]")
 #: ordinary formatting, not evasion, so it must not hide the refspec.
 _CONTINUATION = re.compile(r"\\\n[ \t]*")
 
-#: `main` as a whole ref component: `main`, `HEAD:main`, `origin/main`, `:main`, `main;`.
-#: Not `domain`, `maintenance`, or `main-line`.
-_DEFAULT_REF = re.compile(rf"(?<![\w-]){re.escape(_DEFAULT_BRANCH)}(?![\w-])")
+#: The `refs/heads/` a refspec may spell out; `HEAD:main` and `HEAD:refs/heads/main` are one ref.
+_BRANCH_PREFIX = "refs/heads/"
 
 
 def _scanned_files() -> list[Path]:
@@ -82,6 +86,17 @@ def _operands(args: str) -> list[str]:
     return [token for token in args[: end.start() if end else None].split() if token[:1] != "-"]
 
 
+def _destination(operand: str) -> str:
+    """The branch an operand would write: the refspec's destination half, normalised.
+
+    `main`, `HEAD:main`, `:main`, `main:main`, `+main` and `HEAD:refs/heads/main` all name the
+    same branch. `HEAD:feat/main` does not — it is somebody's feature branch, and matching `main`
+    as a bare word inside it reddened a push that never touches the default branch.
+    """
+    ref = operand.strip("'\"").rsplit(":", 1)[-1].lstrip("+")
+    return ref.removeprefix(_BRANCH_PREFIX)
+
+
 def _default_branch_pushes(text: str) -> list[str]:
     """Return each `git push` in *text* whose refspec names the default branch, as matched.
 
@@ -95,7 +110,7 @@ def _default_branch_pushes(text: str) -> list[str]:
     return [
         match.group(0).strip()
         for match in _PUSH.finditer(scanned)
-        if any(_DEFAULT_REF.search(token) for token in _operands(match.group("args")))
+        if any(_destination(token) == _DEFAULT_BRANCH for token in _operands(match.group("args")))
     ]
 
 
@@ -117,11 +132,16 @@ def test_the_detector_recognises_a_default_branch_push() -> None:
         "          git push \\\n            origin main\n"
     )
     assert len(caught) == 4, f"the detector stopped recognising a push to main: {caught}"
-    # A tag push, a feature branch whose name merely contains "main", a bare tag push, prose
-    # about pushing, a trailing comment, and a quoted string are all outside what this claims.
+    # A fully spelled-out refspec names the same branch, so it is caught too.
+    assert _default_branch_pushes("git push origin HEAD:refs/heads/main\n")
+    # A tag push, a branch whose name merely contains "main", a branch whose last path component
+    # is "main", a bare tag push, prose about pushing, a trailing comment, and a quoted string
+    # are all outside what this claims.
     assert not _default_branch_pushes(
         'git push origin "v{{VERSION}}"\n'
         "  git push origin HEAD:refs/heads/domain-work\n"
+        "  git push origin HEAD:feat/main\n"
+        "  git push origin main-line\n"
         "  git push --tags\n"
         "  # never git push origin main from a workflow\n"
         '  git push origin HEAD:"$BRANCH"  # never main\n'
@@ -143,8 +163,10 @@ def test_no_workflow_pushes_to_the_default_branch() -> None:
         "a base refresh and a full CI cycle (ADR-0633, #2337). Route the change through a "
         "reviewed pull request. If it "
         "targets a pull-request head rather than the default branch, give it an explicit refspec "
-        "(`git push origin HEAD:$BRANCH`) so this guard can tell them apart. If it pushes to a "
-        f"*different* repository whose default branch is also {_DEFAULT_BRANCH!r}, this guard "
-        "cannot tell that from the refspec — say so in review and add the case here. "
+        "(`git push origin HEAD:$BRANCH`) so this guard can tell them apart. Two shapes this "
+        "cannot resolve from the text, both of which need a human rather than a rewrite: a push "
+        f"to a *different* repository whose default branch is also {_DEFAULT_BRANCH!r}, and a "
+        "match that is prose rather than a command (an `echo` or `grep` quoting the push) — say "
+        "which in review, and narrow the scan here if it is the second. "
         f"Offenders: {offenders}"
     )
