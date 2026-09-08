@@ -51,7 +51,7 @@ toolchain resolves under the contract the run path uses.
 **Deployments this changes.** The shipped container fails the new check — `Dockerfile`'s runtime
 stage is `python:3.14.6-slim-bookworm` and installs no `kmod`. That is the honest verdict, and the
 `Dockerfile` fix is deferred to
-[debt 0012](../../debt/0012-shipped-worker-image-has-no-depmod.md); the check is not softened to
+[debt 0014](../../debt/0014-shipped-worker-image-has-no-depmod.md); the check is not softened to
 `not_applicable` to make it green.
 
 **Out of scope** (operator-approved 2026-09-07, `WORK:SCOPE` token `q2339-a036f228`): guest-side

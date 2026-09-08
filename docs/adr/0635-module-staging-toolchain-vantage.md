@@ -72,7 +72,7 @@ actionable half of the verdict, so it goes in the prose fields that survive — 
   nonzero. That is the check working — the image genuinely cannot stage modules, and the gap
   previously surfaced only mid-install. Adding the package is a `Dockerfile` decision outside
   #2339's surface, recorded as
-  [debt 0012](../debt/0012-shipped-worker-image-has-no-depmod.md).
+  [debt 0014](../debt/0014-shipped-worker-image-has-no-depmod.md).
 - A `pass` means `depmod` **resolves**, not that an install will succeed. The run path can still
   fail at exec (`_DEPMOD_EXEC_ERRNOS` in `guest_kernel_writer`) or on a non-zero `depmod` exit. The
   check deliberately does not exec the binary, so that residual stays.
@@ -119,7 +119,7 @@ actionable half of the verdict, so it goes in the prose fields that survive — 
 - **Adding `kmod` to `Dockerfile` here so the shipped image passes.** judgment: a runtime package
   changes what every container deployment installs, and `AGENTS.md` assigns that to the role owning
   the layer, not to a diagnostics change. Recorded as
-  [debt 0012](../debt/0012-shipped-worker-image-has-no-depmod.md) instead.
+  [debt 0014](../debt/0014-shipped-worker-image-has-no-depmod.md) instead.
 - **Doing nothing.** verified: `rg -n "depmod" src/kdive/diagnostics/` returns nothing on
   `origin/main` at 14f9f462b, so the only report today is the mid-install `MISSING_DEPENDENCY`
   failure, after allocation and boot.

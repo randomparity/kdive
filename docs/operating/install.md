@@ -148,7 +148,7 @@ The service `doctor` (`kdivectl doctor --json`) carries a `depmod_toolchain` che
 fails with the package name and those four directories when it cannot resolve one. The
 published container image does not yet ship `kmod`, so a worker running from it fails
 this check until
-[debt 0012](../debt/0012-shipped-worker-image-has-no-depmod.md) is resolved — install
+[debt 0014](../debt/0014-shipped-worker-image-has-no-depmod.md) is resolved — install
 `kmod` in a derived image, or run the worker on a host provisioned by the Ansible roles,
 which already declare it.
 

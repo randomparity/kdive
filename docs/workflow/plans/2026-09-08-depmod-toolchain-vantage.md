@@ -58,7 +58,7 @@ Transcribed from the spec and `AGENTS.md`:
 | `tests/diagnostics/test_default_factory.py` | changed | The substituted worker-check id sets |
 | `tests/diagnostics/test_service.py` | changed | The assembled local-libvirt dispatcher's id set |
 | `docs/operating/install.md` | changed | One operator-facing note: the `kmod` package, the four-directory search, and the new check |
-| `docs/debt/0012-shipped-worker-image-has-no-depmod.md` | created (design phase) | The deferred `Dockerfile` provisioning gap this check exposes |
+| `docs/debt/0014-shipped-worker-image-has-no-depmod.md` | created (design phase) | The deferred `Dockerfile` provisioning gap this check exposes |
 
 ## Task 1 — Share the module-staging tool contract
 
@@ -467,7 +467,7 @@ green. Scope 2 is Task 2 steps 5–7, Scope 3 steps 8–9, Scope 4 step 5, Scope
 Threat-model boundary (a) control is Task 1 steps 1–2 (the constant and its comment move verbatim);
 boundary (b)'s control is the existing allowlist agreement test, extended in Task 2 step 3. The
 spec's "Deployments this changes" paragraph is discharged by
-`docs/debt/0012-shipped-worker-image-has-no-depmod.md`, written in the design phase. No task serves
+`docs/debt/0014-shipped-worker-image-has-no-depmod.md`, written in the design phase. No task serves
 no requirement.
 
 Names borrowed rather than defined, each confirmed present with the assumed signature on
@@ -495,7 +495,7 @@ Names borrowed rather than defined, each confirmed present with the assumed sign
 ## Deferrals carried into the build
 
 - **The shipped worker image has no `depmod`.** Owner:
-  [`docs/debt/0012-shipped-worker-image-has-no-depmod.md`](../../debt/0012-shipped-worker-image-has-no-depmod.md).
+  [`docs/debt/0014-shipped-worker-image-has-no-depmod.md`](../../debt/0014-shipped-worker-image-has-no-depmod.md).
   The check's `fail` on a container deployment is correct and must not be softened; the missing
   piece is a `Dockerfile` package, outside this surface.
 Two adjacent gaps are unowned follow-up candidates rather than deferrals, carried in this run's
