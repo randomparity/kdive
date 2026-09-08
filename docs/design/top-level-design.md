@@ -225,9 +225,9 @@ Applied across every plane.
   logs pass through the redactor before persistence and before any response
   snippet. Raw artifacts stay in the object store, marked sensitive, fetched only
   through the authorized raw-artifact retrieval path (`artifacts.fetch_raw`).
-- **Audit log** — every state transition and every destructive op writes an
-  append-only audit row attributing `(principal, agent_session, tool,
-  args-digest)`.
+- **Audit log** — handlers record attributed operations in an append-only audit log
+  with `(principal, agent_session, tool, args-digest)`. Auditing is explicit at call sites;
+  a repository state update alone does not guarantee an audit row.
 - **Accounting ledger** — allocation transitions emit usage events; admission
   control checks budget/quota on `allocations.request` and denies
   requests that exceed them. The budget/quota **check and the resulting ledger debit

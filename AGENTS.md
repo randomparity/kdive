@@ -27,7 +27,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just lint` | `ruff check` + `ruff format --check` |
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
-| `just test` | the suite, excluding the gated `live_vm` marker |
+| `just test` | the suite, excluding `live_vm`, `live_stack`, and `agent_smoke` |
 | `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
@@ -118,16 +118,12 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 
 ## Host prerequisites
 
-- `libvirt-dev` and `python3-dev` system headers — `libvirt-python` has no wheels and
-  compiles against both the libvirt and Python headers; `uv sync` fails without them. CI
-  apt-installs them; the README lists the distro command. `drgn` and `psycopg[binary]`
-  need nothing extra.
-- `just` and `prek` must be installed before `just setup` (it can't bootstrap its own
-  runner): `uv tool install rust-just && uv tool install prek`. On arches without prebuilt
-  wheels/binaries (e.g. `ppc64le`), these plus `pydantic-core` build from source, so a
-  Rust toolchain ([rustup](https://rustup.rs)) must be on `PATH` first. `just check-deps`
-  enforces this per-arch; the [cross-platform guide](docs/development/cross-platform.md)
-  covers the `ppc64le` prerequisites, container images, and POWER stack bring-up.
+Follow the [installation prerequisites](docs/operating/install.md) and
+[cross-platform guide](docs/development/cross-platform.md) before installing `just`/`prek`
+or syncing dependencies. Normal development and the optional `live` group have different
+native requirements; POWER also needs Rust and the documented source-build prerequisites.
+`just check-deps` checks the host; it cannot install the runner that invokes it.
+
 - The db/integration tests need a reachable Docker daemon (disposable Postgres via
   testcontainers). They **skip** when Docker is absent — unless `KDIVE_REQUIRE_DOCKER=1`
   (set in CI), which turns the skip into a hard failure so a broken runner can't mask the
@@ -200,10 +196,11 @@ PoC's flock.
 
 ### Six durable objects
 
-`Resource ──< Allocation ──< System ──< Run ──< DebugSession`, plus a cross-cutting
-`Investigation` that groups Runs across Allocations/resource kinds. Each is a Postgres row
-with an explicit state machine. Lower layers outlive higher ones; a System never outlives
-its Allocation. See the design doc's "Domain model" section for the precise lifecycles.
+Use the [domain concepts](docs/guide/concepts.md) for Resource, Allocation, System,
+Investigation, Run, and DebugSession relationships. Runs can be unbound; durable experiment
+records, leased capacity, and provider cleanup have separate lifetimes. Allocation expiry
+or release does not prove that provider cleanup has finished. The
+[current architecture](docs/design/top-level-design.md) maps these concepts to code.
 
 ### The provider runtime seam
 

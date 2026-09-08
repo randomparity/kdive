@@ -34,7 +34,7 @@ outside the agent session.
 - **Durable investigations.** Resources, allocations, systems, investigations, runs, and debug
   sessions have explicit lifecycles backed by Postgres; large artifacts live in an S3-compatible
   object store.
-- **Async work that survives the request.** Provisioning, builds, installs, and captures run as
+- **Async work that survives the request.** Provisioning, installs, boots, and captures run as
   durable jobs. Agents receive a job handle and poll for a terminal result.
 - **Local and remote KVM.** Use libvirt on the worker host for the shortest path, or connect to
   operator-managed remote libvirt hosts over TLS.

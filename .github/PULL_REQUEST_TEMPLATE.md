@@ -8,7 +8,7 @@
 
 ## Checklist
 
-- [ ] Tests added or updated for the change
+- [ ] Relevant checks pass; tests added or updated when behavior changes
 - [ ] `just ci` passes locally
 - [ ] Commits follow Conventional Commits (imperative subject ≤72 chars, one logical change each)
 - [ ] This is not a squash merge for a code PR (small commits are kept so `git bisect` stays useful)

@@ -10,22 +10,19 @@ KDIVE is Python 3.14, managed with [`uv`](https://docs.astral.sh/uv/). The
 `justfile` is the single source of truth for build, lint, type, and test
 commands — run the same recipes locally that CI runs.
 
-`just setup` cannot bootstrap its own runner, so install `just` and `prek`
-first:
+Development targets Linux. Before installing runner tools, follow the
+[host prerequisites](docs/operating/install.md) and the
+[cross-platform prerequisites](docs/development/cross-platform.md). In particular, POWER
+hosts need Rust on PATH before installing tools that build from source; `libvirt-python`
+needs the system libvirt and Python headers.
+
+`just setup` cannot bootstrap its own runner. Once the host is prepared:
 
 ```bash
 uv tool install rust-just
 uv tool install prek
 just setup   # check host deps, sync the locked venv, install and run git hooks
 ```
-
-`libvirt-python` has no prebuilt wheels and compiles against the system libvirt
-headers, so install `libvirt-dev` (or your distro's equivalent) before `just
-setup`; `just check-deps` reports any missing host packages. See the
-[installation guide](docs/operating/install.md) for the full host-prerequisite list. On `ppc64le` (POWER),
-`just check-deps` also requires a Rust toolchain — see the
-[cross-platform development guide](docs/development/cross-platform.md) for the
-per-arch prerequisites, container images, and POWER stack bring-up.
 
 ## Skipping reformat commits in `git blame`
 
@@ -91,17 +88,13 @@ artifacts (a doc or ADR that went through several review passes).
 
 ## Pull-request gate
 
-CI runs the `just` recipes (lint, type, both doc guards, tests, and more) on the
-branch head. Two conditions must both hold before a PR merges:
+PR CI runs the configured `just` recipes against GitHub's pull-request merge result;
+local `just ci` checks your checkout. Before merging, require both green checks and a
+conflict-free PR against `main`.
 
-1. **CI is green** — every check passes.
-2. **The PR is mergeable** — no conflicts with `main`. CI runs on the branch
-   head, not the merge result, so a PR can show green checks while it is behind
-   or conflicting against its base. If the PR is not mergeable, rebase `main`
-   in, resolve conflicts, re-run `just ci`, and re-push.
-
-Green checks alone do not mean a PR is ready to merge; it must be green **and**
-mergeable.
+If a published feature branch conflicts, merge current `main` into it, resolve the conflicts,
+run the relevant checks and `just ci` before pushing, then wait for fresh PR checks. Rebase
+only unpublished commits; do not rewrite pushed history.
 
 ## Architecture decisions and releases
 

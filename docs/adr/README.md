@@ -1,9 +1,10 @@
 # Architecture Decision Records
 
-This directory records the load-bearing architecture decisions for the KDIVE
-production rewrite. The top-level design (`../specs/top-level-design.md`) lists
-nine core decisions and states that each "should become an ADR before
-implementation"; those ADRs live here.
+These records preserve why architectural decisions were made. They are historical evidence,
+not an installation guide or a list of features available in the current checkout. Read a
+record's status, amendments, and superseding decisions before applying it. For today's
+architecture, start with the [current code map](../design/top-level-design.md); for learning
+and operating paths, use the [documentation index](../README.md).
 
 ## Process
 
@@ -88,8 +89,9 @@ every parallel PR that appends a row (git conflicts on *adjacent insertions*, so
 stated here was ignored in practice for most of the table's life, and every column was
 recoverable from the filename or the record. See [ADR-0504](0504-no-hand-maintained-adr-index.md).
 
-So an ADR-producing change touches **exactly one file: its own record** — plus, when it
-supersedes an earlier decision, the one-line banner in that record's status (below).
+An ADR-producing change needs no index-table edit. Create the new record and update any
+superseded record's status and banner as described above; retain the implementation and
+other documentation changes required by the decision.
 
 Browse `docs/adr/` directly, or:
 
