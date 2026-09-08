@@ -1562,6 +1562,60 @@ def test_get_expected_crash_surfaces_capture_disclosure(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_get_expected_crash_names_start_session_when_the_stub_answered(
+    migrated_url: str,
+) -> None:
+    # ADR-0628: one envelope must not report an attachable stub while steering the agent to
+    # vmcore.fetch, which always rejects on this outcome. The next action follows the same
+    # available_capture the debug gate reads.
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {
+                    "boot_outcome": "expected_crash_observed",
+                    "available_capture": ["gdbstub", "console"],
+                    "inert_capture": ["host_dump"],
+                },
+            )
+            resp = await get_run(pool, ctx(), run_id)
+        assert "debug.start_session" in resp.suggested_next_actions
+        assert "vmcore.fetch" not in resp.suggested_next_actions
+        # The post-mortem route stays available: ADR-0064's A/B workflow is unchanged.
+        assert "postmortem.crash" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_get_expected_crash_keeps_postmortem_actions_without_a_stub(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {
+                    "boot_outcome": "expected_crash_observed",
+                    "available_capture": ["console"],
+                    "inert_capture": ["gdbstub"],
+                },
+            )
+            resp = await get_run(pool, ctx(), run_id)
+        assert "debug.start_session" not in resp.suggested_next_actions
+        assert "postmortem.crash" in resp.suggested_next_actions
+        assert "vmcore.fetch" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
 def test_get_inert_capture_reason_only_for_expected_crash(migrated_url: str) -> None:
     async def _run() -> None:
         async with runs_support.pool(migrated_url) as pool:
