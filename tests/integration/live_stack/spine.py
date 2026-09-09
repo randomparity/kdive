@@ -35,7 +35,13 @@ import httpx
 import psycopg
 
 from kdive.domain.accounting.cost import quantize_kcu
-from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer, mint_token
+from kdive.mcp.dev_harness import (
+    LiveStackClient,
+    OidcIssuer,
+    _authorization_code,
+    _build_claims,
+    _exchange_code,
+)
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.mcp.json_data import data_str
@@ -49,6 +55,14 @@ from tests.mcp.json_data import data_str
 # a recorded timeout, not a capture failure.
 DRAIN_DEADLINE_S = 7200.0
 POLL_INTERVAL_S = 2.0
+
+# A spine token is minted once and carried for the whole test, so it has to outlive every phase,
+# not just one drain. ``mint_token``'s 3600s default does not: on an emulated host #2383's bundle
+# driver spent 2157s in provision alone and the token expired mid-boot, surfacing as a bare
+# ``401 Unauthorized`` from the transport with no phase attribution. Sized as four whole drains so
+# a test that legitimately reaches DRAIN_DEADLINE_S in several phases still fails on that
+# deadline — the bound that names which phase ran out — rather than on the credential.
+TOKEN_LIFETIME_S = int(DRAIN_DEADLINE_S) * 4
 
 # An allocation's disk request and its provision profile's disk_gb must agree exactly, or
 # reconcile_profile_sizing rejects the mismatch before provision runs (#315/#656, ADR-0205).
@@ -496,15 +510,23 @@ def mint_role_token(
     role: str,
     platform_roles: list[str] | None = None,
 ) -> str:
-    """Mint a per-project role token (the local test's ``_token``, parameterized by project)."""
-    return mint_token(
-        issuer,
+    """Mint a per-project role token (the local test's ``_token``, parameterized by project).
+
+    Drives ``mint_token``'s flow rather than calling it, to override ``exp``: the issuer's own
+    default is 3600s and ``mint_token`` exposes no lifetime, so a spine test that outruns an hour
+    dies on the credential (see ``TOKEN_LIFETIME_S``). The mock issuer applies the login form's
+    literal claims over its own, so an ``exp`` here is the token's ``exp``.
+    """
+    claims = _build_claims(
         subject=f"{role}-{project}",
+        audience=issuer.audience,
         projects=[project],
         roles={project: role},
         platform_roles=platform_roles,
         agent_session=agent_session,
     )
+    claims["exp"] = int(time.time()) + TOKEN_LIFETIME_S
+    return _exchange_code(issuer, _authorization_code(issuer, claims))
 
 
 # --- metering seed (ADR-0046 §0) -----------------------------------------------------------
