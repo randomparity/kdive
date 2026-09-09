@@ -35,34 +35,28 @@ import httpx
 import psycopg
 
 from kdive.domain.accounting.cost import quantize_kcu
-from kdive.mcp.dev_harness import (
-    LiveStackClient,
-    OidcIssuer,
-    _authorization_code,
-    _build_claims,
-    _exchange_code,
-)
+from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer, mint_token
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.mcp.json_data import data_str
 
 # Above the 300s jobs.wait cap and the 30s reconciler interval; teardown is the slowest phase.
-#
-# Sized for a host with hardware acceleration. On an emulated host every libguestfs step runs a
-# software-emulated appliance: provision alone measured ~1474s for the bootstrap-key injection
-# (#2383, ADR-0636), so the former 600s could not cover the provision-ready drain there and the
-# phase failed on the clock rather than on any capture result. A drain that reaches this bound is
-# a recorded timeout, not a capture failure.
-DRAIN_DEADLINE_S = 7200.0
+# This is the budget for a host with hardware acceleration, which is what every consumer of the
+# default runs on. A driver whose phases are legitimately slower — the ppc64le ones under
+# emulation (#2383, ADR-0636) — passes its own `deadline_s` instead of raising this. Raising the
+# shared default would also bound the x86_64 KVM runners, where the extra budget buys nothing and
+# delays every hung phase by the whole difference.
+DRAIN_DEADLINE_S = 600.0
 POLL_INTERVAL_S = 2.0
 
-# A spine token is minted once and carried for the whole test, so it has to outlive every phase,
-# not just one drain. ``mint_token``'s 3600s default does not: on an emulated host #2383's bundle
+# A spine token is minted once and carried for the whole test, so it has to outlive every phase of
+# the slowest driver. ``mint_token``'s 3600s default does not: on an emulated host #2383's bundle
 # driver spent 2157s in provision alone and the token expired mid-boot, surfacing as a bare
-# ``401 Unauthorized`` from the transport with no phase attribution. Sized as four whole drains so
-# a test that legitimately reaches DRAIN_DEADLINE_S in several phases still fails on that
-# deadline — the bound that names which phase ran out — rather than on the credential.
-TOKEN_LIFETIME_S = int(DRAIN_DEADLINE_S) * 4
+# ``401 Unauthorized`` from the transport with no phase attribution. Deliberately not derived from
+# DRAIN_DEADLINE_S, which bounds one phase — the ppc64le fadump driver ran 10292s end to end. A
+# run that legitimately exhausts its phase budgets then still fails on the deadline that names
+# which phase ran out, rather than on the credential.
+TOKEN_LIFETIME_S = 8 * 60 * 60
 
 # An allocation's disk request and its provision profile's disk_gb must agree exactly, or
 # reconcile_profile_sizing rejects the mismatch before provision runs (#315/#656, ADR-0205).
@@ -524,23 +518,16 @@ def mint_role_token(
     role: str,
     platform_roles: list[str] | None = None,
 ) -> str:
-    """Mint a per-project role token (the local test's ``_token``, parameterized by project).
-
-    Drives ``mint_token``'s flow rather than calling it, to override ``exp``: the issuer's own
-    default is 3600s and ``mint_token`` exposes no lifetime, so a spine test that outruns an hour
-    dies on the credential (see ``TOKEN_LIFETIME_S``). The mock issuer applies the login form's
-    literal claims over its own, so an ``exp`` here is the token's ``exp``.
-    """
-    claims = _build_claims(
+    """Mint a per-project role token (the local test's ``_token``, parameterized by project)."""
+    return mint_token(
+        issuer,
         subject=f"{role}-{project}",
-        audience=issuer.audience,
         projects=[project],
         roles={project: role},
         platform_roles=platform_roles,
         agent_session=agent_session,
+        lifetime_s=TOKEN_LIFETIME_S,
     )
-    claims["exp"] = int(time.time()) + TOKEN_LIFETIME_S
-    return _exchange_code(issuer, _authorization_code(issuer, claims))
 
 
 # --- metering seed (ADR-0046 §0) -----------------------------------------------------------

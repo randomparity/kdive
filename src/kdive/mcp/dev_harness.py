@@ -19,6 +19,7 @@ This module imports no pytest symbols so it stays importable as a plain library.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from typing import Self
 
@@ -114,6 +115,7 @@ def mint_token(
     platform_roles: Sequence[str] | None = None,
     agent_session: str | None = None,
     client_id: str | None = None,
+    lifetime_s: int | None = None,
 ) -> str:
     """Mint an access token from the mock-OIDC issuer carrying the kdive claims.
 
@@ -122,6 +124,11 @@ def mint_token(
     array), capture the ``code`` from the redirect, exchange it for the access token. The
     token validates through the server's real ``JWTVerifier`` (ADR-0044). ``client_id`` sets
     the OIDC ``azp`` claim so the boundary test can mint an ``operator-cli`` token.
+
+    ``lifetime_s`` overrides the issuer's own 3600s default by carrying an explicit ``exp`` in
+    the literal claims, which the mock issuer applies over its own. A caller that holds one
+    token for longer than an hour needs it: a spine driver that outruns the default dies on a
+    bare ``401 Unauthorized`` from the transport, with no phase attribution (#2383).
     """
     claims = _build_claims(
         subject=subject,
@@ -132,6 +139,8 @@ def mint_token(
         agent_session=agent_session,
         client_id=client_id,
     )
+    if lifetime_s is not None:
+        claims["exp"] = int(time.time()) + lifetime_s
     code = _authorization_code(issuer, claims)
     return _exchange_code(issuer, code)
 
