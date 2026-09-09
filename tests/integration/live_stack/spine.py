@@ -72,6 +72,20 @@ LOCAL_ALLOCATION_DISK_GB = 10
 
 _ARTIFACT_DIR_ENV = "KDIVE_ARTIFACT_DIR"
 
+# The libvirt endpoint every live-stack consumer drives. `scripts/live-stack/lib.sh:21` sets this
+# same name and default, and `down.sh`, `status.sh` and `lib.sh` all run
+# `virsh -c "$KDIVE_LIBVIRT_URI"`. A phase that inspects a domain directly must agree with them: a
+# host whose worker runs its own session daemon publishes that socket here, and `qemu:///system`
+# still connects — it just sees none of the worker's domains, so the phase fails as if the stack
+# had. #2383's native-POWER9 run lost its fadump and kdump capture verdicts to that mismatch.
+_LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
+_DEFAULT_LIBVIRT_URI = "qemu:///system"
+
+
+def worker_libvirt_uri() -> str:
+    """Return the libvirt URI the worker drives, for a phase that inspects a domain directly."""
+    return os.environ.get(_LIBVIRT_URI_ENV, "").strip() or _DEFAULT_LIBVIRT_URI
+
 
 def record_provision_evidence_target(target: Path, job_id: str, system_id: str) -> None:
     """Exclusively publish the hosted proof's exact provision job/System identity."""

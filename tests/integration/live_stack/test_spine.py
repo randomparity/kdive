@@ -466,3 +466,26 @@ def test_await_system_state_classifies_timeout_without_sleeping() -> None:
         assert excinfo.value.reason == "system did not reach torn_down"
 
     asyncio.run(_run())
+
+
+# --- the worker's libvirt endpoint (#2383) ---------------------------------------------------
+
+
+def test_worker_libvirt_uri_defaults_to_system(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    assert spine.worker_libvirt_uri() == "qemu:///system"
+
+
+def test_worker_libvirt_uri_honors_a_session_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The regression: #2383's native-POWER9 worker published this socket, the attribute phases
+    # ran `virsh -c qemu:///system`, and all three tests died before reaching the crash step.
+    socket_uri = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", socket_uri)
+    assert spine.worker_libvirt_uri() == socket_uri
+
+
+def test_worker_libvirt_uri_treats_empty_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Matches `scripts/live-stack/lib.sh`'s `${KDIVE_LIBVIRT_URI:-qemu:///system}`, where an empty
+    # value takes the default rather than producing `virsh -c ''`.
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "   ")
+    assert spine.worker_libvirt_uri() == "qemu:///system"

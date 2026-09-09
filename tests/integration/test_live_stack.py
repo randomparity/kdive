@@ -70,6 +70,7 @@ from tests.integration.live_stack.spine import (
     seed_metering,
     sha256_b64,
     system_torn_down,
+    worker_libvirt_uri,
 )
 from tests.mcp.json_data import data_mapping, data_str
 
@@ -1156,7 +1157,7 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                     # Discriminating: the running domain boots the *per-Run staged* uploaded bundle
                     # (not the provision-time baseline); the unique install token reached cmdline.
                     xml = subprocess.run(
-                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        ["virsh", "-c", worker_libvirt_uri(), "dumpxml", f"kdive-{system_id}"],
                         capture_output=True,
                         text=True,
                         check=True,
@@ -1370,7 +1371,7 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                     )
                 async with phase("ppc64le-fadump:attribute"):
                     xml = subprocess.run(
-                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        ["virsh", "-c", worker_libvirt_uri(), "dumpxml", f"kdive-{system_id}"],
                         capture_output=True,
                         text=True,
                         check=True,
@@ -1546,7 +1547,7 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                     )
                 async with phase("ppc64le-kdump:attribute"):
                     xml = subprocess.run(
-                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        ["virsh", "-c", worker_libvirt_uri(), "dumpxml", f"kdive-{system_id}"],
                         capture_output=True,
                         text=True,
                         check=True,
@@ -1600,9 +1601,12 @@ async def _assert_teardown(db_url: str, system_id: str) -> None:
 
     from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery  # noqa: PLC0415
 
+    # The worker's own endpoint, not a fixed system URI: against the wrong daemon `list_owned()`
+    # returns nothing and this assertion passes vacuously, so a leaked domain would go unreported.
+    uri = worker_libvirt_uri()
     disc = LocalLibvirtDiscovery(
-        host_uri="qemu:///system",
-        connect=lambda: libvirt.open("qemu:///system"),  # ty: ignore[invalid-argument-type]
+        host_uri=uri,
+        connect=lambda: libvirt.open(uri),  # ty: ignore[invalid-argument-type]
         concurrent_allocation_cap=2,
     )
     owned_ids = {o["system_id"] for o in disc.list_owned()}
