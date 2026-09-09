@@ -41,18 +41,18 @@ appliance is emulated too**, which no hosted `live_vm_tcg` runner reproduces.
 ## What #2383 changed
 
 Freeze 4 amended the charter's no-production-code exclusion after the run proved criteria 1–3
-unreachable without it. Two production files and three test files changed.
+unreachable without it. Three production files and three test files changed.
 
 | Change | Why |
 |---|---|
 | `host_appliance_multiplier()` in `providers/local_libvirt/lifecycle/deadlines.py`, applied to `_VIRT_CUSTOMIZE_TIMEOUT_S` | ADR-0636. `virt-customize --ssh-inject` writes each System's bootstrap key (ADR-0289/0315) and measured **1474 s** against a fixed **300 s** budget. Keyed off the *worker host's* KVM, not the System's `accel`. |
-| `DRAIN_DEADLINE_S` 600 → 7200 (`tests/integration/live_stack/spine.py`) | Pre-authorized. The provision-ready drain cannot cover a 2157 s provision at 600 s. |
-| `_PPC64LE_BOOT_DEADLINE_S` 1800 → 7200 (`tests/integration/test_live_stack.py`) | Pre-authorized, same reason. |
-| `mint_role_token` sets `exp` from `DRAIN_DEADLINE_S` (`spine.py`) | Freeze 5. The mock issuer's default token lifetime is 3600 s while the spine's own per-phase budget is 7200 s, so the credential expired before the budget it must outlive. |
+| `_PPC64LE_PHASE_DEADLINE_S` 7200 s, passed at every ppc64le drain (`tests/integration/test_live_stack.py`) | Pre-authorized. The provision-ready drain cannot cover a 2157 s provision at 600 s, and install and crash-state took the same shared default. Carried per driver rather than by raising `DRAIN_DEADLINE_S`, which also bounds the accelerated hosts every other spine test runs on. |
+| `mint_token` grows `lifetime_s`; the spine passes a whole-test bound (`src/kdive/mcp/dev_harness.py`, `spine.py`) | Freeze 5. The mock issuer's default token lifetime is 3600 s. A spine token is minted once per test, so it must outlive every phase of the slowest driver — this one ran 10292 s. |
+| `worker_libvirt_uri()`, replacing four hard-coded `qemu:///system` sites (`spine.py`, `test_live_stack.py`) | The native-POWER9 follow-up run below lost all three capture verdicts to this. Every other live-stack consumer already read `KDIVE_LIBVIRT_URI`; the spine did not. One of the four is `_assert_teardown`, where the wrong daemon made acceptance criterion #5 pass vacuously. |
 
 `SLOW_BUILD_TOOL_TIMEOUT_S` has the same defect as `_VIRT_CUSTOMIZE_TIMEOUT_S` and was
 deliberately left unscaled: it reaches only rootfs *build* paths, which no #2383 criterion
-exercises. It is recorded as a follow-up rather than changed unexercised.
+exercises. It is recorded as a follow-up rather than changed unexercised: #2397.
 
 ## Measured cost of an emulated host
 
@@ -296,8 +296,18 @@ with no repository counterpart.
    without sourcing `scripts/live-stack/env.sh`, so ADR-0358's emulated-POWER mirror selection
    never reaches it on the one host it was written for.
 
-Deviations 1, 8 and 9, and the Red Hat-family facts behind 2, 3, 5 and 6, are filed as follow-up
-work; none is in #2383's frozen scope.
+None is in #2383's frozen scope. Each is filed:
+
+| Deviation | Issue |
+|---|---|
+| 1 — in-guest `build-fs` times out on an emulated host | #2397 (`SLOW_BUILD_TOOL_TIMEOUT_S` is unscaled) |
+| 6 — `virtnodedevd.socket` enabled by hand | #2401 |
+| 8 — worker venv repaired by hand | #2399 |
+| 9 — `KDIVE_OIDC_IMAGE` exported by hand | #2400 |
+
+The Red Hat-family host facts behind deviations 2, 3 and 5 belong to epic #2388, which covers
+preparing a RHEL/Fedora/SUSE host as a local libvirt server. Deviations 4 and 7 are properties of
+this workstation, not of the repository.
 
 
 ---
@@ -377,10 +387,16 @@ virsh -c qemu:///system dumpxml kdive-<system_id>: returned non-zero exit status
 ```
 
 The test uses the system libvirtd URI. This host's worker uses a dedicated session daemon at a
-different socket. The test runner can connect to that socket (user `drc` is in
+different socket. The test runner can connect to that socket (the runner's account is in the
 `kdive-live-libvirt` group), but the hard-coded `qemu:///system` in the attribute assertion
 cannot see the domains. Since the test never reached the `crash` phase, **no capture verdict
 can be read from this run**, positive or negative.
+
+**Fixed after this run.** The four hard-coded sites now read `KDIVE_LIBVIRT_URI`, which is what
+every other live-stack consumer already did (`scripts/live-stack/lib.sh`, `down.sh`, `status.sh`).
+So this blocker does not stand between a re-run on this host and a capture verdict. This record
+states what the run that happened established; it does not predict the re-run's outcome. Criteria
+2 and 3 stay unproven until a run reaches the crash step and reports one.
 
 Provision timing on native POWER9 with KVM: ~30 s (vs 2157 s under TCG-inside-TCG on the
 emulated host). Boot timing: ~72–92 s. The entire 4-test suite completed in 17 min 25 s.
