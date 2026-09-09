@@ -14,7 +14,7 @@ to validate a deployment.
 |---|---|
 | x86_64 + KVM | Primary local-libvirt target; exercised by the native live suite. |
 | ppc64le + KVM-HV | Native POWER path. The [July 2026 proof](../design/2026-07-15-power-native-kvm-hv-validation-1156-proof-record.md) records the kdump spine on POWER9. POWER10 shares the architecture; that record is not a POWER10 end-to-end result. |
-| ppc64le + TCG | Foreign-architecture path on x86_64, used by the hosted live tier. Recorded [uploaded boot](../design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md) and [kdump](../design/2026-07-13-ppc64le-kdump-proof-record-1148.md) proofs. |
+| ppc64le + TCG | Foreign-architecture path on x86_64, used by the hosted live tier. Recorded [uploaded boot](../design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md) and [kdump](../design/2026-07-13-ppc64le-kdump-proof-record-1148.md) proofs. The [September 2026 emulated-POWER record](../design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md) re-validates the uploaded-kernel banner scan against #2382's rewrite; on that host both capture drivers stopped before the crash step on a guest-side systemd failure, so it adds no capture evidence. |
 | x86_64 + TCG | Available for foreign x86_64 guests on POWER or native guests without KVM. Availability alone is not a dedicated end-to-end proof. |
 
 ### The TCG boot-deadline multiplier
@@ -120,3 +120,9 @@ confirms the admission fix and a POWER10 host's QEMU/KVM prerequisites. It expli
 native crash-to-capture at 4 GiB unexecuted. It is not proof that the POWER10 guest booted or
 captured successfully. Use the recorded kdump path when a demonstrated capture is required,
 and report a new native fadump result with its exact runtime and fixture evidence.
+
+The [2026-09-09 emulated-POWER record](../design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md)
+attempted the capture under TCG-inside-TCG and did not reach the crash step: the guest reserved,
+initialized and RTAS-registered fadump at 4 GiB, then its own systemd froze before run-readiness.
+That record demonstrates fadump *registration* at the ADR-0363 floor and nothing beyond it. Native
+crash-to-capture remains unproven, and an emulated host is not a substitute for establishing it.

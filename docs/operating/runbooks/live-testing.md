@@ -347,7 +347,13 @@ With these fixtures and the live-stack environment configured, run `just test-li
 The marker name does not force emulation; the expected accelerator is resolved from the host.
 Report which drivers passed or skipped. The fadump driver skips non-ppc64le hosts; for its
 intended native proof, also confirm KVM is selected and the fadump prerequisites are met.
-A skip is not capture evidence. The
+A skip is not capture evidence. On an emulated ppc64le host the driver runs rather than skips,
+and running it is still not native evidence: the
+[2026-09-09 record](../../design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md)
+reached fadump registration under TCG-inside-TCG and then lost the guest to a systemd freeze
+before the crash step, after 2 h 51 m. Budget hours per driver there, raise
+`KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, and read a `drain_timeout` on `boot` as a guest that
+never signalled readiness rather than as a capture result. The
 [platform support page](../platform-support.md#crash-capture-methods-by-arch) records the dated
 capture proofs and their limits.
 
