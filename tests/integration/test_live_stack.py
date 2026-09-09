@@ -70,6 +70,7 @@ from tests.integration.live_stack.spine import (
     seed_metering,
     sha256_b64,
     system_torn_down,
+    worker_libvirt_uri,
 )
 from tests.mcp.json_data import data_mapping, data_str
 
@@ -99,8 +100,12 @@ _PPC64LE_REACHABLE_POLL_S = 20.0
 # ppc64le rootfs per docs/design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md; the test
 # skips cleanly when it is absent.
 _PPC64LE_BUNDLE_ENV = "KDIVE_PPC64LE_BUNDLE"
-# The boot window under TCG (upload+install+boot of an uploaded modular kernel) is generous.
-_PPC64LE_BOOT_DEADLINE_S = 1800.0
+# The per-phase window for every ppc64le driver: these run under TCG, and on an emulated-POWER
+# host under TCG *inside* TCG, where provision alone measured 2157s and the libguestfs appliance
+# is emulated too (#2383, ADR-0636). Every ppc64le drain passes this rather than the spine's
+# shared DRAIN_DEADLINE_S, which stays sized for the accelerated hosts the other drivers run on.
+# A phase that reaches this bound is a recorded timeout, not a capture result.
+_PPC64LE_PHASE_DEADLINE_S = 7200.0
 # A throwaway ed25519 public key (public half only; KDIVE never needs the private key to append it).
 # Fixed is fine: authorize_ssh_key dedups on the key fingerprint, so a re-run is idempotent.
 _REACHABILITY_PUBKEY = (
@@ -945,7 +950,13 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                         record_provision_evidence_target(
                             Path(evidence_target), env.object_id, system_id
                         )
-                    await await_system_state(op, "ppc64le:provision", system_id, "ready")
+                    await await_system_state(
+                        op,
+                        "ppc64le:provision",
+                        system_id,
+                        "ready",
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le:systems_get"):
                     got = ok(
                         await scalar(op, "systems.get", system_id=system_id),
@@ -1085,7 +1096,13 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                         "ppc64le-bundle:provision",
                     )
                     system_id = data_str(env, "system_id")
-                    await await_system_state(op, "ppc64le-bundle:provision", system_id, "ready")
+                    await await_system_state(
+                        op,
+                        "ppc64le-bundle:provision",
+                        system_id,
+                        "ready",
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-bundle:create-run"):
                     env = ok(
                         await scalar(
@@ -1139,7 +1156,12 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                         await scalar(op, "runs.install", run_id=run_id, cmdline=proof_token),
                         "ppc64le-bundle:install",
                     )
-                    await drain_job(op, "ppc64le-bundle:install", env.object_id)
+                    await drain_job(
+                        op,
+                        "ppc64le-bundle:install",
+                        env.object_id,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-bundle:boot"):
                     env = ok(await scalar(op, "runs.boot", run_id=run_id), "ppc64le-bundle:boot")
                     # Reaching readiness == kdive-ready on hvc0 (real-root, post-pivot): the
@@ -1148,13 +1170,13 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                         op,
                         "ppc64le-bundle:boot",
                         env.object_id,
-                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
                     )
                 async with phase("ppc64le-bundle:attribute"):
                     # Discriminating: the running domain boots the *per-Run staged* uploaded bundle
                     # (not the provision-time baseline); the unique install token reached cmdline.
                     xml = subprocess.run(
-                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        ["virsh", "-c", worker_libvirt_uri(), "dumpxml", f"kdive-{system_id}"],
                         capture_output=True,
                         text=True,
                         check=True,
@@ -1303,7 +1325,13 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         "ppc64le-fadump:provision",
                     )
                     system_id = data_str(env, "system_id")
-                    await await_system_state(op, "ppc64le-fadump:provision", system_id, "ready")
+                    await await_system_state(
+                        op,
+                        "ppc64le-fadump:provision",
+                        system_id,
+                        "ready",
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-fadump:create-run"):
                     env = ok(
                         await scalar(
@@ -1357,18 +1385,23 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(op, "runs.install", run_id=run_id, cmdline=proof_token),
                         "ppc64le-fadump:install",
                     )
-                    await drain_job(op, "ppc64le-fadump:install", env.object_id)
+                    await drain_job(
+                        op,
+                        "ppc64le-fadump:install",
+                        env.object_id,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-fadump:boot"):
                     env = ok(await scalar(op, "runs.boot", run_id=run_id), "ppc64le-fadump:boot")
                     await drain_job(
                         op,
                         "ppc64le-fadump:boot",
                         env.object_id,
-                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
                     )
                 async with phase("ppc64le-fadump:attribute"):
                     xml = subprocess.run(
-                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        ["virsh", "-c", worker_libvirt_uri(), "dumpxml", f"kdive-{system_id}"],
                         capture_output=True,
                         text=True,
                         check=True,
@@ -1386,7 +1419,13 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(admin, "control.force_crash", system_id=system_id),
                         "ppc64le-fadump:crash",
                     )
-                    await await_system_state(admin, "ppc64le-fadump:crash", system_id, "crashed")
+                    await await_system_state(
+                        admin,
+                        "ppc64le-fadump:crash",
+                        system_id,
+                        "crashed",
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-fadump:capture"):
                     env = ok(
                         await scalar(op, "vmcore.fetch", run_id=run_id), "ppc64le-fadump:capture"
@@ -1395,7 +1434,7 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         op,
                         "ppc64le-fadump:capture",
                         env.object_id,
-                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
                     )
                     refs = await captured_vmcore_refs(
                         op, "ppc64le-fadump:capture", drained, run_id=run_id
@@ -1480,7 +1519,13 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                         "ppc64le-kdump:provision",
                     )
                     system_id = data_str(env, "system_id")
-                    await await_system_state(op, "ppc64le-kdump:provision", system_id, "ready")
+                    await await_system_state(
+                        op,
+                        "ppc64le-kdump:provision",
+                        system_id,
+                        "ready",
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-kdump:create-run"):
                     env = ok(
                         await scalar(
@@ -1536,15 +1581,23 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(op, "runs.install", run_id=run_id, cmdline=proof_token),
                         "ppc64le-kdump:install",
                     )
-                    await drain_job(op, "ppc64le-kdump:install", env.object_id)
+                    await drain_job(
+                        op,
+                        "ppc64le-kdump:install",
+                        env.object_id,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-kdump:boot"):
                     env = ok(await scalar(op, "runs.boot", run_id=run_id), "ppc64le-kdump:boot")
                     await drain_job(
-                        op, "ppc64le-kdump:boot", env.object_id, deadline_s=_PPC64LE_BOOT_DEADLINE_S
+                        op,
+                        "ppc64le-kdump:boot",
+                        env.object_id,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
                     )
                 async with phase("ppc64le-kdump:attribute"):
                     xml = subprocess.run(
-                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        ["virsh", "-c", worker_libvirt_uri(), "dumpxml", f"kdive-{system_id}"],
                         capture_output=True,
                         text=True,
                         check=True,
@@ -1565,7 +1618,13 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(admin, "control.force_crash", system_id=system_id),
                         "ppc64le-kdump:crash",
                     )
-                    await await_system_state(admin, "ppc64le-kdump:crash", system_id, "crashed")
+                    await await_system_state(
+                        admin,
+                        "ppc64le-kdump:crash",
+                        system_id,
+                        "crashed",
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
+                    )
                 async with phase("ppc64le-kdump:capture"):
                     env = ok(
                         await scalar(op, "vmcore.fetch", run_id=run_id), "ppc64le-kdump:capture"
@@ -1574,7 +1633,7 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                         op,
                         "ppc64le-kdump:capture",
                         env.object_id,
-                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                        deadline_s=_PPC64LE_PHASE_DEADLINE_S,
                     )
                     refs = await captured_vmcore_refs(
                         op, "ppc64le-kdump:capture", drained, run_id=run_id
@@ -1598,9 +1657,12 @@ async def _assert_teardown(db_url: str, system_id: str) -> None:
 
     from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery  # noqa: PLC0415
 
+    # The worker's own endpoint, not a fixed system URI: against the wrong daemon `list_owned()`
+    # returns nothing and this assertion passes vacuously, so a leaked domain would go unreported.
+    uri = worker_libvirt_uri()
     disc = LocalLibvirtDiscovery(
-        host_uri="qemu:///system",
-        connect=lambda: libvirt.open("qemu:///system"),  # ty: ignore[invalid-argument-type]
+        host_uri=uri,
+        connect=lambda: libvirt.open(uri),  # ty: ignore[invalid-argument-type]
         concurrent_allocation_cap=2,
     )
     owned_ids = {o["system_id"] for o in disc.list_owned()}

@@ -7,7 +7,10 @@ from collections.abc import Iterator
 import pytest
 
 import kdive.config as config
-from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
+from kdive.providers.local_libvirt.lifecycle.deadlines import (
+    host_appliance_multiplier,
+    tcg_deadline_multiplier,
+)
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 
 
@@ -48,3 +51,26 @@ def test_kvm_never_reads_config() -> None:
     # touching configuration, so an over-optimistic operator value can never break the fast path.
     config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "not-a-float"})
     assert tcg_deadline_multiplier("kvm") == 1.0
+
+
+# --- host-side libguestfs appliance budget (#2383) -------------------------------------------
+#
+# Keyed off the WORKER HOST's KVM, not a System's accel: the appliance is a host-arch VM the
+# worker boots to edit a disk, so an emulated host slows it even for a KVM-accelerated System.
+
+
+def test_host_with_kvm_is_unscaled() -> None:
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0"})
+    assert host_appliance_multiplier(kvm_present=lambda: True) == 1.0
+
+
+def test_host_without_kvm_uses_configured_multiplier() -> None:
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "7.0"})
+    assert host_appliance_multiplier(kvm_present=lambda: False) == 7.0
+
+
+def test_host_without_kvm_clears_the_measured_emulated_cost() -> None:
+    # The regression this scaling exists for: on an emulated-POWER host one
+    # `virt-customize --ssh-inject` measured 1474 s against the unscaled 300 s budget (#2383).
+    config.load({})  # setting default (10.0)
+    assert 5 * 60 * host_appliance_multiplier(kvm_present=lambda: False) > 1474

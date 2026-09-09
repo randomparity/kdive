@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.deadlines import host_appliance_multiplier
 from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
     PROVIDER_TOOL_SEARCH_PATH,
     resolve_provider_tool,
@@ -22,6 +23,9 @@ from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
 
 type OverlayCustomizer = Callable[[str], None]
 
+# Budget for one virt-customize run on a KVM host. Scaled by host_appliance_multiplier() at the
+# call site: without host KVM the libguestfs appliance kernel is emulated and the same injection
+# takes ~5x longer (#2383), so a fixed 300 s made every emulated host fail provisioning.
 _VIRT_CUSTOMIZE_TIMEOUT_S = 5 * 60
 _VIRT_CUSTOMIZE = "virt-customize"
 
@@ -58,7 +62,7 @@ def _real_inject_authorized_key(  # pragma: no cover - live_vm
             capture_output=True,
             text=True,
             check=False,
-            timeout=_VIRT_CUSTOMIZE_TIMEOUT_S,
+            timeout=_VIRT_CUSTOMIZE_TIMEOUT_S * host_appliance_multiplier(),
         )
         if result.returncode != 0:
             raise CategorizedError(

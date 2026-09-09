@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
+import kdive.mcp.dev_harness as dev_harness
 from kdive.mcp.dev_harness import (
     OidcIssuer,
     _build_claims,
@@ -83,6 +86,59 @@ def test_oidc_issuer_from_env_missing_base_url_raises(monkeypatch: pytest.Monkey
     monkeypatch.delenv("KDIVE_OIDC_ISSUER", raising=False)
     with pytest.raises(RuntimeError, match="KDIVE_OIDC_ISSUER"):
         oidc_issuer_from_env()
+
+
+# --- the token-lifetime override (#2383) -----------------------------------------------------
+#
+# The issuer's own default is 3600s, and a spine token is minted once and carried for the whole
+# test. The ppc64le fadump driver ran 10292s, so without an explicit `exp` the credential expires
+# mid-run and the transport returns a bare `401 Unauthorized` that names no phase. These pin the
+# override at the only place it can be checked without a live issuer: the literal claims the
+# login form carries. Both directions, so a silent no-op cannot pass as working.
+
+
+def _capture_flow(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Intercept the network legs and return the claims the flow was handed."""
+    seen: dict[str, object] = {}
+
+    def _authorization_code(issuer: OidcIssuer, claims: dict[str, object]) -> str:
+        seen.update(claims)
+        return "test-code"
+
+    monkeypatch.setattr(dev_harness, "_authorization_code", _authorization_code)
+    monkeypatch.setattr(dev_harness, "_exchange_code", lambda issuer, code: "test-token")
+    return seen
+
+
+def _mint(**kwargs: object) -> str:
+    issuer = OidcIssuer(base_url="http://localhost:8090/default", audience="kdive")
+    return dev_harness.mint_token(
+        issuer,
+        subject="admin-proj-a",
+        projects=["proj-a"],
+        roles={"proj-a": "admin"},
+        **kwargs,  # ty: ignore[invalid-argument-type]
+    )
+
+
+def test_mint_token_carries_the_requested_exp(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_flow(monkeypatch)
+    floor = int(time.time()) + 7200
+
+    assert _mint(lifetime_s=7200) == "test-token"
+
+    exp = seen["exp"]
+    assert isinstance(exp, int)
+    assert floor <= exp <= int(time.time()) + 7200
+
+
+def test_mint_token_omits_exp_without_a_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No claim at all, so the issuer's default still applies — distinct from an exp of zero.
+    seen = _capture_flow(monkeypatch)
+
+    assert _mint() == "test-token"
+
+    assert "exp" not in seen
 
 
 # --- the raw-vmcore egress check (#1610) ----------------------------------------------------

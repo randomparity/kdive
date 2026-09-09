@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,8 +42,22 @@ from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.mcp.json_data import data_str
 
 # Above the 300s jobs.wait cap and the 30s reconciler interval; teardown is the slowest phase.
+# This is the budget for a host with hardware acceleration, which is what every consumer of the
+# default runs on. A driver whose phases are legitimately slower — the ppc64le ones under
+# emulation (#2383, ADR-0636) — passes its own `deadline_s` instead of raising this. Raising the
+# shared default would also bound the x86_64 KVM runners, where the extra budget buys nothing and
+# delays every hung phase by the whole difference.
 DRAIN_DEADLINE_S = 600.0
 POLL_INTERVAL_S = 2.0
+
+# A spine token is minted once and carried for the whole test, so it has to outlive every phase of
+# the slowest driver. ``mint_token``'s 3600s default does not: on an emulated host #2383's bundle
+# driver spent 2157s in provision alone and the token expired mid-boot, surfacing as a bare
+# ``401 Unauthorized`` from the transport with no phase attribution. Deliberately not derived from
+# DRAIN_DEADLINE_S, which bounds one phase — the ppc64le fadump driver ran 10292s end to end. A
+# run that legitimately exhausts its phase budgets then still fails on the deadline that names
+# which phase ran out, rather than on the credential.
+TOKEN_LIFETIME_S = 8 * 60 * 60
 
 # An allocation's disk request and its provision profile's disk_gb must agree exactly, or
 # reconcile_profile_sizing rejects the mismatch before provision runs (#315/#656, ADR-0205).
@@ -51,6 +66,52 @@ REMOTE_ALLOCATION_DISK_GB = 10
 LOCAL_ALLOCATION_DISK_GB = 10
 
 _ARTIFACT_DIR_ENV = "KDIVE_ARTIFACT_DIR"
+
+# The libvirt endpoint every live-stack consumer drives. `scripts/live-stack/lib.sh:21` sets this
+# same name and default, and `down.sh`, `status.sh` and `lib.sh` all run
+# `virsh -c "$KDIVE_LIBVIRT_URI"`. A phase that inspects a domain directly must agree with them: a
+# host whose worker runs its own session daemon publishes that socket here, and `qemu:///system`
+# still connects — it just sees none of the worker's domains, so the phase fails as if the stack
+# had. #2383's native-POWER9 run lost its fadump and kdump capture verdicts to that mismatch.
+_LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
+_DEFAULT_LIBVIRT_URI = "qemu:///system"
+_PUBLISHED_LIBVIRT_URI = Path("/etc/kdive/live-worker-libvirt.env")
+
+
+def _published_worker_libvirt_uri() -> str | None:
+    """Read the fixed live worker's published endpoint, or ``None`` if it is not trustworthy.
+
+    ``deploy/systemd/install-live-worker-lifecycle.sh`` installs this file as root-owned 0644
+    holding exactly one ``KDIVE_LIBVIRT_URI=<uri>`` line. Parsed as data, never sourced, and
+    guarded on the same metadata as ``scripts/live-stack/libvirt-uri.sh``: its content selects
+    the socket a ``virsh`` subprocess connects to, so a file anyone could rewrite is not read.
+    """
+    try:
+        info = _PUBLISHED_LIBVIRT_URI.lstat()
+        if info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o644:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        lines = [ln for ln in _PUBLISHED_LIBVIRT_URI.read_text(encoding="utf-8").splitlines() if ln]
+    except OSError:
+        return None
+    if len(lines) != 1:
+        return None
+    name, separator, uri = lines[0].partition("=")
+    return uri.strip() or None if name == _LIBVIRT_URI_ENV and separator else None
+
+
+def worker_libvirt_uri() -> str:
+    """Return the libvirt URI the worker drives, for a phase that inspects a domain directly.
+
+    Mirrors the precedence ``examples/local-libvirt/env.sh`` already applies: an explicit
+    ``KDIVE_LIBVIRT_URI`` wins, then the root-published fixed-live-worker endpoint, then the
+    live-stack default. The published file matters because `lib.sh` sets the variable in the
+    bring-up shell, not in the pytest process that runs hours later — so on a session-daemon host
+    the fallback is what stands between a re-run and the failure this function exists to remove.
+    """
+    explicit = os.environ.get(_LIBVIRT_URI_ENV, "").strip()
+    return explicit or _published_worker_libvirt_uri() or _DEFAULT_LIBVIRT_URI
 
 
 def record_provision_evidence_target(target: Path, job_id: str, system_id: str) -> None:
@@ -498,6 +559,7 @@ def mint_role_token(
         roles={project: role},
         platform_roles=platform_roles,
         agent_session=agent_session,
+        lifetime_s=TOKEN_LIFETIME_S,
     )
 
 

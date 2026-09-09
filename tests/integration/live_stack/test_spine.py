@@ -466,3 +466,105 @@ def test_await_system_state_classifies_timeout_without_sleeping() -> None:
         assert excinfo.value.reason == "system did not reach torn_down"
 
     asyncio.run(_run())
+
+
+# --- the worker's libvirt endpoint (#2383) ---------------------------------------------------
+
+
+def _no_published_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the fallback away from the real host file, so these cases do not depend on the host."""
+    monkeypatch.setattr(spine, "_PUBLISHED_LIBVIRT_URI", Path("/nonexistent/kdive-libvirt.env"))
+
+
+def test_worker_libvirt_uri_defaults_to_system(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    _no_published_endpoint(monkeypatch)
+    assert spine.worker_libvirt_uri() == "qemu:///system"
+
+
+def test_worker_libvirt_uri_honors_a_session_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The regression: #2383's native-POWER9 worker published this socket, the attribute phases
+    # ran `virsh -c qemu:///system`, and all three tests died before reaching the crash step.
+    socket_uri = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", socket_uri)
+    assert spine.worker_libvirt_uri() == socket_uri
+
+
+def test_worker_libvirt_uri_treats_empty_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Matches `scripts/live-stack/lib.sh`'s `${KDIVE_LIBVIRT_URI:-qemu:///system}`, where an empty
+    # value takes the default rather than producing `virsh -c ''`.
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "   ")
+    _no_published_endpoint(monkeypatch)
+    assert spine.worker_libvirt_uri() == "qemu:///system"
+
+
+def _publish(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str, *, mode: int = 0o644
+) -> Path:
+    """Stand in for the root-published endpoint file, with its ownership guard satisfied."""
+    published = tmp_path / "live-worker-libvirt.env"
+    published.write_text(text, encoding="utf-8")
+    published.chmod(mode)
+    monkeypatch.setattr(spine, "_PUBLISHED_LIBVIRT_URI", published)
+    # The real file is root-owned; a test file is owned by the test user, so report the guard's
+    # expected identity and let the mode and single-assignment checks do the discriminating.
+    real_lstat = Path.lstat
+
+    def _lstat(self: Path) -> os.stat_result:
+        info = real_lstat(self)
+        if self != published:
+            return info
+        fields = list(info)
+        fields[4] = 0  # st_uid
+        fields[5] = 0  # st_gid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    return published
+
+
+_SOCKET_URI = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+
+
+def test_worker_libvirt_uri_reads_the_published_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `lib.sh` exports the variable in the bring-up shell, not in the pytest process that runs
+    # hours later, so the published file is what a session-daemon host actually falls back to.
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    _publish(monkeypatch, tmp_path, f"KDIVE_LIBVIRT_URI={_SOCKET_URI}\n")
+    assert spine.worker_libvirt_uri() == _SOCKET_URI
+
+
+def test_explicit_env_outranks_the_published_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///session")
+    _publish(monkeypatch, tmp_path, f"KDIVE_LIBVIRT_URI={_SOCKET_URI}\n")
+    assert spine.worker_libvirt_uri() == "qemu:///session"
+
+
+def test_a_world_writable_published_endpoint_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The file selects the socket a virsh subprocess connects to, so anything but the installer's
+    # own 0644 is not read — the same guard scripts/live-stack/libvirt-uri.sh applies.
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    _publish(monkeypatch, tmp_path, f"KDIVE_LIBVIRT_URI={_SOCKET_URI}\n", mode=0o666)
+    assert spine.worker_libvirt_uri() == "qemu:///system"
+
+
+def test_a_multi_line_published_endpoint_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # libvirt-uri.sh requires exactly one assignment; a second line means the file is not the
+    # contract it claims to be, so the default stands rather than a guessed first match.
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    _publish(monkeypatch, tmp_path, f"KDIVE_LIBVIRT_URI={_SOCKET_URI}\nEXTRA=1\n")
+    assert spine.worker_libvirt_uri() == "qemu:///system"
+
+
+def test_a_missing_published_endpoint_takes_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    _no_published_endpoint(monkeypatch)
+    assert spine.worker_libvirt_uri() == "qemu:///system"
