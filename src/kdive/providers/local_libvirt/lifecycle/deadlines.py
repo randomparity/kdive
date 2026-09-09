@@ -1,10 +1,15 @@
-"""Accelerator-keyed deadline scaling for the local-libvirt provider (ADR-0341).
+"""Accelerator-keyed deadline scaling for the local-libvirt provider (ADR-0341, ADR-0636).
 
-TCG (software-emulated, foreign-arch) guests execute an order of magnitude slower than
-KVM-accelerated ones, so boot-readiness deadlines tuned for KVM time out spuriously under
-TCG. This module holds the single multiplier the provider applies where a guest-execution
-deadline is computed, keyed off the System's persisted ``accel`` fact (#1141), so the policy
-lives in one place rather than as scattered per-step constants.
+Software-emulated execution runs an order of magnitude slower than KVM-accelerated execution,
+so a budget tuned for KVM times out spuriously without it. This module holds the single
+multiplier the provider applies, and the two keys that select it:
+
+* :func:`tcg_deadline_multiplier` — the System's persisted ``accel`` fact (#1141), for a
+  guest-execution deadline, because the guest executes under that accelerator.
+* :func:`host_appliance_multiplier` — the worker host's KVM (#2383), for a host-side
+  libguestfs appliance budget, because the appliance is a host-arch VM the worker boots.
+
+Keeping both here keeps the policy in one place rather than as scattered per-step constants.
 """
 
 from __future__ import annotations
