@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -74,11 +75,43 @@ _ARTIFACT_DIR_ENV = "KDIVE_ARTIFACT_DIR"
 # had. #2383's native-POWER9 run lost its fadump and kdump capture verdicts to that mismatch.
 _LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
 _DEFAULT_LIBVIRT_URI = "qemu:///system"
+_PUBLISHED_LIBVIRT_URI = Path("/etc/kdive/live-worker-libvirt.env")
+
+
+def _published_worker_libvirt_uri() -> str | None:
+    """Read the fixed live worker's published endpoint, or ``None`` if it is not trustworthy.
+
+    ``deploy/systemd/install-live-worker-lifecycle.sh`` installs this file as root-owned 0644
+    holding exactly one ``KDIVE_LIBVIRT_URI=<uri>`` line. Parsed as data, never sourced, and
+    guarded on the same metadata as ``scripts/live-stack/libvirt-uri.sh``: its content selects
+    the socket a ``virsh`` subprocess connects to, so a file anyone could rewrite is not read.
+    """
+    try:
+        info = _PUBLISHED_LIBVIRT_URI.lstat()
+        if info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o644:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        lines = [ln for ln in _PUBLISHED_LIBVIRT_URI.read_text(encoding="utf-8").splitlines() if ln]
+    except OSError:
+        return None
+    if len(lines) != 1:
+        return None
+    name, separator, uri = lines[0].partition("=")
+    return uri.strip() or None if name == _LIBVIRT_URI_ENV and separator else None
 
 
 def worker_libvirt_uri() -> str:
-    """Return the libvirt URI the worker drives, for a phase that inspects a domain directly."""
-    return os.environ.get(_LIBVIRT_URI_ENV, "").strip() or _DEFAULT_LIBVIRT_URI
+    """Return the libvirt URI the worker drives, for a phase that inspects a domain directly.
+
+    Mirrors the precedence ``examples/local-libvirt/env.sh`` already applies: an explicit
+    ``KDIVE_LIBVIRT_URI`` wins, then the root-published fixed-live-worker endpoint, then the
+    live-stack default. The published file matters because `lib.sh` sets the variable in the
+    bring-up shell, not in the pytest process that runs hours later — so on a session-daemon host
+    the fallback is what stands between a re-run and the failure this function exists to remove.
+    """
+    explicit = os.environ.get(_LIBVIRT_URI_ENV, "").strip()
+    return explicit or _published_worker_libvirt_uri() or _DEFAULT_LIBVIRT_URI
 
 
 def record_provision_evidence_target(target: Path, job_id: str, system_id: str) -> None:
