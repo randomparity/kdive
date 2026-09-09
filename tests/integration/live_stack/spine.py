@@ -41,7 +41,13 @@ from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.mcp.json_data import data_str
 
 # Above the 300s jobs.wait cap and the 30s reconciler interval; teardown is the slowest phase.
-DRAIN_DEADLINE_S = 600.0
+#
+# Sized for a host with hardware acceleration. On an emulated host every libguestfs step runs a
+# software-emulated appliance: provision alone measured ~1474s for the bootstrap-key injection
+# (#2383, ADR-0636), so the former 600s could not cover the provision-ready drain there and the
+# phase failed on the clock rather than on any capture result. A drain that reaches this bound is
+# a recorded timeout, not a capture failure.
+DRAIN_DEADLINE_S = 7200.0
 POLL_INTERVAL_S = 2.0
 
 # An allocation's disk request and its provision profile's disk_gb must agree exactly, or

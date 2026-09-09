@@ -100,7 +100,9 @@ _PPC64LE_REACHABLE_POLL_S = 20.0
 # skips cleanly when it is absent.
 _PPC64LE_BUNDLE_ENV = "KDIVE_PPC64LE_BUNDLE"
 # The boot window under TCG (upload+install+boot of an uploaded modular kernel) is generous.
-_PPC64LE_BOOT_DEADLINE_S = 1800.0
+# Raised for the nested case (#2383): a ppc64le guest on an emulated-POWER host runs TCG under
+# TCG, where 1800s did not cover boot. A phase that reaches this bound is a recorded timeout.
+_PPC64LE_BOOT_DEADLINE_S = 7200.0
 # A throwaway ed25519 public key (public half only; KDIVE never needs the private key to append it).
 # Fixed is fine: authorize_ssh_key dedups on the key fingerprint, so a re-run is idempotent.
 _REACHABILITY_PUBKEY = (
