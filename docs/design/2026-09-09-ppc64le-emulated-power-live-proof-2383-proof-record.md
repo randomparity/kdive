@@ -298,3 +298,89 @@ with no repository counterpart.
 
 Deviations 1, 8 and 9, and the Red Hat-family facts behind 2, 3, 5 and 6, are filed as follow-up
 work; none is in #2383's frozen scope.
+
+
+---
+
+## Appendix — native POWER9 follow-up run (2026-09-09, <REDACTED-HOST>)
+
+A second run against the same branch (`HEAD: 0330b05fc`) was executed on a **native POWER9 host**
+(Ubuntu 26.04.1, kernel `7.0.0-31-generic`, `/dev/kvm` present). This host was not the charter's
+host of record, but the charter's host-of-record decision fixed it as an emulated ppc64le guest —
+not as the only permitted run host. This run adds supplementary evidence on a host where provision
+takes ~30 s (KVM) rather than ~36 min (TCG inside TCG).
+
+| | |
+|---|---|
+| host kernel | `7.0.0-31-generic`, Ubuntu 26.04.1 LTS (Resolute Raccoon) |
+| cpu | POWER9, altivec supported |
+| memory | available via `/dev/kvm` |
+| QEMU | 10.2.1 (Debian `1:10.2.1+ds-1ubuntu3.2`) |
+| libvirt | 12.0.0 |
+| containers | Docker 29.1.3, Compose (stack-up); python 3.14.4 |
+| accel | `/dev/kvm` present; `expected_accel("ppc64le")` resolves `kvm` |
+| access | `<REDACTED-HOST>` |
+| stack | same three-role host stack (`server`/`worker`/`reconciler`) at commit `0330b05fc` |
+
+**Note:** The worker on this host uses a dedicated kdive session libvirtd
+(`qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock`) rather than the
+system libvirtd. The test's `attribute` phase calls `virsh -c qemu:///system dumpxml` (system
+libvirtd), which cannot see domains the worker created in the session daemon. All three
+`test_ppc64le_*_over_the_wire` tests failed at `:attribute` for this reason, not because KDIVE
+itself failed. The underlying KDIVE operations (provision, upload, `runs.complete_build`,
+`runs.install`, `runs.boot`) all succeeded and are recorded in the DB.
+
+### Criterion 1 — the wire-validated release is the whole module-tree name (PASS, native POWER)
+
+All three bundle uploads on this run persisted the same `external_boot_evidence` document.
+Extracted from `investigation_builds.canonical_document`:
+
+```json
+{
+  "schema": "external-boot-evidence-v1",
+  "release": "6.19.10-300.fc44.ppc64le",
+  "architecture": "ppc64le",
+  "elf_metadata_bytes": 16777216,
+  "vmlinuz_size_bytes": 66211760,
+  "gnu_build_id": "06466f9617cff9e5a762af9216bfc23837310b9c",
+  "bundle_sha256": "sha256:7ef6f385815745deabc0b003a43a4663a5753538dd71a6a99d0953b6d25a4a33"
+}
+```
+
+`release` is the full 24-character `6.19.10-300.fc44.ppc64le`. The vmlinuz is 66,211,760 bytes;
+the banner lies past the 16 MiB (`elf_metadata_bytes`) read window added by #2382, confirming
+the ">16 MiB window" half of the fix. Criterion 1 is proven on both hosts.
+
+### Criteria 2 and 3 — fadump and kdump crash→capture (BLOCKED, wrong libvirt URI in test attribute step)
+
+All three boot jobs (`runs.boot`) succeeded with `state=succeeded`:
+
+| run | state | boot job | method |
+|---|---|---|---|
+| `61891dbe` (bundle) | succeeded | `03088575` | `kdump`, cmdline `crashkernel=512M` |
+| `38876443` (fadump) | succeeded | `fae79b4a` | `fadump`, cmdline `fadump=on crashkernel=512M` |
+| `dad5614a` (kdump) | succeeded | `d9223251` | `kdump`, cmdline `crashkernel=512M` |
+
+The worker logs confirm the install cmdlines reached the guest:
+
+```
+install: run 38876443 resolved cmdline 'console=hvc0 root=/dev/vda crashkernel=512M fadump=on
+         kdive_proof_token=[REDACTED]' (method fadump)
+install: run 61891dbe resolved cmdline 'console=hvc0 root=/dev/vda crashkernel=512M
+         kdive_proof_token=[REDACTED]' (method kdump)
+```
+
+However, the tests failed at the `:attribute` phase (before the crash step) with:
+
+```
+virsh -c qemu:///system dumpxml kdive-<system_id>: returned non-zero exit status 1
+```
+
+The test uses the system libvirtd URI. This host's worker uses a dedicated session daemon at a
+different socket. The test runner can connect to that socket (user `drc` is in
+`kdive-live-libvirt` group), but the hard-coded `qemu:///system` in the attribute assertion
+cannot see the domains. Since the test never reached the `crash` phase, **no capture verdict
+can be read from this run**, positive or negative.
+
+Provision timing on native POWER9 with KVM: ~30 s (vs 2157 s under TCG-inside-TCG on the
+emulated host). Boot timing: ~72–92 s. The entire 4-test suite completed in 17 min 25 s.
