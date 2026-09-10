@@ -38,9 +38,14 @@ for this budget. Changes:
   above it ending the run — the job lease is per-heartbeat (`jobs/queue.py`). The probe re-resolves
   per call, so the node's state changing mid-build changes later stages' budgets; none depends on
   another's. A host that runs the appliance against a node other than `${KDIVE_KVM_NODE:-/dev/kvm}`
-  is answered wrongly — the same way all four shell checks answer it wrongly today. This budget and
-  the sibling `virt-customize` budget disagree on the two host classes ADR-0637's Context names
-  (unopenable node; node present with no KVM domain for the arch) until ADR-0352's probe is widened.
+  is answered wrongly — the same way all three shell checks answer it wrongly today, and a
+  directory or relative path there reads as usable KVM, as `[ -r ] && [ -w ]` does. A host whose
+  node opens but which advertises no KVM domain for its arch (the POWER10 host in
+  `tests/providers/test_libvirt_xml.py`; equally a container whose bind-mounted `/dev/kvm` the
+  devices cgroup denies at `open()`) still reads as KVM and stays unscaled — a residual instance of
+  acceptance bullet 1 that no permission test can reach, left to the probe-widening follow-up. This
+  budget and the sibling `virt-customize` budget therefore disagree on exactly one class, the
+  unopenable present node, until ADR-0352's probe is widened.
 - **Covered elsewhere:** the multiplier's value and one-knob rule — ADR-0636; the URI-selected
   probe this budget deliberately does not use — ADR-0352.
 
@@ -53,7 +58,8 @@ for this budget. Changes:
 
 ## Validation
 
-Green for every entry: `uv run python -m pytest tests/providers -q`, then `just ci` for criterion 5.
+Green for every entry: `uv run python -m pytest tests/providers -q`, then `just ci` for the
+charter's guardrail criterion.
 
 - Success 2, both branches, int return, and the un-injected path — `focused-test`:
   `tests/providers/shared/test_build_timeouts.py`, driving `kvm_present` for the branch pair and

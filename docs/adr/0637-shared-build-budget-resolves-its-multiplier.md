@@ -37,17 +37,23 @@ other URI, the default `qemu:///system` included. Branch review found that readi
 classes whose appliance is emulated but whose budget stays unscaled: a worker uid that cannot open
 the node, and a host holding the node while advertising no KVM domain for its architecture — the
 POWER10 host recorded live in `tests/providers/test_libvirt_xml.py`. Both are cases #2397's first
-acceptance criterion names.
+acceptance criterion names. This record addresses **only the first**; the second is an
+arch-awareness question no read+write test can answer, and it is left to the probe-widening
+follow-up.
 
-The repository's shell tier already answers the question, in the opposite terms and for this exact
+The URI is not the right selector here in any case. The tools this budget bounds are run as a
+fixed argv by `images/planes/_build_common.run_guestfs_tool`, with no `-c` argument and no
+environment override, so `KDIVE_LIBVIRT_URI` — the variable `kvm_probe_for_uri` keys on — never
+reaches them and says nothing about how libguestfs launches its appliance. Keying this budget off
+it makes the answer depend on a hypervisor connection the bounded tool does not use.
+
+The repository's shell tier already answers the question in the opposite terms, for this exact
 appliance. `scripts/live-vm/preflight-env.sh` makes it *fatal* when `${KDIVE_KVM_NODE:-/dev/kvm}`
 is not readable **and** writable by the running user — "without KVM the libguestfs appliance falls
 back to emulation" — independent of URI mode; `scripts/operations/check-local-libvirt.sh` and
-`scripts/check-setup-deps.sh` use the same read+write test, and all three honour `KDIVE_KVM_NODE`.
-The URI is not the right selector here in any case: the tool being bounded is not launched by
-libvirtd through `KDIVE_LIBVIRT_URI`, it is a libguestfs appliance the worker process starts
-itself, and `deploy/ansible/playbooks/image.yml` sets `LIBGUESTFS_BACKEND: direct` so it runs in
-the caller's own uid context.
+`scripts/check-setup-deps.sh` use the same read+write test. Those three are the only readers of
+`KDIVE_KVM_NODE`, and an operator whose `preflight-env.sh` passes is exactly an operator whose
+appliance gets KVM.
 
 ## Decision
 
@@ -94,23 +100,34 @@ tool runs.
 The two host-side appliance budgets now answer "does this host have KVM" two different ways, and
 that divergence is the deliberate cost of this record. `virt-customize` keeps ADR-0352's
 URI-selected presence test through `host_appliance_multiplier`; the rootfs build tools use the
-read+write openability test above. On the ordinary host — `/dev/kvm` present and openable, or
-absent — the two agree, so the divergence is visible only on the two host classes the Context
-names, where this budget scales and the sibling does not. Converging them means widening or
-parameterizing `kvm_probe_for_uri` so presence is not read as usability, which is ADR-0352's
-decision to make; that is filed as a follow-up rather than taken here, because widening the probe
-changes what the accel *diagnostic* reports and #2397's approved scope does not reach it.
+read+write openability test above. They differ on exactly one host class: a present node the
+worker uid cannot open, under any URI but `qemu:///session`. There this budget scales and the
+sibling does not. Everywhere else — node openable, or node absent — the two agree, including on
+the POWER10 arch class, where both read KVM and both stay unscaled.
 
-The scaling then reaches the host classes the issue was filed from, but only to the extent that
-`KDIVE_KVM_NODE` names the node the appliance actually opens; a host that runs the appliance
-against some other node and does not set the variable is answered wrongly, the same way it is
-answered wrongly by all three shell checks today. Uniformity with those checks is the point: an
-operator whose `preflight-env.sh` passes gets the unscaled budget, and one whose `preflight-env.sh`
-dies gets a budget their host can meet.
+**What this record does not fix.** A host whose node opens fine while libvirt advertises no KVM
+domain for its architecture still gets the unscaled 1800 s although its appliance is emulated —
+the POWER10 host at `tests/providers/test_libvirt_xml.py`, and equally a container holding a
+bind-mounted `/dev/kvm` that the devices cgroup denies at `open()` while `access()` succeeds. That
+is a residual instance of #2397's own first acceptance criterion. No permission test can answer
+it; it needs an arch-aware probe, which is ADR-0352's to grow. Converging the two budgets by
+widening or parameterizing `kvm_probe_for_uri` is filed as a follow-up rather than taken here,
+because widening that probe changes what the accel *diagnostic* reports and #2397's approved scope
+does not reach it.
 
-`os.access` is a real syscall on a real path, so this probe reports the node's state at the moment
-the tool runs, and it is the only filesystem access this module makes. It follows the effective
-uid, which is the uid that will open the node.
+The scaling is also only as good as `KDIVE_KVM_NODE` naming the node the appliance actually opens;
+a host that runs the appliance against some other node and does not set the variable is answered
+wrongly, the same way all three shell checks answer it wrongly today. Uniformity with those checks
+is the point: an operator whose `preflight-env.sh` passes gets the unscaled budget, and one whose
+`preflight-env.sh` dies gets a budget their host can meet. The probe is a permission test, not a
+node-shape test, so a directory or a relative path at that variable reads as usable KVM — again
+matching `[ -r ] && [ -w ]` in the shell tier.
+
+`os.access` is a live syscall on a live path — the only filesystem access this module makes — so
+the probe reports the node's state at the moment the tool runs; only the node's *path* comes from
+the cached config snapshot. It tests the **real** uid, as `access(2)` does and as the shell tier's
+`[ -r ]`/`[ -w ]` do. Every kdive worker unit is a plain `User=` service, so real and effective
+uid are the same there.
 
 An emulated host now takes 5 hours to surface a genuinely hung build tool instead of 30 minutes,
 and nothing above the tool run terminates it: the job queue's lease is "a per-heartbeat limit, not
@@ -134,7 +151,7 @@ meet at all, and it is the same trade ADR-0636 accepted at its own scale.
   on any host where the node is present but unopenable — a diagnostics contract #2397's approved
   scope excludes. Filed as a follow-up instead.
 - **Declare `KDIVE_KVM_NODE` as a registry `Setting` rather than reading the catalogued name.**
-  verified: it is catalogued in `kdive.config.external_env` as scope `script` and is read by four
+  verified: it is catalogued in `kdive.config.external_env` as scope `script` and is read by three
   shell entry points; promoting it to a `Setting` would publish a new configuration surface,
   duplicate the name against `scripts/guards/check_env_documented.py`'s two sources, and change
   nothing this budget observes. `env_snapshot()` is the declared way to read such a name — the

@@ -27,26 +27,31 @@ _DEFAULT_KVM_NODE = "/dev/kvm"
 
 
 def _worker_host_kvm_usable() -> bool:
-    """Whether this worker's uid can open the KVM node read+write (ADR-0637, #2397).
+    """Whether the KVM node is openable read+write, so the appliance gets KVM (ADR-0637, #2397).
 
-    This is the appliance's own question and it has one answer, so it is asked one way: the
-    libguestfs appliance is started by the worker process itself under
-    ``LIBGUESTFS_BACKEND=direct`` (``deploy/ansible/playbooks/image.yml``), never by libvirtd, so
-    what decides KVM-versus-emulation is whether *this uid* can open the node — regardless of the
-    libvirt connection URI.
+    The URI is not the right selector for this appliance. The tools this budget bounds are run as
+    a fixed argv by ``images/planes/_build_common.run_guestfs_tool`` with no ``-c`` and no
+    environment override, so ``KDIVE_LIBVIRT_URI`` — the variable ADR-0352's probe keys on — never
+    reaches them and does not describe how libguestfs launches its appliance.
 
-    That is the definition the repository's shell tier already enforces for the same appliance:
-    ``scripts/live-vm/preflight-env.sh`` dies when ``${KDIVE_KVM_NODE:-/dev/kvm}`` is not readable
-    **and** writable by the running user, with the comment "without KVM the libguestfs appliance
-    falls back to emulation"; ``scripts/operations/check-local-libvirt.sh`` and
-    ``scripts/check-setup-deps.sh`` use the same test. Honouring ``KDIVE_KVM_NODE``, and treating
-    it as unset when empty, keeps the two tiers answering identically for one host.
+    Read+write openability of the node is the definition the repository's shell tier already
+    enforces for this same appliance: ``scripts/live-vm/preflight-env.sh`` dies when
+    ``${KDIVE_KVM_NODE:-/dev/kvm}`` is not readable **and** writable by the running user, with the
+    comment "without KVM the libguestfs appliance falls back to emulation";
+    ``scripts/operations/check-local-libvirt.sh`` and ``scripts/check-setup-deps.sh`` use the same
+    test. All three honour ``KDIVE_KVM_NODE``, so honouring it here — and treating an empty value
+    as unset, as ``${…:-…}`` does — keeps the two tiers answering identically for one host.
+    ``os.access`` tests the *real* uid, which is what those shell tests do too
+    (``[ -r ]``/``[ -w ]`` is ``access(2)``); every kdive worker unit is a plain ``User=``
+    service, where real and effective uid are the same.
 
     It deliberately diverges from ADR-0352's ``kvm_probe_for_uri``, which the sibling
     ``virt-customize`` budget uses: that probe tests mere *presence* for every URI but
-    ``qemu:///session``, so a worker uid that cannot open the node reads as KVM. ADR-0637 records
-    why the two appliance budgets differ, and converging them by widening ADR-0352's probe is a
-    filed follow-up.
+    ``qemu:///session``, so a worker uid that cannot open a present node reads as KVM. That is the
+    one host class this probe changes. It does **not** make the answer arch-aware — a host whose
+    node opens fine while libvirt advertises no KVM domain for its architecture still reads as KVM
+    and keeps the unscaled budget. ADR-0637 records why the two appliance budgets differ, and
+    converging them by widening ADR-0352's probe is a filed follow-up.
     """
     node = config.env_snapshot().get(_KVM_NODE_ENV) or _DEFAULT_KVM_NODE
     return os.access(node, os.R_OK | os.W_OK)
