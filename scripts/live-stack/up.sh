@@ -140,9 +140,12 @@ fi
 if [[ "$skip_libvirt" != "1" ]]; then
   banner "libvirt"
   # The provider uses user-mode SLIRP networking (no libvirt network), so only the qemu daemon is
-  # needed — do NOT manage virtnetworkd. Gate on `libvirt_ok` (a `virsh list`), not
-  # `systemctl is-active`, which reports the *service* inactive on a healthy socket-activated host.
-  if ! libvirt_ok; then
+  # needed — do NOT manage virtnetworkd. Gate on `libvirt_ok` (a `virsh list`) and `nodedev_ok`
+  # (a `virsh nodedev-list`), not `systemctl is-active`, which reports the *service* inactive on
+  # a healthy socket-activated host. Both checks matter here (#2401): under the modular daemon
+  # model `virsh list` succeeds via virtqemud alone, so a host with virtqemud already enabled but
+  # virtnodedevd never enabled would otherwise skip this whole remediation block.
+  if ! libvirt_ok || ! nodedev_ok; then
     if [[ "$KDIVE_LIBVIRT_URI" == *"live-libvirt"* ]]; then
       # Provisioned-runner recovery (#2032): the dedicated session endpoint is down (fresh boot,
       # reprovision lag). Start the OPERATOR-OWNED session daemon as the invoking user — the same
@@ -158,13 +161,24 @@ if [[ "$skip_libvirt" != "1" ]]; then
       }
     else
       # Bare dev host (qemu:///system default): the system daemon is socket-activated, so enable
-      # --now plus the re-check below is enough.
-      echo "libvirt unreachable; enabling virtqemud.socket (sudo) ..."
-      sudo systemctl enable --now virtqemud.socket
+      # --now plus the re-checks below are enough. Onboarding's resource discovery also needs
+      # virtnodedevd (#2401), so enable it alongside virtqemud rather than leaving it for
+      # discovery to crash on later. `|| true`: under `set -e` a partial two-unit enable failure
+      # would otherwise abort here before either named-unit re-check below runs, losing the
+      # specific diagnostic to systemd's own (unit-naming, but less actionable) error text.
+      echo "libvirt or virtnodedevd unreachable; enabling virtqemud.socket + virtnodedevd.socket (sudo) ..."
+      sudo systemctl enable --now virtqemud.socket virtnodedevd.socket || true
     fi
   fi
   libvirt_ok || {
     echo "libvirt daemon not reachable at ${KDIVE_LIBVIRT_URI}" >&2
+    exit 1
+  }
+  # #2401: a monolithic libvirtd (the session-daemon recovery path) answers node-device queries
+  # itself, but the modular system daemon needs virtnodedevd running separately — fail here,
+  # naming the unit, instead of letting onboarding's resource discovery crash on it later.
+  nodedev_ok || {
+    echo "virtnodedevd not reachable at ${KDIVE_LIBVIRT_URI}; enable virtnodedevd.socket" >&2
     exit 1
   }
   # Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.

@@ -1838,6 +1838,86 @@ def test_up_session_recovery_path_never_sudos_and_keeps_the_bare_host_fallback()
     assert "sudo systemctl enable --now virtqemud.socket" in text
 
 
+def test_up_bare_host_branch_enables_virtnodedevd_alongside_virtqemud() -> None:
+    """#2401: onboarding's resource discovery needs virtnodedevd, not just virtqemud."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    bare_host_branch = text.index("# Bare dev host")
+    libvirt_ok_gate = text.index("libvirt_ok || {", bare_host_branch)
+    branch = text[bare_host_branch:libvirt_ok_gate]
+    assert "sudo systemctl enable --now virtqemud.socket virtnodedevd.socket" in branch
+
+
+def test_up_checks_virtnodedevd_reachability_and_names_the_unit_on_failure() -> None:
+    """#2401 acceptance: a missing daemon fails in up.sh naming the unit, not in discovery.py."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    gate = text.index("libvirt_ok || {")
+    check = text.index("nodedev_ok || {", gate)
+    block = text[check : text.index("}", check)]
+    assert "virtnodedevd" in block
+
+
+def _up_remediation_gate_condition() -> str:
+    """The exact `if ...; then` line up.sh uses to decide whether to remediate libvirt."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    start = text.index("if ! libvirt_ok")
+    return text[start : text.index("\n", start)]
+
+
+def _remediation_gate_fires(tmp_path: Path, *, list_ok: bool, nodedev_list_ok: bool) -> bool:
+    """Source the real lib.sh (so libvirt_ok/nodedev_ok are up.sh's own functions) with a
+    stubbed `virsh`, then evaluate up.sh's own extracted gate condition line. True means
+    up.sh would enter its remediation branch for this virsh behavior (#2401)."""
+    lib_sh_copy = tmp_path / "lib.sh"
+    lib_sh_copy.write_text((ROOT / "scripts/live-stack/lib.sh").read_text(), encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "virsh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        # Invoked as `virsh -c "$KDIVE_LIBVIRT_URI" list|nodedev-list`; the subcommand is
+        # the last argument, so match on it rather than a fixed position.
+        'case "${*: -1}" in\n'
+        f"  list) exit {0 if list_ok else 1} ;;\n"
+        f"  nodedev-list) exit {0 if nodedev_list_ok else 1} ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    condition = _up_remediation_gate_condition()
+    script = (
+        'source "$1"\n'
+        'KDIVE_LIBVIRT_URI="qemu:///system"\n'
+        f"{condition} echo ENTERS_REMEDIATION; else echo SKIPS_REMEDIATION; fi\n"
+    )
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", str(lib_sh_copy)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REMEDIATION" in result.stdout, result.stdout
+    return "ENTERS_REMEDIATION" in result.stdout
+
+
+def test_up_remediation_gate_fires_when_only_virtnodedevd_is_unreachable(tmp_path: Path) -> None:
+    """#2401: virtqemud already healthy (`virsh list` ok) but virtnodedevd never enabled
+    (`virsh nodedev-list` fails) must still enter the remediation branch -- the exact host
+    state issue #2401 names as its trigger, not just a fully-down libvirt."""
+    assert _remediation_gate_fires(tmp_path, list_ok=True, nodedev_list_ok=False)
+
+
+def test_up_remediation_gate_skips_when_both_daemons_are_already_reachable(tmp_path: Path) -> None:
+    """No regression: a fully healthy host must not re-run the remediation branch."""
+    assert not _remediation_gate_fires(tmp_path, list_ok=True, nodedev_list_ok=True)
+
+
 def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> None:
     text = (ROOT / "scripts/live-stack/worker-lifecycle.sh").read_text()
     parser = LIBVIRT_URI.read_text()

@@ -333,6 +333,14 @@ libvirt_ok() {
   virsh -c "$KDIVE_LIBVIRT_URI" list >/dev/null 2>&1
 }
 
+# Node-device enumeration reachable (#2401). Onboarding's resource discovery
+# (VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV) needs this to work; under the modular daemon model
+# that requires virtnodedevd specifically, while a monolithic libvirtd (the session-daemon
+# recovery path) answers it without a separate unit.
+nodedev_ok() {
+  virsh -c "$KDIVE_LIBVIRT_URI" nodedev-list >/dev/null 2>&1
+}
+
 # Operator-owned dedicated session libvirt daemon (#2032). The live_vm_host role provisions a
 # dedicated session daemon for the runner account (config /etc/kdive/libvirtd-live.conf, runtime
 # root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. up.sh's
