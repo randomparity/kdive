@@ -885,11 +885,10 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert source.startswith("#!/bin/bash\nset -euo pipefail\n")
     assert "IFS= read -r witness_dsn" in source
     assert "--witness-dsn" not in source
-    create = "uv venv --python /usr/bin/python3 /opt/kdive-live-worker-lifecycle/.venv"
-    install = "uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive"
+    sync = "uv sync --locked --no-editable --no-dev --group live"
     prepare = "_prepare_attested_runtime_root /opt/kdive-live-worker-lifecycle root root"
-    assert source.index(prepare) < source.index(create)
-    assert source.index(create) < source.index(install)
+    assert source.index(prepare) < source.index(sync)
+    assert "UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv" in source
     assert "-m 0600" in source
     assert "/etc/kdive/credentials/live-worker-witness.dsn" in source
     assert "/opt/kdive-live-worker-lifecycle/revision" in source
@@ -904,6 +903,23 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
 
 
+def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
+    """A venv the installer builds alone must carry ``drgn`` and the locked ``grpcio``.
+
+    Deviation 8 of the #2383 proof record (#2399): the old ``uv venv`` + ``uv pip install``
+    pair did neither -- it ignored ``uv.lock`` and never requested the ``live`` dependency
+    group.
+    """
+    source = _text(INSTALLER)
+    assert "uv venv --python" not in source
+    assert "uv pip install --python" not in source
+    assert "--locked" in source
+    assert "--group live" in source
+    assert "--no-editable" in source
+    assert "UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv" in source
+    assert "--project /opt/kdive --python /usr/bin/python3" in source
+
+
 def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> None:
     """A reinstall must rebuild the manifest, because the manifest describes what it replaced.
 
@@ -913,12 +929,12 @@ def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> No
     rather than erroring -- the queue never drains and neither side logs anything.
     """
     source = _text(INSTALLER)
-    package = "uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive"
+    sync = "uv sync --locked --no-editable --no-dev --group live"
     harden = "_harden_runtime_tree /opt/kdive-live-worker-lifecycle"
     build = '"$manifest_python" "$manifest_builder" build'
     install = '"$manifest_python" "$manifest_builder" install'
     verify = '"$manifest_python" "$manifest_builder" verify'
-    assert source.index(package) < source.index(build)
+    assert source.index(sync) < source.index(build)
     # After hardening, because the manifest records the tree as it finds it.
     assert source.index(harden) < source.index(build)
     assert source.index(build) < source.index(install)

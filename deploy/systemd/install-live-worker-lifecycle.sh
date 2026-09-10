@@ -640,8 +640,16 @@ config_temp=""
 if [[ $source_root != /opt/kdive ]]; then
   _prepare_source_link "$source_root" /opt/kdive
 fi
-uv venv --python /usr/bin/python3 /opt/kdive-live-worker-lifecycle/.venv
-uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
+# A locked sync of the `live` group into a venv separate from the checkout: matches the
+# `provider_authority_host` role's `UV_PROJECT_ENVIRONMENT` pattern
+# (deploy/ansible/roles/provider_authority_host/tasks/install.yml). `--locked` fails the
+# install instead of silently resolving a `uv.lock`-disagreeing `grpcio`; `--group live`
+# supplies the `drgn` every debug-plane operation needs; `--no-dev` keeps ruff/ty/pytest out
+# of the runtime venv; `--no-editable` installs the package rather than linking back to the
+# checkout (kdive#2399, deviation 8 of the #2383 proof record).
+UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv UV_PYTHON_DOWNLOADS=never \
+  uv sync --locked --no-editable --no-dev --group live \
+  --project /opt/kdive --python /usr/bin/python3
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
 # The readiness attestation rejects any replaceable ancestor, independent of the invoking umask.
