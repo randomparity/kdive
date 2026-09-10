@@ -322,7 +322,7 @@ stack-up:
     # (just's default per-line execution) and inherits only the caller's environment, so
     # env.sh's ppc64le-under-qemu auto-detection (the only place KDIVE_OIDC_IMAGE is set,
     # ADR-0358) never reached it (#2400). A shebang-body recipe shares one shell across every
-    # line instead -- the same pattern test-live-stack uses -- so sourcing env.sh here makes
+    # line instead — the same pattern test-live-stack uses — so sourcing env.sh here makes
     # the pre-build check below and compose's own image selection read one source.
     # shellcheck disable=SC1091 # repo-relative env script
     source scripts/live-stack/env.sh

@@ -2480,8 +2480,8 @@ def _stub_docker_recording_invocations(bin_dir: Path, log: Path) -> None:
 
 def _stub_live_stack_scripts(root: Path, *, oidc_image: str | None) -> None:
     """Populate a fake `scripts/live-stack/` under `root` (a `just --working-directory`) so
-    `stack-up` can run without a real live-stack checkout: a stand-in `env.sh` -- the ONLY
-    place `KDIVE_OIDC_IMAGE` is set (ADR-0358) -- exporting `oidc_image` when given (simulating
+    `stack-up` can run without a real live-stack checkout: a stand-in `env.sh` — the ONLY
+    place `KDIVE_OIDC_IMAGE` is set (ADR-0358) — exporting `oidc_image` when given (simulating
     ppc64le-under-qemu auto-detection) or nothing (the undetected/x86_64 case), and a no-op
     `apply-migrations.sh` so the recipe's tail does not need a real database."""
     live_stack = root / "scripts" / "live-stack"
@@ -2519,8 +2519,8 @@ def _run_stack_up(
 
 @pytest.mark.skipif(_JUST is None, reason="just is required to drive the stack-up recipe")
 def test_stack_up_sources_env_sh_and_honors_its_oidc_image(tmp_path: Path) -> None:
-    """The arch branch (#2400): when env.sh resolves `KDIVE_OIDC_IMAGE` -- the
-    ppc64le-under-qemu case -- `stack-up` must take ADR-0358's pull path without ever probing
+    """The arch branch (#2400): when env.sh resolves `KDIVE_OIDC_IMAGE` — the
+    ppc64le-under-qemu case — `stack-up` must take ADR-0358's pull path without ever probing
     or building the local `kdive-mock-oidc:dev` image. Before the fix, `stack-up` never sourced
     env.sh, so this auto-detected value never reached the recipe and this assertion failed."""
     result, log = _run_stack_up(
@@ -2535,7 +2535,7 @@ def test_stack_up_sources_env_sh_and_honors_its_oidc_image(tmp_path: Path) -> No
 @pytest.mark.skipif(_JUST is None, reason="just is required to drive the stack-up recipe")
 def test_stack_up_local_build_path_is_unchanged_when_env_sh_sets_nothing(tmp_path: Path) -> None:
     """#2400 acceptance: "On x86_64 the local-build path is unchanged." When env.sh leaves
-    `KDIVE_OIDC_IMAGE` unset, `stack-up` must still probe for -- and build when absent -- the
+    `KDIVE_OIDC_IMAGE` unset, `stack-up` must still probe for — and build when absent — the
     local `kdive-mock-oidc:dev` image, exactly as before sourcing env.sh was added."""
     result, log = _run_stack_up(tmp_path, oidc_image=None)
     assert result.returncode == 0, result.stderr
