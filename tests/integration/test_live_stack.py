@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import platform
 import subprocess
 import time
 from pathlib import Path
@@ -1275,15 +1274,20 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
     fadump *registers* under QEMU 10.2 TCG (``rtas fadump: Registration is successful!``) but the
     guest's periodic ``rtas_event_scan`` RTAS call then Oopses under emulation, so the guest never
     reaches readiness and the crash→capture cycle cannot complete under TCG. The crash path rides
-    the same Oopsing RTAS, so no boot-window tuning recovers it. This test therefore **skips on any
-    non-ppc64le host** (where a ppc64le guest necessarily runs under TCG) and serves as the driver
-    for a real POWER host (KVM), where it exercises the full capture unchanged. Skips cleanly
-    without ``qemu-system-ppc64`` / the rootfs / the bundle. Self-cleans (release) on exit.
+    the same Oopsing RTAS, so no boot-window tuning recovers it. This test therefore **skips
+    unless the resolved accelerator is KVM** (mirroring the ``ppc64le:systems_get`` reuse of
+    ``expected_accel`` above, #2398) and serves as the driver for a real POWER host (KVM), where
+    it exercises the full capture unchanged. A ppc64le *host* does not imply a KVM-accelerated
+    ppc64le *guest* — an emulated ppc64le host with no ``/dev/kvm`` still runs the guest under
+    nested TCG, which is exactly the case this gate must reject (#2398). Skips cleanly without
+    ``qemu-system-ppc64`` / the rootfs / the bundle. Self-cleans (release) on exit.
     """
-    if platform.machine() != "ppc64le":
+    if expected_accel("ppc64le") != "kvm":
         pytest.skip(
-            "fadump end-to-end capture requires native POWER (KVM); under TCG the guest's RTAS "
-            "fadump emulation Oopses after a successful registration, so readiness never completes "
+            "fadump end-to-end capture requires native POWER under KVM acceleration; this host "
+            "resolves to TCG for a ppc64le guest (ppc64le arch alone does not imply KVM — see "
+            "#2398), and under TCG the guest's RTAS fadump emulation Oopses after a successful "
+            "registration, so readiness never completes "
             "(see docs/design/2026-07-14-ppc64le-fadump-proof-record-1151.md). fadump registration "
             "itself is proven under QEMU 10.2 TCG."
         )
