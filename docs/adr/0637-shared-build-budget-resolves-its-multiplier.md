@@ -65,6 +65,12 @@ and the `details={"timeout_s": ...}` error payload unchanged; a KVM host gets ex
 Resolving per call rather than at import keeps the probe answering for the host as it is when the
 tool runs.
 
+The scaling reaches exactly as far as ADR-0352's probe does. For the default `qemu:///system`
+that probe tests `/dev/kvm` *presence*, so a host holding the node while advertising no KVM domain
+for its architecture — the POWER10 host recorded live in `tests/providers/test_libvirt_xml.py` —
+still gets the unscaled budget although its appliance is emulated. Widening the probe to
+usability is ADR-0352's decision and a follow-up, not this record's.
+
 An emulated host now takes 5 hours to surface a genuinely hung build tool instead of 30 minutes,
 and nothing above the tool run terminates it: the job queue's lease is "a per-heartbeat limit, not
 a total job runtime limit" (`jobs/queue.py`), and `jobs/worker.py` records that a long-running job

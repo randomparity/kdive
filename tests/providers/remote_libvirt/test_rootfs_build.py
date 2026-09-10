@@ -83,6 +83,9 @@ def test_real_virt_builder_invokes_the_fixed_argv(
         return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(_build_common.subprocess, "run", _run)
+    monkeypatch.setattr(
+        rootfs_build, "slow_build_tool_timeout_s", lambda: SLOW_BUILD_TOOL_TIMEOUT_S
+    )
     qcow2 = tmp_path / "scratch.qcow2"
 
     _real_virt_builder(
@@ -105,6 +108,8 @@ def test_real_virt_builder_invokes_the_fixed_argv(
         "systemctl enable qemu-guest-agent.service",
     ]
     assert calls[0]["timeout"] == SLOW_BUILD_TOOL_TIMEOUT_S, "a KVM worker host is unscaled"
+    # The resolver is stubbed rather than inherited: without that this assertion would be a
+    # statement about whichever machine ran the suite, and would fail on a host with no KVM.
 
 
 def test_real_virt_builder_uses_the_scaled_budget(

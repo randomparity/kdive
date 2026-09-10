@@ -26,8 +26,8 @@ SLOW_BUILD_TOOL_TIMEOUT_S = 30 * 60
 def slow_build_tool_timeout_s(*, kvm_present: Callable[[], bool] | None = None) -> int:
     """Return :data:`SLOW_BUILD_TOOL_TIMEOUT_S` scaled by the worker host's KVM (#2397).
 
-    A host with KVM is unscaled, so the fast path keeps exactly today's 1800 s. A host without
-    usable ``/dev/kvm`` emulates the appliance kernel and scales by
+    A host whose probe reports KVM is unscaled, so the fast path keeps exactly today's 1800 s.
+    A host with no ``/dev/kvm`` emulates the appliance kernel and scales by
     ``KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`` — the same knob ADR-0636 applied to the
     ``virt-customize`` budget, so an operator still moves every appliance budget together.
     Measured for #2383 on an emulated-POWER host, in-guest ``build-fs`` failed at
@@ -37,6 +37,11 @@ def slow_build_tool_timeout_s(*, kvm_present: Callable[[], bool] | None = None) 
     into the timeout error's ``details`` payload. ``kvm_present`` is injected so both branches are
     unit-tested without a real ``/dev/kvm``; the default probe is resolved per call, so it answers
     for the host as it is when the tool runs (ADR-0352).
+
+    The probe's reach is ADR-0352's, not this function's: for the default ``qemu:///system`` it
+    tests ``/dev/kvm`` *presence*, so a host that has the node but advertises no KVM domain for
+    its architecture — the POWER10 host recorded in ``tests/providers/test_libvirt_xml.py`` —
+    reads as KVM here and keeps the unscaled budget even though its appliance is emulated.
     """
     probe = kvm_present if kvm_present is not None else kvm_probe_for_uri(resolved_libvirt_uri())
     if probe():

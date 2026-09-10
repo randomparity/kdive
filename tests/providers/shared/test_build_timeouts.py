@@ -70,8 +70,25 @@ def test_clears_the_measured_emulated_repack_failure() -> None:
     assert slow_build_tool_timeout_s(kvm_present=lambda: False) > 1800
 
 
-def test_default_probe_is_the_worker_host_kvm_node() -> None:
-    # Without an injected probe the budget follows the worker host's own /dev/kvm (ADR-0352),
-    # resolved per call rather than bound at import.
+def test_un_injected_call_follows_the_worker_host_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The un-injected path is the one every production call site takes, so drive the seam it
+    # resolves rather than asserting a value set the function cannot fall outside of.
     config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0"})
-    assert slow_build_tool_timeout_s() in (1800, 18000)
+    for kvm, expected in ((True, 1800), (False, 18000)):
+        monkeypatch.setattr(
+            build_timeouts, "kvm_probe_for_uri", lambda _uri, kvm=kvm, **_kw: lambda: kvm
+        )
+        assert slow_build_tool_timeout_s() == expected
+
+
+def test_the_probe_is_resolved_per_call_not_bound_at_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Binding the verdict once would outlive the fact it measures: flipping the host's answer
+    # between two calls must change the second budget.
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0"})
+    answers = iter([True, False])
+    monkeypatch.setattr(
+        build_timeouts, "kvm_probe_for_uri", lambda _uri, **_kw: lambda: next(answers)
+    )
+    assert [slow_build_tool_timeout_s(), slow_build_tool_timeout_s()] == [1800, 18000]
