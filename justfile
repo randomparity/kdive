@@ -316,6 +316,16 @@ stack-migrate:
 # stack report exit 1. Run that init separately to completion — its exit code still propagates,
 # so a real bucket-creation failure fails the recipe.
 stack-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A plain `if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then ...` recipe line runs in its OWN shell
+    # (just's default per-line execution) and inherits only the caller's environment, so
+    # env.sh's ppc64le-under-qemu auto-detection (the only place KDIVE_OIDC_IMAGE is set,
+    # ADR-0358) never reached it (#2400). A shebang-body recipe shares one shell across every
+    # line instead -- the same pattern test-live-stack uses -- so sourcing env.sh here makes
+    # the pre-build check below and compose's own image selection read one source.
+    # shellcheck disable=SC1091 # repo-relative env script
+    source scripts/live-stack/env.sh
     # Pre-build oidc when using the local build path (KDIVE_OIDC_IMAGE unset). ADR-0357
     # has compose build kdive-mock-oidc:dev from ./deploy/mock-oidc; without this pre-build,
     # `compose up` first tries to PULL that local-only tag and prints a confusing "pull
@@ -325,20 +335,26 @@ stack-up:
     # The skip is announced (not silent) so an operator editing deploy/mock-oidc knows to
     # `docker rmi kdive-mock-oidc:dev` to force a rebuild. Skipped entirely when
     # KDIVE_OIDC_IMAGE is set (that's the pull path, ADR-0358).
-    if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then if docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc"; else docker compose build oidc; fi; fi
+    if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then
+      if docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then
+        echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc"
+      else
+        docker compose build oidc
+      fi
+    fi
     # --wait-timeout is required now the backends carry `restart: on-failure` (ADR-0449):
     # a container that keeps failing cycles Exited -> Restarting instead of settling, so
     # without a bound the convergence poll can block indefinitely rather than reporting.
     docker compose up -d --wait --wait-timeout 120 postgres minio oidc
     docker compose run --rm minio-init
     ./scripts/live-stack/apply-migrations.sh
-    @echo "Backends healthy and schema migrated."
-    @echo "App tier, for IN-NETWORK clients: just compose-up"
-    @echo "For the live suites, the CLI, or any local-libvirt VM: scripts/live-stack/up.sh"
-    @echo "  (compose containers get a different OIDC issuer identity than a host-minted token"
-    @echo "   carries -> 401, and no /dev/kvm or libvirt socket -> no local VM. See the runbook.)"
-    @echo "MCP URL: http://127.0.0.1:8000/mcp"
-    @echo "Full runbook: docs/operating/runbooks/live-stack.md"
+    echo "Backends healthy and schema migrated."
+    echo "App tier, for IN-NETWORK clients: just compose-up"
+    echo "For the live suites, the CLI, or any local-libvirt VM: scripts/live-stack/up.sh"
+    echo "  (compose containers get a different OIDC issuer identity than a host-minted token"
+    echo "   carries -> 401, and no /dev/kvm or libvirt socket -> no local VM. See the runbook.)"
+    echo "MCP URL: http://127.0.0.1:8000/mcp"
+    echo "Full runbook: docs/operating/runbooks/live-stack.md"
 
 # Print a bearer token from the bundled Helm-demo mock-OIDC issuer (Kubernetes):
 #   export KDIVE_TOKEN=$(just demo-token)                  # full admin grant (default)
