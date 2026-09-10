@@ -140,9 +140,12 @@ fi
 if [[ "$skip_libvirt" != "1" ]]; then
   banner "libvirt"
   # The provider uses user-mode SLIRP networking (no libvirt network), so only the qemu daemon is
-  # needed — do NOT manage virtnetworkd. Gate on `libvirt_ok` (a `virsh list`), not
-  # `systemctl is-active`, which reports the *service* inactive on a healthy socket-activated host.
-  if ! libvirt_ok; then
+  # needed — do NOT manage virtnetworkd. Gate on `libvirt_ok` (a `virsh list`) and `nodedev_ok`
+  # (a `virsh nodedev-list`), not `systemctl is-active`, which reports the *service* inactive on
+  # a healthy socket-activated host. Both checks matter here (#2401): under the modular daemon
+  # model `virsh list` succeeds via virtqemud alone, so a host with virtqemud already enabled but
+  # virtnodedevd never enabled would otherwise skip this whole remediation block.
+  if ! libvirt_ok || ! nodedev_ok; then
     if [[ "$KDIVE_LIBVIRT_URI" == *"live-libvirt"* ]]; then
       # Provisioned-runner recovery (#2032): the dedicated session endpoint is down (fresh boot,
       # reprovision lag). Start the OPERATOR-OWNED session daemon as the invoking user — the same
