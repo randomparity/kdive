@@ -53,6 +53,7 @@ unreachable without it. Three production files and three test files changed.
 `SLOW_BUILD_TOOL_TIMEOUT_S` has the same defect as `_VIRT_CUSTOMIZE_TIMEOUT_S` and was
 deliberately left unscaled: it reaches only rootfs *build* paths, which no #2383 criterion
 exercises. It is recorded as a follow-up rather than changed unexercised: #2397.
+That follow-up has since scaled it off the worker host's KVM (ADR-0637).
 
 ## Measured cost of an emulated host
 
@@ -300,7 +301,7 @@ None is in #2383's frozen scope. Each is filed:
 
 | Deviation | Issue |
 |---|---|
-| 1 — in-guest `build-fs` times out on an emulated host | #2397 (`SLOW_BUILD_TOOL_TIMEOUT_S` is unscaled) |
+| 1 — in-guest `build-fs` times out on an emulated host | #2397 — cause removed (ADR-0637): `SLOW_BUILD_TOOL_TIMEOUT_S` now scales off the worker host's KVM, unit-proven on both branches. The emulated-host `build-fs` run that would confirm it is still unrun. |
 | 6 — `virtnodedevd.socket` enabled by hand | #2401 |
 | 8 — worker venv repaired by hand | #2399 |
 | 9 — `KDIVE_OIDC_IMAGE` exported by hand | #2400 |

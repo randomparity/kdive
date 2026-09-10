@@ -30,6 +30,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes import _build_common
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.providers.ports.external_boot import Architecture, RootSource, RootSpecV1
+from kdive.providers.remote_libvirt import rootfs_build
 from kdive.providers.remote_libvirt.rootfs_build import (
     RemoteLibvirtRootfsBuildPlane,
     RemoteRootfsBuildTools,
@@ -103,7 +104,32 @@ def test_real_virt_builder_invokes_the_fixed_argv(
         "--run-command",
         "systemctl enable qemu-guest-agent.service",
     ]
-    assert calls[0]["timeout"] == SLOW_BUILD_TOOL_TIMEOUT_S
+    assert calls[0]["timeout"] == SLOW_BUILD_TOOL_TIMEOUT_S, "a KVM worker host is unscaled"
+
+
+def test_real_virt_builder_uses_the_scaled_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remote plane's virt-builder takes the worker-host-scaled budget (#2397, ADR-0637).
+
+    virt-builder drives a libguestfs appliance on the *worker* host (the plane runs in-process
+    under ``asyncio.to_thread``, ADR-0092), so an emulated worker host scales it exactly as the
+    local plane's build tools scale.
+    """
+    calls: list[dict[str, object]] = []
+
+    def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"argv": argv, **kwargs})
+        return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_build_common.subprocess, "run", _run)
+    monkeypatch.setattr(rootfs_build, "slow_build_tool_timeout_s", lambda: 424242)
+
+    _real_virt_builder(
+        releasever="43", packages=("drgn",), qcow2=tmp_path / "scratch.qcow2", size="10G"
+    )
+
+    assert [call["timeout"] for call in calls] == [424242]
 
 
 def test_real_virt_builder_maps_missing_tool_to_missing_dependency(
