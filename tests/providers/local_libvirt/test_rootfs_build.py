@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import stat
+import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -29,6 +31,7 @@ from kdive.images.families.steps import (
     UploadFile,
     WriteFile,
 )
+from kdive.images.planes import _build_common
 from kdive.images.planes._build_common import (
     BootEntriesProbeSeam,
     DrgnProbeSeam,
@@ -44,6 +47,7 @@ from kdive.images.rootfs.catalog import (
     VirtBuilderSource,
     resolve_rootfs_entry,
 )
+from kdive.providers.local_libvirt import rootfs_build
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.rootfs_build import (
     _EXT4_INCOMPATIBLE_FEATURE,
@@ -1055,3 +1059,66 @@ def test_boot_failure_aborts_publish(tmp_path: Path) -> None:
     assert err.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert not calls.sealed, "a failed boot never reaches seal"
     assert not (tmp_path / "work" / "fedora-kdive-ready-44.qcow2").exists(), "publish did not run"
+
+
+# --- worker-host-scaled build budgets (#2397, ADR-0637) ---------------------------------------
+#
+# Every slow build tool this module runs must take its timeout from
+# `slow_build_tool_timeout_s()` at invocation time, not from a module-level alias of the
+# unscaled constant. Stubbing the module's imported name proves the wiring host-independently:
+# a site left on an alias never sees the stub and keeps 1800.
+
+_SCALED_SENTINEL = 424242
+
+
+@pytest.fixture
+def scaled_budget(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Stub the module's budget resolver and record every subprocess call it bounds."""
+    calls: list[dict[str, object]] = []
+
+    def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"argv": argv, **kwargs})
+        stdout = "Filesystem features: has_journal orphan_file\n" if argv[0] == "tune2fs" else ""
+        return subprocess.CompletedProcess(argv, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(_build_common.subprocess, "run", _run)
+    monkeypatch.setattr(rootfs_build, "slow_build_tool_timeout_s", lambda: _SCALED_SENTINEL)
+    return calls
+
+
+def _timeouts(calls: list[dict[str, object]]) -> list[object]:
+    return [call["timeout"] for call in calls]
+
+
+def test_virt_builder_acquire_uses_the_scaled_budget(
+    tmp_path: Path, scaled_budget: list[dict[str, object]]
+) -> None:
+    rootfs_build._real_virt_builder(template="fedora-43", output=tmp_path / "base.qcow2")
+    assert _timeouts(scaled_budget) == [_SCALED_SENTINEL]
+
+
+def test_repack_uses_the_scaled_budget_at_every_stage(
+    tmp_path: Path, scaled_budget: list[dict[str, object]]
+) -> None:
+    rootfs_build._real_repack_whole_disk_ext4(
+        scratch=tmp_path / "scratch.qcow2", qcow2=tmp_path / "out.qcow2", size="6G"
+    )
+    stages = [cast("list[str]", call["argv"])[0] for call in scaled_budget]
+    assert stages == ["virt-tar-out", "virt-make-fs", "tune2fs", "tune2fs", "qemu-img"], (
+        "the orphan_file strip branch runs, so all five repack stages are covered"
+    )
+    assert _timeouts(scaled_budget) == [_SCALED_SENTINEL] * 5
+
+
+def test_offline_inject_uses_the_scaled_budget(
+    tmp_path: Path, scaled_budget: list[dict[str, object]]
+) -> None:
+    rootfs_build._real_inject_offline(tmp_path / "img.qcow2", [], "#!/bin/sh\n", "[Unit]\n")
+    assert _timeouts(scaled_budget) == [_SCALED_SENTINEL]
+
+
+def test_cloud_init_self_check_uses_the_scaled_budget(
+    tmp_path: Path, scaled_budget: list[dict[str, object]]
+) -> None:
+    rootfs_build._run_cloud_init_guestfish(tmp_path / "img.qcow2", "is-file /etc/hosts\n")
+    assert _timeouts(scaled_budget) == [_SCALED_SENTINEL]

@@ -95,13 +95,14 @@ LIBVIRT_TCG_DEADLINE_MULTIPLIER = Setting(
     group="local-libvirt",
     processes=_RT,
     help=(
-        "Multiplier applied to two budgets that share one cause — no hardware acceleration — "
-        "from two different keys (ADR-0341, ADR-0636). Boot-readiness deadlines key off the "
-        "System's persisted accelerator, because the guest executes under it. Host-side "
-        "libguestfs appliance budgets key off the worker host's KVM, because the appliance is "
-        "a host-arch VM the worker boots to edit a disk. KVM is unscaled (1.0); TCG and unknown "
-        "accelerators scale by this factor. Must be >= 1.0; 1.0 disables scaling. Both budgets "
-        "move together and cannot be tuned apart."
+        "Multiplier applied to every budget that shares one cause — no hardware acceleration "
+        "— from two different keys (ADR-0341, ADR-0636, ADR-0637). Boot-readiness deadlines "
+        "key off the System's persisted accelerator, because the guest executes under it. "
+        "Host-side libguestfs appliance budgets — virt-customize and the rootfs build tools — "
+        "key off the worker host's KVM, because the appliance is a host-arch VM the worker "
+        "boots to edit a disk. KVM is unscaled (1.0); TCG and unknown accelerators scale by "
+        "this factor. Must be >= 1.0; 1.0 disables scaling. They move together and cannot be "
+        "tuned apart."
     ),
     suggest="set a float >= 1.0 (default 10.0); 1.0 disables TCG deadline scaling",
 )

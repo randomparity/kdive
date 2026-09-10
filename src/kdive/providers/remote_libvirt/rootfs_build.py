@@ -50,7 +50,7 @@ from kdive.images.planes.provenance_probes import (
     VersionInspectSeam,
 )
 from kdive.providers.ports.external_boot import Architecture, RootSpecV1
-from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+from kdive.providers.shared.build_timeouts import slow_build_tool_timeout_s
 
 _log = logging.getLogger(__name__)
 
@@ -66,7 +66,6 @@ _GUEST_AGENT_PACKAGE = "qemu-guest-agent"
 
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _DEFAULT_IMAGE_SIZE = "10G"
-_VIRT_BUILDER_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
 def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> None:
@@ -104,7 +103,7 @@ def _real_virt_builder(
         "--run-command",
         f"systemctl enable {_GUEST_AGENT_PACKAGE}.service",
     ]
-    _run_libguestfs_tool(argv, stage="virt-builder", timeout_s=_VIRT_BUILDER_TIMEOUT_S)
+    _run_libguestfs_tool(argv, stage="virt-builder", timeout_s=slow_build_tool_timeout_s())
 
 
 type VirtBuilder = Callable[..., None]
