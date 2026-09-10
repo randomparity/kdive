@@ -17,7 +17,7 @@ Per ADR-0637: `package_for`'s RedHat emulator rows answer `qemu-kvm` when the re
 is split. A resolver returns the emulator's path — arch-named binary on `PATH`, else
 `/usr/libexec/qemu-kvm` — and each of the six probe sites in ADR-0637 decision 2 uses it,
 including the one that execs it. Probes report the resolved path, not the name sought.
-No empty-package guard is added: `package_for`'s catch-all at `:148` already prevents one.
+No empty-package guard is added: `package_for`'s catch-all at `:188` already prevents one.
 `docs/operating/platform-support.md:35-52` is updated; the `libvirt_stack` role is untouched.
 
 ### Failure model

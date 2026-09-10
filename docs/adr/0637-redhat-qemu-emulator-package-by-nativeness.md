@@ -35,10 +35,15 @@ host is broken.
 own emulator, and keeps the arch-named package for a foreign request. No distro id is split;
 `load_distro_id`'s collapsed `fedora` arm is unchanged.
 
-Measured on Fedora 44: `dnf repoquery --requires qemu-kvm` returns `qemu-system-x86`, and
-`dnf --forcearch=ppc64le repoquery --requires qemu-kvm` returns `qemu-system-ppc`. One name,
-the host's own emulator, either architecture. On CentOS Stream 9 `qemu-kvm` requires
-`qemu-kvm-core`, which provides `/usr/libexec/qemu-kvm`.
+Measured on Fedora 44 x86_64: `dnf repoquery --requires qemu-kvm` returns `qemu-system-x86`. The
+same query run natively on a Fedora 44 **ppc64le** host returns `qemu-system-ppc`. One name, the
+host's own emulator, either architecture. On Rocky Linux 10.2 x86_64 (EL10),
+`dnf provides /usr/libexec/qemu-kvm` answers `qemu-kvm-core` from `appstream`, and
+`dnf list --available 'qemu-system-*'` returns `No matching Packages to list`.
+
+Whether `qemu-kvm` is likewise available on **EL ppc64le** is not settled here: the default repos
+of the Rocky 9, CentOS Stream 9 and CentOS Stream 10 ppc64le images carry no `qemu-kvm` at all.
+Tracked in #2405. It does not affect this decision's other three arms, each measured above.
 
 This is what the `libvirt_stack` role has always installed
 (`deploy/ansible/roles/libvirt_stack/defaults/main.yml:28-34`), reached from the other side.
@@ -82,12 +87,12 @@ would be false. Each reports the resolved path instead.
 An earlier revision of this record added a guard in `note_package` against an empty package name
 reaching the privileged `-y` install array, where `dnf install -y "" bc` fails the whole
 transaction. That guard is not added, because no reachable call can produce an empty answer:
-`package_for`'s final arm (`:148`) is `*) printf "%s" "${name}"`, so a non-empty name always
+`package_for`'s final arm (`:188`) is `*) printf "%s" "${name}"`, so a non-empty name always
 yields a non-empty package, and both callers that could pass an empty binary name — the advisory
 at `:285` and the future tier at `:404` — are already behind `arch_is_supported`.
 
 The guard was required by the previous design, which introduced a row that deliberately answered
-nothing. This design has no such row. `:148` is therefore load-bearing: it is what keeps an empty
+nothing. This design has no such row. `:188` is therefore load-bearing: it is what keeps an empty
 element out of the install array, and a future row that prints nothing would defeat it.
 
 ## Consequences
