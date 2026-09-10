@@ -15,7 +15,7 @@ the emulator missing, and under `-y` tries to install it. `check-local-libvirt.s
 Per ADR-0636: `package_for`'s RedHat emulator rows answer `qemu-kvm` when the requested
 `qemu-system-<arch>` binary is the host's own, and the arch-named package otherwise; no distro id
 is split. A resolver returns the emulator's path — arch-named binary on `PATH`, else
-`/usr/libexec/qemu-kvm` — and each of the five probe sites in ADR-0636 decision 2 uses it,
+`/usr/libexec/qemu-kvm` — and each of the six probe sites in ADR-0636 decision 2 uses it,
 including the one that execs it. Probes report the resolved path, not the name sought.
 No empty-package guard is added: `package_for`'s catch-all at `:148` already prevents one.
 `docs/operating/platform-support.md:35-52` is updated; the `libvirt_stack` role is untouched.
@@ -53,6 +53,7 @@ non-emulator package name; the three diagnostics' verdicts, which must agree.
   emulator package named on each host arch (red before: `qemu-system-x86` either way); the eight
   non-emulator `:fedora` rows unchanged.
 - Success 3 — **Mode: focused-test**. Shell sides through that harness with a stub libexec path
-  and an emptied `PATH` (red before: a line from each probe); doctor side through
-  `default_guest_arch_accel_probe`'s injected `which`, already host-free.
+  and an emptied `PATH` (red before: a line from each probe); both doctor probes through
+  `default_guest_arch_accel_probe` and `default_pseries_fadump_probe`'s injected `which` and
+  `is_executable`, already host-free.
 - Success 4 — **Mode: task-test-not-applicable**. Prose with no executable consumer.

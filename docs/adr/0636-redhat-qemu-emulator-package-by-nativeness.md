@@ -47,9 +47,9 @@ They are not a copy of one another and are not merged here.
 
 ### 2. Every native-emulator probe resolves the emulator, not just `PATH`
 
-There are four native-emulator probes across three tools, plus one foreign probe that executes
-the binary. A fix to fewer than all of them leaves the project's diagnostics contradicting each
-other on a working EL host:
+There are six emulator probes across four tools; two of them execute the binary they find. A fix
+to fewer than all of them leaves the project's diagnostics contradicting each other on a working
+EL host:
 
 | site | mechanism |
 |---|---|
@@ -58,10 +58,15 @@ other on a working EL host:
 | `check-local-libvirt.sh:173-178` | `_cmd` (`command -v`), `note_fail` |
 | `guest_arch_accel.py:129-139` | `shutil.which`, feeds the gating FAIL at `provider_checks.py:495-502` |
 | `check-local-libvirt.sh:196-207` | `_cmd`, then **execs** `qemu-system-ppc64 --version` |
+| `pseries_fadump.py:51` | `shutil.which`, then **execs** `--version` via `detect_pseries_fadump` |
 
-The last one is why this is a resolution change rather than a presence relaxation: it needs a
-path it can run, not a boolean. A shared resolver returns the emulator's path — the arch-named
+The executing sites are why this is a resolution change rather than a presence relaxation: they
+need a path they can run, not a boolean. A resolver returns the emulator's path — the arch-named
 binary on `PATH`, else `/usr/libexec/qemu-kvm` — and each site uses it.
+
+The fadump probe is the sharpest case: PATH-only it returns `not_applicable` on an EL ppc64le
+host, the exact host fadump exists for, while `LocalLibvirtDiscovery` reads libvirt's capabilities
+XML and sees the arch — so its own promise that "doctor and discovery cannot diverge" fails there.
 
 Native only: EL ships no foreign-architecture emulator, so the cross-architecture advisory keeps
 reporting one absent there, which is true.

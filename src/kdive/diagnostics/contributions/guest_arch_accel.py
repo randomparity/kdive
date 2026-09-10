@@ -71,8 +71,8 @@ def resolved_libvirt_uri() -> str:
 
 
 def _is_executable(path: str) -> bool:
-    """Whether ``path`` is an executable file (the off-PATH emulator probe's default)."""
-    return os.access(path, os.X_OK)
+    """Whether ``path`` is an executable *file* (a directory is executable but not an emulator)."""
+    return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
 def uri_is_local(uri: str) -> bool:

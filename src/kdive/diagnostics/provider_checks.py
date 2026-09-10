@@ -411,12 +411,12 @@ class GuestArchAccelReport:
 
     Attributes:
         accel_by_arch: ``{arch: "kvm"|"tcg"}`` for every supported arch whose qemu
-            emulator is present on the worker's PATH (arch-sorted at construction). A guest
-            arch is ``kvm`` only when it is the host's native arch and the URI-selected KVM
-            signal holds, else ``tcg``.
+            emulator resolves (arch-sorted at construction). A guest arch is ``kvm`` only when it
+            is the host's native arch and the URI-selected KVM signal holds, else ``tcg``.
         native_arch: The worker host's own architecture (``platform.machine()``).
         native_supported: Whether ``native_arch`` is an arch kdive can provision.
-        native_emulator_present: Whether the qemu emulator for ``native_arch`` is on PATH.
+        native_emulator_present: Whether the qemu emulator for ``native_arch`` resolves — on PATH,
+            or at the RedHat family's off-PATH location (ADR-0636).
         native_qemu_binary: The qemu system-emulator binary name for ``native_arch``, or
             ``None`` when the host arch is unsupported (so no native binary is expected).
         target_is_local: Whether the configured libvirt URI runs guests on this worker (a local
@@ -500,14 +500,18 @@ class GuestArchAccelCheck(Check):
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.FAIL,
+                # No package name here: the RedHat family ships no qemu-system-<arch> package at
+                # all, so naming the binary as the thing to install is wrong advice on exactly
+                # the hosts this FAIL reaches. Point at the per-distro hints instead (ADR-0636
+                # decision 3).
                 detail=(
                     f"host cannot schedule its own native arch {report.native_arch}: "
-                    f"{report.native_qemu_binary} not found on PATH"
+                    f"no {report.native_qemu_binary} emulator found"
                 ),
                 fix=(
-                    f"{report.native_qemu_binary} not found on PATH; install it via your "
-                    "distribution package manager (see scripts/check-setup-deps.sh for "
-                    "per-distro hints)"
+                    f"no {report.native_qemu_binary} emulator found on PATH or at the RedHat "
+                    "off-PATH location; install your distribution's qemu system-emulator "
+                    "package (see scripts/check-setup-deps.sh for per-distro hints)"
                 ),
                 provider=self._provider,
                 failure_category=_MISSING_DEPENDENCY,

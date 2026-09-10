@@ -125,7 +125,7 @@ _resolve_emulator() {
     printf "%s" "${resolved}"
     return 0
   fi
-  if [[ "${arch}" == "${host_arch:-}" && -x "${QEMU_LIBEXEC}" ]]; then
+  if [[ "${arch}" == "${host_arch:-}" && -f "${QEMU_LIBEXEC}" && -x "${QEMU_LIBEXEC}" ]]; then
     printf "%s" "${QEMU_LIBEXEC}"
     return 0
   fi
@@ -213,14 +213,17 @@ fi
 # RTAS). Report-only — an absent/old qemu-system-ppc64 does not fail this host (kdump is the spine
 # and x86 is unaffected); it only tells an operator whether fadump systems can be provisioned here.
 if _ppc_qemu="$(_resolve_emulator qemu-system-ppc64 ppc64le)"; then
+  # `|| true` because this advisory is report-only and the script runs under `set -o pipefail`:
+  # without it an emulator whose --version exits nonzero aborts the whole preflight. Resolving the
+  # off-PATH emulator widened which hosts reach this line, so the guard is load-bearing.
   _ppc_ver="$("${_ppc_qemu}" --version 2>/dev/null |
-    sed -n 's/^QEMU emulator version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')"
+    sed -n 's/^QEMU emulator version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')" || true
   read -r _ppc_maj _ppc_min <<<"${_ppc_ver:-0 0}"
   if ((_ppc_maj > 10 || (_ppc_maj == 10 && _ppc_min >= 2))); then
-    note_ok "qemu-system-ppc64 ${_ppc_maj}.${_ppc_min} implements pseries fadump (>= 10.2)"
+    note_ok "${_ppc_qemu} ${_ppc_maj}.${_ppc_min} implements pseries fadump (>= 10.2)"
   else
     note_warn \
-      "qemu-system-ppc64 ${_ppc_maj}.${_ppc_min} predates QEMU 10.2, so pseries fadump is unavailable" \
+      "${_ppc_qemu} ${_ppc_maj}.${_ppc_min} predates QEMU 10.2, so pseries fadump is unavailable" \
       "upgrade QEMU to >= 10.2 to provision fadump systems here, or validate fadump on native POWER; kdump is unaffected"
   fi
 fi

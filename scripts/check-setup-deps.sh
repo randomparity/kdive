@@ -88,7 +88,7 @@ resolve_native_emulator() {
     printf "%s" "${resolved}"
     return 0
   fi
-  if [[ -x "${QEMU_LIBEXEC}" ]]; then
+  if [[ -f "${QEMU_LIBEXEC}" && -x "${QEMU_LIBEXEC}" ]]; then
     printf "%s" "${QEMU_LIBEXEC}"
     return 0
   fi
