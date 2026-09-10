@@ -159,7 +159,9 @@ package_for() {
   # It provides no foreign-arch emulator, so a foreign request keeps the arch-named package:
   # correct on Fedora, and on EL the only name there is to suggest.
   qemu-system-x86_64:fedora | qemu-system-ppc64:fedora)
-    if [[ "${name}" == "$(qemu_binary_for_arch "${host_arch}")" ]]; then
+    # ${host_arch:-} rather than ${host_arch}: this is the only row that reads a global, and an
+    # unset or empty value must fall through to the arch-named answer, not abort under `set -u`.
+    if [[ "${name}" == "$(qemu_binary_for_arch "${host_arch:-}")" ]]; then
       printf "qemu-kvm"
     elif [[ "${name}" == "qemu-system-x86_64" ]]; then
       printf "qemu-system-x86"
