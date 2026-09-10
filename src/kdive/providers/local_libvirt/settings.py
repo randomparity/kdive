@@ -13,6 +13,7 @@ this module accepts through the real guard.
 
 from __future__ import annotations
 
+import math
 import os
 import stat
 from pathlib import Path
@@ -21,17 +22,30 @@ from kdive.config.registry import Setting
 
 _RT = frozenset({"worker", "reconciler"})
 
+# A round, generous ceiling: no real deployment needs a multiplier this large. Unlike the
+# multiplier itself, this constant has no env var binding; raising it if one ever needs to
+# is a follow-up code change to this line, not an operator setting (no ADR required) (#2415).
+_TCG_MULTIPLIER_CEILING = 1000.0
+
 
 def _parse_tcg_multiplier(raw: str) -> float:
-    """Parse the TCG deadline multiplier, rejecting a value below 1.0 (ADR-0341).
+    """Parse the TCG deadline multiplier, rejecting anything outside [1.0, ceiling] (ADR-0341).
 
     A multiplier < 1 would make a TCG (emulated) deadline *tighter* than the KVM baseline,
     which is never intended; ``1.0`` is the operator opt-out ("do not scale even under TCG").
+    ``nan``/``inf`` are not < 1.0, so they must be rejected explicitly, and an unbounded
+    multiplier is rejected too (#2415) — both would otherwise pass this check and fail later,
+    deep inside a build-tool timeout or boot-poll calculation, as an uncaught
+    ``ValueError``/``OverflowError`` instead of a startup ``CONFIGURATION_ERROR``.
     Raises ``ValueError`` so the registry surfaces a ``CONFIGURATION_ERROR``.
     """
     value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"must be a finite number (got {value})")
     if value < 1.0:
         raise ValueError(f"must be >= 1.0 (got {value})")
+    if value > _TCG_MULTIPLIER_CEILING:
+        raise ValueError(f"must be <= {_TCG_MULTIPLIER_CEILING} (got {value})")
     return value
 
 
@@ -104,7 +118,10 @@ LIBVIRT_TCG_DEADLINE_MULTIPLIER = Setting(
         "this factor. Must be >= 1.0; 1.0 disables scaling. They move together and cannot be "
         "tuned apart."
     ),
-    suggest="set a float >= 1.0 (default 10.0); 1.0 disables TCG deadline scaling",
+    suggest=(
+        f"set a finite float in [1.0, {_TCG_MULTIPLIER_CEILING}] (default 10.0); "
+        "1.0 disables TCG deadline scaling"
+    ),
 )
 
 LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S = Setting(

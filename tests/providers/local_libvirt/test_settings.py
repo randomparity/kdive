@@ -61,6 +61,38 @@ def test_tcg_multiplier_rejects_non_float() -> None:
         settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.parse("abc")
 
 
+def test_tcg_multiplier_rejects_nan() -> None:
+    # nan < 1.0 is False, so an unguarded check lets it through (#2415).
+    with pytest.raises(ValueError):
+        settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.parse("nan")
+
+
+def test_tcg_multiplier_rejects_positive_infinity() -> None:
+    # inf < 1.0 is False, so an unguarded check lets it through (#2415).
+    with pytest.raises(ValueError):
+        settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.parse("inf")
+
+
+def test_tcg_multiplier_rejects_negative_infinity() -> None:
+    with pytest.raises(ValueError):
+        settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.parse("-inf")
+
+
+def test_tcg_multiplier_rejects_above_ceiling() -> None:
+    # No upper bound previously meant a multiplier like 1e9 passed validation unbounded (#2415).
+    with pytest.raises(ValueError):
+        settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.parse("1e9")
+
+
+def test_tcg_multiplier_accepts_value_at_ceiling() -> None:
+    assert settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.parse("1000.0") == 1000.0
+
+
+def test_tcg_multiplier_rejects_just_above_ceiling() -> None:
+    with pytest.raises(ValueError):
+        settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.parse("1000.0001")
+
+
 def test_customization_boot_window_setting_fields() -> None:
     s = settings.LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S
     assert s.name == "KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S"
