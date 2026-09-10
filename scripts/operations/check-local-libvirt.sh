@@ -6,6 +6,10 @@
 set -euo pipefail
 
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
+
+# The RedHat family ships the host's OWN emulator here, off PATH: no EL package provides
+# /usr/bin/qemu-system-<arch> (ADR-0636). Overridable for tests, mirroring KDIVE_KVM_NODE.
+readonly QEMU_LIBEXEC="${KDIVE_QEMU_LIBEXEC:-/usr/libexec/qemu-kvm}"
 # The worker imports drgn + the libguestfs binding from the project venv, not system
 # python3. Probe the same interpreter the worker uses. Prefer the .venv sibling of this
 # script when present (in-repo dev loop) so `just check-local-libvirt` needs no env var;
@@ -112,6 +116,21 @@ supported_arches_csv() {
 
 _has_kvm() { [[ -r "${KVM_NODE}" && -w "${KVM_NODE}" ]]; }
 _cmd() { command -v "$1" >/dev/null 2>&1; }
+# Resolve a qemu emulator to a RUNNABLE path, not a boolean: the fadump probe below execs it for
+# --version. The RedHat off-PATH location holds the host's OWN emulator and is never a foreign-arch
+# one, so the fallback applies only when the requested arch is this host's (ADR-0636 decision 2).
+_resolve_emulator() {
+  local binary="$1" arch="$2" resolved
+  if resolved="$(command -v "${binary}" 2>/dev/null)"; then
+    printf "%s" "${resolved}"
+    return 0
+  fi
+  if [[ "${arch}" == "${host_arch:-}" && -x "${QEMU_LIBEXEC}" ]]; then
+    printf "%s" "${QEMU_LIBEXEC}"
+    return 0
+  fi
+  return 1
+}
 _in_libvirt_group() { [[ " $(id -nG 2>/dev/null) " == *" libvirt "* ]]; }
 _virsh_connects() { virsh -c qemu:///system list >/dev/null 2>&1; }
 _default_net_active() {
@@ -171,10 +190,10 @@ printf "\n%s\n" "-- QEMU emulators" >&2
 host_arch="$(uname -m 2>/dev/null || true)"
 native_qemu="$(qemu_binary_for_arch "${host_arch}")"
 if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
-  if _cmd "${native_qemu}"; then
-    note_ok "${native_qemu} present (native KVM-HV for ${host_arch})"
+  if native_path="$(_resolve_emulator "${native_qemu}" "${host_arch}")"; then
+    note_ok "${native_path} present (native KVM-HV for ${host_arch})"
   else
-    note_fail "${native_qemu} not found on PATH" \
+    note_fail "${native_qemu} not found on PATH or at ${QEMU_LIBEXEC}" \
       "install it via your distribution (see scripts/check-setup-deps.sh hints)"
   fi
   for guest_arch in "${SUPPORTED_ARCHES[@]}"; do
@@ -193,8 +212,8 @@ fi
 # Advisory (ADR-0349): fadump on POWER pseries needs QEMU >= 10.2 (the ibm,configure-kernel-dump
 # RTAS). Report-only — an absent/old qemu-system-ppc64 does not fail this host (kdump is the spine
 # and x86 is unaffected); it only tells an operator whether fadump systems can be provisioned here.
-if _cmd qemu-system-ppc64; then
-  _ppc_ver="$(qemu-system-ppc64 --version 2>/dev/null |
+if _ppc_qemu="$(_resolve_emulator qemu-system-ppc64 ppc64le)"; then
+  _ppc_ver="$("${_ppc_qemu}" --version 2>/dev/null |
     sed -n 's/^QEMU emulator version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')"
   read -r _ppc_maj _ppc_min <<<"${_ppc_ver:-0 0}"
   if ((_ppc_maj > 10 || (_ppc_maj == 10 && _ppc_min >= 2))); then

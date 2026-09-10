@@ -17,7 +17,7 @@ Per ADR-0636: `package_for`'s RedHat emulator rows answer `qemu-kvm` when the re
 is split. A resolver returns the emulator's path — arch-named binary on `PATH`, else
 `/usr/libexec/qemu-kvm` — and each of the five probe sites in ADR-0636 decision 2 uses it,
 including the one that execs it. Probes report the resolved path, not the name sought.
-`note_package:154-164` suppresses an empty package without dropping the command at `:158`.
+No empty-package guard is added: `package_for`'s catch-all at `:148` already prevents one.
 `docs/operating/platform-support.md:35-52` is updated; the `libvirt_stack` role is untouched.
 
 ### Failure model
@@ -26,7 +26,7 @@ including the one that execs it. Probes report the resolved path, not the name s
 `just check-local-libvirt`, or `kdivectl doctor`, on any supported distro and either arch.
 
 **Invariants at stake** — the package set `-y` installs, privileged and host-mutating; every
-non-emulator package name; the three diagnostics' verdicts; the `exit 1` gate.
+non-emulator package name; the three diagnostics' verdicts, which must agree.
 
 **Accepted failure classes**
 - On EL the foreign-arch advisory still names `qemu-system-ppc`, which EL lacks. Report-only, and
@@ -44,17 +44,15 @@ non-emulator package name; the three diagnostics' verdicts; the `exit 1` gate.
 2. Every non-emulator package name is unchanged, on every distro id.
 3. On a host with `/usr/libexec/qemu-kvm` and no arch-named binary on `PATH`, all three
    diagnostics report the native emulator present and the doctor check does not fail.
-4. A missing command is still reported and still fails the run when its package is empty.
-5. `docs/operating/platform-support.md:35-52` records what EL can and cannot run.
+4. `docs/operating/platform-support.md:35-52` records what EL can and cannot run.
 
 ## Validation
 
-- Success 1, 2, 4 — **Mode: focused-test**. Extend `tests/scripts/test_check_setup_deps.py`, which
+- Success 1 and 2 — **Mode: focused-test**. Extend `tests/scripts/test_check_setup_deps.py`, which
   drives the script as a subprocess under stubbed `PATH`, `KDIVE_OS_RELEASE` and `uname`: the
   emulator package named on each host arch (red before: `qemu-system-x86` either way); the eight
-  non-emulator `:fedora` rows unchanged; an empty package still reporting its command and
-  exiting 1 (red before: an empty element reaches the tier).
+  non-emulator `:fedora` rows unchanged.
 - Success 3 — **Mode: focused-test**. Shell sides through that harness with a stub libexec path
   and an emptied `PATH` (red before: a line from each probe); doctor side through
   `default_guest_arch_accel_probe`'s injected `which`, already host-free.
-- Success 5 — **Mode: task-test-not-applicable**. Prose with no executable consumer.
+- Success 4 — **Mode: task-test-not-applicable**. Prose with no executable consumer.

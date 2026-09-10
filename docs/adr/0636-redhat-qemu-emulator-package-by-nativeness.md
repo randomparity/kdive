@@ -72,13 +72,18 @@ reporting one absent there, which is true.
 their success messages. On EL that binary does not exist, so a message asserting it is present
 would be false. Each reports the resolved path instead.
 
-### 4. `note_package` ignores an empty package name without losing the command
+### 4. No empty-package guard is added, because the catch-all already prevents one
 
-`note_package` (`:154-164`) records two things: the missing command at `:158` and its package at
-`:163`. The guard suppresses only the second. An early return would also drop the command from
-the report and from the `exit 1` gate, converting a `package_for` table bug into silence — a
-worse failure than the empty element it prevents. `:163` is the only `pkgs+=` in the file, so
-this is the correct choke point.
+An earlier revision of this record added a guard in `note_package` against an empty package name
+reaching the privileged `-y` install array, where `dnf install -y "" bc` fails the whole
+transaction. That guard is not added, because no reachable call can produce an empty answer:
+`package_for`'s final arm (`:148`) is `*) printf "%s" "${name}"`, so a non-empty name always
+yields a non-empty package, and both callers that could pass an empty binary name — the advisory
+at `:285` and the future tier at `:404` — are already behind `arch_is_supported`.
+
+The guard was required by the previous design, which introduced a row that deliberately answered
+nothing. This design has no such row. `:148` is therefore load-bearing: it is what keeps an empty
+element out of the install array, and a future row that prints nothing would defeat it.
 
 ## Consequences
 

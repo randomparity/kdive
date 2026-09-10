@@ -10,6 +10,7 @@ needing stubs.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -228,8 +229,14 @@ def test_advisory_shows_host_arch_first(tmp_path: Path) -> None:
     out = result.stdout
     assert "Host architecture: x86_64 (supported kdive provisioning arch)" in out
     assert out.index("guest arch x86_64:") < out.index("guest arch ppc64le:")
-    native = "guest arch x86_64: available natively via qemu-system-x86_64 (/dev/kvm accessible"
-    assert native in out
+    # The native line reports the RESOLVED path, not the name looked for: on the RedHat family
+    # the arch-named binary does not exist and the emulator lives at /usr/libexec/qemu-kvm
+    # (ADR-0636 decision 3). Here that resolves to the stub on the test PATH.
+    native = re.search(
+        r"guest arch x86_64: available natively via (\S+) \(/dev/kvm accessible", out
+    )
+    assert native is not None, out
+    assert native.group(1).endswith("/qemu-system-x86_64")
     assert "guest arch ppc64le: available via TCG only (qemu-system-ppc64)" in out
 
 
@@ -773,3 +780,66 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
     )
 
     assert "python3-guestfs" not in result.stderr, result.stderr
+
+
+def test_redhat_names_qemu_kvm_for_the_hosts_own_emulator(tmp_path: Path) -> None:
+    """EL ships no qemu-system-x86 at all; qemu-kvm is what pulls this host's own emulator."""
+    result = _run_with_uname("fedora", "x86_64", (), tmp_path)
+    assert "guest arch x86_64: not available; install qemu-kvm for native guests" in result.stdout
+
+
+def test_redhat_keeps_the_arch_named_package_for_a_foreign_emulator(tmp_path: Path) -> None:
+    """qemu-kvm pulls only the host's own emulator, so foreign advice stays arch-named."""
+    result = _run_with_uname("fedora", "x86_64", (), tmp_path)
+    assert "guest arch ppc64le: not available; install qemu-system-ppc" in result.stdout
+
+
+def test_redhat_nativeness_is_symmetric_on_a_ppc64le_host(tmp_path: Path) -> None:
+    """On ppc64le the native row is the ppc one, so qemu-kvm moves with the host arch."""
+    result = _run_with_uname("fedora", "ppc64le", (), tmp_path)
+    assert "guest arch ppc64le: not available; install qemu-kvm for native guests" in result.stdout
+    assert "guest arch x86_64: not available; install qemu-system-x86" in result.stdout
+
+
+def test_nativeness_rule_does_not_touch_debian(tmp_path: Path) -> None:
+    """Debian packages the emulator per arch, so both its answers stay arch-named."""
+    result = _run_with_uname("debian", "x86_64", (), tmp_path)
+    assert (
+        "guest arch x86_64: not available; install qemu-system-x86 for native guests"
+        in result.stdout
+    )
+
+
+def test_native_emulator_is_found_at_the_libexec_path(tmp_path: Path) -> None:
+    """EL keeps the emulator at /usr/libexec/qemu-kvm, off PATH; both probes must accept it."""
+    libexec = tmp_path / "qemu-kvm-libexec"
+    libexec.write_text("#!/bin/sh\nexit 0\n")
+    libexec.chmod(0o755)
+    result = _run_with_uname(
+        "fedora", "x86_64", (), tmp_path, extra_env={"KDIVE_QEMU_LIBEXEC": str(libexec)}
+    )
+    # The advisory stops reporting it missing ...
+    assert "install qemu-kvm for native guests" not in result.stdout
+    # ... and reports the path it resolved, not the name it looked for.
+    assert str(libexec) in result.stdout
+    # The future tier is the second probe: it must not still demand the arch-named binary.
+    assert "qemu-system-x86_64" not in result.stderr
+
+
+def test_non_emulator_redhat_package_names_are_unchanged(tmp_path: Path) -> None:
+    """The nativeness rule touches only the two emulator rows, not the other eight.
+
+    ``ShellCheck`` is the fedora-keyed spelling of ``shellcheck`` and ``libvirt-client`` the
+    RedHat spelling of ``virsh``; both would change if the rule leaked past the emulator rows.
+    """
+    result = _run_with_uname("fedora", "x86_64", (), tmp_path)
+    assert "ShellCheck" in result.stderr
+    assert "libvirt-client" in result.stderr
+
+
+def test_future_tier_install_line_names_qemu_kvm_on_redhat(tmp_path: Path) -> None:
+    """The second probe feeds the `-y` install list, so its package name must change too."""
+    result = _run_with_uname("fedora", "x86_64", (), tmp_path)
+    future = [ln for ln in result.stderr.splitlines() if ln.strip().startswith("dnf install")][-1]
+    assert "qemu-kvm" in future
+    assert "qemu-system-x86 " not in f"{future} "
