@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -9,6 +10,8 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.planes import _build_common
+from kdive.providers.local_libvirt.lifecycle.rootfs import customization_boot
 from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
     CUSTOMIZE_UNIT,
     CustomizationBootSeams,
@@ -276,3 +279,24 @@ def test_seal_raises_provisioning_failure_when_unit_still_present():
         )
     assert ei.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert "was not self-removed" in str(ei.value)
+
+
+# --- worker-host-scaled seal budget (#2397, ADR-0637) -----------------------------------------
+
+
+def test_real_seal_guestfish_uses_the_scaled_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The offline seal takes its timeout from the scaled budget, not a module-level alias."""
+    calls: list[dict[str, object]] = []
+
+    def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"argv": argv, **kwargs})
+        return subprocess.CompletedProcess(argv, returncode=0, stdout="false false\n", stderr="")
+
+    monkeypatch.setattr(_build_common.subprocess, "run", _run)
+    monkeypatch.setattr(customization_boot, "slow_build_tool_timeout_s", lambda: 424242)
+
+    customization_boot._real_run_guestfish(tmp_path / "img.qcow2", "is-file /etc/hosts\n")
+
+    assert [call["timeout"] for call in calls] == [424242]

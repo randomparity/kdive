@@ -126,15 +126,13 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
 from kdive.providers.local_libvirt.lifecycle.xml import render_customization_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.external_boot import Architecture
-from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+from kdive.providers.shared.build_timeouts import slow_build_tool_timeout_s
 from kdive.providers.shared.libvirt_xml import parse_guest_arches
 
 _log = logging.getLogger(__name__)
 
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _DEFAULT_IMAGE_SIZE = "6G"
-_ACQUIRE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
-_REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
 def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> str:
@@ -155,7 +153,7 @@ def _real_virt_builder(*, template: str, output: Path) -> None:  # pragma: no co
     _run_libguestfs_tool(
         ["virt-builder", template, "--format", "qcow2", "--output", str(output)],
         stage="virt-builder",
-        timeout_s=_ACQUIRE_TIMEOUT_S,
+        timeout_s=slow_build_tool_timeout_s(),
     )
 
 
@@ -205,28 +203,30 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
         _run_libguestfs_tool(
             ["virt-tar-out", "-a", str(scratch), "/", str(tar_path)],
             stage="virt-tar-out",
-            timeout_s=_REPACK_TIMEOUT_S,
+            timeout_s=slow_build_tool_timeout_s(),
         )
         make_fs = ["virt-make-fs", "--type=ext4", "--format=raw", f"--size={size}"]
         _run_libguestfs_tool(
             [*make_fs, str(tar_path), str(raw_path)],
             stage="virt-make-fs",
-            timeout_s=_REPACK_TIMEOUT_S,
+            timeout_s=slow_build_tool_timeout_s(),
         )
         tar_path.unlink(missing_ok=True)  # virt-make-fs (sole consumer) done; free before convert
         features = _run_libguestfs_tool(
-            ["tune2fs", "-l", str(raw_path)], stage="tune2fs-l", timeout_s=_REPACK_TIMEOUT_S
+            ["tune2fs", "-l", str(raw_path)],
+            stage="tune2fs-l",
+            timeout_s=slow_build_tool_timeout_s(),
         )
         if _feature_strip_needed(features):
             _run_libguestfs_tool(
                 ["tune2fs", "-O", f"^{_EXT4_INCOMPATIBLE_FEATURE}", str(raw_path)],
                 stage="tune2fs",
-                timeout_s=_REPACK_TIMEOUT_S,
+                timeout_s=slow_build_tool_timeout_s(),
             )
         _run_libguestfs_tool(
             ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", str(raw_path), str(qcow2)],
             stage="qemu-img",
-            timeout_s=_REPACK_TIMEOUT_S,
+            timeout_s=slow_build_tool_timeout_s(),
         )
 
 
@@ -259,8 +259,6 @@ type InjectOffline = Callable[[Path, list[Step], str, str], None]
 type RunCustomizationBoot = Callable[..., None]
 type SealCustomizedImage = Callable[..., None]
 type ResolveAccel = Callable[[str], tuple[str, str | None]]
-
-_INJECT_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
 def _real_resolve_accel(arch: str) -> tuple[str, str | None]:  # pragma: no cover - live_vm
@@ -355,7 +353,7 @@ def _real_inject_offline(
         run_guestfs_tool(
             ["guestfish", "--rw", "-a", str(qcow2), "-i"],
             stage="customize-inject",
-            timeout_s=_INJECT_TIMEOUT_S,
+            timeout_s=slow_build_tool_timeout_s(),
             missing_message="guestfish is not installed; cannot inject the firstboot customization",
             failure_message="offline firstboot injection failed",
             input_text=script,
@@ -391,7 +389,7 @@ def _run_cloud_init_guestfish(qcow2: Path, script: str) -> str:
     return run_guestfs_tool(
         ["guestfish", "--ro", "-a", str(qcow2), "-i"],
         stage="cloud-init-self-check",
-        timeout_s=_REPACK_TIMEOUT_S,
+        timeout_s=slow_build_tool_timeout_s(),
         missing_message="guestfish is not installed; cannot verify cloud-init in the rootfs",
         input_text=script,
     )

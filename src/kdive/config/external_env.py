@@ -450,8 +450,10 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_KVM_NODE",
         "script",
         "/dev/kvm",
-        "KVM device node `check-local-libvirt.sh` and `check-setup-deps.sh` probe for hardware "
-        "virtualization (the latter for its native-arch advisory line).",
+        "KVM device node probed for hardware virtualization by `check-local-libvirt.sh`, "
+        "`check-setup-deps.sh` (for its native-arch advisory line), `preflight-env.sh`, and the "
+        "shared rootfs build-tool budget, which scales when this uid cannot open it read+write "
+        "because the libguestfs appliance then emulates (ADR-0637).",
     ),
     ExternalEnvVar(
         "KDIVE_HOST_RUNTIME_DIRS",

@@ -43,7 +43,7 @@ from kdive.providers.local_libvirt.settings import (
     LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
     LIBVIRT_URI,
 )
-from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+from kdive.providers.shared.build_timeouts import slow_build_tool_timeout_s
 from kdive.providers.shared.runtime_paths import (
     build_domain_name,
     console_log_path,
@@ -299,7 +299,6 @@ type GuestfishRunner = Callable[[Path, str], str]
 _SEAL_UNIT_NOT_REMOVED_MESSAGE = (
     "customization firstboot unit was not self-removed; the build boot did not complete cleanly"
 )
-_SEAL_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
 def _seal_script(*, unit_name: str, selinux: bool) -> str:
@@ -360,7 +359,7 @@ def _real_run_guestfish(qcow2: Path, script: str) -> str:  # pragma: no cover - 
     return run_guestfs_tool(
         ["guestfish", "--rw", "-a", str(qcow2), "-i"],
         stage="customization-seal",
-        timeout_s=_SEAL_TIMEOUT_S,
+        timeout_s=slow_build_tool_timeout_s(),
         missing_message="guestfish is not installed; cannot seal the customized rootfs image",
         input_text=script,
     )
