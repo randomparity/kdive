@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -70,25 +72,60 @@ def test_clears_the_measured_emulated_repack_failure() -> None:
     assert slow_build_tool_timeout_s(kvm_present=lambda: False) > 1800
 
 
-def test_un_injected_call_follows_the_worker_host_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The un-injected path is the one every production call site takes, so drive the seam it
-    # resolves rather than asserting a value set the function cannot fall outside of.
-    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0"})
-    for kvm, expected in ((True, 1800), (False, 18000)):
-        monkeypatch.setattr(
-            build_timeouts, "kvm_probe_for_uri", lambda _uri, kvm=kvm, **_kw: lambda: kvm
-        )
-        assert slow_build_tool_timeout_s() == expected
+# --- the default probe (#2397, ADR-0637) ------------------------------------------------------
+#
+# The un-injected path is the one every production call site takes, and its probe is this budget's
+# own: read+write openability of ${KDIVE_KVM_NODE:-/dev/kvm}, matching preflight-env.sh for the
+# same libguestfs appliance rather than ADR-0352's URI-selected presence test. KDIVE_KVM_NODE is
+# the seam the shell tier's tests already drive, so no monkeypatching is needed to reach it.
 
 
-def test_the_probe_is_resolved_per_call_not_bound_at_import(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _openable_node(tmp_path: Path) -> Path:
+    node = tmp_path / "kvm"
+    node.write_bytes(b"")
+    node.chmod(0o600)
+    return node
+
+
+def test_un_injected_call_keeps_the_unscaled_budget_when_the_node_opens(tmp_path: Path) -> None:
+    node = _openable_node(tmp_path)
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0", "KDIVE_KVM_NODE": str(node)})
+    assert slow_build_tool_timeout_s() == 1800
+
+
+def test_un_injected_call_scales_when_the_node_is_absent(tmp_path: Path) -> None:
+    config.load(
+        {LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0", "KDIVE_KVM_NODE": str(tmp_path / "absent")}
+    )
+    assert slow_build_tool_timeout_s() == 18000
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root opens any mode, so read-only proves nothing")
+def test_a_node_the_worker_uid_cannot_write_scales(tmp_path: Path) -> None:
+    # The host class this budget's own probe exists for: the node is present, so ADR-0352's
+    # presence test would call it KVM, but the worker uid cannot open it read+write and the
+    # appliance is emulated. preflight-env.sh calls the same host fatal.
+    node = _openable_node(tmp_path)
+    node.chmod(0o400)
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0", "KDIVE_KVM_NODE": str(node)})
+    assert slow_build_tool_timeout_s() == 18000
+
+
+def test_an_empty_node_override_falls_back_to_dev_kvm(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ${KDIVE_KVM_NODE:-/dev/kvm} treats empty as unset; an empty string would otherwise be a
+    # path os.access always refuses, silently scaling every budget on a KVM host.
+    seen: list[str] = []
+    monkeypatch.setattr(build_timeouts.os, "access", lambda node, _mode: seen.append(node) is None)
+    config.load({"KDIVE_KVM_NODE": ""})
+    assert slow_build_tool_timeout_s() == 1800
+    assert seen == ["/dev/kvm"]
+
+
+def test_the_probe_is_resolved_per_call_not_bound_at_import(tmp_path: Path) -> None:
     # Binding the verdict once would outlive the fact it measures: flipping the host's answer
     # between two calls must change the second budget.
-    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0"})
-    answers = iter([True, False])
-    monkeypatch.setattr(
-        build_timeouts, "kvm_probe_for_uri", lambda _uri, **_kw: lambda: next(answers)
-    )
-    assert [slow_build_tool_timeout_s(), slow_build_tool_timeout_s()] == [1800, 18000]
+    node = _openable_node(tmp_path)
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0", "KDIVE_KVM_NODE": str(node)})
+    first = slow_build_tool_timeout_s()
+    node.unlink()
+    assert [first, slow_build_tool_timeout_s()] == [1800, 18000]

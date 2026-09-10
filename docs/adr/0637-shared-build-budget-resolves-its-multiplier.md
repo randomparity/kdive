@@ -1,8 +1,8 @@
-# 0637 — The shared build budget resolves its own worker-host multiplier
+# 0637 — The shared build budget resolves its own worker-host probe and multiplier
 
 ## Status
 
-Accepted (2026-09-09)
+Accepted (2026-09-10)
 
 - **Issue:** #2397
 
@@ -29,16 +29,42 @@ provider implementation. `host_appliance_multiplier` is therefore out of reach f
 and so is `tcg_deadline_multiplier`, which it delegates to and which #2397's approved scope
 excludes moving.
 
+Resolving the multiplier here raises a second question ADR-0636 also did not answer, because it
+had only one budget in hand: for *this* budget, what does "the worker host has KVM" mean? The
+first implementation answered with ADR-0352's `kvm_probe_for_uri`, which tests worker-uid
+*openability* of `/dev/kvm` for the exact URI `qemu:///session` and mere *presence* for every
+other URI, the default `qemu:///system` included. Branch review found that reading admits two host
+classes whose appliance is emulated but whose budget stays unscaled: a worker uid that cannot open
+the node, and a host holding the node while advertising no KVM domain for its architecture — the
+POWER10 host recorded live in `tests/providers/test_libvirt_xml.py`. Both are cases #2397's first
+acceptance criterion names.
+
+The repository's shell tier already answers the question, in the opposite terms and for this exact
+appliance. `scripts/live-vm/preflight-env.sh` makes it *fatal* when `${KDIVE_KVM_NODE:-/dev/kvm}`
+is not readable **and** writable by the running user — "without KVM the libguestfs appliance falls
+back to emulation" — independent of URI mode; `scripts/operations/check-local-libvirt.sh` and
+`scripts/check-setup-deps.sh` use the same read+write test, and all three honour `KDIVE_KVM_NODE`.
+The URI is not the right selector here in any case: the tool being bounded is not launched by
+libvirtd through `KDIVE_LIBVIRT_URI`, it is a libguestfs appliance the worker process starts
+itself, and `deploy/ansible/playbooks/image.yml` sets `LIBGUESTFS_BACKEND: direct` so it runs in
+the caller's own uid context.
+
 ## Decision
 
 We will give `providers/shared/build_timeouts.py` a
-`slow_build_tool_timeout_s(*, kvm_present: Callable[[], bool] | None = None) -> int` that resolves
-the worker host's KVM itself — the ADR-0352 probe from
-`kdive.diagnostics.contributions.guest_arch_accel`, which is provider-agnostic — and scales
-`SLOW_BUILD_TOOL_TIMEOUT_S` by `LIBVIRT_TCG_DEADLINE_MULTIPLIER` read through the declared
-settings exception. Every rootfs-build call site in both providers will call it at invocation
-time in place of the five module-level aliases of the constant, which are deleted. Nothing moves:
-`deadlines.py`, `host_appliance_multiplier`, and `overlay_customize.py` are untouched.
+`slow_build_tool_timeout_s(*, kvm_present: Callable[[], bool] | None = None) -> int` that scales
+`SLOW_BUILD_TOOL_TIMEOUT_S` by `LIBVIRT_TCG_DEADLINE_MULTIPLIER`, read through the declared
+settings exception, and resolves the worker host's KVM with **its own probe**: read+write
+openability of `${KDIVE_KVM_NODE:-/dev/kvm}`, tested unconditionally, matching `preflight-env.sh`
+for the same appliance. `KDIVE_KVM_NODE` is read by name from the config snapshot, the way a
+catalogued non-registry variable is read (`kdive.config.external_env`), and an empty value is
+treated as unset exactly as `${…:-…}` does.
+
+Every rootfs-build call site in both providers will call `slow_build_tool_timeout_s()` at
+invocation time in place of the five module-level aliases of the constant, which are deleted.
+Nothing moves and nothing else changes probe: `deadlines.py`, `host_appliance_multiplier`,
+`overlay_customize.py`, and ADR-0352's `kvm_probe_for_uri` are untouched, so the sibling
+`virt-customize` budget keeps the presence test.
 
 ## Consequences
 
@@ -65,11 +91,26 @@ and the `details={"timeout_s": ...}` error payload unchanged; a KVM host gets ex
 Resolving per call rather than at import keeps the probe answering for the host as it is when the
 tool runs.
 
-The scaling reaches exactly as far as ADR-0352's probe does. For the default `qemu:///system`
-that probe tests `/dev/kvm` *presence*, so a host holding the node while advertising no KVM domain
-for its architecture — the POWER10 host recorded live in `tests/providers/test_libvirt_xml.py` —
-still gets the unscaled budget although its appliance is emulated. Widening the probe to
-usability is ADR-0352's decision and a follow-up, not this record's.
+The two host-side appliance budgets now answer "does this host have KVM" two different ways, and
+that divergence is the deliberate cost of this record. `virt-customize` keeps ADR-0352's
+URI-selected presence test through `host_appliance_multiplier`; the rootfs build tools use the
+read+write openability test above. On the ordinary host — `/dev/kvm` present and openable, or
+absent — the two agree, so the divergence is visible only on the two host classes the Context
+names, where this budget scales and the sibling does not. Converging them means widening or
+parameterizing `kvm_probe_for_uri` so presence is not read as usability, which is ADR-0352's
+decision to make; that is filed as a follow-up rather than taken here, because widening the probe
+changes what the accel *diagnostic* reports and #2397's approved scope does not reach it.
+
+The scaling then reaches the host classes the issue was filed from, but only to the extent that
+`KDIVE_KVM_NODE` names the node the appliance actually opens; a host that runs the appliance
+against some other node and does not set the variable is answered wrongly, the same way it is
+answered wrongly by all three shell checks today. Uniformity with those checks is the point: an
+operator whose `preflight-env.sh` passes gets the unscaled budget, and one whose `preflight-env.sh`
+dies gets a budget their host can meet.
+
+`os.access` is a real syscall on a real path, so this probe reports the node's state at the moment
+the tool runs, and it is the only filesystem access this module makes. It follows the effective
+uid, which is the uid that will open the node.
 
 An emulated host now takes 5 hours to surface a genuinely hung build tool instead of 30 minutes,
 and nothing above the tool run terminates it: the job queue's lease is "a per-heartbeat limit, not
@@ -79,6 +120,25 @@ meet at all, and it is the same trade ADR-0636 accepted at its own scale.
 
 ## Considered & rejected
 
+- **Resolve KVM with ADR-0352's `kvm_probe_for_uri`, matching the sibling budget.** This was the
+  first implementation, and it is defensible: it keeps the two appliance budgets identical and
+  needs no new probe. verified as insufficient: `kvm_probe_for_uri` in
+  `diagnostics/contributions/guest_arch_accel.py` returns `lambda: exists(node)` for every URI
+  but `qemu:///session`, so a worker uid that cannot open a present `/dev/kvm` reads as KVM and
+  keeps 1800 s — while `scripts/live-vm/preflight-env.sh` calls the same host fatal for the same
+  appliance. #2397's first acceptance criterion is an emulated host completing `build-fs`, so
+  agreeing with the sibling budget was worth less than agreeing with the appliance.
+- **Widen `kvm_probe_for_uri` itself to a read+write test for every URI, converging both budgets
+  now.** verified out of scope: it is ADR-0352's decision, and the probe's other consumer is the
+  `guest_arch_accel` worker-vantage check, whose reported per-arch `kvm`/`tcg` verdict would change
+  on any host where the node is present but unopenable — a diagnostics contract #2397's approved
+  scope excludes. Filed as a follow-up instead.
+- **Declare `KDIVE_KVM_NODE` as a registry `Setting` rather than reading the catalogued name.**
+  verified: it is catalogued in `kdive.config.external_env` as scope `script` and is read by four
+  shell entry points; promoting it to a `Setting` would publish a new configuration surface,
+  duplicate the name against `scripts/guards/check_env_documented.py`'s two sources, and change
+  nothing this budget observes. `env_snapshot()` is the declared way to read such a name — the
+  same way `resolved_libvirt_uri()` reads `KDIVE_LIBVIRT_URI`.
 - **Import `host_appliance_multiplier` into `providers/shared/build_timeouts.py` from
   `local_libvirt/lifecycle/deadlines.py`.** verified: adding that one import and running
   `uv run python -m pytest tests/providers/test_provider_boundaries.py` at 007b070ea fails

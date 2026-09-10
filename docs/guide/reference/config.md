@@ -348,7 +348,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_HOST_RUNTIME_DIRS` | `/var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs` | Space-separated runtime directories `preflight-env.sh host` asserts are writable. These paths are hardcoded in the provider (no setting redirects them) and live under root-owned `/var/lib/kdive`, so a non-root worker needs them pre-created; the default tracks the constants in `runtime_paths.py` and `lifecycle/storage.py`. |
 | `KDIVE_KERNEL_REF` | `v6.9` | Kernel ref (tag/branch/sha) `fetch-kernel-tree.sh` checks out. |
 | `KDIVE_KERNEL_REPO` | `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git` | Kernel git remote `fetch-kernel-tree.sh` clones. |
-| `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node `check-local-libvirt.sh` and `check-setup-deps.sh` probe for hardware virtualization (the latter for its native-arch advisory line). |
+| `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node probed for hardware virtualization by `check-local-libvirt.sh`, `check-setup-deps.sh` (for its native-arch advisory line), `preflight-env.sh`, and the shared rootfs build-tool budget, which scales when this uid cannot open it read+write because the libguestfs appliance then emulates (ADR-0637). |
 | `KDIVE_LIFECYCLE_COUNT` | — | Internal request-construction handoff carrying start's validated slot count; it is empty for non-start operations. |
 | `KDIVE_LIFECYCLE_EXPECTED_SLOTS` | — | Internal status-check count set by live-stack bring-up after start; unset omits the started-slot count assertion. |
 | `KDIVE_LIFECYCLE_LIBVIRT_URI` | — | Internal request-construction handoff carrying the validated published session URI on start; it is empty for non-start operations. |

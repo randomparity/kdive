@@ -11,10 +11,14 @@ unmeetable: #2383 measured in-guest `build-fs` failing at `virt-tar-out exceeded
 ## Scope
 
 [ADR-0637](../../adr/0637-shared-build-budget-resolves-its-multiplier.md) decides the import
-direction the issue names as its substance. Changes:
+direction the issue names as its substance, and the probe that answers "this worker host has KVM"
+for this budget. Changes:
 
 - `providers/shared/build_timeouts.py` gains `slow_build_tool_timeout_s(*, kvm_present=None) -> int`,
-  resolving the ADR-0352 KVM probe and `LIBVIRT_TCG_DEADLINE_MULTIPLIER` itself.
+  resolving `LIBVIRT_TCG_DEADLINE_MULTIPLIER` and its own KVM probe: read+write openability of
+  `${KDIVE_KVM_NODE:-/dev/kvm}`, tested unconditionally, matching `scripts/live-vm/preflight-env.sh`
+  for the same appliance rather than ADR-0352's URI-selected presence test.
+- `KDIVE_KVM_NODE`'s catalogue entry (`config/external_env.py`) names the new reader.
 - Five module-level aliases of the constant are deleted; their 10 call sites in
   `local_libvirt/rootfs_build.py`, `local_libvirt/lifecycle/rootfs/customization_boot.py`, and
   `remote_libvirt/rootfs_build.py` call the function instead.
@@ -32,9 +36,13 @@ direction the issue names as its substance. Changes:
   local-libvirt implementation module; one operator knob still moves every appliance budget.
 - **Accepted failure classes:** a hung build tool holds the worker 5 h on an emulated host, nothing
   above it ending the run — the job lease is per-heartbeat (`jobs/queue.py`). The probe re-resolves
-  per call, so `/dev/kvm` changing mid-build changes later stages' budgets; none depends on
-  another's. A host with the node but no KVM domain for its arch reads as KVM and stays unscaled.
-- **Covered elsewhere:** the multiplier's value and one-knob rule — ADR-0636; the probe — ADR-0352.
+  per call, so the node's state changing mid-build changes later stages' budgets; none depends on
+  another's. A host that runs the appliance against a node other than `${KDIVE_KVM_NODE:-/dev/kvm}`
+  is answered wrongly — the same way all four shell checks answer it wrongly today. This budget and
+  the sibling `virt-customize` budget disagree on the two host classes ADR-0637's Context names
+  (unopenable node; node present with no KVM domain for the arch) until ADR-0352's probe is widened.
+- **Covered elsewhere:** the multiplier's value and one-knob rule — ADR-0636; the URI-selected
+  probe this budget deliberately does not use — ADR-0352.
 
 ## Success
 
@@ -48,8 +56,9 @@ direction the issue names as its substance. Changes:
 Green for every entry: `uv run python -m pytest tests/providers -q`, then `just ci` for criterion 5.
 
 - Success 2, both branches, int return, and the un-injected path — `focused-test`:
-  `tests/providers/shared/test_build_timeouts.py`, driving `kvm_present` and the module's
-  `kvm_probe_for_uri` so no assertion depends on the runner's `/dev/kvm`.
+  `tests/providers/shared/test_build_timeouts.py`, driving `kvm_present` for the branch pair and
+  `KDIVE_KVM_NODE` at a tmp-path node for the real probe, so no assertion depends on the runner's
+  `/dev/kvm`. The read-only-node case skips under euid 0, which opens any mode.
 - Success 1, all 10 sites — `focused-test`: one case per real entry point (local virt-builder,
   repack, offline inject, cloud-init check, seal; remote virt-builder) under `tests/providers/`,
   faking `subprocess.run` and stubbing each module's imported `slow_build_tool_timeout_s`; a site
