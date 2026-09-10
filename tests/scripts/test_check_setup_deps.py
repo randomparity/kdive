@@ -236,7 +236,7 @@ def test_advisory_shows_host_arch_first(tmp_path: Path) -> None:
     assert out.index("guest arch x86_64:") < out.index("guest arch ppc64le:")
     # The native line reports the RESOLVED path, not the name looked for: on the RedHat family
     # the arch-named binary does not exist and the emulator lives at /usr/libexec/qemu-kvm
-    # (ADR-0636 decision 3). Here that resolves to the stub on the test PATH.
+    # (ADR-0637 decision 3). Here that resolves to the stub on the test PATH.
     native = re.search(
         r"guest arch x86_64: available natively via (\S+) \(/dev/kvm accessible", out
     )

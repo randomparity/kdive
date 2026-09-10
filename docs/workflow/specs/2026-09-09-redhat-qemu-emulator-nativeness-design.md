@@ -1,6 +1,6 @@
 # Name the RedHat QEMU emulator package by nativeness — design
 
-Issue #2390. Decision: [ADR-0636](../../adr/0636-redhat-qemu-emulator-package-by-nativeness.md).
+Issue #2390. Decision: [ADR-0637](../../adr/0637-redhat-qemu-emulator-package-by-nativeness.md).
 
 ## Problem
 
@@ -12,10 +12,10 @@ the emulator missing, and under `-y` tries to install it. `check-local-libvirt.s
 
 ## Scope
 
-Per ADR-0636: `package_for`'s RedHat emulator rows answer `qemu-kvm` when the requested
+Per ADR-0637: `package_for`'s RedHat emulator rows answer `qemu-kvm` when the requested
 `qemu-system-<arch>` binary is the host's own, and the arch-named package otherwise; no distro id
 is split. A resolver returns the emulator's path — arch-named binary on `PATH`, else
-`/usr/libexec/qemu-kvm` — and each of the six probe sites in ADR-0636 decision 2 uses it,
+`/usr/libexec/qemu-kvm` — and each of the six probe sites in ADR-0637 decision 2 uses it,
 including the one that execs it. Probes report the resolved path, not the name sought.
 No empty-package guard is added: `package_for`'s catch-all at `:148` already prevents one.
 `docs/operating/platform-support.md:35-52` is updated; the `libvirt_stack` role is untouched.

@@ -68,7 +68,7 @@ def test_not_applicable_when_no_ppc64_emulator() -> None:
 
 
 def test_ppc64le_host_resolves_the_off_path_emulator() -> None:
-    """ADR-0636: EL ships no qemu-system-ppc64 binary on PATH — the emulator is at libexec.
+    """ADR-0637: EL ships no qemu-system-ppc64 binary on PATH — the emulator is at libexec.
 
     Without this fallback the fadump check reports not_applicable on exactly the EL ppc64le host
     fadump exists for, while LocalLibvirtDiscovery reads libvirt's capabilities XML and sees the

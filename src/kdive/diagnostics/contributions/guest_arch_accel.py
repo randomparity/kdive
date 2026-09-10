@@ -37,7 +37,7 @@ from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 _LOCAL_PROVIDER = "local-libvirt"
 _KVM_NODE = "/dev/kvm"
 # The RedHat family ships the host's OWN emulator here, off PATH: no EL package provides
-# /usr/bin/qemu-system-<arch> (ADR-0636). A PATH-only probe therefore FAILs a working EL host,
+# /usr/bin/qemu-system-<arch> (ADR-0637). A PATH-only probe therefore FAILs a working EL host,
 # and this check gates — has_failure drives a nonzero `kdivectl doctor` exit. Native arch only:
 # this binary is never a foreign-arch emulator.
 _LIBEXEC_EMULATOR = "/usr/libexec/qemu-kvm"
