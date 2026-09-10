@@ -115,8 +115,11 @@ LIBVIRT_TCG_DEADLINE_MULTIPLIER = Setting(
         "Host-side libguestfs appliance budgets — virt-customize and the rootfs build tools — "
         "key off the worker host's KVM, because the appliance is a host-arch VM the worker "
         "boots to edit a disk. KVM is unscaled (1.0); TCG and unknown accelerators scale by "
-        "this factor. Must be >= 1.0; 1.0 disables scaling. They move together and cannot be "
-        "tuned apart."
+        "this factor. Must be finite and >= 1.0, capped at "
+        f"{_TCG_MULTIPLIER_CEILING}; 1.0 disables scaling. They move together and cannot be "
+        "tuned apart. Declared under the local-libvirt group (ADR-0087), but it also governs "
+        "remote-libvirt: the rootfs build tools budget it scales runs there too "
+        "(providers/shared/build_timeouts.py), so this setting is not local-libvirt-only."
     ),
     suggest=(
         f"set a finite float in [1.0, {_TCG_MULTIPLIER_CEILING}] (default 10.0); "

@@ -40,6 +40,16 @@ def test_tcg_multiplier_setting_fields() -> None:
     assert s.secret is False
 
 
+def test_tcg_multiplier_help_names_both_libvirt_providers() -> None:
+    """The setting is declared under ``group="local-libvirt"`` (ADR-0087) but also governs a
+    remote-libvirt budget (``providers/shared/build_timeouts.py``, #2413) — its help text must
+    say so, or an operator who disabled local-libvirt reads the reference as not applicable.
+    """
+    help_text = settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER.help
+    assert help_text is not None
+    assert "remote-libvirt" in help_text
+
+
 def test_tcg_multiplier_default_parses_to_ten() -> None:
     s = settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER
     assert s.default is not None
