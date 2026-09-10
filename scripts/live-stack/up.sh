@@ -158,13 +158,22 @@ if [[ "$skip_libvirt" != "1" ]]; then
       }
     else
       # Bare dev host (qemu:///system default): the system daemon is socket-activated, so enable
-      # --now plus the re-check below is enough.
-      echo "libvirt unreachable; enabling virtqemud.socket (sudo) ..."
-      sudo systemctl enable --now virtqemud.socket
+      # --now plus the re-check below is enough. Onboarding's resource discovery also needs
+      # virtnodedevd (#2401), so enable it alongside virtqemud rather than leaving it for
+      # discovery to crash on later.
+      echo "libvirt unreachable; enabling virtqemud.socket + virtnodedevd.socket (sudo) ..."
+      sudo systemctl enable --now virtqemud.socket virtnodedevd.socket
     fi
   fi
   libvirt_ok || {
     echo "libvirt daemon not reachable at ${KDIVE_LIBVIRT_URI}" >&2
+    exit 1
+  }
+  # #2401: a monolithic libvirtd (the session-daemon recovery path) answers node-device queries
+  # itself, but the modular system daemon needs virtnodedevd running separately — fail here,
+  # naming the unit, instead of letting onboarding's resource discovery crash on it later.
+  nodedev_ok || {
+    echo "virtnodedevd not reachable at ${KDIVE_LIBVIRT_URI}; enable virtnodedevd.socket" >&2
     exit 1
   }
   # Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.

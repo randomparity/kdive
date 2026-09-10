@@ -1838,6 +1838,24 @@ def test_up_session_recovery_path_never_sudos_and_keeps_the_bare_host_fallback()
     assert "sudo systemctl enable --now virtqemud.socket" in text
 
 
+def test_up_bare_host_branch_enables_virtnodedevd_alongside_virtqemud() -> None:
+    """#2401: onboarding's resource discovery needs virtnodedevd, not just virtqemud."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    bare_host_branch = text.index("# Bare dev host")
+    libvirt_ok_gate = text.index("libvirt_ok || {", bare_host_branch)
+    branch = text[bare_host_branch:libvirt_ok_gate]
+    assert "sudo systemctl enable --now virtqemud.socket virtnodedevd.socket" in branch
+
+
+def test_up_checks_virtnodedevd_reachability_and_names_the_unit_on_failure() -> None:
+    """#2401 acceptance: a missing daemon fails in up.sh naming the unit, not in discovery.py."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    gate = text.index("libvirt_ok || {")
+    check = text.index("nodedev_ok || {", gate)
+    block = text[check : text.index("}", check)]
+    assert "virtnodedevd" in block
+
+
 def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> None:
     text = (ROOT / "scripts/live-stack/worker-lifecycle.sh").read_text()
     parser = LIBVIRT_URI.read_text()
