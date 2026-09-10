@@ -22,8 +22,9 @@ from kdive.config.registry import Setting
 
 _RT = frozenset({"worker", "reconciler"})
 
-# A round, generous ceiling: no real deployment needs a multiplier this large, and it is
-# reversible via the env var alone (no ADR) if one ever does (#2415).
+# A round, generous ceiling: no real deployment needs a multiplier this large. Unlike the
+# multiplier itself, this constant has no env var binding; raising it if one ever needs to
+# is a follow-up code change to this line, not an operator setting (no ADR required) (#2415).
 _TCG_MULTIPLIER_CEILING = 1000.0
 
 
