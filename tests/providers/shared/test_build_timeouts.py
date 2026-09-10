@@ -114,11 +114,16 @@ def test_a_node_the_worker_uid_cannot_write_scales(tmp_path: Path) -> None:
 def test_an_empty_node_override_falls_back_to_dev_kvm(monkeypatch: pytest.MonkeyPatch) -> None:
     # ${KDIVE_KVM_NODE:-/dev/kvm} treats empty as unset; an empty string would otherwise be a
     # path os.access always refuses, silently scaling every budget on a KVM host.
-    seen: list[str] = []
-    monkeypatch.setattr(build_timeouts.os, "access", lambda node, _mode: seen.append(node) is None)
+    probed: list[str] = []
+
+    def _record(node: str, _mode: int) -> bool:
+        probed.append(node)
+        return True
+
+    monkeypatch.setattr(build_timeouts.os, "access", _record)
     config.load({"KDIVE_KVM_NODE": ""})
     assert slow_build_tool_timeout_s() == 1800
-    assert seen == ["/dev/kvm"]
+    assert probed == ["/dev/kvm"]
 
 
 def test_the_probe_is_resolved_per_call_not_bound_at_import(tmp_path: Path) -> None:
