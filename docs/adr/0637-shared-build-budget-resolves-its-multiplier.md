@@ -48,9 +48,15 @@ free of local-libvirt lifecycle code (ADR-0076).
 
 The cost is that the "KVM is unscaled, anything else scales by the setting" branch is now written
 twice — once in `host_appliance_multiplier`, once here. What is duplicated is the branch, not the
-factor: both read `LIBVIRT_TCG_DEADLINE_MULTIPLIER`, so ADR-0636's one-knob guarantee holds and
-the two budgets cannot drift apart in an operator's hands. Collapsing the two into one definition
-needs `tcg_deadline_multiplier` in a provider-agnostic module, which #2397 excludes.
+factor: both read `LIBVIRT_TCG_DEADLINE_MULTIPLIER`, so ADR-0636's one-knob guarantee holds and the
+two budgets cannot drift apart in an operator's hands. This is the accepted shape for as long as
+`tcg_deadline_multiplier` stays provider-local; collapsing the branch means moving that helper,
+which is ADR-0636's decision to revisit, not a debt this change books.
+
+The knob now governs a third budget, so `LIBVIRT_TCG_DEADLINE_MULTIPLIER`'s help text stops saying
+it moves "two budgets" — the sentence this change would otherwise falsify in the generated
+`docs/guide/reference/config.md`. Two keys, and every budget they select, remain as ADR-0636 left
+them.
 
 The injected `kvm_present` seam mirrors `host_appliance_multiplier`'s, and for the same stated
 reason: without it the resolved budget is a property of whichever machine runs the suite, so
