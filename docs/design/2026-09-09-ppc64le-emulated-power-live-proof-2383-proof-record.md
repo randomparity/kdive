@@ -302,7 +302,7 @@ None is in #2383's frozen scope. Each is filed:
 
 | Deviation | Issue |
 |---|---|
-| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Still **open**: the emulated-host `build-fs` run that would confirm 18000 s is sufficient is unrun, and the only measured `virt-tar-out` figure is that it exceeded 1800 s. |
+| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Measured on this host 2026-09-10 (#2414); see [Deviation 1, measured](#deviation-1-measured) below. Still **open**: the run clears `virt-tar-out` but does not complete. |
 | 6 — `virtnodedevd.socket` enabled by hand | #2401 |
 | 8 — worker venv repaired by hand | #2399 |
 | 9 — `KDIVE_OIDC_IMAGE` exported by hand | #2400 |
@@ -310,6 +310,49 @@ None is in #2383's frozen scope. Each is filed:
 The Red Hat-family host facts behind deviations 2, 3 and 5 belong to epic #2388, which covers
 preparing a RHEL/Fedora/SUSE host as a local libvirt server. Deviations 4 and 7 are properties of
 this workstation, not of the repository.
+
+### Deviation 1, measured
+
+Run 2026-09-10 on the emulated-POWER host of record above — Fedora 44 ppc64le under
+`qemu-system-ppc64 -machine pseries,accel=tcg -cpu power10 -smp 16 -m 32G`, guest-visible
+16 CPUs / 33358336 kB, QEMU 10.2.2, guestfs-tools 1.56.0, `kvm` blacklisted. In-guest
+`build-fs --image fedora-kdive-ready-44-ppc64le`, no wrapper and no `LD_PRELOAD`, so each figure
+is the tool's own wall clock.
+
+**The measurement was not merely unrun — it was unreachable.** `slow_build_tool_timeout_s()`
+selected its branch with `os.access`, and on any systemd host `50-udev-default.rules` publishes
+`/dev/kvm` at 0666 via `OPTIONS+="static_node=kvm"` whether or not the module ever loads, since
+opening the node is what triggers autoload. Recorded on this host before the run: `os.access`
+returned `True`, `os.open` raised `OSError 19 ENODEV`, and libvirt advertised zero KVM domains.
+So the budget resolved to the unscaled 1800 s on the one host class #2397 exists to scale, and
+#2397's scaling had never engaged here at all. Fixed under #2414 by opening the node instead;
+`budget_s=18000` was recorded from the corrected path immediately before launch.
+
+| Stage | Wall clock | Unscaled 1800 s | Scaled 18000 s |
+|---|---|---|---|
+| `virt-tar-out` | **2406 s** | exceeds — the #2383 failure | passes, 1.34x the base |
+| `virt-make-fs` | **2032 s** | exceeds | passes, 1.13x the base |
+| `guestfish` (`rhel.normalize`) | **303 s** | n/a — see below | n/a — see below |
+
+Timings come from an external process-table sampler on a 10 s interval, because `build-fs`
+emits no per-stage timing at `INFO`; every figure carries that sampling error. The sampler is
+independently corroborated at one point: it read 303 s for the `guestfish` call that `build-fs`
+itself killed at a 300 s timeout, agreeing with a known ground truth to within one interval.
+
+**What this establishes.** 18000 s is sufficient for the two stages that reached it, with wide
+headroom — the largest figure asks for 1.34x where the ADR-0341 default supplies 10x. Scaling is
+required rather than precautionary: both stages exceed the unscaled base, so an unfixed probe
+fails this host at `virt-tar-out` exactly as deviation 1 records. The multiplier now has a second
+measured point beside ADR-0636's 1474 s.
+
+**What it does not establish, and why deviation 1 stays open.** The run does not complete. Past
+`virt-tar-out` it reaches `guestfish` in `rhel.normalize()`, whose `_GUESTFISH_TIMEOUT_S = 5 * 60`
+is a module constant that #2397's scaling never reached, and it expired at 303 s — a 1% miss.
+`images/families/rhel.py`, `images/families/debian.py` and `images/planes/provenance_probes.py`
+each hold their own unscaled 5-minute constant while booting the same host-arch appliance the
+scaled budgets bound. #2397's acceptance bullet "an emulated host completes in-guest `build-fs`"
+is therefore still unmet — for a different reason than when it was written. No `virt-builder` or
+`virt-customize` stage ran, so neither is measured here.
 
 
 ---
