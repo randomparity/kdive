@@ -904,11 +904,11 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
 
 
 def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
-    """Deviation 8 of the #2383 proof record (#2399): a venv the installer builds alone must
+    """A venv the installer builds alone must carry ``drgn`` and the locked ``grpcio``.
 
-    carry ``drgn`` and the locked ``grpcio``, never resolve unlocked. The old ``uv venv`` +
-    ``uv pip install`` pair did neither -- it ignored ``uv.lock`` and never requested the
-    ``live`` dependency group.
+    Deviation 8 of the #2383 proof record (#2399): the old ``uv venv`` + ``uv pip install``
+    pair did neither -- it ignored ``uv.lock`` and never requested the ``live`` dependency
+    group.
     """
     source = _text(INSTALLER)
     assert "uv venv --python" not in source
