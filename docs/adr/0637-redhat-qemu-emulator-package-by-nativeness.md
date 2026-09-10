@@ -123,9 +123,12 @@ element out of the install array, and a future row that prints nothing would def
   row per (family, architecture) regresses the Fedora cross-arch advisory from `qemu-system-ppc`
   to `qemu-kvm`. On Fedora 44 `dnf repoquery --requires qemu-kvm` returns only `qemu-system-x86`,
   and `/usr/bin/qemu-system-ppc64` comes from `qemu-system-ppc-core`.
-- **Unify on `qemu-system-<arch>` for every family.** verified: rpmfind's provider listing for
-  `/usr/bin/qemu-system-x86_64` returns Fedora, openSUSE, Mageia and OpenMandriva packages and no
-  EL9 or EL10 package; the same absence is reported against Incus (lxc/incus#1301) and Packer
-  (hashicorp/packer#10892).
+- **Unify on `qemu-system-<arch>` for every family.** verified: on Rocky Linux 10.2 (x86_64, EL10,
+  BaseOS + AppStream + Extras enabled) `dnf list --available 'qemu-system-*'` exits with
+  `No matching Packages to list`, while `dnf provides /usr/libexec/qemu-kvm` answers
+  `qemu-kvm-core-18:10.1.0-16.el10_2.x86_64` from `appstream` — EL packages the emulator only at
+  the libexec path. For EL9, rpmfind's provider listing for `/usr/bin/qemu-system-x86_64` returns
+  Fedora, openSUSE, Mageia and OpenMandriva packages and no EL package; the same absence is
+  reported against Incus (lxc/incus#1301) and Packer (hashicorp/packer#10892).
 - **Symlink `/usr/libexec/qemu-kvm` onto `PATH`.** judgment: a host mutation to make a read-only
   report come out right.
