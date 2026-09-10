@@ -161,11 +161,13 @@ if [[ "$skip_libvirt" != "1" ]]; then
       }
     else
       # Bare dev host (qemu:///system default): the system daemon is socket-activated, so enable
-      # --now plus the re-check below is enough. Onboarding's resource discovery also needs
+      # --now plus the re-checks below are enough. Onboarding's resource discovery also needs
       # virtnodedevd (#2401), so enable it alongside virtqemud rather than leaving it for
-      # discovery to crash on later.
-      echo "libvirt unreachable; enabling virtqemud.socket + virtnodedevd.socket (sudo) ..."
-      sudo systemctl enable --now virtqemud.socket virtnodedevd.socket
+      # discovery to crash on later. `|| true`: under `set -e` a partial two-unit enable failure
+      # would otherwise abort here before either named-unit re-check below runs, losing the
+      # specific diagnostic to systemd's own (unit-naming, but less actionable) error text.
+      echo "libvirt or virtnodedevd unreachable; enabling virtqemud.socket + virtnodedevd.socket (sudo) ..."
+      sudo systemctl enable --now virtqemud.socket virtnodedevd.socket || true
     fi
   fi
   libvirt_ok || {
