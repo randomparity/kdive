@@ -32,8 +32,25 @@ _fixture_files=(
 )
 
 _link_system_guestfs_binding() (
-  local venv_python="$1" system_site venv_site source
+  local venv_python="$1" system_site venv_site source system_minor venv_minor
   local -a native_modules sources
+  # The binding is a C extension built for the system interpreter, so it is importable from the
+  # venv only when the two minor versions match. Ubuntu 26.04 and Fedora 44 both ship the
+  # project's 3.14 as /usr/bin/python3 and share it. Enterprise Linux ships 3.12 there and
+  # packages 3.14 separately, so its python3-libguestfs can never load in the worker's 3.14 venv
+  # — linking it anyway fails with "No module named 'libguestfsmod'" and used to abort host
+  # preparation entirely. Skip on a mismatch and say so: it costs only local kdump capture
+  # (ADR-0203), which is exactly how examples/local-libvirt/install-host.sh reports the same
+  # condition. A mismatch is a property of the host's packaging, not a broken install; where the
+  # versions DO match, every failure below stays fatal.
+  system_minor="$(/usr/bin/python3 -c 'import sys; print(sys.version_info[1])')"
+  venv_minor="$("$venv_python" -c 'import sys; print(sys.version_info[1])')"
+  if [[ $system_minor != "$venv_minor" ]]; then
+    echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}; the distro" \
+      "guestfs binding cannot be shared. Local kdump capture is unavailable on this host;" \
+      "every other capture method and the whole build/boot/debug path are unaffected." >&2
+    return 0
+  fi
   system_site="$(
     /usr/bin/python3 -c \
       'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)'
