@@ -98,7 +98,9 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   [ADR-0204](0204-install-staging-unwritable-config-error.md), whose remedy text names
   `virt_image_t` for the install-staging root. That record's decision — the errno split that makes
   an unwritable staging root a `CONFIGURATION_ERROR` — is unchanged and not superseded; only the
-  label named in its remedy string moves.
+  label named in its remedy string moves. [ADR-0052](0052-bootable-rootfs-image-builder.md) needs
+  no such amendment: its `virt_image_t` claim (decision 3) is scoped to letting the qemu user read
+  the image "under `qemu:///system`", the privileged-daemon path this change does not alter.
 - Rolling the label back needs `restorecon -R -F`: `svirt_image_t` is listed in
   `/etc/selinux/targeted/contexts/customizable_types` and `virt_image_t` is not, so a plain
   `restorecon` relabels *into* the new type but silently skips relabeling *out* of it.

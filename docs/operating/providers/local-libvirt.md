@@ -76,7 +76,8 @@ These are the points where the two families genuinely diverge, not just in packa
 - **SELinux.** Fedora and Enterprise Linux run SELinux enforcing, so `install-host.sh` and
   `build-image.sh` label the kdive image directories `svirt_image_t` for the confined domain
   (ADR-0639). `install-host.sh` installs `policycoreutils-python-utils` for the `semanage` that
-  needs.
+  needs. If a domain start still fails with `Permission denied` on a kdive image, a stale
+  per-domain label may be stuck — `sudo restorecon -R -F /var/lib/kdive/rootfs` clears it.
 - **libguestfs backend.** The worker pins `LIBGUESTFS_BACKEND=direct` in
   `deploy/systemd/system/kdive-live-worker@.service`. Debian/Ubuntu build libguestfs with that
   backend as its default; Fedora and RHEL default to the libvirt backend, which connects to

@@ -68,8 +68,11 @@ image directories with non-kdive workloads, are not named deployments.
   separation was never running there, so this documents existing state rather than reducing it.
   Systems in one kdive deployment already share a worker, an image tree and a base image.
 - A non-kdive confined domain the operator points at a kdive image directory could write those
-  images, where `virt_image_t` allowed only read. Accepted: it requires the operator to configure
-  another domain against a kdive-owned path, and is outside the named single-tenant deployments.
+  images, where `virt_image_t` allowed only read. This applies to the default `qemu:///system`
+  deployment as well as the session-mode one — at rest, images now restore to `svirt_image_t:s0`
+  (writable by any `svirt_t` domain) where they previously restored to `virt_image_t:s0`
+  (read-only). Accepted: it requires the operator to configure another domain against a
+  kdive-owned path.
 - A host whose fcontext was applied by something other than these scripts keeps its own label.
   Accepted: bounded — provisioning fails closed with the same `Permission denied` this change
   fixes, and re-running the installer recovers it.
