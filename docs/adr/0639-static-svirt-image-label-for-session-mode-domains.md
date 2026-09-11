@@ -85,9 +85,13 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
 - kdive installs **three** fcontext rules: `install-host.sh` owns `/var/lib/kdive/rootfs(/.*)?`
   and `/var/lib/kdive/install(/.*)?`, and `build-image.sh` owns the nested
   `/var/lib/kdive/rootfs/local(/.*)?`. A host installed before this record carries the old type on
-  whichever of those it already has, so the labeling helper migrates an existing rule rather than
-  skipping it. Each script migrates the rules it owns; `install-host.sh` does not touch the nested
-  one. That matters because the nested rule is not redundant: `semanage` local rules are matched
+  whichever of those it already has, so each rule has to be rewritten rather than skipped. One
+  `semanage fcontext -a` does that on its own: `seobject.FcontextRecords.add()` checks the base and
+  local stores, prints `already defined, modifying instead`, and delegates to the modify path,
+  exiting 0 whether or not the pattern was present (verified against the installed implementation
+  on both target families — policycoreutils-python-utils 3.11 on Fedora 44, 3.10 on Rocky 10.2). No
+  migrate-then-add split and no `semanage fcontext -l` parsing is needed. Each script owns the
+  rules it writes; `install-host.sh` does not touch the nested one. That matters because the nested rule is not redundant: `semanage` local rules are matched
   last-match-wins in `file_contexts.local`, so on the documented install order — `install-host.sh`
   adding the parent, `build-image.sh` adding the nested rule afterwards — a stale nested
   `virt_image_t` entry overrides the parent for everything under `local/` (measured, Fedora 44,

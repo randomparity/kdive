@@ -16,8 +16,9 @@ Change the static label kdive's host preparation applies. Nothing in the rendere
 changes: a first design cycle proposed declaring `relabel='no'` per disk, and the review retired
 it — see ADR-0639's rejected alternatives and the re-frozen charter on the issue.
 
-1. A new sourced shell helper under `examples/local-libvirt/` applies the label and **migrates** an
-   existing rule on the same pattern instead of skipping it.
+1. A new sourced shell helper under `examples/local-libvirt/` applies the label with one
+   `semanage fcontext -a`, which adds a missing rule and **rewrites** an existing one on the same
+   pattern instead of skipping it.
 2. `examples/local-libvirt/install-host.sh` calls it for `/var/lib/kdive/rootfs` and for
    `/var/lib/kdive/install`. It does not create the latter — step 6 already runs
    `deploy/systemd/install-live-worker-lifecycle.sh`, which creates it — and it does not touch the
@@ -145,10 +146,11 @@ only by an operator who already has root.
 
 | Contract | Mode | Evidence |
 |---|---|---|
-| A pattern with no rule gets one `svirt_image_t` rule | `focused-test` | `tests/scripts/test_selinux_label.py::test_adds_rule_when_absent` |
-| A pattern carrying a stale `virt_image_t` rule is migrated, not duplicated | `focused-test` | `…::test_migrates_stale_rule` |
+| A pattern with no rule gets one `svirt_image_t` rule | `focused-test` | `tests/scripts/test_selinux_label.py::test_labels_the_directory` |
+| A pattern carrying a stale `virt_image_t` rule is rewritten by the same single call, not duplicated | `focused-test` | `…::test_issues_exactly_one_semanage_call` |
 | The helper no-ops off an enforcing host | `focused-test` | `…::test_noop_when_not_enforcing` |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` |
+| A failing `semanage` or `restorecon` aborts rather than reporting success | `focused-test` | `…::test_aborts_when_semanage_fails`, `…::test_aborts_when_restorecon_fails` |
 | The domain XML is unchanged by this work (Success 4) | `focused-test` | the existing `tests/adversarial/test_provider_xml.py` and `tests/providers/local_libvirt/lifecycle/test_xml.py` suites pass untouched; this change adds no test there because it adds no behavior there |
 | The privileged daemon's relabel/restore cycle is unchanged by the new static label (Success 4) | design-time probe, recorded | measured on Fedora 44 / libvirt 12.0.0, 2026-09-11: a disk at `svirt_image_t:s0` attached to a `qemu:///system` domain went to `svirt_image_t:s0:c51,c883` while running and back to `svirt_image_t:s0` after `virsh destroy`. Recorded in ADR-0639's Decision section. No repeatable arm: the live proof below exercises the session daemon, and standing up a privileged-daemon kdive deployment is outside this change. |
 | `install-host.sh` labels both paths it owns | `task-test-not-applicable` | the installer's own gate harness (`tests/scripts/test_install_host_gates.py`) stops the script at the `sudo` preflight, far above these calls, and driving the whole installer needs a real enforcing host with root — which is the live proof below. The labeling logic itself is covered by the helper tests above, which is where the branching lives. |

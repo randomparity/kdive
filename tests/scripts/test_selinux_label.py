@@ -5,10 +5,13 @@ calls the function directly: ``bash -c 'source <helper>; kdive_label_svirt_image
 PATH pinned to a tmp_path stub directory. Every stub (getenforce, semanage, restorecon) appends
 its argv to one shared log file, which is the whole assertion surface; the sudo stub is
 transparent (``exec "$@"``) so the log records exactly what the helper passed to semanage and
-restorecon. The semanage stub's exit status for the ``-m`` arm is the test parameter: 1 stands
-for a fresh host where only ``-a`` can succeed, 0 for a host that already carries the rule. The
-``-a`` arm's exit status is a separate parameter, non-zero only to simulate a broken policy store
-where neither arm succeeds.
+restorecon.
+
+The helper issues a single ``semanage fcontext -a``, because ``seobject.FcontextRecords.add()``
+rewrites an existing rule rather than failing on it (verified against the installed
+implementation on both target families). These stubs therefore do not model an "already defined"
+failure, since the real tool has none; ``semanage_status`` and ``restorecon_status`` exist only
+to drive the two abort paths.
 """
 
 from __future__ import annotations
@@ -39,8 +42,8 @@ def _bindir(
     *,
     enforcing: bool = True,
     have_semanage: bool = True,
-    semanage_m_status: int = 1,
-    semanage_a_status: int = 0,
+    semanage_status: int = 0,
+    restorecon_status: int = 0,
 ) -> Path:
     """A PATH with stubs for getenforce/semanage/restorecon; sudo is a transparent passthrough."""
     b = tmp_path / "bin"
@@ -57,17 +60,16 @@ def _bindir(
             b,
             "semanage",
             f'#!/bin/sh\nprintf \'%s\\n\' "semanage $*" >> "{log}"\n'
-            f'if [ "$1" = "fcontext" ] && [ "$2" = "-m" ]; then\n'
-            f'  [ {semanage_m_status} -ne 0 ] && echo "semanage: mock -m failure" >&2\n'
-            f"  exit {semanage_m_status}\n"
-            "fi\n"
-            f'if [ "$1" = "fcontext" ] && [ "$2" = "-a" ]; then\n'
-            f'  [ {semanage_a_status} -ne 0 ] && echo "semanage: mock -a failure" >&2\n'
-            f"  exit {semanage_a_status}\n"
-            "fi\n"
-            "exit 0\n",
+            f'[ {semanage_status} -ne 0 ] && echo "semanage: mock failure" >&2\n'
+            f"exit {semanage_status}\n",
         )
-    _stub(b, "restorecon", f'#!/bin/sh\nprintf \'%s\\n\' "restorecon $*" >> "{log}"\n')
+    _stub(
+        b,
+        "restorecon",
+        f'#!/bin/sh\nprintf \'%s\\n\' "restorecon $*" >> "{log}"\n'
+        f'[ {restorecon_status} -ne 0 ] && echo "restorecon: mock failure" >&2\n'
+        f"exit {restorecon_status}\n",
+    )
     return b
 
 
@@ -87,34 +89,45 @@ def _log_lines(tmp_path: Path) -> list[str]:
     return log.read_text().splitlines() if log.exists() else []
 
 
-def test_adds_rule_when_absent(tmp_path: Path) -> None:
-    """No existing rule: -m fails, -a adds it, then restorecon runs."""
-    bindir = _bindir(tmp_path, semanage_m_status=1)
+def test_labels_the_directory(tmp_path: Path) -> None:
+    """One -a call carrying the new type and the recursive pattern, then restorecon."""
+    bindir = _bindir(tmp_path)
 
     _run("/var/lib/kdive/rootfs", bindir)
 
-    lines = _log_lines(tmp_path)
-    assert any(line.startswith("semanage fcontext -m") for line in lines)
-    assert any(
-        line == "semanage fcontext -a -t svirt_image_t /var/lib/kdive/rootfs(/.*)?"
-        for line in lines
-    )
-    assert any(line == "restorecon -R /var/lib/kdive/rootfs" for line in lines)
+    assert _log_lines(tmp_path) == [
+        "semanage fcontext -a -t svirt_image_t /var/lib/kdive/rootfs(/.*)?",
+        "restorecon -R /var/lib/kdive/rootfs",
+    ]
 
 
-def test_migrates_stale_rule(tmp_path: Path) -> None:
-    """An existing rule (even a stale virt_image_t one): -m succeeds, -a never runs."""
-    bindir = _bindir(tmp_path, semanage_m_status=0)
+def test_issues_exactly_one_semanage_call(tmp_path: Path) -> None:
+    """The migrate-then-add split is gone: -a alone converges every host shape.
+
+    ``seobject.FcontextRecords.add()`` prints "already defined, modifying instead" and delegates
+    to the modify path when the pattern is already in the base or local store, so a stale
+    pre-ADR-0639 ``virt_image_t`` rule is rewritten by this same call. A second ``semanage``
+    invocation — in particular a ``-m`` probe — would be dead weight on a false premise.
+    """
+    bindir = _bindir(tmp_path)
 
     _run("/var/lib/kdive/rootfs", bindir)
 
-    lines = _log_lines(tmp_path)
-    assert any(
-        line == "semanage fcontext -m -t svirt_image_t /var/lib/kdive/rootfs(/.*)?"
-        for line in lines
-    )
-    assert not any(line.startswith("semanage fcontext -a") for line in lines)
-    assert any(line == "restorecon -R /var/lib/kdive/rootfs" for line in lines)
+    semanage_calls = [line for line in _log_lines(tmp_path) if line.startswith("semanage ")]
+    assert len(semanage_calls) == 1
+    assert not any(line.startswith("semanage fcontext -m") for line in semanage_calls)
+
+
+def test_strips_a_trailing_slash_from_the_pattern(tmp_path: Path) -> None:
+    """A trailing slash would produce `/var/lib/kdive/rootfs/(/.*)?`, which matches nothing."""
+    bindir = _bindir(tmp_path)
+
+    _run("/var/lib/kdive/rootfs/", bindir)
+
+    assert _log_lines(tmp_path) == [
+        "semanage fcontext -a -t svirt_image_t /var/lib/kdive/rootfs(/.*)?",
+        "restorecon -R /var/lib/kdive/rootfs",
+    ]
 
 
 def test_noop_when_not_enforcing(tmp_path: Path) -> None:
@@ -138,13 +151,22 @@ def test_reports_missing_semanage(tmp_path: Path) -> None:
     assert "/var/lib/kdive/rootfs" in result.stderr
 
 
-def test_aborts_when_migrate_and_add_both_fail(tmp_path: Path) -> None:
-    """A broken policy store (both -m and -a fail): the helper aborts non-zero and names why."""
-    bindir = _bindir(tmp_path, semanage_m_status=1, semanage_a_status=1)
+def test_aborts_when_semanage_fails(tmp_path: Path) -> None:
+    """A policy store that refuses the write: abort non-zero, and do not restorecon over it."""
+    bindir = _bindir(tmp_path, semanage_status=1)
 
     result = _run("/var/lib/kdive/rootfs", bindir, check=False)
 
     assert result.returncode != 0
     assert not any(line.startswith("restorecon") for line in _log_lines(tmp_path))
-    assert "mock -m failure" in result.stderr
-    assert "mock -a failure" in result.stderr
+    assert "mock failure" in result.stderr
+
+
+def test_aborts_when_restorecon_fails(tmp_path: Path) -> None:
+    """The rule landed but relabeling did not: the caller must not read that as a success."""
+    bindir = _bindir(tmp_path, restorecon_status=1)
+
+    result = _run("/var/lib/kdive/rootfs", bindir, check=False)
+
+    assert result.returncode != 0
+    assert any(line.startswith("restorecon ") for line in _log_lines(tmp_path))

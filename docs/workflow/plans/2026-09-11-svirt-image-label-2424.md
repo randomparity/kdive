@@ -6,8 +6,8 @@ confinement intact, by labeling kdive's image directories `svirt_image_t` instea
 the bug as open.
 
 **Architecture.** One surface only: host preparation under `examples/local-libvirt/`. A single
-sourced shell helper applies the label to one directory and migrates an existing rule on the same
-pattern; three call sites use it. No Python behavior changes, and the rendered domain XML is
+sourced shell helper applies the label to one directory with one `semanage fcontext -a`, which
+adds a missing rule and rewrites an existing one; three call sites use it. No Python behavior changes, and the rendered domain XML is
 untouched — a first design cycle proposed a per-disk `<seclabel>` and the review retired it
 (ADR-0639, rejected alternatives).
 
@@ -54,7 +54,7 @@ help-text corrections. Task 3 changes no repository file.
 
 | File | Action | Answerable for |
 |---|---|---|
-| `examples/local-libvirt/selinux-label.sh` | create | the one labeling+migration function, sourceable for tests |
+| `examples/local-libvirt/selinux-label.sh` | create | the one labeling function, sourceable for tests |
 | `examples/local-libvirt/install-host.sh` | modify | sources the helper; labels rootfs and install staging; two comment corrections |
 | `examples/local-libvirt/build-image.sh` | modify | sources the helper; `label_for_qemu` calls it; header comment correction |
 | `tests/scripts/test_selinux_label.py` | create | drives the helper with stubbed `getenforce`/`semanage`/`restorecon` |
@@ -81,8 +81,8 @@ help-text corrections. Task 3 changes no repository file.
 
 ```bash
 # examples/local-libvirt/selinux-label.sh
-kdive_label_svirt_image <directory>   # returns 0 on success or no-op; non-zero if the policy
-                                       # store can't be modified (both -m and -a fail)
+kdive_label_svirt_image <directory>   # returns 0 on success or no-op; non-zero if semanage or
+                                       # restorecon fails
 ```
 
 Task 2 consumes nothing from this task.
@@ -91,11 +91,13 @@ Task 2 consumes nothing from this task.
 
 | Contract | Mode | Detail |
 |---|---|---|
-| A pattern with no rule gets one `svirt_image_t` rule added, then `restorecon` | `focused-test` | `tests/scripts/test_selinux_label.py::test_adds_rule_when_absent`; red before the helper exists — `bash -c 'source <missing>; kdive_label_svirt_image …'` exits 127, so `subprocess.run(..., check=True)` raises `CalledProcessError`; green via `uv run python -m pytest tests/scripts/test_selinux_label.py -q` |
-| A pattern carrying a stale rule is **modified**, never added twice | `focused-test` | `…::test_migrates_stale_rule` — asserts a `-m -t svirt_image_t` call and no second rule; red against the shipped `-a`-only logic, whose presence check short-circuits and records no write at all |
+| The directory is labeled with one `-a` call carrying the new type, then `restorecon` | `focused-test` | `tests/scripts/test_selinux_label.py::test_labels_the_directory`; red before the helper exists — `bash -c 'source <missing>; kdive_label_svirt_image …'` exits 127, so `subprocess.run(..., check=True)` raises `CalledProcessError`; green via `uv run python -m pytest tests/scripts/test_selinux_label.py -q` |
+| A stale rule is rewritten by that same call, with no second `semanage` invocation | `focused-test` | `…::test_issues_exactly_one_semanage_call` — asserts exactly one `semanage` call and no `-m` probe. `seobject.FcontextRecords.add()` prints "already defined, modifying instead" and delegates to the modify path, so `-a` alone converges a stale `virt_image_t` rule; a re-introduced `-m` arm turns the test red (verified by controlled fault) |
+| Both abort paths refuse to report success | `focused-test` | `…::test_aborts_when_semanage_fails` and `…::test_aborts_when_restorecon_fails` — each asserts non-zero, and the semanage case asserts `restorecon` never ran over an unwritten rule |
+| A trailing slash does not produce a pattern that matches nothing | `focused-test` | `…::test_strips_a_trailing_slash_from_the_pattern` |
 | The helper no-ops when SELinux is not enforcing | `focused-test` | `…::test_noop_when_not_enforcing` — asserts no `semanage`/`restorecon` invocation was recorded |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` — asserts nothing was written and the exit status is 0 |
-| The three installer call sites | `task-test-not-applicable` | `tests/scripts/test_install_host_gates.py` stops the installer at its `sudo` preflight, far above these lines, and driving the rest needs a real enforcing host with root — the live proof in Task 3. The branching this task adds lives in the helper, which the four tests above cover. |
+| The three installer call sites | `task-test-not-applicable` | `tests/scripts/test_install_host_gates.py` stops the installer at its `sudo` preflight, far above these lines, and driving the rest needs a real enforcing host with root — the live proof in Task 3. The branching this task adds lives in the helper, which the tests above cover. |
 | The two comment-literal corrections (step 5) | `task-test-not-applicable` | shell comments with no executable consumer. The acceptance criterion below is checked with `rg -n virt_image_t examples/local-libvirt/`, which is a grep over prose, not a contract a test can fail meaningfully. |
 
 ### Steps
@@ -127,11 +129,11 @@ kdive_label_svirt_image() {
     return 0
   fi
 
-  # -m modifies an existing rule, -a adds a missing one, and each fails when the other case
-  # applies. Trying -m first reaches the same state on a fresh host and on one installed before
-  # ADR-0639 (whose rule is still virt_image_t), without parsing `semanage fcontext -l` output.
-  sudo semanage fcontext -m -t svirt_image_t "${pattern}" 2>/dev/null ||
-    sudo semanage fcontext -a -t svirt_image_t "${pattern}"
+  # -a both adds a missing rule and rewrites an existing one: seobject.FcontextRecords.add()
+  # checks the base and local stores and delegates to the modify path when the pattern is already
+  # there, exiting 0 either way. One call converges a fresh host and one carrying the old
+  # virt_image_t rule, with no `semanage fcontext -l` parsing.
+  sudo semanage fcontext -a -t svirt_image_t "${pattern}" || return 1
   sudo restorecon -R "${directory}"
 }
 ```
@@ -207,14 +209,17 @@ label_for_qemu() {
      fresh host where only `-a` can succeed, `0` for a host that already carries a rule. This is
      what separates the two rule-writing tests.
 
-   The four tests assert, against that log:
+   The tests assert, against that log:
 
    | Test | Asserts |
    |---|---|
-   | `test_adds_rule_when_absent` | `-m` was tried, `-a -t svirt_image_t <pattern>` followed, then `restorecon -R <dir>` |
-   | `test_migrates_stale_rule` | `-m -t svirt_image_t <pattern>` ran, **no** `-a` followed, then `restorecon -R <dir>` |
+   | `test_labels_the_directory` | the log is exactly `-a -t svirt_image_t <pattern>` then `restorecon -R <dir>` |
+   | `test_issues_exactly_one_semanage_call` | one `semanage` call, and no `-m` probe |
+   | `test_strips_a_trailing_slash_from_the_pattern` | a trailing slash yields the same pattern as without one |
    | `test_noop_when_not_enforcing` | the log is empty |
    | `test_reports_missing_semanage` | the log is empty and the exit status is 0 |
+   | `test_aborts_when_semanage_fails` | non-zero, and `restorecon` never ran |
+   | `test_aborts_when_restorecon_fails` | non-zero, after `restorecon` ran |
 
 7. Run the focused tests red first, before steps 1–6:
    `uv run python -m pytest tests/scripts/test_selinux_label.py -q`
@@ -348,12 +353,17 @@ anywhere but on a real enforcing host.
    permissive-mode session. Such a domain is not a counterexample and must not be reused; an
    undefine also avoids a System/domain id collision on re-provision.
 2. **Record the pre-state before touching anything:** `sudo semanage fcontext -l -C | grep kdive`.
-   This is what turns step 3 from "the rule is right" into "the rule was migrated" — the `-m` arm
-   is the only genuinely new behaviour in the helper, and on a fresh host step 3 exercises `-a`
-   instead and the migration path never runs against real `semanage`.
+   Without it, step 3 can only show that the rule is right, not that a stale one was rewritten —
+   and rewriting a pre-ADR-0639 `virt_image_t` rule is the behaviour an upgraded host depends on.
+   The Rocky target is the one that still carries such a rule; the Fedora target was pre-labeled
+   during design and can only exercise the already-correct case.
 3. Run the installer from the branch checkout: `examples/local-libvirt/install-host.sh`. Re-run the
-   same listing and diff it against step 2, expecting `svirt_image_t` on each pattern. Record which
-   arm (`-m` migration or `-a` addition) each host actually took.
+   same listing and diff it against step 2, expecting `svirt_image_t` on each pattern. The helper
+   issues one `semanage fcontext -a` per pattern, so the migration evidence is semanage's own
+   stdout: capture whether it printed `File context for <pattern> already defined, modifying
+   instead` (the rewrite path, expected on the Rocky target's pre-existing `virt_image_t` rule and
+   on neither pattern of a fresh host) or stayed silent (the add path). Record which per host and
+   per pattern — this is what distinguishes "the rule is right" from "the rule was migrated".
 4. Bring the stack up (`scripts/live-stack/up.sh`) and provision a System through the ordinary
    worker path. Assert it reaches `ready` with no `setenforce 0` and no `security_driver` change.
 

@@ -12,9 +12,8 @@
 #
 # kdive_label_svirt_image <directory>
 #   No-ops (returns 0) off SELinux-enforcing hosts, and when semanage is missing (reporting the
-#   fix on stderr instead). Aborts non-zero if both the migrate and the add attempt fail — a
-#   broken policy store — or if the final restorecon fails, so a caller under `set -euo pipefail`
-#   does not continue as though the label had been applied.
+#   fix on stderr instead). Aborts non-zero if semanage or restorecon fails, so a caller under
+#   `set -euo pipefail` does not continue as though the label had been applied.
 
 kdive_label_svirt_image() {
   local directory="${1%/}" pattern
@@ -29,17 +28,14 @@ kdive_label_svirt_image() {
     return 0
   fi
 
-  # -m modifies an existing rule, -a adds a missing one, and each fails when the other case
-  # applies. Trying -m first reaches the same state on a fresh host and on one installed before
-  # ADR-0639 (whose rule is still virt_image_t), without parsing `semanage fcontext -l` output.
-  # A double failure means the policy store itself is broken (a lock, a concurrent semanage); -a's
-  # own message alone ("already defined") would not explain that, so re-emit -m's message too.
-  local modify_error
-  if ! modify_error="$(sudo semanage fcontext -m -t svirt_image_t "${pattern}" 2>&1)"; then
-    if ! sudo semanage fcontext -a -t svirt_image_t "${pattern}"; then
-      echo "${modify_error}" >&2
-      return 1
-    fi
-  fi
+  # -a both adds a missing rule and rewrites an existing one: seobject.FcontextRecords.add()
+  # checks the base and local stores first and prints "already defined, modifying instead" before
+  # delegating to the modify path, exiting 0 either way. So one call converges a fresh host, a
+  # host carrying kdive's pre-ADR-0639 virt_image_t rule, and a host whose rule someone else
+  # wrote — no `semanage fcontext -l` parsing and no migrate-then-add split. Verified against the
+  # installed implementation on both target families: policycoreutils-python-utils 3.11 (Fedora
+  # 44) and 3.10 (Rocky 10.2) carry that branch identically. A non-zero exit therefore means the
+  # policy store itself refused the write, which is not something to continue past.
+  sudo semanage fcontext -a -t svirt_image_t "${pattern}" || return 1
   sudo restorecon -R "${directory}"
 }
