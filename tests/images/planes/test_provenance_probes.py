@@ -8,8 +8,38 @@ from typing import Any
 
 import pytest
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes import provenance_probes as probes
+
+# Every probe here boots the same host-arch libguestfs appliance the rootfs build tools boot, so
+# its budget scales by the worker host's KVM (#2397, #2414). Without pinning that verdict, an
+# assertion about the value a probe was run with is a property of whichever machine ran the suite.
+# These drive KDIVE_KVM_NODE, the seam the budget already reads.
+
+
+@pytest.fixture
+def kvm_host(tmp_path: Path) -> Iterator[None]:
+    """Pin the appliance budget to its unscaled base."""
+    node = tmp_path / "kvm"
+    node.write_bytes(b"")
+    node.chmod(0o600)
+    config.load({"KDIVE_KVM_NODE": str(node)})
+    yield
+    config.reset()
+
+
+@pytest.fixture
+def emulated_host(tmp_path: Path) -> Iterator[None]:
+    """Pin the appliance budget to the emulated branch at a 10x multiplier."""
+    config.load(
+        {
+            "KDIVE_KVM_NODE": str(tmp_path / "absent"),
+            "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER": "10.0",
+        }
+    )
+    yield
+    config.reset()
 
 
 def _completed(
@@ -93,6 +123,7 @@ def test_inspect_package_versions_nonzero_exit_reports_stderr_tail(
     assert caught.value.details == {"stderr": stderr[-2000:]}
 
 
+@pytest.mark.usefixtures("kvm_host")
 def test_inspect_package_versions_parses_successful_stdout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -225,6 +256,7 @@ def test_guestfish_probes_missing_executable(
         probes.probe_os_release,
     ],
 )
+@pytest.mark.usefixtures("kvm_host")
 def test_guestfish_probes_timeout(probe: _PathProbe, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_run(
         monkeypatch,
@@ -236,6 +268,34 @@ def test_guestfish_probes_timeout(probe: _PathProbe, monkeypatch: pytest.MonkeyP
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"timeout_s": probes._GUESTFISH_TIMEOUT_S}
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        probes.probe_makedumpfile_marker,
+        probes.probe_drgn_marker,
+        lambda path: probes.probe_kernel_config(path, "6.12.0"),
+        probes.probe_boot_entries,
+        probes.probe_os_release,
+    ],
+)
+@pytest.mark.usefixtures("emulated_host")
+def test_guestfish_probes_scale_their_budget_on_an_emulated_host(
+    probe: _PathProbe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Measured for #2414: with virt-tar-out fixed, in-guest build-fs on an emulated-POWER host
+    # died in guestfish at 303 s against an unscaled 300 s budget, one percent over. The scaled
+    # value must reach the subprocess, so assert on the kwargs the probe actually passed.
+    scaled = probes._GUESTFISH_TIMEOUT_S * 10
+    calls = _patch_run(monkeypatch, [subprocess.TimeoutExpired(cmd="guestfish", timeout=scaled)])
+
+    with pytest.raises(CategorizedError) as caught:
+        probe(Path("image.qcow2"))
+
+    assert caught.value.details == {"timeout_s": scaled}
+    assert calls[0][1]["timeout"] == scaled
+    assert scaled > 303
 
 
 @pytest.mark.parametrize(

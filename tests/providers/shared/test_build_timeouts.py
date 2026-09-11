@@ -26,6 +26,49 @@ def test_slow_build_tool_timeout_is_thirty_minutes() -> None:
     assert build_timeouts.SLOW_BUILD_TOOL_TIMEOUT_S == 1800
 
 
+# --- the general appliance scaler (#2397, #2414) -----------------------------------------------
+#
+# Every budget bounding a libguestfs appliance tool scales by one factor from one probe, but from
+# its own base: a whole-disk repack is bounded at 1800 s while a read-only marker read is bounded
+# at 300 s. The measured emulated-POWER run is the reason the 300 s bases are here at all — it
+# cleared virt-tar-out under the scaled budget and then died in guestfish at 303 s against an
+# unscaled 300 s, one percent over (#2414).
+
+
+def test_the_scaler_passes_any_base_through_untouched_on_a_kvm_host() -> None:
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0"})
+    for base in (300, 1800, 7):
+        assert build_timeouts.appliance_budget_s(base, kvm_present=lambda: True) == base
+
+
+def test_the_scaler_multiplies_any_base_on_an_emulated_host() -> None:
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0"})
+    assert build_timeouts.appliance_budget_s(300, kvm_present=lambda: False) == 3000
+    assert build_timeouts.appliance_budget_s(1800, kvm_present=lambda: False) == 18000
+
+
+def test_the_scaler_clears_the_measured_guestfish_normalization_failure() -> None:
+    # The second regression this scaling exists for: with virt-tar-out fixed, in-guest build-fs on
+    # the emulated-POWER host died at `guestfish exceeded its timeout {'timeout_s': 300}` after a
+    # measured 303 s (#2414). The 300 s base must scale past that on such a host.
+    config.load({})  # setting default (10.0)
+    assert build_timeouts.appliance_budget_s(300, kvm_present=lambda: False) > 303
+
+
+def test_the_scaler_never_reads_config_on_a_kvm_host() -> None:
+    # Same short-circuit contract as the budget that wraps it: a malformed multiplier must not
+    # fail a probe on a KVM host.
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "not-a-float"})
+    assert build_timeouts.appliance_budget_s(300, kvm_present=lambda: True) == 300
+
+
+def test_the_scaler_returns_int_for_the_subprocess_timeout_contract() -> None:
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "2.5"})
+    scaled = build_timeouts.appliance_budget_s(300, kvm_present=lambda: False)
+    assert isinstance(scaled, int)
+    assert scaled == 750
+
+
 # --- worker-host scaling (#2397, ADR-0637) ----------------------------------------------------
 #
 # Keyed off the WORKER HOST's KVM, not a System's accel: the rootfs build tools drive a libguestfs

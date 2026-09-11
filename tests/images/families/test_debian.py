@@ -197,3 +197,34 @@ def test_normalize_writes_fstab_removes_crypttab_no_selinux(tmp_path: Path) -> N
     assert "/etc/fstab" in script and "rm-f /etc/crypttab" in script
     assert "selinux" not in script.lower()
     assert "autorelabel" not in script
+
+
+def test_normalize_scales_its_guestfish_budget_on_an_emulated_host(tmp_path: Path) -> None:
+    # Sibling of the stage that failed the #2414 measurement run: with virt-tar-out fixed,
+    # in-guest build-fs on an emulated-POWER host died in the rhel family's guestfish
+    # normalization at 303 s against an unscaled 300 s budget. Debian shares the base and the
+    # appliance, so it must scale the same way.
+    import kdive.config as config
+    from kdive.images.families import debian as debian_module
+
+    budgets: list[int] = []
+
+    def _fake_run_guestfs(argv: list[str], **kwargs: object) -> str:
+        timeout_s = kwargs["timeout_s"]
+        assert isinstance(timeout_s, int)  # run_guestfs_tool's declared contract
+        budgets.append(timeout_s)
+        return ""
+
+    config.load(
+        {
+            "KDIVE_KVM_NODE": str(tmp_path / "absent"),
+            "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER": "10.0",
+        }
+    )
+    try:
+        DebianFamily().normalize(tmp_path / "img.qcow2", _run_guestfs=_fake_run_guestfs)
+    finally:
+        config.reset()
+
+    assert budgets == [debian_module._GUESTFISH_TIMEOUT_S * 10]
+    assert budgets[0] > 303

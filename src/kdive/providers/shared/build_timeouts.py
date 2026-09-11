@@ -73,23 +73,38 @@ def _worker_host_kvm_usable() -> bool:
     return True
 
 
-def slow_build_tool_timeout_s(*, kvm_present: Callable[[], bool] | None = None) -> int:
-    """Return :data:`SLOW_BUILD_TOOL_TIMEOUT_S` scaled by the worker host's KVM (#2397).
+def appliance_budget_s(base_s: int, *, kvm_present: Callable[[], bool] | None = None) -> int:
+    """Scale one libguestfs appliance budget by the worker host's KVM (#2397, ADR-0637).
 
-    A host whose probe reports usable KVM is unscaled, so the fast path keeps exactly today's
-    1800 s. A host that cannot open the KVM node emulates the appliance kernel and scales by
-    ``KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`` — the same knob ADR-0636 applied to the
+    Every budget this scales bounds a tool that boots the *same* host-arch appliance, so they all
+    move by one factor from one probe. A host whose probe reports usable KVM is unscaled and keeps
+    exactly today's figure. A host that cannot open the KVM node emulates the appliance kernel and
+    scales by ``KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`` — the same knob ADR-0636 applied to the
     ``virt-customize`` budget, so an operator still moves every appliance budget together.
-    Measured for #2383 on an emulated-POWER host, in-guest ``build-fs`` failed at
-    ``virt-tar-out exceeded its timeout {'timeout_s': 1800}``, a budget that host could not meet.
+
+    ``base_s`` is a per-tool figure rather than one shared constant because the tools are not
+    alike: repacking a whole disk is bounded at :data:`SLOW_BUILD_TOOL_TIMEOUT_S`, while a
+    read-only ``guestfish`` marker read or a ``virt-inspector`` pass is bounded at five minutes.
+    What they share is the appliance boot, which is what emulation makes expensive.
 
     The result is an ``int`` because ``run_guestfs_tool`` takes ``timeout_s: int`` and echoes it
     into the timeout error's ``details`` payload. ``kvm_present`` is injected so both branches are
-    unit-tested without a real ``/dev/kvm``; the default probe
-    (:func:`_worker_host_kvm_usable`) runs per call, so it answers for the host as it is when the
-    tool runs.
+    unit-tested without a real ``/dev/kvm``; the default probe (:func:`_worker_host_kvm_usable`)
+    runs per call, so it answers for the host as it is when the tool runs.
     """
     probe = kvm_present if kvm_present is not None else _worker_host_kvm_usable
     if probe():
-        return SLOW_BUILD_TOOL_TIMEOUT_S
-    return int(SLOW_BUILD_TOOL_TIMEOUT_S * config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER))
+        return base_s
+    return int(base_s * config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER))
+
+
+def slow_build_tool_timeout_s(*, kvm_present: Callable[[], bool] | None = None) -> int:
+    """Return :data:`SLOW_BUILD_TOOL_TIMEOUT_S` scaled by the worker host's KVM (#2397).
+
+    Measured for #2383 on an emulated-POWER host, in-guest ``build-fs`` failed at
+    ``virt-tar-out exceeded its timeout {'timeout_s': 1800}``, a budget that host could not meet.
+    Measured again for #2414 once the probe read that host correctly, the same stage completed in
+    2406 s and ``virt-make-fs`` in 2032 s — both above the unscaled base, both inside the scaled
+    budget.
+    """
+    return appliance_budget_s(SLOW_BUILD_TOOL_TIMEOUT_S, kvm_present=kvm_present)

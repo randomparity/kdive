@@ -40,6 +40,7 @@ from kdive.images.families.steps import (
 )
 from kdive.images.planes._build_common import run_guestfs_tool
 from kdive.images.rootfs.kinds import RootfsImageKind
+from kdive.providers.shared.build_timeouts import appliance_budget_s
 
 # Debian debug/guest rootfs: the in-target crash + introspection toolchain by apt name. ``drgn``
 # ships as ``python3-drgn`` (which provides ``/usr/bin/drgn``, so the ``kdive-drgn`` helper's
@@ -74,6 +75,9 @@ _USE_KDUMP_CMD = (
 # debconf prompt. Both run in the guest during the customization boot (ADR-0345).
 _APT_UPDATE_CMD = "apt-get update"
 _APT_INSTALL_COMMAND = "DEBIAN_FRONTEND=noninteractive apt-get -y install"
+# Base budget for one guestfish normalization on a KVM host. Scaled at the call site by
+# appliance_budget_s(): without host KVM the libguestfs appliance kernel is emulated and the
+# same run takes longer than this base (#2397, #2414).
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 # run_guestfs_tool returns the tool's stdout (for callers that parse a native guestfish query);
@@ -152,7 +156,7 @@ class DebianFamily:
             _run_guestfs(
                 ["guestfish", "--rw", "-a", str(qcow2), "-i"],
                 stage="guestfish",
-                timeout_s=_GUESTFISH_TIMEOUT_S,
+                timeout_s=appliance_budget_s(_GUESTFISH_TIMEOUT_S),
                 missing_message="guestfish is not installed; cannot normalize the rootfs image",
                 failure_message="guestfish normalization failed",
                 input_text=script,

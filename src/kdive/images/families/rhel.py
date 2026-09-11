@@ -39,12 +39,16 @@ from kdive.images.families.steps import (
 )
 from kdive.images.planes._build_common import run_guestfs_tool
 from kdive.images.rootfs.kinds import RootfsImageKind
+from kdive.providers.shared.build_timeouts import appliance_budget_s
 
 # Cloud-image SELinux ships enforcing; the bare-ext4 repack drops xattrs, so a relabel-on-boot is
 # required. Set permissive so the first boot relabels (``/.autorelabel``) without denying the
 # host-written authorized_keys, matching the spike-proven F44 image.
 _SELINUX_PERMISSIVE_SED = "sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config"
 _SELINUX_PERMISSIVE_CONFIG = "SELINUX=permissive\nSELINUXTYPE=targeted\n"
+# Base budget for one guestfish normalization on a KVM host. Scaled at the call site by
+# appliance_budget_s(): without host KVM the libguestfs appliance kernel is emulated and the
+# same run takes longer than this base (#2397, #2414).
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 # EL 8/9 bundle makedumpfile + ``kdumpctl`` inside ``kexec-tools`` (no standalone ``makedumpfile``
@@ -176,7 +180,7 @@ class RhelFamily:
             run_guestfs_tool(
                 ["guestfish", "--rw", "-a", str(qcow2), "-i"],
                 stage="guestfish",
-                timeout_s=_GUESTFISH_TIMEOUT_S,
+                timeout_s=appliance_budget_s(_GUESTFISH_TIMEOUT_S),
                 missing_message="guestfish is not installed; cannot normalize the rootfs image",
                 failure_message="guestfish normalization failed",
                 input_text=script,
