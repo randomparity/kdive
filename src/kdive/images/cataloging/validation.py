@@ -20,6 +20,7 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families._fedora_customize import DRGN_HELPER_GUEST_PATH, KDUMP_SYSCTL_PATH
+from kdive.providers.shared.build_timeouts import appliance_budget_s
 
 # Each contract element maps to a canonical in-guest path whose presence proves the element is
 # installed. The keys are the file-verifiable subset of the closed ``Capability`` vocabulary
@@ -35,6 +36,9 @@ GUEST_CONTRACT_PATHS: dict[str, str] = {
     "drgn": DRGN_HELPER_GUEST_PATH,
 }
 
+# Base budget for one read-only guestfish probe on a KVM host, scaled at the call site by
+# appliance_budget_s(): the probe boots the same host-arch appliance the build tools boot, and
+# without host KVM that appliance kernel is emulated (#2397, #2414).
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 type InspectSeam = Callable[[Path, Sequence[str]], set[str]]
@@ -52,13 +56,14 @@ def _real_inspect(qcow2_path: Path, candidates: Sequence[str]) -> set[str]:
     """
     commands = "\n".join(f"exists {path}" for path in candidates)
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i"]
+    budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
     try:
         result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             input=commands + "\n",
             capture_output=True,
             text=True,
-            timeout=_GUESTFISH_TIMEOUT_S,
+            timeout=budget_s,
             check=False,
         )
     except FileNotFoundError as exc:
@@ -71,7 +76,7 @@ def _real_inspect(qcow2_path: Path, candidates: Sequence[str]) -> set[str]:
         raise CategorizedError(
             "guest-contract inspection exceeded its timeout",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+            details={"timeout_s": budget_s},
         ) from exc
     if result.returncode != 0:
         raise CategorizedError(

@@ -27,53 +27,84 @@ _DEFAULT_KVM_NODE = "/dev/kvm"
 
 
 def _worker_host_kvm_usable() -> bool:
-    """Whether the KVM node is openable read+write, so the appliance gets KVM (ADR-0637, #2397).
+    """Whether the KVM node actually opens read+write, so the appliance gets KVM (ADR-0637, #2397).
 
     The URI is not the right selector for this appliance. The tools this budget bounds are run as
     a fixed argv by ``images/planes/_build_common.run_guestfs_tool`` with no ``-c`` and no
     environment override, so ``KDIVE_LIBVIRT_URI`` — the variable ADR-0352's probe keys on — never
     reaches them and does not describe how libguestfs launches its appliance.
 
-    Read+write openability of the node is the definition the repository's shell tier already
-    enforces for this same appliance: ``scripts/live-vm/preflight-env.sh`` dies when
-    ``${KDIVE_KVM_NODE:-/dev/kvm}`` is not readable **and** writable by the running user, with the
-    comment "without KVM the libguestfs appliance falls back to emulation";
-    ``scripts/operations/check-local-libvirt.sh`` and ``scripts/check-setup-deps.sh`` use the same
-    test. All three honour ``KDIVE_KVM_NODE``, so honouring it here — and treating an empty value
-    as unset, as ``${…:-…}`` does — keeps the two tiers answering identically for one host.
-    ``os.access`` tests the *real* uid, which is what those shell tests do too
-    (``[ -r ]``/``[ -w ]`` is ``access(2)``); every kdive worker unit is a plain ``User=``
-    service, where real and effective uid are the same.
+    **The node is opened, not stat-ed.** ``os.access`` tests permission bits, and on a systemd host
+    the bits say nothing about whether KVM exists: ``50-udev-default.rules`` carries
+    ``KERNEL=="kvm", MODE="0666", OPTIONS+="static_node=kvm"``, so ``/dev/kvm`` is created at 0666
+    during boot whether or not ``kvm`` ever loads — that is what ``static_node`` is *for*, since
+    opening the node is what triggers module autoload. A host with the module blacklisted therefore
+    passes an ``access`` test and fails the ``open`` with ``ENODEV``. Measured on the #2383
+    emulated-POWER host of record (Fedora 44 ppc64le, ``blacklist kvm`` +
+    ``install kvm /bin/false``, no ``kvm`` module loaded, libvirt advertising zero KVM domains):
+    ``os.access`` returned ``True`` while ``os.open`` raised ``OSError 19 ENODEV``. Under the
+    permission test this budget stayed at the unscaled 1800 s on the one host class #2397 exists to
+    scale, so the fix never engaged there (#2414).
+
+    Opening is also what the consumer does: the libguestfs appliance opens the node, so a probe
+    that opens it answers the question the budget is asking. Autoload is the intended side effect —
+    a host where the module *can* load has KVM and should read as KVM — and the descriptor is
+    closed immediately, since creating a VM needs a further ``KVM_CREATE_VM`` ioctl this never
+    issues. A missing node raises ``FileNotFoundError``, an ``OSError`` like any other, so it is the
+    same answer by the same path.
+
+    ``KDIVE_KVM_NODE`` is honoured, and an empty value is treated as unset, as ``${…:-…}`` does.
 
     It deliberately diverges from ADR-0352's ``kvm_probe_for_uri``, which the sibling
     ``virt-customize`` budget uses: that probe tests mere *presence* for every URI but
-    ``qemu:///session``, so a worker uid that cannot open a present node reads as KVM. That is the
-    one host class this probe changes. It does **not** make the answer arch-aware — a host whose
-    node opens fine while libvirt advertises no KVM domain for its architecture still reads as KVM
-    and keeps the unscaled budget. ADR-0637 records why the two appliance budgets differ, and
-    converging them by widening ADR-0352's probe is a filed follow-up.
+    ``qemu:///session``. It now also diverges from the repository's **shell** tier, which still
+    tests permission — ``scripts/live-vm/preflight-env.sh``,
+    ``scripts/operations/check-local-libvirt.sh`` and ``scripts/check-setup-deps.sh`` all use
+    ``[ -r ]``/``[ -w ]``, i.e. ``access(2)`` — so on a static-node host those three still call KVM
+    present where this returns ``False``. Converging all of them onto one openability test is
+    #2410's job; this fixes the budget that silently took the wrong branch.
     """
     node = config.env_snapshot().get(_KVM_NODE_ENV) or _DEFAULT_KVM_NODE
-    return os.access(node, os.R_OK | os.W_OK)
+    try:
+        fd = os.open(node, os.O_RDWR)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+def appliance_budget_s(base_s: int, *, kvm_present: Callable[[], bool] | None = None) -> int:
+    """Scale one libguestfs appliance budget by the worker host's KVM (#2397, ADR-0637).
+
+    Every budget this scales bounds a tool that boots the *same* host-arch appliance, so they all
+    move by one factor from one probe. A host whose probe reports usable KVM is unscaled and keeps
+    exactly today's figure. A host that cannot open the KVM node emulates the appliance kernel and
+    scales by ``KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`` — the same knob ADR-0636 applied to the
+    ``virt-customize`` budget, so an operator still moves every appliance budget together.
+
+    ``base_s`` is a per-tool figure rather than one shared constant because the tools are not
+    alike: repacking a whole disk is bounded at :data:`SLOW_BUILD_TOOL_TIMEOUT_S`, while a
+    read-only ``guestfish`` marker read or a ``virt-inspector`` pass is bounded at five minutes.
+    What they share is the appliance boot, which is what emulation makes expensive.
+
+    The result is an ``int`` because ``run_guestfs_tool`` takes ``timeout_s: int`` and echoes it
+    into the timeout error's ``details`` payload. ``kvm_present`` is injected so both branches are
+    unit-tested without a real ``/dev/kvm``; the default probe (:func:`_worker_host_kvm_usable`)
+    runs per call, so it answers for the host as it is when the tool runs.
+    """
+    probe = kvm_present if kvm_present is not None else _worker_host_kvm_usable
+    if probe():
+        return base_s
+    return int(base_s * config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER))
 
 
 def slow_build_tool_timeout_s(*, kvm_present: Callable[[], bool] | None = None) -> int:
     """Return :data:`SLOW_BUILD_TOOL_TIMEOUT_S` scaled by the worker host's KVM (#2397).
 
-    A host whose probe reports usable KVM is unscaled, so the fast path keeps exactly today's
-    1800 s. A host that cannot open the KVM node emulates the appliance kernel and scales by
-    ``KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`` — the same knob ADR-0636 applied to the
-    ``virt-customize`` budget, so an operator still moves every appliance budget together.
     Measured for #2383 on an emulated-POWER host, in-guest ``build-fs`` failed at
     ``virt-tar-out exceeded its timeout {'timeout_s': 1800}``, a budget that host could not meet.
-
-    The result is an ``int`` because ``run_guestfs_tool`` takes ``timeout_s: int`` and echoes it
-    into the timeout error's ``details`` payload. ``kvm_present`` is injected so both branches are
-    unit-tested without a real ``/dev/kvm``; the default probe
-    (:func:`_worker_host_kvm_usable`) runs per call, so it answers for the host as it is when the
-    tool runs.
+    Measured again for #2414 once the probe read that host correctly, the same stage completed in
+    2406 s and ``virt-make-fs`` in 2032 s — both above the unscaled base, both inside the scaled
+    budget.
     """
-    probe = kvm_present if kvm_present is not None else _worker_host_kvm_usable
-    if probe():
-        return SLOW_BUILD_TOOL_TIMEOUT_S
-    return int(SLOW_BUILD_TOOL_TIMEOUT_S * config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER))
+    return appliance_budget_s(SLOW_BUILD_TOOL_TIMEOUT_S, kvm_present=kvm_present)

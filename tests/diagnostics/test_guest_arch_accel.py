@@ -303,3 +303,53 @@ def test_registered_in_assembly_without_duplicate_local_contribution() -> None:
     assert [c.provider for c in contributions].count("local-libvirt") == 1
     ids = {d.id for c in contributions for d in c.unavailable_worker_checks()}
     assert "guest_arch_accel" in ids
+
+
+# --- off-PATH native emulator (the RedHat family, ADR-0637) --------------------------
+
+
+def test_native_emulator_at_libexec_counts_as_present() -> None:
+    """EL ships the host's own emulator at /usr/libexec/qemu-kvm, off PATH.
+
+    A PATH-only probe FAILs a working EL host, and this check gates (`has_failure` drives a
+    nonzero `kdivectl doctor` exit), so the off-PATH location must count as present.
+    """
+    probe = default_guest_arch_accel_probe(
+        host_arch="x86_64",
+        supported=_SUPPORTED,
+        which=_which({}),  # nothing on PATH, as on EL
+        kvm_present=lambda: True,
+        libexec_emulator="/usr/libexec/qemu-kvm",
+        is_executable=lambda p: p == "/usr/libexec/qemu-kvm",
+    )
+    report = _run(probe)
+    assert report.native_emulator_present is True
+    assert report.accel_by_arch == {"x86_64": "kvm"}
+
+
+def test_libexec_fallback_does_not_apply_to_a_foreign_arch() -> None:
+    """/usr/libexec/qemu-kvm is this host's own emulator, never a foreign-arch one."""
+    probe = default_guest_arch_accel_probe(
+        host_arch="x86_64",
+        supported=_SUPPORTED,
+        which=_which({}),
+        kvm_present=lambda: True,
+        libexec_emulator="/usr/libexec/qemu-kvm",
+        is_executable=lambda p: p == "/usr/libexec/qemu-kvm",
+    )
+    report = _run(probe)
+    assert "ppc64le" not in report.accel_by_arch
+
+
+def test_absent_libexec_still_reports_the_native_emulator_missing() -> None:
+    """The fallback must not mask a genuinely emulator-less host."""
+    probe = default_guest_arch_accel_probe(
+        host_arch="x86_64",
+        supported=_SUPPORTED,
+        which=_which({}),
+        kvm_present=lambda: True,
+        libexec_emulator="/usr/libexec/qemu-kvm",
+        is_executable=lambda _p: False,
+    )
+    report = _run(probe)
+    assert report.native_emulator_present is False

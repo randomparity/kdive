@@ -263,3 +263,36 @@ def test_normalize_sets_permissive_without_touching_autorelabel(
     assert "/etc/fstab" in script and "/etc/selinux/config" in script
     assert "rm-f /etc/crypttab" in script
     assert "autorelabel" not in script
+
+
+def test_normalize_scales_its_guestfish_budget_on_an_emulated_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The stage that actually failed the #2414 measurement run: with virt-tar-out fixed, in-guest
+    # build-fs on an emulated-POWER host died here at `guestfish exceeded its timeout
+    # {'timeout_s': 300}` after a measured 303 s. The budget must reach the tool scaled.
+    import kdive.config as config
+    from kdive.images.families import rhel as rhel_module
+
+    budgets: list[int] = []
+
+    def _fake_run_guestfs(argv: list[str], **kwargs: object) -> str:
+        timeout_s = kwargs["timeout_s"]
+        assert isinstance(timeout_s, int)  # run_guestfs_tool's declared contract
+        budgets.append(timeout_s)
+        return ""
+
+    monkeypatch.setattr(rhel_module, "run_guestfs_tool", _fake_run_guestfs)
+    config.load(
+        {
+            "KDIVE_KVM_NODE": str(tmp_path / "absent"),
+            "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER": "10.0",
+        }
+    )
+    try:
+        RhelFamily().normalize(tmp_path / "img.qcow2")
+    finally:
+        config.reset()
+
+    assert budgets == [rhel_module._GUESTFISH_TIMEOUT_S * 10]
+    assert budgets[0] > 303

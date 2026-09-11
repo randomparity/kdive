@@ -24,7 +24,14 @@ def _stub(bindir: Path, name: str, body: str) -> None:
 
 def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     assert BASH is not None
-    return subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
+    # Pin the off-PATH emulator location to an absent path. Its default is the real
+    # /usr/libexec/qemu-kvm, which qemu-kvm-core installs on the whole RHEL family — leaving it
+    # unset would make these tests read the host and fail on exactly the distros this change
+    # exists to support. A caller that wants it present passes its own KDIVE_QEMU_LIBEXEC.
+    full_env = {"KDIVE_QEMU_LIBEXEC": "/nonexistent/qemu-kvm", **env}
+    return subprocess.run(
+        [BASH, str(SCRIPT)], env=full_env, capture_output=True, text=True, check=False
+    )
 
 
 def _stub_python(bindir: Path, name: str, *, imports_ok: bool) -> Path:

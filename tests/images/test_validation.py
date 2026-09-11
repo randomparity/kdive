@@ -8,11 +8,12 @@ libguestfs probe is an injected seam so these tests run without libguestfs.
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
 
+import kdive.config as config
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging import validation
@@ -111,6 +112,35 @@ def test_empty_required_is_a_no_op(tmp_path: Path) -> None:
     validate_guest_contract(image, required=[], inspect=_present())
 
 
+# The guestfish budget scales by the worker host's KVM (#2397, #2414), so an assertion about the
+# value guestfish was run with is otherwise a property of whichever machine ran the suite. These
+# pin the probe through KDIVE_KVM_NODE, the seam the budget already reads.
+
+
+@pytest.fixture
+def kvm_host(tmp_path: Path) -> Iterator[None]:
+    """Pin the appliance budget to its unscaled base."""
+    node = tmp_path / "kvm"
+    node.write_bytes(b"")
+    node.chmod(0o600)
+    config.load({"KDIVE_KVM_NODE": str(node)})
+    yield
+    config.reset()
+
+
+@pytest.fixture
+def emulated_host(tmp_path: Path) -> Iterator[None]:
+    """Pin the appliance budget to the emulated branch at a 10x multiplier."""
+    config.load(
+        {
+            "KDIVE_KVM_NODE": str(tmp_path / "absent"),
+            "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER": "10.0",
+        }
+    )
+    yield
+    config.reset()
+
+
 def _patch_run(
     monkeypatch: pytest.MonkeyPatch, result: subprocess.CompletedProcess[str] | BaseException
 ) -> list[dict[str, object]]:
@@ -139,6 +169,7 @@ def test_real_inspect_maps_missing_guestfish_to_missing_dependency(
     assert caught.value.details == {"tool": "guestfish"}
 
 
+@pytest.mark.usefixtures("kvm_host")
 def test_real_inspect_maps_timeout_to_infrastructure_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -164,6 +195,25 @@ def test_real_inspect_maps_timeout_to_infrastructure_failure(
             "check": False,
         }
     ]
+
+
+@pytest.mark.usefixtures("emulated_host")
+def test_real_inspect_scales_its_budget_on_an_emulated_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This probe boots the same host-arch appliance the rootfs build tools boot, so on a host
+    # without usable KVM it is emulated too. Measured for #2414: with virt-tar-out fixed, in-guest
+    # build-fs on an emulated-POWER host died in a sibling guestfish call at 303 s against an
+    # unscaled 300 s budget. The scaled value must reach the subprocess, not just exist.
+    scaled = validation._GUESTFISH_TIMEOUT_S * 10
+    calls = _patch_run(monkeypatch, subprocess.TimeoutExpired(cmd="guestfish", timeout=scaled))
+
+    with pytest.raises(CategorizedError) as caught:
+        DEFAULT_INSPECT(Path("img.qcow2"), ["/some/path"])
+
+    assert caught.value.details == {"timeout_s": scaled}
+    assert calls[0]["timeout"] == scaled
+    assert scaled > 303
 
 
 def test_real_inspect_maps_nonzero_exit_to_infrastructure_failure_with_truncated_stderr(

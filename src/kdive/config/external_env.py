@@ -456,6 +456,16 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "because the libguestfs appliance then emulates (ADR-0637).",
     ),
     ExternalEnvVar(
+        "KDIVE_QEMU_LIBEXEC",
+        "script",
+        "/usr/libexec/qemu-kvm",
+        "Off-`PATH` location of the host's own QEMU emulator, resolved by "
+        "`check-setup-deps.sh` and `check-local-libvirt.sh` in addition to `PATH`. The RHEL "
+        "family ships no `qemu-system-*` package, so a `PATH`-only probe reports a working "
+        "Enterprise Linux host as permanently broken (ADR-0637). Native arch only — this binary "
+        "is never a foreign-arch emulator.",
+    ),
+    ExternalEnvVar(
         "KDIVE_HOST_RUNTIME_DIRS",
         "script",
         "/var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs",

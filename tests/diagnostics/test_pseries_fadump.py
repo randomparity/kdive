@@ -60,9 +60,66 @@ def test_not_applicable_when_no_ppc64_emulator() -> None:
         calls.append(argv)
         raise AssertionError("no version probe when qemu-system-ppc64 is absent")
 
-    probe = default_pseries_fadump_probe(which=_which({}), run_version=_run)
+    # host_arch is pinned so this stays hermetic: on a real EL ppc64le host the off-PATH
+    # emulator exists and the probe would (correctly) resolve it instead.
+    probe = default_pseries_fadump_probe(which=_which({}), run_version=_run, host_arch="x86_64")
     assert _outcome(probe) is PseriesFadumpOutcome.NOT_APPLICABLE
     assert calls == []
+
+
+def test_ppc64le_host_resolves_the_off_path_emulator() -> None:
+    """ADR-0637: EL ships no qemu-system-ppc64 binary on PATH — the emulator is at libexec.
+
+    Without this fallback the fadump check reports not_applicable on exactly the EL ppc64le host
+    fadump exists for, while LocalLibvirtDiscovery reads libvirt's capabilities XML and sees the
+    arch — the divergence the probe's own docstring promises cannot happen.
+    """
+    seen: list[list[str]] = []
+
+    def _run(argv: list[str]) -> str:
+        seen.append(argv)
+        return "QEMU emulator version 10.2.2"
+
+    probe = default_pseries_fadump_probe(
+        which=_which({}),
+        run_version=_run,
+        host_arch="ppc64le",
+        libexec_emulator="/usr/libexec/qemu-kvm",
+        is_executable=lambda path: path == "/usr/libexec/qemu-kvm",
+    )
+    assert _outcome(probe) is PseriesFadumpOutcome.SUPPORTED
+    # The resolved libexec path is what gets exec'd, not the arch-named binary EL does not ship.
+    assert seen and "/usr/libexec/qemu-kvm" in seen[0]
+
+
+def test_libexec_fallback_does_not_apply_on_a_foreign_arch_host() -> None:
+    """/usr/libexec/qemu-kvm is this host's OWN emulator — on x86_64 it is never a ppc64 one."""
+    probe = default_pseries_fadump_probe(
+        which=_which({}),
+        run_version=_version("QEMU emulator version 10.2.2"),
+        host_arch="x86_64",
+        libexec_emulator="/usr/libexec/qemu-kvm",
+        is_executable=lambda _path: True,
+    )
+    assert _outcome(probe) is PseriesFadumpOutcome.NOT_APPLICABLE
+
+
+def test_path_emulator_wins_over_the_libexec_fallback() -> None:
+    """Fedora ppc64le ships qemu-system-ppc64 on PATH; the fallback must not shadow it."""
+    seen: list[list[str]] = []
+
+    def _run(argv: list[str]) -> str:
+        seen.append(argv)
+        return "QEMU emulator version 10.2.2"
+
+    probe = default_pseries_fadump_probe(
+        which=_which({"qemu-system-ppc64": "/usr/bin/qemu-system-ppc64"}),
+        run_version=_run,
+        host_arch="ppc64le",
+        is_executable=lambda _path: True,
+    )
+    assert _outcome(probe) is PseriesFadumpOutcome.SUPPORTED
+    assert seen and "/usr/bin/qemu-system-ppc64" in seen[0]
 
 
 def test_blocking_version_probe_is_bounded_by_run_check_timeout() -> None:

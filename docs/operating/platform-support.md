@@ -37,17 +37,28 @@ name is distro-specific (and matches what `scripts/check-setup-deps.sh` reports)
 
 | distro | ppc64le emulator (`qemu-system-ppc64`) | x86_64 emulator (`qemu-system-x86_64`) |
 |--------|----------------------------------------|----------------------------------------|
-| Fedora / RHEL / CentOS | `qemu-system-ppc` | `qemu-system-x86` |
+| Fedora | `qemu-system-ppc` | `qemu-system-x86` |
+| RHEL / CentOS Stream / Rocky / AlmaLinux | *not packaged* | *not packaged* |
 | Debian / Ubuntu | `qemu-system-ppc` | `qemu-system-x86` |
 | Arch | `qemu-system-ppc` | `qemu-system-x86` |
 | openSUSE | `qemu-ppc` | `qemu-x86` |
 
 For example, to enable ppc64le guests on an x86_64 Fedora host: `dnf install qemu-system-ppc`.
 
-For a local-libvirt worker, two diagnostics report the per-arch accelerator:
+**The RHEL family runs native guests only.** Enterprise Linux ships no `qemu-system-*` package,
+so neither foreign-arch emulator can be installed there and `just test-live-tcg` cannot run on
+such a host. Its *own* architecture's emulator comes from `qemu-kvm` and is installed as
+`/usr/libexec/qemu-kvm`, off `PATH` — so the three diagnostics below resolve that location as
+well as `PATH`, and `scripts/check-setup-deps.sh` names `qemu-kvm` rather than an arch-named
+package for the host's own arch. Fedora is unaffected: `qemu-kvm` there is a metapackage that
+pulls `qemu-system-x86` (or `qemu-system-ppc` on ppc64le), and foreign emulators install normally.
+
+For a local-libvirt worker, three diagnostics report the per-arch accelerator:
 
 - `scripts/check-setup-deps.sh` prints a cross-arch line per foreign arch — "available via
   TCG only" when its emulator is present, or the exact package to install when it is not.
+- `scripts/operations/check-local-libvirt.sh` fails the host when its own native emulator is
+  absent, and reports whether the ppc64le emulator is new enough for pseries fadump.
 - The service `doctor` (`kdivectl doctor --json`) carries a `guest_arch_accel` check whose
   `data` maps each schedulable arch to `kvm` or `tcg`, and which fails only when the host
   lacks its own native-arch emulator. This is a worker-local probe; a remote provider does not

@@ -36,6 +36,11 @@ from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 
 _LOCAL_PROVIDER = "local-libvirt"
 _KVM_NODE = "/dev/kvm"
+# The RedHat family ships the host's OWN emulator here, off PATH: no EL package provides
+# /usr/bin/qemu-system-<arch> (ADR-0637). A PATH-only probe therefore FAILs a working EL host,
+# and this check gates — has_failure drives a nonzero `kdivectl doctor` exit. Native arch only:
+# this binary is never a foreign-arch emulator.
+_LIBEXEC_EMULATOR = "/usr/libexec/qemu-kvm"
 _SESSION_URI = "qemu:///session"
 _DEFAULT_URI = "qemu:///system"
 # The libvirt connection-URI env var (mirrors local_libvirt.settings.LIBVIRT_URI.name / default).
@@ -63,6 +68,11 @@ def resolved_libvirt_uri() -> str:
     boundary-gated provider settings), matching the same snapshot the registry resolves against.
     """
     return env_snapshot().get(_LIBVIRT_URI_ENV, _DEFAULT_URI)
+
+
+def _is_executable(path: str) -> bool:
+    """Whether ``path`` is an executable *file* (a directory is executable but not an emulator)."""
+    return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
 def uri_is_local(uri: str) -> bool:
@@ -103,6 +113,8 @@ def default_guest_arch_accel_probe(
     which: Callable[[str], str | None] = shutil.which,
     kvm_present: Callable[[], bool] | None = None,
     target_is_local: bool | None = None,
+    libexec_emulator: str = _LIBEXEC_EMULATOR,
+    is_executable: Callable[[str], bool] = _is_executable,
 ) -> GuestArchAccelProbe:
     """Build the probe that observes the per-arch guest accelerator on the worker host.
 
@@ -129,7 +141,13 @@ def default_guest_arch_accel_probe(
         accel_by_arch: dict[str, str] = {}
         for arch in sorted(supported):
             binary = qemu_system_binary(arch)
-            if binary is None or which(binary) is None:
+            if binary is None:
+                continue
+            # PATH first; then, for the host's own arch only, the RedHat off-PATH location.
+            # A foreign arch never falls back — /usr/libexec/qemu-kvm is this host's emulator.
+            if which(binary) is None and not (
+                arch == resolved_host and is_executable(libexec_emulator)
+            ):
                 continue
             accel_by_arch[arch] = "kvm" if arch == resolved_host and kvm() else "tcg"
         native_binary = qemu_system_binary(resolved_host)

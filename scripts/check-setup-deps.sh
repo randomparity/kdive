@@ -28,6 +28,11 @@ readonly ASSUME_YES
 
 readonly OS_RELEASE_FILE="${KDIVE_OS_RELEASE:-/etc/os-release}"
 
+# The RedHat family ships the host's own emulator here, off PATH: no EL package provides
+# /usr/bin/qemu-system-<arch>, so a PATH-only probe reports a working EL host as broken
+# permanently (ADR-0637). Overridable so the probe is testable without an EL host.
+readonly QEMU_LIBEXEC="${KDIVE_QEMU_LIBEXEC:-/usr/libexec/qemu-kvm}"
+
 # The worker imports the libguestfs binding from the project venv, not system python3, so the
 # future-tier binding probe must ask the same interpreter the worker uses (else a binding present
 # system-wide but absent from the venv reports a false green, #1328). Mirror check-local-libvirt.sh:
@@ -70,6 +75,24 @@ manual_hints=()
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+# Resolve the host's OWN qemu emulator to a runnable path: the arch-named binary on PATH, else
+# the RedHat family's off-PATH location. Prints the path and returns 0, or returns 1.
+# Native only — QEMU_LIBEXEC is this host's emulator, never a foreign-arch one, so callers must
+# pass the native binary. Callers print the resolved path rather than the name they asked for,
+# because on EL the arch-named binary does not exist (ADR-0637 decision 3).
+resolve_native_emulator() {
+  local binary="$1" resolved
+  if resolved="$(command -v "${binary}" 2>/dev/null)"; then
+    printf "%s" "${resolved}"
+    return 0
+  fi
+  if [[ -f "${QEMU_LIBEXEC}" && -x "${QEMU_LIBEXEC}" ]]; then
+    printf "%s" "${QEMU_LIBEXEC}"
+    return 0
+  fi
+  return 1
 }
 
 load_distro_id() {
@@ -128,8 +151,25 @@ package_for() {
   docker:debian) printf "docker.io" ;;
   docker:*) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
-  qemu-system-x86_64:*) printf "qemu-system-x86" ;;
   qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
+  # The RedHat family answers by NATIVENESS, not by architecture (ADR-0637). `qemu-kvm` is a
+  # metapackage that pulls exactly this host's own emulator — verified on Fedora 44, where
+  # `dnf repoquery --requires qemu-kvm` returns qemu-system-x86 and the same query under
+  # --forcearch=ppc64le returns qemu-system-ppc — and EL ships no qemu-system-* package at all.
+  # It provides no foreign-arch emulator, so a foreign request keeps the arch-named package:
+  # correct on Fedora, and on EL the only name there is to suggest.
+  qemu-system-x86_64:fedora | qemu-system-ppc64:fedora)
+    # ${host_arch:-} rather than ${host_arch}: this is the only row that reads a global, and an
+    # unset or empty value must fall through to the arch-named answer, not abort under `set -u`.
+    if [[ "${name}" == "$(qemu_binary_for_arch "${host_arch:-}")" ]]; then
+      printf "qemu-kvm"
+    elif [[ "${name}" == "qemu-system-x86_64" ]]; then
+      printf "qemu-system-x86"
+    else
+      printf "qemu-system-ppc"
+    fi
+    ;;
+  qemu-system-x86_64:*) printf "qemu-system-x86" ;;
   qemu-system-ppc64:*) printf "qemu-system-ppc" ;;
   qemu-img:debian) printf "qemu-utils" ;;
   qemu-img:opensuse) printf "qemu-tools" ;;
@@ -271,7 +311,7 @@ arch_needs_rust() {
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 
 print_cross_arch_advisory() {
-  local host="$1" distro="$2" arch binary pkg native
+  local host="$1" distro="$2" arch binary pkg native native_path
   if ! arch_is_supported "${host}"; then
     printf "\nhost arch %s is not a supported kdive provisioning arch (supported: %s)\n" \
       "${host}" "$(join_by_comma "${SUPPORTED_ARCHES[@]}")"
@@ -282,9 +322,9 @@ print_cross_arch_advisory() {
   # /dev/kvm accessibility is only what the probe proves, not that KVM will accelerate;
   # check-local-libvirt.sh is the authoritative gate.
   native="$(qemu_binary_for_arch "${host}")"
-  if command_exists "${native}"; then
+  if native_path="$(resolve_native_emulator "${native}")"; then
     if [[ -r "${KVM_NODE}" && -w "${KVM_NODE}" ]]; then
-      printf "  guest arch %s: available natively via %s (/dev/kvm accessible — KVM)\n" "${host}" "${native}"
+      printf "  guest arch %s: available natively via %s (/dev/kvm accessible — KVM)\n" "${host}" "${native_path}"
     else
       printf "  guest arch %s: native emulator present, /dev/kvm not accessible — runs under TCG until KVM is enabled\n" "${host}"
     fi
@@ -401,13 +441,16 @@ probe_all() {
   future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)
   # Require the host's native qemu emulator only on a supported host arch (an unsupported arch has
   # no native qemu KDIVE can name; the cross-arch advisory below reports that instead).
-  native_qemu="$(qemu_binary_for_arch "${host_arch}")"
-  if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
-    future_cmds+=("${native_qemu}")
-  fi
   for cmd in "${future_cmds[@]}"; do
     require_command future "${cmd}" "${distro}"
   done
+  # The native emulator is probed here rather than through future_cmds because require_command is
+  # PATH-only, and the RedHat family keeps this host's own emulator off PATH (ADR-0637 decision 2).
+  native_qemu="$(qemu_binary_for_arch "${host_arch}")"
+  if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
+    resolve_native_emulator "${native_qemu}" >/dev/null ||
+      note_package future "${native_qemu}" "$(package_for "${native_qemu}" "${distro}")"
+  fi
   command_exists gcc || command_exists clang ||
     note_package future "gcc or clang" "$(package_for gcc-or-clang "${distro}")"
   require_header future libelf-headers libelf "${distro}"
