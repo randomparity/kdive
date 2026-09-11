@@ -28,7 +28,7 @@ kdive_label_svirt_image() {
     return 0
   fi
 
-  # -a both adds a missing rule and rewrites an existing one: seobject.FcontextRecords.add()
+  # -a both adds a missing rule and rewrites an existing one: seobject.fcontextRecords.add()
   # checks the base and local stores first and prints "already defined, modifying instead" before
   # delegating to the modify path, exiting 0 either way. So one call converges a fresh host, a
   # host carrying kdive's pre-ADR-0639 virt_image_t rule, and a host whose rule someone else

@@ -92,7 +92,8 @@ Task 2 consumes nothing from this task.
 | Contract | Mode | Detail |
 |---|---|---|
 | The directory is labeled with one `-a` call carrying the new type, then `restorecon` | `focused-test` | `tests/scripts/test_selinux_label.py::test_labels_the_directory`; red before the helper exists — `bash -c 'source <missing>; kdive_label_svirt_image …'` exits 127, so `subprocess.run(..., check=True)` raises `CalledProcessError`; green via `uv run python -m pytest tests/scripts/test_selinux_label.py -q` |
-| A stale rule is rewritten by that same call, with no second `semanage` invocation | `focused-test` | `…::test_issues_exactly_one_semanage_call` — asserts exactly one `semanage` call and no `-m` probe. `seobject.FcontextRecords.add()` prints "already defined, modifying instead" and delegates to the modify path, so `-a` alone converges a stale `virt_image_t` rule; a re-introduced `-m` arm turns the test red (verified by controlled fault) |
+| Only one `semanage` call is issued — no migrate-then-add probe | `focused-test` | `…::test_labels_the_directory` asserts the call log by list equality, so a re-introduced `-m` arm turns it red (verified by controlled fault) |
+| A stale rule is rewritten by that same call | design-time source read | not observable through the stubs: `seobject.fcontextRecords.add()` prints "already defined, modifying instead" and delegates to the modify path. Read on policycoreutils-python-utils 3.11 (Fedora 44) and 3.10 (Rocky 10.2) |
 | Both abort paths refuse to report success | `focused-test` | `…::test_aborts_when_semanage_fails` and `…::test_aborts_when_restorecon_fails` — each asserts non-zero, and the semanage case asserts `restorecon` never ran over an unwritten rule |
 | A trailing slash does not produce a pattern that matches nothing | `focused-test` | `…::test_strips_a_trailing_slash_from_the_pattern` |
 | The helper no-ops when SELinux is not enforcing | `focused-test` | `…::test_noop_when_not_enforcing` — asserts no `semanage`/`restorecon` invocation was recorded |
@@ -129,7 +130,7 @@ kdive_label_svirt_image() {
     return 0
   fi
 
-  # -a both adds a missing rule and rewrites an existing one: seobject.FcontextRecords.add()
+  # -a both adds a missing rule and rewrites an existing one: seobject.fcontextRecords.add()
   # checks the base and local stores and delegates to the modify path when the pattern is already
   # there, exiting 0 either way. One call converges a fresh host and one carrying the old
   # virt_image_t rule, with no `semanage fcontext -l` parsing.

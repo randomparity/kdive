@@ -59,7 +59,10 @@ image directories with non-kdive workloads, are not named deployments.
 - sVirt confinement of kdive domains stays on; `security_driver` is untouched.
 - The default `qemu:///system` deployment keeps working — nothing may disable the privileged
   daemon's dynamic relabel.
-- The confinement boundary between a kdive domain and the rest of the host is not widened.
+- The domain's own confinement is not weakened: it stays `svirt_t` with per-domain MCS
+  categories, and `security_driver` is untouched. What the change *does* widen is the object
+  side — the kdive image trees move to a type `svirt_t` may write and map, by design, because
+  that is the defect. The accepted classes below bound what else that reaches.
 - A shared base image stays usable by every System that backs onto it.
 
 **Accepted failure classes.**
@@ -152,7 +155,7 @@ only by an operator who already has root.
 |---|---|---|
 | A pattern with no rule gets one `svirt_image_t` rule | `focused-test` | `tests/scripts/test_selinux_label.py::test_labels_the_directory` |
 | Only one `semanage` call is issued — no migrate-then-add probe | `focused-test` | `…::test_labels_the_directory` asserts the call log by list equality |
-| A pattern carrying a stale `virt_image_t` rule is rewritten by that same call, not duplicated | design-time source read, recorded | not observable through the stubs: `seobject.FcontextRecords.add()` detects an existing rule and delegates to the modify path, exiting 0. Read on both target families — policycoreutils-python-utils 3.11 (Fedora 44) and 3.10 (Rocky 10.2), 2026-09-11 — and cited in the helper's comment and ADR-0639. The live proof's step 3 observes it against real `semanage`. |
+| A pattern carrying a stale `virt_image_t` rule is rewritten by that same call, not duplicated | design-time source read, recorded | not observable through the stubs: `seobject.fcontextRecords.add()` detects an existing rule and delegates to the modify path, exiting 0. Read on both target families — policycoreutils-python-utils 3.11 (Fedora 44) and 3.10 (Rocky 10.2), 2026-09-11 — and cited in the helper's comment and ADR-0639. The live proof's step 3 observes it against real `semanage`. |
 | The helper no-ops off an enforcing host | `focused-test` | `…::test_noop_when_not_enforcing` |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` |
 | A failing `semanage` or `restorecon` aborts rather than reporting success | `focused-test` | `…::test_aborts_when_semanage_fails`, `…::test_aborts_when_restorecon_fails` |

@@ -7,7 +7,7 @@ its argv to one shared log file, which is the whole assertion surface; the sudo 
 transparent (``exec "$@"``) so the log records exactly what the helper passed to semanage and
 restorecon.
 
-The helper issues a single ``semanage fcontext -a``, because ``seobject.FcontextRecords.add()``
+The helper issues a single ``semanage fcontext -a``, because ``seobject.fcontextRecords.add()``
 rewrites an existing rule rather than failing on it (verified against the installed
 implementation on both target families). These stubs therefore do not model an "already defined"
 failure, since the real tool has none; ``semanage_status`` and ``restorecon_status`` exist only
@@ -95,7 +95,7 @@ def test_labels_the_directory(tmp_path: Path) -> None:
     """Exactly one -a call carrying the new type and the recursive pattern, then restorecon.
 
     List equality is the assertion, so a re-introduced ``-m`` probe turns this red: the
-    migrate-then-add split is dead weight, because ``seobject.FcontextRecords.add()`` prints
+    migrate-then-add split is dead weight, because ``seobject.fcontextRecords.add()`` prints
     "already defined, modifying instead" and delegates to the modify path when the pattern is
     already in the base or local store. That rewrite behaviour itself is not observable through
     these stubs — its evidence is the installed implementation, cited in the helper's comment.

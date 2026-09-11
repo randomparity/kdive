@@ -75,8 +75,13 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
 - Provisioning is expected to succeed on an SELinux-enforcing RedHat-family host with sVirt
   confinement intact. The end-to-end proof on Fedora 44 and Rocky 10.2 is a completion criterion
   of #2424 and is recorded in the implementing PR, not here.
-- Confinement is unchanged in strength: the domain is still `svirt_t` with per-domain MCS
-  categories. What changed is the object label, not the subject's confinement.
+- The **subject's** confinement is unchanged: the domain is still `svirt_t` with per-domain MCS
+  categories, and `security_driver` is untouched. The **object** side is deliberately widened —
+  that is the fix. Two consequences follow, and neither is hidden by the sentence above: any
+  `svirt_t` domain an operator points at a kdive image directory may now write and map those
+  files where `virt_image_t` allowed only read, and that new at-rest posture applies under the
+  default `qemu:///system` deployment as well as the session one, because it is the label the
+  files carry when no domain is running. Both are accepted in the design's failure model.
 - Under the session daemon the images are not relabeled per boot, so all kdive images share
   `svirt_image_t:s0`. MCS does not isolate one kdive domain's images from another's there — it
   never did, since the relabel that would provide it was not happening. Isolation between kdive
@@ -86,7 +91,7 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   and `/var/lib/kdive/install(/.*)?`, and `build-image.sh` owns the nested
   `/var/lib/kdive/rootfs/local(/.*)?`. A host installed before this record carries the old type on
   whichever of those it already has, so each rule has to be rewritten rather than skipped. One
-  `semanage fcontext -a` does that on its own: `seobject.FcontextRecords.add()` checks the base and
+  `semanage fcontext -a` does that on its own: `seobject.fcontextRecords.add()` checks the base and
   local stores, prints `already defined, modifying instead`, and delegates to the modify path,
   exiting 0 whether or not the pattern was present (verified against the installed implementation
   on both target families — policycoreutils-python-utils 3.11 on Fedora 44, 3.10 on Rocky 10.2). No
