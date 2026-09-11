@@ -39,6 +39,10 @@ _HOST_ARCH_READ_ALLOWLIST = frozenset(
         "kdive/diagnostics/contributions/guest_arch_accel.py",
         # cross-arch gdb doctor probe (ADR-0347): is a multiarch gdb present for foreign guests?
         "kdive/diagnostics/contributions/multiarch_gdb.py",
+        # pseries-fadump doctor probe (ADR-0349): the host arch decides only whether the RedHat
+        # off-PATH /usr/libexec/qemu-kvm is this host's ppc64 emulator (ADR-0637). Emulator
+        # selection, never guest-facing behavior — a foreign-arch host never takes the fallback.
+        "kdive/diagnostics/contributions/pseries_fadump.py",
         # the gdb-engine's cross-arch binary selection (ADR-0347): guest arch comes from the
         # staged vmlinux ELF; the host arch only picks gdb vs gdb-multiarch.
         "kdive/providers/shared/debug_common/gdbmi/core/engine.py",
