@@ -152,18 +152,30 @@ else
   sudo dnf install -y "${packages[@]}"
 fi
 
-# 2b. Start the libvirt daemons (RedHat family only). Installing the packages leaves the modular
-#     socket units *enabled but not started*, so a host that has not rebooted since the install
-#     has no libvirt listening: `virsh -c qemu:///system` fails and the `default` network stays
-#     inactive, which is exactly where the preflight and up.sh stop. Debian/Ubuntu need nothing
-#     here — libvirt-daemon-system's postinst starts libvirtd.socket itself, and that path is
-#     already proven, so leave it alone. The unit list mirrors libvirt_stack_modular_sockets in
+# 2b. Start the daemons (RedHat family only). The RedHat packages leave their units where a
+#     freshly installed host has nothing listening: the modular libvirt sockets are enabled but
+#     not started, and moby-engine ships docker.service outright disabled. Both surface late and
+#     confusingly — `virsh -c qemu:///system` fails with an inactive `default` network, and the
+#     compose backends cannot reach a daemon — so start them here. Debian/Ubuntu need nothing:
+#     libvirt-daemon-system and docker.io both start their units from postinst, and that path is
+#     already proven, so leave it alone.
+#
+#     The libvirt unit list mirrors libvirt_stack_modular_sockets in
 #     deploy/ansible/roles/libvirt_stack; starting virtnetworkd is what brings `default` up.
 if [[ "${distro_family}" == "redhat" ]]; then
   step "modular libvirt sockets"
   sudo systemctl enable --now \
     virtqemud.socket virtnetworkd.socket virtstoraged.socket \
     virtnodedevd.socket virtsecretd.socket virtproxyd.socket
+
+  # Whichever engine is installed: moby-engine on Fedora, or docker-ce where an EL operator
+  # satisfied step 1b with Docker's own repo. An EL host that chose podman instead has no
+  # docker.service, and must not fail here — it runs its own API socket.
+  if systemctl list-unit-files docker.service >/dev/null 2>&1 &&
+    [[ -n "$(systemctl list-unit-files --no-legend docker.service 2>/dev/null)" ]]; then
+    step "container engine"
+    sudo systemctl enable --now docker.service
+  fi
 fi
 
 # 3. Group membership. Takes effect on the next login shell, which is why the script ends with
