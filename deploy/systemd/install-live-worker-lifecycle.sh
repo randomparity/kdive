@@ -32,8 +32,25 @@ _fixture_files=(
 )
 
 _link_system_guestfs_binding() (
-  local venv_python="$1" system_site venv_site source
+  local venv_python="$1" system_site venv_site source system_minor venv_minor
   local -a native_modules sources
+  # The binding is a C extension built for the system interpreter, so it is importable from the
+  # venv only when the two minor versions match. Ubuntu 26.04 and Fedora 44 both ship the
+  # project's 3.14 as /usr/bin/python3 and share it. Enterprise Linux ships 3.12 there and
+  # packages 3.14 separately, so its python3-libguestfs can never load in the worker's 3.14 venv
+  # — linking it anyway fails with "No module named 'libguestfsmod'" and used to abort host
+  # preparation entirely. Skip on a mismatch and say so: it costs only local kdump capture
+  # (ADR-0203), which is exactly how examples/local-libvirt/install-host.sh reports the same
+  # condition. A mismatch is a property of the host's packaging, not a broken install; where the
+  # versions DO match, every failure below stays fatal.
+  system_minor="$(/usr/bin/python3 -c 'import sys; print(sys.version_info[1])')"
+  venv_minor="$("$venv_python" -c 'import sys; print(sys.version_info[1])')"
+  if [[ $system_minor != "$venv_minor" ]]; then
+    echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}; the distro" \
+      "guestfs binding cannot be shared. Local kdump capture is unavailable on this host;" \
+      "every other capture method and the whole build/boot/debug path are unaffected." >&2
+    return 0
+  fi
   system_site="$(
     /usr/bin/python3 -c \
       'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)'
@@ -647,9 +664,17 @@ fi
 # supplies the `drgn` every debug-plane operation needs; `--no-dev` keeps ruff/ty/pytest out
 # of the runtime venv; `--no-editable` installs the package rather than linking back to the
 # checkout (kdive#2399, deviation 8 of the #2383 proof record).
+# `--python-preference only-system` rather than a hard-coded `--python /usr/bin/python3`:
+# that path is the project's Python on Ubuntu 26.04 and Fedora 44, but Enterprise Linux ships
+# 3.12 there and packages the project's interpreter alongside it as /usr/bin/python3.14, so the
+# hard-coded path failed the whole install with "requested interpreter resolved to Python
+# 3.12.14, which is incompatible with the project's Python requirement". Letting uv discover a
+# system interpreter keeps `UV_PYTHON_DOWNLOADS=never` hermetic while naming neither a path nor
+# a version here — the requirement stays in pyproject.toml's `requires-python`, which is what
+# uv matches against.
 UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv UV_PYTHON_DOWNLOADS=never \
   uv sync --locked --no-editable --no-dev --group live \
-  --project /opt/kdive --python /usr/bin/python3
+  --project /opt/kdive --python-preference only-system
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
 # The readiness attestation rejects any replaceable ancestor, independent of the invoking umask.
@@ -696,7 +721,15 @@ _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_d
 libvirt_tuple_action="$_libvirt_tuple_action"
 _restore_libvirt_runtime
 if [[ $libvirt_tuple_action == start ]]; then
-  runuser -u "$operator" -- env XDG_RUNTIME_DIR=/run/kdive/live-libvirt \
+  # Launch with an explicit core-file limit rather than whatever the escalation path left. The
+  # daemon raises RLIMIT_CORE on the QEMU processes it starts, so it cannot start a domain when
+  # its own hard limit is lower than the value it asks for — it fails with "cannot limit core
+  # file size of process N to ...: Operation not permitted", which reads like a QEMU fault
+  # rather than an inherited limit. Classic sudo zeroes RLIMIT_CORE, so every RedHat-family host
+  # reaches this line with a 0 hard limit; Ubuntu 26.04's sudo-rs does not, which is why the
+  # Debian path never hit it. We are root here, so raising the hard limit is permitted.
+  prlimit --core=unlimited -- runuser -u "$operator" -- \
+    env XDG_RUNTIME_DIR=/run/kdive/live-libvirt \
     "$_libvirt_executable" --daemon --config "/etc/kdive/$_libvirt_config" \
     --pid-file "$libvirt_pid_path"
   _lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \

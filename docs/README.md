@@ -26,8 +26,8 @@ The [agent workflow index](guide/agent-index.md) and toolset guides are also ser
 
 Start with [installation and run modes](operating/install.md), then choose a provider:
 
-- [Local-libvirt setup](../examples/local-libvirt/README.md): run KDIVE
-  as host processes on a Linux KVM/libvirt host.
+- [Local-libvirt setup](operating/providers/local-libvirt.md): run KDIVE as host
+  processes on a Linux KVM/libvirt host (Debian/Ubuntu and the RedHat family).
 - [Remote-libvirt setup](operating/providers/remote-libvirt.md): prepare
   a separate libvirt host and connect it to the control plane.
 
