@@ -40,10 +40,6 @@ def test_live_worker_unit_pins_retained_slot_contract() -> None:
     expected = (
         "User=kdive-worker-%i",
         "SupplementaryGroups=kdive-live-libvirt",
-        # The slot accounts have no home, so libguestfs's libvirt backend cannot create its
-        # user cache directory. Pinned rather than inherited: it is the Debian default and not
-        # the Fedora/RHEL one, and the first provision fails without it.
-        "Environment=LIBGUESTFS_BACKEND=direct",  # pragma: allowlist secret — a backend name
         "EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env",
         "LoadCredential=worker-incarnation:"
         "/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential",

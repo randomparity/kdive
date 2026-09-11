@@ -7,9 +7,6 @@ Wants=network-online.target
 Type=simple
 User=kdive-worker-%i
 SupplementaryGroups=kdive-live-libvirt
-# Pinned, not inherited: the slot accounts have no home, and libguestfs's libvirt backend
-# (the Fedora/RHEL default, not the Debian one) needs $HOME/.cache/libvirt to launch.
-Environment=LIBGUESTFS_BACKEND=direct
 EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env
 LoadCredential=worker-incarnation:/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential
 ExecStart=/usr/local/libexec/kdive-live-worker-gate %i

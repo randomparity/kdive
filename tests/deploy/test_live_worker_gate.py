@@ -207,6 +207,9 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
     assert captured["path"] == str(python)
     assert captured["arguments"] == [str(python), "-m", "kdive", "worker"]
     assert captured["environment"] == {
+        # Set by the gate, never passed through: a slot account has no home for libguestfs's
+        # libvirt backend to cache in, and that backend is the Fedora/RHEL default.
+        "LIBGUESTFS_BACKEND": "direct",
         "AWS_ACCESS_KEY_ID": env["AWS_ACCESS_KEY_ID"],
         "AWS_SECRET_ACCESS_KEY": env["AWS_SECRET_ACCESS_KEY"],
         "CREDENTIALS_DIRECTORY": env["CREDENTIALS_DIRECTORY"],

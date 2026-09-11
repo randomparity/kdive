@@ -138,6 +138,16 @@ def _wait_for_release(slot, release, generation, invocation, deadline):
 
 def _worker_environment(incarnation, credentials):
     worker = {name: os.environ[name] for name in _WORKER_ENV_NAMES if name in os.environ}
+    # Set, not passed through: the slot accounts have no home directory, and libguestfs's
+    # libvirt backend launches by connecting to qemu:///session and creating
+    # $HOME/.cache/libvirt. That fails as "Cannot create user runtime directory
+    # '/nonexistent/.cache/libvirt': Permission denied" and surfaces as an
+    # infrastructure_failure on the first provision. Debian/Ubuntu ship libguestfs with the
+    # direct backend as its default and never reach that path; Fedora and RHEL default to the
+    # libvirt backend. Pinning here keeps it out of _WORKER_ENV_NAMES: it is an invariant of
+    # how a slot worker must run, not an operator knob. deploy/ansible/playbooks/image.yml
+    # pins the same value for the same reason.
+    worker["LIBGUESTFS_BACKEND"] = "direct"
     worker["KDIVE_WORKER_INCARNATION_KIND"] = "local"
     worker["KDIVE_WORKER_INCARNATION_ID"] = incarnation
     worker["CREDENTIALS_DIRECTORY"] = str(credentials)
