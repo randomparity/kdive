@@ -116,7 +116,7 @@ if [[ "${distro_family}" == "debian" ]]; then
   )
 else
   packages=(
-    pkgconf-pkg-config libvirt-devel python3-devel
+    pkgconf-pkg-config libvirt-devel
     libvirt libvirt-client qemu-img "${qemu_package}"
     guestfs-tools python3-libguestfs passt e2fsprogs elfutils elfutils-debuginfod-client
     gcc make flex bison bc openssl-devel elfutils-libelf-devel rsync xz git curl ca-certificates
@@ -124,6 +124,15 @@ else
   )
   # Fedora packages the engine and the compose v2 binary; EL reached step 1b instead.
   ((is_fedora)) && packages+=(moby-engine docker-compose)
+  # The project's interpreter. Fedora 44's python3 IS 3.14, so its headers are python3-devel and
+  # there is no python3.14 package to ask for. Enterprise Linux ships 3.12 as python3 and
+  # packages 3.14 alongside it, which the worker venv needs — without it the lifecycle contract
+  # install fails on the interpreter requirement.
+  if ((is_fedora)); then
+    packages+=(python3-devel)
+  else
+    packages+=(python3.14 python3.14-devel)
+  fi
 fi
 
 if [[ "${distro_family}" == "redhat" ]] && ((!is_fedora)); then

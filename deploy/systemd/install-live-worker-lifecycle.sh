@@ -647,9 +647,17 @@ fi
 # supplies the `drgn` every debug-plane operation needs; `--no-dev` keeps ruff/ty/pytest out
 # of the runtime venv; `--no-editable` installs the package rather than linking back to the
 # checkout (kdive#2399, deviation 8 of the #2383 proof record).
+# `--python-preference only-system` rather than a hard-coded `--python /usr/bin/python3`:
+# that path is the project's Python on Ubuntu 26.04 and Fedora 44, but Enterprise Linux ships
+# 3.12 there and packages the project's interpreter alongside it as /usr/bin/python3.14, so the
+# hard-coded path failed the whole install with "requested interpreter resolved to Python
+# 3.12.14, which is incompatible with the project's Python requirement". Letting uv discover a
+# system interpreter keeps `UV_PYTHON_DOWNLOADS=never` hermetic while naming neither a path nor
+# a version here — the requirement stays in pyproject.toml's `requires-python`, which is what
+# uv matches against.
 UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv UV_PYTHON_DOWNLOADS=never \
   uv sync --locked --no-editable --no-dev --group live \
-  --project /opt/kdive --python /usr/bin/python3
+  --project /opt/kdive --python-preference only-system
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
 # The readiness attestation rejects any replaceable ancestor, independent of the invoking umask.

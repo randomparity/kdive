@@ -917,7 +917,9 @@ def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
     assert "--group live" in source
     assert "--no-editable" in source
     assert "UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv" in source
-    assert "--project /opt/kdive --python /usr/bin/python3" in source
+    # Discovery, not a pinned path: Enterprise Linux keeps 3.12 at /usr/bin/python3 and
+    # packages the project's interpreter beside it, so a hard-coded path fails there.
+    assert "--project /opt/kdive --python-preference only-system" in source
 
 
 def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> None:
