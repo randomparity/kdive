@@ -56,7 +56,7 @@ help-text corrections. Task 3 changes no repository file.
 |---|---|---|
 | `examples/local-libvirt/selinux-label.sh` | create | the one labeling function, sourceable for tests |
 | `examples/local-libvirt/install-host.sh` | modify | sources the helper; labels rootfs and install staging; two comment corrections |
-| `examples/local-libvirt/build-image.sh` | modify | sources the helper; `label_for_qemu` calls it; header comment correction |
+| `examples/local-libvirt/build-image.sh` | modify | sources the helper; `label_for_qemu` deleted in favour of a direct call; header comment correction |
 | `tests/scripts/test_selinux_label.py` | create | drives the helper with stubbed `getenforce`/`semanage`/`restorecon` |
 | `tests/providers/local_libvirt/test_install.py` | modify | one assertion string, tracking the `install.py` remediation edit |
 | `examples/local-libvirt/README.md` | modify | one table cell |
@@ -175,14 +175,13 @@ kdive_label_svirt_image /var/lib/kdive/install
 source "${example_dir}/selinux-label.sh"
 ```
 
-   and reduce `label_for_qemu` (`build-image.sh:44-55`) to:
+   and **delete** `label_for_qemu` (`build-image.sh:44-55`), calling the helper directly at its
+   one call site. A wrapper that only forwards is a layer with nothing in it:
 
 ```bash
 # Label the rootfs directory on SELinux-enforcing hosts only (Fedora/EL). A qcow2 published from
 # a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0639).
-label_for_qemu() {
-  kdive_label_svirt_image "${rootfs_dir}"
-}
+kdive_label_svirt_image "${rootfs_dir}"
 ```
 
 5. Correct the two remaining `virt_image_t` comment literals in these scripts, which describe the

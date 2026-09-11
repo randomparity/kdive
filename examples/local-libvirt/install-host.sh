@@ -267,14 +267,13 @@ unset witness_dsn witness_password
 step "/var/lib/kdive/rootfs/local"
 sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/rootfs/local
 
-# 7b. SELinux labels for every directory a confined domain opens. Provisioning writes each
-#     System's overlay under rootfs/ and direct-kernel boot maps the baseline kernel/initrd from
-#     there; the install plane points a live domain's <os> at kernel/initrd under install/.
-#     svirt_t can do neither against virt_image_t (ADR-0639). build-image.sh owns the nested
-#     rootfs/local rule and migrates it itself; the base images under it are read-only backing
-#     files, which svirt_t may read under either label. kdive_label_svirt_image no-ops off an
-#     enforcing host on its own; the banner is gated the same way so a Debian/Ubuntu run does not
-#     announce a step that does nothing.
+# 7b. SELinux labels for every directory a confined domain opens: provisioning writes each
+#     System's overlay and maps its baseline kernel/initrd under rootfs/, and the install plane
+#     points a live domain's <os> at kernel/initrd under install/. svirt_t can do neither against
+#     virt_image_t (ADR-0639). build-image.sh owns the nested rootfs/local rule; the base images
+#     under it are read-only backing files, which svirt_t may read under either label.
+#     The call no-ops off an enforcing host; the banner repeats that gate so a Debian/Ubuntu run
+#     does not announce a step that does nothing.
 if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
   step "SELinux svirt_image_t on the kdive image directories"
 fi

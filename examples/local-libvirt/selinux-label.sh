@@ -28,14 +28,10 @@ kdive_label_svirt_image() {
     return 0
   fi
 
-  # -a both adds a missing rule and rewrites an existing one: seobject.fcontextRecords.add()
-  # checks the base and local stores first and prints "already defined, modifying instead" before
-  # delegating to the modify path, exiting 0 either way. So one call converges a fresh host, a
-  # host carrying kdive's pre-ADR-0639 virt_image_t rule, and a host whose rule someone else
-  # wrote — no `semanage fcontext -l` parsing and no migrate-then-add split. Verified against the
-  # installed implementation on both target families: policycoreutils-python-utils 3.11 (Fedora
-  # 44) and 3.10 (Rocky 10.2) carry that branch identically. A non-zero exit therefore means the
-  # policy store itself refused the write, which is not something to continue past.
+  # -a is sufficient on its own: seobject.fcontextRecords.add() rewrites an existing rule rather
+  # than failing on it, so one call converges a fresh host and one carrying the old virt_image_t
+  # rule alike (verified on policycoreutils-python-utils 3.11 and 3.10; ADR-0639). A non-zero exit
+  # therefore means the policy store refused the write, which is not safe to continue past.
   sudo semanage fcontext -a -t svirt_image_t "${pattern}" || return 1
   sudo restorecon -R "${directory}"
 }

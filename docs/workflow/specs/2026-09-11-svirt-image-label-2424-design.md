@@ -23,7 +23,8 @@ it — see ADR-0639's rejected alternatives and the re-frozen charter on the iss
    `/var/lib/kdive/install`. It does not create the latter — step 6 already runs
    `deploy/systemd/install-live-worker-lifecycle.sh`, which creates it — and it does not touch the
    nested `/var/lib/kdive/rootfs/local` rule, which `build-image.sh` owns and migrates itself.
-3. `examples/local-libvirt/build-image.sh` calls it in place of its own `label_for_qemu` body.
+3. `examples/local-libvirt/build-image.sh` calls it directly, deleting its own `label_for_qemu`
+   wrapper rather than hollowing it out.
 4. Operator-facing text that names `virt_image_t` for a path this change relabels is corrected:
    `examples/local-libvirt/README.md`, `docs/operating/providers/local-libvirt.md` (including its
    `## Known limitation — SELinux and per-System overlays` section, which this change resolves),
