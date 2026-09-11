@@ -226,9 +226,11 @@ checks all apply identically to the x86_64 carrier. The fault arms (`barrier_soc
 restart-recovery, takeover, journal-loss, stale-write) are not yet implemented for the ppc64le
 carrier; they remain separate scope.
 
-Bring up the stack on the POWER host following the [POWER host bring-up runbook](power-host-bringup.md)
-before running this carrier. The [OIDC workaround](power-host-bringup.md#5-the-oidc-issuer-on-ppc64le-no-upstream-image)
-and the root-process requirement for `qemu:///system` apply.
+Bring up the stack on the POWER host following the
+[POWER host integration guide](../../development/cross-platform.md#native-power-host-integration)
+and the [live-stack runbook](live-stack.md) before running this carrier.
+The mock-OIDC image selection note in the cross-platform guide covers the POWER OIDC image
+requirement; `qemu:///system` and root-process constraints also apply.
 
 
 ### Installed remote authority proof prerequisite
