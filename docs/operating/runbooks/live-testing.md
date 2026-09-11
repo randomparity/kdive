@@ -345,17 +345,24 @@ requirements. Image preparation belongs to [image lifecycle](image-lifecycle.md)
 
 With these fixtures and the live-stack environment configured, run `just test-live-tcg`.
 The marker name does not force emulation; the expected accelerator is resolved from the host.
-Report which drivers passed or skipped. The fadump driver skips non-ppc64le hosts; for its
-intended native proof, also confirm KVM is selected and the fadump prerequisites are met.
-A skip is not capture evidence. On an emulated ppc64le host the driver runs rather than skips,
-and running it is still not native evidence: the
+Report which drivers passed or skipped. The fadump driver skips non-ppc64le hosts and
+non-KVM accelerators (#2398); for a native proof, confirm KVM is selected and the fadump
+prerequisites are met. A skip is not capture evidence.
+
+On a native POWER host with `/dev/kvm`, the fadump and kdump capture tests both complete
+in about 5 minutes. The
+[2026-09-11 record](../../design/2026-09-11-native-power-fadump-kdump-proof-2383.md)
+establishes the full crash→capture cycle on POWER9 under KVM-HV.
+
+On an emulated ppc64le host the driver runs rather than skips. The emulated path does not
+produce a capture verdict: the
 [2026-09-09 record](../../design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md)
 reached fadump registration under TCG-inside-TCG and then lost the guest to a systemd freeze
 before the crash step, after 2 h 51 m. Budget hours per driver there, raise
 `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, and read a `drain_timeout` on `boot` as a guest that
 never signalled readiness rather than as a capture result. The
 [platform support page](../platform-support.md#crash-capture-methods-by-arch) records the dated
-capture proofs and their limits.
+capture proofs.
 
 ## The shared harness
 
