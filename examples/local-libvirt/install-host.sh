@@ -15,6 +15,8 @@ set -euo pipefail
 
 example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
+# shellcheck source=examples/local-libvirt/selinux-label.sh disable=SC1091
+source "${example_dir}/selinux-label.sh"
 
 step() { printf '\n=== %s ===\n' "$1"; }
 
@@ -103,7 +105,7 @@ sudo -n true 2>/dev/null || sudo -v
 #    `build-essential` has no RedHat counterpart (gcc Requires glibc-devel there, and make and
 #    pkg-config are listed on their own), the container engine is Fedora-only (step 1b), and
 #    `policycoreutils-python-utils` is RedHat-only — build-image.sh needs `semanage` to label
-#    the rootfs directory virt_image_t on an SELinux-enforcing host.
+#    the rootfs directory svirt_image_t on an SELinux-enforcing host.
 if [[ "${distro_family}" == "debian" ]]; then
   # `qemu-kvm` is deliberately absent: the arch emulator package provides KVM and the
   # transitional name no longer exists on Ubuntu 26.04.
@@ -265,24 +267,15 @@ unset witness_dsn witness_password
 step "/var/lib/kdive/rootfs/local"
 sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/rootfs/local
 
-# 7b. SELinux label for the whole rootfs tree, not just the base images under local/.
-#     Provisioning writes each System's overlay to /var/lib/kdive/rootfs/<system-id>/, and that
-#     parent inherits var_lib_t, which QEMU (svirt_t) cannot open — the domain then dies with
-#     "process exited while connecting to monitor: ... Permission denied" and the provision job
-#     reports provisioning_failure. build-image.sh labels only the base-image directory it
-#     publishes to, so the overlay parent has to be labeled here, where it is created.
-if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
-  step "SELinux virt_image_t on /var/lib/kdive/rootfs"
-  if command -v semanage >/dev/null 2>&1; then
-    if ! sudo semanage fcontext -l | grep -q '^/var/lib/kdive/rootfs(/\.\*)? '; then
-      sudo semanage fcontext -a -t virt_image_t '/var/lib/kdive/rootfs(/.*)?'
-    fi
-    sudo restorecon -R /var/lib/kdive/rootfs
-  else
-    echo "SELinux is enforcing but semanage is missing; install policycoreutils-python-utils" >&2
-    echo "and label /var/lib/kdive/rootfs virt_image_t before provisioning." >&2
-  fi
-fi
+# 7b. SELinux labels for every directory a confined domain opens. Provisioning writes each
+#     System's overlay under rootfs/ and direct-kernel boot maps the baseline kernel/initrd from
+#     there; the install plane points a live domain's <os> at kernel/initrd under install/.
+#     svirt_t can do neither against virt_image_t (ADR-0639). build-image.sh owns the nested
+#     rootfs/local rule and migrates it itself; the base images under it are read-only backing
+#     files, which svirt_t may read under either label.
+step "SELinux svirt_image_t on the kdive image directories"
+kdive_label_svirt_image /var/lib/kdive/rootfs
+kdive_label_svirt_image /var/lib/kdive/install
 
 # 8. The fixed workers run in their own accounts and execute this checkout's source (through
 #    scripts/live-stack/worker-from-checkout) and read the kernel tree, so every directory on

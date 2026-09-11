@@ -6,7 +6,7 @@
 #
 # Per image: `python -m kdive build-fs --image NAME` publishes
 # /var/lib/kdive/rootfs/local/NAME.qcow2 (+ its provenance sidecar); on an SELinux-enforcing
-# host the rootfs directory is labeled virt_image_t so the qemu user can read it; a
+# host the rootfs directory is labeled svirt_image_t so the confined domain can use it; a
 # `staged-path` [[image]] block is appended to systems.toml (skipped when one already declares
 # NAME) and `reconcile-systems` loads it into the catalog. Needs the backends up (up.sh) for
 # the reconcile step. The catalog names come from fixtures/local-libvirt/rootfs_catalog.toml.
@@ -16,6 +16,8 @@ example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 # shellcheck source=examples/local-libvirt/env.sh disable=SC1091
 source "${example_dir}/env.sh"
+# shellcheck source=examples/local-libvirt/selinux-label.sh disable=SC1091
+source "${example_dir}/selinux-label.sh"
 
 if (($# == 0)); then
   echo "usage: build-image.sh CATALOG_IMAGE [CATALOG_IMAGE...]" >&2
@@ -39,20 +41,10 @@ reconcile() {
     "${KDIVE_PYTHON}" -m kdive reconcile-systems "$@"
 }
 
-# Label the rootfs directory for qemu:///system once, on SELinux-enforcing hosts only (Fedora/EL).
-# A qcow2 published from a $HOME workspace can carry data_home_t, which the qemu user cannot read.
+# Label the rootfs directory on SELinux-enforcing hosts only (Fedora/EL). A qcow2 published from
+# a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0639).
 label_for_qemu() {
-  command -v getenforce >/dev/null 2>&1 || return 0
-  [[ "$(getenforce)" == "Enforcing" ]] || return 0
-  if ! command -v semanage >/dev/null 2>&1; then
-    echo "SELinux is enforcing but semanage is missing; install policycoreutils-python-utils and" >&2
-    echo "label ${rootfs_dir} virt_image_t before provisioning (walkthrough Step 6)." >&2
-    return 0
-  fi
-  if ! sudo semanage fcontext -l | grep -q "^${rootfs_dir}(/\.\*)? "; then
-    sudo semanage fcontext -a -t virt_image_t "${rootfs_dir}(/.*)?"
-  fi
-  sudo restorecon -R "${rootfs_dir}"
+  kdive_label_svirt_image "${rootfs_dir}"
 }
 
 mkdir -p "${workspace}" "$(dirname "${systems_toml}")"
