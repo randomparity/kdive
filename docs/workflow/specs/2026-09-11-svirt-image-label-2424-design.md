@@ -95,14 +95,15 @@ image directories with non-kdive workloads, are not named deployments.
   `svirt_home_t` grants `write` but **not `map`**, so a direct-kernel customization boot cannot map
   its `kernel`/`initrd` under either. This is a second instance of the #2424 denial class on the
   build path. It is out of scope for this change — the charter's surface is host preparation for
-  the provisioning path — and is reported as a follow-up. Its consequence here is procedural: the
+  the provisioning path — and is tracked as
+  [#2428](https://github.com/randomparity/kdive/issues/2428). Its consequence here is procedural: the
   live proof stages a prebuilt image rather than building on the target, so a pre-existing build
   failure cannot masquerade as a failure of this change.
 - The `cannot limit core file size` failure observed on `kdive-build-*` domains during design is an
   `RLIMIT_CORE` failure and unrelated to labeling. A related condition is already owned by
   `docs/operating/providers/local-libvirt.md:87-91`; whether this is that condition or a distinct
-  one is not established. Owner: reported as a follow-up candidate in the implementing PR, not
-  fixed here. It is a risk to the live proof — if it recurs on a target, that arm cannot complete
+  one is not established. Owner:
+  [#2429](https://github.com/randomparity/kdive/issues/2429), not fixed here. It is a risk to the live proof — if it recurs on a target, that arm cannot complete
   there, and the PR body says so rather than reporting the criterion met.
 
 ### Threat model

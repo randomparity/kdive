@@ -445,8 +445,9 @@ applied. Two deferrals are carried, matching the spec's "Covered elsewhere":
   Measured on both targets 2026-09-11: `svirt_t` gets neither `write` nor `map` on `data_home_t`,
   and `svirt_home_t` grants `write` but not `map`, so the direct-kernel customization boot cannot
   map `kernel`/`initrd` from `$XDG_DATA_HOME/kdive/build/images` under the session daemon. Owner:
-  reported as a follow-up in the PR, its own issue — operator decision 2026-09-11, on the grounds
-  that it is a distinct path from the provisioning surface this charter covers. Its only effect on
+  [#2428](https://github.com/randomparity/kdive/issues/2428), filed 2026-09-11 under operator
+  authorization, on the grounds that it is a distinct path from the provisioning surface this
+  charter covers. Its only effect on
   this change is that Task 3 stages a prebuilt image instead of building on the target.
 
 - **`cannot limit core file size … Operation not permitted` on `kdive-build-*` domains.** Observed
@@ -454,7 +455,7 @@ applied. Two deferrals are carried, matching the spec's "Covered elsewhere":
   failure, and nothing here touches `RLIMIT_CORE`. A related condition is already owned by
   `docs/operating/providers/local-libvirt.md:87-91`, which records that classic sudo zeroes
   `RLIMIT_CORE` so the lifecycle installer raises it before launching the session daemon. Whether
-  the observed failure is that condition or a distinct one is **not** established. Owner: reported
-  as a follow-up candidate in the PR body, not fixed here. It is a risk to Task 3 — if it recurs on
+  the observed failure is that condition or a distinct one is **not** established. Owner:
+  [#2429](https://github.com/randomparity/kdive/issues/2429), not fixed here. It is a risk to Task 3 — if it recurs on
   a target, the live-proof arm cannot complete there, and Task 3's acceptance criteria require
   saying so rather than reporting the criterion met.

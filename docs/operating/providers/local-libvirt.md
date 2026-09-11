@@ -85,9 +85,11 @@ These are the points where the two families genuinely diverge, not just in packa
   shipped policy grants `svirt_t` neither write nor map on that path's default `data_home_t`, and
   write but not map on `svirt_home_t` (measured 2026-09-11), so a direct-kernel customization boot
   has no mappable path there. A build that fails with `Permission denied` on an enforcing host is
-  therefore a separate defect from the one ADR-0639 fixes, and is not resolved by re-running
-  `install-host.sh`. ADR-0639's own end-to-end proof staged a prebuilt image rather than building
-  on the target for this reason.
+  therefore a separate defect from the one ADR-0639 fixes ([#2428]), and is not resolved by
+  re-running `install-host.sh`. ADR-0639's own end-to-end proof staged a prebuilt image rather than
+  building on the target for this reason.
+
+[#2428]: https://github.com/randomparity/kdive/issues/2428
 - **libguestfs backend.** The worker pins `LIBGUESTFS_BACKEND=direct` in
   `deploy/systemd/system/kdive-live-worker@.service`. Debian/Ubuntu build libguestfs with that
   backend as its default; Fedora and RHEL default to the libvirt backend, which connects to
