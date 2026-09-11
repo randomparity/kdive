@@ -95,6 +95,7 @@ Task 2 consumes nothing from this task.
 | The helper no-ops when SELinux is not enforcing | `focused-test` | `…::test_noop_when_not_enforcing` — asserts no `semanage`/`restorecon` invocation was recorded |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` — asserts nothing was written and the exit status is 0 |
 | The three installer call sites | `task-test-not-applicable` | `tests/scripts/test_install_host_gates.py` stops the installer at its `sudo` preflight, far above these lines, and driving the rest needs a real enforcing host with root — the live proof in Task 3. The branching this task adds lives in the helper, which the four tests above cover. |
+| The two comment-literal corrections (step 5) | `task-test-not-applicable` | shell comments with no executable consumer. The acceptance criterion below is checked with `rg -n virt_image_t examples/local-libvirt/`, which is a grep over prose, not a contract a test can fail meaningfully. |
 
 ### Steps
 
@@ -254,6 +255,7 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 |---|---|---|
 | The generated config table matches the changed `Setting` help text | `focused-test` | `just config-docs-check` — red immediately after editing `core_settings.py` and before regenerating, green after; CI gates this recipe individually |
 | ADR-0639 carries a valid, non-Proposed status while `src/` cites it | `focused-test` | `just adr-status-check` — red while the record says `Proposed` and `install.py` cites ADR-0639, green once flipped to `Accepted` |
+| The staging-root remediation string names the new label | `focused-test` | `tests/providers/local_libvirt/test_install.py:1443`. Change the assertion to `assert "svirt_image_t" in remedy` **first** and run it red against the unmodified `install.py`, then edit `install.py:571`. Green via `uv run python -m pytest tests/providers/local_libvirt/test_install.py -q -k staging`. Order matters: `"virt_image_t"` is a substring of `"svirt_image_t"`, so the original assertion stays green after the source edit and cannot witness this contract. |
 | Prose corrections | `task-test-not-applicable` | documentation wording with no executable consumer; `just docs-links` and `just docs-paths` cover link and path integrity |
 
 ### Steps
@@ -279,9 +281,13 @@ in the PR that implements it, as `docs/adr/README.md` requires.
    tail from "on SELinux hosts give it the virt_image_t label" to "on SELinux hosts give it the
    svirt_image_t label (ADR-0639)". Update the one assertion that reads it,
    `tests/providers/local_libvirt/test_install.py:1443`, from `assert "virt_image_t" in remedy`
-   to `assert "svirt_image_t" in remedy`, and run
-   `uv run python -m pytest tests/providers/local_libvirt/test_install.py -q -k staging`
-   — expect it red between the two edits and green after.
+   to `assert "svirt_image_t" in remedy`.
+
+   **Do the assertion first, then the source.** `"virt_image_t"` is a substring of
+   `"svirt_image_t"`, so the original assertion passes against either string and would never go
+   red. With the assertion tightened and `install.py` untouched,
+   `uv run python -m pytest tests/providers/local_libvirt/test_install.py -q -k staging` is red;
+   after the `install.py` edit it is green.
 7. `deploy/ansible/roles/live_vm_host/tasks/main.yml:1929` — change the closing clause from
    "sVirt label (the SELinux virt_image_t equivalent RHEL required)." to "sVirt label. The
    SELinux equivalent RHEL requires is a static svirt_image_t label on the image directories
