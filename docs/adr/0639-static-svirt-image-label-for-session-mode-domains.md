@@ -2,11 +2,9 @@
 
 ## Status
 
-Proposed
+Accepted (2026-09-11)
 
 - **Issue:** #2424
-- Opens Proposed on the design commit and flips to Accepted in the commit that implements it,
-  per the ratification rule in `docs/adr/README.md`.
 
 ## Context
 

@@ -568,7 +568,7 @@ class LocalLibvirtInstaller:
         root_str = str(root)
         remedy = (
             f"pre-create {root_str} (or repoint {setting.name}) so it is writable "
-            "by the run user; on SELinux hosts give it the virt_image_t label"
+            "by the run user; on SELinux hosts give it the svirt_image_t label (ADR-0639)"
         )
         return CategorizedError(
             f"install {setting.name} root {root_str} is not writable by the run user",
