@@ -228,8 +228,13 @@ label_for_qemu() {
 
 - `kdive_label_svirt_image` exists in one file and is called twice by `install-host.sh` and once
   by `build-image.sh`; neither script contains a `semanage fcontext` invocation of its own.
-- No `virt_image_t` literal remains in `install-host.sh` or `build-image.sh`
-  (`rg -n virt_image_t examples/local-libvirt/` returns only `README.md`, which Task 2 corrects).
+- No `virt_image_t` **directive** remains in `install-host.sh` or `build-image.sh`: no `semanage`
+  argument, no remedy string, and no usage-header claim about the label a path carries. Explanatory
+  prose that names the old label to contrast it with the new one is expected and stays — the
+  helper's header and the step 7b comment, both specified verbatim by steps 1 and 3, do exactly
+  that. A plain `rg virt_image_t` cannot express this: `svirt_image_t` contains `virt_image_t`, so
+  every correct occurrence matches too. Use `rg -n --pcre2 '(?<!s)virt_image_t'` to see the bare
+  ones, then read them.
 - The four focused tests pass; `just lint-shell` is green.
 
 ---
