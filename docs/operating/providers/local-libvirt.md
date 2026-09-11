@@ -117,7 +117,8 @@ Could not open '/var/lib/kdive/rootfs/<system-id>-overlay.qcow2': Permission den
 the unprivileged session libvirt daemon cannot apply sVirt's per-domain relabeling, the RedHat
 analogue of the AppArmor `virt-aa-helper` path `deploy/ansible/roles/live_vm_host` relies on for
 Ubuntu. Confirmed by bisection on a Fedora 44 host: with `setenforce 0` the same provision reaches
-`ready` in 13 s. Tracked separately; it is a confinement-policy decision, not an install fix.
+`ready` in 13 s. Tracked in [#2424](https://github.com/randomparity/kdive/issues/2424); it is
+a confinement-policy decision, not an install fix.
 
 ## Preflight
 
