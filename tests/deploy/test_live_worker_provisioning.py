@@ -526,6 +526,10 @@ def test_existing_worker_provider_contract_is_preserved() -> None:
         "Type=simple\n"
         "User=kdive-worker-%i\n"
         "SupplementaryGroups=kdive-live-libvirt\n"
+        "# Pinned, not inherited: the slot accounts have no home, and libguestfs's libvirt "
+        "backend\n"
+        "# (the Fedora/RHEL default, not the Debian one) needs $HOME/.cache/libvirt to launch.\n"
+        "Environment=LIBGUESTFS_BACKEND=direct\n"  # pragma: allowlist secret — backend name
         "EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env\n"
         "LoadCredential=worker-incarnation:"
         "/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential\n"

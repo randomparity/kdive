@@ -76,6 +76,17 @@ These are the points where the two families genuinely diverge, not just in packa
 - **SELinux.** Fedora and Enterprise Linux run SELinux enforcing, so `build-image.sh` labels the
   rootfs directory `virt_image_t` for the qemu user. `install-host.sh` installs
   `policycoreutils-python-utils` for the `semanage` that needs.
+- **libguestfs backend.** The worker pins `LIBGUESTFS_BACKEND=direct` in
+  `deploy/systemd/system/kdive-live-worker@.service`. Debian/Ubuntu build libguestfs with that
+  backend as its default; Fedora and RHEL default to the libvirt backend, which connects to
+  `qemu:///session` and needs `$HOME/.cache/libvirt`. The fixed worker slot accounts have no home
+  directory, so on a RedHat-family host the unpinned default fails the first provision with
+  `Cannot create user runtime directory '/nonexistent/.cache/libvirt': Permission denied`,
+  reported as an `infrastructure_failure`.
+- **Core-file limit.** The lifecycle installer raises `RLIMIT_CORE` before launching the session
+  libvirt daemon. Classic sudo zeroes it, so every RedHat-family host would otherwise reach the
+  launch with a zero hard limit and fail every domain start with `cannot limit core file size of
+  process N`; Ubuntu 26.04's sudo-rs does not zero it.
 - **kdump capture on Enterprise Linux.** The libguestfs Python binding is a C extension built for
   the system Python, so it is importable from the project venv only when the two minor versions
   match. Ubuntu 26.04 and Fedora 44 both ship 3.14, the project Python; EL9 ships 3.9 and EL10
