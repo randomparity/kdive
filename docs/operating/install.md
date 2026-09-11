@@ -196,8 +196,9 @@ use. The preflight reports missing prerequisites:
 - Local provider: run `just check-local-libvirt`.
 - Remote provider: run `just check-remote-libvirt HOST USER URI`.
 
-See the [local setup](../../examples/local-libvirt/README.md) and
-[remote-libvirt](providers/remote-libvirt.md) for what each provider needs.
+See [local-libvirt](providers/local-libvirt.md) and
+[remote-libvirt](providers/remote-libvirt.md) for what each provider needs. The local page owns
+the supported host families and their per-family differences.
 
 ## Run modes
 

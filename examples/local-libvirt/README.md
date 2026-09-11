@@ -18,8 +18,10 @@ operation and diagnostics.
 
 ## Prerequisites
 
-On a fresh Debian/Ubuntu host, `install-host.sh` does all of the host preparation below (see
-[Fresh Debian/Ubuntu host](#fresh-debianubuntu-host)). Otherwise:
+On a fresh Debian/Ubuntu or RedHat-family host, `install-host.sh` does all of the host
+preparation below (see [Preparing a fresh host](#preparing-a-fresh-host)). The
+[local-libvirt provider page](../../docs/operating/providers/local-libvirt.md) owns which
+families are supported and how they differ. Otherwise:
 
 - A KVM host with `libvirt` and a running `libvirtd`/`virtqemud`, the `default` network
   active, and your user in the `libvirt` group.
@@ -54,7 +56,7 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 
 | File | Purpose |
 |------|---------|
-| `install-host.sh` | Fresh Debian/Ubuntu host preparation: apt packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, the fixed live-worker lifecycle contract (root), the guest-image directory, the venv libguestfs binding. Re-runnable. |
+| `install-host.sh` | Fresh Debian/Ubuntu or RedHat-family host preparation: host packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, the fixed live-worker lifecycle contract (root), the guest-image directory, the venv libguestfs binding. Re-runnable. |
 | `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, the published session `KDIVE_LIBVIRT_URI`, and an XDG log directory. Source it; don't run it. |
 | `up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/up.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
 | `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `virt_image_t` on SELinux hosts, append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
@@ -89,27 +91,34 @@ examples/local-libvirt/down.sh
 examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the bucket, and kdive domains
 ```
 
-## Fresh Debian/Ubuntu host
+## Preparing a fresh host
 
-`install-host.sh` prepares apt-based hosts (validated target: Ubuntu 26.04). What it does, and
-why, so you can audit or redo a step:
+`install-host.sh` prepares Debian/Ubuntu (apt) and RedHat-family (dnf) hosts; it refuses anything
+else with `exit 2` rather than installing a partial set. Validated targets: Ubuntu 26.04 and
+Fedora 44. What it does, and why, so you can audit or redo a step:
 
-- **Packages** — the operator set: libvirt + the arch's QEMU emulator (`qemu-system-x86` or
-  `qemu-system-ppc`; there is no `qemu-kvm` package on Ubuntu 26.04), libguestfs and its
-  Python binding, `passt`, Docker + compose, and the kernel build toolchain for the tree you
-  will build and upload. Installed through `scripts/apt-install.sh` (bounded retry).
-- **Groups** — `libvirt`, `kvm`, `docker` for the invoking user. They apply on the next login
-  shell, so the script ends by telling you to log out and back in rather than running the
-  preflight (which would report the missing group).
-- **Host kernels** — Ubuntu ships `/boot/vmlinuz-*` as `root:0600`; the libguestfs appliance
-  that `build-fs` and the kdump harvest use reads one of them. The script sets them to
-  `root:kvm 0640`, the same posture as the CI runner's Ansible role. A kernel upgrade lands a
-  new `0600` file: re-run the script afterwards.
-- **`uv sync --group live`** — the venv, plus `drgn` for the kdump capture path. Ubuntu 26.04's
-  system Python is 3.14, the same minor as the project's, so the script symlinks the distro
-  `python3-guestfs` binding into the venv and the preflight's `import guestfs, drgn` check
-  passes; on a host whose system Python differs it stays a `WARN` (kdump only) and
-  everything else works. Contributors who also want the dev tooling (shellcheck, prek)
+- **Packages** — the operator set: libvirt + this host's QEMU emulator, libguestfs and its
+  Python binding, `passt`, a container engine + compose, and the kernel build toolchain for the
+  tree you will build and upload. The two families name these differently and the emulator is
+  chosen differently on each (ADR-0637); the
+  [provider page](../../docs/operating/providers/local-libvirt.md#family-differences-that-matter)
+  lists every divergence. Debian/Ubuntu install through `scripts/apt-install.sh` (bounded retry);
+  the RedHat family uses `dnf` directly, and Enterprise Linux gets CodeReady Builder enabled
+  first for `libvirt-devel`.
+- **Groups** — `libvirt`, `kvm`, `docker` for the invoking user, skipping any the host does not
+  have (an Enterprise Linux host that satisfied the engine requirement with podman has no
+  `docker` group). They apply on the next login shell, so the script ends by telling you to log
+  out and back in rather than running the preflight (which would report the missing group).
+- **Host kernels** — the libguestfs appliance that `build-fs` and the kdump harvest use reads a
+  `/boot/vmlinuz-*`. Ubuntu ships those `root:0600`, so the script sets them to `root:kvm 0640`,
+  the same posture as the CI runner's Ansible role; a kernel upgrade lands a new `0600` file, so
+  re-run the script afterwards. Fedora already ships them `0755`, and the script leaves any
+  kernel a non-owner can already read alone rather than narrowing it.
+- **`uv sync --group live`** — the venv, plus `drgn` for the kdump capture path. Ubuntu 26.04
+  and Fedora 44 both ship system Python 3.14, the same minor as the project's, so the script
+  symlinks the distro libguestfs binding into the venv and the preflight's `import guestfs, drgn`
+  check passes. On a host whose system Python differs — EL9 is 3.9, EL10 is 3.12 — it stays a
+  `WARN` (kdump only) and everything else works. Contributors who also want the dev tooling (shellcheck, prek)
   run `./scripts/check-setup-deps.sh -y` separately.
 - **Lifecycle contract** — `deploy/systemd/install-live-worker-lifecycle.sh --operator $USER
   --source <checkout>` as root, with the witness-member DSN on its standard input (the fixed

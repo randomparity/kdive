@@ -21,7 +21,7 @@ runbooks.
 
 | Page | What it covers |
 |---|---|
-| [Local libvirt](../../examples/local-libvirt/README.md) | Host preparation, lifecycle setup, guest images, and client connection |
+| [Local libvirt](providers/local-libvirt.md) | Supported host families, host preparation, lifecycle setup, and guest images |
 | [Remote libvirt](providers/remote-libvirt.md) | Setup sequence, connection requirements, and CPU expectations |
 | [Build lane](external-build-upload.md) | The build lane: build the kernel locally and upload it (no operator-staged source tree or build host) |
 
