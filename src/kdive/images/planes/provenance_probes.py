@@ -16,6 +16,7 @@ from xml.etree.ElementTree import fromstring as _xml_fromstring  # noqa: S405  #
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.external_boot import Architecture, RootSource, RootSpecV1
+from kdive.providers.shared.build_timeouts import appliance_budget_s
 
 # The in-guest marker file a debug build writes ``makedumpfile --version`` into, read back into
 # ``provenance["makedumpfile_version"]`` (ADR-0253). Lives outside a family module so the build
@@ -28,6 +29,11 @@ MAKEDUMPFILE_MARKER_GUEST_PATH = "/usr/lib/kdive/makedumpfile-version"
 # share one path without a families->build cycle.
 DRGN_MARKER_GUEST_PATH = "/usr/lib/kdive/drgn-version"
 
+# Base budgets for one probe on a KVM host. Every probe below boots the same host-arch libguestfs
+# appliance the rootfs build tools boot, so each is scaled at its call site by
+# appliance_budget_s(): on a host without usable KVM that appliance kernel is emulated and the
+# boot alone costs minutes (#2397, #2414). Resolved per call rather than at import, so the answer
+# tracks the host as it is when the probe runs.
 _VIRT_INSPECTOR_TIMEOUT_S = 5 * 60
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
@@ -79,7 +85,7 @@ def inspect_package_versions(qcow2_path: Path) -> dict[str, str]:  # pragma: no 
     argv = ["virt-inspector", "--no-icon", "-a", str(qcow2_path)]
     stdout, _ = _run_bounded_inspector(
         argv,
-        timeout_s=_VIRT_INSPECTOR_TIMEOUT_S,
+        timeout_s=appliance_budget_s(_VIRT_INSPECTOR_TIMEOUT_S),
         max_output_bytes=PACKAGE_INSPECTION_MAX_OUTPUT_BYTES,
         stage="package-version-inspection",
         failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -238,7 +244,7 @@ def inspect_root_boot(
     """Inspect a qcow2 without guest execution and return its authoritative root value."""
     stdout, _ = _run_bounded_inspector(
         ["virt-inspector", "--no-icon", "-a", str(qcow2_path)],
-        timeout_s=_VIRT_INSPECTOR_TIMEOUT_S,
+        timeout_s=appliance_budget_s(_VIRT_INSPECTOR_TIMEOUT_S),
     )
     try:
         return _parse_root_boot(stdout, architecture, image_digest)
@@ -269,13 +275,14 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
         CategorizedError: ``MISSING_DEPENDENCY`` if ``guestfish`` is absent;
             ``INFRASTRUCTURE_FAILURE`` on timeout.
     """
+    budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", MAKEDUMPFILE_MARKER_GUEST_PATH]
     try:
         result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             capture_output=True,
             text=True,
-            timeout=_GUESTFISH_TIMEOUT_S,
+            timeout=budget_s,
             check=False,
         )
     except FileNotFoundError as exc:
@@ -288,7 +295,7 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
         raise CategorizedError(
             "guestfish exceeded its timeout reading the makedumpfile-version marker",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+            details={"timeout_s": budget_s},
         ) from exc
     if result.returncode != 0:
         return None
@@ -314,13 +321,14 @@ def probe_drgn_marker(qcow2_path: Path) -> str | None:  # pragma: no cover - liv
         CategorizedError: ``MISSING_DEPENDENCY`` if ``guestfish`` is absent;
             ``INFRASTRUCTURE_FAILURE`` on timeout.
     """
+    budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", DRGN_MARKER_GUEST_PATH]
     try:
         result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             capture_output=True,
             text=True,
-            timeout=_GUESTFISH_TIMEOUT_S,
+            timeout=budget_s,
             check=False,
         )
     except FileNotFoundError as exc:
@@ -333,7 +341,7 @@ def probe_drgn_marker(qcow2_path: Path) -> str | None:  # pragma: no cover - liv
         raise CategorizedError(
             "guestfish exceeded its timeout reading the drgn-version marker",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+            details={"timeout_s": budget_s},
         ) from exc
     if result.returncode != 0:
         return None
@@ -365,12 +373,13 @@ def probe_kernel_config(  # pragma: no cover - live_vm
             degrade to an omitted config, so a probe failure never fails a build.
     """
     guest_path = f"/boot/config-{version}"
+    budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
     try:
         result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             capture_output=True,
-            timeout=_GUESTFISH_TIMEOUT_S,
+            timeout=budget_s,
             check=False,
         )
     except FileNotFoundError as exc:
@@ -383,7 +392,7 @@ def probe_kernel_config(  # pragma: no cover - live_vm
         raise CategorizedError(
             "guestfish exceeded its timeout reading the kernel config",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+            details={"timeout_s": budget_s},
         ) from exc
     if result.returncode != 0:
         return None
@@ -412,13 +421,14 @@ def probe_boot_entries(qcow2_path: Path) -> list[str] | None:  # pragma: no cove
             ``INFRASTRUCTURE_FAILURE`` on timeout. Both are caught by the advisory caller and
             degrade to an omitted operand, so a probe failure never fails a build.
     """
+    budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "ls", "/boot"]
     try:
         result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             capture_output=True,
             text=True,
-            timeout=_GUESTFISH_TIMEOUT_S,
+            timeout=budget_s,
             check=False,
         )
     except FileNotFoundError as exc:
@@ -431,7 +441,7 @@ def probe_boot_entries(qcow2_path: Path) -> list[str] | None:  # pragma: no cove
         raise CategorizedError(
             "guestfish exceeded its timeout listing /boot",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+            details={"timeout_s": budget_s},
         ) from exc
     if result.returncode != 0:
         return None
@@ -460,6 +470,7 @@ def probe_os_release(qcow2_path: Path) -> str | None:  # pragma: no cover - live
             ``INFRASTRUCTURE_FAILURE`` on timeout. Both are caught by the advisory caller and
             degrade to an omitted operand, so a probe failure never fails a build.
     """
+    budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
     for guest_path in ("/etc/os-release", "/usr/lib/os-release"):
         argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
         try:
@@ -467,7 +478,7 @@ def probe_os_release(qcow2_path: Path) -> str | None:  # pragma: no cover - live
                 argv,
                 capture_output=True,
                 text=True,
-                timeout=_GUESTFISH_TIMEOUT_S,
+                timeout=budget_s,
                 check=False,
             )
         except FileNotFoundError as exc:
@@ -480,7 +491,7 @@ def probe_os_release(qcow2_path: Path) -> str | None:  # pragma: no cover - live
             raise CategorizedError(
                 "guestfish exceeded its timeout reading os-release",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+                details={"timeout_s": budget_s},
             ) from exc
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout
