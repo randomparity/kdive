@@ -302,7 +302,7 @@ None is in #2383's frozen scope. Each is filed:
 
 | Deviation | Issue |
 |---|---|
-| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Measured over three runs on this host, 2026-09-10 and 2026-09-11 (#2414); see [Deviation 1, measured](#deviation-1-measured) below. The timeout half is **answered**: every `kdive`-owned budget on the `build-fs` path is now measured and cleared. `build-fs` still does not complete, but for a cause outside the deviation — the customization-boot guest's systemd freezes before it starts up, reproducibly and independently of any budget. |
+| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Measured over three runs on this host, 2026-09-10 and 2026-09-11 (#2414); see [Deviation 1, measured](#deviation-1-measured) below. The timeout half is **answered**: every `kdive`-owned budget on the `build-fs` path is now measured and cleared. `build-fs` still does not complete, but for a cause outside the deviation — the customization-boot guest's systemd freezes before it starts up, reproducibly and independently of any budget (#2423). |
 | 6 — `virtnodedevd.socket` enabled by hand | #2401 |
 | 8 — worker venv repaired by hand | #2399 |
 | 9 — `KDIVE_OIDC_IMAGE` exported by hand | #2400 |
@@ -398,7 +398,7 @@ This is **not** a defect introduced by #2414, #2419 or #2420, and not a property
 runs were invoked. The identical failure — same message, same `Freezing execution`, same
 systemd 259.5-1.fc44 on ppc64le, at ~1114 s instead of ~1081 s — is present in the console log
 of the #2383-era run on this host from 2026-09-09, taken under a different worker identity and a
-different code state. It reproduces across both.
+different code state. It reproduces across both. Filed as #2423.
 
 Two observations worth carrying to whoever picks this up, neither of them a diagnosis: the
 rootfs is `unlabeled_t` and systemd PID 1 runs as `kernel_t`, so the SELinux transition to
