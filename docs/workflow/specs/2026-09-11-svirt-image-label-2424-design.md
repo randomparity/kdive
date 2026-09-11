@@ -80,6 +80,17 @@ image directories with non-kdive workloads, are not named deployments.
 **Covered elsewhere.**
 
 - Guest-side SELinux posture — ADR-0484 (guest images ship permissive).
+- **The build-time customization boot has the same defect, one path over, and is not fixed here.**
+  `lifecycle/rootfs/customization_boot.py:163` opens `config.require(LIBVIRT_URI)` — under the
+  example stack, the session daemon — against a workspace defaulting to
+  `$XDG_DATA_HOME/kdive/build/images`. Measured on both RedHat-family targets 2026-09-11:
+  `svirt_t` gets neither `write` nor `map` on that path's policy default `data_home_t`, and
+  `svirt_home_t` grants `write` but **not `map`**, so a direct-kernel customization boot cannot map
+  its `kernel`/`initrd` under either. This is a second instance of the #2424 denial class on the
+  build path. It is out of scope for this change — the charter's surface is host preparation for
+  the provisioning path — and is reported as a follow-up. Its consequence here is procedural: the
+  live proof stages a prebuilt image rather than building on the target, so a pre-existing build
+  failure cannot masquerade as a failure of this change.
 - The `cannot limit core file size` failure observed on `kdive-build-*` domains during design is an
   `RLIMIT_CORE` failure and unrelated to labeling. A related condition is already owned by
   `docs/operating/providers/local-libvirt.md:87-91`; whether this is that condition or a distinct

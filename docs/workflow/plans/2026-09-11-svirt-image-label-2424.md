@@ -336,36 +336,66 @@ anywhere but on a real enforcing host.
 |---|---|---|
 | A System provisions to `ready` under SELinux enforcing | live proof | both RedHat-family targets, procedure below |
 | The domain runs confined and produces no denial | live proof | `svirt_t` with MCS categories; no `denied` AVC for a path under the kdive image directories |
-| The repository guardrail suite is green | `focused-test` | `just ci`, bare |
+| The install plane's staged `kernel`/`initrd` carry the new label (criterion 2, second half) | live proof | step 5; provisioning alone never reaches this path |
+| A base image left at `virt_image_t` under `rootfs/local` still serves as a backing file | live proof | step 6; the one claim ADR-0639 rests on an inference rather than a measurement |
+| The repository guardrail suite is green | `focused-test` | `just ci`, bare — **already run on the reviewed HEAD: exit 0, 18470 passed, 30 skipped** |
 
 ### Steps
 
 1. On each target — the Fedora 44 host and the Rocky 10.2 host — confirm the starting state:
-   `getenforce` reports `Enforcing`, and destroy any domain left running from a permissive-mode
-   session, which is not a counterexample and must not be reused.
-2. Run the installer from the branch checkout: `examples/local-libvirt/install-host.sh`. Confirm
-   the resulting rules, expecting `svirt_image_t` on each:
-   `sudo semanage fcontext -l -C | grep kdive`
-3. Bring the stack up and build an image (`scripts/live-stack/up.sh`,
-   `examples/local-libvirt/build-image.sh`), then provision a System through the ordinary worker
-   path. Assert it reaches `ready` with no `setenforce 0` and no `security_driver` change.
-4. While the domain runs, record the three assertions:
+   `getenforce` reports `Enforcing`, and destroy **and undefine** any domain left over from a
+   permissive-mode session. Such a domain is not a counterexample and must not be reused; an
+   undefine also avoids a System/domain id collision on re-provision.
+2. **Record the pre-state before touching anything:** `sudo semanage fcontext -l -C | grep kdive`.
+   This is what turns step 3 from "the rule is right" into "the rule was migrated" — the `-m` arm
+   is the only genuinely new behaviour in the helper, and on a fresh host step 3 exercises `-a`
+   instead and the migration path never runs against real `semanage`.
+3. Run the installer from the branch checkout: `examples/local-libvirt/install-host.sh`. Re-run the
+   same listing and diff it against step 2, expecting `svirt_image_t` on each pattern. Record which
+   arm (`-m` migration or `-a` addition) each host actually took.
+4. Bring the stack up (`scripts/live-stack/up.sh`) and provision a System through the ordinary
+   worker path. Assert it reaches `ready` with no `setenforce 0` and no `security_driver` change.
+
+   **Do not run `build-image.sh`.** Stage a prebuilt image instead, by the path
+   `docs/operating/providers/local-libvirt.md:99-103` documents. The build-time customization boot
+   opens `config.require(LIBVIRT_URI)` (`lifecycle/rootfs/customization_boot.py:163`), which under
+   this stack is the **session** daemon, against a workspace defaulting to
+   `$XDG_DATA_HOME/kdive/build/images`. Measured on both targets 2026-09-11: `svirt_t` gets neither
+   `write` nor `map` on that path's policy default `data_home_t`, and `svirt_home_t` — which the
+   directory happens to carry on the Fedora target — grants `write` but **not `map`**, so a
+   direct-kernel customization boot cannot map its `kernel`/`initrd` there under either. That is a
+   second defect of the same family as #2424, on the build path, and is out of scope here; it must
+   not be allowed to block criterion 6. Record explicitly in the PR that `build-image.sh` was not
+   exercised — "it succeeded" and "it was not run" are different evidence.
+5. While the domain runs, record the provisioning assertions:
    - `ps -eZ | grep qemu-system` shows the process as `svirt_t:s0:c<i>,c<j>`.
    - `ls -Z` on the System's overlay and its baseline `kernel`/`initrd` shows `svirt_image_t`.
    - `journalctl -k --since <start>` carries no `denied` record for a path under
      `/var/lib/kdive/rootfs` or `/var/lib/kdive/install`. Read the **journal**, not `ausearch`,
      which does not surface these denials on either host (ADR-0639 Context).
-5. Run the full gate on the workstation, bare and with stdin closed, per Global Constraints:
-   `just ci > /tmp/kdive-ci-2424.log 2>&1 < /dev/null` — expect exit 0. This covers the recipes
-   Task 2 step 10 does not, including `test-ansible`, `lint-workflows`, `served-doc-links` and
-   `config-guard`.
-6. Record in the PR body which arms ran on which target, and the observed process and file labels.
+6. **Exercise the install plane** — provisioning does not reach it, so without this criterion 2's
+   install-staging half goes unproven while the run still reports green. Perform an install through
+   the ordinary worker path, then assert:
+   - `ls -Z /var/lib/kdive/install/<system-id>/<run-id>/kernel` and `…/initrd` show
+     `svirt_image_t`.
+   - the journal carries no `denied` record naming a path under `/var/lib/kdive/install`.
+7. **Measure the `rootfs/local` read-only claim.** ADR-0639 states that leaving the nested rule to
+   `build-image.sh` is safe because base images there are read-only backing files and `svirt_t` may
+   read `virt_image_t`. Every other load-bearing claim in that record carries a measurement; this
+   one carries an inference. With a base image under `/var/lib/kdive/rootfs/local` left at
+   `virt_image_t` (its state on an upgraded host after `install-host.sh` alone), confirm a System
+   backed by it provisions and runs with no `denied` record naming that path. Record the result in
+   ADR-0639's Consequences the way the other measurements are recorded — and if it is denied, the
+   nested call belongs in `install-host.sh` after all.
+8. Record in the PR body which arms ran on which target, and the observed process and file labels.
 
 ### Acceptance criteria
 
-- Both targets reached `ready` under enforcing, with the three assertions recorded for each.
+- Both targets reached `ready` under enforcing, with the step 5 assertions recorded for each.
+- The install-plane arm (step 6) and the `rootfs/local` measurement (step 7) are recorded.
 - `just ci` exited 0.
-- If either target cannot run the arm, the PR body says so explicitly and names the blocker rather
+- The PR states that `build-image.sh` was not exercised, and why.
+- If either target cannot run an arm, the PR body says so explicitly and names the blocker rather
   than reporting the criterion as met.
 
 ---
@@ -389,7 +419,15 @@ describes.
 ## Deferrals carried into this plan
 
 Every design-review finding from both passes, and every scope-audit finding, was accepted and
-applied. One deferral is carried, matching the spec's "Covered elsewhere":
+applied. Two deferrals are carried, matching the spec's "Covered elsewhere":
+
+- **The build-time customization boot hits the same denial class on the build workspace.**
+  Measured on both targets 2026-09-11: `svirt_t` gets neither `write` nor `map` on `data_home_t`,
+  and `svirt_home_t` grants `write` but not `map`, so the direct-kernel customization boot cannot
+  map `kernel`/`initrd` from `$XDG_DATA_HOME/kdive/build/images` under the session daemon. Owner:
+  reported as a follow-up in the PR, its own issue — operator decision 2026-09-11, on the grounds
+  that it is a distinct path from the provisioning surface this charter covers. Its only effect on
+  this change is that Task 3 stages a prebuilt image instead of building on the target.
 
 - **`cannot limit core file size … Operation not permitted` on `kdive-build-*` domains.** Observed
   on the Fedora 44 target during design, and independent of labeling: it is an `RLIMIT_CORE`
