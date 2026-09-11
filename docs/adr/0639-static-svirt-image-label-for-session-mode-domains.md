@@ -91,8 +91,9 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   exiting 0 whether or not the pattern was present (verified against the installed implementation
   on both target families — policycoreutils-python-utils 3.11 on Fedora 44, 3.10 on Rocky 10.2). No
   migrate-then-add split and no `semanage fcontext -l` parsing is needed. Each script owns the
-  rules it writes; `install-host.sh` does not touch the nested one. That matters because the nested rule is not redundant: `semanage` local rules are matched
-  last-match-wins in `file_contexts.local`, so on the documented install order — `install-host.sh`
+  rules it writes; `install-host.sh` does not touch the nested one. That matters because the
+  nested rule is not redundant: `semanage` local rules are matched last-match-wins in
+  `file_contexts.local`, so on the documented install order — `install-host.sh`
   adding the parent, `build-image.sh` adding the nested rule afterwards — a stale nested
   `virt_image_t` entry overrides the parent for everything under `local/` (measured, Fedora 44,
   2026-09-11). It is left to `build-image.sh` anyway, because `local/` holds base qcow2 images used
@@ -102,9 +103,17 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   [ADR-0204](0204-install-staging-unwritable-config-error.md), whose remedy text names
   `virt_image_t` for the install-staging root. That record's decision — the errno split that makes
   an unwritable staging root a `CONFIGURATION_ERROR` — is unchanged and not superseded; only the
-  label named in its remedy string moves. [ADR-0052](0052-bootable-rootfs-image-builder.md) needs
-  no such amendment: its `virt_image_t` claim (decision 3) is scoped to letting the qemu user read
-  the image "under `qemu:///system`", the privileged-daemon path this change does not alter.
+  label named in its remedy string moves. [ADR-0052](0052-bootable-rootfs-image-builder.md)
+  carries the same amendment, for the same reason: decision 3 scopes its `virt_image_t` to
+  `qemu:///system`
+  and stays correct, but decision 4 restates the host-side labeling without naming a daemon, and
+  the image it describes is what `build-image.sh` publishes under `rootfs/local`.
+- A rule kdive does not own can still win. `semanage fcontext -a` rewrites kdive's own record in
+  place without reordering it, so re-running the installer fixes a foreign rule on the *same*
+  pattern but not a broader one written *later* — under last-match-wins that one keeps winning,
+  and the operator sees `semanage` and `restorecon` both succeed while the denial persists.
+  `sudo semanage fcontext -l -C` lists the local rules in order; such a rule has to be removed by
+  hand.
 - Rolling the label back needs `restorecon -R -F`: `svirt_image_t` is listed in
   `/etc/selinux/targeted/contexts/customizable_types` and `virt_image_t` is not, so a plain
   `restorecon` relabels *into* the new type but silently skips relabeling *out* of it.

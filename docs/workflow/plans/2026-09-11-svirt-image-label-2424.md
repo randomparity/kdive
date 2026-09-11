@@ -398,7 +398,16 @@ anywhere but on a real enforcing host.
    backed by it provisions and runs with no `denied` record naming that path. Record the result in
    ADR-0639's Consequences the way the other measurements are recorded — and if it is denied, the
    nested call belongs in `install-host.sh` after all.
-8. Record in the PR body which arms ran on which target, and the observed process and file labels.
+8. **Diagnostic, explicitly non-gating: run `build-image.sh` on the Fedora target once**, after
+   the criterion-6 arms above have already passed and been recorded. This settles a question this
+   change currently answers by inference: `docs/operating/providers/local-libvirt.md:19` states
+   Fedora builds guest images locally, "verified end to end", while the measured policy says
+   `svirt_t` has no `map` on the workspace's `data_home_t`/`svirt_home_t`. One of those is stale.
+   Run it, capture the outcome and any journal denial naming the workspace path, and record which.
+   This arm **cannot fail criterion 6** — it runs after it, and a failure here is the known
+   build-path defect, not a regression of this change. If it succeeds, the inference is wrong and
+   the provider-page wording added by this change must be narrowed before merge.
+9. Record in the PR body which arms ran on which target, and the observed process and file labels.
 
 ### Acceptance criteria
 

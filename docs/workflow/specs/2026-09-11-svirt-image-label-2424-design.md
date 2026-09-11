@@ -76,7 +76,10 @@ image directories with non-kdive workloads, are not named deployments.
   kdive-owned path.
 - A host whose fcontext was applied by something other than these scripts keeps its own label.
   Accepted: bounded — provisioning fails closed with the same `Permission denied` this change
-  fixes, and re-running the installer recovers it.
+  fixes. Re-running the installer recovers a foreign rule on the **same** pattern, which `-a`
+  rewrites in place; a **broader** foreign pattern written **later** keeps winning under
+  last-match-wins, because the rewrite does not reorder. That one is removed by hand —
+  `semanage fcontext -l -C` shows the order (ADR-0639).
 - An overlay left at `svirt_image_t:s0:c<i>,c<j>` by a privileged daemon that died without
   restoring is skipped by a later plain `restorecon`, because `svirt_image_t` is a customizable
   type. Accepted: bounded and recoverable with `restorecon -F`, which ADR-0639 records.
@@ -147,7 +150,8 @@ only by an operator who already has root.
 | Contract | Mode | Evidence |
 |---|---|---|
 | A pattern with no rule gets one `svirt_image_t` rule | `focused-test` | `tests/scripts/test_selinux_label.py::test_labels_the_directory` |
-| A pattern carrying a stale `virt_image_t` rule is rewritten by the same single call, not duplicated | `focused-test` | `…::test_issues_exactly_one_semanage_call` |
+| Only one `semanage` call is issued — no migrate-then-add probe | `focused-test` | `…::test_labels_the_directory` asserts the call log by list equality |
+| A pattern carrying a stale `virt_image_t` rule is rewritten by that same call, not duplicated | design-time source read, recorded | not observable through the stubs: `seobject.FcontextRecords.add()` detects an existing rule and delegates to the modify path, exiting 0. Read on both target families — policycoreutils-python-utils 3.11 (Fedora 44) and 3.10 (Rocky 10.2), 2026-09-11 — and cited in the helper's comment and ADR-0639. The live proof's step 3 observes it against real `semanage`. |
 | The helper no-ops off an enforcing host | `focused-test` | `…::test_noop_when_not_enforcing` |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` |
 | A failing `semanage` or `restorecon` aborts rather than reporting success | `focused-test` | `…::test_aborts_when_semanage_fails`, `…::test_aborts_when_restorecon_fails` |
