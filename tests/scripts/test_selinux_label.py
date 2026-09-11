@@ -41,6 +41,7 @@ def _bindir(
     tmp_path: Path,
     *,
     enforcing: bool = True,
+    have_getenforce: bool = True,
     have_semanage: bool = True,
     semanage_status: int = 0,
     restorecon_status: int = 0,
@@ -50,11 +51,12 @@ def _bindir(
     b.mkdir(exist_ok=True)
     log = tmp_path / _LOG
     _stub(b, "sudo", '#!/bin/sh\nexec "$@"\n')
-    _stub(
-        b,
-        "getenforce",
-        f"#!/bin/sh\necho {'Enforcing' if enforcing else 'Permissive'}\n",
-    )
+    if have_getenforce:
+        _stub(
+            b,
+            "getenforce",
+            f"#!/bin/sh\necho {'Enforcing' if enforcing else 'Permissive'}\n",
+        )
     if have_semanage:
         _stub(
             b,
@@ -90,7 +92,14 @@ def _log_lines(tmp_path: Path) -> list[str]:
 
 
 def test_labels_the_directory(tmp_path: Path) -> None:
-    """One -a call carrying the new type and the recursive pattern, then restorecon."""
+    """Exactly one -a call carrying the new type and the recursive pattern, then restorecon.
+
+    List equality is the assertion, so a re-introduced ``-m`` probe turns this red: the
+    migrate-then-add split is dead weight, because ``seobject.FcontextRecords.add()`` prints
+    "already defined, modifying instead" and delegates to the modify path when the pattern is
+    already in the base or local store. That rewrite behaviour itself is not observable through
+    these stubs — its evidence is the installed implementation, cited in the helper's comment.
+    """
     bindir = _bindir(tmp_path)
 
     _run("/var/lib/kdive/rootfs", bindir)
@@ -99,23 +108,6 @@ def test_labels_the_directory(tmp_path: Path) -> None:
         "semanage fcontext -a -t svirt_image_t /var/lib/kdive/rootfs(/.*)?",
         "restorecon -R /var/lib/kdive/rootfs",
     ]
-
-
-def test_issues_exactly_one_semanage_call(tmp_path: Path) -> None:
-    """The migrate-then-add split is gone: -a alone converges every host shape.
-
-    ``seobject.FcontextRecords.add()`` prints "already defined, modifying instead" and delegates
-    to the modify path when the pattern is already in the base or local store, so a stale
-    pre-ADR-0639 ``virt_image_t`` rule is rewritten by this same call. A second ``semanage``
-    invocation — in particular a ``-m`` probe — would be dead weight on a false premise.
-    """
-    bindir = _bindir(tmp_path)
-
-    _run("/var/lib/kdive/rootfs", bindir)
-
-    semanage_calls = [line for line in _log_lines(tmp_path) if line.startswith("semanage ")]
-    assert len(semanage_calls) == 1
-    assert not any(line.startswith("semanage fcontext -m") for line in semanage_calls)
 
 
 def test_strips_a_trailing_slash_from_the_pattern(tmp_path: Path) -> None:
@@ -128,6 +120,22 @@ def test_strips_a_trailing_slash_from_the_pattern(tmp_path: Path) -> None:
         "semanage fcontext -a -t svirt_image_t /var/lib/kdive/rootfs(/.*)?",
         "restorecon -R /var/lib/kdive/rootfs",
     ]
+
+
+def test_noop_when_selinux_is_absent(tmp_path: Path) -> None:
+    """No getenforce at all — every Debian/Ubuntu install takes this branch and no other.
+
+    Distinct from the Permissive case below: that one runs getenforce and reads its output,
+    this one never finds the binary. Dropping the `command -v getenforce` guard leaves the
+    helper still returning 0, so only the absence of stderr noise catches the regression.
+    """
+    bindir = _bindir(tmp_path, have_getenforce=False)
+
+    result = _run("/var/lib/kdive/rootfs", bindir)
+
+    assert _log_lines(tmp_path) == []
+    assert result.returncode == 0
+    assert result.stderr == ""
 
 
 def test_noop_when_not_enforcing(tmp_path: Path) -> None:
