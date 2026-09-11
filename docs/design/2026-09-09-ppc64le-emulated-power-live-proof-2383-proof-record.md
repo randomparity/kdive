@@ -302,7 +302,7 @@ None is in #2383's frozen scope. Each is filed:
 
 | Deviation | Issue |
 |---|---|
-| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Measured on this host 2026-09-10 and 2026-09-11 (#2414); see [Deviation 1, measured](#deviation-1-measured) below. Still **open**: every scaled budget is cleared, but no run has yet completed `build-fs` end to end. |
+| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Measured over three runs on this host, 2026-09-10 and 2026-09-11 (#2414); see [Deviation 1, measured](#deviation-1-measured) below. The timeout half is **answered**: every `kdive`-owned budget on the `build-fs` path is now measured and cleared. `build-fs` still does not complete, but for a cause outside the deviation — the customization-boot guest's systemd freezes before it starts up, reproducibly and independently of any budget. |
 | 6 — `virtnodedevd.socket` enabled by hand | #2401 |
 | 8 — worker venv repaired by hand | #2399 |
 | 9 — `KDIVE_OIDC_IMAGE` exported by hand | #2400 |
@@ -313,13 +313,14 @@ this workstation, not of the repository.
 
 ### Deviation 1, measured
 
-Two runs, 2026-09-10 and 2026-09-11, on the emulated-POWER host of record above — Fedora 44
-ppc64le under `qemu-system-ppc64 -machine pseries,accel=tcg -cpu power10 -smp 16 -m 32G`,
-guest-visible 16 CPUs / 33358336 kB, QEMU 10.2.2, guestfs-tools 1.56.0, `kvm` blacklisted.
-In-guest `build-fs --image fedora-kdive-ready-44-ppc64le`, no wrapper and no `LD_PRELOAD`, so
-each figure is the tool's own wall clock. Run 2 carried the #2419 and #2420 changes at their
-pre-merge commits `f590eb50d` and `52505bbf9` on a clean tree; they merged to `main` as
-`9e74f51aa` and `f18b5da05`.
+Three runs, one on 2026-09-10 and two on 2026-09-11, on the emulated-POWER host of record above
+— Fedora 44 ppc64le under `qemu-system-ppc64 -machine pseries,accel=tcg -cpu power10 -smp 16
+-m 32G`, guest-visible 16 CPUs / 33358336 kB, QEMU 10.2.2, guestfs-tools 1.56.0, `kvm`
+blacklisted. In-guest `build-fs --image fedora-kdive-ready-44-ppc64le`, no wrapper and no
+`LD_PRELOAD`, so each figure is the tool's own wall clock. Runs 2 and 3 carried the #2419 and
+#2420 changes at their pre-merge commits `f590eb50d` and `52505bbf9` on a clean tree; they
+merged to `main` as `9e74f51aa` and `f18b5da05`. Run 3 additionally set
+`KDIVE_LIBVIRT_URI=qemu:///session`, for the reason recorded under the customization boot below.
 
 **The measurement was not merely unrun — it was unreachable.** `slow_build_tool_timeout_s()`
 selected its branch with `os.access`, and on any systemd host `50-udev-default.rules` publishes
@@ -330,18 +331,20 @@ So the budget resolved to the unscaled 1800 s on the one host class #2397 exists
 #2397's scaling had never engaged here at all. Fixed under #2419 by opening the node instead;
 `budget_s=18000` was recorded from the corrected path immediately before each launch.
 
-| Stage | Base | Run 1 | Run 2 | Unscaled base | Scaled budget |
-|---|---|---|---|---|---|
-| `virt-tar-out` | 1800 s | **2406 s** | **2888 s** | exceeds — the #2383 failure | 18000 s, passes at 1.34–1.60x |
-| `virt-make-fs` | 1800 s | **2032 s** | **2293 s** | exceeds | 18000 s, passes at 1.13–1.27x |
-| `guestfish` (`rhel.normalize`) | 300 s | killed at 300 s | **1365 s** | exceeds | 3000 s, passes at 4.55x |
+| Stage | Base | Run 1 | Run 2 | Run 3 | Unscaled base | Scaled budget |
+|---|---|---|---|---|---|---|
+| `virt-tar-out` | 1800 s | **2406 s** | **2888 s** | **2955 s** | exceeds — the #2383 failure | 18000 s, passes at 1.34–1.64x |
+| `virt-make-fs` | 1800 s | **2032 s** | **2293 s** | **2256 s** | exceeds | 18000 s, passes at 1.13–1.27x |
+| `guestfish` (`rhel.normalize`) | 300 s | killed at 300 s | **1365 s** | **1324 s** | exceeds | 3000 s, passes at 4.41–4.55x |
 
 Timings come from an external process-table sampler on a 10 s interval, because `build-fs`
 emits no per-stage timing at `INFO`; every figure carries that sampling error. The sampler is
 independently corroborated at one point: it read 303 s for the run-1 `guestfish` call that
 `build-fs` itself killed at a 300 s timeout, agreeing with a known ground truth to within one
-interval. Run 2 is consistently 10–20% slower than run 1 on the same host with no configuration
-change between them, which is the reason each stage is reported as a range rather than a point.
+interval. Run-to-run spread on the same host with no configuration change between runs reaches
+20% (`virt-tar-out`, 2406 s to 2955 s), which is why each stage is reported as a range rather
+than a point. The two stages measured three times each agree closely enough that the spread
+looks like ambient host load rather than anything structural.
 
 **What this establishes.** Scaling is required rather than precautionary: every stage measured
 exceeds its unscaled base, so an unfixed probe fails this host at `virt-tar-out` exactly as
@@ -349,22 +352,64 @@ deviation 1 records. The scaled budgets are sufficient for all three, and the mu
 a second measured point beside ADR-0636's 1474 s `virt-customize --ssh-inject` figure.
 
 **Headroom is not uniform, and the `guestfish` stage is the reason to say so.** The two
-1800 s-based stages ask 1.13–1.60x of their base, well inside the 10x ADR-0341 supplies. The
-300 s-based `guestfish` stage asks **4.55x**. A run-1 reading of "303 s against a 300 s budget"
-invites the conclusion that the budget was marginally short; it was not. 303 s was the point at
-which `build-fs` killed the call, which bounds the work from below and says nothing about its
-length. Allowed to finish under #2420's scaled budget, the same stage took 1365 s. A timeout
-kill is a lower bound, never a measurement, and the two differ here by a factor of four.
+1800 s-based stages ask 1.13–1.64x of their base, well inside the 10x ADR-0341 supplies. The
+300 s-based `guestfish` stage asks **4.41–4.55x**. A run-1 reading of "303 s against a 300 s
+budget" invites the conclusion that the budget was marginally short; it was not. 303 s was the
+point at which `build-fs` killed the call, which bounds the work from below and says nothing
+about its length. Allowed to finish under #2420's scaled budget, the same stage took 1365 s and
+1324 s. A timeout kill is a lower bound, never a measurement, and the two differ here by a
+factor of four.
 
-**What it does not establish.** No `virt-builder` or `virt-customize` stage ran in either run, so
-neither is measured here. Run 2 cleared every scaled budget and then failed in
-`run_customization_boot` with `Unable to open file: /var/lib/kdive/console/<uuid>.log: Permission
-denied`. That is a property of how these runs were invoked, not of the budgets: they used the
-default `KDIVE_LIBVIRT_URI=qemu:///system`, so the opener was the system `virtqemud`, which is
-neither the operator nor a member of `kdive-live-libvirt`, while the console directory is
-provisioned `2770 operator:kdive-live-libvirt` for the operator-owned *session* daemon that
-`lifecycle/rootfs/customization_boot.py` documents. #2397's acceptance bullet "an emulated host
-completes in-guest `build-fs`" is therefore not yet answered either way by these two runs.
+The mechanism is that a smaller base pays the same fixed appliance boot over less work, so it
+asks a larger ratio. Read the 1.1–1.6x figures as a property of the two longest bases, not as
+the multiplier's working range: at the tightest stage measured the 10x margin is closer to 2x.
+
+#### The customization boot does not complete, for a reason no budget reaches
+
+Run 2 failed in `run_customization_boot` with `Unable to open file:
+/var/lib/kdive/console/<uuid>.log: Permission denied`. That was a property of how the run was
+invoked rather than of the code: it used the default `KDIVE_LIBVIRT_URI=qemu:///system`, so the
+opener was the system `virtqemud`, which is neither the operator nor a member of
+`kdive-live-libvirt`, while the console directory is provisioned `2770
+operator:kdive-live-libvirt` for the operator-owned *session* daemon that
+`lifecycle/rootfs/customization_boot.py` documents. Run 3 set `qemu:///session` and the console
+log opened.
+
+Run 3 then reached the customization boot proper and **the guest froze**:
+
+```
+[ 1035.822766] audit: avc: denied { execute_no_trans } for pid=660 comm="(exec-inner)"
+    path="/usr/lib/systemd/system-generators/cloud-init-generator"
+    scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 permissive=1
+[ 1081.029038] systemd[1]: Failed to fork off sandboxing environment for executing generators:
+    Protocol error
+[!!!!!!] Failed to start up manager.
+[ 1083.237850] systemd[1]: Freezing execution.
+```
+
+`build-fs` reported `boot_timeout` — *customization boot did not reach the ok marker within the
+window* — after the full scaled window (1800 s base x 10; ~19555 s wall including poll
+overhead). **That report is misleading about the cause.** The guest had been frozen since
+~1081 s of its own uptime; `kdive` then polled a dead domain for more than five hours. No
+increase in the window, and no change to the multiplier, would alter the outcome: systemd PID 1
+never starts up, so the ok marker can never appear.
+
+This is **not** a defect introduced by #2414, #2419 or #2420, and not a property of how these
+runs were invoked. The identical failure — same message, same `Freezing execution`, same
+systemd 259.5-1.fc44 on ppc64le, at ~1114 s instead of ~1081 s — is present in the console log
+of the #2383-era run on this host from 2026-09-09, taken under a different worker identity and a
+different code state. It reproduces across both.
+
+Two observations worth carrying to whoever picks this up, neither of them a diagnosis: the
+rootfs is `unlabeled_t` and systemd PID 1 runs as `kernel_t`, so the SELinux transition to
+`init_t` has not happened at generator time; and sandboxed generator execution is a recent
+systemd feature, which makes a ppc64le-under-TCG interaction plausible without establishing one.
+
+**What none of the three runs establishes.** No `virt-builder` or `virt-customize` stage ran, so
+neither is measured here. #2397's acceptance bullet "an emulated host completes in-guest
+`build-fs`" is **not met**, and on this host it is not reachable by budget work alone: every
+`kdive`-owned budget on the path is now cleared, and the run still stops at a guest that freezes
+before it can be customized.
 
 
 ---
