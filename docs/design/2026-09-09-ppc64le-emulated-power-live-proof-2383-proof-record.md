@@ -302,7 +302,7 @@ None is in #2383's frozen scope. Each is filed:
 
 | Deviation | Issue |
 |---|---|
-| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Measured on this host 2026-09-10 (#2414); see [Deviation 1, measured](#deviation-1-measured) below. Still **open**: the run clears `virt-tar-out` but does not complete. |
+| 1 — in-guest `build-fs` times out on an emulated host | #2397 — scaling mechanism applied (ADR-0637), unit-proven on both branches. Measured on this host 2026-09-10 and 2026-09-11 (#2414); see [Deviation 1, measured](#deviation-1-measured) below. Still **open**: every scaled budget is cleared, but no run has yet completed `build-fs` end to end. |
 | 6 — `virtnodedevd.socket` enabled by hand | #2401 |
 | 8 — worker venv repaired by hand | #2399 |
 | 9 — `KDIVE_OIDC_IMAGE` exported by hand | #2400 |
@@ -313,11 +313,13 @@ this workstation, not of the repository.
 
 ### Deviation 1, measured
 
-Run 2026-09-10 on the emulated-POWER host of record above — Fedora 44 ppc64le under
-`qemu-system-ppc64 -machine pseries,accel=tcg -cpu power10 -smp 16 -m 32G`, guest-visible
-16 CPUs / 33358336 kB, QEMU 10.2.2, guestfs-tools 1.56.0, `kvm` blacklisted. In-guest
-`build-fs --image fedora-kdive-ready-44-ppc64le`, no wrapper and no `LD_PRELOAD`, so each figure
-is the tool's own wall clock.
+Two runs, 2026-09-10 and 2026-09-11, on the emulated-POWER host of record above — Fedora 44
+ppc64le under `qemu-system-ppc64 -machine pseries,accel=tcg -cpu power10 -smp 16 -m 32G`,
+guest-visible 16 CPUs / 33358336 kB, QEMU 10.2.2, guestfs-tools 1.56.0, `kvm` blacklisted.
+In-guest `build-fs --image fedora-kdive-ready-44-ppc64le`, no wrapper and no `LD_PRELOAD`, so
+each figure is the tool's own wall clock. Run 2 carried the #2419 and #2420 changes at their
+pre-merge commits `f590eb50d` and `52505bbf9` on a clean tree; they merged to `main` as
+`9e74f51aa` and `f18b5da05`.
 
 **The measurement was not merely unrun — it was unreachable.** `slow_build_tool_timeout_s()`
 selected its branch with `os.access`, and on any systemd host `50-udev-default.rules` publishes
@@ -325,34 +327,44 @@ selected its branch with `os.access`, and on any systemd host `50-udev-default.r
 opening the node is what triggers autoload. Recorded on this host before the run: `os.access`
 returned `True`, `os.open` raised `OSError 19 ENODEV`, and libvirt advertised zero KVM domains.
 So the budget resolved to the unscaled 1800 s on the one host class #2397 exists to scale, and
-#2397's scaling had never engaged here at all. Fixed under #2414 by opening the node instead;
-`budget_s=18000` was recorded from the corrected path immediately before launch.
+#2397's scaling had never engaged here at all. Fixed under #2419 by opening the node instead;
+`budget_s=18000` was recorded from the corrected path immediately before each launch.
 
-| Stage | Wall clock | Unscaled 1800 s | Scaled 18000 s |
-|---|---|---|---|
-| `virt-tar-out` | **2406 s** | exceeds — the #2383 failure | passes, 1.34x the base |
-| `virt-make-fs` | **2032 s** | exceeds | passes, 1.13x the base |
-| `guestfish` (`rhel.normalize`) | **303 s** | n/a — see below | n/a — see below |
+| Stage | Base | Run 1 | Run 2 | Unscaled base | Scaled budget |
+|---|---|---|---|---|---|
+| `virt-tar-out` | 1800 s | **2406 s** | **2888 s** | exceeds — the #2383 failure | 18000 s, passes at 1.34–1.60x |
+| `virt-make-fs` | 1800 s | **2032 s** | **2293 s** | exceeds | 18000 s, passes at 1.13–1.27x |
+| `guestfish` (`rhel.normalize`) | 300 s | killed at 300 s | **1365 s** | exceeds | 3000 s, passes at 4.55x |
 
 Timings come from an external process-table sampler on a 10 s interval, because `build-fs`
 emits no per-stage timing at `INFO`; every figure carries that sampling error. The sampler is
-independently corroborated at one point: it read 303 s for the `guestfish` call that `build-fs`
-itself killed at a 300 s timeout, agreeing with a known ground truth to within one interval.
+independently corroborated at one point: it read 303 s for the run-1 `guestfish` call that
+`build-fs` itself killed at a 300 s timeout, agreeing with a known ground truth to within one
+interval. Run 2 is consistently 10–20% slower than run 1 on the same host with no configuration
+change between them, which is the reason each stage is reported as a range rather than a point.
 
-**What this establishes.** 18000 s is sufficient for the two stages that reached it, with wide
-headroom — the largest figure asks for 1.34x where the ADR-0341 default supplies 10x. Scaling is
-required rather than precautionary: both stages exceed the unscaled base, so an unfixed probe
-fails this host at `virt-tar-out` exactly as deviation 1 records. The multiplier now has a second
-measured point beside ADR-0636's 1474 s.
+**What this establishes.** Scaling is required rather than precautionary: every stage measured
+exceeds its unscaled base, so an unfixed probe fails this host at `virt-tar-out` exactly as
+deviation 1 records. The scaled budgets are sufficient for all three, and the multiplier now has
+a second measured point beside ADR-0636's 1474 s `virt-customize --ssh-inject` figure.
 
-**What it does not establish, and why deviation 1 stays open.** The run does not complete. Past
-`virt-tar-out` it reaches `guestfish` in `rhel.normalize()`, whose `_GUESTFISH_TIMEOUT_S = 5 * 60`
-is a module constant that #2397's scaling never reached, and it expired at 303 s — a 1% miss.
-`images/families/rhel.py`, `images/families/debian.py` and `images/planes/provenance_probes.py`
-each hold their own unscaled 5-minute constant while booting the same host-arch appliance the
-scaled budgets bound. #2397's acceptance bullet "an emulated host completes in-guest `build-fs`"
-is therefore still unmet — for a different reason than when it was written. No `virt-builder` or
-`virt-customize` stage ran, so neither is measured here.
+**Headroom is not uniform, and the `guestfish` stage is the reason to say so.** The two
+1800 s-based stages ask 1.13–1.60x of their base, well inside the 10x ADR-0341 supplies. The
+300 s-based `guestfish` stage asks **4.55x**. A run-1 reading of "303 s against a 300 s budget"
+invites the conclusion that the budget was marginally short; it was not. 303 s was the point at
+which `build-fs` killed the call, which bounds the work from below and says nothing about its
+length. Allowed to finish under #2420's scaled budget, the same stage took 1365 s. A timeout
+kill is a lower bound, never a measurement, and the two differ here by a factor of four.
+
+**What it does not establish.** No `virt-builder` or `virt-customize` stage ran in either run, so
+neither is measured here. Run 2 cleared every scaled budget and then failed in
+`run_customization_boot` with `Unable to open file: /var/lib/kdive/console/<uuid>.log: Permission
+denied`. That is a property of how these runs were invoked, not of the budgets: they used the
+default `KDIVE_LIBVIRT_URI=qemu:///system`, so the opener was the system `virtqemud`, which is
+neither the operator nor a member of `kdive-live-libvirt`, while the console directory is
+provisioned `2770 operator:kdive-live-libvirt` for the operator-owned *session* daemon that
+`lifecycle/rootfs/customization_boot.py` documents. #2397's acceptance bullet "an emulated host
+completes in-guest `build-fs`" is therefore not yet answered either way by these two runs.
 
 
 ---

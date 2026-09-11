@@ -201,9 +201,9 @@ def test_normalize_writes_fstab_removes_crypttab_no_selinux(tmp_path: Path) -> N
 
 def test_normalize_scales_its_guestfish_budget_on_an_emulated_host(tmp_path: Path) -> None:
     # Sibling of the stage that failed the #2414 measurement run: with virt-tar-out fixed,
-    # in-guest build-fs on an emulated-POWER host died in the rhel family's guestfish
-    # normalization at 303 s against an unscaled 300 s budget. Debian shares the base and the
-    # appliance, so it must scale the same way.
+    # in-guest build-fs on an emulated-POWER host was killed in the rhel family's guestfish
+    # normalization at its unscaled 300 s budget; that stage measures 1365 s when allowed to
+    # finish. Debian shares the base and the appliance, so it must scale the same way.
     import kdive.config as config
     from kdive.images.families import debian as debian_module
 
@@ -227,4 +227,4 @@ def test_normalize_scales_its_guestfish_budget_on_an_emulated_host(tmp_path: Pat
         config.reset()
 
     assert budgets == [debian_module._GUESTFISH_TIMEOUT_S * 10]
-    assert budgets[0] > 303
+    assert budgets[0] > 1365
