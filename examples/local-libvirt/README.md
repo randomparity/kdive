@@ -133,6 +133,13 @@ Fedora 44. What it does, and why, so you can audit or redo a step:
   describe the contract.
 - **Directories** — `/var/lib/kdive/rootfs/local` (where `build-image.sh` publishes images) as
   you, group `kdive-live-libvirt`, the same posture the installer gives its parent.
+- **SELinux labels** — on an enforcing host only, `svirt_image_t` on `/var/lib/kdive/rootfs` and
+  `/var/lib/kdive/install`, the two trees a confined domain opens: provisioning writes each
+  System's overlay and maps its baseline kernel/initrd under the first, and the install plane
+  points a live domain's `<os>` at staged kernel/initrd under the second. `svirt_t` can do neither
+  against the older `virt_image_t`, and the unprivileged session daemon performs no relabel of its
+  own ([ADR-0639](../../docs/adr/0639-static-svirt-image-label-for-session-mode-domains.md)). The
+  step no-ops off an enforcing host, and `build-image.sh` owns the nested `rootfs/local` rule.
 
 Every catalog family builds through the customization boot (a throwaway guest installs its
 own packages), so no image build depends on the libguestfs appliance network. The Ubuntu

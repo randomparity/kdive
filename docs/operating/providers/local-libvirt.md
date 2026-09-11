@@ -78,6 +78,16 @@ These are the points where the two families genuinely diverge, not just in packa
   (ADR-0639). `install-host.sh` installs `policycoreutils-python-utils` for the `semanage` that
   needs. If a domain start still fails with `Permission denied` on a kdive image, a stale
   per-domain label may be stuck — `sudo restorecon -R -F /var/lib/kdive/rootfs` clears it.
+
+  This labeling covers the **provisioning** path only. It does not extend to step 3's
+  `build-image.sh`, whose customization boot runs against the session daemon with a workspace
+  defaulting under `$HOME` — a location neither script labels. On both RedHat-family targets the
+  shipped policy grants `svirt_t` neither write nor map on that path's default `data_home_t`, and
+  write but not map on `svirt_home_t` (measured 2026-09-11), so a direct-kernel customization boot
+  has no mappable path there. A build that fails with `Permission denied` on an enforcing host is
+  therefore a separate defect from the one ADR-0639 fixes, and is not resolved by re-running
+  `install-host.sh`. ADR-0639's own end-to-end proof staged a prebuilt image rather than building
+  on the target for this reason.
 - **libguestfs backend.** The worker pins `LIBGUESTFS_BACKEND=direct` in
   `deploy/systemd/system/kdive-live-worker@.service`. Debian/Ubuntu build libguestfs with that
   backend as its default; Fedora and RHEL default to the libvirt backend, which connects to
