@@ -152,6 +152,20 @@ else
   sudo dnf install -y "${packages[@]}"
 fi
 
+# 2b. Start the libvirt daemons (RedHat family only). Installing the packages leaves the modular
+#     socket units *enabled but not started*, so a host that has not rebooted since the install
+#     has no libvirt listening: `virsh -c qemu:///system` fails and the `default` network stays
+#     inactive, which is exactly where the preflight and up.sh stop. Debian/Ubuntu need nothing
+#     here — libvirt-daemon-system's postinst starts libvirtd.socket itself, and that path is
+#     already proven, so leave it alone. The unit list mirrors libvirt_stack_modular_sockets in
+#     deploy/ansible/roles/libvirt_stack; starting virtnetworkd is what brings `default` up.
+if [[ "${distro_family}" == "redhat" ]]; then
+  step "modular libvirt sockets"
+  sudo systemctl enable --now \
+    virtqemud.socket virtnetworkd.socket virtstoraged.socket \
+    virtnodedevd.socket virtsecretd.socket virtproxyd.socket
+fi
+
 # 3. Group membership. Takes effect on the next login shell, which is why the script ends with
 #    a reminder instead of running the preflight (it would report the libvirt group as missing).
 #    Only groups that exist are requested: `usermod -aG` fails the whole call on an unknown
