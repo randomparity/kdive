@@ -141,6 +141,17 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   the default deployment and disabled the relabel that makes it work — including the
   customization boot, whose dependence on that relabel is recorded at
   `src/kdive/providers/local_libvirt/rootfs_build.py:233-244`.
+- **`virt_content_t` for the install-staging tree instead of `svirt_image_t`.** verified: it
+  would satisfy criterion 2 with strictly less privilege. `sesearch -A -s svirt_t -t
+  virt_content_t -c file` gives `{ getattr ioctl lock map open read }` — read and **map** but no
+  **write** — plus an explicit `dontaudit virt_domain virt_content_t:file { append ioctl lock open
+  write }` (Fedora 44, `selinux-policy-44.8-1.fc44`, 2026-09-11). Direct-kernel boot only maps the
+  staged `kernel`/`initrd`; nothing in that tree is written by the domain, so the write
+  `svirt_image_t` grants there is unused. Not adopted here: no completion criterion requires the
+  narrowing, one label for both trees is what the live proof exercises, and the `dontaudit` means
+  a wrong call produces a silent failure with no AVC to diagnose it — so the change wants its own
+  validation rather than riding along with this one. Operator decision 2026-09-11; worth revisiting
+  as a follow-up.
 - **Per-domain `<seclabel type='static'>` with kdive-generated MCS categories.** judgment: it
   makes kdive responsible for allocating unique category pairs and for their lifetime across
   crashes and restarts. libvirt already does that correctly.
