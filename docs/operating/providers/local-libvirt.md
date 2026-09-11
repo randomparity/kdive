@@ -13,12 +13,12 @@ which owns the command sequence, the guest-image build, and the MCP client wirin
 `examples/local-libvirt/install-host.sh` prepares a host end to end. It classifies the host from
 `/etc/os-release` and refuses anything outside these families rather than installing a partial set.
 
-| Family | `install-host.sh` | Package names verified on |
-|---|---|---|
-| Debian / Ubuntu | full | Ubuntu 26.04 |
-| Fedora | full | Fedora 44 |
-| RHEL / CentOS Stream / Rocky / Alma | full, after you install a container engine | Rocky 9, Rocky 10 |
-| Anything else (Arch, SUSE, …) | refuses with `exit 2` | — |
+| Family | `install-host.sh` | Build guest images locally | Verified on |
+|---|---|---|---|
+| Debian / Ubuntu | full | yes | Ubuntu 26.04 |
+| Fedora | full | yes | Fedora 44, end to end |
+| RHEL / CentOS Stream / Rocky / Alma | full, once you install a container engine | **no — stage images from elsewhere** | Rocky 10 host prep and stack; Rocky 9 package names |
+| Anything else (Arch, SUSE, …) | refuses with `exit 2` | — | — |
 
 An unsupported host is not a dead end: the [prerequisites](#what-a-host-needs) below are the whole
 contract, and a host that meets them by hand works with every later step. `deploy/ansible/roles/libvirt_stack`
@@ -87,11 +87,37 @@ These are the points where the two families genuinely diverge, not just in packa
   libvirt daemon. Classic sudo zeroes it, so every RedHat-family host would otherwise reach the
   launch with a zero hard limit and fail every domain start with `cannot limit core file size of
   process N`; Ubuntu 26.04's sudo-rs does not zero it.
-- **kdump capture on Enterprise Linux.** The libguestfs Python binding is a C extension built for
-  the system Python, so it is importable from the project venv only when the two minor versions
-  match. Ubuntu 26.04 and Fedora 44 both ship 3.14, the project Python; EL9 ships 3.9 and EL10
-  ships 3.12, so neither can share the binding. Everything except kdump capture works there —
-  provision, build, install, boot, debug, and the other capture methods do not use it.
+- **The interpreter, and what it costs Enterprise Linux.** The project requires Python 3.14.
+  Ubuntu 26.04 and Fedora 44 ship it as `/usr/bin/python3`; EL9 ships 3.9 and EL10 ships 3.12,
+  packaging 3.14 separately as `python3.14`, which `install-host.sh` installs and the lifecycle
+  contract discovers. The consequence is the libguestfs Python binding: it is a C extension built
+  for the *system* interpreter, so it loads in the project venv only when the two minor versions
+  match. On EL they cannot, so the binding is unavailable and two things do not work there:
+
+  - **Local guest-image builds.** `build-image.sh` extracts a baseline kernel through the Python
+    binding, so it fails on EL with `libguestfs (the guestfs Python binding) is required to
+    extract the baseline kernel`. Build images on a matching host and stage them, or publish them
+    through the [image lifecycle runbook](../runbooks/image-lifecycle.md).
+  - **Local kdump capture** (ADR-0203). Every other capture method is unaffected.
+
+  Host preparation, the stack, provisioning, install, boot and debug do not use the binding. Note
+  also that an EL host cannot build a *btrfs* image even with a working binding: the EL libguestfs
+  appliance kernel has no btrfs, so a Fedora cloud image fails with `unknown filesystem type
+  'btrfs'`. The catalog's `rocky-kdive-ready-*` entries are the EL-native choice.
+
+## Known limitation — SELinux and per-System overlays
+
+With SELinux enforcing, provisioning currently fails opening a System's overlay:
+
+```
+Could not open '/var/lib/kdive/rootfs/<system-id>-overlay.qcow2': Permission denied
+```
+
+`install-host.sh` labels the rootfs tree `virt_image_t`, which is necessary but not sufficient:
+the unprivileged session libvirt daemon cannot apply sVirt's per-domain relabeling, the RedHat
+analogue of the AppArmor `virt-aa-helper` path `deploy/ansible/roles/live_vm_host` relies on for
+Ubuntu. Confirmed by bisection on a Fedora 44 host: with `setenforce 0` the same provision reaches
+`ready` in 13 s. Tracked separately; it is a confinement-policy decision, not an install fix.
 
 ## Preflight
 
