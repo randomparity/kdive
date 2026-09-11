@@ -256,6 +256,25 @@ unset witness_dsn witness_password
 step "/var/lib/kdive/rootfs/local"
 sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/rootfs/local
 
+# 7b. SELinux label for the whole rootfs tree, not just the base images under local/.
+#     Provisioning writes each System's overlay to /var/lib/kdive/rootfs/<system-id>/, and that
+#     parent inherits var_lib_t, which QEMU (svirt_t) cannot open — the domain then dies with
+#     "process exited while connecting to monitor: ... Permission denied" and the provision job
+#     reports provisioning_failure. build-image.sh labels only the base-image directory it
+#     publishes to, so the overlay parent has to be labeled here, where it is created.
+if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
+  step "SELinux virt_image_t on /var/lib/kdive/rootfs"
+  if command -v semanage >/dev/null 2>&1; then
+    if ! sudo semanage fcontext -l | grep -q '^/var/lib/kdive/rootfs(/\.\*)? '; then
+      sudo semanage fcontext -a -t virt_image_t '/var/lib/kdive/rootfs(/.*)?'
+    fi
+    sudo restorecon -R /var/lib/kdive/rootfs
+  else
+    echo "SELinux is enforcing but semanage is missing; install policycoreutils-python-utils" >&2
+    echo "and label /var/lib/kdive/rootfs virt_image_t before provisioning." >&2
+  fi
+fi
+
 # 8. The fixed workers run in their own accounts and execute this checkout's source (through
 #    scripts/live-stack/worker-from-checkout) and read the kernel tree, so every directory on
 #    the way there must be traversable by them; the witness refuses to start a worker otherwise.
