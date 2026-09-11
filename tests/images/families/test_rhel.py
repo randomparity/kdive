@@ -270,7 +270,9 @@ def test_normalize_scales_its_guestfish_budget_on_an_emulated_host(
 ) -> None:
     # The stage that actually failed the #2414 measurement run: with virt-tar-out fixed, in-guest
     # build-fs on an emulated-POWER host died here at `guestfish exceeded its timeout
-    # {'timeout_s': 300}` after a measured 303 s. The budget must reach the tool scaled.
+    # {'timeout_s': 300}`. Re-measured under the scaled budget, this stage takes 1365 s — 4.55x
+    # its base, the tightest ratio any #2414 measurement produced. The budget must reach the tool
+    # scaled.
     import kdive.config as config
     from kdive.images.families import rhel as rhel_module
 
@@ -295,4 +297,4 @@ def test_normalize_scales_its_guestfish_budget_on_an_emulated_host(
         config.reset()
 
     assert budgets == [rhel_module._GUESTFISH_TIMEOUT_S * 10]
-    assert budgets[0] > 303
+    assert budgets[0] > 1365

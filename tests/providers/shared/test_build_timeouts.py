@@ -31,8 +31,10 @@ def test_slow_build_tool_timeout_is_thirty_minutes() -> None:
 # Every budget bounding a libguestfs appliance tool scales by one factor from one probe, but from
 # its own base: a whole-disk repack is bounded at 1800 s while a read-only marker read is bounded
 # at 300 s. The measured emulated-POWER run is the reason the 300 s bases are here at all — it
-# cleared virt-tar-out under the scaled budget and then died in guestfish at 303 s against an
-# unscaled 300 s, one percent over (#2414).
+# cleared virt-tar-out under the scaled budget and was then killed in guestfish at its unscaled
+# 300 s (#2414). The smaller base is the tighter case, not the looser one: it pays the same fixed
+# appliance boot over less work, so it measures 4.55x its base where the 1800 s stages measure
+# 1.1-1.6x.
 
 
 def test_the_scaler_passes_any_base_through_untouched_on_a_kvm_host() -> None:
@@ -49,10 +51,11 @@ def test_the_scaler_multiplies_any_base_on_an_emulated_host() -> None:
 
 def test_the_scaler_clears_the_measured_guestfish_normalization_failure() -> None:
     # The second regression this scaling exists for: with virt-tar-out fixed, in-guest build-fs on
-    # the emulated-POWER host died at `guestfish exceeded its timeout {'timeout_s': 300}` after a
-    # measured 303 s (#2414). The 300 s base must scale past that on such a host.
+    # the emulated-POWER host died at `guestfish exceeded its timeout {'timeout_s': 300}` (#2414).
+    # The measured cost of that stage, once allowed to finish, is 1365 s. The 300 s base must
+    # scale past the real figure, not merely past the budget that killed it.
     config.load({})  # setting default (10.0)
-    assert build_timeouts.appliance_budget_s(300, kvm_present=lambda: False) > 303
+    assert build_timeouts.appliance_budget_s(300, kvm_present=lambda: False) > 1365
 
 
 def test_the_scaler_never_reads_config_on_a_kvm_host() -> None:

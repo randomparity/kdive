@@ -45,6 +45,25 @@ def host_appliance_multiplier(*, kvm_present: Callable[[], bool] | None = None) 
     Fedora 44 ppc64le overlay took **1474 s** and exited 0 — appliance boot to key inject
     734 s, SELinux relabel a further 573 s — against a 300 s budget it could never meet.
 
+    Further points from the same host class (#2414), taken through the sibling budgets in
+    :mod:`kdive.providers.shared.build_timeouts`, which scale by this same multiplier. Three
+    in-guest ``build-fs`` runs spent **2406 / 2888 / 2955 s** in ``virt-tar-out`` and
+    **2032 / 2293 / 2256 s** in ``virt-make-fs``, all exiting 0. Every figure exceeds the
+    unscaled 1800 s base, so scaling is required rather than precautionary, and all sit well
+    inside the scaled 18000 s — the largest at 1.64x the base against a 10x multiplier.
+
+    **The headroom is not uniform across stages.** The ``guestfish`` normalization step, whose
+    base is 300 s rather than 1800 s, took **1365 s** and **1324 s** — **4.41-4.55x** its base.
+    Do not read the 1.1-1.6x figures above as the multiplier's working range: they belong to the
+    two longest bases, where the fixed appliance-boot cost is amortized over more work. A smaller
+    base pays the same boot and so asks a larger ratio, which is what puts a 300 s budget
+    four-and-a-half times under water on this host. The 10x ADR-0341 hands down still covers
+    every measurement taken, but with roughly 2x margin at the tightest stage rather than the
+    ~6x the long-base figures alone would imply.
+
+    The timings, their sampling error, and what the runs did *not* establish are recorded in
+    ``docs/design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md``.
+
     ``kvm_present`` is injected so both branches are unit-tested without a real ``/dev/kvm``.
     """
     probe = kvm_present if kvm_present is not None else kvm_probe_for_uri(resolved_libvirt_uri())

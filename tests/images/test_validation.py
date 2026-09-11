@@ -203,8 +203,9 @@ def test_real_inspect_scales_its_budget_on_an_emulated_host(
 ) -> None:
     # This probe boots the same host-arch appliance the rootfs build tools boot, so on a host
     # without usable KVM it is emulated too. Measured for #2414: with virt-tar-out fixed, in-guest
-    # build-fs on an emulated-POWER host died in a sibling guestfish call at 303 s against an
-    # unscaled 300 s budget. The scaled value must reach the subprocess, not just exist.
+    # build-fs on an emulated-POWER host was killed in a sibling guestfish call at its unscaled
+    # 300 s budget; allowed to finish under the scaled budget, that stage took 1365 s. The scaled
+    # value must reach the subprocess, not just exist.
     scaled = validation._GUESTFISH_TIMEOUT_S * 10
     calls = _patch_run(monkeypatch, subprocess.TimeoutExpired(cmd="guestfish", timeout=scaled))
 
@@ -213,7 +214,7 @@ def test_real_inspect_scales_its_budget_on_an_emulated_host(
 
     assert caught.value.details == {"timeout_s": scaled}
     assert calls[0]["timeout"] == scaled
-    assert scaled > 303
+    assert scaled > 1365
 
 
 def test_real_inspect_maps_nonzero_exit_to_infrastructure_failure_with_truncated_stderr(

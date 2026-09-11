@@ -284,9 +284,10 @@ def test_guestfish_probes_timeout(probe: _PathProbe, monkeypatch: pytest.MonkeyP
 def test_guestfish_probes_scale_their_budget_on_an_emulated_host(
     probe: _PathProbe, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Measured for #2414: with virt-tar-out fixed, in-guest build-fs on an emulated-POWER host
-    # died in guestfish at 303 s against an unscaled 300 s budget, one percent over. The scaled
-    # value must reach the subprocess, so assert on the kwargs the probe actually passed.
+    # Measured for #2414: with virt-tar-out fixed, in-guest build-fs on an emulated-POWER host was
+    # killed in guestfish at its unscaled 300 s budget. The kill bounded the work from below and
+    # no more — allowed to finish under the scaled budget, the same stage took 1365 s, 4.55x its
+    # base. The scaled value must reach the subprocess, so assert on the kwargs actually passed.
     scaled = probes._GUESTFISH_TIMEOUT_S * 10
     calls = _patch_run(monkeypatch, [subprocess.TimeoutExpired(cmd="guestfish", timeout=scaled)])
 
@@ -295,7 +296,7 @@ def test_guestfish_probes_scale_their_budget_on_an_emulated_host(
 
     assert caught.value.details == {"timeout_s": scaled}
     assert calls[0][1]["timeout"] == scaled
-    assert scaled > 303
+    assert scaled > 1365
 
 
 @pytest.mark.parametrize(
