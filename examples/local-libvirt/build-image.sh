@@ -41,12 +41,6 @@ reconcile() {
     "${KDIVE_PYTHON}" -m kdive reconcile-systems "$@"
 }
 
-# Label the rootfs directory on SELinux-enforcing hosts only (Fedora/EL). A qcow2 published from
-# a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0639).
-label_for_qemu() {
-  kdive_label_svirt_image "${rootfs_dir}"
-}
-
 mkdir -p "${workspace}" "$(dirname "${systems_toml}")"
 if [[ ! -e "${systems_toml}" ]]; then
   printf 'schema_version = 2\n' >"${systems_toml}"
@@ -63,7 +57,9 @@ for name in "$@"; do
     echo "build-fs did not publish ${qcow2}" >&2
     exit 1
   }
-  label_for_qemu
+  # Label the rootfs directory on SELinux-enforcing hosts only (Fedora/EL). A qcow2 published from
+  # a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0639).
+  kdive_label_svirt_image "${rootfs_dir}"
 
   # Declare the image from its own provenance sidecar (arch + baked capabilities), so the
   # [[image]] block never disagrees with what build-fs actually produced.

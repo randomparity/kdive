@@ -6,7 +6,9 @@ PATH pinned to a tmp_path stub directory. Every stub (getenforce, semanage, rest
 its argv to one shared log file, which is the whole assertion surface; the sudo stub is
 transparent (``exec "$@"``) so the log records exactly what the helper passed to semanage and
 restorecon. The semanage stub's exit status for the ``-m`` arm is the test parameter: 1 stands
-for a fresh host where only ``-a`` can succeed, 0 for a host that already carries the rule.
+for a fresh host where only ``-a`` can succeed, 0 for a host that already carries the rule. The
+``-a`` arm's exit status is a separate parameter, non-zero only to simulate a broken policy store
+where neither arm succeeds.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ def _bindir(
     enforcing: bool = True,
     have_semanage: bool = True,
     semanage_m_status: int = 1,
+    semanage_a_status: int = 0,
 ) -> Path:
     """A PATH with stubs for getenforce/semanage/restorecon; sudo is a transparent passthrough."""
     b = tmp_path / "bin"
@@ -54,21 +57,28 @@ def _bindir(
             b,
             "semanage",
             f'#!/bin/sh\nprintf \'%s\\n\' "semanage $*" >> "{log}"\n'
-            f'if [ "$1" = "fcontext" ] && [ "$2" = "-m" ]; then exit {semanage_m_status}; fi\n'
+            f'if [ "$1" = "fcontext" ] && [ "$2" = "-m" ]; then\n'
+            f'  [ {semanage_m_status} -ne 0 ] && echo "semanage: mock -m failure" >&2\n'
+            f"  exit {semanage_m_status}\n"
+            "fi\n"
+            f'if [ "$1" = "fcontext" ] && [ "$2" = "-a" ]; then\n'
+            f'  [ {semanage_a_status} -ne 0 ] && echo "semanage: mock -a failure" >&2\n'
+            f"  exit {semanage_a_status}\n"
+            "fi\n"
             "exit 0\n",
         )
     _stub(b, "restorecon", f'#!/bin/sh\nprintf \'%s\\n\' "restorecon $*" >> "{log}"\n')
     return b
 
 
-def _run(tmp_path: Path, directory: str, bindir: Path) -> subprocess.CompletedProcess[str]:
+def _run(directory: str, bindir: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     assert BASH is not None, "bash is required to run the helper"
     return subprocess.run(
         [BASH, "-c", f'source "{HELPER}"; kdive_label_svirt_image "{directory}"'],
         env={"PATH": str(bindir)},
         capture_output=True,
         text=True,
-        check=True,
+        check=check,
     )
 
 
@@ -81,7 +91,7 @@ def test_adds_rule_when_absent(tmp_path: Path) -> None:
     """No existing rule: -m fails, -a adds it, then restorecon runs."""
     bindir = _bindir(tmp_path, semanage_m_status=1)
 
-    _run(tmp_path, "/var/lib/kdive/rootfs", bindir)
+    _run("/var/lib/kdive/rootfs", bindir)
 
     lines = _log_lines(tmp_path)
     assert any(line.startswith("semanage fcontext -m") for line in lines)
@@ -96,7 +106,7 @@ def test_migrates_stale_rule(tmp_path: Path) -> None:
     """An existing rule (even a stale virt_image_t one): -m succeeds, -a never runs."""
     bindir = _bindir(tmp_path, semanage_m_status=0)
 
-    _run(tmp_path, "/var/lib/kdive/rootfs", bindir)
+    _run("/var/lib/kdive/rootfs", bindir)
 
     lines = _log_lines(tmp_path)
     assert any(
@@ -111,7 +121,7 @@ def test_noop_when_not_enforcing(tmp_path: Path) -> None:
     """Permissive/disabled hosts: no semanage or restorecon call is recorded."""
     bindir = _bindir(tmp_path, enforcing=False)
 
-    _run(tmp_path, "/var/lib/kdive/rootfs", bindir)
+    _run("/var/lib/kdive/rootfs", bindir)
 
     assert _log_lines(tmp_path) == []
 
@@ -120,7 +130,21 @@ def test_reports_missing_semanage(tmp_path: Path) -> None:
     """semanage absent on an enforcing host: nothing is written, and the helper still returns 0."""
     bindir = _bindir(tmp_path, have_semanage=False)
 
-    result = _run(tmp_path, "/var/lib/kdive/rootfs", bindir)
+    result = _run("/var/lib/kdive/rootfs", bindir)
 
     assert _log_lines(tmp_path) == []
     assert result.returncode == 0
+    assert "policycoreutils-python-utils" in result.stderr
+    assert "/var/lib/kdive/rootfs" in result.stderr
+
+
+def test_aborts_when_migrate_and_add_both_fail(tmp_path: Path) -> None:
+    """A broken policy store (both -m and -a fail): the helper aborts non-zero and names why."""
+    bindir = _bindir(tmp_path, semanage_m_status=1, semanage_a_status=1)
+
+    result = _run("/var/lib/kdive/rootfs", bindir, check=False)
+
+    assert result.returncode != 0
+    assert not any(line.startswith("restorecon") for line in _log_lines(tmp_path))
+    assert "mock -m failure" in result.stderr
+    assert "mock -a failure" in result.stderr

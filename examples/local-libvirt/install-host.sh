@@ -272,8 +272,12 @@ sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/rootfs
 #     there; the install plane points a live domain's <os> at kernel/initrd under install/.
 #     svirt_t can do neither against virt_image_t (ADR-0639). build-image.sh owns the nested
 #     rootfs/local rule and migrates it itself; the base images under it are read-only backing
-#     files, which svirt_t may read under either label.
-step "SELinux svirt_image_t on the kdive image directories"
+#     files, which svirt_t may read under either label. kdive_label_svirt_image no-ops off an
+#     enforcing host on its own; the banner is gated the same way so a Debian/Ubuntu run does not
+#     announce a step that does nothing.
+if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
+  step "SELinux svirt_image_t on the kdive image directories"
+fi
 kdive_label_svirt_image /var/lib/kdive/rootfs
 kdive_label_svirt_image /var/lib/kdive/install
 

@@ -81,7 +81,8 @@ help-text corrections. Task 3 changes no repository file.
 
 ```bash
 # examples/local-libvirt/selinux-label.sh
-kdive_label_svirt_image <directory>   # returns 0 always; no-ops off SELinux-enforcing hosts
+kdive_label_svirt_image <directory>   # returns 0 on success or no-op; non-zero if the policy
+                                       # store can't be modified (both -m and -a fail)
 ```
 
 Task 2 consumes nothing from this task.
