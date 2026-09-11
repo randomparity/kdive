@@ -18,9 +18,10 @@ it — see ADR-0639's rejected alternatives and the re-frozen charter on the iss
 
 1. A new sourced shell helper under `examples/local-libvirt/` applies the label and **migrates** an
    existing rule on the same pattern instead of skipping it.
-2. `examples/local-libvirt/install-host.sh` calls it for `/var/lib/kdive/rootfs`, for the nested
-   `/var/lib/kdive/rootfs/local` rule `build-image.sh` owns, and for `/var/lib/kdive/install`
-   (creating that root, which the installer does not create today).
+2. `examples/local-libvirt/install-host.sh` calls it for `/var/lib/kdive/rootfs` and for
+   `/var/lib/kdive/install`. It does not create the latter — step 6 already runs
+   `deploy/systemd/install-live-worker-lifecycle.sh`, which creates it — and it does not touch the
+   nested `/var/lib/kdive/rootfs/local` rule, which `build-image.sh` owns and migrates itself.
 3. `examples/local-libvirt/build-image.sh` calls it in place of its own `label_for_qemu` body.
 4. Operator-facing text that names `virt_image_t` for a path this change relabels is corrected:
    `examples/local-libvirt/README.md`, `docs/operating/providers/local-libvirt.md` (including its
@@ -33,11 +34,11 @@ it — see ADR-0639's rejected alternatives and the re-frozen charter on the iss
 `docs/operating/runbooks/image-lifecycle.md:91` name `virt_image_t` for `qemu:///system` paths,
 where a privileged daemon relabels dynamically and the old label stays correct; so do
 `src/kdive/testing/live_vm.py` and `tests/live_vm/__init__.py`. The `deploy/ansible/` tree performs
-no labeling at all, and `inventory/group_vars/live_vm_runners.yml:3` describes
-`/var/lib/kdive/live-vm` and `/var/lib/kdive/install` on an Ubuntu/AppArmor runner — this change
-relabels neither on that host, so that comment is left alone. Only
-`roles/live_vm_host/tasks/main.yml:1929`, which names `virt_image_t` as "the SELinux equivalent
-RHEL required", is corrected.
+no labeling at all — no `sefcontext` or `setype` task exists anywhere in it — so two comments there
+are corrected as prose: `roles/live_vm_host/tasks/main.yml:1929`, which names `virt_image_t` as
+"the SELinux equivalent RHEL required", and `inventory/group_vars/live_vm_runners.yml:3`, which
+claims `/var/lib/kdive/live-vm` and `/var/lib/kdive/install` are "Both labeled virt_image_t" — an
+assertion `main.yml:1926-1929` directly contradicts. No task, variable or value changes.
 
 Out of scope per the frozen charter: the Ubuntu/AppArmor path; any behavioral change under
 `deploy/ansible/`; `security_driver = "none"`; the remote-libvirt provider; a custom SELinux
@@ -79,8 +80,12 @@ image directories with non-kdive workloads, are not named deployments.
 **Covered elsewhere.**
 
 - Guest-side SELinux posture — ADR-0484 (guest images ship permissive).
-- The `cannot limit core file size` failure observed on `kdive-build-*` domains during design is
-  unrelated to labeling; reported as a follow-up candidate, not addressed here.
+- The `cannot limit core file size` failure observed on `kdive-build-*` domains during design is an
+  `RLIMIT_CORE` failure and unrelated to labeling. A related condition is already owned by
+  `docs/operating/providers/local-libvirt.md:87-91`; whether this is that condition or a distinct
+  one is not established. Owner: reported as a follow-up candidate in the implementing PR, not
+  fixed here. It is a risk to the live proof — if it recurs on a target, that arm cannot complete
+  there, and the PR body says so rather than reporting the criterion met.
 
 ### Threat model
 
@@ -112,11 +117,12 @@ only by an operator who already has root.
 2. The domain's QEMU process runs as `svirt_t` with MCS categories, and the start produces no
    `denied` AVC for any path under the kdive image directories.
 3. Re-running `install-host.sh` alone on a host carrying the old `virt_image_t` rules leaves
-   exactly one rule of type `svirt_image_t` for each of the three patterns it owns or migrates:
-   `/var/lib/kdive/rootfs(/.*)?`, `/var/lib/kdive/rootfs/local(/.*)?`, and
-   `/var/lib/kdive/install(/.*)?`.
-4. The rendered domain XML is byte-identical to what `main` renders — this change adds no
-   `<seclabel>` and must not perturb the `qemu:///system` default.
+   exactly one rule of type `svirt_image_t` for each of the two patterns it owns —
+   `/var/lib/kdive/rootfs(/.*)?` and `/var/lib/kdive/install(/.*)?` — and re-running
+   `build-image.sh` leaves exactly one for `/var/lib/kdive/rootfs/local(/.*)?`.
+4. The `qemu:///system` default keeps working: the rendered domain XML is byte-identical to what
+   `main` renders, and a privileged daemon's relabel-and-restore cycle from a static
+   `svirt_image_t` base is unchanged.
 5. No operator-facing text still tells a reader that provisioning fails under SELinux, or
    prescribes `virt_image_t` for a path this change relabels.
 6. The repository guardrail suite (`just ci`) is green.
@@ -130,7 +136,8 @@ only by an operator who already has root.
 | The helper no-ops off an enforcing host | `focused-test` | `…::test_noop_when_not_enforcing` |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` |
 | The domain XML is unchanged by this work (Success 4) | `focused-test` | the existing `tests/adversarial/test_provider_xml.py` and `tests/providers/local_libvirt/lifecycle/test_xml.py` suites pass untouched; this change adds no test there because it adds no behavior there |
-| `install-host.sh` labels all three paths | `task-test-not-applicable` | the installer's own gate harness (`tests/scripts/test_install_host_gates.py`) stops the script at the `sudo` preflight, far above these calls, and driving the whole installer needs a real enforcing host with root — which is the live proof below. The labeling logic itself is covered by the helper tests above, which is where the branching lives. |
+| The privileged daemon's relabel/restore cycle is unchanged by the new static label (Success 4) | design-time probe, recorded | measured on Fedora 44 / libvirt 12.0.0, 2026-09-11: a disk at `svirt_image_t:s0` attached to a `qemu:///system` domain went to `svirt_image_t:s0:c51,c883` while running and back to `svirt_image_t:s0` after `virsh destroy`. Recorded in ADR-0639's Decision section. No repeatable arm: the live proof below exercises the session daemon, and standing up a privileged-daemon kdive deployment is outside this change. |
+| `install-host.sh` labels both paths it owns | `task-test-not-applicable` | the installer's own gate harness (`tests/scripts/test_install_host_gates.py`) stops the script at the `sudo` preflight, far above these calls, and driving the whole installer needs a real enforcing host with root — which is the live proof below. The labeling logic itself is covered by the helper tests above, which is where the branching lives. |
 | Prose corrections | `task-test-not-applicable` | documentation and help text with no executable consumer; `just docs-links`, `just docs-paths` and `just config-docs-check` cover link, path and generated-table integrity |
 | End-to-end provisioning under enforcing | live proof | Fedora 44 and Rocky 10.2: run the installer, provision a System, assert `ready`, assert QEMU is `svirt_t`, assert no AVC under the kdive image directories |
 

@@ -17,8 +17,8 @@ untouched — a first design cycle proposed a per-disk `<seclabel>` and the revi
 **Decision:** `docs/adr/0639-static-svirt-image-label-for-session-mode-domains.md`
 
 Expected implementation size: 150–200 changed lines (M) — derived from the file map below: one new
-~30-line shell helper, one new ~85-line test module, three small script edits, and six prose or
-help-text corrections.
+~30-line shell helper, one new ~85-line test module, three small script edits, and nine prose or
+help-text corrections. Task 3 changes no repository file.
 
 ## Global Constraints
 
@@ -55,15 +55,17 @@ help-text corrections.
 | File | Action | Answerable for |
 |---|---|---|
 | `examples/local-libvirt/selinux-label.sh` | create | the one labeling+migration function, sourceable for tests |
-| `examples/local-libvirt/install-host.sh` | modify | sources the helper; labels rootfs, rootfs/local, and install staging |
-| `examples/local-libvirt/build-image.sh` | modify | sources the helper; `label_for_qemu` calls it |
+| `examples/local-libvirt/install-host.sh` | modify | sources the helper; labels rootfs and install staging; two comment corrections |
+| `examples/local-libvirt/build-image.sh` | modify | sources the helper; `label_for_qemu` calls it; header comment correction |
 | `tests/scripts/test_selinux_label.py` | create | drives the helper with stubbed `getenforce`/`semanage`/`restorecon` |
+| `tests/providers/local_libvirt/test_install.py` | modify | one assertion string, tracking the `install.py` remediation edit |
 | `examples/local-libvirt/README.md` | modify | one table cell |
 | `docs/operating/providers/local-libvirt.md` | modify | the SELinux bullet; delete the resolved `## Known limitation` section |
 | `src/kdive/config/core_settings.py` | modify | `KDIVE_INSTALL_STAGING` help text |
 | `docs/guide/reference/config.md` | regenerate | the generated row for that setting |
 | `src/kdive/providers/local_libvirt/lifecycle/install.py` | modify | the staging-root remediation string |
 | `deploy/ansible/roles/live_vm_host/tasks/main.yml` | modify | one comment clause |
+| `deploy/ansible/inventory/group_vars/live_vm_runners.yml` | modify | one comment clause |
 | the ADR-0639 record | modify | Status Proposed → Accepted |
 
 ---
@@ -92,7 +94,7 @@ Task 2 consumes nothing from this task.
 | A pattern carrying a stale rule is **modified**, never added twice | `focused-test` | `…::test_migrates_stale_rule` — asserts a `-m -t svirt_image_t` call and no second rule; red against the shipped `-a`-only logic, whose presence check short-circuits and records no write at all |
 | The helper no-ops when SELinux is not enforcing | `focused-test` | `…::test_noop_when_not_enforcing` — asserts no `semanage`/`restorecon` invocation was recorded |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` — asserts nothing was written and the exit status is 0 |
-| The three installer call sites | `task-test-not-applicable` | `tests/scripts/test_install_host_gates.py` stops the installer at its `sudo` preflight, far above these lines, and driving the rest needs a real enforcing host with root — the live proof. The branching this task adds lives in the helper, which the four tests above cover. |
+| The three installer call sites | `task-test-not-applicable` | `tests/scripts/test_install_host_gates.py` stops the installer at its `sudo` preflight, far above these lines, and driving the rest needs a real enforcing host with root — the live proof in Task 3. The branching this task adds lives in the helper, which the four tests above cover. |
 
 ### Steps
 
@@ -140,15 +142,7 @@ kdive_label_svirt_image() {
 source "${example_dir}/selinux-label.sh"
 ```
 
-3. In the same file, add the install-staging root beside the existing `local/` creation at step 7
-   (`install-host.sh:265-266`), since the installer does not create it today:
-
-```bash
-step "/var/lib/kdive/install"
-sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/install
-```
-
-4. Replace the whole of step 7b (`install-host.sh:268-285`, the
+3. Replace the whole of step 7b (`install-host.sh:268-285`, the
    `if command -v getenforce …` block ending at its `fi`) with:
 
 ```bash
@@ -156,14 +150,19 @@ sudo install -d -o "${USER}" -g kdive-live-libvirt -m 2770 /var/lib/kdive/instal
 #     System's overlay under rootfs/ and direct-kernel boot maps the baseline kernel/initrd from
 #     there; the install plane points a live domain's <os> at kernel/initrd under install/.
 #     svirt_t can do neither against virt_image_t (ADR-0639). build-image.sh owns the nested
-#     rootfs/local rule, migrated here too so re-running this script alone is sufficient.
+#     rootfs/local rule and migrates it itself; the base images under it are read-only backing
+#     files, which svirt_t may read under either label.
 step "SELinux svirt_image_t on the kdive image directories"
 kdive_label_svirt_image /var/lib/kdive/rootfs
-kdive_label_svirt_image /var/lib/kdive/rootfs/local
 kdive_label_svirt_image /var/lib/kdive/install
 ```
 
-5. In `examples/local-libvirt/build-image.sh`, source the helper after `example_dir` is resolved
+   Do **not** add a creation step for `/var/lib/kdive/install`. Step 6 at `install-host.sh:254-259`
+   runs `deploy/systemd/install-live-worker-lifecycle.sh`, which already creates it at `:611-613`
+   with `install -d -o "$operator" -g "$libvirt_group" -m 2770`, so the directory exists before
+   step 7b and a second creator would apply a different owner/group posture in the same run.
+
+4. In `examples/local-libvirt/build-image.sh`, source the helper after `example_dir` is resolved
    (`build-image.sh:15`, beside the existing `env.sh` source at `:17`):
 
 ```bash
@@ -181,94 +180,39 @@ label_for_qemu() {
 }
 ```
 
-6. Create `tests/scripts/test_selinux_label.py`:
+5. Correct the two remaining `virt_image_t` comment literals in these scripts, which describe the
+   rootfs directory this change relabels:
 
-```python
-"""Gate tests for examples/local-libvirt/selinux-label.sh (ADR-0639, #2424).
+   - `install-host.sh:106` — "build-image.sh needs `semanage` to label the rootfs directory
+     virt_image_t on an SELinux-enforcing host" → "… to label the rootfs directory svirt_image_t
+     on an SELinux-enforcing host".
+   - `build-image.sh:9` — "on an SELinux-enforcing host the rootfs directory is labeled
+     virt_image_t so the qemu user can read it" → "… is labeled svirt_image_t so the confined
+     domain can use it".
 
-The helper is sourced, not executed: each test drives one function call with stubbed
-getenforce/sudo/semanage/restorecon on PATH, so nothing is ever labeled. Every stub appends its
-argv to a log file, and that log is the assertion surface.
-"""
+6. Create `tests/scripts/test_selinux_label.py`, following the `_stub`/`_bindir` pattern already in
+   `tests/scripts/test_install_host_gates.py` and carrying
+   `pytestmark = requires_bash(4, 3, …)` from `tests.host_capabilities` (the helper uses `[[ ]]`
+   and `local`). The harness sources the helper rather than executing it —
+   `bash -c 'source <helper>; kdive_label_svirt_image /var/lib/kdive/rootfs'` with `PATH` set to a
+   `tmp_path` stub directory — so nothing is ever labeled. Three points are not obvious and carry
+   the design:
 
-from __future__ import annotations
+   - The `sudo` stub is **transparent** (`exec "$@"`), so the `semanage` and `restorecon` stubs
+     observe exactly the argv the helper passed.
+   - Each stub appends its argv to one log file, and that log is the whole assertion surface.
+   - The `semanage` stub's exit status for the `-m` arm is the test parameter: `1` stands for a
+     fresh host where only `-a` can succeed, `0` for a host that already carries a rule. This is
+     what separates the two rule-writing tests.
 
-import shutil
-import subprocess
-from pathlib import Path
+   The four tests assert, against that log:
 
-from tests.host_capabilities import requires_bash
-
-HELPER = Path(__file__).resolve().parents[2] / "examples" / "local-libvirt" / "selinux-label.sh"
-BASH = shutil.which("bash")
-
-pytestmark = requires_bash(4, 3, "the helper uses [[ ]] and local")
-
-_TARGET = "/var/lib/kdive/rootfs"
-_PATTERN = f"{_TARGET}(/.*)?"
-
-
-def _stub(bindir: Path, name: str, body: str) -> None:
-    path = bindir / name
-    path.write_text(body)
-    path.chmod(0o755)
-
-
-def _run(tmp_path: Path, *, enforce: str, modify_rc: int = 0, semanage: bool = True) -> list[str]:
-    """Source the helper, call it once, and return the recorded stub invocations.
-
-    ``modify_rc`` is the status the ``semanage fcontext -m`` arm returns: 0 stands for a host
-    that already has a rule on the pattern, 1 for a fresh host where only ``-a`` can succeed.
-    """
-    assert BASH is not None, "bash is required to source the helper"
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    log = tmp_path / "log"
-    _stub(bindir, "getenforce", f"#!/bin/sh\necho {enforce}\n")
-    # sudo is transparent: it records nothing and runs its argv, so the stubs below see exactly
-    # the argv the helper passed.
-    _stub(bindir, "sudo", '#!/bin/sh\nexec "$@"\n')
-    _stub(
-        bindir,
-        "semanage",
-        f'#!/bin/sh\necho "semanage $*" >> "{log}"\n'
-        f'[ "$2" = "-m" ] && exit {modify_rc}\nexit 0\n',
-    )
-    _stub(bindir, "restorecon", f'#!/bin/sh\necho "restorecon $*" >> "{log}"\n')
-    if not semanage:
-        (bindir / "semanage").unlink()
-    subprocess.run(
-        [BASH, "-c", f'source "{HELPER}"; kdive_label_svirt_image {_TARGET}'],
-        env={"PATH": str(bindir)},
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=30,
-    )
-    return log.read_text().splitlines() if log.exists() else []
-
-
-def test_adds_rule_when_absent(tmp_path: Path) -> None:
-    calls = _run(tmp_path, enforce="Enforcing", modify_rc=1)
-    assert f"semanage fcontext -m -t svirt_image_t {_PATTERN}" in calls
-    assert f"semanage fcontext -a -t svirt_image_t {_PATTERN}" in calls
-    assert f"restorecon -R {_TARGET}" in calls
-
-
-def test_migrates_stale_rule(tmp_path: Path) -> None:
-    calls = _run(tmp_path, enforce="Enforcing", modify_rc=0)
-    assert f"semanage fcontext -m -t svirt_image_t {_PATTERN}" in calls
-    assert not any(" -a -t " in call for call in calls), "a second rule must not be added"
-    assert f"restorecon -R {_TARGET}" in calls
-
-
-def test_noop_when_not_enforcing(tmp_path: Path) -> None:
-    assert _run(tmp_path, enforce="Permissive") == []
-
-
-def test_reports_missing_semanage(tmp_path: Path) -> None:
-    assert _run(tmp_path, enforce="Enforcing", semanage=False) == []
-```
+   | Test | Asserts |
+   |---|---|
+   | `test_adds_rule_when_absent` | `-m` was tried, `-a -t svirt_image_t <pattern>` followed, then `restorecon -R <dir>` |
+   | `test_migrates_stale_rule` | `-m -t svirt_image_t <pattern>` ran, **no** `-a` followed, then `restorecon -R <dir>` |
+   | `test_noop_when_not_enforcing` | the log is empty |
+   | `test_reports_missing_semanage` | the log is empty and the exit status is 0 |
 
 7. Run the focused tests red first, before steps 1–6:
    `uv run python -m pytest tests/scripts/test_selinux_label.py -q`
@@ -281,9 +225,10 @@ def test_reports_missing_semanage(tmp_path: Path) -> None:
 
 ### Acceptance criteria
 
-- `kdive_label_svirt_image` exists in one file and is called three times by `install-host.sh` and
-  once by `build-image.sh`; neither script contains a `semanage fcontext` invocation of its own.
-- No `virt_image_t` literal remains in `examples/local-libvirt/`.
+- `kdive_label_svirt_image` exists in one file and is called twice by `install-host.sh` and once
+  by `build-image.sh`; neither script contains a `semanage fcontext` invocation of its own.
+- No `virt_image_t` literal remains in `install-host.sh` or `build-image.sh`
+  (`rg -n virt_image_t examples/local-libvirt/` returns only `README.md`, which Task 2 corrects).
 - The four focused tests pass; `just lint-shell` is green.
 
 ---
@@ -297,7 +242,9 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 **Modifies:** `examples/local-libvirt/README.md`,
 `docs/operating/providers/local-libvirt.md`, `src/kdive/config/core_settings.py`,
 `docs/guide/reference/config.md`, `src/kdive/providers/local_libvirt/lifecycle/install.py`,
-`deploy/ansible/roles/live_vm_host/tasks/main.yml`, the ADR-0639 record
+`tests/providers/local_libvirt/test_install.py`,
+`deploy/ansible/roles/live_vm_host/tasks/main.yml`,
+`deploy/ansible/inventory/group_vars/live_vm_runners.yml`, the ADR-0639 record
 
 **Interfaces.** Consumes nothing and provides nothing; no signature changes.
 
@@ -338,17 +285,20 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 7. `deploy/ansible/roles/live_vm_host/tasks/main.yml:1929` — change the closing clause from
    "sVirt label (the SELinux virt_image_t equivalent RHEL required)." to "sVirt label. The
    SELinux equivalent RHEL requires is a static svirt_image_t label on the image directories
-   (ADR-0639)." Touch no other line in that file, and leave
-   `inventory/group_vars/live_vm_runners.yml` alone: its comment describes
-   `/var/lib/kdive/live-vm` and `/var/lib/kdive/install` on an Ubuntu/AppArmor runner, neither of
-   which this change relabels on that host.
-8. the ADR-0639 record — change `## Status` from `Proposed` to `Accepted (2026-09-11)` and delete
+   (ADR-0639)." Touch no other line in that file.
+8. `deploy/ansible/inventory/group_vars/live_vm_runners.yml:3` — the clause "Both labeled
+   virt_image_t, both traversable." asserts labeling the role does not perform: `main.yml:1926-1929`
+   records that the Ubuntu target uses AppArmor and needs no static sVirt label, and
+   `rg -n 'sefcontext|setype' deploy/ansible/` finds no such task anywhere in the tree. Replace the
+   clause with "Both traversable; the Ubuntu runner confines qemu with AppArmor and needs no static
+   sVirt label." Comment only — no variable, task, or value changes, within exclusion 2.
+9. the ADR-0639 record — change `## Status` from `Proposed` to `Accepted (2026-09-11)` and delete
    the ratification note beneath it.
-9. `just lint && just type && just adr-status-check && just docs-links && just docs-paths &&
-   just config-docs-check` — expect every one green.
-10. `just lint-ansible < /dev/null` — expect exit 0. (ansible-core aborts on non-blocking stdin;
+10. `just lint && just type && just adr-status-check && just docs-links && just docs-paths &&
+    just config-docs-check` — expect every one green.
+11. `just lint-ansible < /dev/null` — expect exit 0. (ansible-core aborts on non-blocking stdin;
     redirect it.)
-11. Stage, `prek run`, re-add exactly the staged paths, commit:
+12. Stage, `prek run`, re-add exactly the staged paths, commit:
     `docs(local-libvirt): record the svirt_image_t label and retire the SELinux limitation`
 
 ### Acceptance criteria
@@ -361,10 +311,60 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 
 ---
 
+## Task 3 — the live proof and the full gate
+
+**Where it fits.** Completion criteria 6 and 7 are the only ones no earlier task discharges. The
+helper tests cover the labeling logic; nothing below the `sudo` preflight of `install-host.sh` runs
+anywhere but on a real enforcing host.
+
+**Modifies:** nothing in the repository. This task produces evidence for the PR body.
+
+### Verification
+
+| Contract | Mode | Detail |
+|---|---|---|
+| A System provisions to `ready` under SELinux enforcing | live proof | both RedHat-family targets, procedure below |
+| The domain runs confined and produces no denial | live proof | `svirt_t` with MCS categories; no `denied` AVC for a path under the kdive image directories |
+| The repository guardrail suite is green | `focused-test` | `just ci`, bare |
+
+### Steps
+
+1. On each target — the Fedora 44 host and the Rocky 10.2 host — confirm the starting state:
+   `getenforce` reports `Enforcing`, and destroy any domain left running from a permissive-mode
+   session, which is not a counterexample and must not be reused.
+2. Run the installer from the branch checkout: `examples/local-libvirt/install-host.sh`. Confirm
+   the resulting rules, expecting `svirt_image_t` on each:
+   `sudo semanage fcontext -l -C | grep kdive`
+3. Bring the stack up and build an image (`scripts/live-stack/up.sh`,
+   `examples/local-libvirt/build-image.sh`), then provision a System through the ordinary worker
+   path. Assert it reaches `ready` with no `setenforce 0` and no `security_driver` change.
+4. While the domain runs, record the three assertions:
+   - `ps -eZ | grep qemu-system` shows the process as `svirt_t:s0:c<i>,c<j>`.
+   - `ls -Z` on the System's overlay and its baseline `kernel`/`initrd` shows `svirt_image_t`.
+   - `journalctl -k --since <start>` carries no `denied` record for a path under
+     `/var/lib/kdive/rootfs` or `/var/lib/kdive/install`. Read the **journal**, not `ausearch`,
+     which does not surface these denials on either host (ADR-0639 Context).
+5. Run the full gate on the workstation, bare and with stdin closed, per Global Constraints:
+   `just ci > /tmp/kdive-ci-2424.log 2>&1 < /dev/null` — expect exit 0. This covers the recipes
+   Task 2 step 10 does not, including `test-ansible`, `lint-workflows`, `served-doc-links` and
+   `config-guard`.
+6. Record in the PR body which arms ran on which target, and the observed process and file labels.
+
+### Acceptance criteria
+
+- Both targets reached `ready` under enforcing, with the three assertions recorded for each.
+- `just ci` exited 0.
+- If either target cannot run the arm, the PR body says so explicitly and names the blocker rather
+  than reporting the criterion as met.
+
+---
+
 ## Rollback and cleanup
 
 `git revert`-clean in the repository. On a host already migrated, reverting the repository does
-**not** restore the old label. An operator who needs that runs, for each of the three patterns:
+**not** restore the old label. An operator who needs that runs, for each of the three patterns the
+two scripts own — `/var/lib/kdive/rootfs(/.*)?` and `/var/lib/kdive/install(/.*)?` from
+`install-host.sh`, `/var/lib/kdive/rootfs/local(/.*)?` from `build-image.sh`:
 
 ```sh
 sudo semanage fcontext -m -t virt_image_t '/var/lib/kdive/rootfs(/.*)?'
@@ -377,5 +377,15 @@ describes.
 
 ## Deferrals carried into this plan
 
-None. Every design-review finding from both passes was accepted and applied, or rejected with
-evidence recorded in ADR-0639's rejected alternatives.
+Every design-review finding from both passes, and every scope-audit finding, was accepted and
+applied. One deferral is carried, matching the spec's "Covered elsewhere":
+
+- **`cannot limit core file size … Operation not permitted` on `kdive-build-*` domains.** Observed
+  on the Fedora 44 target during design, and independent of labeling: it is an `RLIMIT_CORE`
+  failure, and nothing here touches `RLIMIT_CORE`. A related condition is already owned by
+  `docs/operating/providers/local-libvirt.md:87-91`, which records that classic sudo zeroes
+  `RLIMIT_CORE` so the lifecycle installer raises it before launching the session daemon. Whether
+  the observed failure is that condition or a distinct one is **not** established. Owner: reported
+  as a follow-up candidate in the PR body, not fixed here. It is a risk to Task 3 — if it recurs on
+  a target, the live-proof arm cannot complete there, and Task 3's acceptance criteria require
+  saying so rather than reporting the criterion met.

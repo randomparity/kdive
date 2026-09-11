@@ -25,6 +25,19 @@ avc: denied { map } comm="qemu-system-x86" path="…/<system-id>-baseline/initrd
      scontext=…:svirt_t:s0:c498,c849 tcontext=system_u:object_r:virt_image_t:s0 tclass=file
 ```
 
+The shipped policy says the same thing directly (`sesearch -A -s svirt_t -c file`, Fedora 44,
+`selinux-policy-44.3-1.fc44`):
+
+```
+allow virt_domain virt_image_t:file  { getattr ioctl lock open read };
+allow virt_domain svirt_image_t:file { append create getattr ioctl link lock map open read
+                                       rename setattr unlink watch watch_reads write };
+```
+
+The only other rule granting `map` is conditional — `allow domain file_type:file map;
+[ domain_can_mmap_files ]` — and that boolean is `off`, which is why the `map` denial above is
+reached at all.
+
 `svirt_t` may **read** `virt_image_t` but may not **write** or **map** it. `virt_image_t` labels an
 image the virtualization stack manages and relabels on demand; `svirt_image_t` is the label a
 confined domain may actually use. A **privileged** daemon closes that gap itself, relabeling each
@@ -52,6 +65,13 @@ The label is chosen so that it is correct under **both** daemons. A privileged d
 from `svirt_image_t` exactly as it relabelled from `virt_image_t`, so the default deployment is
 unaffected; an unprivileged one relabels nothing and meets a label it can use.
 
+That first half is measured, not argued. A disk labeled `svirt_image_t:s0` and attached to a
+domain started under `qemu:///system` (libvirt 12.0.0, Fedora 44, 2026-09-11) went
+`svirt_image_t:s0` → `svirt_image_t:s0:c51,c883` while running, with
+`<imagelabel>system_u:object_r:svirt_image_t:s0:c51,c883</imagelabel>` in the live XML, and back to
+`svirt_image_t:s0` after `virsh destroy`. libvirt records the pre-start label in its own state
+rather than re-deriving it, so the customizable-type caveat below does not reach its restore path.
+
 ## Consequences
 
 - Provisioning is expected to succeed on an SELinux-enforcing RedHat-family host with sVirt
@@ -64,12 +84,23 @@ unaffected; an unprivileged one relabels nothing and meets a label it can use.
   never did, since the relabel that would provide it was not happening. Isolation between kdive
   and **non-kdive** domains is unaffected, and under a privileged daemon per-domain categories
   still apply.
-- kdive installs **two** fcontext rules on the rootfs tree — `install-host.sh` owns
-  `/var/lib/kdive/rootfs(/.*)?` and `build-image.sh` owns the nested
-  `/var/lib/kdive/rootfs/local(/.*)?` — plus one for the install-staging root. A host installed
-  before this record carries the old type on whichever of those it already has, so the labeling
-  helper migrates an existing rule rather than skipping it, and `install-host.sh` migrates the
-  nested rule too so that re-running it alone is sufficient.
+- kdive installs **three** fcontext rules: `install-host.sh` owns `/var/lib/kdive/rootfs(/.*)?`
+  and `/var/lib/kdive/install(/.*)?`, and `build-image.sh` owns the nested
+  `/var/lib/kdive/rootfs/local(/.*)?`. A host installed before this record carries the old type on
+  whichever of those it already has, so the labeling helper migrates an existing rule rather than
+  skipping it. Each script migrates the rules it owns; `install-host.sh` does not touch the nested
+  one. That matters because the nested rule is not redundant: `semanage` local rules are matched
+  last-match-wins in `file_contexts.local`, so on the documented install order — `install-host.sh`
+  adding the parent, `build-image.sh` adding the nested rule afterwards — a stale nested
+  `virt_image_t` entry overrides the parent for everything under `local/` (measured, Fedora 44,
+  2026-09-11). It is left to `build-image.sh` anyway, because `local/` holds base qcow2 images used
+  as read-only backing files and `svirt_t` may read `virt_image_t`; the tree converges on the next
+  `build-image.sh` run without a second owner for the rule.
+- This corrects the incidental labeling guidance in
+  [ADR-0204](0204-install-staging-unwritable-config-error.md), whose remedy text names
+  `virt_image_t` for the install-staging root. That record's decision — the errno split that makes
+  an unwritable staging root a `CONFIGURATION_ERROR` — is unchanged and not superseded; only the
+  label named in its remedy string moves.
 - Rolling the label back needs `restorecon -R -F`: `svirt_image_t` is listed in
   `/etc/selinux/targeted/contexts/customizable_types` and `virt_image_t` is not, so a plain
   `restorecon` relabels *into* the new type but silently skips relabeling *out* of it.
