@@ -79,7 +79,13 @@ services:
     # than once per `up`, so editing it needs a `just compose-down` to take effect.
     volumes:
       - kdive-pgdata:/var/lib/postgresql/data
-      - ./deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro
+      # `z` relabels this host file for container access. On an SELinux-enforcing host (Fedora,
+      # RHEL) the container is otherwise denied the host label and the mount reads as
+      # "Permission denied" inside the container — here that means the migration owner role is
+      # never created and every later connection fails password authentication. It is a no-op
+      # where SELinux is not enabled, so Debian/Ubuntu behaviour is unchanged. The other
+      # host-file bind mounts in this file carry it for the same reason.
+      - ./deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro,z
 
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
@@ -189,7 +195,7 @@ services:
       KDIVE_LOCAL_ROLE_BOOTSTRAP: ${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}
       KDIVE_MIGRATION_DATABASE_URL: ${KDIVE_MIGRATION_DATABASE_URL:-postgresql://kdive-migration:kdive-migration-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
     volumes:
-      - ./deploy/compose/bootstrap-runtime-roles.sh:/bootstrap/bootstrap-runtime-roles.sh:ro
+      - ./deploy/compose/bootstrap-runtime-roles.sh:/bootstrap/bootstrap-runtime-roles.sh:ro,z
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -358,7 +364,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=6h
     volumes:
-      - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
     tmpfs:
       - /prometheus:mode=0700,uid=65534,gid=65534,size=256m
     ports:
