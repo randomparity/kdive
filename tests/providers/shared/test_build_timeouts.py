@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -75,9 +76,13 @@ def test_clears_the_measured_emulated_repack_failure() -> None:
 # --- the default probe (#2397, ADR-0637) ------------------------------------------------------
 #
 # The un-injected path is the one every production call site takes, and its probe is this budget's
-# own: read+write openability of ${KDIVE_KVM_NODE:-/dev/kvm}, matching preflight-env.sh for the
-# same libguestfs appliance rather than ADR-0352's URI-selected presence test. KDIVE_KVM_NODE is
-# the seam the shell tier's tests already drive, so no monkeypatching is needed to reach it.
+# own: whether ${KDIVE_KVM_NODE:-/dev/kvm} actually opens read+write, rather than ADR-0352's
+# URI-selected presence test. KDIVE_KVM_NODE is the seam the shell tier's tests already drive, so
+# most of these reach the probe with no monkeypatching at all.
+#
+# The probe opens rather than stat-ing because permission bits do not answer the question on a
+# systemd host: udev's `static_node=kvm` publishes /dev/kvm at 0666 whether or not the module ever
+# loads (#2414).
 
 
 def _openable_node(tmp_path: Path) -> Path:
@@ -111,16 +116,52 @@ def test_a_node_the_worker_uid_cannot_write_scales(tmp_path: Path) -> None:
     assert slow_build_tool_timeout_s() == 18000
 
 
+def test_a_present_world_writable_node_that_cannot_open_scales(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The static-node host class, measured on the #2383 emulated-POWER host of record (#2414):
+    # udev publishes /dev/kvm at 0666 whether or not `kvm` loads, so with the module blacklisted
+    # the permission test passed while the open raised ENODEV. Every guest ran under TCG and the
+    # appliance was emulated, yet this budget stayed unscaled at 1800 s — the one host class
+    # #2397 exists to scale.
+    node = _openable_node(tmp_path)
+    node.chmod(0o666)
+    assert os.access(node, os.R_OK | os.W_OK), "the permission test the old probe ran must pass"
+
+    real_open = build_timeouts.os.open
+
+    def _enodev(path: str, flags: int, *args: int) -> int:
+        if str(path) == str(node):
+            raise OSError(errno.ENODEV, "No such device")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(build_timeouts.os, "open", _enodev)
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0", "KDIVE_KVM_NODE": str(node)})
+    assert slow_build_tool_timeout_s() == 18000
+
+
+def test_the_probe_closes_the_descriptor_it_opens(tmp_path: Path) -> None:
+    # A probe runs per call on a long-lived worker, so a leaked descriptor per call is a leak per
+    # build tool. Opening the same node many times must not exhaust the process's fd table.
+    node = _openable_node(tmp_path)
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0", "KDIVE_KVM_NODE": str(node)})
+    before = len(os.listdir(f"/proc/{os.getpid()}/fd"))
+    for _ in range(64):
+        assert slow_build_tool_timeout_s() == 1800
+    assert len(os.listdir(f"/proc/{os.getpid()}/fd")) == before
+
+
 def test_an_empty_node_override_falls_back_to_dev_kvm(monkeypatch: pytest.MonkeyPatch) -> None:
     # ${KDIVE_KVM_NODE:-/dev/kvm} treats empty as unset; an empty string would otherwise be a
-    # path os.access always refuses, silently scaling every budget on a KVM host.
+    # path the open always refuses, silently scaling every budget on a KVM host.
     probed: list[str] = []
+    real_open = build_timeouts.os.open
 
-    def _record(node: str, _mode: int) -> bool:
-        probed.append(node)
-        return True
+    def _record(node: str, flags: int, *args: int) -> int:
+        probed.append(str(node))
+        return real_open(os.devnull, flags, *args)
 
-    monkeypatch.setattr(build_timeouts.os, "access", _record)
+    monkeypatch.setattr(build_timeouts.os, "open", _record)
     config.load({"KDIVE_KVM_NODE": ""})
     assert slow_build_tool_timeout_s() == 1800
     assert probed == ["/dev/kvm"]
