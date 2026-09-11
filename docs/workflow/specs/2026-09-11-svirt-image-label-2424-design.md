@@ -1,4 +1,4 @@
-# Static `svirt_image_t` label for session-mode domains — #2424
+# Static `svirt_image_t` label for kdive images — #2424
 
 - **Issue:** #2424
 - **Decision record:** [ADR-0639](../../adr/0639-static-svirt-image-label-for-session-mode-domains.md)
@@ -6,123 +6,133 @@
 ## Problem
 
 Provisioning fails on an SELinux-enforcing RedHat-family host: QEMU cannot open the per-System
-overlay and the System goes to `error`. The kdive rootfs tree is labeled `virt_image_t`, which
-`svirt_t` may read but not write or map; the unprivileged session libvirt daemon never performs
-the dynamic relabel that would fix that on a privileged daemon. ADR-0639 holds the analysis and
-the decision.
+overlay and the System goes to `error`. The kdive image directories are labeled `virt_image_t`,
+which `svirt_t` may read but not write or map; the unprivileged session libvirt daemon never
+performs the dynamic relabel that covers that on a privileged daemon. ADR-0639 holds the analysis.
 
 ## Scope
 
-Change the static label kdive's host preparation applies, and state the static-label contract in
-the domain XML.
+Change the static label kdive's host preparation applies. Nothing in the rendered domain XML
+changes: a first design cycle proposed declaring `relabel='no'` per disk, and the review retired
+it — see ADR-0639's rejected alternatives and the re-frozen charter on the issue.
 
-1. `examples/local-libvirt/install-host.sh` — the persistent fcontext for
-   `/var/lib/kdive/rootfs(/.*)?` becomes `svirt_image_t`, and an existing rule on that pattern is
-   **replaced** rather than skipped, so re-running the installer migrates a host installed before
-   this change.
-2. `examples/local-libvirt/build-image.sh` — the same change for the rootfs directory it labels
-   when publishing a base image.
-3. `src/kdive/providers/local_libvirt/lifecycle/xml.py` — `_append_root_disk` emits
-   `<seclabel model='selinux' relabel='no'/>` inside `<source>`. Both renderers
-   (`render_domain_xml`, `render_customization_domain_xml`) route through it, so one change covers
-   System and build domains.
-4. Prose that names `virt_image_t` as the RedHat equivalent is corrected where it describes the
-   session-mode path: `examples/local-libvirt/README.md`, the two comments named in the charter
-   under `deploy/ansible/`.
+1. A new sourced shell helper under `examples/local-libvirt/` applies the label and **migrates** an
+   existing rule on the same pattern instead of skipping it.
+2. `examples/local-libvirt/install-host.sh` calls it for `/var/lib/kdive/rootfs`, for the nested
+   `/var/lib/kdive/rootfs/local` rule `build-image.sh` owns, and for `/var/lib/kdive/install`
+   (creating that root, which the installer does not create today).
+3. `examples/local-libvirt/build-image.sh` calls it in place of its own `label_for_qemu` body.
+4. Operator-facing text that names `virt_image_t` for a path this change relabels is corrected:
+   `examples/local-libvirt/README.md`, `docs/operating/providers/local-libvirt.md` (including its
+   `## Known limitation — SELinux and per-System overlays` section, which this change resolves),
+   `src/kdive/config/core_settings.py` help text, the matching row in
+   `docs/guide/reference/config.md`, and the remediation string in
+   `src/kdive/providers/local_libvirt/lifecycle/install.py`.
 
-Out of scope, per the frozen charter: the Ubuntu/AppArmor path; any behavioral change under
-`deploy/ansible/`; `security_driver = "none"`; the remote-libvirt provider; authoring a custom
-SELinux policy module. Also excluded on evidence: `KDIVE_INSTALL_STAGING`
-(`src/kdive/config/core_settings.py`) and the `live_vm` harness docstrings, which describe the
-install-staging directory and the **system-mode** boot path respectively — a privileged daemon
-relabels dynamically there, so `virt_image_t` is correct and changing it would introduce an error.
+**Deliberately unchanged, with reasons.** `docs/operating/runbooks/live-testing.md` and
+`docs/operating/runbooks/image-lifecycle.md:91` name `virt_image_t` for `qemu:///system` paths,
+where a privileged daemon relabels dynamically and the old label stays correct; so do
+`src/kdive/testing/live_vm.py` and `tests/live_vm/__init__.py`. The `deploy/ansible/` tree performs
+no labeling at all, and `inventory/group_vars/live_vm_runners.yml:3` describes
+`/var/lib/kdive/live-vm` and `/var/lib/kdive/install` on an Ubuntu/AppArmor runner — this change
+relabels neither on that host, so that comment is left alone. Only
+`roles/live_vm_host/tasks/main.yml:1929`, which names `virt_image_t` as "the SELinux equivalent
+RHEL required", is corrected.
+
+Out of scope per the frozen charter: the Ubuntu/AppArmor path; any behavioral change under
+`deploy/ansible/`; `security_driver = "none"`; the remote-libvirt provider; a custom SELinux
+policy module.
 
 ### Failure model
 
 **Actors and deployments.** A local operator running `examples/local-libvirt/install-host.sh` and
-`build-image.sh` on a single-tenant RedHat-family workstation or lab host; the kdive worker
-account on that same host driving the operator-owned session daemon. Designed for Fedora 44 and
-Rocky 10.2 with SELinux enforcing, and for the existing Debian/AppArmor and `qemu:///system`
-deployments, which must keep working unchanged. Multi-tenant hosts and hosts sharing the kdive
-rootfs tree with non-kdive workloads are not named deployments.
+`build-image.sh` on a single-tenant RedHat-family workstation or lab host, and the kdive worker
+account on that host driving the operator-owned session daemon. Designed for Fedora 44 and Rocky
+10.2 with SELinux enforcing, and for the existing Debian/AppArmor and `qemu:///system`
+deployments, which must keep working unchanged. Multi-tenant hosts, and hosts sharing the kdive
+image directories with non-kdive workloads, are not named deployments.
 
 **Invariants and assets at stake.**
 
-- sVirt confinement of kdive domains stays on: the domain runs as `svirt_t` with per-domain MCS
-  categories, and `security_driver` is untouched.
-- The confinement boundary between a kdive domain and the **rest of the host** is not widened.
+- sVirt confinement of kdive domains stays on; `security_driver` is untouched.
+- The default `qemu:///system` deployment keeps working — nothing may disable the privileged
+  daemon's dynamic relabel.
+- The confinement boundary between a kdive domain and the rest of the host is not widened.
 - A shared base image stays usable by every System that backs onto it.
-- The `qemu:///system` paths (self-hosted runner, snapshot) keep working.
 
 **Accepted failure classes.**
 
-- MCS no longer distinguishes one kdive domain's images from another kdive domain's, since all
-  kdive images share `svirt_image_t:s0`. Accepted: the relabel that would have provided that
-  isolation was never running on the session daemon, so this is a documented property of the
-  existing state rather than a reduction. Systems within one kdive deployment are already mutually
-  trusted — they share one worker, one rootfs tree, and one base image.
-- A non-kdive confined domain that the operator points at the kdive rootfs tree could read and
-  write those images. Accepted: reaching that state requires the operator to configure another
-  domain against a kdive-owned path, and it is outside the named single-tenant deployments.
-- A host whose fcontext was applied by something other than the installer keeps its own label.
+- Under the session daemon, MCS does not separate one kdive System's images from another's, since
+  all kdive images share `svirt_image_t:s0`. Accepted: the relabel that would provide that
+  separation was never running there, so this documents existing state rather than reducing it.
+  Systems in one kdive deployment already share a worker, an image tree and a base image.
+- A non-kdive confined domain the operator points at a kdive image directory could write those
+  images, where `virt_image_t` allowed only read. Accepted: it requires the operator to configure
+  another domain against a kdive-owned path, and is outside the named single-tenant deployments.
+- A host whose fcontext was applied by something other than these scripts keeps its own label.
   Accepted: bounded — provisioning fails closed with the same `Permission denied` this change
-  fixes, and `restorecon -R` on the tree recovers it.
+  fixes, and re-running the installer recovers it.
+- An overlay left at `svirt_image_t:s0:c<i>,c<j>` by a privileged daemon that died without
+  restoring is skipped by a later plain `restorecon`, because `svirt_image_t` is a customizable
+  type. Accepted: bounded and recoverable with `restorecon -F`, which ADR-0639 records.
 
 **Covered elsewhere.**
 
 - Guest-side SELinux posture — ADR-0484 (guest images ship permissive).
-- The `cannot limit core file size` failure seen on `kdive-build-*` domains on the Fedora host is
-  unrelated to labeling and not addressed here; reported as a follow-up candidate.
+- The `cannot limit core file size` failure observed on `kdive-build-*` domains during design is
+  unrelated to labeling; reported as a follow-up candidate, not addressed here.
 
 ### Threat model
 
-**Boundary inventory.** This change adds no boundary. It changes the object label at one existing
-boundary — the host filesystem objects a confined QEMU domain opens — and it adds a declaration
-(`relabel='no'`) at the libvirt/domain-XML boundary that kdive already controls. No new entry
-point, no parsing of foreign input, no secret handling, no dependency change.
+**Boundary inventory.** No boundary is added. The change alters the object label at one existing
+boundary: the host filesystem objects a confined QEMU domain opens. No new entry point, no parsing
+of foreign input, no secret handling, no dependency change, no domain-XML change.
 
 **Actor model.** The untrusted party is the **guest kernel under test**, which is expected to
-crash and may be hostile-by-accident: kdive exists to run crashing kernels. It is confined by
-QEMU plus sVirt (`svirt_t` + MCS). The operator and the worker account are trusted. There is no
-anonymous or network-reachable actor on this path.
+crash and may be hostile by accident — kdive exists to run crashing kernels. It is confined by
+QEMU plus sVirt (`svirt_t` + MCS). The operator and the worker account are trusted. No anonymous
+or network-reachable actor is on this path.
 
 **Control per boundary.**
 
-- Guest → host filesystem: QEMU's own `-sandbox on` plus the SELinux type transition to `svirt_t`.
-  Unchanged by this work. The type system still confines the domain to `svirt_image_type` objects;
-  what changed is that the files kdive gives it now carry such a type.
-- kdive → libvirt: `relabel='no'` asserts that kdive, not libvirt, owns the image label. Its
-  failure mode is a start-time error from libvirt, not a silent widening.
-- Host preparation → filesystem: `semanage fcontext` plus `restorecon`, scoped to the single path
-  pattern `/var/lib/kdive/rootfs(/.*)?`.
+- Guest → host filesystem: QEMU's `-sandbox on` plus the SELinux type transition to `svirt_t`,
+  both unchanged. The type system still confines the domain to `svirt_image_type` objects; what
+  changed is that the files kdive gives it now carry such a type.
+- Host preparation → filesystem: `semanage fcontext` plus `restorecon`, each scoped to one
+  explicit path pattern, invoked only when `getenforce` reports `Enforcing`.
 
-**Explicitly out of scope.** Isolation between two kdive Systems on one host (accepted above);
-isolation of a multi-tenant host (not a named deployment); anything reachable only by an operator
-who already has root on the host.
+**Explicitly out of scope.** Separation between two kdive Systems on one host under the session
+daemon (accepted above); multi-tenant host isolation (not a named deployment); anything reachable
+only by an operator who already has root.
 
 ## Success
 
 1. On a host in the named deployments, with SELinux enforcing, a System provisions to `ready`
    through the ordinary worker path — no `setenforce 0`, no `security_driver` change.
 2. The domain's QEMU process runs as `svirt_t` with MCS categories, and the start produces no
-   `denied` AVC for any path under the kdive rootfs tree.
-3. Re-running `install-host.sh` on a host that already carries a `virt_image_t` fcontext rule for
-   the kdive rootfs pattern leaves exactly one rule for that pattern, of type `svirt_image_t`.
-4. Every disk `render_domain_xml` and `render_customization_domain_xml` emit carries
-   `<seclabel model='selinux' relabel='no'/>` within `<source>`, and the rendered XML is accepted
-   by libvirt.
-5. The repository guardrail suite (`just ci`) is green.
+   `denied` AVC for any path under the kdive image directories.
+3. Re-running `install-host.sh` alone on a host carrying the old `virt_image_t` rules leaves
+   exactly one rule of type `svirt_image_t` for each of the three patterns it owns or migrates:
+   `/var/lib/kdive/rootfs(/.*)?`, `/var/lib/kdive/rootfs/local(/.*)?`, and
+   `/var/lib/kdive/install(/.*)?`.
+4. The rendered domain XML is byte-identical to what `main` renders — this change adds no
+   `<seclabel>` and must not perturb the `qemu:///system` default.
+5. No operator-facing text still tells a reader that provisioning fails under SELinux, or
+   prescribes `virt_image_t` for a path this change relabels.
+6. The repository guardrail suite (`just ci`) is green.
 
 ## Validation
 
 | Contract | Mode | Evidence |
 |---|---|---|
-| `_append_root_disk` emits the per-disk seclabel | `focused-test` | `tests/providers/local_libvirt/test_xml.py` — assert `source/seclabel` with `model="selinux"`, `relabel="no"`, for both renderers |
-| Rendered XML stays libvirt-acceptable | `focused-test` | same file — the existing render assertions must still pass; plus the live `virsh define` in criterion 4 below |
-| `install-host.sh` replaces an existing rule | `focused-test` | `tests/examples/test_install_host_selinux.sh` via the repo's shell-test path — seed a `virt_image_t` rule, run the block, assert one `svirt_image_t` rule remains |
-| `build-image.sh` labels `svirt_image_t` | `task-test-not-applicable` | the changed line is a single literal in a `sudo semanage` argv guarded by `getenforce`; no executable observation exists that does not require an SELinux-enforcing host with root, which is the live proof below |
-| Prose corrections | `task-test-not-applicable` | documentation wording; `just docs-links` and `just ci` cover link and format integrity, and no executable consumer reads the text |
-| End-to-end provisioning under enforcing | live proof | Fedora 44 and Rocky 10.2: run the installer, provision a System, assert `ready`, assert QEMU is `svirt_t`, assert no AVC under the rootfs tree |
+| A pattern with no rule gets one `svirt_image_t` rule | `focused-test` | `tests/scripts/test_selinux_label.py::test_adds_rule_when_absent` |
+| A pattern carrying a stale `virt_image_t` rule is migrated, not duplicated | `focused-test` | `…::test_migrates_stale_rule` |
+| The helper no-ops off an enforcing host | `focused-test` | `…::test_noop_when_not_enforcing` |
+| A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` |
+| The domain XML is unchanged by this work (Success 4) | `focused-test` | the existing `tests/adversarial/test_provider_xml.py` and `tests/providers/local_libvirt/lifecycle/test_xml.py` suites pass untouched; this change adds no test there because it adds no behavior there |
+| `install-host.sh` labels all three paths | `task-test-not-applicable` | the installer's own gate harness (`tests/scripts/test_install_host_gates.py`) stops the script at the `sudo` preflight, far above these calls, and driving the whole installer needs a real enforcing host with root — which is the live proof below. The labeling logic itself is covered by the helper tests above, which is where the branching lives. |
+| Prose corrections | `task-test-not-applicable` | documentation and help text with no executable consumer; `just docs-links`, `just docs-paths` and `just config-docs-check` cover link, path and generated-table integrity |
+| End-to-end provisioning under enforcing | live proof | Fedora 44 and Rocky 10.2: run the installer, provision a System, assert `ready`, assert QEMU is `svirt_t`, assert no AVC under the kdive image directories |
 
 The live proof is a completion criterion of the frozen charter, not an optional arm; the operator
 authorized both hosts. Record which arms ran in the PR body.
