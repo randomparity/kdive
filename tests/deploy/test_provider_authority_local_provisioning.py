@@ -574,7 +574,9 @@ def test_runbook_describes_a_complete_local_mutation_vars_file() -> None:
 
 
 def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
-    defaults = _yaml(ROLE.parent / "live_vm_host" / "defaults" / "main.yml")
+    defaults = _yaml(ROLE.parent / "live_vm_host" / "defaults" / "main.yml") | _yaml(
+        ROLE.parent / "local_worker_host" / "defaults" / "main.yml"
+    )
     assert defaults["live_vm_host_worker_authority_enabled"] is False
     assert defaults["live_vm_host_worker_authority_request_socket"] == (
         "/run/kdive/provider-authority/request/authority.sock"
@@ -583,6 +585,9 @@ def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
         "external-boot-authority/server-ca"
     )
     tasks = (ROLE.parent / "live_vm_host" / "tasks" / "main.yml").read_text(encoding="utf-8")
+    tasks += (ROLE.parent / "local_worker_host" / "tasks" / "worker_accounts.yml").read_text(
+        encoding="utf-8"
+    )
     assert "Create the fixed-worker authority client group before account membership" in tasks
     assert "Install protected fixed-worker authority TLS files" in tasks
     assert 'mode: "0440"' in tasks

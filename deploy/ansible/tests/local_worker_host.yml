@@ -1,0 +1,10 @@
+---
+- name: Probe standalone local worker preparation
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  gather_subset: [min]
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - role: local_worker_host

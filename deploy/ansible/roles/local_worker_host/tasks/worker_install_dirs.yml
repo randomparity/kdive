@@ -1,0 +1,25 @@
+---
+- name: Look up the live-worker operator account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ local_worker_host_operator_user }}"
+
+- name: Record the live-worker operator uid  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.set_fact:
+    live_vm_host_worker_operator_uid: "{{ ansible_facts.getent_passwd[local_worker_host_operator_user][1] }}"
+
+- name: Create root-owned live-worker installation and credential directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /usr/local/libexec, mode: "0755"}
+    - {path: /etc/kdive, mode: "0755"}
+    # Traverse-only lets each service reach its own private child without listing sibling names.
+    - {path: /etc/kdive/credentials, mode: "0711"}
+    - {path: /var/lib/kdive/secrets, mode: "0711"}
+    - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
+    - {path: /opt/kdive-live-worker-lifecycle, mode: "0755"}

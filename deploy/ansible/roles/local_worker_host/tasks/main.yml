@@ -1,0 +1,31 @@
+---
+- name: Validate the standalone local-worker host before mutation
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [always]
+
+- name: Install Debian-family worker packages
+  ansible.builtin.import_tasks: packages_debian.yml
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install Fedora worker packages
+  ansible.builtin.import_tasks: packages_redhat.yml
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Install Tumbleweed worker packages
+  ansible.builtin.import_tasks: packages_suse.yml
+  when: ansible_facts['os_family'] == 'Suse'
+
+- name: Prepare fixed worker groups
+  ansible.builtin.import_tasks: worker_groups.yml
+
+- name: Prepare fixed worker accounts
+  ansible.builtin.import_tasks: worker_accounts.yml
+
+- name: Prepare protected worker installation paths
+  ansible.builtin.import_tasks: worker_install_dirs.yml
+
+- name: Prepare worker slots and runtime paths
+  ansible.builtin.import_tasks: worker_slots_runtime.yml
+
+- name: Prepare shared provider data paths
+  ansible.builtin.import_tasks: shared_directories.yml

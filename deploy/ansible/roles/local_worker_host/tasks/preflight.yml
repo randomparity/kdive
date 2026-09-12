@@ -1,0 +1,37 @@
+---
+- name: Require a supported standalone local-worker distribution
+  ansible.builtin.assert:
+    that:
+      - >-
+        (ansible_facts['os_family'] == 'Debian'
+        and ansible_facts['distribution'] in ['Debian', 'Ubuntu'])
+        or (ansible_facts['os_family'] == 'RedHat'
+        and ansible_facts['distribution'] == 'Fedora')
+        or (ansible_facts['os_family'] == 'Suse'
+        and ansible_facts['distribution'] == 'openSUSE Tumbleweed')
+    fail_msg: >-
+      local_worker_host supports Debian, Ubuntu, Fedora, and openSUSE Tumbleweed;
+      got {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+
+- name: Require a named standalone local-worker operator
+  ansible.builtin.assert:
+    that:
+      - local_worker_host_operator_user | length > 0
+    fail_msg: Set local_worker_host_operator_user to an existing host account.
+
+- name: Look up the standalone local-worker operator
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ local_worker_host_operator_user }}"
+    fail_key: false
+  register: local_worker_host_operator_getent
+
+- name: Require the standalone local-worker operator to exist
+  ansible.builtin.assert:
+    that:
+      - >-
+        local_worker_host_operator_getent.ansible_facts.getent_passwd.get(
+        local_worker_host_operator_user) is not none
+    fail_msg: >-
+      local_worker_host_operator_user={{ local_worker_host_operator_user }} does not exist;
+      create that host account before applying local_worker_host.

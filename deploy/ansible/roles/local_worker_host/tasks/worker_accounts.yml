@@ -1,0 +1,22 @@
+---
+- name: Create the fixed-worker authority client group before account membership
+  ansible.builtin.group:
+    name: "{{ live_vm_host_authority_client_group }}"
+    system: true
+    state: present
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Create the isolated live-worker accounts
+  ansible.builtin.user:
+    name: "{{ item }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+    group: "{{ item }}"
+    groups: >-
+      {{ [live_vm_host_worker_libvirt_group, 'kvm', live_vm_host_authority_client_group]
+         if live_vm_host_worker_authority_enabled else
+         [live_vm_host_worker_libvirt_group, 'kvm'] }}
+    append: false
+  loop: "{{ live_vm_host_worker_accounts }}"

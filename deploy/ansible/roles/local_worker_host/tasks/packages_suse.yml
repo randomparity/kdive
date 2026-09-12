@@ -1,0 +1,6 @@
+---
+- name: Install the kernel-debug toolchain + venv build deps (Suse)
+  community.general.zypper:
+    name: "{{ local_worker_host_packages_suse }}"
+    state: present
+  tags: [authority_prerequisites]

@@ -1,0 +1,6 @@
+---
+- name: Install the kernel-debug toolchain + venv build deps (RedHat)
+  ansible.builtin.dnf:
+    name: "{{ local_worker_host_packages_redhat }}"
+    state: present
+  tags: [authority_prerequisites]
