@@ -196,6 +196,47 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
+
+### Installed local authority carrier — ppc64le (#2152)
+
+Issue #2152's native ppc64le carrier is selected by the `live_vm` marker but remains dormant
+unless `KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG` names an owner-only mode-`0400` or mode-`0600`
+JSON file. The config file has the same shape as the x86_64 carrier's `KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG`
+file: `installed_revision` (the exact 40-character SHA), `system_id` (a pre-provisioned
+disposable System UUID on the POWER host), `project`, `ownership_prefix`
+(`kdive-2151-<sha12>-<nonce8>`), and the literal `kdive-external-boot-authority.service`
+service name. `barrier_socket` is optional.
+
+**Machine-checkable carrier gate.** Before reading the config, the test asserts:
+
+1. `platform.machine() == "ppc64le"` — the test skips on any other host (it is not an
+   error to run the suite on an x86_64 host where this carrier is unconfigured).
+2. `/dev/kvm` is present — the test **fails loud** if the host is ppc64le but `/dev/kvm`
+   is absent. A ppc64le host without KVM-HV is a mis-provisioned runner; TCG is not
+   an accepted substitute for native ppc64le authority proof (#2152).
+
+Run only the focused carrier after provisioning and backend bring-up on the POWER host:
+
+```sh
+KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG=/protected/power-authority-carrier.json \
+  uv run python -m pytest tests/live_vm/test_installed_local_authority_ppc64le.py -q
+```
+
+The proof is structurally identical to the x86_64 carrier's normal-operations arm: it opens
+an Investigation, creates a labeled Run on the disposable System with `arch=ppc64le` in the
+build profile, uploads the kernel through the public artifact contract, and drains the real
+install, activate, and root release jobs. Confinement, revision-coherence, and artifact-ownership
+checks all apply identically to the x86_64 carrier. The fault arms (`barrier_socket`,
+restart-recovery, takeover, journal-loss, stale-write) are not yet implemented for the ppc64le
+carrier; they remain separate scope.
+
+Bring up the stack on the POWER host following the
+[POWER host integration guide](../../development/cross-platform.md#native-power-host-integration)
+and the [live-stack runbook](live-stack.md) before running this carrier.
+The mock-OIDC image selection note in the cross-platform guide covers the POWER OIDC image
+requirement; `qemu:///system` and root-process constraints also apply.
+
+
 ### Installed remote authority proof prerequisite
 
 The production `provider_authority_host` role keeps the ADR-0622 proof socket absent by default.
@@ -349,17 +390,24 @@ requirements. Image preparation belongs to [image lifecycle](image-lifecycle.md)
 
 With these fixtures and the live-stack environment configured, run `just test-live-tcg`.
 The marker name does not force emulation; the expected accelerator is resolved from the host.
-Report which drivers passed or skipped. The fadump driver skips non-ppc64le hosts; for its
-intended native proof, also confirm KVM is selected and the fadump prerequisites are met.
-A skip is not capture evidence. On an emulated ppc64le host the driver runs rather than skips,
-and running it is still not native evidence: the
+Report which drivers passed or skipped. The fadump driver skips non-ppc64le hosts and
+non-KVM accelerators (#2398); for a native proof, confirm KVM is selected and the fadump
+prerequisites are met. A skip is not capture evidence.
+
+On a native POWER host with `/dev/kvm`, the fadump and kdump capture tests both complete
+in about 5 minutes. The
+[2026-09-11 record](../../design/2026-09-11-native-power-fadump-kdump-proof-2383.md)
+establishes the full crash→capture cycle on POWER9 under KVM-HV.
+
+On an emulated ppc64le host the driver runs rather than skips. The emulated path does not
+produce a capture verdict: the
 [2026-09-09 record](../../design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md)
 reached fadump registration under TCG-inside-TCG and then lost the guest to a systemd freeze
 before the crash step, after 2 h 51 m. Budget hours per driver there, raise
 `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, and read a `drain_timeout` on `boot` as a guest that
 never signalled readiness rather than as a capture result. The
 [platform support page](../platform-support.md#crash-capture-methods-by-arch) records the dated
-capture proofs and their limits.
+capture proofs.
 
 ## The shared harness
 

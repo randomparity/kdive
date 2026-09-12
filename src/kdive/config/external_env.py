@@ -139,6 +139,15 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "while unsafe configuration or mismatched running builds fails before fixture mutation.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG",
+        "test",
+        None,
+        "Path to the owner-only JSON configuration for the installed local-authority native "
+        "carrier on a ppc64le (POWER) host (#2152). Names an exact installed revision and "
+        "disposable System; unset skips the ppc64le carrier, while an unsafe configuration or "
+        "a ppc64le host without /dev/kvm fails before fixture mutation.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG",
         "test",
         None,

@@ -1,4 +1,4 @@
-# 0640 — MinIO images use the official Quay registry
+# 0639 — MinIO images use the official Quay registry
 
 ## Status
 

@@ -111,29 +111,29 @@ customization proof above.
 |---|---|
 | kdump | Implemented on both arches. ppc64le capture is recorded under TCG and native POWER9 in the proofs above. |
 | host_dump | QEMU-side mechanism available on both arches; architecture-independent implementation does not establish a separate live result for every combination. |
-| fadump | Local-libvirt opt-in for ppc64le; admission requirements and live limitations below. |
+| fadump | Local-libvirt opt-in for ppc64le; admission requirements and live proof below. |
 
-### Known limitation — native POWER fadump capture
+### Native POWER fadump capture — proven 2026-09-11
 
 A fadump profile must select `ppc64le`, opt in through `debug.fadump`, carry a `crashkernel`
-reservation, and resolve to at least **4096 MiB** guest memory. Admission also requires the
-host's `pseries_fadump` capability. The detector compares the discovered emulator's QEMU version
-with the repository's **10.2** floor and rejects missing or failed probes. These checks do not
-prove that the guest will complete a firmware-assisted capture.
+reservation, and resolve to at least **4096 MiB** guest memory (ADR-0363, #1181). Admission
+also requires the host's `pseries_fadump` capability. The detector compares the discovered
+emulator's QEMU version with the repository's **10.2** floor and rejects missing or failed probes.
+The driver skips non-ppc64le hosts and non-KVM accelerators (ADR-0349, #2398); confirm KVM is
+selected for a native proof.
 
-The [2026-07-14 TCG record](../design/2026-07-14-ppc64le-fadump-proof-record-1151.md) reached fadump
-registration and then a guest Oops. The current driver skips non-ppc64le hosts and is intended
-for native POWER/KVM validation. Neither that host-architecture check nor the production
-version detector enforces the accelerator; confirm KVM is actually selected for a native proof.
+The [2026-09-11 native-POWER proof record](../design/2026-09-11-native-power-fadump-kdump-proof-2383.md)
+establishes the complete fadump crash→capture cycle on a native POWER9 host (ltcwspoon18,
+Ubuntu 26.04.1 LTS, QEMU 10.2.1 KVM-HV) against merged `main` (`f18b5da05`). Key evidence:
+`rtas fadump: Registration is successful!` at 0.1 s of guest time; `force_crash` triggered;
+capture kernel reported `Firmware-assisted dump is active.`; `fadump-capture.service` found
+`/proc/vmcore`, ran `makedumpfile`, and saved the vmcore; worker harvested `vmcore-fadump`.
+`test_ppc64le_fadump_captures_a_vmcore_under_tcg` PASSED in 5:22 (5:18 on the second run).
 
-The [2026-07-15 RAM-floor record](../design/2026-07-15-power-native-fadump-ram-floor-1181-proof-record.md)
-confirms the admission fix and a POWER10 host's QEMU/KVM prerequisites. It explicitly leaves
-native crash-to-capture at 4 GiB unexecuted. It is not proof that the POWER10 guest booted or
-captured successfully. Use the recorded kdump path when a demonstrated capture is required,
-and report a new native fadump result with its exact runtime and fixture evidence.
-
-The [2026-09-09 emulated-POWER record](../design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md)
-attempted the capture under TCG-inside-TCG and did not reach the crash step: the guest reserved,
-initialized and RTAS-registered fadump at 4 GiB, then its own systemd froze before run-readiness.
-That record demonstrates fadump *registration* at the ADR-0363 floor and nothing beyond it. Native
-crash-to-capture remains unproven, and an emulated host is not a substitute for establishing it.
+Historical capture records: the
+[2026-07-14 TCG record](../design/2026-07-14-ppc64le-fadump-proof-record-1151.md) reached
+fadump registration then a guest Oops under TCG emulation; the
+[2026-07-15 RAM-floor record](../design/2026-07-15-power-native-fadump-ram-floor-1181-proof-record.md)
+confirmed the admission fix and POWER10 prerequisites without executing the capture; the
+[2026-09-09 emulated-POWER record](../design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md)
+reached RTAS registration under TCG-inside-TCG then a systemd freeze before run-readiness.

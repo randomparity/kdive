@@ -17,7 +17,7 @@ YAML, shell, Python tests, Helm templates, and repository ADR/doc guards.
 - Preserve `RELEASE.2025-04-22T22-12-26Z` for MinIO and `RELEASE.2025-04-16T18-13-26Z` for mc.
 - Preserve fixture digest `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`.
 - Use official `quay.io/minio/minio` and `quay.io/minio/mc` repositories; add no credentials or dependency.
-- New ADR-0640 starts Proposed and is ratified only when its implementing PR merges.
+- New ADR-0639 starts Proposed and is ratified only when its implementing PR merges.
 - Run `just lint`, `just type`, focused tests, and relevant doc/ADR guards.
 
 Expected implementation size: 8–20 changed lines (S) — four image-reference owners plus documentation.
@@ -44,7 +44,7 @@ Steps:
 1. Replace only the MinIO registry hostname in Compose, Helm, fixture, and pre-pull references.
 2. Canonicalize only the two exact official Quay MinIO repositories (preserving tag/digest suffixes)
    to the historical Docker Hub names for ADR-0356 set equality; unrelated registries remain distinct.
-   Add README-format dated amendments to ADR-0356 and ADR-0017, and add ADR-0640 as Proposed.
+   Add README-format dated amendments to ADR-0356 and ADR-0017, and add ADR-0639 as Proposed.
 3. Update the Helm assertion to accept the Quay mc prefix. Run consistency, alias, Helm, and
    compose-smoke focused tests; a skipped compose smoke is inconclusive. Confirm
    `docker buildx imagetools inspect` resolves both exact deployed Quay tags and the pinned fixture digest.
