@@ -38,6 +38,10 @@ require(
     "the checkout sentinel must require the project manifest",
 )
 require(
+    "uv.lock" in str(pre_tasks["Inspect required local-libvirt checkout entries"]),
+    "the checkout sentinel must require the locked dependency set",
+)
+require(
     "install-live-worker-lifecycle.sh"
     in str(pre_tasks["Inspect required local-libvirt checkout entries"]),
     "the checkout sentinel must require the lifecycle installer",

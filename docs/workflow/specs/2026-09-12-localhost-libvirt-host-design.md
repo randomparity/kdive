@@ -18,7 +18,7 @@ apply is claimed.
 
 `local-libvirt-host.yml` targets `localhost` with `connection: local` and
 `become: true`. Required variables name the checkout, operator, and witness DSN.
-It verifies the checkout manifest, Git worktree and revision, lifecycle installer and manifest
+It verifies the checkout manifest and lockfile, Git worktree and revision, lifecycle installer and manifest
 builder, and fixture catalog before any role mutates the host. It composes the three existing
 roles, then uses a `uv sync
 --locked --group live --dry-run` receipt to report whether the operator's checked-out

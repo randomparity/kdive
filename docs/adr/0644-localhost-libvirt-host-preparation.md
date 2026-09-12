@@ -26,7 +26,7 @@ runs the playbook through uv-pinned ansible-core.
 ## Consequences
 
 The playbook requires an explicit, non-symlinked Git checkout with a resolvable revision,
-the manifest, lifecycle installer and manifest builder, and local-libvirt fixtures; an operator
+the manifest and lockfile, lifecycle installer and manifest builder, and local-libvirt fixtures; an operator
 account; and a witness DSN.
 It checks those conditions before role mutation. A dry-run `uv sync` provides the
 change receipt for the locked live dependency synchronization. It can alter the local

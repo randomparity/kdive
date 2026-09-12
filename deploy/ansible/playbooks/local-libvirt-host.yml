@@ -40,6 +40,8 @@
       loop:
         - path: pyproject.toml
           kind: file
+        - path: uv.lock
+          kind: file
         - path: deploy/systemd/install-live-worker-lifecycle.sh
           kind: file
         - path: scripts/generate/build-capture-bootstrap-manifest.py
