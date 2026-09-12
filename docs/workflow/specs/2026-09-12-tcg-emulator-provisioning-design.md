@@ -18,6 +18,14 @@ The role derives its package list from native architecture plus a family-specifi
 list. Debian and SUSE add ppc64le; RedHat adds none because EL has no such package. The harness
 evaluates the rendered lists under both architectures. Platform support states the consequence.
 
+## Failure model
+
+Operators apply the role to Debian-family, RedHat-family, or SUSE-family hosts. A supported host
+must receive its native emulator; Debian and SUSE must also receive the ppc64le emulator. Package
+repository failures remain Ansible package failures and are repaired by restoring repository
+availability then reapplying the role. No live-host proof is claimed: that belongs to the excluded
+live environment owner.
+
 ## Validation
 
 `deploy/ansible/tests/run-libvirt-stack-families.sh` proves the six fact-driven package routes.
