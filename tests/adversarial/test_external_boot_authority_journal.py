@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
+    AuthorityOperation,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     RecoveryObjectBindingV1,
@@ -256,14 +257,17 @@ async def test_every_observation_classification_is_terminal_and_bounded(
 
 @pytest.mark.anyio
 async def test_release_and_teardown_are_independently_fenced(tmp_path: Path) -> None:
-    for purpose in ("release", "teardown"):
+    for purpose, operation in (
+        ("release", AuthorityOperation.RELEASE),
+        ("teardown", AuthorityOperation.TEARDOWN),
+    ):
         lane = tmp_path / purpose
         lane.mkdir()
         service, repository, adapter, peer, base = _service(lane)
         request = base.model_copy(
             update={
                 "purpose": purpose,
-                "operation": purpose,
+                "operation": operation,
                 "operation_identity": f"takeover-{purpose}",
             }
         )
@@ -273,7 +277,7 @@ async def test_release_and_teardown_are_independently_fenced(tmp_path: Path) -> 
         repository.current = True
         mutation = _mutation(request).model_copy(
             update={
-                "operation": purpose,
+                "operation": operation,
                 "operation_identity": f"{purpose}-identity",
                 "attempt_id": uuid4(),
             }
