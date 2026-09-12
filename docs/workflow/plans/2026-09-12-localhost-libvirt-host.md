@@ -50,8 +50,9 @@ new facts select only that route without a live package operation.
 Create the playbook with localhost/local connection, role order
 `libvirt_stack`, `libvirt_pool_net`, `local_worker_host`, a no-log command task
 for `install-live-worker-lifecycle.sh --operator <operator> --source <source>`
-with `stdin`, an operator-owned `uv sync --group live` task before venv access,
-a pre-role getent validation and operator-home kernel-source derivation,
+with `stdin`, an operator-owned locked `uv sync --group live` task before venv access
+whose change receipt comes from a locked dry-run, pre-role source sentinel and getent
+validation, and operator-home kernel-source derivation,
 a `2770` operator-owned `/var/lib/kdive/rootfs/local` task, an existing-directory
 ancestor walk from each source root through `/` that adds only `o+x`, and guestfs
 mismatch/report/link/import tasks. The matching-minor path asserts a nonempty
@@ -60,7 +61,8 @@ mismatch/report/link/import tasks. The matching-minor path asserts a nonempty
 ## Task 2 — regression wiring
 
 **Verification.** Mode: focused-test. The harness parses YAML and fails if the
-target, connection, roles, stdin/no-log contract, uv sync ordering, ancestor-walk
+target, connection, roles, pre-role checkout sentinel, stdin/no-log contract, locked uv sync
+ordering/change receipt, rootfs ownership, ancestor-walk
 shape, guestfs mismatch branch, nonempty discovery, or post-link import
 changes. Green command: `just test-ansible`.
 

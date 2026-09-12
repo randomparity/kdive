@@ -16,8 +16,10 @@ selection structurally; no RHEL/SLES package apply is claimed.
 
 `local-libvirt-host.yml` targets `localhost` with `connection: local` and
 `become: true`. Required variables name the checkout, operator, and witness DSN.
-It composes the three existing roles, syncs the checked-out project with `uv
-sync --group live` as the operator, then uses Ansible modules and one root
+It verifies the checkout manifest, lifecycle installer, and fixture catalog before any
+role mutates the host. It composes the three existing roles, then uses a `uv sync
+--locked --group live --dry-run` receipt to report whether the operator's checked-out
+project venv changed during `uv sync --locked --group live`. It then uses Ansible modules and one root
 installer command to converge the remaining local route. The command receives
 the DSN through `stdin`; it is marked no-log. A task walks each existing source
 and kernel ancestor up to `/`, granting only traversal permission. A final
@@ -27,7 +29,8 @@ venv; otherwise it reports the unavailable capture path and succeeds.
 
 ## Failure model
 
-Missing source, operator, or DSN inputs fail before role mutation. Lifecycle installation fails
+An incomplete or symlinked source checkout, missing operator, or missing DSN input fails before
+role mutation. Lifecycle installation fails
 when its stdin DSN is absent or invalid. A matching-minor binding discovery or
 post-link import failure is fatal; an ABI mismatch reports the system and venv
 minors and leaves the binding untouched. The harness renders
