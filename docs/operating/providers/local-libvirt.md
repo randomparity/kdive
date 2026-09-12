@@ -61,7 +61,7 @@ These are the points where the two families genuinely diverge, not just in packa
 - **Emulator package.** Debian/Ubuntu name the emulator by architecture (`qemu-system-x86`,
   `qemu-system-ppc`). The RedHat family answers by *nativeness* instead: `qemu-kvm` is the
   metapackage that pulls this host's own emulator, and Enterprise Linux ships no `qemu-system-*`
-  package at all ([ADR-0637](../../adr/0637-redhat-qemu-emulator-package-by-nativeness.md)).
+  package at all ([ADR-0641](../../adr/0641-redhat-qemu-emulator-package-by-nativeness.md)).
 - **CodeReady Builder.** Enterprise Linux keeps `libvirt-devel` in CRB, disabled by default;
   `install-host.sh` enables it. Fedora has no CRB and needs nothing here.
 - **Container engine.** Debian/Ubuntu package `docker.io` and Fedora packages `moby-engine`, both

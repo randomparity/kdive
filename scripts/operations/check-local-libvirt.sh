@@ -8,7 +8,7 @@ set -euo pipefail
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 
 # The RedHat family ships the host's OWN emulator here, off PATH: no EL package provides
-# /usr/bin/qemu-system-<arch> (ADR-0637). Overridable for tests, mirroring KDIVE_KVM_NODE.
+# /usr/bin/qemu-system-<arch> (ADR-0641). Overridable for tests, mirroring KDIVE_KVM_NODE.
 readonly QEMU_LIBEXEC="${KDIVE_QEMU_LIBEXEC:-/usr/libexec/qemu-kvm}"
 # The worker imports drgn + the libguestfs binding from the project venv, not system
 # python3. Probe the same interpreter the worker uses. Prefer the .venv sibling of this
@@ -118,7 +118,7 @@ _has_kvm() { [[ -r "${KVM_NODE}" && -w "${KVM_NODE}" ]]; }
 _cmd() { command -v "$1" >/dev/null 2>&1; }
 # Resolve a qemu emulator to a RUNNABLE path, not a boolean: the fadump probe below execs it for
 # --version. The RedHat off-PATH location holds the host's OWN emulator and is never a foreign-arch
-# one, so the fallback applies only when the requested arch is this host's (ADR-0637 decision 2).
+# one, so the fallback applies only when the requested arch is this host's (ADR-0641 decision 2).
 _resolve_emulator() {
   local binary="$1" arch="$2" resolved
   if resolved="$(command -v "${binary}" 2>/dev/null)"; then

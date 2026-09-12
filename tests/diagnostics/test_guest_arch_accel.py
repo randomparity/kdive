@@ -305,7 +305,7 @@ def test_registered_in_assembly_without_duplicate_local_contribution() -> None:
     assert "guest_arch_accel" in ids
 
 
-# --- off-PATH native emulator (the RedHat family, ADR-0637) --------------------------
+# --- off-PATH native emulator (the RedHat family, ADR-0641) --------------------------
 
 
 def test_native_emulator_at_libexec_counts_as_present() -> None:
