@@ -28,7 +28,8 @@ demo walkthrough below. Otherwise:
 - The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`. There is no
   PyPI wheel yet; the checkout is the install, and the scripts here run from it.
 - The fixed live-worker lifecycle contract installed for this checkout and your user
-  (`deploy/systemd/install-live-worker-lifecycle.sh`, root; `install-host.sh` runs it). A
+  (the [installation procedure](../../docs/operating/install.md#local-libvirt-host-preparation)
+  runs it). A
   worker cannot start outside it — it has no incarnation credential — and it is what publishes
   the session libvirt endpoint every script here uses.
 - A kdive-ready guest image at `/var/lib/kdive/rootfs/local/<name>.qcow2`, declared in
@@ -55,7 +56,7 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 
 | File | Purpose |
 |------|---------|
-| `install-host.sh` | Fresh Debian/Ubuntu or RedHat-family host preparation: host packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, the fixed live-worker lifecycle contract (root), the guest-image directory, the venv libguestfs binding. Re-runnable. |
+| `install-host.sh` | Compatibility caller for the canonical host-preparation recipe in the installation guide. |
 | `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, the published session `KDIVE_LIBVIRT_URI`, and an XDG log directory. Source it; don't run it. |
 | `up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/up.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
 | `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `svirt_image_t` on SELinux hosts (ADR-0640), append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
