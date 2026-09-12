@@ -42,14 +42,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
       # The checker's own suite runs first: its dangerous failure mode is reporting a
       # clean run over nothing, so a broken checker must not be the thing that declares
       # the records fine.
       - name: Test the checker
         run: ./.github/scripts/check-records-test.sh "${RUNNER_TEMP}/check-records-test"
 
+      # `just records` (justfile) runs the same check-records.sh invocation, so CI and a
+      # local pre-push run cannot drift. base.sha is exactly the commit the PR is merging
+      # against; GitHub's default pull_request checkout resolves HEAD to the synthetic
+      # merge ref (a descendant of base.sha), which is what makes merge-base resolve to
+      # base.sha unchanged rather than an older fork point.
       - name: Check decision records
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          RECORD_PROFILES: adr debt
-        run: ./.github/scripts/check-records.sh
+        run: just records "$BASE_SHA"

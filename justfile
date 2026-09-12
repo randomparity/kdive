@@ -501,6 +501,14 @@ served-doc-links:
 adr-status-check:
     python3 scripts/guards/check_adr_status.py
 
+# Run the same decision-record shape/anti-erasure gate the `records` workflow runs in CI
+# (ADR-0504), so an ADR number collision or malformed record is caught before pushing rather
+# than only in CI. CI passes the PR's base commit; locally the default origin/main is the
+# closest stand-in, same convention as `schema-guard`.
+records base_ref="origin/main":
+    BASE_SHA="$(git merge-base {{base_ref}} HEAD)" RECORD_PROFILES="adr debt" \
+        ./.github/scripts/check-records.sh
+
 # Audit runtime dependencies for known vulnerabilities. The script retries only a run that
 # produced no verdict (unreachable PyPI), never a run that found something — pip-audit exits 1
 # for both, so retrying on exit status alone would re-run genuine advisories (ADR-0553, #1913).
