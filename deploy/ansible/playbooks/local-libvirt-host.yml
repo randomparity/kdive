@@ -1,0 +1,200 @@
+---
+- name: Prepare this host for the local-libvirt provider
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    local_libvirt_host_source: "{{ playbook_dir }}/../../.."
+    local_libvirt_host_operator_user: ""
+    local_libvirt_host_witness_dsn: >-
+      {{ lookup('ansible.builtin.env', 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL', default='') }}
+    local_libvirt_host_kernel_source: "{{ ansible_env.HOME }}/src/linux"
+    local_worker_host_operator_user: "{{ local_libvirt_host_operator_user }}"
+  pre_tasks:
+    - name: Require the local-libvirt source checkout
+      ansible.builtin.assert:
+        that:
+          - local_libvirt_host_source is abs
+          - local_libvirt_host_source | length > 1
+        fail_msg: Set local_libvirt_host_source to the absolute KDIVE checkout path.
+
+    - name: Inspect the local-libvirt source checkout
+      ansible.builtin.stat:
+        path: "{{ local_libvirt_host_source }}"
+        follow: false
+      register: local_libvirt_host_source_stat
+
+    - name: Require a real local-libvirt source checkout
+      ansible.builtin.assert:
+        that:
+          - local_libvirt_host_source_stat.stat.isdir
+          - not local_libvirt_host_source_stat.stat.islnk
+          - local_libvirt_host_source_stat.stat.exists
+        fail_msg: local_libvirt_host_source must name a real KDIVE checkout directory.
+
+    - name: Require the operator account
+      ansible.builtin.assert:
+        that:
+          - local_libvirt_host_operator_user | length > 0
+        fail_msg: Set local_libvirt_host_operator_user to the host account that owns local data.
+
+    - name: Require the lifecycle witness DSN
+      ansible.builtin.assert:
+        that:
+          - local_libvirt_host_witness_dsn | length > 0
+        fail_msg: Set local_libvirt_host_witness_dsn; it is passed only on standard input.
+      no_log: true
+  roles:
+    - libvirt_stack
+    - libvirt_pool_net
+    - local_worker_host
+  tasks:
+    - name: Sync the project venv with the live dependencies
+      ansible.builtin.command:
+        argv: [uv, sync, --group, live]
+        chdir: "{{ local_libvirt_host_source }}"
+      become: true
+      become_user: "{{ local_libvirt_host_operator_user }}"
+      changed_when: false
+
+    - name: Install the fixed live-worker lifecycle contract
+      ansible.builtin.command:
+        argv:
+          - "{{ local_libvirt_host_source }}/deploy/systemd/install-live-worker-lifecycle.sh"
+          - --operator
+          - "{{ local_libvirt_host_operator_user }}"
+          - --source
+          - "{{ local_libvirt_host_source }}"
+        stdin: "{{ local_libvirt_host_witness_dsn }}"
+        stdin_add_newline: true
+      no_log: true
+      # The installer converges its own files and units but has no change receipt; keeping this
+      # task read-only to Ansible makes reruns accurately report role-managed changes only.
+      changed_when: false
+
+    - name: Create the local rootfs publication directory
+      ansible.builtin.file:
+        path: /var/lib/kdive/rootfs/local
+        state: directory
+        owner: "{{ local_libvirt_host_operator_user }}"
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "2770"
+
+    - name: Inspect the checkout and kernel roots
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ local_libvirt_host_source }}"
+        - "{{ local_libvirt_host_kernel_source }}"
+      register: local_libvirt_host_tree_roots
+
+    - name: Make every existing checkout and kernel ancestor traversable by workers
+      ansible.builtin.shell: |
+        set -euo pipefail
+        path=$(realpath -e -- {{ item.item | quote }})
+        changed=false
+        while [[ "$path" != / ]]; do
+          if [[ ! $(stat -c '%A' -- "$path") =~ x$ ]]; then
+            chmod o+x -- "$path"
+            changed=true
+          fi
+          path=$(dirname -- "$path")
+        done
+        printf '%s\n' "$changed"
+      args:
+        executable: /bin/bash
+      loop: "{{ local_libvirt_host_tree_roots.results }}"
+      when: item.stat.isdir and not item.stat.islnk
+      register: local_libvirt_host_traversal
+      changed_when: local_libvirt_host_traversal.stdout == 'true'
+
+    - name: Read the system Python minor version
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -c, "import sys; print(sys.version_info.minor)"]
+      register: local_libvirt_host_system_python_minor
+      changed_when: false
+
+    - name: Read the project venv Python minor version
+      ansible.builtin.command:
+        argv:
+          - "{{ local_libvirt_host_source }}/.venv/bin/python"
+          - -c
+          - "import sys; print(sys.version_info.minor)"
+      register: local_libvirt_host_venv_python_minor
+      changed_when: false
+
+    - name: Explain why the system guestfs binding cannot be shared
+      ansible.builtin.debug:
+        msg: >-
+          system python3 is 3.{{ local_libvirt_host_system_python_minor.stdout }} but the venv is
+          3.{{ local_libvirt_host_venv_python_minor.stdout }}; the distro guestfs binding cannot
+          be shared, so build-fs and local kdump capture are unavailable from this venv.
+      when: >-
+        local_libvirt_host_system_python_minor.stdout != local_libvirt_host_venv_python_minor.stdout
+
+    - name: Read the system guestfs module directory
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "import os, guestfs; print(os.path.dirname(guestfs.__file__))"
+      register: local_libvirt_host_guestfs_site
+      changed_when: false
+      when: >-
+        local_libvirt_host_system_python_minor.stdout == local_libvirt_host_venv_python_minor.stdout
+
+    - name: Read the project venv site-packages directory
+      ansible.builtin.command:
+        argv:
+          - "{{ local_libvirt_host_source }}/.venv/bin/python"
+          - -c
+          - "import sysconfig; print(sysconfig.get_path('platlib'))"
+      register: local_libvirt_host_venv_site
+      changed_when: false
+      when: >-
+        local_libvirt_host_system_python_minor.stdout == local_libvirt_host_venv_python_minor.stdout
+
+    - name: Find the system guestfs binding files
+      ansible.builtin.find:
+        paths: "{{ local_libvirt_host_guestfs_site.stdout }}"
+        patterns: guestfs.py,libguestfsmod*.so
+        file_type: file
+      register: local_libvirt_host_guestfs_files
+      when: >-
+        local_libvirt_host_system_python_minor.stdout == local_libvirt_host_venv_python_minor.stdout
+
+    - name: Require the system guestfs binding files
+      ansible.builtin.assert:
+        that:
+          - local_libvirt_host_guestfs_files.matched | int > 1
+          - >-
+            local_libvirt_host_guestfs_files.files | selectattr('path', 'search', '/guestfs\\.py$')
+            | list | length == 1
+          - >-
+            local_libvirt_host_guestfs_files.files | selectattr('path', 'search', '/libguestfsmod.*\\.so$')
+            | list | length > 0
+        fail_msg: System Python has no complete guestfs binding to link into the project venv.
+      when: >-
+        local_libvirt_host_system_python_minor.stdout == local_libvirt_host_venv_python_minor.stdout
+
+    - name: Link the system guestfs binding into the project venv
+      ansible.builtin.file:
+        src: "{{ item.path }}"
+        dest: "{{ local_libvirt_host_venv_site.stdout }}/{{ item.path | basename }}"
+        state: link
+        force: true
+      loop: "{{ local_libvirt_host_guestfs_files.files }}"
+      when: >-
+        local_libvirt_host_system_python_minor.stdout == local_libvirt_host_venv_python_minor.stdout
+
+    - name: Verify the linked guestfs binding imports from the project venv
+      ansible.builtin.command:
+        argv:
+          - "{{ local_libvirt_host_source }}/.venv/bin/python"
+          - -c
+          - import guestfs
+      changed_when: false
+      when: >-
+        local_libvirt_host_system_python_minor.stdout == local_libvirt_host_venv_python_minor.stdout

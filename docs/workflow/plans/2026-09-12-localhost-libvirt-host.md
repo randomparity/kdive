@@ -43,13 +43,17 @@ deploy/ansible/tests/run-local-libvirt-host.py`.
 Create the playbook with localhost/local connection, role order
 `libvirt_stack`, `libvirt_pool_net`, `local_worker_host`, a no-log command task
 for `install-live-worker-lifecycle.sh --operator <operator> --source <source>`
-with `stdin`, a `2770` operator-owned `/var/lib/kdive/rootfs/local` task,
-ancestor traversal tasks, and guestfs mismatch/report/link tasks.
+with `stdin`, an operator-owned `uv sync --group live` task before venv access,
+a `2770` operator-owned `/var/lib/kdive/rootfs/local` task, an existing-directory
+ancestor walk from each source root through `/` that adds only `o+x`, and guestfs
+mismatch/report/link/import tasks. The matching-minor path asserts a nonempty
+`guestfs.py` plus `libguestfsmod*.so` discovery and imports `guestfs` from the venv.
 
 ## Task 2 — regression wiring
 
 **Verification.** Mode: focused-test. The harness parses YAML and fails if the
-target, connection, roles, stdin/no-log contract, or guestfs mismatch branch
+target, connection, roles, stdin/no-log contract, uv sync ordering, ancestor-walk
+shape, guestfs mismatch branch, nonempty discovery, or post-link import
 changes. Green command: `just test-ansible`.
 
 Add the recipe `prepare-local-libvirt-host` beside local-libvirt preflight,
@@ -63,5 +67,6 @@ repositories, and the witness database are operator-owned external state; a
 structural test cannot establish an apply result.
 
 On the configured Ubuntu 26.04 operator host, run the recipe twice and retain
-the changed count from each run. Report that RHEL, Fedora, SLES, and openSUSE
+the changed count from each run; the second count must be zero. Record the
+lifecycle-managed unit/file state after each run and require it to match. Report that RHEL, Fedora, SLES, and openSUSE
 were not live-proven when no corresponding host is reachable.

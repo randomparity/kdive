@@ -15,8 +15,8 @@ declarative localhost route without making Ansible a host prerequisite.
 
 Add a localhost playbook that composes `libvirt_stack`, `libvirt_pool_net`, and
 `local_worker_host`. The playbook owns only the remaining workstation contract:
-the root lifecycle installer, local rootfs directory, source-tree traversal, and
-the project-venv guestfs binding. It invokes the lifecycle installer with the
+operator `uv sync --group live`, the root lifecycle installer, local rootfs directory,
+source-tree traversal, and the project-venv guestfs binding. It invokes the lifecycle installer with the
 witness DSN through Ansible `stdin`, never a command argument. A just recipe
 runs the playbook through uv-pinned ansible-core.
 
