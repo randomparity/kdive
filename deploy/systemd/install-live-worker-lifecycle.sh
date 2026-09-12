@@ -444,6 +444,14 @@ _select_libvirt_tuple() {
     _libvirt_pid="virtqemud.pid"
     _libvirt_uri="qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock"
     ;;
+  *" suse "* | *" sles "* | *" opensuse "* | *" opensuse-tumbleweed "*)
+    _libvirt_family="SUSE-family"
+    _libvirt_daemon="virtqemud"
+    _libvirt_config="virtqemud-live.conf"
+    _libvirt_socket="virtqemud-sock"
+    _libvirt_pid="virtqemud.pid"
+    _libvirt_uri="qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock"
+    ;;
   *)
     echo "unsupported distro family in $os_release (ID=${ID:-unset}, ID_LIKE=${ID_LIKE:-unset})" >&2
     return 1

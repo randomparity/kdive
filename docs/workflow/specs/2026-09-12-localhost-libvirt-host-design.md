@@ -11,8 +11,10 @@ the justfile. The example installer is evidence only and is not invoked.
 ## Design
 
 `local_worker_host` admits RHEL-compatible distributions through its RedHat
-package route and SLES through its Suse route. The regression harness proves that
-selection structurally; no RHEL/SLES package apply is claimed.
+package route and SLES through its Suse route. The lifecycle installer selects
+the same modular `virtqemud` tuple for SLES as it does for RHEL-compatible hosts.
+The regression harness proves those selections structurally; no RHEL/SLES package
+apply is claimed.
 
 `local-libvirt-host.yml` targets `localhost` with `connection: local` and
 `become: true`. Required variables name the checkout, operator, and witness DSN.

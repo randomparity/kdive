@@ -44,6 +44,20 @@
           kind: file
         - path: scripts/generate/build-capture-bootstrap-manifest.py
           kind: file
+        - path: deploy/systemd/bin/kdive-live-worker-gate
+          kind: file
+        - path: deploy/systemd/bin/kdive-live-worker-lifecycle
+          kind: file
+        - path: deploy/systemd/system/kdive-live-worker@.service
+          kind: file
+        - path: deploy/systemd/system/kdive-live-worker-lifecycle.socket
+          kind: file
+        - path: deploy/systemd/system/kdive-live-worker-lifecycle@.service
+          kind: file
+        - path: deploy/systemd/libvirtd-live.conf
+          kind: file
+        - path: deploy/systemd/virtqemud-live.conf
+          kind: file
         - path: fixtures/local-libvirt
           kind: directory
         - path: fixtures/local-libvirt/manifest.yaml

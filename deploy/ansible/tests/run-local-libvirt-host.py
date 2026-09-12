@@ -47,6 +47,19 @@ require(
     in str(pre_tasks["Inspect required local-libvirt checkout entries"]),
     "the checkout sentinel must require the lifecycle manifest builder",
 )
+for required_payload in (
+    "kdive-live-worker-gate",
+    "kdive-live-worker-lifecycle",
+    "kdive-live-worker@.service",
+    "kdive-live-worker-lifecycle.socket",
+    "kdive-live-worker-lifecycle@.service",
+    "libvirtd-live.conf",
+    "virtqemud-live.conf",
+):
+    require(
+        required_payload in str(pre_tasks["Inspect required local-libvirt checkout entries"]),
+        f"the checkout sentinel must require {required_payload}",
+    )
 require(
     "fixtures/local-libvirt" in str(pre_tasks["Inspect required local-libvirt checkout entries"]),
     "the checkout sentinel must require local-libvirt fixtures",

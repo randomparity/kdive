@@ -32,6 +32,8 @@ structural harness; and justfile wiring.
 | `justfile` | modify | operator recipe, syntax check, and harness wiring |
 | `deploy/ansible/roles/local_worker_host/tasks/preflight.yml` | modify | RHEL/SLES admission |
 | `deploy/ansible/tests/run-local-worker-host.py` | modify | RHEL/SLES route coverage |
+| `deploy/systemd/install-live-worker-lifecycle.sh` | modify | SLES modular daemon selection |
+| `tests/deploy/test_live_worker_provisioning.py` | modify | SLES lifecycle selection coverage |
 
 ## Task 1 — localhost playbook
 
@@ -45,7 +47,8 @@ deploy/ansible/tests/run-local-libvirt-host.py`.
 
 Extend `local_worker_host` preflight to accept RHEL-compatible distributions and SLES,
 reusing the existing RedHat and Suse package task routes. Extend its harness to prove the
-new facts select only that route without a live package operation.
+new facts select only that route without a live package operation. Make the lifecycle installer
+select SLES's modular `virtqemud` tuple, and add its focused regression test.
 
 Create the playbook with localhost/local connection, role order
 `libvirt_stack`, `libvirt_pool_net`, `local_worker_host`, a no-log command task

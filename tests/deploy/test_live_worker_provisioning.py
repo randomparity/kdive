@@ -1328,6 +1328,20 @@ def test_installer_selects_redhat_modular_tuple(tmp_path: Path) -> None:
     ]
 
 
+def test_installer_selects_suse_modular_tuple(tmp_path: Path) -> None:
+    result = _select_libvirt_tuple(
+        tmp_path, os_release='ID=sles\nID_LIKE="suse"\n', binaries=("virtqemud",)
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "virtqemud",
+        "virtqemud-live.conf",
+        "virtqemud-sock",
+        "virtqemud.pid",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock",
+    ]
+
+
 def test_installer_rejects_unsupported_distro_family(tmp_path: Path) -> None:
     result = _select_libvirt_tuple(tmp_path, os_release="ID=arch\n", binaries=())
     assert result.returncode != 0
