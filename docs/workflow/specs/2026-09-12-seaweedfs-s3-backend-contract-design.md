@@ -29,9 +29,10 @@ either issue, alter Python/storage APIs, or migrate data.
 
 The source pin is the reproducible input. A future image uses `weed mini -dir=/data` with its
 bucket and credentials explicitly configured. The default Compose image is locally built, like
-mock OIDC; an override selects a digest-pinned published manifest. A compatibility suite proves
-the six required S3/readiness behaviors before consumer migration. Operators retain the old
-volume and start a distinct empty data volume, so the decision never implies format compatibility.
+mock OIDC; an override selects a digest-pinned published manifest. #2446 proves `weed mini`,
+readiness, and the six required S3 behaviors on amd64, arm64, and ppc64le before #2445 can make
+it the bundled default. Operators retain the old volume and start a distinct empty data volume,
+so the decision never implies format compatibility.
 
 ## Success
 

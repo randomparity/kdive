@@ -41,9 +41,10 @@ The image contract is:
    GET and delete select the requested version; multipart create/upload/complete reads back the
    assembled object; generated presigned GET and checksum-bearing PUT URLs succeed; and the
    readiness probe waits for the S3 API and creates/enables the configured bucket idempotently.
-   The proof runs on amd64 and arm64, while the build/publish proof covers all three required
-   architectures. A ppc64le runtime proof remains required before claiming native runtime
-   support in release evidence.
+   #2446 owns this proof on amd64, arm64, and ppc64le: each architecture must boot `weed mini`,
+   pass readiness, and pass the named S3 behavior suite. Manifest inspection alone proves only
+   pullability. #2445 must not make SeaweedFS the bundled default until #2446 has recorded all
+   three runtime proofs.
 4. Existing `kdive-minio-data` volumes are incompatible input. The supported transition is to
    stop the old stack, retain that volume unchanged as a rollback artifact, create a new named
    SeaweedFS data volume, and start the new stack with an empty bucket initialized by its own
@@ -58,8 +59,9 @@ manifest proof those consumers cite.
 
 - The bundled backend becomes a KDIVE-owned, source-pinned artifact with a local-build default
   and an optional digest-pinned pull path.
-- A failed image build, manifest inspection, S3 compatibility proof, or readiness proof blocks
-  consumer migration rather than falling back to MinIO or an unauthenticated service.
+- A failed image build, manifest inspection, per-architecture runtime/S3 compatibility proof, or
+  readiness proof blocks consumer migration rather than falling back to MinIO or an
+  unauthenticated service.
 - An existing MinIO volume is preserved but is not made readable by the new service. The new
   default begins empty unless an operator separately migrates data.
 - External `KDIVE_S3_*` deployments remain unchanged; this decision governs only bundled

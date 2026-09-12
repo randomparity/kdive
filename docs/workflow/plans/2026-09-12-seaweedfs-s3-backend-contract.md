@@ -45,12 +45,13 @@ transition to #2445/#2446.
 
 1. Add the proposed ADR with its five required sections.
 2. Pin release 4.46's full commit ID and specify `S3_BUCKET=kdive-artifacts weed mini -dir=/data`.
-3. State image architecture and S3-proof obligations and the no-reuse volume transition.
+3. State that #2446 proves `weed mini`, readiness, and required S3 behavior on amd64, arm64,
+   and ppc64le before #2445 may make the image the bundled default, plus the no-reuse transition.
 4. Add only ADR-0639's supersession banner.
 5. Run `just records`; expect success.
 
-**Acceptance criteria:** the ADR names no mutable image tag as evidence, has all required
-downstream ownership, and does not claim compatibility proof that #2446 has not run.
+**Acceptance criteria:** the ADR names no mutable image tag as evidence, assigns all runtime
+proof to #2446 before #2445 adoption, and does not claim compatibility proof that #2446 has not run.
 
 ## Task 2: Preserve the implementation handoff
 
