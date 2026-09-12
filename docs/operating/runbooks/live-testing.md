@@ -115,8 +115,12 @@ into `boot_throwaway_domain(mode=…)`.
 - **Guest confinement is named per environment.** Under **system mode** on the
   RHEL-family self-hosted runner, staged images must be relabeled SELinux
   `virt_image_t`; under system mode on an Ubuntu host, AppArmor's `libvirt-qemu`
-  profile applies. **Session mode engages neither** — qemu runs as the invoking
-  user with no sVirt relabel — so a session-mode tier sidesteps both.
+  profile applies. **Session mode still confines the domain** — qemu runs as
+  `svirt_t` with its own MCS categories — but the unprivileged daemon performs no
+  image *relabel*, so the static label on the image tree has to be one `svirt_t`
+  can use: `svirt_image_t`
+  ([ADR-0640](../../adr/0640-static-svirt-image-label-for-session-mode-domains.md)).
+  A session-mode tier sidesteps the relabel, not sVirt.
 - **Guest image and matching debuginfo** are staged at a known location and kept
   warm between runs on the self-hosted host.
 
@@ -693,9 +697,10 @@ workers and logs, not the current slot identity contract.
   monitor socket lives under it and hits a 108-byte path limit) — `XDG_RUNTIME_DIR`
   is *not* the lever. The harness redirects it to a short path automatically; the
   quirk bites only code that boots a session-mode domain without the harness.
-- **Staged images need the right label under system mode** — `virt_image_t`
-  (SELinux) or the `libvirt-qemu` AppArmor profile — and the rootfs's parent
-  dir must be writable, because the boot stages an overlay beside it.
+- **Staged images need the right label on an SELinux host** — `virt_image_t` under
+  system mode, `svirt_image_t` under session mode (ADR-0640), or the
+  `libvirt-qemu` AppArmor profile on Ubuntu — and the rootfs's parent dir must be
+  writable, because the boot stages an overlay beside it.
 - **`pytest -m live_vm` selects all four families.** If you run a nightly for
   only one, declare which families you intend to run and let the fail-loud gate
   catch a missing declared family, rather than skipping to green.

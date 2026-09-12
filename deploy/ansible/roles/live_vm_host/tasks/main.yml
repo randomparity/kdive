@@ -1926,7 +1926,8 @@
 # No static disk labeling on the Ubuntu target: libvirt confines qemu with AppArmor, and
 # virt-aa-helper adds each domain's disk paths to its per-domain profile dynamically from the
 # domain XML. The world-traversable, runner-owned staging dirs above therefore need no static
-# sVirt label (the SELinux virt_image_t equivalent RHEL required).
+# sVirt label. The SELinux equivalent RHEL requires is a static svirt_image_t label on the image
+# directories (ADR-0640).
 
 - name: Run the host-contract gate
   ansible.builtin.import_tasks: verify.yml

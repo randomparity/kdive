@@ -73,9 +73,23 @@ These are the points where the two families genuinely diverge, not just in packa
   `root:kvm 0640` ([ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md)). Fedora
   ships them `0755` and is left alone. A Debian/Ubuntu kernel upgrade installs a fresh `0600` file:
   re-run the script afterwards.
-- **SELinux.** Fedora and Enterprise Linux run SELinux enforcing, so `build-image.sh` labels the
-  rootfs directory `virt_image_t` for the qemu user. `install-host.sh` installs
-  `policycoreutils-python-utils` for the `semanage` that needs.
+- **SELinux.** Fedora and Enterprise Linux run SELinux enforcing, so `install-host.sh` and
+  `build-image.sh` label the kdive image directories `svirt_image_t` for the confined domain
+  (ADR-0640). `install-host.sh` installs `policycoreutils-python-utils` for the `semanage` that
+  needs. If a domain start still fails with `Permission denied` on a kdive image, a stale
+  per-domain label may be stuck — `sudo restorecon -R -F /var/lib/kdive/rootfs` clears it.
+
+  This labeling covers the **provisioning** path only. It does not extend to step 3's
+  `build-image.sh`, whose customization boot runs against the session daemon with a workspace
+  defaulting under `$HOME` — a location neither script labels. On both RedHat-family targets the
+  shipped policy grants `svirt_t` neither write nor map on that path's default `data_home_t`, and
+  write but not map on `svirt_home_t` (measured 2026-09-11), so a direct-kernel customization boot
+  has no mappable path there. A build that fails with `Permission denied` on an enforcing host is
+  therefore a separate defect from the one ADR-0640 fixes ([#2428]), and is not resolved by
+  re-running `install-host.sh`. ADR-0640's own end-to-end proof staged a prebuilt image rather than
+  building on the target for this reason.
+
+[#2428]: https://github.com/randomparity/kdive/issues/2428
 - **libguestfs backend.** The worker pins `LIBGUESTFS_BACKEND=direct` in
   `deploy/systemd/system/kdive-live-worker@.service`. Debian/Ubuntu build libguestfs with that
   backend as its default; Fedora and RHEL default to the libvirt backend, which connects to
@@ -104,21 +118,6 @@ These are the points where the two families genuinely diverge, not just in packa
   also that an EL host cannot build a *btrfs* image even with a working binding: the EL libguestfs
   appliance kernel has no btrfs, so a Fedora cloud image fails with `unknown filesystem type
   'btrfs'`. The catalog's `rocky-kdive-ready-*` entries are the EL-native choice.
-
-## Known limitation — SELinux and per-System overlays
-
-With SELinux enforcing, provisioning currently fails opening a System's overlay:
-
-```
-Could not open '/var/lib/kdive/rootfs/<system-id>-overlay.qcow2': Permission denied
-```
-
-`install-host.sh` labels the rootfs tree `virt_image_t`, which is necessary but not sufficient:
-the unprivileged session libvirt daemon cannot apply sVirt's per-domain relabeling, the RedHat
-analogue of the AppArmor `virt-aa-helper` path `deploy/ansible/roles/live_vm_host` relies on for
-Ubuntu. Confirmed by bisection on a Fedora 44 host: with `setenforce 0` the same provision reaches
-`ready` in 13 s. Tracked in [#2424](https://github.com/randomparity/kdive/issues/2424); it is
-a confinement-policy decision, not an install fix.
 
 ## Preflight
 

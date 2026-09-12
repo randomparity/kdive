@@ -59,7 +59,7 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 | `install-host.sh` | Fresh Debian/Ubuntu or RedHat-family host preparation: host packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, the fixed live-worker lifecycle contract (root), the guest-image directory, the venv libguestfs binding. Re-runnable. |
 | `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, the published session `KDIVE_LIBVIRT_URI`, and an XDG log directory. Source it; don't run it. |
 | `up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/up.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
-| `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `virt_image_t` on SELinux hosts, append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
+| `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `svirt_image_t` on SELinux hosts (ADR-0640), append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
 | `down.sh` | `scripts/live-stack/down.sh` with the example env: retires the lifecycle workers through the witness, stops the daemons and the compose backends, keeps state. `--wipe` also drops the data volumes and reaps kdive domains. |
 | `mint-token.sh` | Print an admin developer token for `KDIVE_PROJECT` to stdout. |
 | `mcp.json` | The MCP client config installed into the kernel tree; reads the token from `${KDIVE_TOKEN}` (holds no secret). |
@@ -76,6 +76,8 @@ examples/local-libvirt/install-host.sh
 examples/local-libvirt/up.sh
 
 # 2. Build and register a guest image (once; re-run per extra distro you want to boot).
+#    On an SELinux-enforcing host, read the SELinux note in docs/operating/providers/
+#    local-libvirt.md first: host labeling covers provisioning, not this build.
 examples/local-libvirt/build-image.sh fedora-kdive-ready-44
 
 # 3. In the shell you launch your MCP client from, export a fresh token:
@@ -117,8 +119,12 @@ Fedora 44. What it does, and why, so you can audit or redo a step:
 - **`uv sync --group live`** — the venv, plus `drgn` for the kdump capture path. Ubuntu 26.04
   and Fedora 44 both ship system Python 3.14, the same minor as the project's, so the script
   symlinks the distro libguestfs binding into the venv and the preflight's `import guestfs, drgn`
-  check passes. On a host whose system Python differs — EL9 is 3.9, EL10 is 3.12 — it stays a
-  `WARN` (kdump only) and everything else works. Contributors who also want the dev tooling (shellcheck, prek)
+  check passes. On a host whose system Python differs — EL9 is 3.9, EL10 is 3.12 — the binding
+  cannot be symlinked, and the consequence is larger than the `WARN` suggests: `guestfs` is also
+  how the provider extracts a System's baseline kernel, so **provisioning cannot complete** on such
+  a host, not merely kdump. Measured on Rocky 10.2 (system 3.12, venv 3.14): the provision fails
+  `missing_dependency — libguestfs (the guestfs Python binding) is required to extract the baseline
+  kernel`. Match the venv to the system Python, or use a host whose minors already agree. Contributors who also want the dev tooling (shellcheck, prek)
   run `./scripts/check-setup-deps.sh -y` separately.
 - **Lifecycle contract** — `deploy/systemd/install-live-worker-lifecycle.sh --operator $USER
   --source <checkout>` as root, with the witness-member DSN on its standard input (the fixed
@@ -133,6 +139,13 @@ Fedora 44. What it does, and why, so you can audit or redo a step:
   describe the contract.
 - **Directories** — `/var/lib/kdive/rootfs/local` (where `build-image.sh` publishes images) as
   you, group `kdive-live-libvirt`, the same posture the installer gives its parent.
+- **SELinux labels** — on an enforcing host only, `svirt_image_t` on `/var/lib/kdive/rootfs` and
+  `/var/lib/kdive/install`, the two trees a confined domain opens: provisioning writes each
+  System's overlay and maps its baseline kernel/initrd under the first, and the install plane
+  points a live domain's `<os>` at staged kernel/initrd under the second. `svirt_t` can do neither
+  against the older `virt_image_t`, and the unprivileged session daemon performs no relabel of its
+  own ([ADR-0640](../../docs/adr/0640-static-svirt-image-label-for-session-mode-domains.md)). The
+  step no-ops off an enforcing host, and `build-image.sh` owns the nested `rootfs/local` rule.
 
 Every catalog family builds through the customization boot (a throwaway guest installs its
 own packages), so no image build depends on the libguestfs appliance network. The Ubuntu

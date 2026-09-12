@@ -76,6 +76,17 @@ module), and how a host-built image is **referenced** versus the long-term catal
    bytes. Loosening the catalog `url` constraint to admit pre-built images is named as the
    follow-on, deliberately not done here.
 
+### Amendment (2026-09-11): host-side image label (#2424)
+
+This amends the host-side label named in decisions 3 and 4, not the builder decisions
+themselves. Decision 3 scopes its `virt_image_t` to reading the image "under `qemu:///system`",
+which remains correct; decision 4 restates the same labeling without naming a daemon. Under the
+unprivileged **session** daemon that `examples/local-libvirt` installs, `virt_image_t` is not
+usable by the confined domain — it performs no dynamic relabel — so host preparation labels the
+kdive image directories `svirt_image_t` instead. See
+[ADR-0640](0640-static-svirt-image-label-for-session-mode-domains.md). Decision 4's point stands
+either way: guest-internal SELinux is independent of the host-side label.
+
 ## Consequences
 
 - The vulnerable kernel can boot to a real userspace and the demo's `__d_lookup()` path becomes

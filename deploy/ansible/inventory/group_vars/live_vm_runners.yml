@@ -1,6 +1,7 @@
 ---
 # Throwaway-rootfs overlay area (KDIVE_LIVE_VM_ROOTFS's parent) + the provisioned-System
-# install staging check-local-libvirt.sh asserts. Both labeled virt_image_t, both traversable.
+# install staging check-local-libvirt.sh asserts. Both traversable; the Ubuntu runner confines
+# qemu with AppArmor and needs no static sVirt label.
 live_vm_staging_dir: /var/lib/kdive/live-vm
 install_staging_dir: /var/lib/kdive/install
 # Persistent warm store for the native-KVM nightly's rootfs + kernel + matching debuginfo (#1292,

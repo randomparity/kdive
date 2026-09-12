@@ -1440,7 +1440,7 @@ def test_install_unwritable_staging_root_is_config_error(tmp_path: Path) -> None
     assert str(staging_root) in str(err.details["root"])
     remedy = str(err.details["remedy"])
     assert "writable" in remedy
-    assert "virt_image_t" in remedy
+    assert "svirt_image_t" in remedy
 
 
 # --- live_vm real redefine + boot ----------------------------------------------------

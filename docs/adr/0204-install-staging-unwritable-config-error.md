@@ -41,6 +41,16 @@ Split the `mkdir` failure mapping by errno:
 The `KDIVE_INSTALL_STAGING` help text gains a one-line writability note so the failure's
 remedy is also discoverable in `config.md` before an install is ever run.
 
+### Amendment (2026-09-11): install-staging label (#2424)
+
+This amends the label named in the `PermissionError` remedy text above, not the errno-split
+decision itself. Host preparation for the local-libvirt example stack labels the staging root
+`svirt_image_t`, not `virt_image_t`: an unprivileged session libvirt daemon never performs the
+dynamic relabel that lets a confined domain use `virt_image_t`, so the remedy's label was wrong
+for that deployment. See [ADR-0640](0640-static-svirt-image-label-for-session-mode-domains.md),
+which also corrects the matching remedy string in
+`src/kdive/providers/local_libvirt/lifecycle/install.py`.
+
 ## Consequences
 
 - An unwritable staging root now self-describes: category, env var, path, and fix, so the
