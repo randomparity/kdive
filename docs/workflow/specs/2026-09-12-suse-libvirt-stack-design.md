@@ -28,8 +28,10 @@ Python ABI; the Tumbleweed host resolves them to Python 3.13 bindings. `communit
 already pinned in `deploy/ansible/requirements.yml`.
 
 RedHat and SUSE share the modular daemon block; Debian keeps the monolithic block. The modular
-block masks monolithic units and enables the existing QEMU, network, storage, node-device, secret,
-and proxy sockets. The group task stays common but selects the connection user, falling back to
+block masks installed monolithic units and enables the existing QEMU, network, storage,
+node-device, secret, and proxy sockets. Tumbleweed's modular package set has no monolithic unit
+files, so the role skips those masks on a clean host. The group task stays common but selects the
+connection user, falling back to
 sudo's original user and then the gathered user when no connection user is declared; privileged
 fact gathering reports `root` on the offered host and must not choose root over its operator.
 The KVM validation task stays common. The runner-task snapshot added
@@ -42,8 +44,8 @@ by #2391 must be updated for the new entry and SUSE package tasks.
   the named connection operator for group membership.
 - For an unsupported family, the first role task fails with the family name and missing-set
   guidance, before a package, service, or KVM task executes.
-- On the offered clean Tumbleweed host, the applied role resolves packages, enables modular
-  sockets, keeps `libvirtd` masked, adds the connection operator to `kvm` and `libvirt`, and
+- On the offered Tumbleweed host, the applied role resolves packages, enables modular
+  sockets, leaves `libvirtd` inactive, adds the connection operator to `kvm` and `libvirt`, and
   reaches KVM validation.
 - `just test-ansible`, `just lint-ansible`, and the role syntax check pass. Live SLES and Leap
   behavior is reported as untested.
