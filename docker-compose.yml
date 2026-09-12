@@ -88,7 +88,7 @@ services:
       - ./deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro,z
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     # Policed like the app tier: without this, a recreate that outlives the backend leaves
     # the app services restarting against something that can never answer. `on-failure`
     # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
@@ -113,7 +113,7 @@ services:
 
   # Creates the artifacts bucket, enables bucket-wide versioning, verifies it, then exits.
   minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
     depends_on:
       minio:
         condition: service_healthy

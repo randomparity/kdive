@@ -192,6 +192,47 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
+
+### Installed local authority carrier — ppc64le (#2152)
+
+Issue #2152's native ppc64le carrier is selected by the `live_vm` marker but remains dormant
+unless `KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG` names an owner-only mode-`0400` or mode-`0600`
+JSON file. The config file has the same shape as the x86_64 carrier's `KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG`
+file: `installed_revision` (the exact 40-character SHA), `system_id` (a pre-provisioned
+disposable System UUID on the POWER host), `project`, `ownership_prefix`
+(`kdive-2151-<sha12>-<nonce8>`), and the literal `kdive-external-boot-authority.service`
+service name. `barrier_socket` is optional.
+
+**Machine-checkable carrier gate.** Before reading the config, the test asserts:
+
+1. `platform.machine() == "ppc64le"` — the test skips on any other host (it is not an
+   error to run the suite on an x86_64 host where this carrier is unconfigured).
+2. `/dev/kvm` is present — the test **fails loud** if the host is ppc64le but `/dev/kvm`
+   is absent. A ppc64le host without KVM-HV is a mis-provisioned runner; TCG is not
+   an accepted substitute for native ppc64le authority proof (#2152).
+
+Run only the focused carrier after provisioning and backend bring-up on the POWER host:
+
+```sh
+KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG=/protected/power-authority-carrier.json \
+  uv run python -m pytest tests/live_vm/test_installed_local_authority_ppc64le.py -q
+```
+
+The proof is structurally identical to the x86_64 carrier's normal-operations arm: it opens
+an Investigation, creates a labeled Run on the disposable System with `arch=ppc64le` in the
+build profile, uploads the kernel through the public artifact contract, and drains the real
+install, activate, and root release jobs. Confinement, revision-coherence, and artifact-ownership
+checks all apply identically to the x86_64 carrier. The fault arms (`barrier_socket`,
+restart-recovery, takeover, journal-loss, stale-write) are not yet implemented for the ppc64le
+carrier; they remain separate scope.
+
+Bring up the stack on the POWER host following the
+[POWER host integration guide](../../development/cross-platform.md#native-power-host-integration)
+and the [live-stack runbook](live-stack.md) before running this carrier.
+The mock-OIDC image selection note in the cross-platform guide covers the POWER OIDC image
+requirement; `qemu:///system` and root-process constraints also apply.
+
+
 ### Installed remote authority proof prerequisite
 
 The production `provider_authority_host` role keeps the ADR-0622 proof socket absent by default.

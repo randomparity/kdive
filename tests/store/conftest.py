@@ -41,7 +41,7 @@ from tests.support import xdist_backend
 # silently change the image (ADR-0505 shape, #1921). To update: `docker pull` the
 # new tag and replace the digest. If the tag stops resolving, swap to a Chainguard
 # MinIO rebuild or a localstack S3 fixture (ADR-0017).
-_MINIO_IMAGE = "minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"  # noqa: E501  # RELEASE.2025-09-07T16-13-09Z
+_MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"  # noqa: E501  # RELEASE.2025-09-07T16-13-09Z
 _MINIO_PORT = 9000
 _ROOT_USER = "kdive-test"
 _ROOT_PASSWORD = "kdive-test-secret"  # disposable local test container credential

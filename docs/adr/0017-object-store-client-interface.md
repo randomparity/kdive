@@ -79,6 +79,13 @@ forecloses key injection; tenant isolation itself remains an access-control conc
 
 ## Consequences
 
+### Amendment (2026-09-11): Test image source moved to official Quay (#2430)
+
+This amendment qualifies the fixture's registry location while preserving its release-tag and
+digest rationale. Docker Hub now rejects the archived MinIO repositories; the same pinned
+`RELEASE.2025-09-07T16-13-09Z` manifest is available from `quay.io/minio/minio`, so the fixture
+and CI pre-pull use that official source. The fallback and content-pinning constraints remain.
+
 - A synchronous client keeps the dependency surface to the already-present `boto3`;
   the cost is that async callers must remember `asyncio.to_thread` (documented on
   the methods). A future move to `aioboto3` stays additive.
