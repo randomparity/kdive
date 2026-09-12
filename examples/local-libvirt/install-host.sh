@@ -51,7 +51,7 @@ readonly is_fedora
 
 # The emulator package is arch-named on Debian/Ubuntu, but the RedHat family answers by
 # NATIVENESS instead: `qemu-kvm` is the metapackage that pulls exactly this host's own emulator,
-# and EL ships no qemu-system-* package at all (ADR-0637). scripts/check-setup-deps.sh keeps the
+# and EL ships no qemu-system-* package at all (ADR-0641). scripts/check-setup-deps.sh keeps the
 # same split in package_for.
 host_arch="$(uname -m)"
 case "${distro_family}:${host_arch}" in

@@ -30,7 +30,7 @@ readonly OS_RELEASE_FILE="${KDIVE_OS_RELEASE:-/etc/os-release}"
 
 # The RedHat family ships the host's own emulator here, off PATH: no EL package provides
 # /usr/bin/qemu-system-<arch>, so a PATH-only probe reports a working EL host as broken
-# permanently (ADR-0637). Overridable so the probe is testable without an EL host.
+# permanently (ADR-0641). Overridable so the probe is testable without an EL host.
 readonly QEMU_LIBEXEC="${KDIVE_QEMU_LIBEXEC:-/usr/libexec/qemu-kvm}"
 
 # The worker imports the libguestfs binding from the project venv, not system python3, so the
@@ -81,7 +81,7 @@ command_exists() {
 # the RedHat family's off-PATH location. Prints the path and returns 0, or returns 1.
 # Native only — QEMU_LIBEXEC is this host's emulator, never a foreign-arch one, so callers must
 # pass the native binary. Callers print the resolved path rather than the name they asked for,
-# because on EL the arch-named binary does not exist (ADR-0637 decision 3).
+# because on EL the arch-named binary does not exist (ADR-0641 decision 3).
 resolve_native_emulator() {
   local binary="$1" resolved
   if resolved="$(command -v "${binary}" 2>/dev/null)"; then
@@ -152,7 +152,7 @@ package_for() {
   docker:*) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
   qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
-  # The RedHat family answers by NATIVENESS, not by architecture (ADR-0637). `qemu-kvm` is a
+  # The RedHat family answers by NATIVENESS, not by architecture (ADR-0641). `qemu-kvm` is a
   # metapackage that pulls exactly this host's own emulator — verified on Fedora 44, where
   # `dnf repoquery --requires qemu-kvm` returns qemu-system-x86 and the same query under
   # --forcearch=ppc64le returns qemu-system-ppc — and EL ships no qemu-system-* package at all.
@@ -445,7 +445,7 @@ probe_all() {
     require_command future "${cmd}" "${distro}"
   done
   # The native emulator is probed here rather than through future_cmds because require_command is
-  # PATH-only, and the RedHat family keeps this host's own emulator off PATH (ADR-0637 decision 2).
+  # PATH-only, and the RedHat family keeps this host's own emulator off PATH (ADR-0641 decision 2).
   native_qemu="$(qemu_binary_for_arch "${host_arch}")"
   if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
     resolve_native_emulator "${native_qemu}" >/dev/null ||

@@ -2,7 +2,7 @@
 
 fadump on POWER pseries needs a host QEMU >= 10.2 (the ``ibm,configure-kernel-dump`` RTAS). This
 contribution adds one worker-vantage check that resolves ``qemu-system-ppc64`` — on PATH, or at
-the RedHat off-PATH location on a ppc64le host (ADR-0637) — and compares its version against the
+the RedHat off-PATH location on a ppc64le host (ADR-0641) — and compares its version against the
 floor — reusing :func:`detect_pseries_fadump` — so it needs no DB handle
 and no libvirt call. The synchronous version detector runs in a worker thread so the shared
 per-check timeout can interrupt the async probe. It attributes to ``local-libvirt`` (the provider
@@ -34,7 +34,7 @@ _LOCAL_PROVIDER = "local-libvirt"
 _PPC64_EMULATOR = "qemu-system-ppc64"
 _PPC64_HOST = "ppc64le"
 # The RedHat family ships the host's OWN emulator here, off PATH: no EL package provides
-# /usr/bin/qemu-system-<arch> (ADR-0637). A PATH-only probe therefore reports not_applicable on
+# /usr/bin/qemu-system-<arch> (ADR-0641). A PATH-only probe therefore reports not_applicable on
 # an EL ppc64le host — the exact host fadump exists for — while LocalLibvirtDiscovery reads
 # libvirt's capabilities XML and sees the arch, so doctor and discovery diverge. Native arch
 # only: /usr/libexec/qemu-kvm is this host's emulator, never a foreign-arch one.
@@ -60,7 +60,7 @@ def default_pseries_fadump_probe(
     ``shutil.which``, :func:`detect_pseries_fadump`'s own bounded subprocess, ``platform.machine``
     and an executable-file test) so the probe is unit-tested without a real qemu. The emulator is
     resolved rather than PATH-probed: PATH first, then — on a ppc64le host only — the RedHat
-    off-PATH location (ADR-0637). A host with no ppc64 emulator at all cannot run ppc64le guests,
+    off-PATH location (ADR-0641). A host with no ppc64 emulator at all cannot run ppc64le guests,
     so fadump is ``not_applicable`` and no subprocess is spawned; otherwise the emulator's version
     is compared against the floor via the same :func:`detect_pseries_fadump` discovery uses, so
     doctor and discovery cannot diverge. The detector is offloaded so the async probe yields while

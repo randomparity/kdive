@@ -416,7 +416,7 @@ class GuestArchAccelReport:
         native_arch: The worker host's own architecture (``platform.machine()``).
         native_supported: Whether ``native_arch`` is an arch kdive can provision.
         native_emulator_present: Whether the qemu emulator for ``native_arch`` resolves — on PATH,
-            or at the RedHat family's off-PATH location (ADR-0637).
+            or at the RedHat family's off-PATH location (ADR-0641).
         native_qemu_binary: The qemu system-emulator binary name for ``native_arch``, or
             ``None`` when the host arch is unsupported (so no native binary is expected).
         target_is_local: Whether the configured libvirt URI runs guests on this worker (a local
@@ -502,7 +502,7 @@ class GuestArchAccelCheck(Check):
                 status=CheckStatus.FAIL,
                 # No package name here: the RedHat family ships no qemu-system-<arch> package at
                 # all, so naming the binary as the thing to install is wrong advice on exactly
-                # the hosts this FAIL reaches. Point at the per-distro hints instead (ADR-0637
+                # the hosts this FAIL reaches. Point at the per-distro hints instead (ADR-0641
                 # decision 3).
                 detail=(
                     f"host cannot schedule its own native arch {report.native_arch}: "

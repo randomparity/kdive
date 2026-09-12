@@ -471,7 +471,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Off-`PATH` location of the host's own QEMU emulator, resolved by "
         "`check-setup-deps.sh` and `check-local-libvirt.sh` in addition to `PATH`. The RHEL "
         "family ships no `qemu-system-*` package, so a `PATH`-only probe reports a working "
-        "Enterprise Linux host as permanently broken (ADR-0637). Native arch only — this binary "
+        "Enterprise Linux host as permanently broken (ADR-0641). Native arch only — this binary "
         "is never a foreign-arch emulator.",
     ),
     ExternalEnvVar(

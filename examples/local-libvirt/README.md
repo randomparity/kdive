@@ -102,7 +102,7 @@ Fedora 44. What it does, and why, so you can audit or redo a step:
 - **Packages** — the operator set: libvirt + this host's QEMU emulator, libguestfs and its
   Python binding, `passt`, a container engine + compose, and the kernel build toolchain for the
   tree you will build and upload. The two families name these differently and the emulator is
-  chosen differently on each (ADR-0637); the
+  chosen differently on each (ADR-0641); the
   [provider page](../../docs/operating/providers/local-libvirt.md#family-differences-that-matter)
   lists every divergence. Debian/Ubuntu install through `scripts/apt-install.sh` (bounded retry);
   the RedHat family uses `dnf` directly, and Enterprise Linux gets CodeReady Builder enabled
