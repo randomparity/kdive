@@ -10,9 +10,14 @@
 - name: Select the QEMU emulators for native and supported foreign guests
   ansible.builtin.set_fact:
     libvirt_stack_qemu_packages: >-
-      {{ ([ansible_architecture]
-          + libvirt_stack_foreign_guest_architectures[ansible_os_family])
-         | map('extract', libvirt_stack_qemu_package_map[ansible_os_family])
+      {{ (([ansible_architecture]
+           + libvirt_stack_foreign_guest_architectures[ansible_os_family]
+           + libvirt_stack_foreign_guest_architectures_by_distribution.get(
+               ansible_distribution, []))
+          | map('extract', libvirt_stack_qemu_package_map[ansible_os_family])
+          | list
+          + libvirt_stack_foreign_guest_packages_by_distribution.get(
+              ansible_distribution, []))
          | unique
          | list }}
 

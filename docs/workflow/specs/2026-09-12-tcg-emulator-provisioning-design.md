@@ -15,8 +15,10 @@ ppc64le guests. A provisioned x86_64 host consequently lacks its foreign emulato
 ## Design
 
 The role derives its package list from native architecture plus a family-specific foreign guest
-list. Debian and SUSE add ppc64le; RedHat adds none because EL has no such package. The harness
-evaluates the rendered lists under both architectures. Platform support states the consequence.
+list. Debian and SUSE add ppc64le; RedHat adds none because EL has no such package, while Fedora
+adds its foreign emulator through a distribution package override. The harness evaluates the
+production selection expression under representative distribution facts. Platform support states
+the consequence.
 
 ## Failure model
 

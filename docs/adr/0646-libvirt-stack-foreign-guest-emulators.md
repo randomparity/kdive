@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-09-12)
+Proposed (2026-09-12)
 
 - **Issue:** #2402
 
@@ -15,15 +15,17 @@ not package a foreign-architecture emulator.
 
 ## Decision
 
-`libvirt_stack` installs the native emulator and ppc64le emulator on Debian-family and
-SUSE-family hosts. RedHat-family hosts remain native-only. The family-to-guest availability map
-is role-local because it selects packages for privileged provisioning; ADR-0641 keeps diagnostic
-package advice separate.
+`libvirt_stack` installs the native emulator and ppc64le emulator on Debian-family, SUSE-family,
+and Fedora hosts. Enterprise Linux hosts remain native-only. The family-to-guest availability map
+has a Fedora distribution package override because Fedora shares Ansible's RedHat family with
+Enterprise Linux but uses a different foreign emulator package. It is role-local because it
+selects packages for privileged provisioning; ADR-0641 keeps diagnostic package advice separate.
 
 ## Consequences
 
-Provisioned Debian-family and SUSE-family x86_64 hosts can run the ppc64le TCG tier. RedHat-family
-hosts clearly do not promise that tier, while retaining their native `qemu-kvm` installation.
+Provisioned Debian-family, SUSE-family, and Fedora x86_64 hosts can run the ppc64le TCG tier.
+Enterprise Linux hosts clearly do not promise that tier, while retaining their native `qemu-kvm`
+installation.
 
 ## Considered & rejected
 
