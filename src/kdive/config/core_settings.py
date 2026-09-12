@@ -534,7 +534,7 @@ INSTALL_STAGING = Setting(
     help=(
         "Worker staging root for install artifacts. Must be writable by the run user; the "
         "default's parent (/var/lib/kdive) is root-owned, so on a source checkout pre-create "
-        "it (or repoint this var) — on SELinux hosts with the svirt_image_t label (ADR-0639). An "
+        "it (or repoint this var) — on SELinux hosts with the svirt_image_t label (ADR-0640). An "
         "unwritable root fails install with a configuration_error (ADR-0204)."
     ),
 )

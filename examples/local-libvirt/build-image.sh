@@ -58,7 +58,7 @@ for name in "$@"; do
     exit 1
   }
   # Label the rootfs directory on SELinux-enforcing hosts only (Fedora/EL). A qcow2 published from
-  # a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0639).
+  # a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0640).
   kdive_label_svirt_image "${rootfs_dir}"
 
   # Declare the image from its own provenance sidecar (arch + baked capabilities), so the

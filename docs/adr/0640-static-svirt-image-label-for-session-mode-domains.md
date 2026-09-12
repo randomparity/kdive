@@ -1,4 +1,4 @@
-# 0639 — kdive disk images carry a static `svirt_image_t` label
+# 0640 — kdive disk images carry a static `svirt_image_t` label
 
 ## Status
 

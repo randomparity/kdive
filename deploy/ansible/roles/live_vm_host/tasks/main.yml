@@ -1927,7 +1927,7 @@
 # virt-aa-helper adds each domain's disk paths to its per-domain profile dynamically from the
 # domain XML. The world-traversable, runner-owned staging dirs above therefore need no static
 # sVirt label. The SELinux equivalent RHEL requires is a static svirt_image_t label on the image
-# directories (ADR-0639).
+# directories (ADR-0640).
 
 - name: Run the host-contract gate
   ansible.builtin.import_tasks: verify.yml

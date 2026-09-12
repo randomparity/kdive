@@ -9,12 +9,12 @@ the bug as open.
 sourced shell helper applies the label to one directory with one `semanage fcontext -a`, which
 adds a missing rule and rewrites an existing one; three call sites use it. No Python behavior changes, and the rendered domain XML is
 untouched — a first design cycle proposed a per-disk `<seclabel>` and the review retired it
-(ADR-0639, rejected alternatives).
+(ADR-0640, rejected alternatives).
 
 **Tech stack.** Bash (installer scripts), pytest (driving the helper through a stub PATH).
 
 **Spec:** `docs/workflow/specs/2026-09-11-svirt-image-label-2424-design.md`
-**Decision:** `docs/adr/0639-static-svirt-image-label-for-session-mode-domains.md`
+**Decision:** `docs/adr/0640-static-svirt-image-label-for-session-mode-domains.md`
 
 Expected implementation size: 150–200 changed lines (M) — derived from the file map below: one new
 ~30-line shell helper, one new ~85-line test module, three small script edits, and nine prose or
@@ -38,7 +38,7 @@ help-text corrections. Task 3 changes no repository file.
 - Doc-style: use **Milestone**, never "Sprint"; avoid "critical", "robust", "comprehensive",
   "elegant" in ADRs, specs, commit messages and comments.
 - ADRs live under `docs/adr/`, named `NNNN-kebab-title.md`, monotonic numbers never reused. This
-  change owns **0639** and touches no other ADR file. There is no ADR index (ADR-0504).
+  change owns **0640** and touches no other ADR file. There is no ADR index (ADR-0504).
 - `semanage fcontext -l` prints each rule's pattern **verbatim** — `/var/lib/kdive/rootfs(/.*)?` —
   space-padded into columns. The backslashes in the existing greps at `install-host.sh:277` and
   `build-image.sh:52` are BRE escaping of `.` and `*`, not characters in the output. This plan
@@ -66,7 +66,7 @@ help-text corrections. Task 3 changes no repository file.
 | `src/kdive/providers/local_libvirt/lifecycle/install.py` | modify | the staging-root remediation string |
 | `deploy/ansible/roles/live_vm_host/tasks/main.yml` | modify | one comment clause |
 | `deploy/ansible/inventory/group_vars/live_vm_runners.yml` | modify | one comment clause |
-| the ADR-0639 record | modify | Status Proposed → Accepted |
+| the ADR-0640 record | modify | Status Proposed → Accepted |
 
 ---
 
@@ -107,7 +107,7 @@ Task 2 consumes nothing from this task.
 
 ```bash
 #!/usr/bin/env bash
-# Label a kdive image directory so a confined QEMU domain can use it (ADR-0639, #2424).
+# Label a kdive image directory so a confined QEMU domain can use it (ADR-0640, #2424).
 #
 # svirt_t may read virt_image_t but may not write or map it, and the unprivileged session
 # libvirt daemon never performs the dynamic relabel that closes that gap on a privileged
@@ -154,7 +154,7 @@ source "${example_dir}/selinux-label.sh"
 # 7b. SELinux labels for every directory a confined domain opens. Provisioning writes each
 #     System's overlay under rootfs/ and direct-kernel boot maps the baseline kernel/initrd from
 #     there; the install plane points a live domain's <os> at kernel/initrd under install/.
-#     svirt_t can do neither against virt_image_t (ADR-0639). build-image.sh owns the nested
+#     svirt_t can do neither against virt_image_t (ADR-0640). build-image.sh owns the nested
 #     rootfs/local rule and migrates it itself; the base images under it are read-only backing
 #     files, which svirt_t may read under either label.
 step "SELinux svirt_image_t on the kdive image directories"
@@ -180,7 +180,7 @@ source "${example_dir}/selinux-label.sh"
 
 ```bash
 # Label the rootfs directory on SELinux-enforcing hosts only (Fedora/EL). A qcow2 published from
-# a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0639).
+# a $HOME workspace can carry data_home_t, which the confined domain cannot read (ADR-0640).
 kdive_label_svirt_image "${rootfs_dir}"
 ```
 
@@ -248,7 +248,7 @@ kdive_label_svirt_image "${rootfs_dir}"
 ## Task 2 — correct the operator-facing text, and ratify the ADR
 
 **Where it fits.** After Task 1 the project's own documentation tells operators the feature is
-broken and prescribes the label that breaks it. This closes that, and flips ADR-0639 to Accepted
+broken and prescribes the label that breaks it. This closes that, and flips ADR-0640 to Accepted
 in the PR that implements it, as `docs/adr/README.md` requires.
 
 **Modifies:** `examples/local-libvirt/README.md`,
@@ -256,7 +256,7 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 `docs/guide/reference/config.md`, `src/kdive/providers/local_libvirt/lifecycle/install.py`,
 `tests/providers/local_libvirt/test_install.py`,
 `deploy/ansible/roles/live_vm_host/tasks/main.yml`,
-`deploy/ansible/inventory/group_vars/live_vm_runners.yml`, the ADR-0639 record
+`deploy/ansible/inventory/group_vars/live_vm_runners.yml`, the ADR-0640 record
 
 **Interfaces.** Consumes nothing and provides nothing; no signature changes.
 
@@ -265,7 +265,7 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 | Contract | Mode | Detail |
 |---|---|---|
 | The generated config table matches the changed `Setting` help text | `focused-test` | `just config-docs-check` — red immediately after editing `core_settings.py` and before regenerating, green after; CI gates this recipe individually |
-| ADR-0639 carries a valid, non-Proposed status while `src/` cites it | `focused-test` | `just adr-status-check` — red while the record says `Proposed` and `install.py` cites ADR-0639, green once flipped to `Accepted` |
+| ADR-0640 carries a valid, non-Proposed status while `src/` cites it | `focused-test` | `just adr-status-check` — red while the record says `Proposed` and `install.py` cites ADR-0640, green once flipped to `Accepted` |
 | The staging-root remediation string names the new label | `focused-test` | `tests/providers/local_libvirt/test_install.py:1443`. Change the assertion to `assert "svirt_image_t" in remedy` **first** and run it red against the unmodified `install.py`, then edit `install.py:571`. Green via `uv run python -m pytest tests/providers/local_libvirt/test_install.py -q -k staging`. Order matters: `"virt_image_t"` is a substring of `"svirt_image_t"`, so the original assertion stays green after the source edit and cannot witness this contract. |
 | Prose corrections | `task-test-not-applicable` | documentation wording with no executable consumer; `just docs-links` and `just docs-paths` cover link and path integrity |
 
@@ -273,24 +273,24 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 
 1. `examples/local-libvirt/README.md` — in the `build-image.sh` table row, change "label the
    rootfs directory `virt_image_t` on SELinux hosts" to "label the rootfs directory
-   `svirt_image_t` on SELinux hosts (ADR-0639)".
+   `svirt_image_t` on SELinux hosts (ADR-0640)".
 2. `docs/operating/providers/local-libvirt.md:76-78` — replace the **SELinux** bullet body with:
    "Fedora and Enterprise Linux run SELinux enforcing, so `install-host.sh` and `build-image.sh`
-   label the kdive image directories `svirt_image_t` for the confined domain (ADR-0639).
+   label the kdive image directories `svirt_image_t` for the confined domain (ADR-0640).
    `install-host.sh` installs `policycoreutils-python-utils` for the `semanage` that needs."
 3. Same file — delete the whole `## Known limitation — SELinux and per-System overlays` section:
    lines **108-122**, from the `##` heading through the blank line before `## Preflight` at line
-   123. It describes a resolved defect and hands the reader `setenforce 0`, which ADR-0639
+   123. It describes a resolved defect and hands the reader `setenforce 0`, which ADR-0640
    rejects. Add no replacement section; the SELinux bullet above now carries the operative
    statement.
 4. `src/kdive/config/core_settings.py` — in `INSTALL_STAGING.help`, change "on SELinux hosts with
-   the virt_image_t label" to "on SELinux hosts with the svirt_image_t label (ADR-0639)".
+   the virt_image_t label" to "on SELinux hosts with the svirt_image_t label (ADR-0640)".
 5. Regenerate the config table and confirm: `just config-docs` (the generator recipe, `justfile:588`),
    then `just config-docs-check` (`justfile:592`) — expect exit 0. Stage the regenerated
    `docs/guide/reference/config.md` with the source edit; CI gates the check recipe individually.
 6. `src/kdive/providers/local_libvirt/lifecycle/install.py:569-571` — change the remedy string's
    tail from "on SELinux hosts give it the virt_image_t label" to "on SELinux hosts give it the
-   svirt_image_t label (ADR-0639)". Update the one assertion that reads it,
+   svirt_image_t label (ADR-0640)". Update the one assertion that reads it,
    `tests/providers/local_libvirt/test_install.py:1443`, from `assert "virt_image_t" in remedy`
    to `assert "svirt_image_t" in remedy`.
 
@@ -302,14 +302,14 @@ in the PR that implements it, as `docs/adr/README.md` requires.
 7. `deploy/ansible/roles/live_vm_host/tasks/main.yml:1929` — change the closing clause from
    "sVirt label (the SELinux virt_image_t equivalent RHEL required)." to "sVirt label. The
    SELinux equivalent RHEL requires is a static svirt_image_t label on the image directories
-   (ADR-0639)." Touch no other line in that file.
+   (ADR-0640)." Touch no other line in that file.
 8. `deploy/ansible/inventory/group_vars/live_vm_runners.yml:3` — the clause "Both labeled
    virt_image_t, both traversable." asserts labeling the role does not perform: `main.yml:1926-1929`
    records that the Ubuntu target uses AppArmor and needs no static sVirt label, and
    `rg -n 'sefcontext|setype' deploy/ansible/` finds no such task anywhere in the tree. Replace the
    clause with "Both traversable; the Ubuntu runner confines qemu with AppArmor and needs no static
    sVirt label." Comment only — no variable, task, or value changes, within exclusion 2.
-9. the ADR-0639 record — change `## Status` from `Proposed` to `Accepted (2026-09-11)` and delete
+9. the ADR-0640 record — change `## Status` from `Proposed` to `Accepted (2026-09-11)` and delete
    the ratification note beneath it.
 10. `just lint && just type && just adr-status-check && just docs-links && just docs-paths &&
     just config-docs-check` — expect every one green.
@@ -324,7 +324,7 @@ in the PR that implements it, as `docs/adr/README.md` requires.
   #2424 as an open limitation.
 - The `qemu:///system` references in `docs/operating/runbooks/` and `src/kdive/testing/live_vm.py`
   are untouched, as the spec's Scope records.
-- ADR-0639 is `Accepted`; `just adr-status-check` and `just config-docs-check` are green.
+- ADR-0640 is `Accepted`; `just adr-status-check` and `just config-docs-check` are green.
 
 ---
 
@@ -343,7 +343,7 @@ anywhere but on a real enforcing host.
 | A System provisions to `ready` under SELinux enforcing | live proof | both RedHat-family targets, procedure below |
 | The domain runs confined and produces no denial | live proof | `svirt_t` with MCS categories; no `denied` AVC for a path under the kdive image directories |
 | The install plane's staged `kernel`/`initrd` carry the new label (criterion 2, second half) | live proof | step 5; provisioning alone never reaches this path |
-| A base image left at `virt_image_t` under `rootfs/local` still serves as a backing file | live proof | step 6; the one claim ADR-0639 rests on an inference rather than a measurement |
+| A base image left at `virt_image_t` under `rootfs/local` still serves as a backing file | live proof | step 6; the one claim ADR-0640 rests on an inference rather than a measurement |
 | The repository guardrail suite is green | `focused-test` | `just ci`, bare — **already run on the reviewed HEAD: exit 0, 18470 passed, 30 skipped** |
 
 ### Steps
@@ -354,7 +354,7 @@ anywhere but on a real enforcing host.
    undefine also avoids a System/domain id collision on re-provision.
 2. **Record the pre-state before touching anything:** `sudo semanage fcontext -l -C | grep kdive`.
    Without it, step 3 can only show that the rule is right, not that a stale one was rewritten —
-   and rewriting a pre-ADR-0639 `virt_image_t` rule is the behaviour an upgraded host depends on.
+   and rewriting a pre-ADR-0640 `virt_image_t` rule is the behaviour an upgraded host depends on.
    The Rocky target is the one that still carries such a rule; the Fedora target was pre-labeled
    during design and can only exercise the already-correct case.
 3. Run the installer from the branch checkout: `examples/local-libvirt/install-host.sh`. Re-run the
@@ -383,20 +383,20 @@ anywhere but on a real enforcing host.
    - `ls -Z` on the System's overlay and its baseline `kernel`/`initrd` shows `svirt_image_t`.
    - `journalctl -k --since <start>` carries no `denied` record for a path under
      `/var/lib/kdive/rootfs` or `/var/lib/kdive/install`. Read the **journal**, not `ausearch`,
-     which does not surface these denials on either host (ADR-0639 Context).
+     which does not surface these denials on either host (ADR-0640 Context).
 6. **Exercise the install plane** — provisioning does not reach it, so without this criterion 2's
    install-staging half goes unproven while the run still reports green. Perform an install through
    the ordinary worker path, then assert:
    - `ls -Z /var/lib/kdive/install/<system-id>/<run-id>/kernel` and `…/initrd` show
      `svirt_image_t`.
    - the journal carries no `denied` record naming a path under `/var/lib/kdive/install`.
-7. **Measure the `rootfs/local` read-only claim.** ADR-0639 states that leaving the nested rule to
+7. **Measure the `rootfs/local` read-only claim.** ADR-0640 states that leaving the nested rule to
    `build-image.sh` is safe because base images there are read-only backing files and `svirt_t` may
    read `virt_image_t`. Every other load-bearing claim in that record carries a measurement; this
    one carries an inference. With a base image under `/var/lib/kdive/rootfs/local` left at
    `virt_image_t` (its state on an upgraded host after `install-host.sh` alone), confirm a System
    backed by it provisions and runs with no `denied` record naming that path. Record the result in
-   ADR-0639's Consequences the way the other measurements are recorded — and if it is denied, the
+   ADR-0640's Consequences the way the other measurements are recorded — and if it is denied, the
    nested call belongs in `install-host.sh` after all.
 8. **Diagnostic, explicitly non-gating: run `build-image.sh` on the Fedora target once**, after
    the criterion-6 arms above have already passed and been recorded. This settles a question this

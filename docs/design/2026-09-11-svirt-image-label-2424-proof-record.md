@@ -1,6 +1,6 @@
 # Proof record — static `svirt_image_t` label for kdive images (#2424)
 
-- **Issue:** #2424 · **Decision:** [ADR-0639](../adr/0639-static-svirt-image-label-for-session-mode-domains.md)
+- **Issue:** #2424 · **Decision:** [ADR-0640](../adr/0640-static-svirt-image-label-for-session-mode-domains.md)
 - **Branch build under test:** `5af70d10e`, confirmed on both targets before any measurement
   (`scripts/live-stack/status.sh` build stamps read `g5af70d10e` for server and reconciler after
   `up.sh` restarted them; they had been running the pre-branch build).
@@ -10,7 +10,7 @@
   libvirt default).
 
 Completion criterion 6 of the frozen charter. Criteria 1, 2, 3 and 5 are discharged here;
-criterion 4 was discharged by a design-time privileged-daemon probe recorded in ADR-0639;
+criterion 4 was discharged by a design-time privileged-daemon probe recorded in ADR-0640;
 criterion 7 is `just ci`.
 
 ## What each target proved, and what it could not
@@ -74,7 +74,7 @@ onboard → allocate → provision → poll ready) against a **staged prebuilt i
 - **Zero `avc: denied` records of any kind** in the kernel journal across the provisioning window
   (read from the journal, not `ausearch`, which does not surface these on either target).
 
-The live XML is the direct confirmation of ADR-0639's model:
+The live XML is the direct confirmation of ADR-0640's model:
 
 ```xml
 <seclabel type='dynamic' model='selinux' relabel='yes'>
@@ -99,7 +99,7 @@ Two files in the same run, one relabeled and one not, differing only in ownershi
 The unprivileged daemon relabels what it has permission to relabel and nothing else. In this
 deployment the images are created by the fixed `kdive-worker-N` accounts while the daemon runs as
 the operator, so it cannot relabel them — which is precisely why the **static** label is
-load-bearing. ADR-0639 records this refinement.
+load-bearing. ADR-0640 records this refinement.
 
 ## 3. Install staging — criterion 2, second half
 
@@ -122,7 +122,7 @@ operator-owned, were relabeled to `virt_content_t` before the map, per §2.
 
 ## 4. `rootfs/local` left at `virt_image_t` — the claim that was an inference
 
-ADR-0639 leaves the nested `rootfs/local` rule to `build-image.sh`, on the grounds that base images
+ADR-0640 leaves the nested `rootfs/local` rule to `build-image.sh`, on the grounds that base images
 there are read-only backing files a `svirt_t` domain may read under either label. Every other
 load-bearing claim in that record carried a measurement; this one carried an inference, and the
 operator's decision on 2026-09-11 was to keep the cut and measure it here.
@@ -193,4 +193,4 @@ all.
   `virsh list --all` shows only the provisioned System.
 - Fedora 44: restoring the base image's label needed `restorecon -F` — a plain `restorecon`
   refused with *"not reset as customized by admin"*, which is live confirmation of the
-  customizable-type caveat ADR-0639 records as the rollback lever.
+  customizable-type caveat ADR-0640 records as the rollback lever.

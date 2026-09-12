@@ -84,7 +84,7 @@ which remains correct; decision 4 restates the same labeling without naming a da
 unprivileged **session** daemon that `examples/local-libvirt` installs, `virt_image_t` is not
 usable by the confined domain — it performs no dynamic relabel — so host preparation labels the
 kdive image directories `svirt_image_t` instead. See
-[ADR-0639](0639-static-svirt-image-label-for-session-mode-domains.md). Decision 4's point stands
+[ADR-0640](0640-static-svirt-image-label-for-session-mode-domains.md). Decision 4's point stands
 either way: guest-internal SELinux is independent of the host-side label.
 
 ## Consequences

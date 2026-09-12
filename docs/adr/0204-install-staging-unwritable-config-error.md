@@ -47,7 +47,7 @@ This amends the label named in the `PermissionError` remedy text above, not the 
 decision itself. Host preparation for the local-libvirt example stack labels the staging root
 `svirt_image_t`, not `virt_image_t`: an unprivileged session libvirt daemon never performs the
 dynamic relabel that lets a confined domain use `virt_image_t`, so the remedy's label was wrong
-for that deployment. See [ADR-0639](0639-static-svirt-image-label-for-session-mode-domains.md),
+for that deployment. See [ADR-0640](0640-static-svirt-image-label-for-session-mode-domains.md),
 which also corrects the matching remedy string in
 `src/kdive/providers/local_libvirt/lifecycle/install.py`.
 

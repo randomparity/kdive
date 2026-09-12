@@ -1,20 +1,20 @@
 # Static `svirt_image_t` label for kdive images — #2424
 
 - **Issue:** #2424
-- **Decision record:** [ADR-0639](../../adr/0639-static-svirt-image-label-for-session-mode-domains.md)
+- **Decision record:** [ADR-0640](../../adr/0640-static-svirt-image-label-for-session-mode-domains.md)
 
 ## Problem
 
 Provisioning fails on an SELinux-enforcing RedHat-family host: QEMU cannot open the per-System
 overlay and the System goes to `error`. The kdive image directories are labeled `virt_image_t`,
 which `svirt_t` may read but not write or map; the unprivileged session libvirt daemon never
-performs the dynamic relabel that covers that on a privileged daemon. ADR-0639 holds the analysis.
+performs the dynamic relabel that covers that on a privileged daemon. ADR-0640 holds the analysis.
 
 ## Scope
 
 Change the static label kdive's host preparation applies. Nothing in the rendered domain XML
 changes: a first design cycle proposed declaring `relabel='no'` per disk, and the review retired
-it — see ADR-0639's rejected alternatives and the re-frozen charter on the issue.
+it — see ADR-0640's rejected alternatives and the re-frozen charter on the issue.
 
 1. A new sourced shell helper under `examples/local-libvirt/` applies the label with one
    `semanage fcontext -a`, which adds a missing rule and **rewrites** an existing one on the same
@@ -83,10 +83,10 @@ image directories with non-kdive workloads, are not named deployments.
   fixes. Re-running the installer recovers a foreign rule on the **same** pattern, which `-a`
   rewrites in place; a **broader** foreign pattern written **later** keeps winning under
   last-match-wins, because the rewrite does not reorder. That one is removed by hand —
-  `semanage fcontext -l -C` shows the order (ADR-0639).
+  `semanage fcontext -l -C` shows the order (ADR-0640).
 - An overlay left at `svirt_image_t:s0:c<i>,c<j>` by a privileged daemon that died without
   restoring is skipped by a later plain `restorecon`, because `svirt_image_t` is a customizable
-  type. Accepted: bounded and recoverable with `restorecon -F`, which ADR-0639 records.
+  type. Accepted: bounded and recoverable with `restorecon -F`, which ADR-0640 records.
 
 **Covered elsewhere.**
 
@@ -156,12 +156,12 @@ only by an operator who already has root.
 |---|---|---|
 | A pattern with no rule gets one `svirt_image_t` rule | `focused-test` | `tests/scripts/test_selinux_label.py::test_labels_the_directory` |
 | Only one `semanage` call is issued — no migrate-then-add probe | `focused-test` | `…::test_labels_the_directory` asserts the call log by list equality |
-| A pattern carrying a stale `virt_image_t` rule is rewritten by that same call, not duplicated | design-time source read, recorded | not observable through the stubs: `seobject.fcontextRecords.add()` detects an existing rule and delegates to the modify path, exiting 0. Read on both target families — policycoreutils-python-utils 3.11 (Fedora 44) and 3.10 (Rocky 10.2), 2026-09-11 — and cited in the helper's comment and ADR-0639. The live proof's step 3 observes it against real `semanage`. |
+| A pattern carrying a stale `virt_image_t` rule is rewritten by that same call, not duplicated | design-time source read, recorded | not observable through the stubs: `seobject.fcontextRecords.add()` detects an existing rule and delegates to the modify path, exiting 0. Read on both target families — policycoreutils-python-utils 3.11 (Fedora 44) and 3.10 (Rocky 10.2), 2026-09-11 — and cited in the helper's comment and ADR-0640. The live proof's step 3 observes it against real `semanage`. |
 | The helper no-ops off an enforcing host | `focused-test` | `…::test_noop_when_not_enforcing` |
 | A missing `semanage` reports and returns 0 | `focused-test` | `…::test_reports_missing_semanage` |
 | A failing `semanage` or `restorecon` aborts rather than reporting success | `focused-test` | `…::test_aborts_when_semanage_fails`, `…::test_aborts_when_restorecon_fails` |
 | The domain XML is unchanged by this work (Success 4) | `focused-test` | the existing `tests/adversarial/test_provider_xml.py` and `tests/providers/local_libvirt/lifecycle/test_xml.py` suites pass untouched; this change adds no test there because it adds no behavior there |
-| The privileged daemon's relabel/restore cycle is unchanged by the new static label (Success 4) | design-time probe, recorded | measured on Fedora 44 / libvirt 12.0.0, 2026-09-11: a disk at `svirt_image_t:s0` attached to a `qemu:///system` domain went to `svirt_image_t:s0:c51,c883` while running and back to `svirt_image_t:s0` after `virsh destroy`. Recorded in ADR-0639's Decision section. No repeatable arm: the live proof below exercises the session daemon, and standing up a privileged-daemon kdive deployment is outside this change. |
+| The privileged daemon's relabel/restore cycle is unchanged by the new static label (Success 4) | design-time probe, recorded | measured on Fedora 44 / libvirt 12.0.0, 2026-09-11: a disk at `svirt_image_t:s0` attached to a `qemu:///system` domain went to `svirt_image_t:s0:c51,c883` while running and back to `svirt_image_t:s0` after `virsh destroy`. Recorded in ADR-0640's Decision section. No repeatable arm: the live proof below exercises the session daemon, and standing up a privileged-daemon kdive deployment is outside this change. |
 | `install-host.sh` labels both paths it owns | `task-test-not-applicable` | the installer's own gate harness (`tests/scripts/test_install_host_gates.py`) stops the script at the `sudo` preflight, far above these calls, and driving the whole installer needs a real enforcing host with root — which is the live proof below. The labeling logic itself is covered by the helper tests above, which is where the branching lives. |
 | Prose corrections | `task-test-not-applicable` | documentation and help text with no executable consumer; `just docs-links`, `just docs-paths` and `just config-docs-check` cover link, path and generated-table integrity |
 | End-to-end provisioning under enforcing | live proof | Fedora 44 and Rocky 10.2: run the installer, provision a System, assert `ready`, assert QEMU is `svirt_t`, assert no AVC under the kdive image directories |

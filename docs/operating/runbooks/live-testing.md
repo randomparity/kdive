@@ -119,7 +119,7 @@ into `boot_throwaway_domain(mode=…)`.
   `svirt_t` with its own MCS categories — but the unprivileged daemon performs no
   image *relabel*, so the static label on the image tree has to be one `svirt_t`
   can use: `svirt_image_t`
-  ([ADR-0639](../../adr/0639-static-svirt-image-label-for-session-mode-domains.md)).
+  ([ADR-0640](../../adr/0640-static-svirt-image-label-for-session-mode-domains.md)).
   A session-mode tier sidesteps the relabel, not sVirt.
 - **Guest image and matching debuginfo** are staged at a known location and kept
   warm between runs on the self-hosted host.
@@ -698,7 +698,7 @@ workers and logs, not the current slot identity contract.
   is *not* the lever. The harness redirects it to a short path automatically; the
   quirk bites only code that boots a session-mode domain without the harness.
 - **Staged images need the right label on an SELinux host** — `virt_image_t` under
-  system mode, `svirt_image_t` under session mode (ADR-0639), or the
+  system mode, `svirt_image_t` under session mode (ADR-0640), or the
   `libvirt-qemu` AppArmor profile on Ubuntu — and the rootfs's parent dir must be
   writable, because the boot stages an overlay beside it.
 - **`pytest -m live_vm` selects all four families.** If you run a nightly for

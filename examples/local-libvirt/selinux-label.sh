@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Label a kdive image directory so a confined QEMU domain can use it (ADR-0639, #2424).
+# Label a kdive image directory so a confined QEMU domain can use it (ADR-0640, #2424).
 #
 # svirt_t may read virt_image_t but may not write or map it, and the unprivileged session
 # libvirt daemon never performs the dynamic relabel that closes that gap on a privileged
@@ -30,7 +30,7 @@ kdive_label_svirt_image() {
 
   # -a is sufficient on its own: seobject.fcontextRecords.add() rewrites an existing rule rather
   # than failing on it, so one call converges a fresh host and one carrying the old virt_image_t
-  # rule alike (verified on policycoreutils-python-utils 3.11 and 3.10; ADR-0639). A non-zero exit
+  # rule alike (verified on policycoreutils-python-utils 3.11 and 3.10; ADR-0640). A non-zero exit
   # therefore means the policy store refused the write, which is not safe to continue past.
   sudo semanage fcontext -a -t svirt_image_t "${pattern}" || return 1
   sudo restorecon -R "${directory}"
