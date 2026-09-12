@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 import yaml
+from jinja2 import Environment, StrictUndefined
 
 ROOT = Path(__file__).resolve().parents[3]
 ANSIBLE = ROOT / "deploy/ansible"
@@ -113,6 +114,33 @@ require(
     "runner Python guard followed Ansible facts instead of /usr/bin/python3",
 )
 print("ok runner: Python guard follows /usr/bin/python3 despite contrary Ansible facts")
+
+jinja = Environment(undefined=StrictUndefined)
+jinja.filters["basename"] = os.path.basename
+guestfs_tasks = [
+    task
+    for task in runner_tasks
+    if task["name"]
+    in (
+        "Symlink the libguestfs binding into the venv site-packages (no PyPI wheel exists)",
+        "Symlink the target-native libguestfs binding into the authority venv",
+        "Symlink the libguestfs binding into the lifecycle worker venv",
+    )
+]
+require(len(guestfs_tasks) == 3, "expected three runner guestfs venv links")
+for task in guestfs_tasks:
+    destination = jinja.from_string(task["ansible.builtin.file"]["dest"]).render(
+        live_vm_venv="/opt/kdive",
+        live_vm_host_authority_runtime_install="/opt/kdive-provider-authority",
+        live_vm_host_system_python_version={"stdout": "3.14"},
+        ansible_python={"version": {"major": 3, "minor": 15}},
+        item={"path": "/usr/lib/python3/dist-packages/guestfs.py"},
+    )
+    require(
+        "/lib/python3.14/site-packages/guestfs.py" in destination,
+        f"{task['name']} does not follow the validated system Python ABI",
+    )
+print("ok runner: all three guestfs venv links follow system Python, not Ansible Python")
 
 probe = TESTS / "local_worker_host.yml"
 syntax = playbook(probe, "--syntax-check")

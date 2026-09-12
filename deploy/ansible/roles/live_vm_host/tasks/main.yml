@@ -221,15 +221,15 @@
     that: live_vm_host_libguestfs_files.matched > 0
     fail_msg: >-
       guestfs.py / libguestfsmod*.so not found under /usr/lib/python3/dist-packages —
-      is python3-guestfs installed (it is in live_vm_host_packages) and does the ansible
-      interpreter match /usr/bin/python3 (the venv's --python)?
+      is python3-guestfs installed (it is in live_vm_host_packages) and does its
+      binding match /usr/bin/python3 (the venv's --python)?
 
 - name: Symlink the libguestfs binding into the venv site-packages (no PyPI wheel exists)
   ansible.builtin.file:
     src: "{{ item.path }}"
     dest: >-
-      {{ live_vm_venv }}/.venv/lib/python{{ ansible_python.version.major }}.{{
-      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+      {{ live_vm_venv }}/.venv/lib/python{{ live_vm_host_system_python_version.stdout
+      }}/site-packages/{{ item.path | basename }}
     state: link
     force: true
   loop: "{{ live_vm_host_libguestfs_files.files }}"
@@ -648,8 +648,8 @@
   ansible.builtin.file:
     src: "{{ item.path }}"
     dest: >-
-      {{ live_vm_host_authority_runtime_install }}/.venv/lib/python{{ ansible_python.version.major }}.{{
-      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+      {{ live_vm_host_authority_runtime_install }}/.venv/lib/python{{
+      live_vm_host_system_python_version.stdout }}/site-packages/{{ item.path | basename }}
     state: link
     force: true
   loop: "{{ live_vm_host_libguestfs_files.files }}"
@@ -1043,8 +1043,8 @@
   ansible.builtin.file:
     src: "{{ item.path }}"
     dest: >-
-      /opt/kdive-live-worker-lifecycle/.venv/lib/python{{ ansible_python.version.major }}.{{
-      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+      /opt/kdive-live-worker-lifecycle/.venv/lib/python{{ live_vm_host_system_python_version.stdout
+      }}/site-packages/{{ item.path | basename }}
     state: link
     force: true
   loop: "{{ live_vm_host_libguestfs_files.files }}"
