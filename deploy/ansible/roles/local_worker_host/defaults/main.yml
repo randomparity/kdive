@@ -1,0 +1,105 @@
+---
+# Existing operator account owning shared local-libvirt data.
+local_worker_host_operator_user: ""
+
+# Kernel-debug toolchain + venv build deps the live_vm contract needs beyond libvirt_stack, on
+# the Ubuntu 26.04 runner base (ADR-0387). drgn and libvirt-python are built from PyPI into the
+# venv, so their -dev headers (libvirt-dev, libelf/libdw/libkdumpfile) are build deps here;
+# libguestfs has no PyPI package and is symlinked from the system python3-guestfs binding.
+live_vm_host_packages:  # noqa: var-naming[no-role-prefix]
+  - bubblewrap         # unreadable-/proc carrier in test-compose-lifecycle
+  - crash
+  - makedumpfile
+  - kexec-tools
+  - kdump-tools        # Debian name for kdump-utils
+  - gdb
+  - kmod               # depmod: host-side kernel module indexing (ADR-0346, #2300, #2331)
+  - python3-guestfs    # the system libguestfs binding, built for Ubuntu 26.04's Python 3.14
+  - elfutils           # eu-readelf: the live-vm store scripts read the kernel/debuginfo build-id (#1292)
+  - debuginfod         # debuginfod-find: fetch matching vmlinux debuginfo by build-id (#1292)
+  - git
+  - python3-pip        # Ubuntu ships no pip for the system python; uv needs it
+  - build-essential    # gcc/make: uv builds drgn + libvirt-python from source
+  - pkg-config
+  - libvirt-dev        # libvirt-python build
+  - login              # sg: refresh the fixed daemon's declared group at each user-unit start
+  - libelf-dev         # drgn build
+  - libdw-dev          # drgn build
+  - libkdumpfile-dev   # drgn kdump support
+
+# Fixed host-worker authority contract (ADR-0574). Keep the slot count literal: unit names,
+# account isolation, and lifecycle bounds all use exactly 1..8.
+# Preserve these inventory names across runner and standalone role use.
+# ansible-lint role-prefix exceptions below keep existing inventory overrides working.
+live_vm_host_worker_accounts:  # noqa: var-naming[no-role-prefix]
+  - kdive-worker-1
+  - kdive-worker-2
+  - kdive-worker-3
+  - kdive-worker-4
+  - kdive-worker-5
+  - kdive-worker-6
+  - kdive-worker-7
+  - kdive-worker-8
+live_vm_host_worker_control_group: kdive-live-control  # noqa: var-naming[no-role-prefix]
+live_vm_host_worker_libvirt_group: kdive-live-libvirt  # noqa: var-naming[no-role-prefix]
+live_vm_host_worker_state_root: /var/lib/kdive/live-workers  # noqa: var-naming[no-role-prefix]
+live_vm_host_worker_shared_directories:  # noqa: var-naming[no-role-prefix]
+  - /var/lib/kdive/rootfs
+  - /var/lib/kdive/console
+  - /var/lib/kdive/pcap
+  - /var/lib/kdive/build
+  - /var/lib/kdive/install
+# Local external-boot recovery roots (ADR-0586, #2210) use one owner-only child per worker.
+# The traverse-only root remains root-owned so a worker cannot replace sibling roots.
+live_vm_host_worker_recovery_root: /var/lib/kdive/live-workers/external-boot-recovery  # noqa: var-naming[no-role-prefix]
+# Per activation; the capacity gate reserves this many bytes for each admitted activation.
+live_vm_host_external_boot_capacity_bytes: 34359738368  # noqa: var-naming[no-role-prefix]
+live_vm_host_external_boot_concurrent_activations: 8  # noqa: var-naming[no-role-prefix]
+live_vm_host_worker_authority_enabled: false  # noqa: var-naming[no-role-prefix]
+live_vm_host_authority_client_group: kdive-provider-authority-client  # noqa: var-naming[no-role-prefix]
+
+# Fedora worker debug/build packages; QEMU/libvirt host packages belong to libvirt_stack.
+local_worker_host_packages_redhat:
+  - bubblewrap
+  - crash
+  - makedumpfile
+  - kexec-tools
+  - kdump-utils
+  - gdb
+  - kmod
+  - python3-libguestfs
+  - elfutils
+  - elfutils-debuginfod-client
+  - git
+  - python3-pip
+  - gcc
+  - make
+  - pkgconf-pkg-config
+  - libvirt-devel
+  - shadow-utils
+  - elfutils-libelf-devel
+  - elfutils-devel
+  - libkdumpfile-devel
+
+# openSUSE Tumbleweed worker debug/build packages.
+local_worker_host_packages_suse:
+  - bubblewrap
+  - crash
+  - makedumpfile
+  - kexec-tools
+  - kdump
+  - gdb
+  - kmod
+  - python3-libguestfs
+  - elfutils
+  - debuginfod-client
+  - git
+  - python3-pip
+  - gcc
+  - make
+  - pkg-config
+  - libvirt-devel
+  - shadow
+  - libelf-devel
+  - libdw-devel
+  - libkdumpfile-devel

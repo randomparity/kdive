@@ -1,0 +1,9 @@
+---
+- name: Create group-writable provider data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ local_worker_host_operator_user }}"
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "2770"
+  loop: "{{ live_vm_host_worker_shared_directories }}"

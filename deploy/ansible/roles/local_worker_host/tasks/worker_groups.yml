@@ -1,0 +1,24 @@
+---
+- name: Ensure the /var/lib/kdive parent is world-traversable
+  ansible.builtin.file:
+    path: /var/lib/kdive
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the fixed live-worker groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop:
+    - "{{ live_vm_host_worker_control_group }}"
+    - "{{ live_vm_host_worker_libvirt_group }}"
+
+- name: Create the fixed live-worker primary groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop: "{{ live_vm_host_worker_accounts }}"

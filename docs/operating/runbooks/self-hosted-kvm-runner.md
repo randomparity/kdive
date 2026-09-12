@@ -29,6 +29,11 @@ matching `python3-guestfs` binding (see ADR-0387).
 4. `github_runner` — the runner asset (checksum-verified), registration, and the
    systemd service (installed stopped).
 
+`live_vm_host` calls `local_worker_host` task files for the debug/build packages,
+fixed worker accounts, and worker data directories at their existing positions.
+The runner checkout, Docker, fixture catalog, units, and Ubuntu Python/guestfs
+contract remain in `live_vm_host`.
+
 ## Prerequisites
 
 - Ubuntu 26.04 LTS host (x86_64; ppc64le is a drop-in — see below), SSH-reachable
