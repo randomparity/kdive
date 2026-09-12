@@ -1603,7 +1603,7 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
     (tmp_path / "source").mkdir()
     await source.acknowledge_takeover(peer, request)
     source_repository.current = True
-    mutation = _mutation(request).model_copy(update={"operation": "deadline"})
+    mutation = _mutation(request).model_copy(update={"operation": AuthorityOperation.DEADLINE})
     await source.execute_mutation(peer, mutation)
     source_records = tuple(source_repository.records)
     source_lines = (
@@ -1674,7 +1674,7 @@ async def test_restart_rejects_divergent_trusted_continuation_before_recovery_ac
     await service.acknowledge_takeover(peer, request)
     repository.current = True
     adapter.fail_commit = True
-    mutation = _mutation(request).model_copy(update={"operation": "deadline"})
+    mutation = _mutation(request).model_copy(update={"operation": AuthorityOperation.DEADLINE})
     with pytest.raises(AuthorityServiceError, match="provider_conflict"):
         await service.execute_mutation(peer, mutation)
     successor = request.model_copy(
@@ -1691,7 +1691,7 @@ async def test_restart_rejects_divergent_trusted_continuation_before_recovery_ac
     if divergence == "missing":
         corrupted = None
     elif divergence == "operation":
-        corrupted = replace(suspended, operation="fail")
+        corrupted = replace(suspended, operation=AuthorityOperation.FAIL)
     else:
         corrupted = replace(suspended, phase=JournalPhase.PROVIDER_RETURNED)
     repository.head = replace(repository.head, suspended_operation=corrupted)

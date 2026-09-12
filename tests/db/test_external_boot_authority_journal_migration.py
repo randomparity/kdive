@@ -21,6 +21,7 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
+    AuthorityOperation,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -699,7 +700,7 @@ def test_full_current_mutation_phase_sequence_and_rejections(
             if phase is not JournalPhase.ADMITTED:
                 replacements = (
                     {"attempt_id": uuid4()},
-                    {"operation": "fail"},
+                    {"operation": AuthorityOperation.FAIL},
                     {"expected_source_identity": "source-b"},
                     {"intended_target_identity": "target-b"},
                     {
