@@ -457,9 +457,10 @@ lint-ansible:
         uv run --with 'ansible-core==2.21.1' \
         ansible-playbook "$p" --syntax-check -i inventory/hosts.yml; done
 
-# Run the Ansible role regression harnesses (gdbstub_acl ufw prune #616; image admission
-# + staged-volume confirmation #1629; remote module-appliance clean-host installation #2128).
+# Run the Ansible role regression harnesses (libvirt_stack families #2392; gdbstub_acl ufw
+# prune #616; image admission + staged-volume confirmation #1629; remote module appliance #2128).
 test-ansible:
+    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-libvirt-stack-families.sh
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh

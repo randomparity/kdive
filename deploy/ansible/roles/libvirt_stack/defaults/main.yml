@@ -23,6 +23,19 @@ libvirt_stack_packages_redhat:
   - libseccomp
   - python3-libvirt
   - python3-lxml
+libvirt_stack_packages_suse:
+  - libvirt-daemon-qemu
+  - libvirt-daemon-proxy
+  - libvirt-client
+  - qemu-tools
+  - guestfs-tools
+  - e2fsprogs
+  - virt-install
+  - gnutls
+  - libseccomp2
+  # Zypper capabilities select bindings for the distro's default Python ABI.
+  - python3-libvirt-python
+  - python3-lxml
 
 # qemu emulator package by os_family + arch.
 libvirt_stack_qemu_package_map:
@@ -32,6 +45,9 @@ libvirt_stack_qemu_package_map:
   RedHat:
     x86_64: qemu-kvm
     ppc64le: qemu-kvm
+  Suse:
+    x86_64: qemu-x86
+    ppc64le: qemu-ppc
 
 libvirt_stack_monolithic_units:
   - libvirtd.service
