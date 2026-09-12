@@ -44,8 +44,16 @@ disk at start and restoring it at shutdown — which is why `qemu:///system` (kd
 
 An **unprivileged** session daemon does not. It still generates a correct dynamic label — the
 domain runs as `svirt_t:s0:c681,c997` with `imagelabel svirt_image_t:s0:c681,c997` in the live XML
-— but never applies the image relabel, so whatever static label the file carries is what QEMU
+— but the image relabel does not land, so whatever static label the file carries is what QEMU
 meets. That label therefore has to be one `svirt_t` can use.
+
+The reason is narrower than "a session daemon never relabels", and the live proof measured it: the
+daemon relabels what it has permission to relabel. Two files in one run differed only in ownership
+— a worker-staged `kernel` owned by `kdive-worker-1` stayed `svirt_image_t:s0` untouched, while a
+file owned by the daemon's own user was relabeled to `virt_content_t:s0`. In this deployment the
+images are created by the fixed `kdive-worker-N` accounts while the daemon runs as the operator, so
+it cannot relabel them. That ownership split is structural to the lifecycle contract, not
+incidental, and it is what makes the **static** label load-bearing.
 
 MCS makes that a one-word change rather than per-domain bookkeeping: the constraint is dominance,
 so a domain at `s0:c681,c997` may read *and write* an object at plain `s0`. One static
@@ -72,9 +80,11 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
 
 ## Consequences
 
-- Provisioning is expected to succeed on an SELinux-enforcing RedHat-family host with sVirt
-  confinement intact. The end-to-end proof on Fedora 44 and Rocky 10.2 is a completion criterion
-  of #2424 and is recorded in the implementing PR, not here.
+- Provisioning succeeds on an SELinux-enforcing RedHat-family host with sVirt confinement
+  intact. The end-to-end evidence — a System at `ready`, QEMU as `svirt_t` with MCS categories,
+  every image file at `svirt_image_t`, and no AVC denial — is in
+  [the proof record](../design/2026-09-11-svirt-image-label-2424-proof-record.md), which also
+  names the arms that did not run and why.
 - The **subject's** confinement is unchanged: the domain is still `svirt_t` with per-domain MCS
   categories, and `security_driver` is untouched. The **object** side is deliberately widened —
   that is the fix. Two consequences follow, and neither is hidden by the sentence above: any
@@ -103,7 +113,10 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   `virt_image_t` entry overrides the parent for everything under `local/` (measured, Fedora 44,
   2026-09-11). It is left to `build-image.sh` anyway, because `local/` holds base qcow2 images used
   as read-only backing files and `svirt_t` may read `virt_image_t`; the tree converges on the next
-  `build-image.sh` run without a second owner for the rule.
+  `build-image.sh` run without a second owner for the rule. That is measured, not inferred: a
+  root-owned base the daemon could not relabel, left at `virt_image_t`, backed a confined domain
+  that started and ran with zero denials while the base stayed `virt_image_t` and the overlay took
+  `svirt_image_t:s0:c16,c599` (Fedora 44, 2026-09-11 — see the proof record).
 - This corrects the incidental labeling guidance in
   [ADR-0204](0204-install-staging-unwritable-config-error.md), whose remedy text names
   `virt_image_t` for the install-staging root. That record's decision — the errno split that makes
@@ -121,7 +134,9 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   hand.
 - Rolling the label back needs `restorecon -R -F`: `svirt_image_t` is listed in
   `/etc/selinux/targeted/contexts/customizable_types` and `virt_image_t` is not, so a plain
-  `restorecon` relabels *into* the new type but silently skips relabeling *out* of it.
+  `restorecon` relabels *into* the new type but skips relabeling *out* of it. Observed during the
+  live proof: a plain `restorecon` refused with `not reset as customized by admin`, and `-F`
+  relabeled the same file. `virt_content_t` is customizable on the same footing.
 
 ## Considered & rejected
 

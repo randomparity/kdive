@@ -119,8 +119,12 @@ Fedora 44. What it does, and why, so you can audit or redo a step:
 - **`uv sync --group live`** — the venv, plus `drgn` for the kdump capture path. Ubuntu 26.04
   and Fedora 44 both ship system Python 3.14, the same minor as the project's, so the script
   symlinks the distro libguestfs binding into the venv and the preflight's `import guestfs, drgn`
-  check passes. On a host whose system Python differs — EL9 is 3.9, EL10 is 3.12 — it stays a
-  `WARN` (kdump only) and everything else works. Contributors who also want the dev tooling (shellcheck, prek)
+  check passes. On a host whose system Python differs — EL9 is 3.9, EL10 is 3.12 — the binding
+  cannot be symlinked, and the consequence is larger than the `WARN` suggests: `guestfs` is also
+  how the provider extracts a System's baseline kernel, so **provisioning cannot complete** on such
+  a host, not merely kdump. Measured on Rocky 10.2 (system 3.12, venv 3.14): the provision fails
+  `missing_dependency — libguestfs (the guestfs Python binding) is required to extract the baseline
+  kernel`. Match the venv to the system Python, or use a host whose minors already agree. Contributors who also want the dev tooling (shellcheck, prek)
   run `./scripts/check-setup-deps.sh -y` separately.
 - **Lifecycle contract** — `deploy/systemd/install-live-worker-lifecycle.sh --operator $USER
   --source <checkout>` as root, with the witness-member DSN on its standard input (the fixed
