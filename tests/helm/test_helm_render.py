@@ -1126,7 +1126,7 @@ def test_bundled_app_workloads_share_minio_versioning_startup_barrier() -> None:
     assert set(barriers) == set(_WORKLOAD_KINDS)
     assert len({barrier["command"][2] for barrier in barriers.values()}) == 1
     for proc, barrier in barriers.items():
-        assert barrier["image"].startswith("minio/mc:"), proc
+        assert barrier["image"].startswith("quay.io/minio/mc:"), proc
         env = {entry["name"]: entry["value"] for entry in barrier["env"]}
         assert env["MC_CONFIG_DIR"] == "/tmp/.mc", proc
         assert env["MC_BUCKET"] == "kdive-artifacts", proc

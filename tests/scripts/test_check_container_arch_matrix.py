@@ -69,6 +69,30 @@ def test_clean_pair_has_no_violations() -> None:
     assert evaluate(GOOD_COMPOSE, GOOD_MATRIX) == []
 
 
+def test_official_quay_alias_matches_matrix() -> None:
+    compose = "services:\n  minio:\n    image: quay.io/minio/minio:RELEASE\n"
+    matrix = (
+        "<!-- arch-matrix:begin -->\n"
+        "| Image | Role | amd64 | arm64 | ppc64le | Handling |\n"
+        "|---|---|:---:|:---:|:---:|---|\n"
+        "| `minio/minio:RELEASE` | store | ✅ | ✅ | ✅ | rely-on-upstream |\n"
+        "<!-- arch-matrix:end -->\n"
+    )
+    assert evaluate(compose, matrix) == []
+
+
+def test_unrelated_registry_remains_distinct() -> None:
+    compose = "services:\n  minio:\n    image: registry.example/minio/minio:RELEASE\n"
+    matrix = (
+        "<!-- arch-matrix:begin -->\n"
+        "| Image | Role | amd64 | arm64 | ppc64le | Handling |\n"
+        "|---|---|:---:|:---:|:---:|---|\n"
+        "| `minio/minio:RELEASE` | store | ✅ | ✅ | ✅ | rely-on-upstream |\n"
+        "<!-- arch-matrix:end -->\n"
+    )
+    assert evaluate(compose, matrix)
+
+
 def test_real_repo_files_pass() -> None:
     """The live pin: the shipped compose file and ADR-0356 matrix are self-consistent."""
     compose = COMPOSE_PATH.read_text(encoding="utf-8")
