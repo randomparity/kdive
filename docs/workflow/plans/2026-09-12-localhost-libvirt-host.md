@@ -51,8 +51,8 @@ Create the playbook with localhost/local connection, role order
 `libvirt_stack`, `libvirt_pool_net`, `local_worker_host`, a no-log command task
 for `install-live-worker-lifecycle.sh --operator <operator> --source <source>`
 with `stdin`, an operator-owned locked `uv sync --group live` task before venv access
-whose change receipt comes from a locked dry-run, pre-role source sentinel and getent
-validation, and operator-home kernel-source derivation,
+whose change receipt comes from a locked dry-run, pre-role Git checkout/source sentinel and
+getent validation, and operator-home kernel-source derivation,
 a `2770` operator-owned `/var/lib/kdive/rootfs/local` task, an existing-directory
 ancestor walk from each source root through `/` that adds only `o+x`, and guestfs
 mismatch/report/link/import tasks. The matching-minor path asserts a nonempty

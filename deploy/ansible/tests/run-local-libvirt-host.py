@@ -43,6 +43,11 @@ require(
     "the checkout sentinel must require the lifecycle installer",
 )
 require(
+    "build-capture-bootstrap-manifest.py"
+    in str(pre_tasks["Inspect required local-libvirt checkout entries"]),
+    "the checkout sentinel must require the lifecycle manifest builder",
+)
+require(
     "fixtures/local-libvirt" in str(pre_tasks["Inspect required local-libvirt checkout entries"]),
     "the checkout sentinel must require local-libvirt fixtures",
 )
@@ -60,6 +65,20 @@ require(
     "getent_passwd"
     in str(pre_tasks["Resolve the kernel source from the validated operator account"]),
     "the default kernel source must derive from the operator home",
+)
+git_worktree = pre_tasks["Verify the local-libvirt source is a Git worktree"]
+require(
+    git_worktree["ansible.builtin.command"]["argv"][-1] == "--is-inside-work-tree",
+    "the checkout sentinel must probe the Git worktree",
+)
+require(
+    "Require the local-libvirt source to be a Git worktree" in pre_tasks,
+    "the checkout sentinel must reject non-Git source directories",
+)
+git_revision = pre_tasks["Verify the local-libvirt source has a revision"]
+require(
+    "HEAD^{commit}" in git_revision["ansible.builtin.command"]["argv"],
+    "the checkout sentinel must require a resolvable Git revision",
 )
 
 tasks = {task["name"]: task for task in play["tasks"]}

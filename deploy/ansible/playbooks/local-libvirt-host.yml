@@ -42,6 +42,8 @@
           kind: file
         - path: deploy/systemd/install-live-worker-lifecycle.sh
           kind: file
+        - path: scripts/generate/build-capture-bootstrap-manifest.py
+          kind: file
         - path: fixtures/local-libvirt
           kind: directory
         - path: fixtures/local-libvirt/manifest.yaml
@@ -66,6 +68,29 @@
           local_libvirt_host_source is not a usable KDIVE checkout: {{ item.item.path }} must
           exist as a real {{ item.item.kind }}.
       loop: "{{ local_libvirt_host_checkout_entries.results }}"
+
+    - name: Verify the local-libvirt source is a Git worktree
+      ansible.builtin.command:
+        argv: [git, -C, "{{ local_libvirt_host_source }}", rev-parse, --is-inside-work-tree]
+      register: local_libvirt_host_git_worktree
+      changed_when: false
+
+    - name: Require the local-libvirt source to be a Git worktree
+      ansible.builtin.assert:
+        that:
+          - local_libvirt_host_git_worktree.stdout == 'true'
+        fail_msg: local_libvirt_host_source must be a KDIVE Git worktree.
+
+    - name: Verify the local-libvirt source has a revision
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ local_libvirt_host_source }}"
+          - rev-parse
+          - --verify
+          - "HEAD^{commit}"
+      changed_when: false
 
     - name: Require the operator account
       ansible.builtin.assert:
