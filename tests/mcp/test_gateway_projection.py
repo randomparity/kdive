@@ -8,22 +8,15 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools.gateway import SearchDetail, describe_tool
 from kdive.profiles.provisioning import ProvisioningProfile
-
-
-class _FakeTool:
-    # project_listed_tool() calls tool.model_copy(update=...) for NARROWED_TOOLS, so the stub
-    # must support it (mirrors the _FakeTool in tests/mcp/middleware/test_exposure_projection.py).
-    def __init__(self, name: str, parameters: dict) -> None:
-        self.name = name
-        self.description = name
-        self.parameters = parameters
-
-    def model_copy(self, *, update: dict) -> _FakeTool:
-        return _FakeTool(self.name, update["parameters"])
+from tests.mcp.conftest import FakeTool
 
 
 def test_describe_narrows_allocation_kind_enum() -> None:
-    tool = _FakeTool("allocations.request", AllocationRequestPayload.model_json_schema())
+    tool = FakeTool(
+        "allocations.request",
+        AllocationRequestPayload.model_json_schema(),
+        description="allocations.request",
+    )
     described = describe_tool(
         tool,  # ty: ignore[invalid-argument-type]
         frozenset({ResourceKind.LOCAL_LIBVIRT}),
@@ -56,7 +49,7 @@ def test_parameters_tier_reads_the_projected_schema(monkeypatch: Any) -> None:
     monkeypatch.setattr(gateway_module, "project_listed_tool", _drop_one)
 
     described = describe_tool(
-        _FakeTool("allocations.request", raw),  # ty: ignore[invalid-argument-type]
+        FakeTool("allocations.request", raw, description="allocations.request"),  # ty: ignore[invalid-argument-type]
         frozenset({ResourceKind.LOCAL_LIBVIRT}),
         detail=SearchDetail.PARAMETERS,
     )
@@ -66,7 +59,11 @@ def test_parameters_tier_reads_the_projected_schema(monkeypatch: Any) -> None:
 
 
 def test_describe_narrows_systems_section_props() -> None:
-    tool = _FakeTool("systems.provision", ProvisioningProfile.model_json_schema())
+    tool = FakeTool(
+        "systems.provision",
+        ProvisioningProfile.model_json_schema(),
+        description="systems.provision",
+    )
     described = describe_tool(
         tool,  # ty: ignore[invalid-argument-type]
         frozenset({ResourceKind.LOCAL_LIBVIRT}),

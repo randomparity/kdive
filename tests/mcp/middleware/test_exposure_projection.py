@@ -20,16 +20,7 @@ from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
-
-
-class _FakeTool:
-    def __init__(self, name: str, parameters: dict) -> None:
-        self.name = name
-        self.parameters = parameters
-
-    def model_copy(self, *, update: dict) -> _FakeTool:
-        return _FakeTool(self.name, update["parameters"])
+from tests.mcp.conftest import AUDIENCE, ISSUER, FakeTool, make_keypair
 
 
 def _ctx(*, client_id: str | None = None) -> RequestContext:
@@ -64,14 +55,14 @@ def test_narrowed_tools_membership() -> None:
 
 def test_allocation_tool_kind_enum_is_projected() -> None:
     # allocations.request narrows via the $defs.ResourceKind enum.
-    tool = _FakeTool("allocations.request", AllocationRequestPayload.model_json_schema())
+    tool = FakeTool("allocations.request", AllocationRequestPayload.model_json_schema())
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
     assert out.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
 
 
 def test_systems_tool_section_props_are_projected() -> None:
     # systems.provision narrows via $defs.ProviderSection.properties (no ResourceKind enum).
-    tool = _FakeTool("systems.provision", ProvisioningProfile.model_json_schema())
+    tool = FakeTool("systems.provision", ProvisioningProfile.model_json_schema())
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
     kept = set(out.parameters["$defs"]["ProviderSection"]["properties"])
     assert kept == {"local-libvirt"}
@@ -79,14 +70,14 @@ def test_systems_tool_section_props_are_projected() -> None:
 
 def test_systems_reprovision_section_props_are_projected() -> None:
     # systems.reprovision accepts a ProvisioningProfile and narrows the same ProviderSection union.
-    tool = _FakeTool("systems.reprovision", ProvisioningProfile.model_json_schema())
+    tool = FakeTool("systems.reprovision", ProvisioningProfile.model_json_schema())
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
     kept = set(out.parameters["$defs"]["ProviderSection"]["properties"])
     assert kept == {"local-libvirt"}
 
 
 def test_unaffected_tool_is_returned_unchanged() -> None:
-    tool = _FakeTool("resources.list", ProvisioningProfile.model_json_schema())
+    tool = FakeTool("resources.list", ProvisioningProfile.model_json_schema())
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
     assert out is tool
 
@@ -204,8 +195,8 @@ def test_resolver_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  #
     _PROJECTION_FAILURES (not _EXPOSURE_FAILOPEN), returns the RBAC-filtered visible
     tools unprojected, and still excludes non-visible tools (RBAC is preserved).
     """
-    alloc_tool = _FakeTool("allocations.request", {"type": "object"})
-    hidden_tool = _FakeTool("admin.secret", {"type": "object"})
+    alloc_tool = FakeTool("allocations.request", {"type": "object"})
+    hidden_tool = FakeTool("admin.secret", {"type": "object"})
     tools = [alloc_tool, hidden_tool]
 
     class _ExplodingResolver:
@@ -262,8 +253,8 @@ def test_exposure_failopen_increments_exposure_counter(monkeypatch, caplog) -> N
     The two counters are distinct so operators can distinguish auth plumbing breaks from
     schema-projection failures.
     """
-    alloc_tool = _FakeTool("allocations.request", {"type": "object"})
-    hidden_tool = _FakeTool("admin.secret", {"type": "object"})
+    alloc_tool = FakeTool("allocations.request", {"type": "object"})
+    hidden_tool = FakeTool("admin.secret", {"type": "object"})
     tools = [alloc_tool, hidden_tool]
 
     composition = ProviderComposition(secret_registry=SecretRegistry())
@@ -312,8 +303,8 @@ def test_projection_failure_fails_open_and_counts(monkeypatch, caplog) -> None: 
     Instead it must revert to the full schema, increment the OTLP counter, and log a
     warning so the silent revert is observable.
     """
-    alloc_tool = _FakeTool("allocations.request", {"type": "object"})
-    other_tool = _FakeTool("resources.list", {"type": "object"})
+    alloc_tool = FakeTool("allocations.request", {"type": "object"})
+    other_tool = FakeTool("resources.list", {"type": "object"})
     tools = [alloc_tool, other_tool]
 
     monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
