@@ -186,11 +186,13 @@ for distribution, family in (
     ("Debian", "Debian"),
     ("Ubuntu", "Debian"),
     ("Fedora", "RedHat"),
+    ("Rocky", "RedHat"),
     ("openSUSE Tumbleweed", "Suse"),
+    ("SLES", "Suse"),
 ):
     result = preflight(distribution, family, operator)
     require(result.returncode == 0, f"{distribution} standalone preflight failed")
-for distribution, family in (("openSUSE Leap", "Suse"), ("SLES", "Suse"), ("Rocky", "RedHat")):
+for distribution, family in (("openSUSE Leap", "Suse"),):
     result = preflight(distribution, family, operator)
     require(result.returncode != 0, f"{distribution} passed the unsupported-host preflight")
     require(
@@ -258,7 +260,9 @@ def package_route(distribution: str, family: str, selected: str) -> None:
 for distribution, family, selected in (
     ("Debian", "Debian", "Debian"),
     ("Fedora", "RedHat", "RedHat"),
+    ("Rocky", "RedHat", "RedHat"),
     ("openSUSE Tumbleweed", "Suse", "Suse"),
+    ("SLES", "Suse", "Suse"),
 ):
     package_route(distribution, family, selected)
 print("ok packages: check mode routes each supported family to only its package task")

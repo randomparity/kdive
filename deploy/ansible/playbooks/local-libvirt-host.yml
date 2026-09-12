@@ -9,7 +9,7 @@
     local_libvirt_host_operator_user: ""
     local_libvirt_host_witness_dsn: >-
       {{ lookup('ansible.builtin.env', 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL', default='') }}
-    local_libvirt_host_kernel_source: "{{ ansible_env.HOME }}/src/linux"
+    local_libvirt_host_kernel_source: ""
     local_worker_host_operator_user: "{{ local_libvirt_host_operator_user }}"
   pre_tasks:
     - name: Require the local-libvirt source checkout
@@ -38,6 +38,30 @@
         that:
           - local_libvirt_host_operator_user | length > 0
         fail_msg: Set local_libvirt_host_operator_user to the host account that owns local data.
+
+    - name: Look up the operator account before host mutation
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ local_libvirt_host_operator_user }}"
+        fail_key: false
+      register: local_libvirt_host_operator_getent
+
+    - name: Require the operator account to exist before host mutation
+      ansible.builtin.assert:
+        that:
+          - >-
+            local_libvirt_host_operator_getent.ansible_facts.getent_passwd.get(
+            local_libvirt_host_operator_user) is not none
+        fail_msg: >-
+          local_libvirt_host_operator_user={{ local_libvirt_host_operator_user }} does not exist;
+          correct it before preparing this host.
+
+    - name: Resolve the kernel source from the validated operator account
+      ansible.builtin.set_fact:
+        local_libvirt_host_kernel_source_effective: >-
+          {{ local_libvirt_host_kernel_source | default(
+             local_libvirt_host_operator_getent.ansible_facts.getent_passwd[
+             local_libvirt_host_operator_user][4] ~ '/src/linux', true) }}
 
     - name: Require the lifecycle witness DSN
       ansible.builtin.assert:
@@ -87,7 +111,7 @@
         follow: false
       loop:
         - "{{ local_libvirt_host_source }}"
-        - "{{ local_libvirt_host_kernel_source }}"
+        - "{{ local_libvirt_host_kernel_source_effective }}"
       register: local_libvirt_host_tree_roots
 
     - name: Make every existing checkout and kernel ancestor traversable by workers

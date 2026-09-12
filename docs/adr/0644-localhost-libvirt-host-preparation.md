@@ -14,7 +14,8 @@ declarative localhost route without making Ansible a host prerequisite.
 ## Decision
 
 Add a localhost playbook that composes `libvirt_stack`, `libvirt_pool_net`, and
-`local_worker_host`. The playbook owns only the remaining workstation contract:
+`local_worker_host`. Its RedHat and Suse package routes also admit RHEL-compatible
+and SLES distributions with structural coverage; live proof remains separate. The playbook owns only the remaining workstation contract:
 operator `uv sync --group live`, the root lifecycle installer, local rootfs directory,
 source-tree traversal, and the project-venv guestfs binding. It invokes the lifecycle installer with the
 witness DSN through Ansible `stdin`, never a command argument. A just recipe

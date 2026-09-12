@@ -3,10 +3,16 @@
 ## Scope and authority
 
 Issue #2393 is the authority. Its frozen scope token is `q2393-1a2cbc02`.
+The operator authorized expansion to RHEL and SLES in this session after branch review
+found the existing reusable-role preflight rejected both.
 The permitted surface is the localhost Ansible composition, its harness, and
 the justfile. The example installer is evidence only and is not invoked.
 
 ## Design
+
+`local_worker_host` admits RHEL-compatible distributions through its RedHat
+package route and SLES through its Suse route. The regression harness proves that
+selection structurally; no RHEL/SLES package apply is claimed.
 
 `local-libvirt-host.yml` targets `localhost` with `connection: local` and
 `become: true`. Required variables name the checkout, operator, and witness DSN.
@@ -21,7 +27,7 @@ venv; otherwise it reports the unavailable capture path and succeeds.
 
 ## Failure model
 
-Missing required inputs or `uv` fail before lifecycle installation. Lifecycle installation fails
+Missing source, operator, or DSN inputs fail before role mutation. Lifecycle installation fails
 when its stdin DSN is absent or invalid. A matching-minor binding discovery or
 post-link import failure is fatal; an ABI mismatch reports the system and venv
 minors and leaves the binding untouched. The harness renders

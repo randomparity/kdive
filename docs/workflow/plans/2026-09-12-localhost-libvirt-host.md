@@ -12,8 +12,9 @@ It passes the lifecycle DSN on stdin and makes guestfs ABI degradation explicit.
 **Spec:** `docs/workflow/specs/2026-09-12-localhost-libvirt-host-design.md`
 **Decision:** `docs/adr/0644-localhost-libvirt-host-preparation.md`
 
-Expected implementation size: 260–330 changed lines (L) — one playbook with
-explicit lifecycle, traversal, and guestfs guards; one structural harness; and justfile wiring.
+Expected implementation size: 310–390 changed lines (L) — one playbook with
+explicit lifecycle, traversal, and guestfs guards; reusable-family routing coverage; one
+structural harness; and justfile wiring.
 
 ## Global Constraints
 
@@ -29,6 +30,8 @@ explicit lifecycle, traversal, and guestfs guards; one structural harness; and j
 | `deploy/ansible/playbooks/local-libvirt-host.yml` | create | localhost composition and remaining setup |
 | `deploy/ansible/tests/run-local-libvirt-host.py` | create | structural regression harness |
 | `justfile` | modify | operator recipe, syntax check, and harness wiring |
+| `deploy/ansible/roles/local_worker_host/tasks/preflight.yml` | modify | RHEL/SLES admission |
+| `deploy/ansible/tests/run-local-worker-host.py` | modify | RHEL/SLES route coverage |
 
 ## Task 1 — localhost playbook
 
@@ -40,10 +43,15 @@ explicit lifecycle, traversal, and guestfs guards; one structural harness; and j
 playbook exists and pass with `uv run --with 'ansible-core==2.21.1' python3
 deploy/ansible/tests/run-local-libvirt-host.py`.
 
+Extend `local_worker_host` preflight to accept RHEL-compatible distributions and SLES,
+reusing the existing RedHat and Suse package task routes. Extend its harness to prove the
+new facts select only that route without a live package operation.
+
 Create the playbook with localhost/local connection, role order
 `libvirt_stack`, `libvirt_pool_net`, `local_worker_host`, a no-log command task
 for `install-live-worker-lifecycle.sh --operator <operator> --source <source>`
 with `stdin`, an operator-owned `uv sync --group live` task before venv access,
+a pre-role getent validation and operator-home kernel-source derivation,
 a `2770` operator-owned `/var/lib/kdive/rootfs/local` task, an existing-directory
 ancestor walk from each source root through `/` that adds only `o+x`, and guestfs
 mismatch/report/link/import tasks. The matching-minor path asserts a nonempty
