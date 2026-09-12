@@ -62,6 +62,15 @@ def _resolve_image_ref(image: str) -> str:
     return _ENV_DEFAULT.sub(lambda m: m.group(1), image)
 
 
+def _canonical_image_ref(image: str) -> str:
+    """Treat official Quay MinIO refs as aliases of the historical matrix names."""
+    for repository in ("minio", "mc"):
+        quay_prefix = f"quay.io/minio/{repository}:"
+        if image.startswith(quay_prefix):
+            return f"minio/{repository}:{image[len(quay_prefix) :]}"
+    return image
+
+
 @dataclass(frozen=True)
 class ImageInfo:
     """How a compose image is used, aggregated across the services that reference it."""
@@ -97,7 +106,7 @@ def parse_compose(text: str) -> dict[str, ImageInfo]:
         image = svc.get("image")
         if not image:
             continue
-        image = _resolve_image_ref(image)
+        image = _canonical_image_ref(_resolve_image_ref(image))
         # Docker Compose starts a service on a bare `up` when its profiles list is empty or
         # absent (len==0). A falsy `profiles` (missing / None / []) therefore means
         # default-profile; only a non-empty list gates it opt-in.

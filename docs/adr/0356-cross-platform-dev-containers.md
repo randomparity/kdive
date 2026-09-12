@@ -99,6 +99,15 @@ has no pulled per-arch manifest; the guard verifies instead that a compose servi
 
 ## Consequences
 
+### Amendment (2026-09-11): MinIO registry aliases (#2430)
+
+This amendment qualifies the matrix's image-name matching without changing its architecture
+observations or handling obligations. Compose and Helm now use the official Quay names
+`quay.io/minio/minio` and `quay.io/minio/mc` because Docker Hub no longer serves those
+repositories. The matrix retains its historical Docker Hub names; the guard canonicalizes
+only these two official MinIO registry aliases for set equality. `docker buildx imagetools inspect`
+on Quay confirmed the pinned test manifest still publishes amd64, arm64, and ppc64le.
+
 - The epic's downstream sub-issues (OIDC mirror, buildx job) build against a written, verified
   contract instead of ad-hoc decisions.
 - A compose change that adds, removes, or retags a backing image fails `container-arch-check`
