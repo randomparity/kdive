@@ -415,6 +415,9 @@ probe_all() {
   require_tool required uv "curl -LsSf https://astral.sh/uv/install.sh | sh"
   require_command required pkg-config "${distro}"
   require_header required libvirt-headers libvirt "${distro}"
+  # `fedora` also covers EL, where libvirt-devel is in CRB rather than the enabled repositories.
+  [[ "${distro}" != fedora ]] ||
+    note_manual required "libvirt-devel" "sudo dnf config-manager --set-enabled crb (Enterprise Linux only)"
   # libvirt-python and any wheel-less C/Rust extension (e.g. pydantic-core, grpcio on
   # arches without prebuilt wheels) compile against the Python development headers.
   require_header required python-headers python3 "${distro}"
@@ -428,14 +431,16 @@ probe_all() {
   # RECOMMENDED — needed to reproduce the full local CI gate.
   require_command recommended git "${distro}"
   require_command recommended make "${distro}"
-  require_command recommended shellcheck "${distro}"
-  require_command recommended shfmt "${distro}"
+  # The collapsed `fedora` distro bucket also covers EL, which packages none of these tools.
+  require_tool recommended shellcheck "https://github.com/koalaman/shellcheck#installing"
+  require_tool recommended shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@latest"
   require_tool recommended just "uv tool install rust-just"
   require_tool recommended prek "uv tool install prek"
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
-  require_command recommended docker "${distro}"
+  require_tool recommended docker \
+    "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
 
   # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
   future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)

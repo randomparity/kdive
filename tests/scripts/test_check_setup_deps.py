@@ -163,6 +163,26 @@ def test_all_missing_emits_required_hint_per_distro(
     assert f"{manager} prek" not in result.stderr
 
 
+def test_redhat_unavailable_tools_use_manual_hints_and_name_crb(tmp_path: Path) -> None:
+    """EL-only package gaps stay out of the collapsed RedHat install line."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    result = _run("fedora", str(empty), tmp_path)
+
+    assert result.returncode == 1, result.stderr
+    dnf_lines = [line for line in result.stderr.splitlines() if "dnf install" in line]
+    unavailable_packages = ("ShellCheck", "shfmt", "docker")
+    assert all(package not in line for line in dnf_lines for package in unavailable_packages)
+    assert "libvirt-devel" in dnf_lines[0]
+    assert "shellcheck: https://github.com/koalaman/shellcheck#installing" in result.stderr
+    assert "shfmt: go install mvdan.cc/sh/v3/cmd/shfmt@latest" in result.stderr
+    assert "docker: install Docker from https://docs.docker.com/engine/install/" in result.stderr
+    assert (
+        "libvirt-devel: sudo dnf config-manager --set-enabled crb (Enterprise Linux only)"
+        in result.stderr
+    )
+
+
 def test_unknown_distro_falls_back_to_generic_hint(tmp_path: Path) -> None:
     """An unrecognized ID yields the generic, manager-agnostic instruction."""
     empty = tmp_path / "empty-bin"
@@ -840,14 +860,11 @@ def test_native_emulator_is_found_at_the_libexec_path(tmp_path: Path) -> None:
     assert "qemu-system-x86_64" not in result.stderr
 
 
-def test_non_emulator_redhat_package_names_are_unchanged(tmp_path: Path) -> None:
-    """The nativeness rule touches only the two emulator rows, not the other eight.
-
-    ``ShellCheck`` is the fedora-keyed spelling of ``shellcheck`` and ``libvirt-client`` the
-    RedHat spelling of ``virsh``; both would change if the rule leaked past the emulator rows.
-    """
+def test_redhat_nativeness_rule_does_not_change_virsh_package(tmp_path: Path) -> None:
+    """The emulator rule stays confined while EL gaps use manual hints."""
     result = _run_with_uname("fedora", "x86_64", (), tmp_path)
-    assert "ShellCheck" in result.stderr
+    assert "ShellCheck" not in result.stderr
+    assert "shellcheck: https://github.com/koalaman/shellcheck#installing" in result.stderr
     assert "libvirt-client" in result.stderr
 
 
