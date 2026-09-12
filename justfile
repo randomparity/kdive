@@ -49,6 +49,12 @@ check-local-libvirt:
 setup-local-libvirt:
     ./scripts/operations/setup-local-libvirt.sh
 
+# Prepare this host for the local-libvirt provider. Supply the witness DSN through the
+# environment so it is passed to Ansible stdin rather than a process argument.
+prepare-local-libvirt-host:
+    test -n "${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-}" || { echo "set KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" >&2; exit 2; }
+    ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' ansible-playbook deploy/ansible/playbooks/local-libvirt-host.yml --ask-become-pass -e "local_libvirt_host_operator_user=${USER:?set USER to the operator account}"
+
 # Fund a dev-stack project + mint a token (preflight, migrate, seed, verify; KDIVE_PROJECT=demo). See #834.
 onboard:
     ./scripts/live-stack/onboard.sh
@@ -453,7 +459,7 @@ lint-ansible:
     ANSIBLE_CONFIG=deploy/ansible/ansible.cfg \
         uv run --with 'ansible-lint==26.4.0' --with 'ansible-core==2.21.1' \
         ansible-lint -c deploy/ansible/.ansible-lint deploy/ansible
-    cd deploy/ansible && for p in site.yml playbooks/pki.yml playbooks/image.yml; do \
+    cd deploy/ansible && for p in site.yml playbooks/pki.yml playbooks/image.yml playbooks/local-libvirt-host.yml; do \
         uv run --with 'ansible-core==2.21.1' \
         ansible-playbook "$p" --syntax-check -i inventory/hosts.yml; done
 
@@ -468,6 +474,7 @@ test-ansible:
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
     uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
+    uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its
