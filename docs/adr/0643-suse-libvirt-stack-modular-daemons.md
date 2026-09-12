@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-09-12)
+Proposed
 
 - **Issue:** #2392 (sub-issue of #2388)
 
