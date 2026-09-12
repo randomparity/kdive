@@ -21,8 +21,8 @@ unverified on a live host.
 
 ## Decision
 
-The SUSE family uses the existing modular socket list and masks monolithic units when their vendor
-unit files exist, sharing that path with RedHat. Tumbleweed's modular packages omit those files.
+The SUSE family uses the existing modular socket list and masks monolithic units that systemd
+reports as loaded, sharing that path with RedHat. Tumbleweed's modular packages omit those units.
 Its package list installs the QEMU daemon bundle, proxy, client, host tools, and Python
 bindings; the architecture-specific emulator comes from the existing role map with `Suse` rows.
 An unsupported OS family fails before package or service mutation with its family name and a

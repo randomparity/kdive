@@ -49,12 +49,13 @@
       loop: "{{ libvirt_stack_monolithic_units }}"
       failed_when: false
 
-    # SUSE's modular packages omit libvirtd units; systemd_service rejects masks for absent units.
-    - name: Check installed monolithic unit files
-      ansible.builtin.stat:
-        path: "/usr/lib/systemd/system/{{ item }}"
+    # SUSE omits libvirtd units; query systemd so local unit paths are not missed.
+    - name: Check monolithic unit load states
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=LoadState, --value, "{{ item }}"]
       loop: "{{ libvirt_stack_monolithic_units }}"
-      register: libvirt_stack_monolithic_unit_files
+      register: libvirt_stack_monolithic_unit_states
+      changed_when: false
 
     - name: Disable and mask the monolithic libvirt units
       ansible.builtin.systemd_service:
@@ -62,8 +63,8 @@
         enabled: false
         masked: true
       loop: >-
-        {{ libvirt_stack_monolithic_unit_files.results
-           | selectattr('stat.exists') | map(attribute='item') | list }}
+        {{ libvirt_stack_monolithic_unit_states.results
+           | selectattr('stdout', 'equalto', 'loaded') | map(attribute='item') | list }}
 
     - name: Enable and start the modular libvirt sockets
       ansible.builtin.systemd_service:

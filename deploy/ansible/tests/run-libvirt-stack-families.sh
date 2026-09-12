@@ -120,20 +120,20 @@ require(
     "modular daemon unit loops differ",
 )
 unit_check = next(
-    (task for task in modular["block"] if "ansible.builtin.stat" in task), None
+    (task for task in modular["block"] if "ansible.builtin.command" in task), None
 )
-require(unit_check is not None, "monolithic unit presence is not checked")
+require(unit_check is not None, "monolithic unit state is not checked")
 require(
-    render(unit_check["ansible.builtin.stat"]["path"], item="libvirtd.socket")
-    == "/usr/lib/systemd/system/libvirtd.socket",
-    "monolithic unit check uses the wrong vendor path",
+    unit_check["ansible.builtin.command"]["argv"]
+    == ["systemctl", "show", "--property=LoadState", "--value", "{{ item }}"],
+    "monolithic unit check does not query systemd by name",
 )
 mask = next(task for task in modular["block"] if task.get("name", "").startswith("Disable and mask"))
-for present, expected_units in ((False, []), (True, ["libvirtd.socket"])):
-    files = {"results": [{"item": "libvirtd.socket", "stat": {"exists": present}}]}
+for state, expected_units in (("not-found", []), ("masked", []), ("loaded", ["libvirtd.socket"])):
+    states = {"results": [{"item": "libvirtd.socket", "stdout": state}]}
     require(
-        render(mask["loop"], libvirt_stack_monolithic_unit_files=files) == expected_units,
-        "monolithic mask did not follow the vendor unit inventory",
+        render(mask["loop"], libvirt_stack_monolithic_unit_states=states) == expected_units,
+        "monolithic mask did not follow systemd unit state",
     )
 require(
     render(modular["block"][3]["loop"]) == [

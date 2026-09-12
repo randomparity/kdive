@@ -28,12 +28,12 @@ Python ABI; the Tumbleweed host resolves them to Python 3.13 bindings. `communit
 already pinned in `deploy/ansible/requirements.yml`.
 
 RedHat and SUSE share the modular daemon block; Debian keeps the monolithic block. The modular
-block masks installed monolithic units and enables the existing QEMU, network, storage,
-node-device, secret, and proxy sockets. Tumbleweed's modular package set has no monolithic unit
-files, so the role skips those masks on a clean host. The group task stays common but selects the
-connection user, falling back to
-sudo's original user and then the gathered user when no connection user is declared; privileged
-fact gathering reports `root` on the offered host and must not choose root over its operator.
+block masks monolithic units that systemd reports as loaded and enables the existing QEMU,
+network, storage, node-device, secret, and proxy sockets. Tumbleweed's modular package set has no
+monolithic units, so the role skips those masks on a clean host. The group task stays common but
+selects the connection user, falling back to sudo's original user and then the gathered user when
+no connection user is declared. Privileged fact gathering reports `root` on the offered host, so
+the role must not choose root over its operator.
 The KVM validation task stays common. The runner-task snapshot added
 by #2391 must be updated for the new entry and SUSE package tasks.
 
@@ -60,7 +60,7 @@ by #2391 must be updated for the new entry and SUSE package tasks.
   libvirt guest or monolithic client; group changes affect the connection operator account.
 - **Accepted failure classes:** unavailable distro repositories or KVM devices fail with Ansible's
   package/KVM diagnostics after family selection; the offered host can prove Tumbleweed only, not
-  SLES or Leap. A service-start failure can leave a partial modular transition. Repair the failed
+  SLES or Leap. A unit-transition failure can leave a partial modular state. Repair the failed
   package/unit, then reapply the role; to restore a previously active monolithic model, unmask
   `libvirtd.service` and its sockets and enable/start `libvirtd.socket`. No host-independent
   harness claims live service success.
