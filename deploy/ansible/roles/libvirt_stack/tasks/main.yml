@@ -1,4 +1,12 @@
 ---
+- name: Require a supported virtualization package set
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family in ['Debian', 'RedHat', 'Suse']
+    fail_msg: >-
+      Unsupported libvirt_stack OS family '{{ ansible_os_family }}':
+      add its virtualization package set and emulator map before running this role.
+
 - name: Install virtualization packages (Debian)
   ansible.builtin.apt:
     name: >-
@@ -16,14 +24,23 @@
     state: present
   when: ansible_os_family == 'RedHat'
 
-# Daemon model is PER-DISTRO. Fedora/RHEL ship the modular daemons (virtqemud,
-# virtproxyd, ...) and we switch fully to them. Ubuntu/Debian do NOT package the
+- name: Install virtualization packages (Suse)
+  community.general.zypper:
+    name: >-
+      {{ libvirt_stack_packages_suse
+         + [libvirt_stack_qemu_package_map['Suse'][ansible_architecture]] }}
+    state: present
+  when: ansible_os_family == 'Suse'
+
+# Daemon model is PER-DISTRO. Fedora/RHEL and SUSE ship modular daemons (virtqemud,
+# virtproxyd, ...); SLES 15 SP7 enables them by default (SUSE Virtualization Guide, chapter 8).
+# Ubuntu/Debian do NOT package the
 # modular daemons — the libvirt-daemon-driver-* packages are connection-driver
 # plugins for the monolithic libvirtd, and there is no virtqemud/virtproxyd binary
 # or socket unit (verified on Ubuntu 26.04). So Debian stays monolithic, matching
 # the proven runbook. Masking libvirtd there would leave the host with no libvirt.
-- name: Switch to the modular libvirt daemons (Fedora/RHEL)
-  when: ansible_os_family == 'RedHat'
+- name: Switch to the modular libvirt daemons (Fedora/RHEL/SUSE)
+  when: ansible_os_family in ['RedHat', 'Suse']
   block:
     - name: Stop the monolithic libvirt units (best effort; may be absent)
       ansible.builtin.systemd_service:
@@ -65,7 +82,7 @@
 
 - name: Add the login user to the kvm and libvirt groups
   ansible.builtin.user:
-    name: "{{ ansible_user_id }}"
+    name: "{{ ansible_user | default(ansible_env.SUDO_USER | default(ansible_user_id)) }}"
     groups: [kvm, libvirt]
     append: true
 

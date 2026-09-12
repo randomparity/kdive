@@ -1,6 +1,8 @@
 Validate dormant authority inputs before any runner-host mutation	TAGS: []
+libvirt_stack : Require a supported virtualization package set	TAGS: []
 libvirt_stack : Install virtualization packages (Debian)	TAGS: []
 libvirt_stack : Install virtualization packages (RedHat)	TAGS: []
+libvirt_stack : Install virtualization packages (Suse)	TAGS: []
 libvirt_stack : Stop the monolithic libvirt units (best effort; may be absent)	TAGS: []
 libvirt_stack : Disable and mask the monolithic libvirt units	TAGS: []
 libvirt_stack : Enable and start the modular libvirt sockets	TAGS: []
