@@ -52,7 +52,9 @@ jobs:
 
       # `just records` (justfile) runs the same check-records.sh invocation, so CI and a
       # local pre-push run cannot drift. base.sha is exactly the commit the PR is merging
-      # against; passed as a fixed SHA, merge-base resolves to it unchanged.
+      # against; GitHub's default pull_request checkout resolves HEAD to the synthetic
+      # merge ref (a descendant of base.sha), which is what makes merge-base resolve to
+      # base.sha unchanged rather than an older fork point.
       - name: Check decision records
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
