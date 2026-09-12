@@ -12,8 +12,8 @@ It passes the lifecycle DSN on stdin and makes guestfs ABI degradation explicit.
 **Spec:** `docs/workflow/specs/2026-09-12-localhost-libvirt-host-design.md`
 **Decision:** `docs/adr/0644-localhost-libvirt-host-preparation.md`
 
-Expected implementation size: 180–260 changed lines (L) — one playbook, one
-structural harness, and justfile wiring.
+Expected implementation size: 260–330 changed lines (L) — one playbook with
+explicit lifecycle, traversal, and guestfs guards; one structural harness; and justfile wiring.
 
 ## Global Constraints
 
