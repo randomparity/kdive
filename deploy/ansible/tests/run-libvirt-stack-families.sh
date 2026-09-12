@@ -112,14 +112,31 @@ for family in supported:
         bool(evaluate(monolithic["when"], **facts)) == (family == "Debian"),
         f"{family} monolithic daemon route differs",
     )
+require(len(modular["block"]) == 4, "modular daemon task count differs")
 require(
-    [task["loop"] for task in modular["block"]]
-    == ["{{ libvirt_stack_monolithic_units }}", "{{ libvirt_stack_monolithic_units }}",
-        "{{ libvirt_stack_modular_sockets }}"],
+    modular["block"][0]["loop"] == "{{ libvirt_stack_monolithic_units }}"
+    and modular["block"][1]["loop"] == "{{ libvirt_stack_monolithic_units }}"
+    and modular["block"][3]["loop"] == "{{ libvirt_stack_modular_sockets }}",
     "modular daemon unit loops differ",
 )
+unit_check = next(
+    (task for task in modular["block"] if "ansible.builtin.stat" in task), None
+)
+require(unit_check is not None, "monolithic unit presence is not checked")
 require(
-    render(modular["block"][2]["loop"]) == [
+    render(unit_check["ansible.builtin.stat"]["path"], item="libvirtd.socket")
+    == "/usr/lib/systemd/system/libvirtd.socket",
+    "monolithic unit check uses the wrong vendor path",
+)
+mask = next(task for task in modular["block"] if task.get("name", "").startswith("Disable and mask"))
+for present, expected_units in ((False, []), (True, ["libvirtd.socket"])):
+    files = {"results": [{"item": "libvirtd.socket", "stat": {"exists": present}}]}
+    require(
+        render(mask["loop"], libvirt_stack_monolithic_unit_files=files) == expected_units,
+        "monolithic mask did not follow the vendor unit inventory",
+    )
+require(
+    render(modular["block"][3]["loop"]) == [
         "virtqemud.socket", "virtnetworkd.socket", "virtstoraged.socket",
         "virtnodedevd.socket", "virtsecretd.socket", "virtproxyd.socket",
     ],
