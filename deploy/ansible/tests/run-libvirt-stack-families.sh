@@ -72,9 +72,9 @@ expected = {
     ],
 }
 emulators = {
-    "Debian": {"x86_64": "qemu-system-x86", "ppc64le": "qemu-system-ppc"},
-    "RedHat": {"x86_64": "qemu-kvm", "ppc64le": "qemu-kvm"},
-    "Suse": {"x86_64": "qemu-x86", "ppc64le": "qemu-ppc"},
+    "Debian": {"x86_64": ["qemu-system-x86", "qemu-system-ppc"], "ppc64le": ["qemu-system-ppc"]},
+    "RedHat": {"x86_64": ["qemu-kvm"], "ppc64le": ["qemu-kvm"]},
+    "Suse": {"x86_64": ["qemu-x86", "qemu-ppc"], "ppc64le": ["qemu-ppc"]},
 }
 modules = {
     "Debian": "ansible.builtin.apt",
@@ -82,6 +82,15 @@ modules = {
     "Suse": "community.general.zypper",
 }
 install = {family: module_task(module) for family, module in modules.items()}
+selection = next(
+    task for task in tasks if task.get("name", "").startswith("Select the QEMU emulators")
+)
+selection_expression = selection["ansible.builtin.set_fact"]["libvirt_stack_qemu_packages"]
+require("libvirt_stack_foreign_guest_architectures" in selection_expression,
+        "emulator selection omits foreign guest architectures")
+foreign = defaults["libvirt_stack_foreign_guest_architectures"]
+require(foreign == {"Debian": ["ppc64le"], "RedHat": [], "Suse": ["ppc64le"]},
+        "foreign guest emulator availability differs")
 for family in supported:
     for arch in ("x86_64", "ppc64le"):
         facts = {"ansible_os_family": family, "ansible_architecture": arch}
@@ -90,13 +99,21 @@ for family in supported:
             == [family],
             f"{family}/{arch} selected the wrong package task",
         )
-        packages = render(install[family][modules[family]]["name"], **facts)
+        selected = list(
+            dict.fromkeys(
+                defaults["libvirt_stack_qemu_package_map"][family][guest]
+                for guest in [arch] + foreign[family]
+            )
+        )
+        require(selected == emulators[family][arch], f"{family}/{arch} selected emulators differ")
+        package_facts = facts | {"libvirt_stack_qemu_packages": selected}
+        packages = render(install[family][modules[family]]["name"], **package_facts)
         require(
-            packages == expected[family] + [emulators[family][arch]],
+            packages == expected[family] + emulators[family][arch],
             f"{family}/{arch} package list differs: {packages}",
         )
         require(
-            defaults["libvirt_stack_qemu_package_map"][family][arch] == emulators[family][arch],
+            defaults["libvirt_stack_qemu_package_map"][family][arch] == emulators[family][arch][0],
             f"{family}/{arch} emulator map differs",
         )
 

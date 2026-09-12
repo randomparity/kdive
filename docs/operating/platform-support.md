@@ -45,6 +45,10 @@ name is distro-specific (and matches what `scripts/check-setup-deps.sh` reports)
 
 For example, to enable ppc64le guests on an x86_64 Fedora host: `dnf install qemu-system-ppc`.
 
+`libvirt_stack` installs the ppc64le emulator alongside the native emulator on Debian/Ubuntu and
+openSUSE/SLES hosts. It deliberately leaves RedHat-family hosts native-only: Enterprise Linux has
+no foreign-architecture emulator package, so its provisioned hosts cannot run `live_vm_tcg`.
+
 **The RHEL family runs native guests only.** Enterprise Linux ships no `qemu-system-*` package,
 so neither foreign-arch emulator can be installed there and `just test-live-tcg` cannot run on
 such a host. Its *own* architecture's emulator comes from `qemu-kvm` and is installed as

@@ -37,7 +37,16 @@ libvirt_stack_packages_suse:
   - python3-libvirt-python
   - python3-lxml
 
-# qemu emulator package by os_family + arch.
+# The `live_vm_tcg` tier exercises ppc64le guests.  EL cannot install their
+# emulator, so it remains native-only; the other supported families install it.
+libvirt_stack_foreign_guest_architectures:
+  Debian:
+    - ppc64le
+  RedHat: []
+  Suse:
+    - ppc64le
+
+# QEMU emulator package by OS family and guest architecture.
 libvirt_stack_qemu_package_map:
   Debian:
     x86_64: qemu-system-x86

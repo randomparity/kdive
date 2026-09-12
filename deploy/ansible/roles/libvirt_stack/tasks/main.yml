@@ -7,11 +7,20 @@
       Unsupported libvirt_stack OS family '{{ ansible_os_family }}':
       add its virtualization package set and emulator map before running this role.
 
+- name: Select the QEMU emulators for native and supported foreign guests
+  ansible.builtin.set_fact:
+    libvirt_stack_qemu_packages: >-
+      {{ ([ansible_architecture]
+          + libvirt_stack_foreign_guest_architectures[ansible_os_family])
+         | map('extract', libvirt_stack_qemu_package_map[ansible_os_family])
+         | unique
+         | list }}
+
 - name: Install virtualization packages (Debian)
   ansible.builtin.apt:
     name: >-
       {{ libvirt_stack_packages_debian
-         + [libvirt_stack_qemu_package_map['Debian'][ansible_architecture]] }}
+         + libvirt_stack_qemu_packages }}
     state: present
     update_cache: true
   when: ansible_os_family == 'Debian'
@@ -20,7 +29,7 @@
   ansible.builtin.dnf:
     name: >-
       {{ libvirt_stack_packages_redhat
-         + [libvirt_stack_qemu_package_map['RedHat'][ansible_architecture]] }}
+         + libvirt_stack_qemu_packages }}
     state: present
   when: ansible_os_family == 'RedHat'
 
@@ -28,7 +37,7 @@
   community.general.zypper:
     name: >-
       {{ libvirt_stack_packages_suse
-         + [libvirt_stack_qemu_package_map['Suse'][ansible_architecture]] }}
+         + libvirt_stack_qemu_packages }}
     state: present
   when: ansible_os_family == 'Suse'
 
