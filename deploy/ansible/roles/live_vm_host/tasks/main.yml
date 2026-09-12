@@ -2,6 +2,16 @@
 - name: Validate external-boot authority inputs before direct role mutation
   ansible.builtin.import_tasks: authority_preflight.yml
 
+- name: Read the runner system Python version used by uv
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+  register: live_vm_host_system_python_version
+  changed_when: false
+  check_mode: false
+
 - name: Assert the runner host is Ubuntu/Debian (system Python 3.14 + python3-guestfs, ADR-0387)
   # The venv strategy relies on the system interpreter being Python 3.14 with a matching
   # python3-guestfs binding. Ubuntu 26.04 ships both; RHEL/Rocky ship Python 3.12 and no 3.14
@@ -10,13 +20,12 @@
     that:
       - ansible_facts['distribution'] == 'Ubuntu'
       - ansible_facts['distribution_version'] == '26.04'
-      - ansible_facts['python']['version']['major'] | int == 3
-      - ansible_facts['python']['version']['minor'] | int == 14
+      - live_vm_host_system_python_version.stdout == '3.14'
     fail_msg: >-
       live_vm_host requires Ubuntu 26.04 and system Python 3.14 so its venv can
       use the distribution's python3-guestfs binding (ADR-0387); this host is
-      {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }} with Python
-      {{ ansible_facts.python.version.major }}.{{ ansible_facts.python.version.minor }}.
+      {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }} with system Python
+      {{ live_vm_host_system_python_version.stdout }}.
 
 - name: Install external-boot authority prerequisites
   ansible.builtin.apt:

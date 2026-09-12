@@ -31,11 +31,23 @@ AUTHORITY_ENV_TEMPLATE = ROLE / "templates" / "provider-authority.env.j2"
 AUTHORITY_SERVICE_TEMPLATE = ROLE / "templates" / "external-boot-authority.service.j2"
 RUNNER_PLAY = ROOT / "deploy" / "ansible" / "playbooks" / "runner.yml"
 PROVIDER_AUTHORITY = ROLE.parent / "provider_authority_host"
+LOCAL_WORKER = ROLE.parent / "local_worker_host"
 
 
 def _text(path: Path) -> str:
     text = path.read_text(encoding="utf-8")
     if path == MAIN_TASKS:
+        # Inspect the runner's ordered task composition, including the extracted role.
+        def expand_worker_import(match: re.Match[str]) -> str:
+            task = yaml.safe_load(match.group())[0]
+            imported = LOCAL_WORKER / "tasks" / task["ansible.builtin.import_role"]["tasks_from"]
+            return imported.read_text(encoding="utf-8").removeprefix("---\n")
+
+        text = re.sub(
+            r"(?m)^- name: Import reusable [^\n]+\n(?:^(?!- name:).+\n)*",
+            expand_worker_import,
+            text,
+        )
         # Follow the shared endpoint task at the same call site the runner executes it.
         shared = PROVIDER_AUTHORITY / "tasks/libvirt.yml"
         start = text.find("- name: Consume the shared private authority libvirt endpoint tasks")
@@ -44,6 +56,10 @@ def _text(path: Path) -> str:
             expanded = shared.read_text(encoding="utf-8").removeprefix("---\n")
             expanded = expanded.replace("provider_authority_host_", "live_vm_host_authority_")
             text = text[:start] + expanded + "\n" + text[end:]
+    elif path == DEFAULTS:
+        text += "\n" + (LOCAL_WORKER / "defaults/main.yml").read_text(
+            encoding="utf-8"
+        ).removeprefix("---\n")
     return text
 
 
@@ -1993,9 +2009,9 @@ def test_external_boot_recovery_parent_is_checked_before_creation() -> None:
     tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
     assert (
         'path: "{{ live_vm_host_worker_recovery_root }}" follow: false '
-        "register: live_vm_host_recovery_root_before" in tasks
+        "register: local_worker_host_recovery_root_before" in tasks
     )
-    assert "live_vm_host_recovery_root_before.stat.islnk" in tasks
+    assert "local_worker_host_recovery_root_before.stat.islnk" in tasks
 
 
 def test_external_boot_recovery_roots_are_health_gated() -> None:
@@ -2040,7 +2056,7 @@ def test_external_boot_recovery_slot_roots_are_checked_before_creation() -> None
     assert (
         'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" follow: false '
         'loop: "{{ live_vm_host_worker_accounts }}" '
-        "register: live_vm_host_recovery_slots_before" in tasks
+        "register: local_worker_host_recovery_slots_before" in tasks
     )
     assert "not item.stat.exists or (item.stat.isdir and not item.stat.islnk)" in tasks
 

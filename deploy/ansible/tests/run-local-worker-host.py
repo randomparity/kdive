@@ -4,6 +4,7 @@
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -45,7 +46,18 @@ runner = playbook(ANSIBLE / "playbooks/runner.yml", "--list-tasks")
 require(runner.returncode == 0, "runner task listing failed")
 expected_tasks = (TESTS / "fixtures/runner-tasks-2391.txt").read_text().splitlines()
 actual_tasks = tasks(runner.stdout, include_tags=True)
-require(len(actual_tasks) == 306, f"runner listed {len(actual_tasks)} tasks, expected 306")
+python_probe = "live_vm_host : Read the runner system Python version used by uv\tTAGS: []"
+python_guard = next(
+    index
+    for index, task in enumerate(actual_tasks)
+    if "Assert the runner host is Ubuntu/Debian" in task
+)
+require(
+    actual_tasks[python_guard - 1] == python_probe,
+    "runner system Python probe must immediately precede the Ubuntu guard",
+)
+actual_tasks.pop(python_guard - 1)
+require(len(actual_tasks) == 306, f"runner listed {len(actual_tasks)} baseline tasks, expected 306")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
 print("ok runner: 306 ordered task names and tags match the pre-extraction baseline")
@@ -56,6 +68,51 @@ require(
     defaults["live_vm_host_packages"] == expected_packages, "Ubuntu worker package list changed"
 )
 print("ok runner: 19 Ubuntu worker packages match the pre-extraction baseline")
+
+python_version_script = "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+system_python = subprocess.check_output(
+    ["/usr/bin/python3", "-c", python_version_script],
+    text=True,
+).strip()
+runner_tasks = yaml.safe_load((ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text())
+python_tasks = runner_tasks[1:3]
+require(
+    [task["name"] for task in python_tasks]
+    == [
+        "Read the runner system Python version used by uv",
+        "Assert the runner host is Ubuntu/Debian (system Python 3.14 + python3-guestfs, ADR-0387)",
+    ],
+    "runner Python guard moved",
+)
+opposite_minor = 13 if system_python == "3.14" else 14
+with tempfile.TemporaryDirectory(prefix="kdive-python-guard-") as temp_dir:
+    guard_probe = Path(temp_dir) / "guard.yml"
+    guard_probe.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "name": "Probe runner system Python guard",
+                    "hosts": "localhost",
+                    "connection": "local",
+                    "gather_facts": False,
+                    "vars": {
+                        "ansible_facts": {
+                            "distribution": "Ubuntu",
+                            "distribution_version": "26.04",
+                            "python": {"version": {"major": 3, "minor": opposite_minor}},
+                        }
+                    },
+                    "tasks": python_tasks,
+                }
+            ]
+        )
+    )
+    guard = playbook(guard_probe, "--check")
+require(
+    (guard.returncode == 0) == (system_python == "3.14"),
+    "runner Python guard followed Ansible facts instead of /usr/bin/python3",
+)
+print("ok runner: Python guard follows /usr/bin/python3 despite contrary Ansible facts")
 
 probe = TESTS / "local_worker_host.yml"
 syntax = playbook(probe, "--syntax-check")
@@ -130,3 +187,50 @@ for user in ("", "kdive-nonexistent-2391"):
         "invalid operator reached packages",
     )
 print("ok preflight: named distributions and operator paths fail before mutation")
+
+
+def package_route(distribution: str, family: str, selected: str) -> None:
+    facts = {
+        "ansible_facts": {
+            "distribution": distribution,
+            "distribution_version": "probe",
+            "os_family": family,
+        },
+        "local_worker_host_operator_user": operator,
+    }
+    result = playbook(
+        probe, "--check", "--tags", "authority_prerequisites", "-e", json.dumps(facts)
+    )
+    require(
+        "Require the standalone local-worker operator to exist" in result.stdout,
+        f"{distribution} failed before package routing",
+    )
+    families = ("Debian", "RedHat", "Suse")
+    for candidate in families:
+        heading = (
+            "TASK [local_worker_host : Install the kernel-debug toolchain + venv build deps "
+            f"({candidate})]"
+        )
+        if families.index(candidate) > families.index(selected) and heading not in result.stdout:
+            continue  # A missing native package manager can fail the selected task immediately.
+        require(heading in result.stdout, f"{distribution} omitted {candidate} package task")
+        section = result.stdout.split(heading, 1)[1].split("\nTASK [", 1)[0]
+        if candidate == selected:
+            require(
+                "skipping: [localhost]" not in section,
+                f"{distribution} skipped its {candidate} package task",
+            )
+        else:
+            require(
+                "skipping: [localhost]" in section,
+                f"{distribution} entered the {candidate} package task",
+            )
+
+
+for distribution, family, selected in (
+    ("Debian", "Debian", "Debian"),
+    ("Fedora", "RedHat", "RedHat"),
+    ("openSUSE Tumbleweed", "Suse", "Suse"),
+):
+    package_route(distribution, family, selected)
+print("ok packages: check mode routes each supported family to only its package task")
