@@ -18,10 +18,9 @@ operation and diagnostics.
 
 ## Prerequisites
 
-On a fresh Debian/Ubuntu or RedHat-family host, `install-host.sh` does all of the host
-preparation below (see [Preparing a fresh host](#preparing-a-fresh-host)). The
-[local-libvirt provider page](../../docs/operating/providers/local-libvirt.md) owns which
-families are supported and how they differ. Otherwise:
+Prepare the host with the canonical [local-libvirt installation procedure](../../docs/operating/install.md#local-libvirt-host-preparation).
+`install-host.sh` remains as a compatibility caller for that procedure. This example then owns the
+demo walkthrough below. Otherwise:
 
 - A KVM host with `libvirt` and a running `libvirtd`/`virtqemud`, the `default` network
   active, and your user in the `libvirt` group.
@@ -29,7 +28,8 @@ families are supported and how they differ. Otherwise:
 - The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`. There is no
   PyPI wheel yet; the checkout is the install, and the scripts here run from it.
 - The fixed live-worker lifecycle contract installed for this checkout and your user
-  (`deploy/systemd/install-live-worker-lifecycle.sh`, root; `install-host.sh` runs it). A
+  (the [installation procedure](../../docs/operating/install.md#local-libvirt-host-preparation)
+  runs it). A
   worker cannot start outside it — it has no incarnation credential — and it is what publishes
   the session libvirt endpoint every script here uses.
 - A kdive-ready guest image at `/var/lib/kdive/rootfs/local/<name>.qcow2`, declared in
@@ -56,7 +56,7 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 
 | File | Purpose |
 |------|---------|
-| `install-host.sh` | Fresh Debian/Ubuntu or RedHat-family host preparation: host packages, `libvirt`/`kvm`/`docker` groups, readable host kernels, `uv` + `uv sync --group live`, the fixed live-worker lifecycle contract (root), the guest-image directory, the venv libguestfs binding. Re-runnable. |
+| `install-host.sh` | Compatibility caller for the canonical host-preparation recipe in the installation guide. |
 | `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, the published session `KDIVE_LIBVIRT_URI`, and an XDG log directory. Source it; don't run it. |
 | `up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/up.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
 | `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `svirt_image_t` on SELinux hosts (ADR-0640), append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
@@ -69,7 +69,7 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 ```bash
 KDIVE_CHECKOUT="$PWD"    # run this block from the KDIVE checkout
 
-# 0. Fresh Debian/Ubuntu host only: prepare it, then log out and back in for the groups.
+# 0. Prepare the host using the installation guide, then log out and back in for the groups.
 examples/local-libvirt/install-host.sh
 
 # 1. Bring everything up (no sudo: the lifecycle contract from step 0 does the privileged part).
@@ -92,64 +92,6 @@ cd "$KDIVE_CHECKOUT"
 examples/local-libvirt/down.sh
 examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the bucket, and kdive domains
 ```
-
-## Preparing a fresh host
-
-`install-host.sh` prepares Debian/Ubuntu (apt) and RedHat-family (dnf) hosts; it refuses anything
-else with `exit 2` rather than installing a partial set. Validated targets: Ubuntu 26.04 and
-Fedora 44. What it does, and why, so you can audit or redo a step:
-
-- **Packages** — the operator set: libvirt + this host's QEMU emulator, libguestfs and its
-  Python binding, `passt`, a container engine + compose, and the kernel build toolchain for the
-  tree you will build and upload. The two families name these differently and the emulator is
-  chosen differently on each (ADR-0641); the
-  [provider page](../../docs/operating/providers/local-libvirt.md#family-differences-that-matter)
-  lists every divergence. Debian/Ubuntu install through `scripts/apt-install.sh` (bounded retry);
-  the RedHat family uses `dnf` directly, and Enterprise Linux gets CodeReady Builder enabled
-  first for `libvirt-devel`.
-- **Groups** — `libvirt`, `kvm`, `docker` for the invoking user, skipping any the host does not
-  have (an Enterprise Linux host that satisfied the engine requirement with podman has no
-  `docker` group). They apply on the next login shell, so the script ends by telling you to log
-  out and back in rather than running the preflight (which would report the missing group).
-- **Host kernels** — the libguestfs appliance that `build-fs` and the kdump harvest use reads a
-  `/boot/vmlinuz-*`. Ubuntu ships those `root:0600`, so the script sets them to `root:kvm 0640`,
-  the same posture as the CI runner's Ansible role; a kernel upgrade lands a new `0600` file, so
-  re-run the script afterwards. Fedora already ships them `0755`, and the script leaves any
-  kernel a non-owner can already read alone rather than narrowing it.
-- **`uv sync --group live`** — the venv, plus `drgn` for the kdump capture path. Ubuntu 26.04
-  and Fedora 44 both ship system Python 3.14, the same minor as the project's, so the script
-  symlinks the distro libguestfs binding into the venv and the preflight's `import guestfs, drgn`
-  check passes. On a host whose system Python differs — EL9 is 3.9, EL10 is 3.12 — the binding
-  cannot be symlinked, and the consequence is larger than the `WARN` suggests: `guestfs` is also
-  how the provider extracts a System's baseline kernel, so **provisioning cannot complete** on such
-  a host, not merely kdump. Measured on Rocky 10.2 (system 3.12, venv 3.14): the provision fails
-  `missing_dependency — libguestfs (the guestfs Python binding) is required to extract the baseline
-  kernel`. Match the venv to the system Python, or use a host whose minors already agree. Contributors who also want the dev tooling (shellcheck, prek)
-  run `./scripts/check-setup-deps.sh -y` separately.
-- **Lifecycle contract** — `deploy/systemd/install-live-worker-lifecycle.sh --operator $USER
-  --source <checkout>` as root, with the witness-member DSN on its standard input (the fixed
-  local development login the compose `role-bootstrap` one-shot creates). It provisions the
-  eight `kdive-worker-N` slot accounts, the `kdive-live-control`/`kdive-live-libvirt` groups
-  (you join both), the root lifecycle witness socket, an operator-owned session `libvirtd` with
-  its endpoint published in `/etc/kdive/live-worker-libvirt.env`, the provider data
-  directories under `/var/lib/kdive`, and a worker venv under `/opt/kdive-live-worker-lifecycle`
-  built from the checkout (re-run the script after pulling a new revision). The
-  [live-stack runbook](../../docs/operating/runbooks/live-stack.md#prerequisites) and
-  [`deploy/systemd/README.md`](../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract)
-  describe the contract.
-- **Directories** — `/var/lib/kdive/rootfs/local` (where `build-image.sh` publishes images) as
-  you, group `kdive-live-libvirt`, the same posture the installer gives its parent.
-- **SELinux labels** — on an enforcing host only, `svirt_image_t` on `/var/lib/kdive/rootfs` and
-  `/var/lib/kdive/install`, the two trees a confined domain opens: provisioning writes each
-  System's overlay and maps its baseline kernel/initrd under the first, and the install plane
-  points a live domain's `<os>` at staged kernel/initrd under the second. `svirt_t` can do neither
-  against the older `virt_image_t`, and the unprivileged session daemon performs no relabel of its
-  own ([ADR-0640](../../docs/adr/0640-static-svirt-image-label-for-session-mode-domains.md)). The
-  step no-ops off an enforcing host, and `build-image.sh` owns the nested `rootfs/local` rule.
-
-Every catalog family builds through the customization boot (a throwaway guest installs its
-own packages), so no image build depends on the libguestfs appliance network. The Ubuntu
-24.04 `passt` failure (#694) applied to the earlier `virt-customize` path, retired in #1167.
 
 ## Tokens
 

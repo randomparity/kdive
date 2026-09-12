@@ -134,7 +134,7 @@ Postgres DSN, S3 endpoint and credentials, and the three OIDC values.
 
 Installing a built kernel indexes its modules with the host's `depmod` (ADR-0346), so a
 worker host needs `kmod` — `apt install kmod` on Debian/Ubuntu, `dnf install kmod` on
-Fedora. Resolution is **not** `PATH`-based: `depmod` is looked for in `/usr/sbin`,
+Fedora, or `zypper install kmod` on SUSE. Resolution is **not** `PATH`-based: `depmod` is looked for in `/usr/sbin`,
 `/usr/bin`, `/sbin`, and `/bin` only, so a copy installed elsewhere will not be found.
 The service `doctor` (`kdivectl doctor --json`) carries a `depmod_toolchain` check that
 fails with the package name and those four directories when it cannot resolve one. The
@@ -164,6 +164,13 @@ sudo apt install build-essential pkg-config libvirt-dev python3-dev \
 ```bash
 sudo dnf install gcc make pkgconf-pkg-config libvirt-devel python3-devel \
   elfutils-libelf-devel ShellCheck shfmt git curl
+```
+
+**SLES / openSUSE:**
+
+```bash
+sudo zypper install gcc make pkg-config libvirt-devel python3-devel \
+  libelf-devel ShellCheck shfmt git curl
 ```
 
 On POWER, complete the [architecture-specific prerequisites](
@@ -196,9 +203,34 @@ use. The preflight reports missing prerequisites:
 - Local provider: run `just check-local-libvirt`.
 - Remote provider: run `just check-remote-libvirt HOST USER URI`.
 
-See [local-libvirt](providers/local-libvirt.md) and
-[remote-libvirt](providers/remote-libvirt.md) for what each provider needs. The local page owns
-the supported host families and their per-family differences.
+See [remote-libvirt](providers/remote-libvirt.md) for remote-provider requirements.
+
+### Local-libvirt host preparation
+
+From a complete KDIVE checkout, prepare a local-libvirt host with the canonical Ansible-backed
+recipe. It prompts for privilege escalation and reads the lifecycle-witness database URL from the
+environment, so the URL is not a process argument:
+
+```bash
+export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL='<witness database URL>'
+just prepare-local-libvirt-host
+```
+
+The recipe installs and configures the local virtualization stack, worker lifecycle, project venv,
+and guestfs binding. Start a new login session after it completes so group membership takes effect,
+then run `just check-local-libvirt`. Do not use `examples/local-libvirt/install-host.sh` as a
+second installer; it only calls this recipe for compatibility with the example walkthrough.
+
+| Family | Host-preparation status | Limits and proof strength |
+|---|---|---|
+| Debian / Ubuntu | Supported | Structurally checked. Ubuntu 26.04 live apply remains operator-provided and is not recorded by this checkout. |
+| Fedora | Supported | Structurally checked; no live apply is claimed. |
+| RHEL / Rocky | Supported with a guestfs limit | Structurally checked; their system Python does not provide the matching Python 3.14 `python3-guestfs` binding. The recipe reports the mismatch and continues, but build-fs and local kdump capture are unavailable from that venv. |
+| SLES / openSUSE | Supported | Structurally checked; no live apply is claimed. |
+
+For foreign-architecture emulator packages and their availability, use the
+[per-distro emulator table](platform-support.md#cross-architecture-guests); package names are
+intentionally not duplicated here.
 
 ## Run modes
 
