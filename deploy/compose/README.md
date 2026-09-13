@@ -2,7 +2,7 @@
 
 The repo-root [`docker-compose.yml`](../../docker-compose.yml) brings up the three kdive
 processes (`server` / `worker` / `reconciler`) plus a `migrate` one-shot, on top of the
-existing dev backends (Postgres, MinIO, mock OIDC). Everything is wired purely through
+existing dev backends (Postgres, SeaweedFS, mock OIDC). Everything is wired purely through
 `KDIVE_*` (see the [config reference](../../docs/guide/reference/config.md)); the shared
 backend env is declared once as the `x-backends` anchor and merged into each service.
 
@@ -29,7 +29,7 @@ fails; use `just compose-recreate-worker` to retry after correcting the cause.
 
 The dependency graph is self-contained, so a single `up` brings the whole stack. The checked-in
 passwords below are allowlisted for local development only; never reuse them in a
-production deployment. Postgres, MinIO, and the mock OIDC issuer bind `127.0.0.1` by default
+production deployment. Postgres, SeaweedFS, and the mock OIDC issuer bind `127.0.0.1` by default
 (ADR-0554), so they are reachable on `localhost` only. The backend port variables accept an
 `ADDR:PORT` host mapping. Exposing the fixed-credential backends is an explicit operator choice. If `KDIVE_POSTGRES_PORT` includes an address, also set
 `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` to a valid witness DSN with a reachable host and numeric

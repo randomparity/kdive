@@ -73,8 +73,7 @@ is built, not pulled per-arch; arch notes live in the `Role` column). Handling t
 | Image | Role | amd64 | arm64 | ppc64le | Handling |
 |---|---|:---:|:---:|:---:|---|
 | `postgres:17` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
-| `minio/minio:RELEASE.2025-04-22T22-12-26Z` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
-| `minio/mc:RELEASE.2025-04-16T18-13-26Z` | core (bucket-init one-shot) | ✅ | ✅ | ✅ | rely-on-upstream |
+| `kdive-seaweedfs:dev` | core backend (SeaweedFS 4.46 source-pinned image; published OCI index proof in #2446) | — | — | — | build-local |
 | `kdive-mock-oidc:dev` | core backend (OIDC mock; built in-repo from the upstream jar, #1183 / ADR-0357) | — | — | — | build-local |
 | `prom/prometheus:v3.12.0` | observability (`obs` profile) | ✅ | ✅ | ✅ | rely-on-upstream |
 | `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ | accept-gap |
