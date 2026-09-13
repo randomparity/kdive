@@ -50,14 +50,14 @@ spec:
   # accept external build uploads the guest/uploader must reach S3 too — set
   # demo.minio.service.type=NodePort (and a node-routable KDIVE_S3_ENDPOINT_URL) to expose it.
   # The cluster network/firewall must permit the chosen NodePort.
-  type: {{ .Values.demo.minio.service.type | default "ClusterIP" }}
+  type: {{ .Values.demo.seaweedfs.service.type | default "ClusterIP" }}
   selector:
     app: {{ include "kdive.fullname" . }}-seaweedfs
   ports:
     - port: 8333
       targetPort: 8333
-      {{- if and (eq (.Values.demo.minio.service.type | default "ClusterIP") "NodePort") .Values.demo.minio.service.nodePort }}
-      nodePort: {{ .Values.demo.minio.service.nodePort }}
+      {{- if and (eq (.Values.demo.seaweedfs.service.type | default "ClusterIP") "NodePort") .Values.demo.seaweedfs.service.nodePort }}
+      nodePort: {{ .Values.demo.seaweedfs.service.nodePort }}
       {{- end }}
 ---
 apiVersion: batch/v1

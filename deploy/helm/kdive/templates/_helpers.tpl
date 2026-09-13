@@ -240,7 +240,7 @@ initContainers:
 {{- define "kdive.minioVersioningBarrierItem" -}}
 {{- if .Values.bundledBackends }}
   - name: verify-seaweedfs-versioning
-    image: {{ .Values.demo.mc.image }}
+    image: {{ include "kdive.image" . }}
     command:
       - /bin/sh
       - -c
