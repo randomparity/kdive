@@ -17,6 +17,7 @@ role = Path(os.environ["LIBVIRT_STACK_ROLE"])
 defaults = yaml.safe_load((role / "defaults/main.yml").read_text())
 tasks = yaml.safe_load((role / "tasks/main.yml").read_text())
 jinja = NativeEnvironment(undefined=StrictUndefined)
+jinja.filters["extract"] = lambda value, mapping: mapping[value]
 
 
 def require(condition, message):
@@ -25,6 +26,8 @@ def require(condition, message):
 
 
 def evaluate(expression, **facts):
+    if expression.startswith("{{") and expression.endswith("}}"):
+        return jinja.from_string(expression).render(**defaults, **facts)
     return jinja.compile_expression(expression)(**defaults, **facts)
 
 
@@ -71,34 +74,74 @@ expected = {
         "python3-libvirt-python", "python3-lxml",
     ],
 }
-emulators = {
-    "Debian": {"x86_64": "qemu-system-x86", "ppc64le": "qemu-system-ppc"},
-    "RedHat": {"x86_64": "qemu-kvm", "ppc64le": "qemu-kvm"},
-    "Suse": {"x86_64": "qemu-x86", "ppc64le": "qemu-ppc"},
-}
+routes = (
+    ("Debian", "Debian", "x86_64", ["qemu-system-x86", "qemu-system-ppc"]),
+    ("Debian", "Ubuntu", "ppc64le", ["qemu-system-ppc"]),
+    ("RedHat", "Fedora", "x86_64", ["qemu-kvm", "qemu-system-ppc"]),
+    ("RedHat", "Fedora", "ppc64le", ["qemu-kvm", "qemu-system-ppc"]),
+    ("Suse", "openSUSE Tumbleweed", "x86_64", ["qemu-x86", "qemu-ppc"]),
+    ("Suse", "SLES", "ppc64le", ["qemu-ppc"]),
+)
 modules = {
     "Debian": "ansible.builtin.apt",
     "RedHat": "ansible.builtin.dnf",
     "Suse": "community.general.zypper",
 }
 install = {family: module_task(module) for family, module in modules.items()}
-for family in supported:
-    for arch in ("x86_64", "ppc64le"):
-        facts = {"ansible_os_family": family, "ansible_architecture": arch}
-        require(
-            [name for name, task in install.items() if evaluate(task["when"], **facts)]
-            == [family],
-            f"{family}/{arch} selected the wrong package task",
-        )
-        packages = render(install[family][modules[family]]["name"], **facts)
-        require(
-            packages == expected[family] + [emulators[family][arch]],
-            f"{family}/{arch} package list differs: {packages}",
-        )
-        require(
-            defaults["libvirt_stack_qemu_package_map"][family][arch] == emulators[family][arch],
-            f"{family}/{arch} emulator map differs",
-        )
+selection = next(
+    task for task in tasks if task.get("name", "").startswith("Select the QEMU emulators")
+)
+el_ppc64le_refusal = next(
+    task
+    for task in tasks
+    if task.get("name", "").startswith("Refuse unavailable default-EL ppc64le")
+)
+refusal = el_ppc64le_refusal["ansible.builtin.assert"]
+rocky_facts = {
+    "ansible_os_family": "RedHat",
+    "ansible_distribution": "Rocky",
+    "ansible_architecture": "ppc64le",
+}
+require(
+    not all(evaluate(condition, **rocky_facts) for condition in refusal["that"]),
+    "Rocky ppc64le must refuse the unavailable native emulator before DNF",
+)
+refusal_message = render(refusal["fail_msg"], **rocky_facts)
+require(
+    "default EL ppc64le repositories" in refusal_message and "qemu-kvm" in refusal_message,
+    "Rocky ppc64le refusal lacks the package-contract context",
+)
+selection_expression = selection["ansible.builtin.set_fact"]["libvirt_stack_qemu_packages"]
+require("libvirt_stack_foreign_guest_architectures" in selection_expression,
+        "emulator selection omits foreign guest architectures")
+foreign = defaults["libvirt_stack_foreign_guest_architectures"]
+require(foreign == {"Debian": ["ppc64le"], "RedHat": [], "Suse": ["ppc64le"]},
+        "foreign guest emulator availability differs")
+foreign_by_distribution = defaults["libvirt_stack_foreign_guest_architectures_by_distribution"]
+require(foreign_by_distribution == {"Fedora": []}, "distribution architecture overrides differ")
+foreign_packages_by_distribution = defaults["libvirt_stack_foreign_guest_packages_by_distribution"]
+require(
+    foreign_packages_by_distribution == {"Fedora": ["qemu-system-ppc"]},
+    "distribution package overrides differ",
+)
+for family, distribution, arch, emulators in routes:
+    facts = {
+        "ansible_os_family": family,
+        "ansible_distribution": distribution,
+        "ansible_architecture": arch,
+    }
+    require(
+        [name for name, task in install.items() if evaluate(task["when"], **facts)] == [family],
+        f"{distribution}/{arch} selected the wrong package task",
+    )
+    selected = evaluate(selection_expression, **facts)
+    require(selected == emulators, f"{distribution}/{arch} selected emulators differ")
+    packages = render(install[family][modules[family]]["name"], **(facts | {"libvirt_stack_qemu_packages": selected}))
+    require(packages == expected[family] + emulators, f"{distribution}/{arch} package list differs: {packages}")
+    require(
+        defaults["libvirt_stack_qemu_package_map"][family][arch] == emulators[0],
+        f"{distribution}/{arch} native emulator map differs",
+    )
 
 modular = next(task for task in tasks if task.get("name", "").startswith("Switch to the modular"))
 monolithic = next(task for task in tasks if task.get("name", "").startswith("Use the monolithic"))

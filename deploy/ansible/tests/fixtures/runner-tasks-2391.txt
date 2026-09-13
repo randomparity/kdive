@@ -1,5 +1,7 @@
 Validate dormant authority inputs before any runner-host mutation	TAGS: []
 libvirt_stack : Require a supported virtualization package set	TAGS: []
+libvirt_stack : Refuse unavailable default-EL ppc64le native emulator	TAGS: []
+libvirt_stack : Select the QEMU emulators for native and supported foreign guests	TAGS: []
 libvirt_stack : Install virtualization packages (Debian)	TAGS: []
 libvirt_stack : Install virtualization packages (RedHat)	TAGS: []
 libvirt_stack : Install virtualization packages (Suse)	TAGS: []

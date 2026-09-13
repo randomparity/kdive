@@ -45,13 +45,19 @@ name is distro-specific (and matches what `scripts/check-setup-deps.sh` reports)
 
 For example, to enable ppc64le guests on an x86_64 Fedora host: `dnf install qemu-system-ppc`.
 
-**The RHEL family runs native guests only.** Enterprise Linux ships no `qemu-system-*` package,
-so neither foreign-arch emulator can be installed there and `just test-live-tcg` cannot run on
-such a host. Its *own* architecture's emulator comes from `qemu-kvm` and is installed as
-`/usr/libexec/qemu-kvm`, off `PATH` — so the three diagnostics below resolve that location as
-well as `PATH`, and `scripts/check-setup-deps.sh` names `qemu-kvm` rather than an arch-named
-package for the host's own arch. Fedora is unaffected: `qemu-kvm` there is a metapackage that
-pulls `qemu-system-x86` (or `qemu-system-ppc` on ppc64le), and foreign emulators install normally.
+`libvirt_stack` installs the ppc64le emulator alongside the native emulator on Debian/Ubuntu,
+openSUSE/SLES, and Fedora hosts. It deliberately leaves Enterprise Linux hosts native-only:
+Enterprise Linux has no foreign-architecture emulator package, so its provisioned hosts cannot run
+`live_vm_tcg`.
+
+**Enterprise Linux lacks the TCG tier.** It ships no `qemu-system-*` package, so neither
+foreign-arch emulator can be installed there and `just test-live-tcg` cannot run on such a host.
+On x86_64, its own emulator comes from `qemu-kvm` at `/usr/libexec/qemu-kvm`, off `PATH`; the
+three diagnostics below resolve that location as well as `PATH`. Default EL ppc64le repositories
+provide no native `qemu-kvm` package, so `libvirt_stack` refuses that host before DNF rather than
+requesting an unavailable package. This bounded contract does not claim a result for subscribed
+RHEL channels. Fedora is unaffected: `qemu-kvm` there is a metapackage that pulls
+`qemu-system-x86` (or `qemu-system-ppc` on ppc64le), and foreign emulators install normally.
 
 For a local-libvirt worker, three diagnostics report the per-arch accelerator:
 
