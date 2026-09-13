@@ -19,8 +19,10 @@ provisionable state and only transitions to `torn_down`.
 The handler resolves the provider after it commits the fence, then performs the provider teardown.
 Only after that call succeeds does its final locked transaction call
 `worker_discharge_system_mutation_obligations`, transition to `torn_down`, and audit the terminal
-edge. Any exception rolls back the final transaction; the durable state remains `tearing_down` and
-the existing job retry route remains available.
+edge. Any exception rolls back the final transaction; the durable state remains `tearing_down`.
+The reconciler repairs a fenced System with no active ordinary teardown job or canceled row by
+recycling its failed or succeeded dedup row (or creating the missing row) under the System lock. It
+never recycles a canceled row, and processes at most 100 candidates per pass.
 
 The state is non-terminal. The provision-result compensator treats it as a teardown fence and
 reaps a domain a slow provision created after the fence committed. It is included in allocation
@@ -36,26 +38,28 @@ change.
 4. `tearing_down` is non-terminal, capacity-occupying, rootfs-pinning, and excluded from
    terminal/console state sets.
 5. Existing external-boot and authority-owned terminal paths remain unchanged.
-6. `just ci` is green after generated artifacts are refreshed.
+6. An exhausted ordinary teardown on a live Allocation is requeued without reviving a canceled job.
+7. `just ci` is green after generated artifacts are refreshed.
 
 ## Scope
 
-Included: the ordinary worker handler, shared System state model and database constraint, direct
-classification consumers, generated references, focused integration/adversarial tests, ADR-0650.
-Excluded: historical-row repair (ADR-0634), external-boot/authority-owned terminal behavior, role
-grants, and changes to mutation-obligation semantics.
+Included: the ordinary worker handler, shared System state model and database constraint, bounded
+ordinary-teardown liveness repair, direct classification consumers, generated references, focused
+integration/adversarial tests, ADR-0650. Excluded: historical-row repair (ADR-0634), external-
+boot/authority-owned terminal behavior, role grants, and changes to mutation-obligation semantics.
 
 ## Failure and concurrency model
 
 `tearing_down` is committed before the external provider call, so slow provision commits observe a
 non-provisionable state. The System advisory lock serializes each state transition and final
 discharge. The provider call remains outside a database transaction; a crash there leaves the
-fence, allowing the durable teardown job/reconciler to retry rather than declaring completion.
-The final transaction is all-or-nothing: a discharge failure cannot expose `torn_down`.
+fence. The bounded repair requeues only when no teardown job is `queued`, `running`, or canceled,
+preserving an in-flight attempt and an operator cancellation. The final transaction is all-or-
+nothing: a discharge failure cannot expose `torn_down`.
 
 ## Validation
 
 Focused tests prove the post-provider atomic terminal commit, rollback on injected discharge
 failure, retained provider-failure state, and the existing concurrent provision race. State-set
-tests prove classification. Regeneration plus `just ci` proves generated artifacts and repository
-guardrails.
+tests prove classification. Reconciler tests prove only failed/succeeded ordinary teardown rows
+recycle. Regeneration plus `just ci` proves generated artifacts and repository guardrails.

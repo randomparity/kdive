@@ -16,7 +16,8 @@ from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs.payloads import Authorizing
+from kdive.jobs import queue
+from kdive.jobs.payloads import Authorizing, TeardownPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
@@ -27,6 +28,10 @@ from kdive.services.systems.authority_owned import (
 _log = logging.getLogger(__name__)
 
 _ACTIVE_JOB_STATE_VALUES = (JobState.QUEUED.value, JobState.RUNNING.value)
+_STALLED_TEARING_DOWN_BLOCKING_JOB_STATE_VALUES = (
+    *_ACTIVE_JOB_STATE_VALUES,
+    JobState.CANCELED.value,
+)
 
 _TERMINAL_ALLOCATION_STATES = (
     AllocationState.RELEASED,
@@ -56,6 +61,7 @@ _TEARDOWN_IN_FLIGHT = "(j.state = ANY(%s) OR j.updated_at > now() - %s)"
 # catalog -- `module_volume_reap_jobs_enqueued`, the sweep that consumes these discharges, most of
 # all. `ORDER BY` is what makes each pass a stable prefix instead of an arbitrary subset.
 _LEAKED_MUTATION_REPAIR_LIMIT = 100
+_STALLED_TEARING_DOWN_REPAIR_LIMIT = 100
 _LEAKED_MUTATION_CANDIDATES_SQL = (
     "SELECT DISTINCT o.system_id "
     "FROM remote_module_attempt_obligations o "
@@ -203,6 +209,73 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
 def gone_system_state_values() -> tuple[str, ...]:
     """Return terminal System states used by collector GC."""
     return _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES
+
+
+async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
+    """Requeue ordinary teardown when its durable fence outlives its retryable job.
+
+    The `tearing_down` marker stays put until the worker proves provider absence, discharges
+    mutation obligations, and commits `torn_down` in one transaction. A failed or missing job
+    would otherwise strand that marker on a live Allocation. Recycle only terminal jobs; a canceled
+    job is an operator stop, and queued/running jobs remain owned by the normal worker retry path.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT s.id FROM systems s "
+            "WHERE s.state = %s "
+            "  AND NOT EXISTS ( "
+            "    SELECT 1 FROM jobs j "
+            "    WHERE j.dedup_key = s.id::text || ':teardown' "
+            "      AND j.state = ANY(%s) "
+            "  ) "
+            "ORDER BY s.id "
+            "LIMIT %s",
+            (
+                SystemState.TEARING_DOWN.value,
+                list(_STALLED_TEARING_DOWN_BLOCKING_JOB_STATE_VALUES),
+                _STALLED_TEARING_DOWN_REPAIR_LIMIT,
+            ),
+        )
+        candidates: list[UUID] = [row["id"] for row in await cur.fetchall()]
+    requeued = 0
+    for system_id in candidates:
+        try:
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+                system = await SYSTEMS.get(conn, system_id)
+                if system is None or system.state is not SystemState.TEARING_DOWN:
+                    continue
+                existing = await queue.get_by_dedup_key(conn, f"{system_id}:teardown")
+                if existing is not None and existing.state in {
+                    JobState.QUEUED,
+                    JobState.RUNNING,
+                    JobState.CANCELED,
+                }:
+                    continue
+                _, admitted = await queue.enqueue_with_status(
+                    conn,
+                    JobKind.TEARDOWN,
+                    TeardownPayload(system_id=str(system_id)),
+                    Authorizing(
+                        principal=SYSTEM_RECONCILER_PRINCIPAL,
+                        agent_session=None,
+                        project=system.project,
+                    ),
+                    f"{system_id}:teardown",
+                    recycle=queue.JobRecyclePolicy.TERMINAL,
+                )
+        except Exception:  # noqa: BLE001 - one stuck System must not starve the repair lane
+            _log.warning(
+                "reconciler: stalled teardown replay failed for system %s; retrying next pass",
+                system_id,
+                exc_info=True,
+            )
+            continue
+        if admitted:
+            requeued += 1
+            _log.info(
+                "reconciler: stalled tearing-down system %s -> teardown job queued", system_id
+            )
+    return requeued
 
 
 async def repair_stalled_crashing_systems(conn: AsyncConnection) -> int:

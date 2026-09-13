@@ -28,8 +28,11 @@ rootfs ownership, and it has exactly one successor, `torn_down`.
 
 After the provider confirms absence, the same locked database transaction discharges mutation
 obligations, updates `tearing_down -> torn_down`, and writes the audit record. A failed provider
-call or failed final transaction leaves `tearing_down`, never `torn_down`; the existing durable
-teardown job can retry it. Add a migration for the database state constraint and update direct
+call or failed final transaction leaves `tearing_down`, never `torn_down`. The reconciler retries
+a fenced System when its ordinary teardown job is absent or no longer active: it recycles only a
+failed or succeeded row under the same deduplication key, never selects an operator-canceled row.
+The repair is capped at 100 candidates per pass and rechecks state and job activity under the System
+lock before it requeues. Add a migration for the database state constraint and update direct
 state-set consumers and generated references.
 
 ## Consequences
@@ -38,6 +41,9 @@ state-set consumers and generated references.
   obligation.
 - A System can visibly remain `tearing_down` while provider deletion or its retry is in progress.
   It still consumes its allocation's capacity and pins its rootfs base.
+- A dead-lettered ordinary teardown is retried by the bounded reconciler lane, including while its
+  Allocation is still live. Operator cancellation remains a stop: the lane never recycles a
+  canceled job.
 - The existing reconciler repair lane remains responsible for historical leaks; it is not removed
   or widened by this change.
 - The state is a public returned value, so generated CLI and MCP reference artifacts must be
