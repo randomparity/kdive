@@ -15,16 +15,26 @@ from kdive.diagnostics.checks import (
     CheckResult,
     CheckStatus,
 )
-from kdive.diagnostics.contributions.depmod_toolchain import depmod_toolchain_worker_descriptor
-from kdive.diagnostics.contributions.guest_arch_accel import guest_arch_accel_worker_descriptor
-from kdive.diagnostics.contributions.pseries_fadump import pseries_fadump_worker_descriptor
 from kdive.diagnostics.result_codec import (
-    _ALLOWED_IDS,
     ResultCodecError,
-    deserialize_results,
     serialize_results,
 )
+from kdive.diagnostics.result_codec import (
+    deserialize_results as _deserialize_results,
+)
 from kdive.domain.errors import ErrorCategory
+
+
+def deserialize_results(raw: str | None) -> list[CheckResult]:
+    """Decode with the production static registration, not a test-owned ID list."""
+    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
+
+    allowed_ids = frozenset(
+        check_id
+        for contribution in diagnostic_provider_contributions()
+        for check_id in contribution.worker_vantage_ids
+    )
+    return _deserialize_results(raw, allowed_ids=allowed_ids)
 
 
 def test_roundtrip_preserves_three_state_and_fields() -> None:
@@ -131,27 +141,6 @@ def test_depmod_toolchain_id_survives_roundtrip() -> None:
     assert result.status is CheckStatus.FAIL
     assert result.failure_category is ErrorCategory.MISSING_DEPENDENCY
     assert result.fix == "install kmod"
-
-
-def test_allowed_ids_matches_registered_worker_vantage_descriptors() -> None:
-    """`_ALLOWED_IDS` must track every worker-vantage id the diagnostics contributions register.
-
-    Regression guard for the bug this codec fixed: a registered `WorkerVantageDescriptor` id
-    silently missing from `_ALLOWED_IDS` degraded (or, before per-item isolation, poisoned) its
-    worker result. Calling the real descriptor-producing functions — rather than restating their
-    ids as literals — means renaming or removing a registered id without updating the allowlist
-    fails this test.
-    """
-    expected_ids = {
-        PROVIDER_TLS_ID,
-        GDBSTUB_ACL_ID,
-        AUTHORITY_READINESS_ID,
-        MULTIARCH_GDB_ID,
-        pseries_fadump_worker_descriptor().id,
-        guest_arch_accel_worker_descriptor().id,
-        depmod_toolchain_worker_descriptor().id,
-    }
-    assert expected_ids == _ALLOWED_IDS
 
 
 def test_roundtrip_preserves_resource_id() -> None:

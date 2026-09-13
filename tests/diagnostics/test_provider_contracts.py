@@ -29,6 +29,7 @@ def test_provider_contribution_field_set() -> None:
     fields = {f.name for f in dataclasses.fields(DiagnosticProviderContribution)}
     assert fields == {
         "provider",
+        "worker_vantage_ids",
         "enabled",
         "checks",
         "unavailable_worker_checks",
@@ -40,6 +41,7 @@ def test_provider_contribution_field_set() -> None:
 def test_provider_contribution_is_frozen() -> None:
     contribution = DiagnosticProviderContribution(
         provider="p",
+        worker_vantage_ids=("check-1",),
         enabled=lambda: True,
         checks=lambda: [],
         unavailable_worker_checks=lambda: [],
