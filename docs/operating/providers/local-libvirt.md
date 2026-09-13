@@ -79,17 +79,11 @@ These are the points where the two families genuinely diverge, not just in packa
   needs. If a domain start still fails with `Permission denied` on a kdive image, a stale
   per-domain label may be stuck — `sudo restorecon -R -F /var/lib/kdive/rootfs` clears it.
 
-  This labeling covers the **provisioning** path only. It does not extend to step 3's
-  `build-image.sh`, whose customization boot runs against the session daemon with a workspace
-  defaulting under `$HOME` — a location neither script labels. On both RedHat-family targets the
-  shipped policy grants `svirt_t` neither write nor map on that path's default `data_home_t`, and
-  write but not map on `svirt_home_t` (measured 2026-09-11), so a direct-kernel customization boot
-  has no mappable path there. A build that fails with `Permission denied` on an enforcing host is
-  therefore a separate defect from the one ADR-0640 fixes ([#2428]), and is not resolved by
-  re-running `install-host.sh`. ADR-0640's own end-to-end proof staged a prebuilt image rather than
-  building on the target for this reason.
-
-[#2428]: https://github.com/randomparity/kdive/issues/2428
+  `build-image.sh` applies the same label to its resolved `KDIVE_BUILD_IMAGE_WORKSPACE` before its
+  session-daemon customization boot. This covers the temporary disk and direct-kernel inputs that
+  build-fs creates beneath that workspace, including when the configured path is a symlink. The
+  workspace rule treats its path as a literal fcontext prefix, so an operator-selected name does
+  not broaden the label beyond that directory and descendants.
 - **libguestfs backend.** The worker pins `LIBGUESTFS_BACKEND=direct` in
   `deploy/systemd/system/kdive-live-worker@.service`. Debian/Ubuntu build libguestfs with that
   backend as its default; Fedora and RHEL default to the libvirt backend, which connects to

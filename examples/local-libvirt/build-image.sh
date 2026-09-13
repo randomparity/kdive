@@ -41,7 +41,9 @@ reconcile() {
     "${KDIVE_PYTHON}" -m kdive reconcile-systems "$@"
 }
 
+workspace="$(realpath -m -- "${workspace}")"
 mkdir -p "${workspace}" "$(dirname "${systems_toml}")"
+kdive_label_svirt_image "${workspace}"
 if [[ ! -e "${systems_toml}" ]]; then
   printf 'schema_version = 2\n' >"${systems_toml}"
   echo "created ${systems_toml}"
