@@ -25,6 +25,7 @@ def _isolate_config() -> Iterator[None]:
 def test_slow_build_tool_timeout_is_thirty_minutes() -> None:
     assert build_timeouts.SLOW_BUILD_TOOL_TIMEOUT_S == 30 * 60
     assert build_timeouts.SLOW_BUILD_TOOL_TIMEOUT_S == 1800
+    assert not hasattr(build_timeouts, "_worker_host_kvm_usable")
 
 
 # --- the general appliance scaler (#2397, #2414) -----------------------------------------------
