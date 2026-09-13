@@ -613,15 +613,16 @@ def test_run_once_retryable_category_still_requeues(migrated_url: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("kind", "run_state"),
+    ("kind", "run_state", "expected_run_state"),
     [
-        (JobKind.BOOT, RunState.RUNNING),
-        (JobKind.INSTALL, RunState.RUNNING),
-        (JobKind.INSTALL, RunState.SUCCEEDED),
+        (JobKind.BOOT, RunState.RUNNING, RunState.FAILED),
+        (JobKind.INSTALL, RunState.RUNNING, RunState.FAILED),
+        (JobKind.INSTALL, RunState.SUCCEEDED, RunState.FAILED),
+        (JobKind.BOOT, RunState.SUCCEEDED, RunState.SUCCEEDED),
     ],
 )
 def test_terminal_run_job_failure_marks_owning_run_failed(
-    migrated_url: str, kind: JobKind, run_state: RunState
+    migrated_url: str, kind: JobKind, run_state: RunState, expected_run_state: RunState
 ) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
@@ -656,10 +657,14 @@ def test_terminal_run_job_failure_marks_owning_run_failed(
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
             assert final.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            expected_failure = (
+                (ErrorCategory.INFRASTRUCTURE_FAILURE.value, str(job.id))
+                if expected_run_state is RunState.FAILED
+                else (None, None)
+            )
             assert await _run_failure_row(pool, run_id) == (
-                RunState.FAILED.value,
-                ErrorCategory.INFRASTRUCTURE_FAILURE.value,
-                str(job.id),
+                expected_run_state.value,
+                *expected_failure,
             )
 
     asyncio.run(_run())
