@@ -78,7 +78,7 @@ routes = (
     ("Debian", "Debian", "x86_64", ["qemu-system-x86", "qemu-system-ppc"]),
     ("Debian", "Ubuntu", "ppc64le", ["qemu-system-ppc"]),
     ("RedHat", "Fedora", "x86_64", ["qemu-kvm", "qemu-system-ppc"]),
-    ("RedHat", "Rocky", "ppc64le", ["qemu-kvm"]),
+    ("RedHat", "Fedora", "ppc64le", ["qemu-kvm", "qemu-system-ppc"]),
     ("Suse", "openSUSE Tumbleweed", "x86_64", ["qemu-x86", "qemu-ppc"]),
     ("Suse", "SLES", "ppc64le", ["qemu-ppc"]),
 )
@@ -90,6 +90,26 @@ modules = {
 install = {family: module_task(module) for family, module in modules.items()}
 selection = next(
     task for task in tasks if task.get("name", "").startswith("Select the QEMU emulators")
+)
+el_ppc64le_refusal = next(
+    task
+    for task in tasks
+    if task.get("name", "").startswith("Refuse unavailable default-EL ppc64le")
+)
+refusal = el_ppc64le_refusal["ansible.builtin.assert"]
+rocky_facts = {
+    "ansible_os_family": "RedHat",
+    "ansible_distribution": "Rocky",
+    "ansible_architecture": "ppc64le",
+}
+require(
+    not all(evaluate(condition, **rocky_facts) for condition in refusal["that"]),
+    "Rocky ppc64le must refuse the unavailable native emulator before DNF",
+)
+refusal_message = render(refusal["fail_msg"], **rocky_facts)
+require(
+    "default EL ppc64le repositories" in refusal_message and "qemu-kvm" in refusal_message,
+    "Rocky ppc64le refusal lacks the package-contract context",
 )
 selection_expression = selection["ansible.builtin.set_fact"]["libvirt_stack_qemu_packages"]
 require("libvirt_stack_foreign_guest_architectures" in selection_expression,

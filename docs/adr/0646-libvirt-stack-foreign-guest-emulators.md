@@ -11,12 +11,15 @@ Proposed
 `live_vm_tcg` exercises ppc64le guests. The host role previously installed only the emulator
 matching the host architecture, leaving its advertised TCG tier unavailable after provisioning.
 Debian-family and SUSE-family repositories package the ppc64le emulator; Enterprise Linux does
-not package a foreign-architecture emulator.
+not package a foreign-architecture emulator. #2405 further establishes that default EL ppc64le
+repositories do not provide the native `qemu-kvm` package either.
 
 ## Decision
 
 `libvirt_stack` installs the native emulator and ppc64le emulator on Debian-family, SUSE-family,
-and Fedora hosts. Enterprise Linux hosts remain native-only. The family-to-guest availability map
+and Fedora hosts. Enterprise Linux hosts remain native-only where a native emulator package is
+available. Default EL ppc64le fails before DNF because no native emulator package is available.
+The family-to-guest availability map
 has a Fedora distribution package override because Fedora shares Ansible's RedHat family with
 Enterprise Linux but uses a different foreign emulator package. It is role-local because it
 selects packages for privileged provisioning; ADR-0641 keeps diagnostic package advice separate.
@@ -24,8 +27,9 @@ selects packages for privileged provisioning; ADR-0641 keeps diagnostic package 
 ## Consequences
 
 Provisioned Debian-family, SUSE-family, and Fedora x86_64 hosts can run the ppc64le TCG tier.
-Enterprise Linux hosts clearly do not promise that tier, while retaining their native `qemu-kvm`
-installation.
+Enterprise Linux hosts clearly do not promise that tier. Default EL ppc64le also stops before
+package installation rather than asking DNF to install unavailable `qemu-kvm`; this bounded
+refusal does not claim a result for subscribed RHEL channels.
 
 ## Considered & rejected
 
