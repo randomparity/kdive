@@ -12,7 +12,7 @@ EnvironmentFile=/etc/kdive/kdive.env
 ExecStart=/opt/kdive/.venv/bin/python -m kdive reconciler
 Restart=on-failure
 RestartSec=5
-# Backends (Postgres/MinIO/OIDC) are external and not systemd-ordered here; the unit
+# Backends (Postgres/SeaweedFS/OIDC) are external and not systemd-ordered here; the unit
 # retries until they are reachable rather than failing terminally (ADR-0114 §4).
 # Sandboxing: the reconciler is a network service that also reaches the libvirt socket
 # under /run (which ProtectSystem=full leaves reachable) and writes nothing under /usr,

@@ -32,6 +32,7 @@ import boto3
 import psycopg
 import pytest
 from botocore.client import Config as BotoConfig
+from botocore.exceptions import ClientError
 
 pytestmark = pytest.mark.live_stack
 
@@ -42,7 +43,7 @@ _COMPOSE_FILE = _ROOT / "docker-compose.yml"
 #: expectation in ``test_compose_config.py``; this module proves the runtime consequence.
 _DATA_MOUNTS = {
     "postgres": ("kdive-pgdata", "/var/lib/postgresql/data"),
-    "minio": ("kdive-minio-data", "/data"),
+    "seaweedfs": ("kdive-seaweedfs-data", "/data"),
 }
 
 #: prometheus is started too, but its image `VOLUME /prometheus` is covered by tmpfs rather
@@ -198,8 +199,8 @@ def _s3_when_ready(endpoint: str, *, deadline_s: float = 60.0):  # noqa: ANN202 
     client = boto3.client(
         "s3",
         endpoint_url=endpoint,
-        aws_access_key_id="minioadmin",
-        aws_secret_access_key="minioadmin",  # pragma: allowlist secret — compose dev literal
+        aws_access_key_id="kdive",
+        aws_secret_access_key="kdive-demo-secret",  # pragma: allowlist secret — compose dev literal
         region_name="us-east-1",
         config=BotoConfig(signature_version="s3v4", retries={"max_attempts": 1}),
     )
@@ -214,23 +215,69 @@ def _s3_when_ready(endpoint: str, *, deadline_s: float = 60.0):  # noqa: ANN202 
             time.sleep(0.2)
 
 
+def _s3_bucket_when_visible(client, bucket: str, *, deadline_s: float = 60.0) -> int:  # noqa: ANN202 - botocore client
+    """Wait until a newly created bucket is observable through its S3 head operation."""
+    deadline = time.monotonic() + deadline_s
+    while True:
+        try:
+            status = client.head_bucket(Bucket=bucket)["ResponseMetadata"]["HTTPStatusCode"]
+            if status == 200:
+                return status
+        except Exception:  # noqa: BLE001 - the local S3 service can lag after a volume reset
+            pass
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"S3 bucket {bucket!r} did not become visible before the deadline")
+        time.sleep(0.2)
+
+
+def test_bucket_visibility_waits_for_the_created_bucket(monkeypatch) -> None:
+    class _Client:
+        responses = iter(
+            (
+                ClientError({"Error": {"Code": "NoSuchBucket"}}, "HeadBucket"),
+                {"ResponseMetadata": {"HTTPStatusCode": 200}},
+            )
+        )
+
+        def head_bucket(self, *, Bucket: str):  # noqa: N803 - S3 operation keyword
+            response = next(self.responses)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    assert _s3_bucket_when_visible(_Client(), "fresh-bucket") == 200
+
+    assert sleeps == [0.2]
+
+
+def test_bucket_visibility_fails_at_its_deadline() -> None:
+    class _Client:
+        def head_bucket(self, *, Bucket: str):  # noqa: N803 - S3 operation keyword
+            raise ClientError({"Error": {"Code": "NoSuchBucket"}}, "HeadBucket")
+
+    with pytest.raises(AssertionError, match="did not become visible"):
+        _s3_bucket_when_visible(_Client(), "fresh-bucket", deadline_s=0)
+
+
 @contextmanager
 def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
     token = uuid.uuid4().hex[:12]
     project = f"kdive-volume-proof-{token}"
-    postgres_port, minio_port, console_port, prometheus_port = _free_ports(4)
+    postgres_port, seaweedfs_port, prometheus_port = _free_ports(3)
     env = {
         "COMPOSE_PROJECT_NAME": project,
         # Every published host port is overridden to an isolated loopback address and port:
-        # the defaults (5432/9000/9001/9090 on 127.0.0.1, ADR-0554) would still collide with
+        # the defaults (5432/8333/9090 on 127.0.0.1, ADR-0554) would still collide with
         # an operator's running stack on the same host.
         "KDIVE_POSTGRES_PORT": f"127.0.0.1:{postgres_port}",
-        "KDIVE_MINIO_PORT": f"127.0.0.1:{minio_port}",
-        "KDIVE_MINIO_CONSOLE_PORT": f"127.0.0.1:{console_port}",
+        "KDIVE_SEAWEEDFS_PORT": f"127.0.0.1:{seaweedfs_port}",
         "KDIVE_PROMETHEUS_PORT": f"127.0.0.1:{prometheus_port}",
     }
     dsn = f"postgresql://{_PG_CREDENTIALS}@127.0.0.1:{postgres_port}/kdive"
-    endpoint = f"http://127.0.0.1:{minio_port}"
+    endpoint = f"http://127.0.0.1:{seaweedfs_port}"
     try:
         yield env, project, dsn, endpoint
     finally:
@@ -328,7 +375,8 @@ def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None
                 ("after-wipe",)
             ]
         s3 = _s3_when_ready(endpoint)
-        buckets = {entry["Name"] for entry in s3.list_buckets()["Buckets"]}
-        assert bucket not in buckets
+        with pytest.raises(ClientError) as missing_bucket:
+            s3.get_object(Bucket=bucket, Key=_MARKER_KEY)
+        assert missing_bucket.value.response["Error"]["Code"] in {"NoSuchBucket", "NoSuchKey"}
         s3.create_bucket(Bucket=bucket)
-        assert bucket in {entry["Name"] for entry in s3.list_buckets()["Buckets"]}
+        assert _s3_bucket_when_visible(s3, bucket) == 200

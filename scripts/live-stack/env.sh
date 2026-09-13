@@ -12,8 +12,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 # only the host mapping does — so an operator whose host already runs e.g. Postgres on 5432 or a
 # vLLM on 8000 can relocate kdive's mapping without touching any container.
 export KDIVE_POSTGRES_PORT="${KDIVE_POSTGRES_PORT:-5432}"
-export KDIVE_MINIO_PORT="${KDIVE_MINIO_PORT:-9000}"
-export KDIVE_MINIO_CONSOLE_PORT="${KDIVE_MINIO_CONSOLE_PORT:-9001}"
+export KDIVE_SEAWEEDFS_PORT="${KDIVE_SEAWEEDFS_PORT:-8333}"
 export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-8090}"
 export KDIVE_PROMETHEUS_PORT="${KDIVE_PROMETHEUS_PORT:-9090}"
 export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
@@ -57,11 +56,11 @@ if [[ -z "${KDIVE_OIDC_IMAGE+set}" && "$(uname -m 2>/dev/null || true)" == "ppc6
   grep -q 'emulated by qemu' /sys/firmware/devicetree/base/model 2>/dev/null; then
   export KDIVE_OIDC_IMAGE="ghcr.io/randomparity/mock-oauth2-server@sha256:e11ba633538714499356765720c05ef57ecb0ac70db4ca780f6a44d2e49a070a"
 fi
-export KDIVE_S3_ENDPOINT_URL="${KDIVE_S3_ENDPOINT_URL:-http://localhost:${KDIVE_MINIO_PORT}}"
+export KDIVE_S3_ENDPOINT_URL="${KDIVE_S3_ENDPOINT_URL:-http://localhost:${KDIVE_SEAWEEDFS_PORT}}"
 export KDIVE_S3_BUCKET="${KDIVE_S3_BUCKET:-kdive-artifacts}"
 export KDIVE_S3_REGION="${KDIVE_S3_REGION:-us-east-1}"
-export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-minioadmin}"
-export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-minioadmin}"
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-kdive}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-kdive-demo-secret}"
 export KDIVE_HTTP_HOST="${KDIVE_HTTP_HOST:-127.0.0.1}"
 export KDIVE_HTTP_PORT="${KDIVE_HTTP_PORT:-8000}"
 export KDIVE_STACK_BASE_URL="${KDIVE_STACK_BASE_URL:-http://${KDIVE_HTTP_HOST}:${KDIVE_HTTP_PORT}/mcp}"

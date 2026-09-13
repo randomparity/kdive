@@ -204,7 +204,7 @@ S3_ENDPOINT_URL = Setting(
     processes=_STORE_USERS,
     required_when=_always,
     help="S3-compatible endpoint URL for bulk artifacts (required, ADR-0337).",
-    suggest="an S3-compatible endpoint URL, e.g. http://minio:9000",
+    suggest="an S3-compatible endpoint URL, e.g. http://seaweedfs:8333",
 )
 S3_BUCKET = Setting(
     name="KDIVE_S3_BUCKET",

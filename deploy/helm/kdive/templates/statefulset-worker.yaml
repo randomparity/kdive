@@ -50,7 +50,7 @@ spec:
         runAsUser: 10001
         fsGroup: 10001
       initContainers:
-        {{- include "kdive.minioVersioningBarrierItem" . | nindent 6 }}
+        {{- include "kdive.seaweedfsInitializationBarrierItem" . | nindent 6 }}
         - name: worker-credential
           image: {{ include "kdive.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}

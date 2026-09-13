@@ -25,7 +25,7 @@ or the built kernel tree.
   qemu-guest-agent (enabled), a kdump-capable base OS, `drgn`, and a matching
   `vmlinux`/debuginfo. Provisioning verifies the volume **exists**, not its contents — these
   image-content obligations are the operator's (ADR-0078/0079).
-- The local stack backends up (Postgres + MinIO + mock OIDC) and the host
+- The local stack backends up (Postgres + SeaweedFS + mock OIDC) and the host
   `server`/`worker`/`reconciler` running, exactly as in the [local runbook](live-stack.md)
   steps 1–4. The remote variant changes only the **target** of provisioning, not the control
   plane.

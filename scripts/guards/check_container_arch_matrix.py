@@ -20,8 +20,9 @@ per-handling-token obligation on every matrix row:
 
 Compose is parsed with ``yaml.safe_load`` (PyYAML is a hard dependency), which resolves the
 file's anchors, merge keys, and block scalars; the guard reads only the ``services`` mapping.
-The matrix is the ``<!-- arch-matrix:begin -->`` … ``<!-- arch-matrix:end -->`` block in the
-ADR, parsed as a Markdown table. Run via
+The current matrix is the optional ``<!-- arch-matrix-current:begin -->`` …
+``<!-- arch-matrix-current:end -->`` addendum block; otherwise it is the historical
+``arch-matrix`` block in the ADR. Run via
 ``uv run python scripts/guards/check_container_arch_matrix.py`` (``just container-arch-check``).
 Exit 0 clean, 1 on any violation or a malformed matrix.
 """
@@ -41,6 +42,8 @@ ADR_PATH = _ROOT / "docs" / "adr" / "0356-cross-platform-dev-containers.md"
 
 _BEGIN = "<!-- arch-matrix:begin -->"
 _END = "<!-- arch-matrix:end -->"
+_CURRENT_BEGIN = "<!-- arch-matrix-current:begin -->"
+_CURRENT_END = "<!-- arch-matrix-current:end -->"
 
 HANDLING = frozenset({"rely-on-upstream", "mirror", "build-local", "accept-gap"})
 ARCHES = ("amd64", "arm64", "ppc64le")  # the three arch columns, one source for the checks
@@ -119,11 +122,14 @@ def parse_compose(text: str) -> dict[str, ImageInfo]:
 
 
 def _matrix_block(adr_text: str) -> str:
-    """Return the text between the arch-matrix markers, or raise if they are absent."""
-    if _BEGIN not in adr_text or _END not in adr_text:
+    """Return the current matrix addendum, or the original matrix when none exists."""
+    begin, end_marker = (_CURRENT_BEGIN, _CURRENT_END)
+    if begin not in adr_text and end_marker not in adr_text:
+        begin, end_marker = (_BEGIN, _END)
+    if begin not in adr_text or end_marker not in adr_text:
         raise ValueError("arch matrix: begin/end markers not found in the ADR")
-    start = adr_text.index(_BEGIN) + len(_BEGIN)
-    end = adr_text.index(_END)
+    start = adr_text.index(begin) + len(begin)
+    end = adr_text.index(end_marker)
     if end < start:
         raise ValueError("arch matrix: end marker precedes begin marker")
     return adr_text[start:end]

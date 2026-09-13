@@ -12,7 +12,7 @@ EnvironmentFile=/etc/kdive/kdive.env
 ExecStart=/opt/kdive/.venv/bin/python -m kdive worker
 Restart=on-failure
 RestartSec=5
-# Backends (Postgres/MinIO/OIDC) are external and not systemd-ordered here; the unit
+# Backends (Postgres/SeaweedFS/OIDC) are external and not systemd-ordered here; the unit
 # retries until they are reachable rather than failing terminally (ADR-0114 §4).
 # Sandboxing exemption: unlike the server/reconciler, the worker is intentionally NOT
 # sandboxed. It runs the build/install/capture planes — libguestfs + qemu (needs /dev/kvm

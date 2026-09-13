@@ -1,7 +1,7 @@
 # kdive Helm chart
 
 Deploys four long-running Kubernetes workloads — server, worker, reconciler, lifecycle witness —
-plus a migrate one-shot Job, against operator-provided Postgres/MinIO/OIDC backends. Implements
+plus a migrate one-shot Job, against operator-provided Postgres/S3-compatible/OIDC backends. Implements
 ADR-0088 (deployment & packaging).
 
 This README is the value/flag reference. For an end-to-end bring-up — building and
@@ -76,7 +76,7 @@ Apply captured overrides to the new defaults; do not use bare `--reuse-values`.
 
 A `helm upgrade` that changes a shared `config.*` value rolls server, worker, and reconciler
 workloads automatically (a `checksum/config` pod annotation, ADR-0134) — no manual
-`kubectl rollout restart` is needed. The bundled Postgres/MinIO backends carry no such
+`kubectl rollout restart` is needed. The bundled Postgres/SeaweedFS backends carry no such
 annotation, so a config change never rolls their `emptyDir` pods. The lifecycle witness consumes
 only explicit authority settings; changing its database Secret ref rolls that workload alone.
 
@@ -111,7 +111,7 @@ Scaling down or uninstalling deletes the departing replicas' claims:
 ## Bundled backends (demo only)
 
 `bundledBackends=true` (co-set with `demoAcknowledged=true`) stands up first-party Postgres,
-MinIO, and a mock-OIDC issuer as in-chart Deployments on `emptyDir`: **a pod restart drops all
+SeaweedFS, and a mock-OIDC issuer as in-chart Deployments on `emptyDir`: **a pod restart drops all
 state by design.** The issuer mints valid `aud=kdive` tokens for any caller, so the chart
 forces `service.type=ClusterIP` on this path — reach MCP with `kubectl port-forward`, never
 expose it.
@@ -129,25 +129,25 @@ roles before app readiness can pass. Upgrades use a pre-upgrade migration hook.
 image the demo cannot pull. The demo migrate Job runs `post-install` behind a DB-readiness
 init container.
 
-The bundled `minio-init` Job creates the configured bucket, enables bucket-wide versioning, then
-fails closed unless MinIO reports `Enabled`, MFA Delete off, and no prefix/folder exclusions. The
-server, worker, and reconciler Pods each repeat that policy check in an `mc` init container. Until
-the bucket exists and passes, Kubernetes may restart the init container, but it cannot start the
-app container. External-backend workloads omit this MinIO-specific barrier and use the runtime S3
-validation described above.
+The bundled `seaweedfs-init` Job invokes the packaged KDIVE bucket initializer. It creates the
+configured bucket, enables bucket-wide versioning, and fails unless S3 reports `Enabled`. The
+server, worker, and reconciler Pods each run the same initializer as a startup barrier. Until it
+completes, Kubernetes may restart the init container, but it cannot start the app container.
+External-backend workloads omit this bundled-store barrier and use the runtime S3 validation
+described above.
 
 ### Single object store (remote-libvirt & external uploads)
 
 A deployment has **one** object store, and three parties use it over presigned URLs: the
 in-cluster worker, an external uploader (`runs.complete_build`), and the remote-libvirt guest
-(`install` fetch + `kdump` capture). The bundled MinIO defaults to **ClusterIP** with
-`KDIVE_S3_ENDPOINT_URL=http://<release>-kdive-minio:9000` — in-cluster only, so `host_dump` capture and
+(`install` fetch + `kdump` capture). The bundled SeaweedFS defaults to **ClusterIP** with
+`KDIVE_S3_ENDPOINT_URL=http://<release>-kdive-seaweedfs:8333` — in-cluster only, so `host_dump` capture and
 `introspect.from_vmcore` work but external uploads and remote-libvirt `install`/`kdump` capture do
 not. `config.KDIVE_S3_ENDPOINT_URL` overrides that default in both modes. Follow the
 [object-store exposure procedure](../../../docs/operating/runbooks/kubernetes-deploy.md#the-bundled-demos-object-store-is-in-cluster-only--expose-it-for-remote-libvirt)
 to configure an endpoint reachable by all three consumers and verify the network route.
 
-Exposing the store opens a companion NetworkPolicy on :9000 from `demo.minio.service.sourceRanges`
+Exposing the store opens a companion NetworkPolicy on :8333 from `demo.seaweedfs.service.sourceRanges`
 (default `0.0.0.0/0`). That allowlist does **not** restrict by client IP: under the Service's
 default `externalTrafficPolicy: Cluster`, external traffic is SNAT'd to a node IP before the
 NetworkPolicy controller sees it, so the rule matches iff the node IP is in range — effectively

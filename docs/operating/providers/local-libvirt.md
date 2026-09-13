@@ -45,7 +45,7 @@ Kernel compilation happens outside KDIVE — follow the
 
 - **KVM and libvirt:** a running `libvirtd` (Debian/Ubuntu) or `virtqemud` (RedHat family), the
   `default` network active, and the operator in the `libvirt` and `kvm` groups.
-- **A container engine:** the Postgres, MinIO, and mock-OIDC backends run under `docker compose`.
+- **A container engine:** the Postgres, SeaweedFS, and mock-OIDC backends run under `docker compose`.
 - **libguestfs and its Python binding:** `build-fs` and the kdump capture path build a supermin
   appliance, which needs a readable host kernel under `/boot`.
 - **The checkout, synced:** there is no PyPI wheel yet — `uv sync --locked` in the checkout is the

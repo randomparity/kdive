@@ -1,9 +1,10 @@
-"""Disposable-MinIO fixtures for the object-store tests (ADR-0017, ADR-0401).
+"""Disposable SeaweedFS fixtures for the object-store tests (ADR-0017, ADR-0401).
 
 ``minio_store`` yields an :class:`ObjectStore` bound to a per-worker bucket on a
-MinIO shared for the whole run. It first honors ``KDIVE_TEST_S3_URL`` (a running
-MinIO/S3, e.g. ``just compose-up``, credentials ``KDIVE_TEST_S3_ACCESS_KEY`` /
-``KDIVE_TEST_S3_SECRET_KEY`` defaulting to the compose ``minioadmin`` root); with no
+SeaweedFS S3 endpoint shared for the whole run. It first honors ``KDIVE_TEST_S3_URL``
+(a running SeaweedFS/S3 endpoint, e.g. ``just compose-up``), with credentials
+``KDIVE_TEST_S3_ACCESS_KEY`` / ``KDIVE_TEST_S3_SECRET_KEY`` defaulting to the Compose
+``kdive`` account; with no
 override it lazily starts one shared testcontainer coordinated across xdist workers
 (``tests/support/xdist_backend``). Each worker owns a ``kdive-test-<worker>-<token>``
 bucket; ``key_ns`` gives each test a unique key prefix within it. When Docker is
@@ -14,8 +15,7 @@ container path a killed run strands the container itself; the next run to start 
 it, keyed to a lock the owning run holds while alive, so a concurrent suite's container is
 never taken (ADR-0551, #1910).
 
-MinIO's official image is archived (final tag pinned below); if it stops resolving,
-swap in localstack or a Chainguard MinIO rebuild (ADR-0017).
+The KDIVE-built SeaweedFS image is pinned to its immutable OCI index digest.
 """
 
 from __future__ import annotations
@@ -35,24 +35,20 @@ from botocore.exceptions import BotoCoreError, ClientError
 from kdive.store.objectstore import ObjectStore
 from tests.support import xdist_backend
 
-# MinIO's official images are archived; the last tag actually pushed to Docker Hub
-# is RELEASE.2025-09-07T16-13-09Z (the later source-only 2025-10-15 patch was never
-# published as an image). Pinned to the manifest-list digest so a re-tag cannot
-# silently change the image (ADR-0505 shape, #1921). To update: `docker pull` the
-# new tag and replace the digest. If the tag stops resolving, swap to a Chainguard
-# MinIO rebuild or a localstack S3 fixture (ADR-0017).
-_MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"  # noqa: E501  # RELEASE.2025-09-07T16-13-09Z
-_MINIO_PORT = 9000
+# The image is pinned to its OCI index digest so a re-tag cannot silently change the
+# tested backend. To update, pull the new published digest and replace this value.
+_SEAWEEDFS_IMAGE = "ghcr.io/randomparity/kdive-seaweedfs@sha256:6a4e9f013ecd9c1f86136ed3d3c7eb089c8eb13ff3eee83044ab2a2950f7ce6c"  # noqa: E501
+_SEAWEEDFS_PORT = 8333
 _ROOT_USER = "kdive-test"
 _ROOT_PASSWORD = "kdive-test-secret"  # disposable local test container credential
 _REGION = "us-east-1"
 _READY_TIMEOUT_S = 60.0
-_DEFAULT_S3_ACCESS_KEY = "minioadmin"  # just compose-up MinIO root
-_DEFAULT_S3_SECRET_KEY = "minioadmin"  # pragma: allowlist secret - local dev only
+_DEFAULT_S3_ACCESS_KEY = "kdive"  # just compose-up SeaweedFS account
+_DEFAULT_S3_SECRET_KEY = "kdive-demo-secret"  # pragma: allowlist secret - local dev only
 
 
 def _await_ready(client: Any) -> None:
-    """Poll ``list_buckets`` until MinIO answers or the timeout elapses."""
+    """Poll ``list_buckets`` until SeaweedFS answers or the timeout elapses."""
     deadline = time.monotonic() + _READY_TIMEOUT_S
     last_exc: Exception | None = None
     while time.monotonic() < deadline:
@@ -62,11 +58,11 @@ def _await_ready(client: Any) -> None:
         except (BotoCoreError, ClientError, OSError) as exc:
             last_exc = exc
             time.sleep(0.5)
-    raise RuntimeError(f"MinIO not ready within {_READY_TIMEOUT_S}s: {last_exc}")
+    raise RuntimeError(f"SeaweedFS not ready within {_READY_TIMEOUT_S}s: {last_exc}")
 
 
 def _select_s3_endpoint() -> tuple[str, str, str]:
-    """Return (endpoint, access_key, secret_key) for an override MinIO, if set."""
+    """Return (endpoint, access_key, secret_key) for an override S3 endpoint, if set."""
     endpoint = os.environ["KDIVE_TEST_S3_URL"]
     access = os.environ.get("KDIVE_TEST_S3_ACCESS_KEY", _DEFAULT_S3_ACCESS_KEY)
     secret = os.environ.get("KDIVE_TEST_S3_SECRET_KEY", _DEFAULT_S3_SECRET_KEY)
@@ -77,7 +73,7 @@ def _worker_bucket_name() -> str:
     return f"kdive-test-{xdist_backend.xdist_worker_id()}-{xdist_backend.worker_namespace_token()}"
 
 
-def _start_minio(labels: Mapping[str, str]) -> tuple[str, str]:
+def _start_seaweedfs(labels: Mapping[str, str]) -> tuple[str, str]:
     from testcontainers.core.config import testcontainers_config
     from testcontainers.core.container import DockerContainer
 
@@ -88,26 +84,26 @@ def _start_minio(labels: Mapping[str, str]) -> tuple[str, str]:
     testcontainers_config.ryuk_disabled = True
     xdist_backend.sweep_stale_backend_containers()
     container = (
-        DockerContainer(_MINIO_IMAGE)
-        .with_command("server /data")
-        .with_env("MINIO_ROOT_USER", _ROOT_USER)
-        .with_env("MINIO_ROOT_PASSWORD", _ROOT_PASSWORD)
-        .with_exposed_ports(_MINIO_PORT)
+        DockerContainer(_SEAWEEDFS_IMAGE)
+        .with_command("mini -dir=/data")
+        .with_env("S3_ACCESS_KEY", _ROOT_USER)
+        .with_env("S3_SECRET_KEY", _ROOT_PASSWORD)
+        .with_exposed_ports(_SEAWEEDFS_PORT)
         .with_kwargs(labels=dict(labels))
     )
     container.start()
     endpoint = (
-        f"http://{container.get_container_host_ip()}:{container.get_exposed_port(_MINIO_PORT)}"
+        f"http://{container.get_container_host_ip()}:{container.get_exposed_port(_SEAWEEDFS_PORT)}"
     )
     return endpoint, container.get_wrapped_container().id
 
 
-def _stop_minio(container_id: str) -> None:
+def _stop_seaweedfs(container_id: str) -> None:
     import docker.errors
     from testcontainers.core.docker_client import DockerClient
 
     with suppress(docker.errors.NotFound):  # already reaped
-        # `v=True` is load-bearing: the MinIO image declares VOLUME /data, so every
+        # `v=True` is load-bearing: the SeaweedFS image declares VOLUME /data, so every
         # container gets an anonymous volume holding this run's uploaded artifacts.
         # Removing the container without it leaves that volume dangling, once per run.
         DockerClient().client.containers.get(container_id).remove(force=True, v=True)
@@ -126,7 +122,7 @@ def _s3_client(endpoint: str, access: str, secret: str) -> Any:
 
 def _ensure_empty_bucket(client: Any, bucket: str) -> None:
     """Create the bucket if absent, then always empty it (handles a same-token retry
-    where the bucket already exists, and MinIO/us-east-1 returning 200 for an owned
+    where the bucket already exists, and SeaweedFS/us-east-1 returning 200 for an owned
     bucket rather than raising)."""
     with suppress(client.exceptions.BucketAlreadyOwnedByYou, client.exceptions.BucketAlreadyExists):
         client.create_bucket(Bucket=bucket)
@@ -142,12 +138,12 @@ def _empty_bucket(client: Any, bucket: str) -> None:
 
 
 @contextmanager
-def _acquire_minio_endpoint(
+def _acquire_seaweedfs_endpoint(
     tmp_path_factory: pytest.TempPathFactory, *, require_docker: bool
 ) -> Iterator[tuple[str, str, str]]:
     """Yield (endpoint, access_key, secret_key): the override if set, else a shared
     container. Extracted so the override / require-docker / skip decisions are directly
-    testable (the tests monkeypatch ``_start_minio``)."""
+    testable (the tests monkeypatch ``_start_seaweedfs``)."""
     if os.environ.get("KDIVE_TEST_S3_URL"):
         yield _select_s3_endpoint()
         return
@@ -161,7 +157,11 @@ def _acquire_minio_endpoint(
 
     root = xdist_backend.per_run_root(tmp_path_factory)
     with xdist_backend.shared_container_or_skip(
-        root, "minio", start=_start_minio, stop=_stop_minio, require_docker=require_docker
+        root,
+        "seaweedfs",
+        start=_start_seaweedfs,
+        stop=_stop_seaweedfs,
+        require_docker=require_docker,
     ) as endpoint:
         yield endpoint, _ROOT_USER, _ROOT_PASSWORD
 
@@ -170,7 +170,7 @@ def _acquire_minio_endpoint(
 def minio_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ObjectStore]:
     require_docker = os.environ.get("KDIVE_REQUIRE_DOCKER") == "1"
     bucket = _worker_bucket_name()
-    with _acquire_minio_endpoint(tmp_path_factory, require_docker=require_docker) as (
+    with _acquire_seaweedfs_endpoint(tmp_path_factory, require_docker=require_docker) as (
         endpoint,
         access,
         secret,

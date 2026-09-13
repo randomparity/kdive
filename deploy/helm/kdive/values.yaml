@@ -4,7 +4,7 @@ image:
   digest: ""         # set to pin by digest (overrides tag)
   pullPolicy: IfNotPresent
 
-# bundledBackends pulls the Postgres/MinIO subcharts for a turnkey demo. They run
+# bundledBackends pulls the Postgres/SeaweedFS demo backends for a turnkey demo. They run
 # on emptyDir (no PVC, no backup): a pod restart drops all state by design. It is
 # ephemeral/demo-only and must be co-set with demoAcknowledged=true or the chart
 # fails to render. Production runs against operator-provided backends, toggle off.
@@ -160,16 +160,16 @@ demoCredentials:
     workerPassword: kdive-worker-demo # pragma: allowlist secret
     reconcilerPassword: kdive-reconciler-demo # pragma: allowlist secret
     lifecycleWitnessPassword: kdive-witness-demo # pragma: allowlist secret
-  minio:
-    rootUser: kdive
-    rootPassword: kdive-demo-secret # pragma: allowlist secret
+  seaweedfs:
+    accessKey: kdive
+    secretKey: kdive-demo-secret # pragma: allowlist secret
 
 # Image pins for the first-party demo backends (bundledBackends path only).
 demo:
   postgres:
     image: postgres:17
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+  seaweedfs:
+    image: ghcr.io/randomparity/kdive-seaweedfs@sha256:6a4e9f013ecd9c1f86136ed3d3c7eb089c8eb13ff3eee83044ab2a2950f7ce6c
     # Expose the bundled object store off-cluster (needed for remote-libvirt guest
     # install/capture and external build uploads — see the deploy README, "Single object
     # store"). Default ClusterIP keeps it in-cluster; with NodePort also set a node-routable
@@ -178,15 +178,13 @@ demo:
       type: ClusterIP
       nodePort: ""
       # When exposed (type != ClusterIP), the demo default-deny NetworkPolicy is opened for the
-      # MinIO S3 port from these CIDRs so the remote guest/uploader can reach it. Empty = anywhere
+      # SeaweedFS S3 port from these CIDRs so the remote guest/uploader can reach it. Empty = anywhere
       # (0.0.0.0/0, demo only). NOTE: this does NOT restrict by client IP — under the Service's
       # default externalTrafficPolicy (Cluster) external traffic is SNAT'd to a node IP before the
       # NetworkPolicy sees it, so the allowlist effectively gates only the node/pod CIDR (the rule
       # matches iff the node IP falls in range). For real per-client restriction, scope at your
       # LoadBalancer or network firewall. NOTES.txt warns whenever the effective range is world-open.
       sourceRanges: []
-  mc:
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
   oidc:
     image: ghcr.io/navikt/mock-oauth2-server:3.0.3
     # Demo-only claim set the bundled issuer stamps on every token. The issuer mints a

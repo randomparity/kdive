@@ -2,7 +2,7 @@
 
 The repo-root [`docker-compose.yml`](../../docker-compose.yml) brings up the three kdive
 processes (`server` / `worker` / `reconciler`) plus a `migrate` one-shot, on top of the
-existing dev backends (Postgres, MinIO, mock OIDC). Everything is wired purely through
+existing dev backends (Postgres, SeaweedFS, mock OIDC). Everything is wired purely through
 `KDIVE_*` (see the [config reference](../../docs/guide/reference/config.md)); the shared
 backend env is declared once as the `x-backends` anchor and merged into each service.
 
@@ -29,7 +29,7 @@ fails; use `just compose-recreate-worker` to retry after correcting the cause.
 
 The dependency graph is self-contained, so a single `up` brings the whole stack. The checked-in
 passwords below are allowlisted for local development only; never reuse them in a
-production deployment. Postgres, MinIO, and the mock OIDC issuer bind `127.0.0.1` by default
+production deployment. Postgres, SeaweedFS, and the mock OIDC issuer bind `127.0.0.1` by default
 (ADR-0554), so they are reachable on `localhost` only. The backend port variables accept an
 `ADDR:PORT` host mapping. Exposing the fixed-credential backends is an explicit operator choice. If `KDIVE_POSTGRES_PORT` includes an address, also set
 `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` to a valid witness DSN with a reachable host and numeric
@@ -43,11 +43,18 @@ just compose-up   # builds the image, runs the backends + migrate, then gates th
 The four supported worker lifecycle recipes are `just compose-up`, `just compose-stop`,
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
-destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
-artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
+destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-seaweedfs-data`
+(the artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
 Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
 The operator-side lifecycle wrapper binds the exact full container ID to a
 random nonce in Postgres before start and records retained terminal inspect evidence before removal.
+
+### SeaweedFS data-volume transition
+
+`kdive-minio-data` is incompatible input for SeaweedFS. Stop the old stack and retain that volume
+unchanged as a rollback artifact, then start the new stack with an empty `kdive-seaweedfs-data`
+volume. Do not mount, reuse, or convert the old volume; export/import needs a separately approved
+operator procedure.
 Compose does not run a persistent lifecycle-witness service. Raw Compose/Docker lifecycle commands
 and host-launched workers bypass that chain and are unsupported. On a database failure, the wrapper
 leaves the never-started or terminal worker retained; restore Postgres and retry.
@@ -105,22 +112,21 @@ they bypass the public lifecycle path and retain pins.
 ## Startup ordering and recovery
 
 The lifecycle wrapper resolves the graph rather than relying on the operator to order it:
-the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
-(which itself waits for a healthy MinIO), the OIDC issuer, and the `migrate` one-shot. They
+the app services pull in a healthy Postgres, the `seaweedfs-init` bucket-creation one-shot
+(which itself waits for healthy SeaweedFS), the OIDC issuer, and the `migrate` one-shot. They
 declare `depends_on: migrate` with `condition: service_completed_successfully`, so they
 never reach the database before the schema is rolled forward (ADR-0088 decision 4); a
 non-zero `migrate` exit blocks app start. The bucket-creation one-shot completes before any
 app process starts, so the worker's first artifact write never races a missing bucket.
 
-The bucket initializer enables bucket-wide versioning and requires `Enabled`, MFA Delete off,
-and no prefix/folder exclusions. An external replacement needs the same policy and runtime
-permissions, including `s3:GetObjectVersion`; follow the
+The bucket initializer enables bucket-wide versioning and requires S3 to report `Enabled`. An
+external replacement needs versioning and runtime permissions, including `s3:GetObjectVersion`; follow the
 [object-store preflight](../../docs/operating/install.md#object-store-preflight).
 
 The three app processes acquire their first database connection with a ten-second timeout after
 startup initialization. If acquisition fails, read the error and preceding `psycopg.pool` warning
 for the database, credential, or network cause. App services and backends use `restart: on-failure`
-to retry failures; `migrate`, `role-bootstrap`, and `minio-init` are one-shots. After a Docker daemon
+to retry failures; `migrate`, `role-bootstrap`, and `seaweedfs-init` are one-shots. After a Docker daemon
 restart, explicitly run `just compose-up`; `on-failure` does not bring the stack back on reboot.
 
 The `migrate` service defines the shared app image build; `KDIVE_IMAGE` selects an alternative
@@ -210,16 +216,17 @@ They own signature identity, image tags, SBOM, and provenance checks. Git releas
 
 ## Using the stack as a test backend
 
-Tests can use the Compose Postgres and MinIO through explicit overrides:
+Tests can use the Compose Postgres and SeaweedFS through explicit overrides:
 
 ```bash
 export KDIVE_TEST_PG_URL=postgresql://kdive:kdive@localhost:5432/kdive  # pragma: allowlist secret
-export KDIVE_TEST_S3_URL=http://localhost:9000
+export KDIVE_TEST_S3_URL=http://localhost:8333
 ```
 
 Those are the checked-in local admin credentials. For another server, provide a dedicated test
 admin DSN that can create/drop test databases and run their migrations. S3 credentials default
-to local `minioadmin`; override `KDIVE_TEST_S3_ACCESS_KEY` and `KDIVE_TEST_S3_SECRET_KEY` when needed.
+to local `kdive` / `kdive-demo-secret`; override `KDIVE_TEST_S3_ACCESS_KEY` and
+`KDIVE_TEST_S3_SECRET_KEY` when needed.
 Adjust endpoints to the published ports. Never point test overrides at a production backend.
 
 Each worker gets a unique `kdive_test_<worker>_<token>` database and
@@ -229,7 +236,7 @@ use `just compose-down` if the entire Compose project's state is disposable. Do 
 wildcard force-drop while other runs may own matching names. Named volumes preserve leftovers
 across `just compose-stop`; that command does not reclaim them.
 
-Without overrides, the fixtures share one disposable Postgres and one MinIO container per run.
+Without overrides, the fixtures share one disposable Postgres and one SeaweedFS container per run.
 They stop on normal teardown; a later run can reap a killed run's containers using their liveness
 locks. The [fixture coordination source](../../tests/support/xdist_backend.py) owns those rules.
 

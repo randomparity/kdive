@@ -388,7 +388,7 @@ coeff = "1.0"
 # secrets_root = "/home/you/.kdive-secrets"
 # build_workspace = "/work/.live-build"
 # build_component_roots = "/work/fixtures/local-libvirt:/work/.live-components"
-# s3_endpoint_url = "http://<workstation-lan-ip>:9000"   # reachable FROM the remote guest
+# s3_endpoint_url = "http://<workstation-lan-ip>:8333"   # reachable FROM the remote guest
 # lan_ip = "<workstation-lan-ip>"
 
 # [campaign.remote_libvirt]

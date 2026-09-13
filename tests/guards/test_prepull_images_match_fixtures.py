@@ -38,7 +38,7 @@ _SUITE_WORKFLOWS = ("ci.yml", "test-ordering.yml")
 #: ``_POSTGRES_IMAGE = "postgres:17"`` — the fixture constant, matched by name, not by line.
 _FIXTURE_CONSTANTS = {
     "tests/db/conftest.py": "_POSTGRES_IMAGE",
-    "tests/store/conftest.py": "_MINIO_IMAGE",
+    "tests/store/conftest.py": "_SEAWEEDFS_IMAGE",
 }
 
 #: The ``readonly IMAGES=( ... )`` array in the pull script, up to its closing paren.

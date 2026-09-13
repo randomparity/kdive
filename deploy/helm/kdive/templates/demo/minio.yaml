@@ -2,35 +2,35 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "kdive.fullname" . }}-minio
+  name: {{ include "kdive.fullname" . }}-seaweedfs
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ include "kdive.fullname" . }}-minio
+      app: {{ include "kdive.fullname" . }}-seaweedfs
   template:
     metadata:
       labels:
-        app: {{ include "kdive.fullname" . }}-minio
+        app: {{ include "kdive.fullname" . }}-seaweedfs
         {{- include "kdive.labels" . | nindent 8 }}
     spec:
       containers:
-        - name: minio
-          image: {{ .Values.demo.minio.image }}
-          args: ["server", "/data", "--console-address", ":9001"]
+        - name: seaweedfs
+          image: {{ .Values.demo.seaweedfs.image }}
+          args: ["mini", "-dir=/data"]
           env:
-            - name: MINIO_ROOT_USER
-              value: {{ .Values.demoCredentials.minio.rootUser | quote }}
-            - name: MINIO_ROOT_PASSWORD
-              value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
+            - name: S3_ACCESS_KEY
+              value: {{ .Values.demoCredentials.seaweedfs.accessKey | quote }}
+            - name: S3_SECRET_KEY
+              value: {{ .Values.demoCredentials.seaweedfs.secretKey | quote }}
           ports:
-            - containerPort: 9000
+            - containerPort: 8333
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
-              port: 9000
+              path: /
+              port: 8333
             periodSeconds: 5
           volumeMounts:
             - name: data
@@ -42,28 +42,28 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "kdive.fullname" . }}-minio
+  name: {{ include "kdive.fullname" . }}-seaweedfs
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
   # Default ClusterIP keeps the bundled object store in-cluster. To drive remote-libvirt or
   # accept external build uploads the guest/uploader must reach S3 too — set
-  # demo.minio.service.type=NodePort (and a node-routable KDIVE_S3_ENDPOINT_URL) to expose it.
+  # demo.seaweedfs.service.type=NodePort (and a node-routable KDIVE_S3_ENDPOINT_URL) to expose it.
   # The cluster network/firewall must permit the chosen NodePort.
-  type: {{ .Values.demo.minio.service.type | default "ClusterIP" }}
+  type: {{ .Values.demo.seaweedfs.service.type | default "ClusterIP" }}
   selector:
-    app: {{ include "kdive.fullname" . }}-minio
+    app: {{ include "kdive.fullname" . }}-seaweedfs
   ports:
-    - port: 9000
-      targetPort: 9000
-      {{- if and (eq (.Values.demo.minio.service.type | default "ClusterIP") "NodePort") .Values.demo.minio.service.nodePort }}
-      nodePort: {{ .Values.demo.minio.service.nodePort }}
+    - port: 8333
+      targetPort: 8333
+      {{- if and (eq (.Values.demo.seaweedfs.service.type | default "ClusterIP") "NodePort") .Values.demo.seaweedfs.service.nodePort }}
+      nodePort: {{ .Values.demo.seaweedfs.service.nodePort }}
       {{- end }}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "kdive.fullname" . }}-minio-init
+  name: {{ include "kdive.fullname" . }}-seaweedfs-init
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
@@ -75,27 +75,19 @@ spec:
     spec:
       restartPolicy: OnFailure
       containers:
-        - name: mc
-          image: {{ .Values.demo.mc.image }}
+        - name: initialize-bucket
+          image: {{ include "kdive.image" . }}
           command:
-            - /bin/sh
-            - -c
-            - |
-              set -eu
-              bucket="local/$MC_BUCKET"
-              until mc alias set local http://{{ include "kdive.fullname" . }}-minio:9000 "$MC_USER" "$MC_PASS"; do
-                echo "waiting for minio..."; sleep 3
-              done
-              mc mb --ignore-existing "$bucket"
-              mc version enable "$bucket"
-              version_info=$(mc version info --json "$bucket")
-              # Pinned mc omits ExcludedPrefixes when empty; compatible variants may emit [].
-              {{- include "kdive.minioVersioningPolicyCheck" . | nindent 14 }}
+            - python
+            - -m
+            - kdive.store.initialize_bucket
           env:
-            - name: MC_BUCKET
+            - name: KDIVE_S3_BUCKET
               value: {{ .Values.config.KDIVE_S3_BUCKET | quote }}
-            - name: MC_USER
-              value: {{ .Values.demoCredentials.minio.rootUser | quote }}
-            - name: MC_PASS
-              value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
+            - name: KDIVE_S3_ENDPOINT_URL
+              value: {{ include "kdive.s3Endpoint" . | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              value: {{ .Values.demoCredentials.seaweedfs.accessKey | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              value: {{ .Values.demoCredentials.seaweedfs.secretKey | quote }}
 {{- end }}
