@@ -23,7 +23,7 @@ an authenticated S3 endpoint on port 8333.
 
 The initializer is a repository-owned packaged Python module under `src/kdive`, run with
 `python -m` from the
-already-owned, pinned KDIVE application image (which has the locked boto3 dependency). Compose's
+already-owned configured KDIVE application image (which has the locked boto3 dependency). Compose's
 one-shot and Helm's Job/barrier invoke that same entry point with the bundled endpoint and
 credentials. Its retry count and delay are explicit constants; it creates the bucket idempotently,
 enables versioning, verifies `Status=Enabled`, and exits non-zero for any connection, create, or
