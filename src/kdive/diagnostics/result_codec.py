@@ -13,32 +13,11 @@ so one bad id cannot poison its recognised siblings.
 from __future__ import annotations
 
 import json
+from collections.abc import Container
 from typing import Any
 
-from kdive.diagnostics.checks import (
-    AUTHORITY_READINESS_ID,
-    DEPMOD_TOOLCHAIN_ID,
-    GDBSTUB_ACL_ID,
-    GUEST_ARCH_ACCEL_ID,
-    MULTIARCH_GDB_ID,
-    PROVIDER_TLS_ID,
-    PSERIES_FADUMP_ID,
-    CheckResult,
-    CheckStatus,
-)
+from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.domain.errors import ErrorCategory
-
-_ALLOWED_IDS = frozenset(
-    {
-        PROVIDER_TLS_ID,
-        GDBSTUB_ACL_ID,
-        AUTHORITY_READINESS_ID,
-        MULTIARCH_GDB_ID,
-        PSERIES_FADUMP_ID,
-        GUEST_ARCH_ACCEL_ID,
-        DEPMOD_TOOLCHAIN_ID,
-    }
-)
 
 
 class ResultCodecError(ValueError):
@@ -68,7 +47,7 @@ def serialize_results(results: list[CheckResult]) -> str:
     )
 
 
-def deserialize_results(raw: str | None) -> list[CheckResult]:
+def deserialize_results(raw: str | None, *, allowed_ids: Container[str]) -> list[CheckResult]:
     """Parse inline worker results, degrading each rejected item to its own ``error`` result.
 
     Raises ResultCodecError only when the payload itself cannot be parsed (empty, invalid JSON,
@@ -83,13 +62,13 @@ def deserialize_results(raw: str | None) -> list[CheckResult]:
     items = doc.get("results") if isinstance(doc, dict) else None
     if not isinstance(items, list):
         raise ResultCodecError("diagnostics result has no 'results' list")
-    return [_reconstruct_or_error(item) for item in items]
+    return [_reconstruct_or_error(item, allowed_ids=allowed_ids) for item in items]
 
 
-def _reconstruct_or_error(item: Any) -> CheckResult:
+def _reconstruct_or_error(item: Any, *, allowed_ids: Container[str]) -> CheckResult:
     """Reconstruct one item, mapping a rejected item to an ``error`` result for its own check id."""
     try:
-        return _reconstruct(item)
+        return _reconstruct(item, allowed_ids=allowed_ids)
     except ResultCodecError as exc:
         check_id = item.get("check_id") if isinstance(item, dict) else None
         return CheckResult(
@@ -100,11 +79,11 @@ def _reconstruct_or_error(item: Any) -> CheckResult:
         )
 
 
-def _reconstruct(item: Any) -> CheckResult:
+def _reconstruct(item: Any, *, allowed_ids: Container[str]) -> CheckResult:
     if not isinstance(item, dict):
         raise ResultCodecError("diagnostics result item is not an object")
     check_id = item.get("check_id")
-    if check_id not in _ALLOWED_IDS:
+    if check_id not in allowed_ids:
         raise ResultCodecError(f"unexpected worker-vantage check id {check_id!r}")
     try:
         return CheckResult(

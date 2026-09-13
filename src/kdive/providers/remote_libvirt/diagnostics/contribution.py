@@ -122,6 +122,7 @@ def diagnostic_contribution(
 ) -> DiagnosticProviderContribution:
     return DiagnosticProviderContribution(
         provider=_REMOTE_PROVIDER,
+        worker_vantage_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID, AUTHORITY_READINESS_ID),
         enabled=is_remote_libvirt_configured,
         checks=_checks,
         unavailable_worker_checks=_unavailable_worker_checks,
