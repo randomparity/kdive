@@ -49,6 +49,7 @@
     {"id": "diagnostic-sysrq.artifacts.insert", "job_kind": "diagnostic_sysrq", "table": "public.artifacts", "privilege": "INSERT", "route": "direct"},
     {"id": "diagnostic-sysrq.audit-log.insert", "job_kind": "diagnostic_sysrq", "table": "public.audit_log", "privilege": "INSERT", "route": "direct"},
     {"id": "force-crash.systems.update", "job_kind": "force_crash", "table": "public.systems", "privilege": "UPDATE", "route": "direct"},
+    {"id": "image-build.image-catalog.insert", "job_kind": "image_build", "table": "public.image_catalog", "privilege": "INSERT", "route": "direct"},
     {"id": "image-build.image-catalog.update", "job_kind": "image_build", "table": "public.image_catalog", "privilege": "UPDATE", "route": "direct"},
     {"id": "install.run-steps.delete", "job_kind": "install", "table": "public.run_steps", "privilege": "DELETE", "route": "direct"},
     {"id": "install.run-steps.insert", "job_kind": "install", "table": "public.run_steps", "privilege": "INSERT", "route": "direct"},
