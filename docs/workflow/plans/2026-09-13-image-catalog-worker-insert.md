@@ -14,7 +14,8 @@ Tech stack: PostgreSQL migrations, Python 3.14, pytest, psycopg.
 - ADR-0653 remains the governing decision; no new architectural decision is introduced.
 
 Expected implementation size: 28–42 changed lines (M) — one SQL grant, two JSON declarations,
-one worker-role test adaptation, four migration-tail assertions, and one privilege-matrix entry.
+one worker-role test adaptation, seven migration-tail assertions across four modules, and one
+privilege-matrix entry.
 
 ## File map
 
@@ -46,8 +47,8 @@ Provides the effective INSERT authority consumed by the catalog guard and worker
   migration 0154, the handler's catalog insert raises PostgreSQL insufficient privilege. Green
   command: `just test-verbose tests/jobs/test_image_build_handler.py::test_worker_role_handler_builds_validates_publishes_registered`.
 - Contract: migration history has the expected 0154 tail. Mode: focused-test. Red observation:
-  adding migration 0154 without advancing the hard-coded tails makes the equality assertions end
-  at 0153. Green command: `just test-verbose tests/db/test_migrate.py tests/db/test_migration_0102_build_gc_cursors.py tests/db/test_migration_0091_system_object_sweep_cursors.py tests/db/test_migration_0115_capture_reap_state.py`.
+  adding migration 0154 without advancing seven hard-coded 0153 expectations across four modules
+  makes their equality assertions fail. Green command: `just test-verbose tests/db/test_migrate.py tests/db/test_migration_0102_build_gc_cursors.py tests/db/test_migration_0091_system_object_sweep_cursors.py tests/db/test_migration_0115_capture_reap_state.py`.
 - Contract: worker authority adds only INSERT on image_catalog. Mode: focused-test. Red observation:
   before the matrix entry is added, the migrated worker privilege matrix expects INSERT to be
   absent; the matrix retains existing SELECT and UPDATE and rejects DELETE, REFERENCES, TRIGGER,
@@ -63,7 +64,8 @@ Provides the effective INSERT authority consumed by the catalog guard and worker
 3. Update the baseline record's migration line/text, verdict, and confirmed-leak list.
 4. Stage a job with the migration owner, reconnect through `authority_role_dsns("kdive_worker")`,
    and assert the existing publish result remains registered and stored.
-5. Advance the four migration-history tails with `("0154", "0154_worker_image_catalog_insert.sql")`.
+5. Advance the seven hard-coded migration-history expectations across four modules with
+   `("0154", "0154_worker_image_catalog_insert.sql")`.
 6. Add `image_catalog` only to `_WORKER_MUTATIONS["INSERT"]`, preserving every other role and
    operation set.
 7. Run all focused checks above, then `just lint` and `just type`.
