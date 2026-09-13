@@ -13,11 +13,16 @@ their reachable writes and the authority path that performs each write.
 ## Scope
 
 Add a versioned JSON baseline under `tests/jobs/`, one record per active `JobKind`, and a focused
-structural test. A write record has `table`, `operation`, `source`, `role`, `route`, and `verdict`.
-`source` is a repository-relative `file:line`; `route` is `direct` or `security-definer`; and
-`verdict` is `covered`, `definer-mediated`, or `LEAK`. A no-write handler has an explicit empty
-`writes` list. The guide cites the worker-grant migrations and names the audit's handler-only
-boundary.
+structural test. A write record has a stable `id`, `table`, `operation`, `handler_source`,
+`write_source`, `role`, `route`, `authority_source`, `grant_source`, and `verdict`. Every source
+is a repository-relative `file:line` plus an expected text fragment. `handler_source` identifies
+the registered handler path; `write_source` identifies the table statement; `authority_source`
+identifies either its direct table path or `SECURITY DEFINER` function; and `grant_source`
+identifies the table or function grant. `route` is `direct` or `security-definer`; `verdict` is
+`covered`, `definer-mediated`, or `LEAK`. A no-write handler has an explicit empty `writes` list.
+The top-level sorted `confirmed_leaks` list must equal the identities of `LEAK` rows, so `[]` is a
+durable zero-leak result. The guide cites the worker-grant migrations and names the audit's
+handler-only boundary.
 
 The implementation is analysis-only. It changes no runtime source, database schema, role grant,
 handler behavior, database connection, or migration. A discovered `LEAK` is recorded and handed
@@ -27,10 +32,11 @@ to its remediation owner; this issue does not repair it.
 
 - A newly active handler is omitted: the test compares manifest job kinds to the active job-kind
   set and fails.
-- A baseline row is duplicated, unsorted, malformed, or points at a moved source line: the test
-  fails with the offending record.
+- A baseline row is duplicated, unsorted, malformed, or points at moved handler, write, authority,
+  or grant evidence: the test fails with the offending record.
 - A direct write is misclassified as grant-covered or definer-mediated: review resolves the
-  handler call path and the grant-matrix evidence before it enters the manifest.
+  handler call path, direct grant or `SECURITY DEFINER` function, and grant-matrix evidence before
+  it enters the manifest.
 - A source change adds a new write within an already-classified handler: this baseline preserves
   a reviewable starting point; subsequent structural grant work owns broader call-graph drift
   detection.
@@ -53,12 +59,13 @@ or alter a `LEAK`. Those require their owning work items and role-bound integrat
 ## Success
 
 1. Every active worker handler has exactly one baseline entry, including explicit no-write cases.
-2. Every handler-reachable write in the recorded sweep has its table, operation, source, role,
-   route, and verdict recorded.
+2. Every handler-reachable write in the recorded sweep has its identity, table, operation,
+   handler, write, authority, and grant evidence, role, route, and verdict recorded.
 3. The baseline is valid JSON with a declared format version, stable ordering, and no duplicate
    handler or write identity.
-4. The focused test rejects malformed data, missing handler coverage, duplicate identities, and a
-   source line that no longer carries its recorded write.
+4. The focused test rejects malformed data, missing handler coverage, duplicate identities,
+   mismatched leak lists, and any handler, write, authority, or grant evidence that no longer
+   carries its recorded fragment.
 5. The guide identifies the grant-matrix evidence, `SECURITY DEFINER` interpretation, scope, and
    refresh procedure.
 6. No production code or migrations change.
