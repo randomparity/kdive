@@ -218,8 +218,7 @@ def test_genuine_fault_raises():
 def test_terminal_manager_freeze_raises_without_sleeping():
     events: list[str] = []
     console = (
-        b"[!!!!!!] Failed to start up manager.\n"
-        b"[ 1083.237850] systemd[1]: Freezing execution.\n"
+        b"[!!!!!!] Failed to start up manager.\n[ 1083.237850] systemd[1]: Freezing execution.\n"
     )
     seams = CustomizationBootSeams(
         prepare_console=lambda _bid: events.append("prepare"),
