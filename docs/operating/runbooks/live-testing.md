@@ -272,7 +272,7 @@ just stack-up          # backends healthy + schema migrated + host-process env
 just test-live-stack   # runs -m live_stack; skips cleanly if the stack is absent
 ```
 
-`just stack-up` reuses the compose backends (Postgres + MinIO + mock-OIDC) and
+`just stack-up` reuses the compose backends (Postgres + SeaweedFS + mock-OIDC) and
 keeps the host `server`/`worker`/`reconciler` outside compose. Full bring-up,
 including the host-process env block, is in the
 [live-stack runbook](live-stack.md). To drive a genuinely remote
@@ -501,7 +501,7 @@ Traps this run hit, in the order they bite:
   `object_id` answers `not_found` and looks like a failure.
 - **Count downloads at the store, not in the logs.** The staging path emits no
   per-download log line, so "exactly one download" is only observable at the
-  object store. `mc admin trace` from a throwaway `minio/mc` container on the
+  object store. Use the selected S3 endpoint's access logging on the
   compose network shows the request kind, the object key, and the transferred
   bytes — enough to distinguish one full-object GET from two.
 - **The reclaim grace is a day.** `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`
@@ -593,7 +593,7 @@ Drive it as the Reuse arm — one investigation, one uploaded rootfs, two
   Reuse arm's trap routes onto the gzip lane.)
 - **Make the download long enough to observe.** The lock is held across the
   object-store fetch, so the contention window is the download. A ~1.4 GiB
-  incompressible qcow2 gives a window of several seconds against local MinIO —
+  incompressible qcow2 gives a window of several seconds against local SeaweedFS —
   ample for a sub-second poll. It does not need to be bootable: this arm asserts
   on the fetch, which precedes every boot concern.
 
@@ -625,7 +625,7 @@ would mean the lock ran and achieved nothing.
 |--------|-------|--------------------|
 | Two rows sharing one `(classid, objid)`: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity`, above | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
 | Both of **your two** provision jobs `running`, each with a non-NULL `jobs.worker_id`, and the two values **different** | `SELECT id, state, worker_id FROM jobs WHERE id IN ('<job1>', '<job2>')` — the two ids the provisions returned as `object_id` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock rows above were something else |
-| Exactly one `GetObject` for the rootfs key | `mc admin trace` at the store, per the "count downloads at the store" trap above | The dedup *outcome* the lock exists to produce, and the only place it is observable |
+| Exactly one `GetObject` for the rootfs key | S3 endpoint access logs, per the "count downloads at the store" trap above | The dedup *outcome* the lock exists to produce, and the only place it is observable |
 
 Name the two job ids explicitly in row 2; do not reach for the newest provision
 rows. Every relaxation of that query passes on the serialization the row exists to

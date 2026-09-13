@@ -835,8 +835,7 @@ def test_live_stack_env_exports_required_defaults() -> None:
         "KDIVE_STACK_BASE_URL",
         # Configurable compose backend host ports (single source of truth for publish + client URL).
         "KDIVE_POSTGRES_PORT",
-        "KDIVE_MINIO_PORT",
-        "KDIVE_MINIO_CONSOLE_PORT",
+        "KDIVE_SEAWEEDFS_PORT",
         "KDIVE_OIDC_PORT",
         "KDIVE_PROMETHEUS_PORT",
         "KDIVE_GRAFANA_PORT",
@@ -869,7 +868,7 @@ def test_client_urls_derive_from_the_configurable_ports() -> None:
     # reference the port var, not a second hardcoded literal that could silently drift from compose.
     env = (ROOT / "scripts/live-stack/env.sh").read_text()
     assert "localhost:${KDIVE_POSTGRES_PORT}/kdive" in env
-    assert "http://localhost:${KDIVE_MINIO_PORT}" in env
+    assert "http://localhost:${KDIVE_SEAWEEDFS_PORT}" in env
     assert "http://localhost:${KDIVE_OIDC_PORT}/default" in env
 
 
@@ -1541,7 +1540,7 @@ def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> Non
             "ready": False,
             "checks": {
                 "postgres": True,
-                "minio": True,
+                "seaweedfs": True,
                 "capture_bootstrap_manifest": False,
                 "capture_recovery": True,
             },
@@ -1566,7 +1565,7 @@ def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> Non
     assert result.returncode == 0
     assert result.stderr == ""
     assert result.stdout == (
-        "worker_readiness ready=false postgres=true minio=true "
+        "worker_readiness ready=false postgres=true seaweedfs=true "
         "capture_bootstrap_manifest=false capture_recovery=true\n"
     )
     assert "version" not in result.stdout

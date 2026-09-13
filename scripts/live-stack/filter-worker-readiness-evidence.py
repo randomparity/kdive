@@ -10,7 +10,7 @@ from typing import Any
 _MAX_BYTES = 4096
 _COMPONENTS = (
     "postgres",
-    "minio",
+    "seaweedfs",
     "capture_bootstrap_manifest",
     "capture_recovery",
 )

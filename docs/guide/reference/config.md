@@ -313,7 +313,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_PPC64LE_VMCORE` | — | Path to the retained real #1148 ppc64le vmcore for the live_vm drgn-open proof (#1150, ADR-0348, epic #1139); unset → that test skips (a set-but-missing/mismatched path fails). |
 | `KDIVE_PROVISION_EVIDENCE_TARGET` | — | Workflow-temporary mode-0600 path where the hosted ppc64le proof writes its exact provision job/System pair for bounded post-proof queue diagnostics; unset disables publication. |
 | `KDIVE_REMOTE_BASE_IMAGE_VOLUME` | — | Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack test; unset → that test skips. |
-| `KDIVE_REQUIRE_DOCKER` | `0` | Set to 1 to fail (not skip) the disposable-Postgres/MinIO fixtures when Docker is absent. |
+| `KDIVE_REQUIRE_DOCKER` | `0` | Set to 1 to fail (not skip) the disposable-Postgres/SeaweedFS fixtures when Docker is absent. |
 | `KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF` | — | Presence gate for the isolated executable Compose worker-lifecycle proof; the dedicated just recipe sets it to 1 and treats unavailable Docker as a failure. |
 | `KDIVE_RUN_COMPOSE_VOLUME_PROOF` | — | Presence gate for the isolated executable proof that a plain Compose down preserves the named data volumes; the dedicated just recipe sets it to 1 and treats unavailable Docker as a failure. |
 | `KDIVE_RUN_SYSTEMD_WORKER_PROOF` | — | Presence gate for the real-host systemd worker proof (tests/live_vm/test_systemd_worker_lifecycle.py); the hosted live.yml proof step sets it to 1 after installing the fixed lifecycle contract. Must be exactly 1 when present. |
@@ -325,9 +325,9 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_STACK_SKEW_POLICY` | — | How hard the live_stack version-skew preflight bites (ADR-0482): 'off' (do not probe), 'warn' (never skip), 'strict' (skip on anything but a fresh stack); unset → the default table, where only stale_restart skips. |
 | `KDIVE_TEST_BUILD_CONFIG` | — | Path or file:// URL to a kernel .config (kdump + debuginfo) for the live_vm real-make build-id test; unset → that test skips. |
 | `KDIVE_TEST_PG_URL` | — | Postgres server URL (with credentials) the db-test fixtures reuse instead of starting a per-run container (ADR-0401); unset → one shared testcontainer is started per run. Each worker creates its own kdive_test_<worker>_<token> database on it. |
-| `KDIVE_TEST_S3_ACCESS_KEY` | `minioadmin` | Access key for the KDIVE_TEST_S3_URL override MinIO/S3 (ADR-0401); defaults to the just compose-up minioadmin root. |
-| `KDIVE_TEST_S3_SECRET_KEY` | `minioadmin` | Secret key for the KDIVE_TEST_S3_URL override MinIO/S3 (ADR-0401); defaults to the just compose-up minioadmin root. |
-| `KDIVE_TEST_S3_URL` | — | MinIO/S3 endpoint the store-test fixtures reuse instead of starting a per-run container (ADR-0401); unset → one shared testcontainer is started per run. Each worker creates its own kdive-test-<worker>-<token> bucket on it. |
+| `KDIVE_TEST_S3_ACCESS_KEY` | `kdive` | Access key for the KDIVE_TEST_S3_URL override SeaweedFS/S3 (ADR-0401); defaults to the just compose-up SeaweedFS account. |
+| `KDIVE_TEST_S3_SECRET_KEY` | `kdive-demo-secret` | Secret key for the KDIVE_TEST_S3_URL override SeaweedFS/S3 (ADR-0401); defaults to the just compose-up SeaweedFS account. |
+| `KDIVE_TEST_S3_URL` | — | SeaweedFS/S3 endpoint the store-test fixtures reuse instead of starting a per-run container (ADR-0401); unset → one shared testcontainer is started per run. Each worker creates its own kdive-test-<worker>-<token> bucket on it. |
 
 ## Operator scripts
 
@@ -362,8 +362,6 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_MAX_ALLOC` | `4` | max_concurrent_allocations quota the setup-*-libvirt.sh scripts set. |
 | `KDIVE_MAX_SYS` | `4` | max_concurrent_systems quota the setup-*-libvirt.sh scripts set. |
 | `KDIVE_MCP_BASE` | — | Server MCP endpoint (must end in /mcp) the setup-*-libvirt.sh onboarding calls target. |
-| `KDIVE_MINIO_CONSOLE_PORT` | `9001` | Host port the compose `minio` web console publishes (no client URL derives from it). |
-| `KDIVE_MINIO_PORT` | `9000` | Host port the compose `minio` S3 API publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_S3_ENDPOINT_URL`. |
 | `KDIVE_OIDC_PORT` | `8090` | Host port the compose `oidc` mock issuer publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`. |
 | `KDIVE_OS_RELEASE` | `/etc/os-release` | os-release file `check-setup-deps.sh` reads to detect the host distro. |
 | `KDIVE_POSTGRES_PORT` | `5432` | Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it into the default role database DSNs (#1929). |
@@ -377,9 +375,10 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
 | `KDIVE_ROLE` | `admin` | Role `scripts/live-stack/onboard.sh` writes into the minted token's `roles` claim and the printed binding contract; a sub-CONTRIBUTOR value warns (allocations.request needs CONTRIBUTOR+). |
 | `KDIVE_ROOTFS_DIR` | `/var/lib/kdive/rootfs` | Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/lib.sh` reads this to locate and create guest disk overlays. |
+| `KDIVE_SEAWEEDFS_PORT` | `8333` | Host port the compose `seaweedfs` S3 API publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_S3_ENDPOINT_URL`. |
 | `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the host server process (and the Compose reference server service); external deployments override the local development member. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
-| `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
+| `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, seaweedfs, oidc) still start. |
 | `KDIVE_SOURCE_ROOT` | — | Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root setting; start fails when it is not an existing absolute directory. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory for the server/reconciler daemons `scripts/live-stack/lib.sh` starts; `examples/local-libvirt/env.sh` overrides the default to an XDG state path. |
 | `KDIVE_SYSTEM_PY_MINOR` | `$(python3 --version)` | System Python `X.Y` minor `check-setup-deps.sh` compares against the venv's for the libguestfs ABI check before symlinking the binding (ADR-0393). |

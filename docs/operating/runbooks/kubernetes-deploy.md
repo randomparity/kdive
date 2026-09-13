@@ -1914,8 +1914,8 @@ parties touch it.
 
 ### The bundled demo's object store is in-cluster only — expose it for remote-libvirt
 
-`bundledBackends=true` defaults MinIO to a **ClusterIP** Service and sets
-`KDIVE_S3_ENDPOINT_URL=http://<release>-kdive-minio:9000` unless explicitly overridden. Only
+`bundledBackends=true` defaults SeaweedFS to a **ClusterIP** Service and sets
+`KDIVE_S3_ENDPOINT_URL=http://<release>-kdive-seaweedfs:8333` unless explicitly overridden. Only
 in-cluster pods resolve that name. With that default, `host_dump` capture and `introspect.from_vmcore` work (worker-side, in-cluster), but
 **external uploads and any remote-libvirt `install`/`kdump` capture fail**: the uploader and the
 guest cannot reach a cluster-internal name. To use the bundled store off-cluster, expose it and
@@ -1925,11 +1925,11 @@ point the endpoint at a node-routable address all three parties reach:
 helm get values kdive -o yaml > kdive-values.yaml   # capture overrides (not --reuse-values; see Upgrade)
 helm upgrade kdive deploy/helm/kdive \
   -f deploy/helm/kdive/values-demo.yaml -f kdive-values.yaml \
-  --set demo.minio.service.type=NodePort --set demo.minio.service.nodePort=30900 \
+  --set demo.seaweedfs.service.type=NodePort --set demo.seaweedfs.service.nodePort=30900 \
   --set config.KDIVE_S3_ENDPOINT_URL=http://<node-ip>:30900
 # The endpoint change rolls server/worker/reconciler automatically (checksum/config, ADR-0134);
 # no manual rollout restart — and never `rollout restart -l app.kubernetes.io/name=kdive`, whose
-# selector also restarts the emptyDir Postgres/MinIO and wipes demo data.
+# selector also restarts the emptyDir Postgres/SeaweedFS and wipes demo data.
 ```
 
 > **The cluster network/firewall must permit this.** A locked-down cluster that only admits the

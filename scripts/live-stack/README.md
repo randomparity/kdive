@@ -23,7 +23,7 @@ elevates via sudo to socket-activate the system daemon.
 | `up.sh --skip-libvirt` | backends + host processes only (no VM provisioning) |
 | `up.sh --reset-db` | full `down.sh --wipe` first, then bring up (recovery from migration drift) |
 | `down.sh` | stop host processes + backends, **keep** state |
-| `down.sh --wipe` | full reset: drop DB/MinIO volumes AND reap `kdive-*` domains + overlays |
+| `down.sh --wipe` | full reset: drop DB/SeaweedFS volumes AND reap `kdive-*` domains + overlays |
 | `status.sh` | read-only health of every layer and retained worker slots |
 
 `up.sh --skip-libvirt` skips VM provisioning checks but still requires and uses the installed
@@ -46,7 +46,7 @@ Worker startup proves conditional-create behavior against the configured store b
 
 ## Backends only — `just stack-up` (no sudo)
 
-Brings up only the compose backends (Postgres/MinIO/OIDC) and migrates the schema — for the
+Brings up only the compose backends (Postgres/SeaweedFS/OIDC) and migrates the schema — for the
 `just test-live-stack` suite. It does not start host processes or libvirt. For the container app
 tier, follow the [Compose operating guide](../../deploy/compose/README.md), including its worker
 lifecycle recipes.

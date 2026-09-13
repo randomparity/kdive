@@ -12,7 +12,7 @@ EnvironmentFile=/etc/kdive/kdive.env
 ExecStart=/opt/kdive/.venv/bin/python -m kdive server
 Restart=on-failure
 RestartSec=5
-# Backends (Postgres/MinIO/OIDC) are external and not systemd-ordered here; the unit
+# Backends (Postgres/SeaweedFS/OIDC) are external and not systemd-ordered here; the unit
 # retries until they are reachable rather than failing terminally (ADR-0114 §4).
 # Sandboxing: the server is a pure network service that writes nothing under /usr, /etc,
 # or /boot, so these directives are safe (the worker is intentionally exempt — it runs

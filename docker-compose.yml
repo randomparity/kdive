@@ -1,7 +1,7 @@
 # Operator tooling for the live walking-skeleton run (#26, ADR-0035 §3).
 #
 # Stands up the three backing services the kdive MCP server needs for a real end-to-end run
-# driven by hand or on a self-hosted KVM runner: Postgres (system of record), MinIO
+# driven by hand or on a self-hosted KVM runner: Postgres (system of record), SeaweedFS
 # (S3-compatible object store for vmcore artifacts), and a mock OIDC issuer (so the server's
 # JWTVerifier validates real signed bearer tokens). This compose is NOT on any automated CI
 # test path — the non-gated exit-criterion tests construct RequestContext in-process and use
@@ -12,7 +12,7 @@
 #   KDIVE_OIDC_ISSUER=http://localhost:8090/default
 #   KDIVE_OIDC_JWKS_URI=http://localhost:8090/default/jwks
 #   KDIVE_OIDC_AUDIENCE=kdive
-#   KDIVE_S3_ENDPOINT_URL=http://localhost:9000
+#   KDIVE_S3_ENDPOINT_URL=http://localhost:8333
 #   KDIVE_S3_BUCKET=kdive-artifacts
 #   KDIVE_S3_REGION=us-east-1
 # Mint a token for an operator request from the mock issuer's token endpoint (see its README).
@@ -44,8 +44,8 @@ x-backends: &backends
   KDIVE_S3_BUCKET: kdive-artifacts
   KDIVE_S3_REGION: us-east-1
   # kdive's object store signs with boto3's default credential chain (the standard AWS_*
-  # vars, objectstore.py), so the app tier authenticates to MinIO with its root creds —
-  # without these the server/worker /readyz MinIO check can never pass. Matches the
+  # vars, objectstore.py), so the app tier authenticates to SeaweedFS with its S3 credentials —
+  # without these the server/worker /readyz object-store check can never pass. Matches the
   AWS_ACCESS_KEY_ID: kdive  # pragma: allowlist secret — local dev only
   AWS_SECRET_ACCESS_KEY: kdive-demo-secret  # pragma: allowlist secret — local dev only
 
@@ -222,7 +222,7 @@ services:
       # the same var the host-daemon live-stack binds, so one override moves both serving paths.
       - "${KDIVE_HTTP_PORT:-8000}:8000"
     # Self-contained graph: a bare `docker compose up server` pulls in migrate
-    # (completed), the bucket-creation one-shot (completed → minio healthy + bucket
+  # (completed), the bucket-creation one-shot (completed → SeaweedFS healthy + bucket
     # exists), and the issuer (started; the mock has no healthcheck, and JWKS is
     # fetched lazily on first request anyway).
     depends_on:

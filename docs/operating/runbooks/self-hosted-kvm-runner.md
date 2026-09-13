@@ -93,7 +93,7 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
      `main`. Merging D does not expose the runner — only enabling the service does.
 
 3. **Wire the object-store secrets.** The `native` gate stands up the compose
-   MinIO on the box and authenticates with its `minioadmin` default (no repo
+   SeaweedFS on the box and authenticates with the local `kdive` account (no repo
    secret needed for the nightly's on-box object store). If you instead point the
    worker at an external S3, add `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` as
    repo/organization secrets (readable by `schedule` / `workflow_dispatch`, never

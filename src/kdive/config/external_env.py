@@ -106,23 +106,23 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_TEST_S3_URL",
         "test",
         None,
-        "MinIO/S3 endpoint the store-test fixtures reuse instead of starting a per-run container "
-        "(ADR-0401); unset → one shared testcontainer is started per run. Each worker creates its "
-        "own kdive-test-<worker>-<token> bucket on it.",
+        "SeaweedFS/S3 endpoint the store-test fixtures reuse instead of starting a per-run "
+        "container (ADR-0401); unset → one shared testcontainer is started per run. Each worker "
+        "creates its own kdive-test-<worker>-<token> bucket on it.",
     ),
     ExternalEnvVar(
         "KDIVE_TEST_S3_ACCESS_KEY",
         "test",
-        "minioadmin",
-        "Access key for the KDIVE_TEST_S3_URL override MinIO/S3 (ADR-0401); defaults to the "
-        "just compose-up minioadmin root.",
+        "kdive",
+        "Access key for the KDIVE_TEST_S3_URL override SeaweedFS/S3 (ADR-0401); defaults to the "
+        "just compose-up SeaweedFS account.",
     ),
     ExternalEnvVar(
         "KDIVE_TEST_S3_SECRET_KEY",
         "test",
-        "minioadmin",  # pragma: allowlist secret - local dev default
-        "Secret key for the KDIVE_TEST_S3_URL override MinIO/S3 (ADR-0401); defaults to the "
-        "just compose-up minioadmin root.",
+        "kdive-demo-secret",  # pragma: allowlist secret - local dev default
+        "Secret key for the KDIVE_TEST_S3_URL override SeaweedFS/S3 (ADR-0401); defaults to the "
+        "just compose-up SeaweedFS account.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_SSH_TARGET",
@@ -268,7 +268,8 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_REQUIRE_DOCKER",
         "test",
         "0",
-        "Set to 1 to fail (not skip) the disposable-Postgres/MinIO fixtures when Docker is absent.",
+        "Set to 1 to fail (not skip) the disposable-Postgres/SeaweedFS fixtures when Docker is "
+        "absent.",
     ),
     ExternalEnvVar(
         "KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF",
@@ -581,7 +582,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         "0",
         "When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability "
-        "tier; the essential backend services (postgres, minio, oidc) still start.",
+        "tier; the essential backend services (postgres, seaweedfs, oidc) still start.",
     ),
     ExternalEnvVar(
         "KDIVE_WORKER_COUNT",
@@ -719,17 +720,11 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "into the default role database DSNs (#1929).",
     ),
     ExternalEnvVar(
-        "KDIVE_MINIO_PORT",
+        "KDIVE_SEAWEEDFS_PORT",
         "script",
-        "9000",
-        "Host port the compose `minio` S3 API publishes; `scripts/live-stack/env.sh` folds it into "
-        "the default `KDIVE_S3_ENDPOINT_URL`.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_MINIO_CONSOLE_PORT",
-        "script",
-        "9001",
-        "Host port the compose `minio` web console publishes (no client URL derives from it).",
+        "8333",
+        "Host port the compose `seaweedfs` S3 API publishes; `scripts/live-stack/env.sh` folds "
+        "it into the default `KDIVE_S3_ENDPOINT_URL`.",
     ),
     ExternalEnvVar(
         "KDIVE_OIDC_PORT",
