@@ -15,7 +15,7 @@ kwargs (mirrors `tests/adversarial/test_provider_state_races.py`'s `_TrackingPro
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -56,6 +56,38 @@ from tests.support.object_store import INERT_OBJECT_STORE
 _RESOLVED_CPU: dict[str, Any] = {"model": "SapphireRapids", "arch": "x86_64"}
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _bind_worker_handler_calls(
+    authority_role_dsns: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Replace every direct handler act in this module with its worker-login execution."""
+    worker_dsn = authority_role_dsns("kdive_worker")
+
+    def via_worker(handler: Any) -> Any:
+        async def call(_owner: Any, *args: Any, **kwargs: Any) -> Any:
+            async with _pool(worker_dsn) as worker_pool, worker_pool.connection() as worker:
+                try:
+                    result = await handler(worker, *args, **kwargs)
+                except BaseException as error:
+                    captured = error
+                else:
+                    captured = None
+            if captured is not None:
+                raise captured
+            return result
+
+        return call
+
+    for name in ("provision_handler", "reprovision_handler", "teardown_handler"):
+        monkeypatch.setattr(systems_handlers, name, via_worker(getattr(systems_handlers, name)))
+    monkeypatch.setitem(
+        globals(),
+        "remote_module_volume_reap_handler",
+        via_worker(remote_module_volume_reap_handler),
+    )
+    yield
 
 
 class _RecordingProvisioner:
