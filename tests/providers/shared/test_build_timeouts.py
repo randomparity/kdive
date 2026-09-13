@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import kdive.config as config
+from kdive.diagnostics.contributions import guest_arch_accel
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 from kdive.providers.shared import build_timeouts
 from kdive.providers.shared.build_timeouts import slow_build_tool_timeout_s
@@ -24,6 +25,7 @@ def _isolate_config() -> Iterator[None]:
 def test_slow_build_tool_timeout_is_thirty_minutes() -> None:
     assert build_timeouts.SLOW_BUILD_TOOL_TIMEOUT_S == 30 * 60
     assert build_timeouts.SLOW_BUILD_TOOL_TIMEOUT_S == 1800
+    assert not hasattr(build_timeouts, "_worker_host_kvm_usable")
 
 
 # --- the general appliance scaler (#2397, #2414) -----------------------------------------------
@@ -174,14 +176,14 @@ def test_a_present_world_writable_node_that_cannot_open_scales(
     node.chmod(0o666)
     assert os.access(node, os.R_OK | os.W_OK), "the permission test the old probe ran must pass"
 
-    real_open = build_timeouts.os.open
+    real_open = guest_arch_accel.os.open
 
     def _enodev(path: str, flags: int, *args: int) -> int:
         if str(path) == str(node):
             raise OSError(errno.ENODEV, "No such device")
         return real_open(path, flags, *args)
 
-    monkeypatch.setattr(build_timeouts.os, "open", _enodev)
+    monkeypatch.setattr(guest_arch_accel.os, "open", _enodev)
     config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "10.0", "KDIVE_KVM_NODE": str(node)})
     assert slow_build_tool_timeout_s() == 18000
 
@@ -201,13 +203,13 @@ def test_an_empty_node_override_falls_back_to_dev_kvm(monkeypatch: pytest.Monkey
     # ${KDIVE_KVM_NODE:-/dev/kvm} treats empty as unset; an empty string would otherwise be a
     # path the open always refuses, silently scaling every budget on a KVM host.
     probed: list[str] = []
-    real_open = build_timeouts.os.open
+    real_open = guest_arch_accel.os.open
 
     def _record(node: str, flags: int, *args: int) -> int:
         probed.append(str(node))
         return real_open(os.devnull, flags, *args)
 
-    monkeypatch.setattr(build_timeouts.os, "open", _record)
+    monkeypatch.setattr(guest_arch_accel.os, "open", _record)
     config.load({"KDIVE_KVM_NODE": ""})
     assert slow_build_tool_timeout_s() == 1800
     assert probed == ["/dev/kvm"]

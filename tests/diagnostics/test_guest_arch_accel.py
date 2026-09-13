@@ -82,44 +82,37 @@ def test_arch_supported_but_unmapped_is_treated_unsupported_not_none_fail() -> N
 # --- kvm_probe_for_uri (the URI-selected filesystem seam) ---------------------------
 
 
-def test_kvm_probe_session_uses_worker_uid_openability() -> None:
-    access_calls: list[tuple[str, int]] = []
-    exists_calls: list[str] = []
-    probe = kvm_probe_for_uri(
-        "qemu:///session",
-        node="/fake/kvm",
-        access=lambda node, mode: access_calls.append((node, mode)) or True,
-        exists=lambda node: exists_calls.append(node) or True,
-    )
-    assert probe() is True
-    assert access_calls == [("/fake/kvm", 6)]  # os.R_OK | os.W_OK == 6
-    assert exists_calls == []  # session must not fall back to presence
-
-
-def test_kvm_probe_system_uses_presence() -> None:
-    access_calls: list[tuple[str, int]] = []
-    exists_calls: list[str] = []
+def test_kvm_probe_uses_openability_for_every_uri() -> None:
+    open_calls: list[tuple[str, int]] = []
+    close_calls: list[int] = []
     probe = kvm_probe_for_uri(
         "qemu:///system",
         node="/fake/kvm",
-        access=lambda node, mode: access_calls.append((node, mode)) or True,
-        exists=lambda node: exists_calls.append(node) or True,
+        open=lambda node, mode: open_calls.append((node, mode)) or 42,
+        close=close_calls.append,
     )
     assert probe() is True
-    assert exists_calls == ["/fake/kvm"]
-    assert access_calls == []  # system must not require worker-uid openability
+    assert open_calls == [("/fake/kvm", os.O_RDWR)]
+    assert close_calls == [42]
 
 
-def test_kvm_probe_unknown_uri_defaults_to_presence() -> None:
-    exists_calls: list[str] = []
+def test_kvm_probe_open_error_is_unavailable() -> None:
     probe = kvm_probe_for_uri(
         "qemu+tls://host/system",
         node="/fake/kvm",
-        access=lambda *_a: False,
-        exists=lambda node: exists_calls.append(node) or False,
+        open=lambda *_args: (_ for _ in ()).throw(OSError("ENODEV")),
     )
     assert probe() is False
-    assert exists_calls == ["/fake/kvm"]
+
+
+def test_kvm_probe_close_error_is_unavailable() -> None:
+    probe = kvm_probe_for_uri(
+        "qemu+tls://host/system",
+        node="/fake/kvm",
+        open=lambda *_args: 42,
+        close=lambda _fd: (_ for _ in ()).throw(OSError("close failed")),
+    )
+    assert probe() is False
 
 
 # --- resolved_libvirt_uri (the config-snapshot glue) --------------------------------

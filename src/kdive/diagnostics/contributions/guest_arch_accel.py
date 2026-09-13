@@ -46,6 +46,7 @@ _DEFAULT_URI = "qemu:///system"
 # The libvirt connection-URI env var (mirrors local_libvirt.settings.LIBVIRT_URI.name / default).
 # Read by name from the config snapshot to avoid importing the boundary-gated provider settings.
 _LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
+_KVM_NODE_ENV = "KDIVE_KVM_NODE"
 
 # The qemu system-emulator binary per supported arch. Asymmetric and NOT ``uname -m``: ppc64le
 # maps to ``qemu-system-ppc64`` (POWER has no ``-ppc64le`` binary). One entry per SUPPORTED_ARCHES
@@ -70,6 +71,11 @@ def resolved_libvirt_uri() -> str:
     return env_snapshot().get(_LIBVIRT_URI_ENV, _DEFAULT_URI)
 
 
+def resolved_kvm_node() -> str:
+    """Return the configured KVM node, treating an empty override as unset."""
+    return env_snapshot().get(_KVM_NODE_ENV) or _KVM_NODE
+
+
 def _is_executable(path: str) -> bool:
     """Whether ``path`` is an executable *file* (a directory is executable but not an emulator)."""
     return os.path.isfile(path) and os.access(path, os.X_OK)
@@ -89,21 +95,25 @@ def uri_is_local(uri: str) -> bool:
 def kvm_probe_for_uri(
     uri: str,
     *,
-    node: str = _KVM_NODE,
-    access: Callable[[str, int], bool] = os.access,
-    exists: Callable[[str], bool] = os.path.exists,
+    node: str | None = None,
+    open: Callable[[str, int], int] | None = None,
+    close: Callable[[int], None] | None = None,
 ) -> Callable[[], bool]:
-    """Build the URI-selected host-KVM probe (ADR-0352).
+    """Build the shared worker-host KVM openability probe (ADR-0648)."""
+    del uri
+    resolved_node = node if node is not None else resolved_kvm_node()
+    open_node = open if open is not None else os.open
+    close_node = close if close is not None else os.close
 
-    ``qemu:///session`` runs qemu as the worker uid, so the signal is worker-uid *openability*
-    (``os.access`` R+W). Any other URI — the default ``qemu:///system`` and privileged/remote
-    URIs — runs qemu privileged, so the signal is ``/dev/kvm`` *presence* (``os.path.exists``),
-    which succeeds regardless of the worker uid. ``node``/``access``/``exists`` are injected so
-    the branch is unit-tested without touching the real ``/dev/kvm``.
-    """
-    if uri.strip() == _SESSION_URI:
-        return lambda: access(node, os.R_OK | os.W_OK)
-    return lambda: exists(node)
+    def _probe() -> bool:
+        try:
+            fd = open_node(resolved_node, os.O_RDWR)
+            close_node(fd)
+        except OSError:
+            return False
+        return True
+
+    return _probe
 
 
 def default_guest_arch_accel_probe(

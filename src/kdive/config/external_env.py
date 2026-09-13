@@ -461,8 +461,9 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "/dev/kvm",
         "KVM device node probed for hardware virtualization by `check-local-libvirt.sh`, "
         "`check-setup-deps.sh` (for its native-arch advisory line), `preflight-env.sh`, and the "
-        "shared rootfs build-tool budget, which scales when this uid cannot open it read+write "
-        "because the libguestfs appliance then emulates (ADR-0637).",
+        "guest-architecture diagnostic, and shared rootfs build-tool budgets, which use one "
+        "read+write openability probe because the libguestfs appliance otherwise emulates "
+        "(ADR-0648).",
     ),
     ExternalEnvVar(
         "KDIVE_QEMU_LIBEXEC",
