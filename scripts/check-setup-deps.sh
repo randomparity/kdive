@@ -104,7 +104,8 @@ load_distro_id() {
     id_like="${ID_LIKE:-}"
   fi
   case " ${id} ${id_like} " in
-  *" fedora "* | *" rhel "* | *" centos "*) printf "fedora" ;;
+  *" rhel "* | *" centos "*) printf "el" ;;
+  *" fedora "*) printf "fedora" ;;
   *" debian "* | *" ubuntu "*) printf "debian" ;;
   *" arch "*) printf "arch" ;;
   *" opensuse "* | *" suse "*) printf "opensuse" ;;
@@ -117,35 +118,35 @@ load_distro_id() {
 package_for() {
   local name="$1" distro="$2"
   case "${name}:${distro}" in
-  pkg-config:fedora) printf "pkgconf-pkg-config" ;;
+  pkg-config:fedora | pkg-config:el) printf "pkgconf-pkg-config" ;;
   pkg-config:arch) printf "pkgconf" ;;
-  libvirt-headers:fedora | libvirt-headers:opensuse) printf "libvirt-devel" ;;
+  libvirt-headers:fedora | libvirt-headers:el | libvirt-headers:opensuse) printf "libvirt-devel" ;;
   libvirt-headers:arch) printf "libvirt" ;;
   libvirt-headers:*) printf "libvirt-dev" ;;
-  python-headers:fedora | python-headers:opensuse) printf "python3-devel" ;;
+  python-headers:fedora | python-headers:el | python-headers:opensuse) printf "python3-devel" ;;
   python-headers:arch) printf "python" ;;
   python-headers:*) printf "python3-dev" ;;
-  shellcheck:fedora) printf "ShellCheck" ;;
-  libelf-headers:fedora) printf "elfutils-libelf-devel" ;;
+  shellcheck:fedora | shellcheck:el) printf "ShellCheck" ;;
+  libelf-headers:fedora | libelf-headers:el) printf "elfutils-libelf-devel" ;;
   libelf-headers:opensuse) printf "libelf-devel" ;;
   libelf-headers:arch) printf "libelf" ;;
   libelf-headers:*) printf "libelf-dev" ;;
   # libdw is the DWARF debuginfo library from elfutils; drgn's vendored libdrgn links against
   # it when building from source (wheel-less arches). On Fedora it lives inside elfutils-devel;
   # Arch's libelf package already includes libdw.
-  libdw-headers:fedora) printf "elfutils-devel" ;;
+  libdw-headers:fedora | libdw-headers:el) printf "elfutils-devel" ;;
   libdw-headers:opensuse) printf "libdw-devel" ;;
   libdw-headers:arch) printf "libelf" ;;
   libdw-headers:*) printf "libdw-dev" ;;
   # libkdumpfile lets drgn open kdump-COMPRESSED vmcores; without it the local-libvirt kdump
   # capture path fails "drgn was built without libkdumpfile support" even though ELF cores read.
-  libkdumpfile-headers:fedora | libkdumpfile-headers:opensuse) printf "libkdumpfile-devel" ;;
+  libkdumpfile-headers:fedora | libkdumpfile-headers:el | libkdumpfile-headers:opensuse) printf "libkdumpfile-devel" ;;
   libkdumpfile-headers:arch) printf "libkdumpfile" ;;
   libkdumpfile-headers:*) printf "libkdumpfile-dev" ;;
   # The libguestfs Python binding — required for the local-libvirt kdump capture path (ADR-0203).
   # Fedora/RHEL/openSUSE keep the historical `python3-libguestfs` name; Debian/Ubuntu renamed to
   # `python3-guestfs` (POWER host bring-up runbook, §1). Not pip-installable; system package only.
-  python3-guestfs:fedora | python3-guestfs:opensuse) printf "python3-libguestfs" ;;
+  python3-guestfs:fedora | python3-guestfs:el | python3-guestfs:opensuse) printf "python3-libguestfs" ;;
   python3-guestfs:arch) printf "libguestfs" ;;
   python3-guestfs:*) printf "python3-guestfs" ;;
   docker:debian) printf "docker.io" ;;
@@ -158,7 +159,7 @@ package_for() {
   # --forcearch=ppc64le returns qemu-system-ppc — and EL ships no qemu-system-* package at all.
   # It provides no foreign-arch emulator, so a foreign request keeps the arch-named package:
   # correct on Fedora, and on EL the only name there is to suggest.
-  qemu-system-x86_64:fedora | qemu-system-ppc64:fedora)
+  qemu-system-x86_64:fedora | qemu-system-ppc64:fedora | qemu-system-x86_64:el | qemu-system-ppc64:el)
     # ${host_arch:-} rather than ${host_arch}: this is the only row that reads a global, and an
     # unset or empty value must fall through to the arch-named answer, not abort under `set -u`.
     if [[ "${name}" == "$(qemu_binary_for_arch "${host_arch:-}")" ]]; then
@@ -245,7 +246,7 @@ print_install_hint() {
   local distro="$1"
   shift
   case "${distro}" in
-  fedora) printf "    dnf install %s\n" "$*" ;;
+  fedora | el) printf "    dnf install %s\n" "$*" ;;
   debian) printf "    apt install %s\n" "$*" ;;
   arch) printf "    pacman -S %s\n" "$*" ;;
   opensuse) printf "    zypper install %s\n" "$*" ;;
@@ -328,6 +329,8 @@ print_cross_arch_advisory() {
     else
       printf "  guest arch %s: native emulator present, /dev/kvm not accessible — runs under TCG until KVM is enabled\n" "${host}"
     fi
+  elif [[ "${distro}" == el && "${host}" == ppc64le ]]; then
+    printf "  guest arch %s: not available; default EL ppc64le repositories provide no native emulator package\n" "${host}"
   else
     printf "  guest arch %s: not available; install %s for native guests\n" "${host}" "$(package_for "${native}" "${distro}")"
   fi
@@ -415,6 +418,9 @@ probe_all() {
   require_tool required uv "curl -LsSf https://astral.sh/uv/install.sh | sh"
   require_command required pkg-config "${distro}"
   require_header required libvirt-headers libvirt "${distro}"
+  # Fedora and EL use libvirt-devel; on EL it is in CRB rather than the enabled repositories.
+  [[ "${distro}" != fedora && "${distro}" != el ]] ||
+    note_manual required "libvirt-devel" "sudo dnf config-manager --set-enabled crb (Enterprise Linux only)"
   # libvirt-python and any wheel-less C/Rust extension (e.g. pydantic-core, grpcio on
   # arches without prebuilt wheels) compile against the Python development headers.
   require_header required python-headers python3 "${distro}"
@@ -428,14 +434,16 @@ probe_all() {
   # RECOMMENDED — needed to reproduce the full local CI gate.
   require_command recommended git "${distro}"
   require_command recommended make "${distro}"
-  require_command recommended shellcheck "${distro}"
-  require_command recommended shfmt "${distro}"
+  # Fedora and EL package none of these tools.
+  require_tool recommended shellcheck "https://github.com/koalaman/shellcheck#installing"
+  require_tool recommended shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@latest"
   require_tool recommended just "uv tool install rust-just"
   require_tool recommended prek "uv tool install prek"
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
-  require_command recommended docker "${distro}"
+  require_tool recommended docker \
+    "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
 
   # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
   future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)
@@ -448,8 +456,13 @@ probe_all() {
   # PATH-only, and the RedHat family keeps this host's own emulator off PATH (ADR-0641 decision 2).
   native_qemu="$(qemu_binary_for_arch "${host_arch}")"
   if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
-    resolve_native_emulator "${native_qemu}" >/dev/null ||
-      note_package future "${native_qemu}" "$(package_for "${native_qemu}" "${distro}")"
+    if ! resolve_native_emulator "${native_qemu}" >/dev/null; then
+      if [[ "${distro}" == el && "${host_arch}" == ppc64le ]]; then
+        note_manual future "${native_qemu}" "default EL ppc64le repositories provide no native emulator package; enable a verified vendor channel before selecting an installer package"
+      else
+        note_package future "${native_qemu}" "$(package_for "${native_qemu}" "${distro}")"
+      fi
+    fi
   fi
   command_exists gcc || command_exists clang ||
     note_package future "gcc or clang" "$(package_for gcc-or-clang "${distro}")"
@@ -525,7 +538,7 @@ maybe_install_tier() {
   local -a refresh_cmd=() install_cmd=()
   case "${distro}" in
   debian) refresh_cmd=(apt-get update) && install_cmd=(apt-get install -y "${pkgs[@]}") ;;
-  fedora) install_cmd=(dnf install -y "${pkgs[@]}") ;;
+  fedora | el) install_cmd=(dnf install -y "${pkgs[@]}") ;;
   # Arch uses plain `pacman -S` (no `-Sy`): a bare `-Sy <pkg>` leaves the unsupported partial-upgrade
   # state on a non-fresh host, and `-Syu` would surprise-upgrade the whole system (ADR-0393).
   arch) install_cmd=(pacman -S --noconfirm "${pkgs[@]}") ;;

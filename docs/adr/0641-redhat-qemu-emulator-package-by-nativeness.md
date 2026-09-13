@@ -45,6 +45,17 @@ Whether `qemu-kvm` is likewise available on **EL ppc64le** is not settled here: 
 of the Rocky 9, CentOS Stream 9 and CentOS Stream 10 ppc64le images carry no `qemu-kvm` at all.
 Tracked in #2405. It does not affect this decision's other three arms, each measured above.
 
+### Amendment (2026-09-12): default EL ppc64le has no native-emulator package
+
+#2405 resolves the default-repository contract without claiming an answer for subscribed RHEL.
+Rocky 9, CentOS Stream 9, and CentOS Stream 10 ppc64le default repositories contain neither
+`qemu-kvm`, `qemu-kvm-core`, nor a `qemu-system-*` package. On this bounded EL ppc64le case, the
+checker now distinguishes `el` from Fedora, reports that no native-emulator package is available,
+and excludes that missing dependency from both the package hint and the `-y` installer argv.
+It instead tells the operator to enable a verified vendor channel before selecting an installer
+package. Fedora ppc64le retains the measured `qemu-kvm` native path, and the foreign-architecture
+advisory is unchanged.
+
 This is what the `libvirt_stack` role has always installed
 (`deploy/ansible/roles/libvirt_stack/defaults/main.yml:28-34`), reached from the other side.
 The role and the checker still hold separate tables, because they answer different questions.

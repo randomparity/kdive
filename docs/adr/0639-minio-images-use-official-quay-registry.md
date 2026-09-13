@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed
+Superseded (2026-09-12)
+
+> **Superseded by [0647](0647-supported-s3-backend-and-compose-data-transition.md)** (2026-09-12)
 
 ## Context
 
