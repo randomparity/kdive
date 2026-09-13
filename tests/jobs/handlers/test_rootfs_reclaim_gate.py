@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -93,9 +94,9 @@ def _write_overlay(rootfs_dir: Path, system_id: UUID) -> None:
     (rootfs_dir / overlay_name(str(system_id))).write_bytes(b"overlay")
 
 
-def _reclaimable(migrated_url: str, inv: UUID, rootfs_dir: Path) -> bool:
+def _reclaimable(worker_dsn: str, inv: UUID, rootfs_dir: Path) -> bool:
     async def _run() -> bool:
-        conn = await connect(migrated_url)
+        conn = await connect(worker_dsn)
         try:
             return await rootfs_base_reclaimable(conn, inv, _TOKEN_X, rootfs_dir=str(rootfs_dir))
         finally:
@@ -104,7 +105,9 @@ def _reclaimable(migrated_url: str, inv: UUID, rootfs_dir: Path) -> bool:
     return asyncio.run(_run())
 
 
-def test_overlay_present_pins_the_base(migrated_url: str, tmp_path: Path) -> None:
+def test_overlay_present_pins_the_base(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
     async def _seed() -> tuple[UUID, UUID]:
         conn = await connect(migrated_url)
         try:
@@ -123,10 +126,14 @@ def test_overlay_present_pins_the_base(migrated_url: str, tmp_path: Path) -> Non
 
     inv, sys_id = asyncio.run(_seed())
     _write_overlay(tmp_path, sys_id)
-    assert not _reclaimable(migrated_url, inv, tmp_path)  # condition (a) pins it
+    assert not _reclaimable(
+        authority_role_dsns("kdive_worker"), inv, tmp_path
+    )  # condition (a) pins it
 
 
-def test_failed_referencer_with_overlay_gone_drains(migrated_url: str, tmp_path: Path) -> None:
+def test_failed_referencer_with_overlay_gone_drains(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
     # AC-8: a `failed` referencer (terminal, never reaches torn_down) whose overlay has been
     # reclaimed MUST drain — a state-keyed gate that pins `failed` forever is the regression.
     async def _seed() -> UUID:
@@ -147,10 +154,12 @@ def test_failed_referencer_with_overlay_gone_drains(migrated_url: str, tmp_path:
 
     inv = asyncio.run(_seed())
     tmp_path.mkdir(parents=True, exist_ok=True)  # accessible root, no overlay file
-    assert _reclaimable(migrated_url, inv, tmp_path)
+    assert _reclaimable(authority_role_dsns("kdive_worker"), inv, tmp_path)
 
 
-def test_reprovisioning_referencer_pins_via_condition_b(migrated_url: str, tmp_path: Path) -> None:
+def test_reprovisioning_referencer_pins_via_condition_b(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
     # AC-8c: overlay momentarily absent mid-re-materialize; condition (b) defers.
     async def _seed() -> UUID:
         conn = await connect(migrated_url)
@@ -170,10 +179,14 @@ def test_reprovisioning_referencer_pins_via_condition_b(migrated_url: str, tmp_p
 
     inv = asyncio.run(_seed())
     tmp_path.mkdir(parents=True, exist_ok=True)
-    assert not _reclaimable(migrated_url, inv, tmp_path)  # pinned by state, no overlay needed
+    assert not _reclaimable(
+        authority_role_dsns("kdive_worker"), inv, tmp_path
+    )  # pinned by state, no overlay needed
 
 
-def test_unrelated_and_catalog_systems_do_not_pin(migrated_url: str, tmp_path: Path) -> None:
+def test_unrelated_and_catalog_systems_do_not_pin(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
     # AC-8f: a live System referencing a DIFFERENT checksum or a catalog rootfs is not a
     # referencer of X — X reclaims even while that System stays live with an overlay present.
     async def _seed() -> tuple[UUID, UUID, UUID]:
@@ -202,10 +215,12 @@ def test_unrelated_and_catalog_systems_do_not_pin(migrated_url: str, tmp_path: P
     inv, other, cat = asyncio.run(_seed())
     _write_overlay(tmp_path, other)
     _write_overlay(tmp_path, cat)
-    assert _reclaimable(migrated_url, inv, tmp_path)
+    assert _reclaimable(authority_role_dsns("kdive_worker"), inv, tmp_path)
 
 
-def test_torn_down_referencer_is_excluded(migrated_url: str, tmp_path: Path) -> None:
+def test_torn_down_referencer_is_excluded(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
     async def _seed() -> tuple[UUID, UUID]:
         conn = await connect(migrated_url)
         try:
@@ -224,11 +239,11 @@ def test_torn_down_referencer_is_excluded(migrated_url: str, tmp_path: Path) -> 
 
     inv, sys_id = asyncio.run(_seed())
     _write_overlay(tmp_path, sys_id)  # even with an overlay, torn_down is not enumerated
-    assert _reclaimable(migrated_url, inv, tmp_path)
+    assert _reclaimable(authority_role_dsns("kdive_worker"), inv, tmp_path)
 
 
 def test_the_state_classifier_is_not_widened_by_the_fetch_lease(
-    migrated_url: str, tmp_path: Path
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
 ) -> None:
     # The AC-8 reconciliation for #1702/ADR-0515, asserted rather than left implicit.
     #
@@ -275,4 +290,4 @@ def test_the_state_classifier_is_not_widened_by_the_fetch_lease(
 
     inv = asyncio.run(_seed())
     tmp_path.mkdir(parents=True, exist_ok=True)
-    assert _reclaimable(migrated_url, inv, tmp_path)
+    assert _reclaimable(authority_role_dsns("kdive_worker"), inv, tmp_path)
