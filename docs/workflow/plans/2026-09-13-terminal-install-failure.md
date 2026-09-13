@@ -22,8 +22,9 @@ Files: `src/kdive/domain/capacity/state.py`, `src/kdive/jobs/worker.py`,
 `tests/mcp/lifecycle/test_runs_tools.py` if the existing worker test cannot reach `runs.get`.
 
 Interfaces: consume `RunState`, `can_transition`, `_fail_job_and_run`, and existing lifecycle
-fixtures. Produce the legal `succeeded -> failed` edge and terminal compensation while retaining
-the `JobState.FAILED` and worker-fence guards.
+fixtures. Produce the legal `succeeded -> failed` edge for terminal install compensation while
+retaining the `JobState.FAILED` and worker-fence guards; preserve terminal boot's ADR-0230 read
+path.
 
 Verification:
 
@@ -33,6 +34,9 @@ Verification:
 - Mode: focused-test. Contract: terminal install failure writes `failed`, category, and failing job;
   a requeue keeps the Run `succeeded`. Expected red: terminal result remains `succeeded`. Green:
   `just test-verbose tests/jobs/test_worker.py` exits 0.
+- Mode: focused-test. Contract: terminal boot failure preserves a build-succeeded Run for
+  `boot_readiness`. Expected red: that Run becomes `failed`. Green:
+  `just test-verbose tests/jobs/test_worker.py` exits 0.
 - Mode: focused-test. Contract: `runs.get` returns the existing failure envelope after terminal
   finalization. Expected red: the response is successful. Green:
   `just test-verbose tests/mcp/lifecycle/test_runs_tools.py` exits 0.
@@ -41,8 +45,10 @@ Steps:
 
 1. Add `RunState.FAILED` to `RunState.SUCCEEDED` in both the production table and its exhaustive
    test oracle.
-2. Add `RunState.SUCCEEDED` to `_RUN_COMPENSATION_STATES`; retain all other guards unchanged.
-3. Add the terminal/retryable worker proof and, only if absent there, an MCP read-path proof.
+2. Allow `RunState.SUCCEEDED` only for terminal install compensation; retain the boot-readiness
+   exception and all other guards.
+3. Add terminal-install, terminal-boot-preservation, and retryable worker proof and, only if
+   absent there, an MCP read-path proof.
 4. Run the focused commands, then `just lint`, `just type`, `just test`, and `just ci` before
    handoff.
 
