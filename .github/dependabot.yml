@@ -31,6 +31,7 @@ updates:
     directories:
       - "/"
       - "/deploy/mock-oidc"
+      - "/deploy/seaweedfs"
     schedule:
       interval: "weekly"
     cooldown:
