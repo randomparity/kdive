@@ -18,7 +18,7 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Release.Namespace }}
-{{- if ne (.Values.demo.minio.service.type | default "ClusterIP") "ClusterIP" }}
+{{- if ne (.Values.demo.seaweedfs.service.type | default "ClusterIP") "ClusterIP" }}
 ---
 # When the bundled object store is exposed off-cluster (demo.minio.service.type != ClusterIP),
 # the default-deny policy above still rejects external LoadBalancer/NodePort traffic to the MinIO
@@ -32,22 +32,22 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "kdive.fullname" . }}-minio-ext
+  name: {{ include "kdive.fullname" . }}-seaweedfs-ext
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      app: {{ include "kdive.fullname" . }}-minio
+      app: {{ include "kdive.fullname" . }}-seaweedfs
   policyTypes: ["Ingress"]
   ingress:
     - from:
-        {{- range (.Values.demo.minio.service.sourceRanges | default (list "0.0.0.0/0")) }}
+        {{- range (.Values.demo.seaweedfs.service.sourceRanges | default (list "0.0.0.0/0")) }}
         - ipBlock:
             cidr: {{ . | quote }}
         {{- end }}
       ports:
         - protocol: TCP
-          port: 9000
+          port: 8333
 {{- end }}
 {{- end }}
