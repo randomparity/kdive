@@ -24,7 +24,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         fsGroup: 10001
-      {{- include "kdive.minioVersioningBarrier" . | nindent 6 }}
+      {{- include "kdive.seaweedfsInitializationBarrier" . | nindent 6 }}
       containers:
         - name: reconciler
           image: {{ include "kdive.image" . }}

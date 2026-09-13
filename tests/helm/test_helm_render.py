@@ -12,7 +12,6 @@ index both kinds — see :func:`_workloads`.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -174,88 +173,8 @@ def _template_bundled_bucket(bucket: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _minio_init_container_from_render(
-    res: subprocess.CompletedProcess[str],
-) -> dict[str, Any]:
-    assert res.returncode == 0, res.stderr
-    for doc in yaml.safe_load_all(res.stdout):
-        if not (isinstance(doc, dict) and doc.get("kind") == "Job"):
-            continue
-        if str(doc.get("metadata", {}).get("name", "")).endswith("-minio-init"):
-            return doc["spec"]["template"]["spec"]["containers"][0]
-    raise AssertionError("bundled chart rendered no MinIO initializer Job")
-
-
-def _minio_init_container(*set_args: str) -> dict[str, Any]:
-    res = _template("bundledBackends=true", "demoAcknowledged=true", *set_args)
-    return _minio_init_container_from_render(res)
-
-
-def _minio_init_script(*set_args: str) -> str:
-    command = _minio_init_container(*set_args)["command"]
-    assert command[:2] == ["/bin/sh", "-c"]
-    return command[2]
-
-
-def _literal_env(container: dict[str, Any]) -> dict[str, str]:
-    return {entry["name"]: entry["value"] for entry in container["env"]}
-
-
-def _fake_mc(tmp_path: Path) -> Path:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    calls = tmp_path / "mc-calls"
-    executable = tmp_path / "mc"
-    executable.write_text(
-        "#!/bin/sh\n"
-        "set -eu\n"
-        'printf \'%s\\n\' "$*" >>"$MC_CALLS"\n'
-        "last_argument=\n"
-        'for argument in "$@"; do last_argument=$argument; done\n'
-        'case "$1 ${2:-}" in\n'
-        '  "mb --ignore-existing"|"version enable"|"version info")\n'
-        '    printf \'%s\\n\' "$last_argument" >>"$MC_BUCKET_ARGS"\n'
-        "    ;;\n"
-        "esac\n"
-        'case "$*" in\n'
-        '  "version info --json "*)\n'
-        '    [ "${MC_INFO_FAIL:-0}" = 0 ] || exit 23\n'
-        "    printf '%s\\n' \"$MC_VERSION_INFO\"\n"
-        "    ;;\n"
-        "esac\n"
-    )
-    executable.chmod(0o755)
-    return calls
-
-
-def _run_minio_init(
-    tmp_path: Path,
-    reply: str,
-    *,
-    info_fails: bool = False,
-    container: dict[str, Any] | None = None,
-) -> tuple[int, list[str]]:
-    calls = _fake_mc(tmp_path)
-    rendered_container = container or _minio_init_container()
-    command = rendered_container["command"]
-    assert command[:2] == ["/bin/sh", "-c"]
-    result = subprocess.run(
-        ["/bin/bash", "-c", command[2]],
-        capture_output=True,
-        text=True,
-        env={
-            **_literal_env(rendered_container),
-            "PATH": f"{tmp_path}:{os.environ['PATH']}",
-            "MC_CALLS": str(calls),
-            "MC_BUCKET_ARGS": str(tmp_path / "mc-buckets"),
-            "MC_VERSION_INFO": reply,
-            "MC_INFO_FAIL": "1" if info_fails else "0",
-        },
-    )
-    return result.returncode, calls.read_text().splitlines()
-
-
-def _minio_ext_cidrs(res: subprocess.CompletedProcess[str]) -> list[str] | None:
-    """Return the ipBlock CIDRs of the `-minio-ext` NetworkPolicy, or None if it's not rendered.
+def _seaweedfs_ext_cidrs(res: subprocess.CompletedProcess[str]) -> list[str] | None:
+    """Return the ipBlock CIDRs of the `-seaweedfs-ext` NetworkPolicy, or None if absent.
 
     This is the actual exposure control (NOTES only mirrors it in prose). Rendered by
     `helm template`, so it works offline — unlike NOTES, which Helm only emits via
@@ -264,7 +183,7 @@ def _minio_ext_cidrs(res: subprocess.CompletedProcess[str]) -> list[str] | None:
     for doc in yaml.safe_load_all(res.stdout):
         if not (isinstance(doc, dict) and doc.get("kind") == "NetworkPolicy"):
             continue
-        if not str(doc.get("metadata", {}).get("name", "")).endswith("-minio-ext"):
+        if not str(doc.get("metadata", {}).get("name", "")).endswith("-seaweedfs-ext"):
             continue
         cidrs: list[str] = []
         for rule in doc["spec"]["ingress"]:
@@ -888,7 +807,7 @@ def test_bundled_path_wires_backends_into_config() -> None:
         "lifecycle-witness-dsn",
     }
     assert len(set(secret["stringData"].values())) == 5
-    assert 'KDIVE_S3_ENDPOINT_URL: "http://kdive-kdive-minio:9000"' in res.stdout
+    assert 'KDIVE_S3_ENDPOINT_URL: "http://kdive-kdive-seaweedfs:8333"' in res.stdout
     assert 'KDIVE_OIDC_ISSUER: "http://kdive-kdive-oidc:8080/default"' in res.stdout
     assert 'KDIVE_OIDC_JWKS_URI: "http://kdive-kdive-oidc:8080/default/jwks"' in res.stdout
     assert "wait-for-db" in res.stdout
@@ -1088,115 +1007,40 @@ def _bundled_workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     return _rendered_app_workloads("bundledBackends=true", "demoAcknowledged=true", *set_args)
 
 
-def _minio_barrier(workload: dict[str, Any]) -> dict[str, Any]:
+def _seaweedfs_barrier(workload: dict[str, Any]) -> dict[str, Any]:
     init_containers = workload["spec"]["template"]["spec"].get("initContainers", [])
-    matches = [item for item in init_containers if item["name"] == "verify-minio-versioning"]
+    matches = [item for item in init_containers if item["name"] == "verify-seaweedfs-versioning"]
     assert len(matches) == 1
     return matches[0]
-
-
-def _run_minio_barrier(
-    tmp_path: Path, workload: dict[str, Any], reply: str
-) -> tuple[int, list[str]]:
-    calls = _fake_mc(tmp_path)
-    barrier = _minio_barrier(workload)
-    assert barrier["command"][:2] == ["/bin/sh", "-c"]
-    result = subprocess.run(
-        ["/bin/bash", "-c", barrier["command"][2]],
-        capture_output=True,
-        text=True,
-        env={
-            **_literal_env(barrier),
-            "PATH": f"{tmp_path}:{os.environ['PATH']}",
-            "MC_CALLS": str(calls),
-            "MC_BUCKET_ARGS": str(tmp_path / "mc-buckets"),
-            "MC_VERSION_INFO": reply,
-            "MC_INFO_FAIL": "0",
-        },
-    )
-    return result.returncode, calls.read_text().splitlines()
 
 
 def _container(workload: dict[str, Any]) -> dict[str, Any]:
     return workload["spec"]["template"]["spec"]["containers"][0]
 
 
-def test_bundled_app_workloads_share_minio_versioning_startup_barrier() -> None:
-    barriers = {proc: _minio_barrier(workload) for proc, workload in _bundled_workloads().items()}
+def test_bundled_app_workloads_share_seaweedfs_initialization_barrier() -> None:
+    barriers = {
+        proc: _seaweedfs_barrier(workload) for proc, workload in _bundled_workloads().items()
+    }
     assert set(barriers) == set(_WORKLOAD_KINDS)
-    assert len({barrier["command"][2] for barrier in barriers.values()}) == 1
     for proc, barrier in barriers.items():
-        assert barrier["image"].startswith("quay.io/minio/mc:"), proc
+        assert barrier["image"] == _container(_bundled_workloads()[proc])["image"], proc
+        assert barrier["command"] == ["python", "-m", "kdive.store.initialize_bucket"], proc
         env = {entry["name"]: entry["value"] for entry in barrier["env"]}
-        assert env["MC_CONFIG_DIR"] == "/tmp/.mc", proc
-        assert env["MC_BUCKET"] == "kdive-artifacts", proc
-        assert set(env) == {"MC_CONFIG_DIR", "MC_USER", "MC_PASS", "MC_BUCKET"}, proc
+        assert env == {
+            "KDIVE_S3_BUCKET": "kdive-artifacts",
+            "KDIVE_S3_ENDPOINT_URL": "http://kdive-kdive-seaweedfs:8333",
+            "AWS_ACCESS_KEY_ID": "kdive",
+            "AWS_SECRET_ACCESS_KEY": "kdive-demo-secret",  # pragma: allowlist secret
+        }, proc
 
 
-def test_external_app_workloads_omit_minio_versioning_startup_barrier() -> None:
+def test_external_app_workloads_omit_seaweedfs_initialization_barrier() -> None:
     for proc, workload in _workloads().items():
         names = {
             item["name"] for item in workload["spec"]["template"]["spec"].get("initContainers", [])
         }
-        assert "verify-minio-versioning" not in names, proc
-
-
-@pytest.mark.parametrize("proc", list(_WORKLOAD_KINDS))
-def test_bundled_minio_barrier_allows_only_compatible_policy(tmp_path: Path, proc: str) -> None:
-    workload = _bundled_workloads()[proc]
-    barrier_env = _literal_env(_minio_barrier(workload))
-    compatible = (
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}'
-    )
-    returncode, calls = _run_minio_barrier(tmp_path / "ok", workload, compatible)
-    assert returncode == 0
-    assert calls == [
-        "alias set local http://kdive-kdive-minio:9000 "
-        f"{barrier_env['MC_USER']} {barrier_env['MC_PASS']}",
-        "version info --json local/kdive-artifacts",
-    ]
-
-    incompatible = (
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Suspended","MFADelete":""}}'
-    )
-    returncode, calls = _run_minio_barrier(tmp_path / "bad", workload, incompatible)
-    assert returncode != 0
-    assert calls[-1] == "version info --json local/kdive-artifacts"
-
-
-def test_bundled_minio_barrier_uses_configured_bucket(tmp_path: Path) -> None:
-    workload = _bundled_workloads("config.KDIVE_S3_BUCKET=custom-artifacts")["server"]
-    reply = (
-        '{"Op":"info","status":"success","url":"local/custom-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}}'
-    )
-    returncode, calls = _run_minio_barrier(tmp_path, workload, reply)
-    assert returncode == 0
-    assert calls[-1] == "version info --json local/custom-artifacts"
-
-
-@pytest.mark.parametrize(("_case", "bucket_pattern"), _SHELL_BUCKET_CASES)
-def test_bundled_minio_barrier_passes_bucket_as_literal_data(
-    tmp_path: Path, _case: str, bucket_pattern: str
-) -> None:
-    sentinel = tmp_path / "shell-executed"
-    bucket_value = bucket_pattern.format(sentinel=sentinel)
-    rendered = _template_bundled_bucket(bucket_value)
-    workload = _rendered_app_workloads_from_render(rendered)["server"]
-    barrier = _minio_barrier(workload)
-    assert bucket_value not in barrier["command"][2]
-    assert _literal_env(barrier)["MC_BUCKET"] == bucket_value
-
-    reply = (
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}'
-    )
-    returncode, _calls = _run_minio_barrier(tmp_path, workload, reply)
-    assert returncode == 0
-    assert not sentinel.exists()
-    assert (tmp_path / "mc-buckets").read_text().splitlines() == [f"local/{bucket_value}"]
+        assert "verify-seaweedfs-versioning" not in names, proc
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))
@@ -1427,7 +1271,7 @@ def test_fixtures_configmap_mounts_on_components_not_migrate() -> None:
 def test_bundled_renders_demo_backends() -> None:
     res = _template("bundledBackends=true", "demoAcknowledged=true")
     assert res.returncode == 0, res.stderr
-    for name in ("kdive-kdive-postgres", "kdive-kdive-minio", "kdive-kdive-oidc"):
+    for name in ("kdive-kdive-postgres", "kdive-kdive-seaweedfs", "kdive-kdive-oidc"):
         assert f"name: {name}\n" in res.stdout, name
     assert "mock-oauth2-server" in res.stdout
     assert "kind: NetworkPolicy" in res.stdout
@@ -1435,61 +1279,6 @@ def test_bundled_renders_demo_backends() -> None:
     # worker is the one StatefulSet (ADR-0514).
     assert res.stdout.count("kind: Deployment") == 6
     assert res.stdout.count("kind: StatefulSet") == 1
-
-
-@pytest.mark.parametrize(("_case", "reply", "expected"), _VERSIONING_REPLIES)
-def test_bundled_minio_init_fails_closed_on_bucket_versioning(
-    tmp_path: Path, _case: str, reply: str, expected: int
-) -> None:
-    returncode, calls = _run_minio_init(tmp_path, reply)
-    assert (returncode == 0) is (expected == 0), _case
-    bucket = "local/kdive-artifacts"
-    assert calls[1:] == [
-        f"mb --ignore-existing {bucket}",
-        f"version enable {bucket}",
-        f"version info --json {bucket}",
-    ]
-
-
-def test_bundled_minio_init_uses_configured_bucket(tmp_path: Path) -> None:
-    container = _minio_init_container("config.KDIVE_S3_BUCKET=custom-artifacts")
-    reply = (
-        '{"Op":"info","status":"success","url":"local/custom-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}'
-    )
-    returncode, calls = _run_minio_init(tmp_path, reply, container=container)
-    assert returncode == 0
-    assert calls[1:] == [
-        "mb --ignore-existing local/custom-artifacts",
-        "version enable local/custom-artifacts",
-        "version info --json local/custom-artifacts",
-    ]
-
-
-@pytest.mark.parametrize(("_case", "bucket_pattern"), _SHELL_BUCKET_CASES)
-def test_bundled_minio_init_passes_bucket_as_literal_data(
-    tmp_path: Path, _case: str, bucket_pattern: str
-) -> None:
-    sentinel = tmp_path / "shell-executed"
-    bucket_value = bucket_pattern.format(sentinel=sentinel)
-    container = _minio_init_container_from_render(_template_bundled_bucket(bucket_value))
-    assert bucket_value not in container["command"][2]
-    assert _literal_env(container)["MC_BUCKET"] == bucket_value
-
-    reply = (
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}'
-    )
-    returncode, _calls = _run_minio_init(tmp_path, reply, container=container)
-    assert returncode == 0
-    assert not sentinel.exists()
-    assert (tmp_path / "mc-buckets").read_text().splitlines() == [f"local/{bucket_value}"] * 3
-
-
-def test_bundled_minio_init_propagates_version_info_command_failure(tmp_path: Path) -> None:
-    returncode, calls = _run_minio_init(tmp_path, "", info_fails=True)
-    assert returncode != 0
-    assert calls[-1] == "version info --json local/kdive-artifacts"
 
 
 def test_external_path_has_no_demo_backends() -> None:
@@ -1624,28 +1413,32 @@ def test_demo_token_script_client_ids_match_rendered_variants() -> None:
     )
 
 
-def test_exposed_minio_networkpolicy_ingress_scope() -> None:
+def test_exposed_seaweedfs_networkpolicy_ingress_scope() -> None:
     # The actual exposure control (the NOTES warning only mirrors this in prose, and NOTES can't
     # render offline so it isn't asserted here). A ClusterIP store renders no companion policy;
-    # exposing it with the empty default opens :9000 to the world (0.0.0.0/0); a scoped override
+    # exposing it with the empty default opens :8333 to the world (0.0.0.0/0); a scoped override
     # opens only that CIDR. Pins both the footgun default and that scoping actually narrows it.
     base = ("bundledBackends=true", "demoAcknowledged=true")
 
     clusterip = _template(*base)
     assert clusterip.returncode == 0, clusterip.stderr
-    assert _minio_ext_cidrs(clusterip) is None, "ClusterIP store must render no -minio-ext policy"
+    assert _seaweedfs_ext_cidrs(clusterip) is None, (
+        "ClusterIP store must render no companion policy"
+    )
 
-    exposed = _template(*base, "demo.minio.service.type=LoadBalancer")
+    exposed = _template(*base, "demo.seaweedfs.service.type=LoadBalancer")
     assert exposed.returncode == 0, exposed.stderr
-    assert _minio_ext_cidrs(exposed) == ["0.0.0.0/0"], "empty sourceRanges must open to the world"
+    assert _seaweedfs_ext_cidrs(exposed) == ["0.0.0.0/0"], (
+        "empty sourceRanges must open to the world"
+    )
 
     scoped = _template(
         *base,
-        "demo.minio.service.type=LoadBalancer",
-        "demo.minio.service.sourceRanges={192.168.16.0/24}",
+        "demo.seaweedfs.service.type=LoadBalancer",
+        "demo.seaweedfs.service.sourceRanges={192.168.16.0/24}",
     )
     assert scoped.returncode == 0, scoped.stderr
-    cidrs = _minio_ext_cidrs(scoped)
+    cidrs = _seaweedfs_ext_cidrs(scoped)
     assert cidrs == ["192.168.16.0/24"], f"scoped override must narrow the ingress, got {cidrs}"
 
 

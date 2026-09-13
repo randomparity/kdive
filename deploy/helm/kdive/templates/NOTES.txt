@@ -16,19 +16,19 @@ migrate hook; changing a runtime ref rolls only its consumer.
 {{- end }}
 {{- if and .Values.bundledBackends .Values.demoAcknowledged }}
 
-WARNING: bundledBackends is on — Postgres/MinIO run on emptyDir. Data is NOT durable;
+WARNING: bundledBackends is on — Postgres/SeaweedFS run on emptyDir. Data is NOT durable;
 a pod restart drops all state. Use external backends for anything but a throwaway demo.
 {{- end }}
 {{- if .Values.bundledBackends }}
 
 DEMO MODE (ephemeral — a pod restart drops all state).
-{{- $minioSvc := .Values.demo.seaweedfs.service | default dict }}
-{{- $minioExposed := ne ($minioSvc.type | default "ClusterIP") "ClusterIP" }}
-{{- $minioRanges := $minioSvc.sourceRanges | default (list) }}
-{{- if and $minioExposed (or (not $minioRanges) (has "0.0.0.0/0" $minioRanges)) }}
+{{- $seaweedfsSvc := .Values.demo.seaweedfs.service | default dict }}
+{{- $seaweedfsExposed := ne ($seaweedfsSvc.type | default "ClusterIP") "ClusterIP" }}
+{{- $seaweedfsRanges := $seaweedfsSvc.sourceRanges | default (list) }}
+{{- if and $seaweedfsExposed (or (not $seaweedfsRanges) (has "0.0.0.0/0" $seaweedfsRanges)) }}
 
 WARNING: the bundled object store is exposed off-cluster (demo.seaweedfs.service.type=
-{{ $minioSvc.type }}) and its NetworkPolicy admits :9000 from 0.0.0.0/0 (anywhere). It is
+{{ $seaweedfsSvc.type }}) and its NetworkPolicy admits :8333 from 0.0.0.0/0 (anywhere). It is
 fronted by static demo credentials — anyone who can route to it can read/write all stored
 kernel images and vmcores. Restrict access at your LoadBalancer or network firewall for
 anything but a throwaway lab. NOTE: demo.seaweedfs.service.sourceRanges canNOT restrict by client

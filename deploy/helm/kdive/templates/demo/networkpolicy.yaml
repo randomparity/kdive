@@ -20,10 +20,10 @@ spec:
               kubernetes.io/metadata.name: {{ .Release.Namespace }}
 {{- if ne (.Values.demo.seaweedfs.service.type | default "ClusterIP") "ClusterIP" }}
 ---
-# When the bundled object store is exposed off-cluster (demo.minio.service.type != ClusterIP),
-# the default-deny policy above still rejects external LoadBalancer/NodePort traffic to the MinIO
+# When the bundled object store is exposed off-cluster (demo.seaweedfs.service.type != ClusterIP),
+# the default-deny policy above still rejects external LoadBalancer/NodePort traffic to SeaweedFS
 # pod — the k3s NetworkPolicy controller rejects unmatched ingress with icmp-port-unreachable, so
-# the guest's install/capture S3 fetch and external build uploads fail. Allow ingress to the MinIO
+# the guest's install/capture S3 fetch and external build uploads fail. Allow ingress to SeaweedFS
 # pod on the S3 port from the configured source ranges (default: anywhere, demo only).
 # CAVEAT: this does NOT restrict by client IP. Under the Service's default externalTrafficPolicy
 # (Cluster) external traffic is SNAT'd to a node IP before this policy sees it (see the base

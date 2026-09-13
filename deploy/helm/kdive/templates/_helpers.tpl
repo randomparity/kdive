@@ -17,18 +17,18 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
 {{/*
-On the bundledBackends demo path the apps must reach the in-chart MinIO/OIDC. These helpers
+On the bundledBackends demo path the apps must reach the in-chart SeaweedFS/OIDC. These helpers
 derive the non-secret endpoint values from the in-chart services and fixed demo configuration,
 falling back to the operator-provided .Values.config.* on the external-backend path. Database
 DSNs are always wired separately through Secret refs.
 */}}
 {{- define "kdive.s3Endpoint" -}}
 {{- if .Values.config.KDIVE_S3_ENDPOINT_URL -}}
-{{- /* An explicit override wins in BOTH modes. The bundled MinIO is reachable in-cluster as
-       <fullname>-minio:9000, but a remote-libvirt guest and an external uploader cannot resolve
+{{- /* An explicit override wins in BOTH modes. The bundled SeaweedFS is reachable in-cluster as
+       <fullname>-seaweedfs:8333, but a remote-libvirt guest and an external uploader cannot resolve
        that name — presigned URLs must carry an address all three (worker, uploader, guest)
-       reach. Set config.KDIVE_S3_ENDPOINT_URL to that address and expose the MinIO Service
-       (demo.minio.service.type) to make the bundled object store usable off-cluster. */ -}}
+       reach. Set config.KDIVE_S3_ENDPOINT_URL to that address and expose the SeaweedFS Service
+       (demo.seaweedfs.service.type) to make the bundled object store usable off-cluster. */ -}}
 {{- .Values.config.KDIVE_S3_ENDPOINT_URL -}}
 {{- else if .Values.bundledBackends -}}
 {{- printf "http://%s-seaweedfs:8333" (include "kdive.fullname" .) -}}
@@ -90,7 +90,7 @@ running env stays stale (helm reports success, nothing changes). Hashing the ren
 configmap.yaml makes the pod template vary with the ConfigMap, so `helm upgrade` rolls exactly
 the consuming Deployments. Only the chart-rendered ConfigMap is hashed — the optional
 systems/fixtures ConfigMaps are operator-authored and referenced by name, so the chart cannot
-see their content. The demo backends (postgres/minio/oidc) do not include this, so a config
+see their content. The demo backends (postgres/seaweedfs/oidc) do not include this, so a config
 change never rolls their emptyDir pods and demo data is preserved. Call with the root context.
 */}}
 {{- define "kdive.configChecksum" -}}
@@ -207,37 +207,18 @@ prometheus.io/port: "{{ . }}"
 {{- end -}}
 
 {{/*
-Validate the complete compact JSON schema emitted by the pinned mc client. Its /bin/sh is Bash
-5.1, so [[ =~ ]] gives an anchored whole-document match without adding a parser binary to the
-minimal image. The caller must set version_info from a successful `mc version info --json` call.
+Bundled app Pods must not start before the seaweedfs-init Job has created and configured the
+bucket. Every workload includes this helper to keep the endpoint and credentials identical.
+External-backend Pods rely on runtime S3 validation and render no bundled-store init container.
 */}}
-{{- define "kdive.minioVersioningPolicyCheck" -}}
-# The pinned mc image's /bin/sh is Bash 5.1; match the entire compact reply.
-versioning_pattern='^\{"Op":"info","status":"success",'
-versioning_pattern+='"url":"[^"[:space:]]+",'
-versioning_pattern+='"versioning":\{"status":"Enabled","MFADelete":""'
-versioning_pattern+='(,"ExcludedPrefixes":\[\])?\}\}$'
-if [[ ! "$version_info" =~ $versioning_pattern ]]; then
-  echo "MinIO bucket versioning is incompatible." >&2
-  echo "Require Enabled, MFA Delete off, and no excluded prefixes." >&2
-  exit 1
-fi
-{{- end -}}
-
-{{/*
-Bundled app Pods must not start before the ordinary minio-init Job has created and configured the
-bucket. Every workload includes this one helper, keeping the endpoint, credentials, writable mc
-config path, and policy parser identical. External-backend Pods rely on runtime S3 validation and
-render no MinIO-specific init container.
-*/}}
-{{- define "kdive.minioVersioningBarrier" -}}
+{{- define "kdive.seaweedfsInitializationBarrier" -}}
 {{- if .Values.bundledBackends }}
 initContainers:
-{{ include "kdive.minioVersioningBarrierItem" . | nindent 2 }}
+{{ include "kdive.seaweedfsInitializationBarrierItem" . | nindent 2 }}
 {{- end }}
 {{- end -}}
 
-{{- define "kdive.minioVersioningBarrierItem" -}}
+{{- define "kdive.seaweedfsInitializationBarrierItem" -}}
 {{- if .Values.bundledBackends }}
   - name: verify-seaweedfs-versioning
     image: {{ include "kdive.image" . }}
@@ -248,9 +229,9 @@ initContainers:
       - name: KDIVE_S3_ENDPOINT_URL
         value: {{ include "kdive.s3Endpoint" . | quote }}
       - name: AWS_ACCESS_KEY_ID
-        value: {{ .Values.demoCredentials.minio.rootUser | quote }}
+        value: {{ .Values.demoCredentials.seaweedfs.accessKey | quote }}
       - name: AWS_SECRET_ACCESS_KEY
-        value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
+        value: {{ .Values.demoCredentials.seaweedfs.secretKey | quote }}
 {{- end }}
 {{- end -}}
 

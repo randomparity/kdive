@@ -35,8 +35,8 @@ data:
   KDIVE_OIDC_ISSUER: {{ include "kdive.oidcIssuer" . | quote }}
   KDIVE_OIDC_JWKS_URI: {{ include "kdive.oidcJwks" . | quote }}
   {{- if .Values.bundledBackends }}
-  # Demo MinIO credentials for boto3's default chain (AWS_* vars). External
+  # Demo SeaweedFS credentials for boto3's default chain (AWS_* vars). External
   # backends supply these out of band (IRSA, secret files under KDIVE_SECRETS_ROOT).
-  AWS_ACCESS_KEY_ID: {{ .Values.demoCredentials.minio.rootUser | quote }}
-  AWS_SECRET_ACCESS_KEY: {{ .Values.demoCredentials.minio.rootPassword | quote }}
+  AWS_ACCESS_KEY_ID: {{ .Values.demoCredentials.seaweedfs.accessKey | quote }}
+  AWS_SECRET_ACCESS_KEY: {{ .Values.demoCredentials.seaweedfs.secretKey | quote }}
   {{- end }}

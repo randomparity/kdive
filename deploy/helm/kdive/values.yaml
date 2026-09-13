@@ -4,7 +4,7 @@ image:
   digest: ""         # set to pin by digest (overrides tag)
   pullPolicy: IfNotPresent
 
-# bundledBackends pulls the Postgres/MinIO subcharts for a turnkey demo. They run
+# bundledBackends pulls the Postgres/SeaweedFS demo backends for a turnkey demo. They run
 # on emptyDir (no PVC, no backup): a pod restart drops all state by design. It is
 # ephemeral/demo-only and must be co-set with demoAcknowledged=true or the chart
 # fails to render. Production runs against operator-provided backends, toggle off.
@@ -160,9 +160,9 @@ demoCredentials:
     workerPassword: kdive-worker-demo # pragma: allowlist secret
     reconcilerPassword: kdive-reconciler-demo # pragma: allowlist secret
     lifecycleWitnessPassword: kdive-witness-demo # pragma: allowlist secret
-  minio:
-    rootUser: kdive
-    rootPassword: kdive-demo-secret # pragma: allowlist secret
+  seaweedfs:
+    accessKey: kdive
+    secretKey: kdive-demo-secret # pragma: allowlist secret
 
 # Image pins for the first-party demo backends (bundledBackends path only).
 demo:
@@ -178,7 +178,7 @@ demo:
       type: ClusterIP
       nodePort: ""
       # When exposed (type != ClusterIP), the demo default-deny NetworkPolicy is opened for the
-      # MinIO S3 port from these CIDRs so the remote guest/uploader can reach it. Empty = anywhere
+      # SeaweedFS S3 port from these CIDRs so the remote guest/uploader can reach it. Empty = anywhere
       # (0.0.0.0/0, demo only). NOTE: this does NOT restrict by client IP — under the Service's
       # default externalTrafficPolicy (Cluster) external traffic is SNAT'd to a node IP before the
       # NetworkPolicy sees it, so the allowlist effectively gates only the node/pod CIDR (the rule

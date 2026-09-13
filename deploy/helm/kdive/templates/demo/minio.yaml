@@ -22,9 +22,9 @@ spec:
           args: ["mini", "-dir=/data"]
           env:
             - name: S3_ACCESS_KEY
-              value: {{ .Values.demoCredentials.minio.rootUser | quote }}
+              value: {{ .Values.demoCredentials.seaweedfs.accessKey | quote }}
             - name: S3_SECRET_KEY
-              value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
+              value: {{ .Values.demoCredentials.seaweedfs.secretKey | quote }}
           ports:
             - containerPort: 8333
           readinessProbe:
@@ -48,7 +48,7 @@ metadata:
 spec:
   # Default ClusterIP keeps the bundled object store in-cluster. To drive remote-libvirt or
   # accept external build uploads the guest/uploader must reach S3 too — set
-  # demo.minio.service.type=NodePort (and a node-routable KDIVE_S3_ENDPOINT_URL) to expose it.
+  # demo.seaweedfs.service.type=NodePort (and a node-routable KDIVE_S3_ENDPOINT_URL) to expose it.
   # The cluster network/firewall must permit the chosen NodePort.
   type: {{ .Values.demo.seaweedfs.service.type | default "ClusterIP" }}
   selector:
@@ -87,7 +87,7 @@ spec:
             - name: KDIVE_S3_ENDPOINT_URL
               value: {{ include "kdive.s3Endpoint" . | quote }}
             - name: AWS_ACCESS_KEY_ID
-              value: {{ .Values.demoCredentials.minio.rootUser | quote }}
+              value: {{ .Values.demoCredentials.seaweedfs.accessKey | quote }}
             - name: AWS_SECRET_ACCESS_KEY
-              value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
+              value: {{ .Values.demoCredentials.seaweedfs.secretKey | quote }}
 {{- end }}
