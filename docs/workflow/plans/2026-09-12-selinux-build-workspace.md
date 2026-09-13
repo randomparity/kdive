@@ -2,12 +2,14 @@
 
 **Goal.** Let the local example build a guest image through its session daemon on an
 SELinux-enforcing RedHat-family host by labeling the selected build workspace with the established
-`svirt_image_t` contract before customization starts.
+`svirt_image_t` contract before customization starts, including when the operator chooses a
+symlinked or regular-expression-metacharacter-containing workspace name.
 
-**Architecture.** `build-image.sh` remains the one caller that owns its workspace. It reuses the
-sourceable `kdive_label_svirt_image` helper from ADR-0640 rather than duplicating SELinux commands.
-The documentation follows the executable behavior. No provider runtime, libvirt URI, policy module,
-or provisioning/install label behavior changes.
+**Architecture.** `build-image.sh` remains the one caller that owns its workspace. It canonicalizes
+once, then passes that value to the sourceable `kdive_label_svirt_image` helper and `build-fs`.
+The helper escapes the fcontext literal before adding its recursive suffix. No SELinux command is
+duplicated. The documentation follows the executable behavior. No provider runtime, libvirt URI,
+policy module, or provisioning/install label behavior changes.
 
 **Tech stack.** Bash, pytest, Markdown.
 
@@ -29,46 +31,69 @@ small static script-contract test, and two focused documentation updates.
 
 | File | Action | Responsibility |
 |---|---|---|
-| `examples/local-libvirt/build-image.sh` | modify | label the resolved workspace before build-fs |
-| `tests/scripts/test_build_image_workspace.py` | create | verify script ordering and helper reuse |
+| `examples/local-libvirt/build-image.sh` | modify | canonicalize and label the shared workspace before build-fs |
+| `examples/local-libvirt/selinux-label.sh` | modify | escape fcontext literals before recursive matching |
+| `tests/scripts/test_build_image_workspace.py` | create | verify canonical-path reuse and ordering |
+| `tests/scripts/test_selinux_label.py` | modify | prove metacharacters are escaped in fcontext patterns |
 | `examples/local-libvirt/README.md` | modify | describe workspace labeling accurately |
 | `docs/operating/providers/local-libvirt.md` | modify | retire the stale unresolved-build warning |
 
 ## Task 1 — label the workspace before customization
 
-**Files:** modify `examples/local-libvirt/build-image.sh`; create
-`tests/scripts/test_build_image_workspace.py`.
+**Files:** modify `examples/local-libvirt/build-image.sh` and
+`examples/local-libvirt/selinux-label.sh`; create `tests/scripts/test_build_image_workspace.py`;
+modify `tests/scripts/test_selinux_label.py`.
 
-**Interfaces.** Consume `kdive_label_svirt_image <directory>` from
+**Interfaces.** Consume `kdive_label_svirt_image <canonical-directory>` from
 `examples/local-libvirt/selinux-label.sh`; no new interface is introduced.
 
 ### Verification
 
 | Contract | Mode | Detail |
 |---|---|---|
-| The script calls the existing helper on `workspace` after `mkdir -p` and before `build-fs` | focused-test | Add a source-order test; it is red before the call exists and green with `uv run python -m pytest tests/scripts/test_build_image_workspace.py -q` |
-| The generic helper remains the label implementation | focused-test | `uv run python -m pytest tests/scripts/test_selinux_label.py -q` passes its argument and failure-path contracts |
+| The script calls the existing helper and `build-fs` with one canonical workspace after `mkdir -p` | focused-test | Add a source-contract test; it is red before the shared canonical value exists and green with `uv run python -m pytest tests/scripts/test_build_image_workspace.py -q` |
+| The helper writes literal fcontext patterns and retains its failure paths | focused-test | `uv run python -m pytest tests/scripts/test_selinux_label.py -q` passes its metacharacter, argument, and failure-path contracts |
 
 ### Steps
 
-1. Add `kdive_label_svirt_image "${workspace}"` immediately after the existing workspace creation.
-   Do not add a second `semanage`, `restorecon`, SELinux probe, or helper wrapper.
-2. Add a small Python source-contract test that reads `build-image.sh`, finds the `mkdir -p`, helper
-   call, and `build-fs --image` text, and asserts their byte offsets are increasing. This test
-   proves the only executable ordering contract without attempting a privileged image build.
+1. Canonicalize the chosen value once, preserving `build-fs`'s `Path.resolve()` semantics:
+
+   ```bash
+   workspace="$(realpath -m -- "${workspace}")"
+   mkdir -p "${workspace}" "$(dirname "${systems_toml}")"
+   kdive_label_svirt_image "${workspace}"
+   ```
+
+   Keep the existing `--workspace "${workspace}"` argument. Do not add a second `semanage`,
+   `restorecon`, SELinux probe, or helper wrapper.
+2. Make the helper produce its fcontext base with a Bash character loop. Each of `\\ . ^ $ * + ?
+   ( ) [ ] { } |` receives one literal backslash; all other characters pass unchanged. Append the
+   existing recursive descendant suffix only after the literal base is complete. This preserves arbitrary valid workspace
+   names while keeping the rule to that path and descendants.
+3. Add a small Python source-contract test that reads `build-image.sh`, finds `realpath -m`, the
+   workspace creation, helper call, and `build-fs --image` text, and asserts their byte offsets are
+   increasing and the helper and CLI both use the canonical `workspace` value. This proves the
+   ordering and shared-value contract without attempting a privileged image build.
 
    ```python
    from pathlib import Path
 
    SCRIPT = Path(__file__).resolve().parents[2] / "examples/local-libvirt/build-image.sh"
 
-   def test_workspace_is_labeled_before_build_fs() -> None:
+   def test_workspace_is_canonicalized_and_labeled_before_build_fs() -> None:
        source = SCRIPT.read_text(encoding="utf-8")
-       assert source.index('mkdir -p "${workspace}"') < source.index(
+       assert source.index('realpath -m -- "${workspace}"') < source.index(
+           'mkdir -p "${workspace}"'
+       ) < source.index(
            'kdive_label_svirt_image "${workspace}"'
        ) < source.index('build-fs --image "${name}"')
    ```
-3. Run both focused test modules. Expected result: all selected tests pass.
+
+4. Extend `test_selinux_label.py` with a directory such as `/tmp/kdive.build[1]` and assert the
+   stub records an escaped dot and brackets before the helper's existing descendant suffix. This
+   is red for direct interpolation and proves the literal fcontext boundary without a real policy
+   store.
+5. Run both focused test modules. Expected result: all selected tests pass.
 
 ## Task 2 — align operator guidance
 
