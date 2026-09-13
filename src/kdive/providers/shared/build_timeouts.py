@@ -36,8 +36,8 @@ def appliance_budget_s(base_s: int, *, kvm_present: Callable[[], bool] | None = 
 
     The result is an ``int`` because ``run_guestfs_tool`` takes ``timeout_s: int`` and echoes it
     into the timeout error's ``details`` payload. ``kvm_present`` is injected so both branches are
-    unit-tested without a real ``/dev/kvm``; the default probe (:func:`_worker_host_kvm_usable`)
-    runs per call, so it answers for the host as it is when the tool runs.
+    unit-tested without a real ``/dev/kvm``; the shared openability probe runs per call, so it
+    answers for the host as it is when the tool runs.
     """
     probe = kvm_present if kvm_present is not None else kvm_probe_for_uri("")
     if probe():
