@@ -16,11 +16,16 @@ from kdive.diagnostics.checks import (
     CheckStatus,
     Vantage,
 )
-from kdive.diagnostics.result_codec import deserialize_results
+from kdive.diagnostics.result_codec import deserialize_results as _deserialize_results
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.diagnostics import diagnostics_worker_check_handler
+
+
+def deserialize_results(raw: str | None) -> list[CheckResult]:
+    """Decode handler output with the IDs its test worker is registered to emit."""
+    return _deserialize_results(raw, allowed_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID))
 
 
 class _FakeCheck(Check):
