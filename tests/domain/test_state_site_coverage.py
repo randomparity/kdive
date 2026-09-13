@@ -7,7 +7,8 @@ found the console-rotate and power gates missing from one. So this guard scans *
 crash-window trio ``READY`` + ``CRASHING`` + ``CRASHED`` (the four such sets — admission's
 quota-holding set, the reconciler's allocation-liveness set, and the two console live/seal sets —
 all share it, while adjacency successor sets, terminal sets, and narrow gates do not). Every such
-set must also contain every live state (``RESTORING``, ``PAUSED``) unless it is on
+set must also contain every live state (``RESTORING``, ``PAUSED``, ``TEARING_DOWN``) unless it is
+on
 ``INTENTIONALLY_PARTIAL`` with a reason.
 
 Follows the whole-tree AST-scan precedent (``test_no_service_import``, ``test_provider_boundary``).
@@ -25,19 +26,33 @@ _SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "kdive"
 # A literal that enumerates the live System states contains this crash-window trio.
 _LIVE_STATE_SIGNAL = frozenset({"READY", "CRASHING", "CRASHED"})
 # The live states such a set is expected to also contain.
-_LIVE_STATES_REQUIRED = frozenset({"RESTORING", "PAUSED"})
+_LIVE_STATES_REQUIRED = frozenset({"RESTORING", "PAUSED", "TEARING_DOWN"})
 
 # Live-state sets that deliberately exclude a live state, keyed by (repo-relative path, frozenset
 # of the SystemState member names in the literal) -> reason.
 INTENTIONALLY_PARTIAL: dict[tuple[str, frozenset[str]], str] = {
     # Not a live-state set: ROOTFS_BASE_OVERLAY_BACKED_SYSTEM_STATES classifies the non-terminal
     # states whose overlay file backs the rootfs base for the reclaim gate's condition (a).
-    # RESTORING is deliberately excluded — it is a base-re-materialize state (overlay momentarily
-    # absent), classified in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES instead (ADR-0441 §6).
+    # RESTORING and TEARING_DOWN are deliberately excluded — both are pre-overlay states,
+    # classified in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES instead (ADR-0441 §6).
     (
         "domain/capacity/state.py",
         frozenset({"READY", "PAUSED", "CRASHING", "CRASHED"}),
-    ): "overlay-backed reclaim-gate set; RESTORING is pre-overlay, classified apart (ADR-0441)",
+    ): "overlay-backed reclaim-gate set; RESTORING and TEARING_DOWN are pre-overlay (ADR-0441)",
+    # Console rotation/sealing stops once teardown is fenced; it must not acquire console output
+    # while provider cleanup is in progress.
+    (
+        "jobs/handlers/console/console_rotate.py",
+        frozenset({"READY", "RESTORING", "PAUSED", "CRASHING", "CRASHED"}),
+    ): "console sealing excludes the teardown fence",
+    (
+        "providers/infra/console_hosting.py",
+        frozenset({"READY", "REPROVISIONING", "RESTORING", "PAUSED", "CRASHING", "CRASHED"}),
+    ): "remote console hosting excludes the teardown fence",
+    (
+        "reconciler/repairs/console_rotation.py",
+        frozenset({"READY", "RESTORING", "PAUSED", "CRASHING", "CRASHED"}),
+    ): "console-rotation repair excludes the teardown fence",
 }
 
 

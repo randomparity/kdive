@@ -1686,7 +1686,7 @@ def test_teardown_provider_failure_leaves_mutation_obligation_open(migrated_url:
                     )
             async with pool.connection() as conn:
                 system = await SYSTEMS.get(conn, UUID(system_id))
-                assert system is not None and system.state is SystemState.TORN_DOWN
+                assert system is not None and system.state is SystemState.TEARING_DOWN
                 assert await repository.mutation_obligation_is_open(conn, attempt) is True
 
     asyncio.run(_run())
@@ -1725,7 +1725,7 @@ def test_teardown_discharge_rollback_keeps_mutation_obligation_open(
                     )
             async with pool.connection() as conn:
                 system = await SYSTEMS.get(conn, UUID(system_id))
-                assert system is not None and system.state is SystemState.TORN_DOWN
+                assert system is not None and system.state is SystemState.TEARING_DOWN
                 assert await repository.mutation_obligation_is_open(conn, attempt) is True
 
     asyncio.run(_run())
@@ -1772,7 +1772,7 @@ def test_teardown_cancellation_keeps_mutation_obligation_open(migrated_url: str)
 
             async with pool.connection() as conn:
                 system = await SYSTEMS.get(conn, UUID(system_id))
-                assert system is not None and system.state is SystemState.TORN_DOWN
+                assert system is not None and system.state is SystemState.TEARING_DOWN
                 assert await repository.mutation_obligation_is_open(conn, attempt) is True
 
     asyncio.run(_run())

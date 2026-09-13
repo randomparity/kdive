@@ -167,7 +167,8 @@ async def _force_crash_precheck(conn: AsyncConnection, system_id: UUID) -> _Cras
     ``crash`` is the first attempt (READY): the caller resolves the controller, enters CRASHING,
     then fires the NMI. ``finalize`` is a retry whose CRASHING marker is already set: finalize
     only, no controller and no NMI (the marker means "NMI already dispatched"; re-firing into a
-    mid-kdump guest can corrupt the dump). ``done`` is terminal or already CRASHED: nothing to do.
+    mid-kdump guest can corrupt the dump). ``done`` is terminal, already CRASHED, or fenced for
+    teardown: nothing to do.
     """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
@@ -177,7 +178,11 @@ async def _force_crash_precheck(conn: AsyncConnection, system_id: UUID) -> _Cras
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
-        if system.state in TERMINAL_SYSTEM_STATES or system.state is SystemState.CRASHED:
+        if system.state in {
+            *TERMINAL_SYSTEM_STATES,
+            SystemState.CRASHED,
+            SystemState.TEARING_DOWN,
+        }:
             return "done"
         if system.state is SystemState.CRASHING:
             return "finalize"

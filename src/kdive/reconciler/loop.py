@@ -154,6 +154,7 @@ _repair_terminal_authority_system_attempts = job_repairs.repair_terminal_authori
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
 _repair_leaked_mutation_obligations = system_repairs.repair_leaked_mutation_obligations
+_repair_stalled_tearing_down_systems = system_repairs.repair_stalled_tearing_down_systems
 _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_systems
 _repair_stalled_restoring_systems = system_repairs.repair_stalled_restoring_systems
 _repair_stalled_creating_snapshots = system_repairs.repair_stalled_creating_snapshots
@@ -577,6 +578,11 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # stalled-state repairs do.
     _RepairCatalogEntry(
         "leaked_mutation_obligations", lambda _r, _c, _g: _repair_leaked_mutation_obligations
+    ),
+    # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted teardown job.
+    # A fenced System then gets one bounded replay while preserving operator cancellation.
+    _RepairCatalogEntry(
+        "stalled_tearing_down_systems", lambda _r, _c, _g: _repair_stalled_tearing_down_systems
     ),
     _RepairCatalogEntry(
         "terminal_authority_system_attempts",

@@ -4004,6 +4004,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                     "paused",
                     "crashing",
                     "crashed",
+                    "tearing_down",
                     "torn_down",
                     "failed",
                 ),

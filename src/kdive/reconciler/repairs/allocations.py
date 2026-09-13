@@ -75,6 +75,7 @@ _LIVE_SYSTEM_STATES = (
     SystemState.PAUSED,  # start_paused restore: suspended guest, still a live domain (ADR-0378)
     SystemState.CRASHING,
     SystemState.CRASHED,
+    SystemState.TEARING_DOWN,
 )
 _LIVE_SYSTEM_STATE_VALUES = tuple(state.value for state in _LIVE_SYSTEM_STATES)
 _CRASHED_SYSTEM_STATE_VALUE = SystemState.CRASHED.value

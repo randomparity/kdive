@@ -735,7 +735,7 @@ def test_the_lanes_mid_materialize_states_are_the_curated_pre_overlay_set() -> N
     # instead of silently keeping a two-element list someone wrote by hand.
     curated = tuple(sorted(state.value for state in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES))
     assert curated == investigation_rootfs._MID_MATERIALIZE_STATE_VALUES
-    assert set(curated) == {"provisioning", "reprovisioning", "restoring"}
+    assert set(curated) == {"provisioning", "reprovisioning", "restoring", "tearing_down"}
 
 
 def test_staging_drain_lane_issues_one_job_for_an_investigation_with_several_systems(
