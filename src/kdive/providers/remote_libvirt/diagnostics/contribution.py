@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID, Check
+from kdive.diagnostics.checks import (
+    AUTHORITY_READINESS_ID,
+    GDBSTUB_ACL_ID,
+    PROVIDER_TLS_ID,
+    Check,
+)
 from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 from kdive.diagnostics.provider_checks import (
     BaseImageStagingCheck,
@@ -35,10 +40,7 @@ from kdive.providers.remote_libvirt.diagnostics import (
     base_image_staging,
     reachability,
 )
-from kdive.providers.remote_libvirt.diagnostics.authority import (
-    AUTHORITY_READINESS_ID,
-    AuthorityReadinessCheck,
-)
+from kdive.providers.remote_libvirt.diagnostics.authority import AuthorityReadinessCheck
 from kdive.providers.remote_libvirt.diagnostics.provider_tls import provider_tls_probe
 
 _REMOTE_PROVIDER = "remote-libvirt"
