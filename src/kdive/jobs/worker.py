@@ -65,7 +65,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 _log = logging.getLogger(__name__)
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
-_RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
+_RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING, RunState.SUCCEEDED)
 _RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
 _CLAIM_LOOP_FAILURE_REASON = re.compile(
     r"(?:pool-timeout|timeout|postgres-(?:[A-Z0-9]{5}|unknown)|unexpected)"

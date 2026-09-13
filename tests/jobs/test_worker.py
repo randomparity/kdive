@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
 
-from kdive.db.repositories import JOBS
+from kdive.db.repositories import JOBS, RUNS
 from kdive.domain.capacity.state import JobState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
@@ -579,6 +579,9 @@ def test_run_once_retryable_category_still_requeues(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             calls = 0
+            run_id = await _seed_worker_run(pool)
+            async with pool.connection() as conn:
+                await RUNS.update_state(conn, UUID(run_id), RunState.SUCCEEDED)
 
             async def transient(conn: psycopg.AsyncConnection, job: Job) -> str:
                 nonlocal calls
@@ -592,7 +595,7 @@ def test_run_once_retryable_category_still_requeues(migrated_url: str) -> None:
                 job = await queue.enqueue(
                     conn,
                     JobKind.INSTALL,
-                    _build_payload(),
+                    InstallPayload(run_id=run_id),
                     _AUTHORIZING,
                     "dk-transient",
                     max_attempts=3,
@@ -602,17 +605,30 @@ def test_run_once_retryable_category_still_requeues(migrated_url: str) -> None:
             assert calls == 1
             requeued = await _final_state(migrated_url, job.id)
             assert requeued.state is JobState.QUEUED  # retryable: another attempt remains
+            assert await _run_failure_row(pool, run_id) == (RunState.SUCCEEDED.value, None, None)
             await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert calls == 2
 
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("kind", [JobKind.BOOT, JobKind.INSTALL])
-def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kind: JobKind) -> None:
+@pytest.mark.parametrize(
+    ("kind", "run_state"),
+    [
+        (JobKind.BOOT, RunState.RUNNING),
+        (JobKind.INSTALL, RunState.RUNNING),
+        (JobKind.INSTALL, RunState.SUCCEEDED),
+    ],
+)
+def test_terminal_run_job_failure_marks_owning_run_failed(
+    migrated_url: str, kind: JobKind, run_state: RunState
+) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             run_id = await _seed_worker_run(pool)
+            if run_state is RunState.SUCCEEDED:
+                async with pool.connection() as conn:
+                    await RUNS.update_state(conn, UUID(run_id), RunState.SUCCEEDED)
 
             async def raises_uncategorized(conn: psycopg.AsyncConnection, job: Job) -> str:
                 raise RuntimeError("uncategorized provider failure")

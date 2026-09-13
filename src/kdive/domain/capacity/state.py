@@ -284,7 +284,7 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
     RunState: {
         RunState.CREATED: frozenset({RunState.RUNNING, RunState.CANCELED}),
         RunState.RUNNING: frozenset({RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELED}),
-        RunState.SUCCEEDED: frozenset(),
+        RunState.SUCCEEDED: frozenset({RunState.FAILED}),
         RunState.FAILED: frozenset(),
         RunState.CANCELED: frozenset(),
     },
