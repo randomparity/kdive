@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -157,8 +158,11 @@ async def _seed_ready_system(pool: AsyncConnectionPool) -> UUID:
     return system.id
 
 
-async def _rotate(pool: AsyncConnectionPool, store: _FakeStore, system_id: UUID) -> None:
-    async with pool.connection() as conn:
+async def _rotate(worker_dsn: str, store: _FakeStore, system_id: UUID) -> None:
+    async with (
+        AsyncConnectionPool(worker_dsn, min_size=1, max_size=2, open=False) as worker_pool,
+        worker_pool.connection() as conn,
+    ):
         await console_rotate.console_rotate_handler(
             conn,
             _console_job(system_id, "boot-A"),
@@ -167,10 +171,13 @@ async def _rotate(pool: AsyncConnectionPool, store: _FakeStore, system_id: UUID)
         )
 
 
-async def _teardown(pool: AsyncConnectionPool, store: _FakeStore, system_id: UUID) -> str:
+async def _teardown(worker_dsn: str, store: _FakeStore, system_id: UUID) -> str:
     prov = _Provisioner()
     resolver = provider_resolver(provisioner=prov)
-    async with pool.connection() as conn:
+    async with (
+        AsyncConnectionPool(worker_dsn, min_size=1, max_size=2, open=False) as worker_pool,
+        worker_pool.connection() as conn,
+    ):
         result = await systems_handlers.teardown_handler(
             conn,
             _teardown_job(system_id),
@@ -192,8 +199,13 @@ async def _part_rows(pool: AsyncConnectionPool, system_id: UUID) -> list[str]:
 
 
 def test_teardown_reclaims_console_parts_and_sidecar(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    worker_dsn = authority_role_dsns("kdive_worker")
+
     async def _run() -> tuple[list[str], list[str], list[str], bool]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
@@ -202,11 +214,11 @@ def test_teardown_reclaims_console_parts_and_sidecar(
             log.write_bytes(_CONSOLE)
             monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
             store = _FakeStore()
-            await _rotate(pool, store, system_id)
+            await _rotate(worker_dsn, store, system_id)
             before = await _part_rows(pool, system_id)
             sidecar_key = f"local/systems/{system_id}/{sidecar_object_name()}"
             assert sidecar_key in store.objects, "rotation must have written a sidecar"
-            await _teardown(pool, store, system_id)
+            await _teardown(worker_dsn, store, system_id)
             after = await _part_rows(pool, system_id)
             objects_after = [k for k in store.objects if "console-part-" in k]
             return before, after, objects_after, sidecar_key in store.objects
@@ -244,7 +256,11 @@ async def _seed_sysrq_artifact(
     return stored.key
 
 
-def test_teardown_reclaims_sysrq_diagnostic_artifacts(migrated_url: str) -> None:
+def test_teardown_reclaims_sysrq_diagnostic_artifacts(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    worker_dsn = authority_role_dsns("kdive_worker")
+
     async def _run() -> tuple[list[str], list[str], bool]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
@@ -253,7 +269,7 @@ def test_teardown_reclaims_sysrq_diagnostic_artifacts(migrated_url: str) -> None
             key = await _seed_sysrq_artifact(pool, store, system_id)
             assert key in store.objects
             before = await _part_rows(pool, system_id)
-            await _teardown(pool, store, system_id)
+            await _teardown(worker_dsn, store, system_id)
             after = await _part_rows(pool, system_id)
             return before, after, key in store.objects
 
@@ -264,7 +280,11 @@ def test_teardown_reclaims_sysrq_diagnostic_artifacts(migrated_url: str) -> None
     assert not still_present, "sysrq object must be deleted at teardown"
 
 
-def test_teardown_retains_only_incomplete_console_and_sysrq_rows(migrated_url: str) -> None:
+def test_teardown_retains_only_incomplete_console_and_sysrq_rows(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    worker_dsn = authority_role_dsns("kdive_worker")
+
     async def _run() -> list[tuple[str, int]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
@@ -307,7 +327,7 @@ def test_teardown_retains_only_incomplete_console_and_sysrq_rows(migrated_url: s
             retained = _SequencedStore()
             retained.objects = store.objects
             for expected_rows in ([console_key], [console_key], []):
-                assert await _teardown(pool, retained, system_id) is not None
+                assert await _teardown(worker_dsn, retained, system_id) is not None
                 assert await _part_rows(pool, system_id) == expected_rows
             return retained.calls
 
@@ -316,7 +336,11 @@ def test_teardown_retains_only_incomplete_console_and_sysrq_rows(migrated_url: s
     assert all(limit == 20 for _key, limit in calls)
 
 
-def test_teardown_retains_sysrq_row_until_retired_key_batch_completes(migrated_url: str) -> None:
+def test_teardown_retains_sysrq_row_until_retired_key_batch_completes(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    worker_dsn = authority_role_dsns("kdive_worker")
+
     async def _run() -> tuple[str, list[tuple[str, int]]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
@@ -348,7 +372,7 @@ def test_teardown_retains_sysrq_row_until_retired_key_batch_completes(migrated_u
             store = _SequencedStore()
             store.objects = base.objects
             for expected_rows in ([sysrq_key], [sysrq_key], []):
-                assert await _teardown(pool, store, system_id) is not None
+                assert await _teardown(worker_dsn, store, system_id) is not None
                 assert await _part_rows(pool, system_id) == expected_rows
             return sysrq_key, store.calls
 
@@ -356,10 +380,14 @@ def test_teardown_retains_sysrq_row_until_retired_key_batch_completes(migrated_u
     assert [call for call in calls if call[0] == key] == [(key, 20)] * 3
 
 
-def test_teardown_does_not_reclaim_the_shared_uploaded_rootfs(migrated_url: str) -> None:
+def test_teardown_does_not_reclaim_the_shared_uploaded_rootfs(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     # The investigation-scoped uploaded rootfs is a SHARED, investigation-owned object (ADR-0441):
     # teardown must NOT delete its object or row — that is the reconciler sweeps' job under the
     # overlay-absence gate. A per-System teardown delete would drop a base a sibling still boots.
+    worker_dsn = authority_role_dsns("kdive_worker")
+
     async def _run() -> tuple[list[str], bool]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
@@ -379,7 +407,7 @@ def test_teardown_does_not_reclaim_the_shared_uploaded_rootfs(migrated_url: str)
                     "VALUES ('investigations', %s, %s, 'e', 'sensitive', 'rootfs')",
                     (inv_id, key),
                 )
-            await _teardown(pool, store, system_id)
+            await _teardown(worker_dsn, store, system_id)
             async with pool.connection() as conn:
                 cur = await conn.execute("SELECT 1 FROM artifacts WHERE object_key = %s", (key,))
                 row_present = await cur.fetchone() is not None
@@ -391,13 +419,17 @@ def test_teardown_does_not_reclaim_the_shared_uploaded_rootfs(migrated_url: str)
     assert all("rootfs-" not in key for key in deleted), "the shared base must not be deleted"
 
 
-def test_teardown_succeeds_with_nothing_to_clean(migrated_url: str) -> None:
+def test_teardown_succeeds_with_nothing_to_clean(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    worker_dsn = authority_role_dsns("kdive_worker")
+
     async def _run() -> tuple[str, list[str], list[str]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
             system_id = await _seed_ready_system(pool)
             store = _FakeStore()
-            result = await _teardown(pool, store, system_id)
+            result = await _teardown(worker_dsn, store, system_id)
             return result, await _part_rows(pool, system_id), store.deleted
 
     result, rows, deleted = asyncio.run(_run())
@@ -409,8 +441,13 @@ def test_teardown_succeeds_with_nothing_to_clean(migrated_url: str) -> None:
 
 
 def test_teardown_survives_store_delete_failure(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    worker_dsn = authority_role_dsns("kdive_worker")
+
     async def _run() -> tuple[str, list[str]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
@@ -418,9 +455,9 @@ def test_teardown_survives_store_delete_failure(
             log = tmp_path / f"{system_id}.log"
             log.write_bytes(_CONSOLE)
             monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
-            await _rotate(pool, _FakeStore(), system_id)
+            await _rotate(worker_dsn, _FakeStore(), system_id)
             failing = _FakeStore(fail_delete=True)
-            result = await _teardown(pool, failing, system_id)
+            result = await _teardown(worker_dsn, failing, system_id)
             # Object delete failed before the row delete, so #768 can still reclaim the rows.
             return result, await _part_rows(pool, system_id)
 
