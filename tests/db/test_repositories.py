@@ -38,6 +38,7 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.artifacts import Artifact, Sensitivity
 from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import (
     Allocation,
     DebugSession,
@@ -302,6 +303,29 @@ def test_update_state_illegal_raises(migrated_url: str) -> None:
             # or failed only — ADR-0069 added the released cancellation edge).
             with pytest.raises(IllegalTransition):
                 await ALLOCATIONS.update_state(conn, alloc.id, AllocationState.EXPIRED)
+
+    asyncio.run(_run_test())
+
+
+def test_record_terminal_run_failure_rejects_an_illegal_source(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            resource = await RESOURCES.insert(conn, _resource())
+            allocation = await ALLOCATIONS.insert(conn, _allocation(resource.id))
+            system = await SYSTEMS.insert(conn, _system(allocation.id))
+            investigation = await INVESTIGATIONS.insert(conn, _investigation())
+            run = await RUNS.insert(conn, _run(investigation.id, system.id))
+
+            with pytest.raises(IllegalTransition):
+                await RUNS.record_terminal_failure(
+                    conn,
+                    run.id,
+                    ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    uuid4(),
+                    eligible_states=frozenset({RunState.CREATED}),
+                )
+            reloaded = await RUNS.get(conn, run.id)
+            assert reloaded is not None and reloaded.state is RunState.CREATED
 
     asyncio.run(_run_test())
 
