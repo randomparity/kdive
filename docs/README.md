@@ -43,6 +43,8 @@ an installation or a code change against real infrastructure.
 3. Consult [cross-platform development](development/cross-platform.md) for x86_64 and ppc64le,
    [mutation testing](development/mutation-testing.md) for test effectiveness, and
    [releasing](development/releasing.md) when preparing a release.
+4. Use the [worker-handler write baseline](guide/worker-write-baseline.md) when changing a worker
+   database write or its grant evidence.
 
 ## Current guidance and historical records
 
