@@ -87,6 +87,13 @@ def main() -> int:
             == b"first"
         )
         client.delete_object(Bucket=bucket, Key="exact", VersionId=second)
+        try:
+            client.get_object(Bucket=bucket, Key="exact", VersionId=second)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] not in {"NoSuchKey", "NoSuchVersion"}:
+                raise
+        else:
+            raise AssertionError("exact version deletion left the selected version readable")
         upload = client.create_multipart_upload(Bucket=bucket, Key="multipart")["UploadId"]
         part = client.upload_part(
             Bucket=bucket, Key="multipart", UploadId=upload, PartNumber=1, Body=b"part"
