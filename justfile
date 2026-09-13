@@ -318,7 +318,7 @@ stack-migrate:
 # host-process startup step. Reuses the compose backends; host processes stay outside compose.
 #
 # `--wait` is scoped to the three long-running backends: it treats ANY container exit as a wait
-# failure, so the one-shot `minio-init` (creates the bucket, then exits 0) would make a healthy
+# failure, so the one-shot `seaweedfs-init` (creates the bucket, then exits 0) would make a healthy
 # stack report exit 1. Run that init separately to completion — its exit code still propagates,
 # so a real bucket-creation failure fails the recipe.
 stack-up:

@@ -5,7 +5,7 @@ Two upgrade footguns the chart must close:
 - #470: a ``config.*`` change must roll the pods that read it via ``envFrom``. A
   ``checksum/config`` pod annotation makes the pod template vary with the rendered
   ConfigMap, so ``helm upgrade`` rolls exactly the three app workloads — and never
-  postgres/minio (which do not consume the ConfigMap, so their demo data is preserved).
+  postgres/seaweedfs (which do not consume the ConfigMap, so their demo data is preserved).
   The worker is a StatefulSet (ADR-0514); the other two are Deployments.
 - #469: ``helm upgrade --reuse-values`` drops new chart-default config keys. The chart
   renders ``KDIVE_LOCAL_LIBVIRT_ENABLED`` from a defensive ``default "false"`` so a reused
@@ -32,7 +32,7 @@ CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
 # The three app processes whose pods read config.* via envFrom (and must roll on a change).
 _APP_PROCS = ("server", "worker", "reconciler")
 # The bundled-demo backends that do NOT consume the config ConfigMap (must NOT roll).
-_BACKEND_PROCS = ("postgres", "minio", "oidc")
+_BACKEND_PROCS = ("postgres", "seaweedfs", "oidc")
 # Every workload kind carrying a pod template in this chart. The worker's per-replica scratch
 # volumes make it a StatefulSet (ADR-0514); everything else is a Deployment.
 _WORKLOAD_KINDS = ("Deployment", "StatefulSet")
@@ -142,7 +142,7 @@ def test_lifecycle_witness_database_ref_change_rolls_only_witness() -> None:
 
 
 def test_backend_pods_have_no_config_checksum_annotation() -> None:
-    # postgres/minio/oidc do not consume the config ConfigMap; a checksum on them would roll
+    # postgres/seaweedfs/oidc do not consume the config ConfigMap; a checksum on them would roll
     # the emptyDir demo backends on a config change and wipe demo data (#470 acceptance).
     deploys = _workloads("bundledBackends=true", "demoAcknowledged=true")
     for proc in _BACKEND_PROCS:
