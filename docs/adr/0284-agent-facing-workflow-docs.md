@@ -1,6 +1,6 @@
 # ADR-0284: agent-facing workflow doc system (#940)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-30
 - Builds on [ADR-0151](0151-mcp-doc-resources.md) (operator docs as MCP
   resources), [ADR-0202](0202-mcp-lifecycle-prompts.md) (lifecycle prompts),
