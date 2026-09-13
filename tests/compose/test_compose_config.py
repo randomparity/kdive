@@ -58,102 +58,6 @@ _LOCAL_LOGIN_MEMBERS = {
     "lifecycle-witness": ("kdive-witness-member", "kdive_lifecycle_witness"),
 }
 
-_VERSIONING_REPLIES = (
-    (
-        "enabled-omitted-exclusions",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}',
-        0,
-    ),
-    (
-        "enabled-explicit-empty-exclusions",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}}',
-        0,
-    ),
-    (
-        "suspended",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Suspended","MFADelete":""}}',
-        1,
-    ),
-    (
-        "excluded-prefix",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":"",'
-        '"ExcludedPrefixes":["tmp/"]}}',
-        1,
-    ),
-    (
-        "excluded-folders",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":"","ExcludeFolders":true}}',
-        1,
-    ),
-    (
-        "missing-status",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"MFADelete":""}}',
-        1,
-    ),
-    (
-        "mfa-delete-enabled",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":"Enabled"}}',
-        1,
-    ),
-    (
-        "missing-mfa-delete",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled"}}',
-        1,
-    ),
-    (
-        "malformed-exclusions",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":null}}',
-        1,
-    ),
-    (
-        "compatible-decoy-before-suspended-real-state",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"decoy":{"versioning":{"status":"Enabled","MFADelete":""}},'
-        '"versioning":{"status":"Suspended","MFADelete":""}}',
-        1,
-    ),
-    (
-        "duplicate-versioning-keys",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""},'
-        '"versioning":{"status":"Suspended","MFADelete":""}}',
-        1,
-    ),
-    (
-        "trailing-junk",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}not-json',
-        1,
-    ),
-    (
-        "error-status-decoy",
-        '{"Op":"info","status":"error","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}',
-        1,
-    ),
-    (
-        "reordered-fields",
-        '{"status":"success","Op":"info","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""}}',
-        1,
-    ),
-    (
-        "extra-top-level-field",
-        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
-        '"versioning":{"status":"Enabled","MFADelete":""},"extra":true}',
-        1,
-    ),
-)
-
 
 def _config(
     env_overrides: dict[str, str] | None = None, *, obs: bool = False, managed_worker: bool = True
@@ -312,51 +216,6 @@ def test_external_role_provisioning_can_disable_local_bootstrap_and_override_run
     )
 
 
-def _minio_init_script() -> str:
-    entrypoint = _services()["minio-init"]["entrypoint"]
-    assert entrypoint[:2] == ["/bin/sh", "-c"]
-    # ``docker compose config`` preserves the source escape as ``$$``; Compose converts it to
-    # one dollar when it creates the container. Mirror that final argv here before executing it.
-    return entrypoint[2].replace("$$", "$")
-
-
-def _fake_mc(tmp_path: Path) -> Path:
-    calls = tmp_path / "mc-calls"
-    executable = tmp_path / "mc"
-    executable.write_text(
-        "#!/bin/sh\n"
-        "set -eu\n"
-        'printf \'%s\\n\' "$*" >>"$MC_CALLS"\n'
-        'case "$*" in\n'
-        '  "version info --json "*)\n'
-        '    [ "${MC_INFO_FAIL:-0}" = 0 ] || exit 23\n'
-        "    printf '%s\\n' \"$MC_VERSION_INFO\"\n"
-        "    ;;\n"
-        "esac\n"
-    )
-    executable.chmod(0o755)
-    return calls
-
-
-def _run_minio_init(
-    tmp_path: Path, reply: str, *, info_fails: bool = False
-) -> tuple[int, list[str]]:
-    calls = _fake_mc(tmp_path)
-    result = subprocess.run(
-        ["/bin/bash", "-c", _minio_init_script()],
-        capture_output=True,
-        text=True,
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}:{os.environ['PATH']}",
-            "MC_CALLS": str(calls),
-            "MC_VERSION_INFO": reply,
-            "MC_INFO_FAIL": "1" if info_fails else "0",
-        },
-    )
-    return result.returncode, calls.read_text().splitlines()
-
-
 def _published_ports(service: dict[str, Any]) -> set[str]:
     return {str(p.get("published")) for p in service.get("ports", [])}
 
@@ -367,24 +226,10 @@ def test_compose_config_is_valid() -> None:
     assert _services()  # non-empty → parsed
 
 
-@pytest.mark.parametrize(("_case", "reply", "expected"), _VERSIONING_REPLIES)
-def test_minio_init_fails_closed_on_bucket_versioning(
-    tmp_path: Path, _case: str, reply: str, expected: int
-) -> None:
-    returncode, calls = _run_minio_init(tmp_path, reply)
-    assert (returncode == 0) is (expected == 0), _case
-    assert calls[:3] == [
-        "alias set local http://minio:9000 minioadmin minioadmin",
-        "mb --ignore-existing local/kdive-artifacts",
-        "version enable local/kdive-artifacts",
-    ]
-    assert calls[3:] == ["version info --json local/kdive-artifacts"]
-
-
-def test_minio_init_propagates_version_info_command_failure(tmp_path: Path) -> None:
-    returncode, calls = _run_minio_init(tmp_path, "", info_fails=True)
-    assert returncode != 0
-    assert calls[-1] == "version info --json local/kdive-artifacts"
+def test_seaweedfs_initializer_uses_packaged_module() -> None:
+    initializer = _services()["seaweedfs-init"]
+    assert initializer["command"] == ["python", "-m", "kdive.store.initialize_bucket"]
+    assert initializer["environment"]["KDIVE_S3_ENDPOINT_URL"] == "http://seaweedfs:8333"
 
 
 def test_migrate_one_shot_runs_command_and_waits_for_postgres() -> None:
@@ -401,7 +246,7 @@ def test_app_service_waits_for_migrate_completion(service: str) -> None:
     assert dep["migrate"]["condition"] == "service_completed_successfully"
 
 
-_LONG_RUNNING_SERVICES = (*_APP_SERVICES, "postgres", "minio", "oidc")
+_LONG_RUNNING_SERVICES = (*_APP_SERVICES, "postgres", "seaweedfs", "oidc")
 
 
 @pytest.mark.parametrize("service", ("prometheus", "grafana"))
@@ -426,22 +271,22 @@ def test_long_running_service_restarts_so_an_outage_is_recoverable(service: str)
     # `on-failure`, not `unless-stopped`, on two counts. It is the policy ADR-0114 section 4
     # documents and the systemd units ship, which is the contract ADR-0449 cites. And
     # `unless-stopped` additionally starts a container on *daemon start*, which would make
-    # this stack's demo-credential MinIO and token-minting mock issuer — both published on
+    # this stack's demo-credential SeaweedFS and token-minting mock issuer — both published on
     # host ports — come back on every reboot of any machine that ever ran the stack.
     #
-    # The `migrate` and `minio-init` one-shots are deliberately excluded: they are meant to
+    # The `migrate` and `seaweedfs-init` one-shots are deliberately excluded: they are meant to
     # run once and exit, and `on-failure` would still re-run a genuinely failing one forever.
     assert _services()[service]["restart"] == "on-failure"
 
 
 @pytest.mark.parametrize("service", _APP_SERVICES)
 def test_app_service_waits_for_bucket_creation(service: str) -> None:
-    # All three app processes do object-store I/O, so they wait for the minio-init
-    # one-shot to complete — which transitively guarantees minio is healthy and the
+    # All three app processes do object-store I/O, so they wait for the seaweedfs-init
+    # one-shot to complete — which transitively guarantees SeaweedFS is healthy and the
     # artifacts bucket exists. Without this edge a bare `up <service>` starts a
     # process whose first S3 call fails (no bucket).
     dep = _services()[service]["depends_on"]
-    assert dep["minio-init"]["condition"] == "service_completed_successfully"
+    assert dep["seaweedfs-init"]["condition"] == "service_completed_successfully"
 
 
 def test_server_waits_for_the_issuer() -> None:
@@ -476,7 +321,7 @@ def _host_ips(service: dict[str, Any]) -> set[str | None]:
 
 
 # Fixed-credential backends that must not be reachable from outside the host (ADR-0554).
-_FIXED_CREDENTIAL_BACKENDS = ("postgres", "minio", "oidc")
+_FIXED_CREDENTIAL_BACKENDS = ("postgres", "seaweedfs", "oidc")
 
 
 @pytest.mark.parametrize("service", _FIXED_CREDENTIAL_BACKENDS)
@@ -499,7 +344,7 @@ def test_fixed_credential_backend_binds_loopback_by_default(service: str) -> Non
     ("service", "env_var", "internal", "obs"),
     [
         ("postgres", "KDIVE_POSTGRES_PORT", "5432", False),
-        ("minio", "KDIVE_MINIO_PORT", "9000", False),
+        ("seaweedfs", "KDIVE_SEAWEEDFS_PORT", "8333", False),
         ("oidc", "KDIVE_OIDC_PORT", "8080", False),
         ("server", "KDIVE_HTTP_PORT", "8000", False),
         ("prometheus", "KDIVE_PROMETHEUS_PORT", "9090", True),
@@ -526,7 +371,7 @@ def test_backend_host_port_is_overridable(
     ("service", "env_var", "container_port"),
     [
         ("postgres", "KDIVE_POSTGRES_PORT", "5432"),
-        ("minio", "KDIVE_MINIO_PORT", "9000"),
+        ("seaweedfs", "KDIVE_SEAWEEDFS_PORT", "8333"),
         ("oidc", "KDIVE_OIDC_PORT", "8080"),
     ],
 )
@@ -652,7 +497,7 @@ _EXPECTED_MOUNTS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ),
         ("volume", "kdive-pgdata", "/var/lib/postgresql/data"),
     ),
-    "minio": (("volume", "kdive-minio-data", "/data"),),
+    "seaweedfs": (("volume", "kdive-seaweedfs-data", "/data"),),
     "prometheus": (("bind", "deploy/compose/prometheus.yml", "/etc/prometheus/prometheus.yml"),),
 }
 
