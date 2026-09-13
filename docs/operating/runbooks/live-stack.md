@@ -93,15 +93,15 @@ workers on the host so they can access KVM and libvirt.
 just stack-up
 ```
 
-This waits for the three long-running backends — Postgres, MinIO, and the mock OIDC issuer
+This waits for the three long-running backends — Postgres, SeaweedFS, and the mock OIDC issuer
 — to be **healthy**, runs the one-shot `seaweedfs-init` to completion (creating the
-`kdive-artifacts` bucket, enabling bucket-wide versioning, and verifying `Enabled`, MFA Delete
-off, and no MinIO prefix/folder exclusions), and applies database migrations.
+`kdive-artifacts` bucket, enabling bucket-wide versioning, and verifying `Enabled`), and applies
+database migrations.
 
 > The recipe scopes `docker compose up --wait` to the long-running backends and runs
 > `seaweedfs-init` separately, because `--wait` treats a run-to-completion service's exit as a
-> wait failure. `seaweedfs-init`'s exit code still propagates, so a bucket creation, version enable,
-> or version-policy verification failure fails `just stack-up` before any KDIVE process starts.
+> wait failure. `seaweedfs-init`'s exit code still propagates, so a bucket creation or versioning
+> verification failure fails `just stack-up` before any KDIVE process starts.
 
 For an external bucket, the runtime identity needs `s3:GetObjectVersion`,
 `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. Complete the
@@ -122,13 +122,8 @@ orphan on its own. Add this rule after the bucket exists (one-day incomplete-upl
 existing bucket lifecycle rules; do not add noncurrent-version expiry, which can remove
 completed object versions still pinned by KDIVE records:
 
-```bash
-# MinIO
-mc ilm rule add local/kdive-artifacts --incomplete-multipart-days 1
-
-```
-
-For S3, merge the following rule into the bucket's existing lifecycle configuration before
+For an external S3 backend, merge the following rule into the bucket's existing lifecycle
+configuration before
 applying the complete policy. `put-bucket-lifecycle-configuration` replaces the policy; a
 standalone rule must not discard existing retention settings.
 
@@ -196,9 +191,9 @@ defaults before starting KDIVE. The full set of `KDIVE_*` variables is in
 
 **The most error-prone step:** the object store reads S3 **credentials from boto3's
 default chain** (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), **not** from `KDIVE_S3_*`.
-MinIO's root user/password are `minioadmin`/`minioadmin`, so those must be exported as the
-`AWS_*` vars or every artifact `put`/`get` fails with an access error that looks like a
-code bug. The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
+The bundled SeaweedFS account is `kdive` / `kdive-demo-secret`, so those must be exported as the
+`AWS_*` vars or every artifact `put`/`get` fails with an access error that looks like a code bug.
+The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
 
 | var | value | consumed by |
 |-----|-------|-------------|
@@ -209,11 +204,11 @@ code bug. The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
 | `KDIVE_OIDC_ISSUER` | `http://localhost:8090/default` | `mcp/auth.py` |
 | `KDIVE_OIDC_JWKS_URI` | `http://localhost:8090/default/jwks` | `mcp/auth.py` |
 | `KDIVE_OIDC_AUDIENCE` | `kdive` | `mcp/auth.py` |
-| `KDIVE_S3_ENDPOINT_URL` | `http://localhost:9000` | `store/objectstore.py` |
+| `KDIVE_S3_ENDPOINT_URL` | `http://localhost:8333` | `store/objectstore.py` |
 | `KDIVE_S3_BUCKET` | `kdive-artifacts` | `store/objectstore.py` |
 | `KDIVE_S3_REGION` | `us-east-1` | `store/objectstore.py` |
-| `AWS_ACCESS_KEY_ID` | `minioadmin` | boto3 default chain |
-| `AWS_SECRET_ACCESS_KEY` | `minioadmin` | boto3 default chain |
+| `AWS_ACCESS_KEY_ID` | `kdive` | boto3 default chain |
+| `AWS_SECRET_ACCESS_KEY` | `kdive-demo-secret` | boto3 default chain |
 
 The root lifecycle service separately reads the witness-member DSN from
 `/etc/kdive/credentials/live-worker-witness.dsn`; that login is member only of
@@ -400,7 +395,7 @@ use it as a substitute for that host setup.
 ```bash
 scripts/live-stack/down.sh          # stop host processes + backends, keep state
 scripts/live-stack/down.sh --force  # also SIGKILL host processes left after the grace period
-scripts/live-stack/down.sh --wipe   # full reset: drop DB/MinIO volumes AND reap kdive-* domains/overlays
+scripts/live-stack/down.sh --wipe   # full reset: drop DB/SeaweedFS volumes AND reap kdive-* domains/overlays
 ```
 
 `down.sh --force` is an operator recovery when graceful lifecycle stop cannot converge. It can end
@@ -409,5 +404,5 @@ database incarnation and any artifact fences may therefore be stranded until an 
 or explicitly reconciles them. Prefer restoring the failed dependency and retrying plain
 `down.sh`; force recovery trades cleanup for lost evidence.
 
-`down.sh --wipe` drops the Postgres and MinIO volumes and reaps all `kdive-*` libvirt domains
+`down.sh --wipe` drops the Postgres and SeaweedFS volumes and reaps all `kdive-*` libvirt domains
 and their overlay disks, so the next `up.sh` starts from a clean schema and an empty bucket.
