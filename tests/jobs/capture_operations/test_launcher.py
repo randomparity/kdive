@@ -526,23 +526,21 @@ def test_post_spawn_attestation_faults_abort_before_release(
             _fail_first_pidfd,
         )
     else:
-        group_scans = 0
 
-        def _extra_member(pid: int, *, host_instance: str) -> dict[int, object]:
-            nonlocal group_scans
-            group_scans += 1
-            if group_scans == 3:
-                return {}
+        def _extra_handoff_member(pid: int, *, host_instance: str) -> dict[int, object]:
             identity = launcher_module.LinuxIdentity.read(pid, host_instance=host_instance)
-            if group_scans == 1:
-                impossible = replace(identity, pid=2_147_483_647)
-                return {pid: identity, impossible.pid: impossible}
-            return {pid: identity}
+            impossible = replace(identity, pid=2_147_483_647)
+            return {pid: identity, impossible.pid: impossible}
 
-        monkeypatch.setattr(launcher_module, "_process_group_members", _extra_member)
+        monkeypatch.setattr(launcher_module, "_process_group_members", _extra_handoff_member)
 
     aborts: list[LaunchAbortEvidence] = []
-    with pytest.raises((OSError, RuntimeError), match=fault.replace("-", " ")):
+    expected_error = (
+        "^capture child process group was not empty at handoff$"
+        if fault == "process-group"
+        else fault.replace("-", " ")
+    )
+    with pytest.raises((OSError, RuntimeError), match=expected_error):
         asyncio.run(launcher.launch(request, operation, on_abort=aborts.append))
     assert not (tmp_path / "runtime" / str(operation.id) / "result.json").exists()
     assert len(aborts) == 1
