@@ -81,7 +81,7 @@ write is bounded by the fixed statement: one table, two columns, one fixed liter
 still enforcing first-write-wins beneath it. The function raises no message carrying caller
 data. Serialization stays the caller's `advisory_xact_lock(conn, LockScope.SYSTEM, system_id)`,
 which is the same fence ADR-0605 verification takes
-(`src/kdive/services/remote_module_attempt_preparation.py:80`).
+(`src/kdive/services/remote_module_attempt_preparation.py:54`).
 
 **Out of scope.** A compromised worker or reconciler role can discharge obligations for any
 System. Bounding that further would need a job-lease fence like migration 0134's, and the

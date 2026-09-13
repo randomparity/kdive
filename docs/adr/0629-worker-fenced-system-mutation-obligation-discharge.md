@@ -127,3 +127,10 @@ only the teardown reclaim path switches to that method. The shared
   `torn_down` from its terminal short-circuit without enqueueing a job
   (`../../src/kdive/mcp/tools/lifecycle/systems/admin.py:451-462`). The retry reports success
   and no later job ever discharges the obligations.
+
+### Amendment (2026-09-13): System advisory-lock citation (#2466)
+
+This amendment qualifies the earlier claim that cites the System advisory-lock acquisition.
+The acquisition moved with the removal of dead preparation functions; its current source location
+is `../../src/kdive/services/remote_module_attempt_preparation.py:54`. The earlier line-80
+citation remains as part of the accepted record's historical text.
