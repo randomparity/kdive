@@ -115,7 +115,7 @@ only the teardown reclaim path switches to that method. The shared
 - **Take the System advisory lock inside the function.** verified: the fence this discharge
   shares with ADR-0605 verification is the Python helper's key,
   `blake2b(b'system\x00' || uuid)` (`../../src/kdive/db/locks.py:79-91`), which
-  `../../src/kdive/services/remote_module_attempt_preparation.py:80` takes, while every
+  `../../src/kdive/services/remote_module_attempt_preparation.py:54` takes, while every
   in-schema lock uses the disjoint `hashtextextended('kdive:system:' || id, 2125)` key space
   (`../../src/kdive/db/schema/0122_external_boot_authority.sql:413`). An in-body lock would
   serialize against nothing this write needs, and under READ COMMITTED the
