@@ -24,8 +24,9 @@ successful descriptor immediately.
 
 The provider-agnostic diagnostics contribution owns one worker-host KVM probe. Its node comes
 from `KDIVE_KVM_NODE` in `config.env_snapshot()`, with empty and absent values falling back to
-`/dev/kvm`. For each invocation it opens that path `O_RDWR`, closes a successful descriptor, and
-returns false for any `OSError`. URI text no longer changes the filesystem test.
+`/dev/kvm`. For each invocation it opens that path `O_RDWR`, attempts to close a successful
+descriptor once, and returns false for an `OSError` from either operation. URI text no longer
+changes the filesystem test.
 
 `guest_arch_accel`, `host_appliance_multiplier`, the shared `appliance_budget_s`, and live-stack
 test defaults use that probe. `providers/shared/build_timeouts.py` deletes its private probe but

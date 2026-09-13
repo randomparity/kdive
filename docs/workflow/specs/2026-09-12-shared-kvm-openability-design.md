@@ -20,8 +20,8 @@ open node proves a libvirt KVM domain for each architecture.
 
 - `KDIVE_KVM_NODE` is snapshot-resolved on each default probe invocation; empty or missing values
   select `/dev/kvm`.
-- For local and remote URI strings alike, `O_RDWR` success returns true and closes exactly once;
-  an `OSError` returns false.
+- For local and remote URI strings alike, `O_RDWR` success attempts one close and returns true;
+  an `OSError` from opening or closing returns false.
 - Native acceleration and both host-appliance budget paths share that result; their existing
   injected seams and timeout/scaler behavior remain intact.
 - ADR-0648 records the narrow supersession and residual per-architecture limit.
@@ -39,7 +39,7 @@ open node proves a libvirt KVM domain for each architecture.
 ## Validation
 
 - `tests/diagnostics/test_guest_arch_accel.py`: injected open/close, URI independence, override,
-  empty fallback, OSError, and native TCG reporting.
+  empty fallback, open/close OSError, and native TCG reporting.
 - `tests/providers/shared/test_build_timeouts.py`: default shared budget consumes the shared probe
   and preserves unscaled/scaled branches.
 - `tests/providers/test_provider_boundaries.py`: shared module remains free of local-libvirt

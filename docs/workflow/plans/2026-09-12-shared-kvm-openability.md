@@ -39,9 +39,9 @@ accepts optional `node`, `open`, and `close` seams and returns `Callable[[], boo
 **Steps:**
 
 1. Write tests for system/session/transport URI independence, configured-node override, empty
-   fallback, `O_RDWR` flags, immediate close, and an injected ENODEV result.
-2. Implement snapshot resolution and `try: fd = open(node, os.O_RDWR) ... finally: close(fd)`;
-   return false on `OSError` and never call close after an unsuccessful open.
+   fallback, `O_RDWR` flags, one close attempt, and injected ENODEV and close-error results.
+2. Implement snapshot resolution; return false on an `OSError` from open or the one close attempt,
+   and never call close after an unsuccessful open.
 3. Make the default acceleration probe call the shared factory directly; retain URI only for
    remote-target reporting.
 
