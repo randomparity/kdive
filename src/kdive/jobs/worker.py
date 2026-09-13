@@ -904,7 +904,7 @@ async def _mark_run_failed(
     Assumes the caller holds the transaction and the Run's advisory lock
     (:func:`_fail_job_and_run`). A requeued job — or one whose ``worker_id`` fence missed, which
     ``queue.fail`` reports by returning it still ``running`` — leaves the Run untouched. The
-    The repository guard keeps an already-terminal Run terminal. A terminal install may
+    repository guard keeps an already-terminal Run terminal. A terminal install may
     transition a build-succeeded Run, while a terminal boot preserves that Run for ADR-0230's
     boot-readiness read path.
     """
