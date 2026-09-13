@@ -140,6 +140,14 @@ def test_committed_inventory_is_complete_and_valid() -> None:
             ),
             "privilege is invalid",
         ),
+        (
+            lambda inventory: next(
+                entry
+                for entry in inventory["worker_write_coverage"]
+                if entry["route"] == "security-definer"
+            ).__setitem__("function", "public.not_a_worker_boundary(uuid)"),
+            "function is not an approved signature",
+        ),
     ],
 )
 def test_inventory_rejects_structural_mutations(mutator: Any, expected: str) -> None:
