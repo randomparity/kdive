@@ -375,9 +375,7 @@ def _worker_vantage_dispatch_mode(
         JobWorkerCheckDispatcher(
             pool,
             provider=contribution.contribution.provider,
-            worker_check_ids=tuple(
-                descriptor.id for descriptor in contribution.unavailable_worker_checks
-            ),
+            worker_check_ids=contribution.contribution.worker_vantage_ids,
         )
         for contribution in contributions
     ]
