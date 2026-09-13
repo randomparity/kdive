@@ -19,6 +19,8 @@ jobs:
   prove:
     name: prove ${{ matrix.platform }}
     runs-on: ubuntu-latest
+    # First-run source compilation and QEMU runtime proof are the bound; revise after CI observes it.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +37,8 @@ jobs:
     if: github.event_name == 'push'
     needs: prove
     runs-on: ubuntu-latest
+    # The publish repeats three builds and pushes their layers; revise after CI observes it.
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
