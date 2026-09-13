@@ -47,8 +47,9 @@ provider configuration → descriptors/checks                  (unchanged fan-ou
 
 ## Verification
 
-The regression guard compares the production contributions' static lists with the codec's
-configured dispatch allowance rather than reconstructing a hand-written expectation. A controlled
-test fault removes a registered ID from a contribution list, observes the guard fail, restores the
-source, and re-runs green. Focused codec, dispatch, provider-contract tests and `just ci` prove the
-change.
+The regression guard compares each production contribution's static list with IDs emitted by its
+actual `worker_checks()` builder under a deterministic remote-libvirt configuration and authority
+sender fixture. It does not compare the list with the value merely passed to the dispatcher. A
+controlled test fault removes a registered ID while its check builder still emits it; the guard must
+fail, then the source is restored and the guard re-runs green. Focused codec, dispatch,
+provider-contract, and factory tests and `just ci` prove the change.

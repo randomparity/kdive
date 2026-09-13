@@ -34,8 +34,11 @@ per-provider validation independent of provider configuration.
 2. Thread the static IDs through dispatch and codec reconstruction. The dispatcher rejects an ID
    outside its provider contribution while retaining the existing per-item error behavior. Focused
    codec/worker-dispatch tests prove this.
-3. Replace the hand-curated codec guard with an assertion over production contributions. Perform a
-   controlled fault by deleting one static ID, run the guard to red, restore it, then run it green.
+3. Replace the hand-curated codec guard with an assertion that compares each production
+   contribution's static IDs with actual `worker_checks()` IDs under deterministic local and remote
+   configuration fixtures. The remote fixture supplies an authority sender so the authority check
+   is constructed. Perform a controlled fault by deleting one static ID while its actual check
+   builder still emits it, run the guard to red, restore it, then run it green.
 4. Run `just lint`, `just type`, focused tests, self-review, and `just ci`; commit the design and
    implementation as one scoped change.
 
@@ -43,7 +46,7 @@ per-provider validation independent of provider configuration.
 
 | Criterion | Proof |
 |---|---|
-| One static registration authority | Production-contribution guard and controlled missing-ID fault. |
+| One static registration authority | Production worker-check guard and controlled missing-ID fault. |
 | Config independence | Remote contribution test with no configured instances asserts the full static ID list. |
 | No codec provider dependency | Codec imports only diagnostics/domain modules; focused tests exercise injected IDs. |
 | No behavior regression | Focused diagnostics/job-handler tests and `just ci`. |
