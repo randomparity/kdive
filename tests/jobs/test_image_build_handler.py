@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -179,6 +179,36 @@ def test_handler_builds_validates_publishes_registered(migrated_url: str, tmp_pa
             assert plane.spec is not None
             assert plane.spec.releasever == "43"
             assert plane.spec.source_image_digest == "virt-builder:fedora-43"
+
+    asyncio.run(_run())
+
+
+def test_worker_role_handler_builds_validates_publishes_registered(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
+    plane = _FakePlane(tmp_path)
+    store = _FakeStore()
+
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as owner:
+            job = await queue.enqueue(
+                owner, JobKind.IMAGE_BUILD, _payload(), _AUTHORIZING, "dedup-worker-role"
+            )
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_worker"), autocommit=True
+        ) as worker:
+            ref = await image_build_handler(
+                worker,
+                job,
+                resolver=_resolver_with_plane(plane),
+                store=store,
+                inspect=_all_present,
+            )
+            assert ref is not None
+            rows = await IMAGE_CATALOG.list_all(worker)
+            assert len(rows) == 1
+            assert rows[0].state is ImageState.REGISTERED
+            assert store.head(rows[0].object_key or "") is not None
 
     asyncio.run(_run())
 

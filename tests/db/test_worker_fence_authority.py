@@ -307,6 +307,7 @@ _WORKER_MUTATIONS = {
         "component_uploads",
         "egress_probe_guests",
         "host_dump_volume_leases",
+        "image_catalog",
         "ledger",
         "object_write_leases",
         "rootfs_fetch_leases",
