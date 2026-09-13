@@ -7,16 +7,18 @@ database grants or handler behavior.
 
 ## Task 1 — inventory and conversion boundary
 
-Create a session-scoped, xdist-worker-local LOGIN set after migrations and a function-scoped DSN
-adapter/pool for each current migrated database. Identify every handler-test module and add a
-checked `worker_role_inventory.json` record: worker-act records cite every handler-act source
-location; owner-only records cite the source-backed reason; package fixtures are marked directly.
-For each worker-act path, preserve owner setup and assertions while passing `kdive_worker_pool` to
-the act phase. Do not create or drop a LOGIN principal per test.
+Create a session-scoped, xdist-worker-local LOGIN set after migrations under the existing
+maintenance-database cluster-global role lock, and take that same lock during teardown. Add a
+function-scoped DSN adapter/pool for each current migrated database. Identify every handler-test
+module and add a checked `worker_role_inventory.json` record: worker-act records cite every
+handler-act source location; owner-only records cite the source-backed reason; package fixtures
+are marked directly. For each worker-act path, preserve owner setup and assertions while passing
+`kdive_worker_pool` to the act phase. Do not create or drop a LOGIN principal per test.
 
 **Verification:** the structural inventory test rejects a missing module, duplicate path, invalid
 classification, and owner-backed worker-act source; a focused file test proves its handler succeeds
-with owner-seeded data.
+with owner-seeded data. A focused fixture lifecycle test proves create and teardown run under the
+cluster-global role lock.
 
 ## Task 2 — privilege regression proof
 

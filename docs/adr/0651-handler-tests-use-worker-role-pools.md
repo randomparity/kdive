@@ -19,9 +19,11 @@ principal per converted test would queue behind the global role lock under xdist
 ## Decision
 
 Create one uniquely named LOGIN set per xdist worker session after that worker's migrated schema
-exists. Build a function-scoped DSN adapter from the current `migrated_url`, and open a
-function-scoped `kdive_worker_pool` from it for the act phase. This keeps each test database in
-its DSN while limiting cluster-global CREATE/DROP ROLE work to once per worker session.
+exists. Acquire the existing maintenance-database cluster-global role lock around both CREATE ROLE
+and DROP ROLE, because another xdist worker can migrate while this worker creates its principal.
+Build a function-scoped DSN adapter from the current `migrated_url`, and open a function-scoped
+`kdive_worker_pool` from it for the act phase. This keeps each test database in its DSN while
+limiting cluster-global CREATE/DROP ROLE work to once per worker session.
 
 Keep `migrated_url` connections for setup and post-condition observation only. Test helpers that
 need both phases accept distinct owner and worker connections/pools rather than hiding role
@@ -35,7 +37,8 @@ owner-execution compatibility path for their handler calls.
 
 Converted tests exercise the same database grant boundary as the worker process. Existing seed and
 inspection helpers can continue to use the migration owner. Test signatures and helpers become
-explicit about the owner/worker boundary, and a missing worker grant fails the relevant test.
+explicit about the owner/worker boundary, and a missing worker grant fails the relevant test. A
+focused lifecycle test proves role creation and teardown take the existing cluster-global lock.
 If conversion finds an unrecorded missing grant, this branch is parked with its failing evidence;
 reporting the leak does not make a red handler test mergeable.
 
