@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -224,7 +224,9 @@ async def _seed_system(conn: AsyncConnection, *, state: str = "ready") -> UUID:
 
 
 def test_handler_serializes_reachable_verdict(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
 
@@ -241,6 +243,12 @@ def test_handler_serializes_reachable_verdict(
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22001))
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 verdict = await check_ssh_reachable_handler(
                     conn,
                     job,
@@ -268,7 +276,9 @@ def test_handler_serializes_reachable_verdict(
 
 
 def test_handler_serializes_unreachable_verdict_as_success(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A probe that RAN and found the guest unreachable is a job success, not a failure.
     monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
@@ -282,6 +292,12 @@ def test_handler_serializes_unreachable_verdict_as_success(
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 return await check_ssh_reachable_handler(
                     conn,
                     job,
@@ -295,7 +311,9 @@ def test_handler_serializes_unreachable_verdict_as_success(
 
 
 def test_unreachable_verdict_carries_console_tail(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # ADR-0306: an unreachable verdict embeds the guest console tail so "did sshd start?" is
     # answerable from the verdict alone.
@@ -320,6 +338,12 @@ def test_unreachable_verdict_carries_console_tail(
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 verdict = await check_ssh_reachable_handler(
                     conn,
                     job,
