@@ -69,6 +69,17 @@ def test_clean_pair_has_no_violations() -> None:
     assert evaluate(GOOD_COMPOSE, GOOD_MATRIX) == []
 
 
+def test_current_matrix_takes_precedence_over_the_historical_matrix() -> None:
+    current = GOOD_MATRIX.replace("arch-matrix", "arch-matrix-current")
+    assert evaluate(GOOD_COMPOSE, GOOD_MATRIX + current) == []
+
+
+def test_one_sided_current_matrix_marker_is_hard_error() -> None:
+    malformed = GOOD_MATRIX + "<!-- arch-matrix-current:begin -->\n"
+    with pytest.raises(ValueError):
+        evaluate(GOOD_COMPOSE, malformed)
+
+
 def test_official_quay_alias_matches_matrix() -> None:
     compose = "services:\n  minio:\n    image: quay.io/minio/minio:RELEASE\n"
     matrix = (
