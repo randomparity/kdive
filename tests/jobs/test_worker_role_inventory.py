@@ -9,9 +9,13 @@ from typing import Any, cast
 
 import pytest
 
+from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS
+
 _ROOT = Path(__file__).resolve().parents[2]
 _INVENTORY = _ROOT / "tests/jobs/handlers/worker_role_inventory.json"
 _CLASSES = {"worker-act", "owner-only"}
+_PRIVILEGES = {"INSERT", "UPDATE", "DELETE"}
+_ROUTES = {"direct", "security-definer"}
 
 
 def _load(path: Path = _INVENTORY) -> dict[str, Any]:
@@ -19,14 +23,21 @@ def _load(path: Path = _INVENTORY) -> dict[str, Any]:
 
 
 def _violations(inventory: object) -> list[str]:
-    if not isinstance(inventory, dict) or set(inventory) != {"format_version", "modules"}:
-        return ["inventory must contain format_version and modules"]
+    if not isinstance(inventory, dict) or set(inventory) != {
+        "format_version",
+        "modules",
+        "worker_write_coverage",
+    }:
+        return ["inventory must contain format_version, modules, and worker_write_coverage"]
     record = cast(dict[str, object], inventory)
-    if record["format_version"] != 1:
-        return ["format_version must be 1"]
+    if record["format_version"] != 2:
+        return ["format_version must be 2"]
     modules = record["modules"]
+    coverage = record["worker_write_coverage"]
     if not isinstance(modules, list):
         return ["modules must be a list"]
+    if not isinstance(coverage, list):
+        return ["worker_write_coverage must be a list"]
     expected = sorted(
         str(path.relative_to(_ROOT)) for path in (_ROOT / "tests/jobs/handlers").rglob("test_*.py")
     )
@@ -60,6 +71,40 @@ def _violations(inventory: object) -> list[str]:
         violations.append("module paths must be unique and sorted")
     if paths != expected:
         violations.append("module paths must cover every handler test module")
+    coverage_ids: list[str] = []
+    job_kinds = {kind.value for kind in ACTIVE_JOB_KINDS}
+    for entry in coverage:
+        if not isinstance(entry, dict):
+            violations.append("worker write coverage must be an object")
+            continue
+        write = cast(dict[str, object], entry)
+        route = write.get("route")
+        expected_fields = {"id", "job_kind", "table", "privilege", "route"}
+        if route == "security-definer":
+            expected_fields.add("function")
+        if set(write) != expected_fields:
+            violations.append("worker write coverage has invalid fields")
+            continue
+        write_id = write["id"]
+        if not isinstance(write_id, str) or not write_id:
+            violations.append("worker write coverage id must be a non-empty string")
+            continue
+        coverage_ids.append(write_id)
+        if write["job_kind"] not in job_kinds:
+            violations.append(f"{write_id} job kind is not active")
+        table = write["table"]
+        if not isinstance(table, str) or not table.startswith("public."):
+            violations.append(f"{write_id} table must be public-qualified")
+        if write["privilege"] not in _PRIVILEGES:
+            violations.append(f"{write_id} privilege is invalid")
+        if route not in _ROUTES:
+            violations.append(f"{write_id} route is invalid")
+        if route == "security-definer" and write["function"] != (
+            "public.discharge_system_mutation_obligations(uuid)"
+        ):
+            violations.append(f"{write_id} function is not an approved signature")
+    if coverage_ids != sorted(coverage_ids) or len(coverage_ids) != len(set(coverage_ids)):
+        violations.append("worker write coverage ids must be unique and sorted")
     return violations
 
 
@@ -82,6 +127,18 @@ def test_committed_inventory_is_complete_and_valid() -> None:
         (
             lambda inventory: inventory["modules"][0].__setitem__("evidence", "absent-token"),
             "evidence does not match",
+        ),
+        (
+            lambda inventory: inventory["worker_write_coverage"].append(
+                deepcopy(inventory["worker_write_coverage"][0])
+            ),
+            "worker write coverage ids must be unique and sorted",
+        ),
+        (
+            lambda inventory: inventory["worker_write_coverage"][0].__setitem__(
+                "privilege", "SELECT"
+            ),
+            "privilege is invalid",
         ),
     ],
 )
