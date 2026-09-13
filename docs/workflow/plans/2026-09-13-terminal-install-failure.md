@@ -37,6 +37,9 @@ Verification:
 - Mode: focused-test. Contract: terminal boot failure preserves a build-succeeded Run for
   `boot_readiness`. Expected red: that Run becomes `failed`. Green:
   `just test-verbose tests/jobs/test_worker.py` exits 0.
+- Mode: focused-test. Contract: a stale worker that loses its lease cannot apply the terminal
+  Run transition. Green: `just test-verbose tests/adversarial/test_run_failure_atomicity.py::test_stale_worker_that_lost_its_lease_does_not_fail_the_run`
+  exits 0.
 - Mode: focused-test. Contract: `runs.get` returns the existing failure envelope after terminal
   finalization. Expected red: the response is successful. Green:
   `just test-verbose tests/mcp/lifecycle/test_runs_tools.py` exits 0.

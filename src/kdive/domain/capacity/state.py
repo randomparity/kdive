@@ -135,8 +135,9 @@ class RunState(StrEnum):
 
     ``succeeded`` means the **build** step succeeded — not that the kernel is installed or
     booted. Install and boot progress live in the ``run_steps`` ledger and are surfaced by
-    ``runs.get`` as ``data.steps``. A failed install/boot step fails the Run to
-    ``failed``.
+    ``runs.get`` as ``data.steps``. A terminal install failure may fail a build-succeeded
+    Run; a terminal boot failure preserves ``succeeded`` for ``boot_readiness`` evidence
+    (ADR-0230).
     """
 
     CREATED = "created"
