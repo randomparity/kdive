@@ -1,4 +1,4 @@
-"""The reconciler repair for mutation obligations leaked on torn-down Systems (ADR-0634, #2326).
+"""The reconciler repair for leaked terminal-System mutation obligations (ADR-0634, ADR-0652).
 
 The teardown handler commits `torn_down` before the discharge that follows it, and
 `systems.teardown` then short-circuits on that terminal state without enqueueing a job, so a
@@ -21,21 +21,30 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     RemoteModuleAttemptObligationRepository,
 )
-from kdive.domain.capacity.state import JobState, SystemState
+from kdive.domain.capacity.state import (
+    ExternalBootActivationState,
+    ExternalBootReservationState,
+    JobState,
+    SystemState,
+)
+from kdive.domain.external_boot_activation import ExternalBootActivation, ExternalBootReservation
 from kdive.reconciler import loop
 from kdive.reconciler.repairs import systems as repairs_systems
 from kdive.reconciler.repairs.systems import repair_leaked_mutation_obligations
@@ -91,6 +100,70 @@ async def _seed_teardown_job(
     )
 
 
+async def _seed_restricting_activation(conn: psycopg.AsyncConnection, system_id: UUID) -> UUID:
+    """Add the durable external-boot recovery owner that must defer the repair."""
+    cursor = await conn.execute("SELECT id FROM runs WHERE system_id = %s", (system_id,))
+    row = await cursor.fetchone()
+    assert row is not None
+    activation_id = uuid4()
+    await conn.execute(
+        "INSERT INTO external_boot_activations "
+        "(id, system_id, run_id, plan_identity, operation_owner_id, authority_generation, "
+        "state, cleanup_complete) "
+        "VALUES (%s, %s, %s, %s, %s, 1, 'preparing', false)",
+        (
+            activation_id,
+            system_id,
+            row[0],
+            "sha256:" + "a" * 64,
+            uuid4(),
+        ),
+    )
+    return activation_id
+
+
+async def _activation_records(
+    conn: psycopg.AsyncConnection, system_id: UUID
+) -> tuple[ExternalBootActivation, ExternalBootReservation]:
+    """Build the production activation-create inputs for ``system_id``."""
+    cursor = await conn.execute("SELECT id FROM runs WHERE system_id = %s", (system_id,))
+    row = await cursor.fetchone()
+    assert row is not None
+    now = datetime.now(UTC)
+    activation_id = uuid4()
+    return (
+        ExternalBootActivation(
+            id=activation_id,
+            system_id=system_id,
+            run_id=row[0],
+            plan_identity="sha256:" + "b" * 64,
+            operation_owner_id=uuid4(),
+            authority_generation=1,
+            state=ExternalBootActivationState.PREPARING,
+            created_at=now,
+            updated_at=now,
+        ),
+        ExternalBootReservation(
+            activation_id=activation_id,
+            store_identity="stores/main",
+            owner_key=f"owners/{activation_id}",
+            reserved_bytes=4096,
+            state=ExternalBootReservationState.PENDING,
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+
+
+async def _wait_for_active_query(conn: psycopg.AsyncConnection) -> None:
+    """Wait until the concurrent creator is blocked in its advisory-lock query."""
+    for _ in range(100):
+        if conn.info.transaction_status is TransactionStatus.ACTIVE:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("activation creator did not reach its advisory-lock query")
+
+
 async def _discharges(conn: psycopg.AsyncConnection, system_id: UUID) -> list[tuple[Any, Any]]:
     cursor = await conn.execute(
         "SELECT mutation_discharged_at, mutation_discharge_reason "
@@ -133,13 +206,48 @@ def test_leaked_obligation_on_torn_down_system_is_discharged(migrated_url: str) 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("job_state", [JobState.QUEUED.value, JobState.RUNNING.value])
-def test_active_teardown_job_defers_the_repair(migrated_url: str, job_state: str) -> None:
-    """A teardown still queued or running is the window the issue's exclusion 1 names."""
+def test_leaked_obligation_on_failed_system_is_discharged(migrated_url: str) -> None:
+    """A failed System without an external-boot recovery owner is repairable."""
 
     async def run() -> None:
         conn = await connect(migrated_url)
-        system_id = await _seed_open_obligation(conn)
+        system_id = await _seed_open_obligation(conn, system_state=SystemState.FAILED)
+
+        assert await _run(migrated_url) == 1
+        assert (await _discharges(conn, system_id))[0][1] == "terminal_escape"
+        await conn.close()
+
+    asyncio.run(run())
+
+
+def test_restricting_activation_defers_failed_system_repair(migrated_url: str) -> None:
+    """A preparing activation remains the recovery owner until it is gone."""
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        system_id = await _seed_open_obligation(conn, system_state=SystemState.FAILED)
+        activation_id = await _seed_restricting_activation(conn, system_id)
+
+        assert await _run(migrated_url) == 0
+        assert await _discharges(conn, system_id) == [(None, None)]
+        await conn.execute("DELETE FROM external_boot_activations WHERE id = %s", (activation_id,))
+        assert await _run(migrated_url) == 1
+        assert (await _discharges(conn, system_id))[0][1] == "terminal_escape"
+        await conn.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("job_state", [JobState.QUEUED.value, JobState.RUNNING.value])
+@pytest.mark.parametrize("system_state", [SystemState.TORN_DOWN, SystemState.FAILED])
+def test_active_teardown_job_defers_the_repair(
+    migrated_url: str, job_state: str, system_state: SystemState
+) -> None:
+    """A teardown still queued or running defers either terminal repair lane."""
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        system_id = await _seed_open_obligation(conn, system_state=system_state)
         await _seed_teardown_job(conn, system_id, state=job_state)
 
         assert await _run(migrated_url) == 0
@@ -203,12 +311,13 @@ def test_non_terminal_system_is_untouched(migrated_url: str) -> None:
     asyncio.run(run())
 
 
-def test_second_pass_is_a_noop(migrated_url: str) -> None:
+@pytest.mark.parametrize("system_state", [SystemState.TORN_DOWN, SystemState.FAILED])
+def test_second_pass_is_a_noop(migrated_url: str, system_state: SystemState) -> None:
     """First-write-wins: the `mutation_discharged_at IS NULL` predicate holds the first evidence."""
 
     async def run() -> None:
         conn = await connect(migrated_url)
-        system_id = await _seed_open_obligation(conn)
+        system_id = await _seed_open_obligation(conn, system_state=system_state)
 
         assert await _run(migrated_url) == 1
         first = await _discharges(conn, system_id)
@@ -376,6 +485,83 @@ def test_teardown_job_appearing_under_the_lock_defers_the_candidate(
         assert await _run(migrated_url) == 0
         assert await _discharges(conn, system_id) == [(None, None)]
         await conn.close()
+
+    asyncio.run(run())
+
+
+def test_restricting_activation_appearing_under_the_lock_defers_the_candidate(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The locked re-read preserves a recovery owner that appears after selection."""
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        system_id = await _seed_open_obligation(conn, system_state=SystemState.FAILED)
+
+        real_lock = repairs_systems.advisory_xact_lock
+
+        @asynccontextmanager
+        async def racing_lock(
+            connection: psycopg.AsyncConnection, scope: LockScope, key: UUID | str
+        ) -> AsyncIterator[None]:
+            async with real_lock(connection, scope, key):
+                racer = await connect(migrated_url)
+                await _seed_restricting_activation(racer, system_id)
+                await racer.close()
+                yield
+
+        monkeypatch.setattr(repairs_systems, "advisory_xact_lock", racing_lock)
+
+        assert await _run(migrated_url) == 0
+        assert await _discharges(conn, system_id) == [(None, None)]
+        await conn.close()
+
+    asyncio.run(run())
+
+
+def test_activation_creation_waits_for_failed_system_repair_lock(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new recovery owner cannot appear between the locked re-read and discharge."""
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        system_id = await _seed_open_obligation(conn, system_state=SystemState.FAILED)
+        racer = await psycopg.AsyncConnection.connect(migrated_url)
+        creation: asyncio.Task[ExternalBootActivation] | None = None
+        try:
+            activation, reservation = await _activation_records(conn, system_id)
+            real_lock = repairs_systems.advisory_xact_lock
+
+            @asynccontextmanager
+            async def racing_lock(
+                connection: psycopg.AsyncConnection, scope: LockScope, key: UUID | str
+            ) -> AsyncIterator[None]:
+                nonlocal creation
+                async with real_lock(connection, scope, key):
+                    creation = asyncio.create_task(
+                        ExternalBootActivationRepository().create(racer, activation, reservation)
+                    )
+                    await _wait_for_active_query(racer)
+                    assert not creation.done()
+                    yield
+
+            monkeypatch.setattr(repairs_systems, "advisory_xact_lock", racing_lock)
+
+            assert await _run(migrated_url) == 1
+            assert creation is not None
+            created = await creation
+            assert created.id == activation.id
+            assert created.state is ExternalBootActivationState.PREPARING
+            await racer.commit()
+            assert (await _discharges(conn, system_id))[0][1] == "terminal_escape"
+        finally:
+            if creation is not None and not creation.done():
+                creation.cancel()
+                with suppress(asyncio.CancelledError):
+                    await creation
+            await racer.close()
+            await conn.close()
 
     asyncio.run(run())
 

@@ -62,12 +62,24 @@ _TEARDOWN_IN_FLIGHT = "(j.state = ANY(%s) OR j.updated_at > now() - %s)"
 # all. `ORDER BY` is what makes each pass a stable prefix instead of an arbitrary subset.
 _LEAKED_MUTATION_REPAIR_LIMIT = 100
 _STALLED_TEARING_DOWN_REPAIR_LIMIT = 100
+# An activation that is neither terminal-and-cleaned nor absent still owns a recovery path. This
+# exact predicate matches `ExternalBootActivationRepository.get_restricting_for_system`; repair
+# must not discharge the remote-module mutation while that owner remains (ADR-0652).
+_NO_RESTRICTING_EXTERNAL_BOOT_ACTIVATION = (
+    "NOT EXISTS ( "
+    "    SELECT 1 FROM external_boot_activations activation "
+    "    WHERE activation.system_id = s.id "
+    "      AND (activation.state NOT IN ('recovered', 'abandoned', 'torn_down') "
+    "           OR NOT activation.cleanup_complete) "
+    "  )"
+)
 _LEAKED_MUTATION_CANDIDATES_SQL = (
     "SELECT DISTINCT o.system_id "
     "FROM remote_module_attempt_obligations o "
     "JOIN systems s ON s.id = o.system_id "
     "WHERE o.mutation_discharged_at IS NULL "
-    "  AND s.state = %s "
+    "  AND s.state = ANY(%s) "
+    f"  AND {_NO_RESTRICTING_EXTERNAL_BOOT_ACTIVATION} "
     "  AND NOT EXISTS ( "
     "    SELECT 1 FROM jobs j "
     "    WHERE j.dedup_key = s.id::text || ':teardown' "
@@ -75,6 +87,17 @@ _LEAKED_MUTATION_CANDIDATES_SQL = (
     "  ) "
     "ORDER BY o.system_id "
     "LIMIT %s"
+)
+_LEAKED_MUTATION_CANDIDATE_RECHECK_SQL = (
+    "SELECT 1 FROM systems s "
+    "WHERE s.id = %s "
+    "  AND s.state = ANY(%s) "
+    f"  AND {_NO_RESTRICTING_EXTERNAL_BOOT_ACTIVATION} "
+    "  AND NOT EXISTS ( "
+    "    SELECT 1 FROM jobs j "
+    "    WHERE j.dedup_key = s.id::text || ':teardown' "
+    f"      AND {_TEARDOWN_IN_FLIGHT} "
+    "  )"
 )
 
 
@@ -127,12 +150,13 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
 
 
 async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
-    """Discharge mutation obligations left open on a `torn_down` System (ADR-0634, #2326).
+    """Discharge eligible terminal-System obligations (ADR-0634, ADR-0652).
 
-    The teardown handler commits the terminal state before the discharge that follows it, and
-    `systems.teardown` then short-circuits on `torn_down` without enqueueing a job, so nothing
-    else ever reaches that discharge and `retained_owners` holds the attempt's volumes out of the
-    module-volume sweep. Returns the number of obligation rows discharged.
+    The teardown handler commits `torn_down` before the discharge that follows it, and a failed
+    System can similarly retain an open obligation after its lifecycle work ends. Both terminal
+    states otherwise leave `retained_owners` holding the attempt's volumes out of the module-volume
+    sweep. A failed System is eligible only after its external-boot recovery owner is absent.
+    Returns the number of obligation rows discharged.
 
     A candidate is deferred while its teardown job is active *or* terminal within
     `_TEARDOWN_SETTLE`; ADR-0634 carries why job state alone is not enough and what the window
@@ -143,7 +167,7 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
         await cur.execute(
             _LEAKED_MUTATION_CANDIDATES_SQL,
             (
-                SystemState.TORN_DOWN.value,
+                list(_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES),
                 list(_ACTIVE_JOB_STATE_VALUES),
                 _TEARDOWN_SETTLE,
                 _LEAKED_MUTATION_REPAIR_LIMIT,
@@ -156,21 +180,20 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
     for system_id in candidates:
         try:
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-                # Only the job half is re-read: `torn_down` is terminal, so the state half cannot
-                # change between the candidate query and this lock. The lock is taken here, rather
-                # than left to the repository method below, because the re-read has to happen
-                # under it; the method retaking the same key is a no-op, since
-                # `pg_advisory_xact_lock` is reference-counted per transaction (0152:28).
+                # The terminal state, teardown window, and recovery-owner absence are re-read
+                # together under the System lock. Activation creation uses the same lock, so a
+                # recovery owner cannot appear between this check and the discharge below.
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        f"SELECT 1 FROM jobs j WHERE j.dedup_key = %s AND {_TEARDOWN_IN_FLIGHT}",
+                        _LEAKED_MUTATION_CANDIDATE_RECHECK_SQL,
                         (
-                            f"{system_id}:teardown",
+                            system_id,
+                            list(_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES),
                             list(_ACTIVE_JOB_STATE_VALUES),
                             _TEARDOWN_SETTLE,
                         ),
                     )
-                    if await cur.fetchone() is not None:
+                    if await cur.fetchone() is None:
                         continue
                 discharged = await obligations.worker_discharge_system_mutation_obligations(
                     conn, system_id
@@ -187,7 +210,7 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
         if discharged:
             discharged_rows += discharged
             _log.info(
-                "reconciler: torn-down system %s had %d leaked mutation obligation(s) discharged",
+                "reconciler: terminal system %s had %d leaked mutation obligation(s) discharged",
                 system_id,
                 discharged,
             )
