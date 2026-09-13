@@ -65,8 +65,12 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 _log = logging.getLogger(__name__)
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
-_RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING, RunState.SUCCEEDED)
+_RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
+_INSTALL_RUN_COMPENSATION_STATES = (*_RUN_COMPENSATION_STATES, RunState.SUCCEEDED)
 _RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
+_INSTALL_RUN_COMPENSATION_STATE_VALUES = tuple(
+    state.value for state in _INSTALL_RUN_COMPENSATION_STATES
+)
 _CLAIM_LOOP_FAILURE_REASON = re.compile(
     r"(?:pool-timeout|timeout|postgres-(?:[A-Z0-9]{5}|unknown)|unexpected)"
 )
@@ -904,10 +908,17 @@ async def _mark_run_failed(
     Assumes the caller holds the transaction and the Run's advisory lock
     (:func:`_fail_job_and_run`). A requeued job — or one whose ``worker_id`` fence missed, which
     ``queue.fail`` reports by returning it still ``running`` — leaves the Run untouched. The
-    ``state = ANY(...)`` guard keeps an already-terminal Run terminal.
+    ``state = ANY(...)`` guard keeps an already-terminal Run terminal. A terminal install may
+    transition a build-succeeded Run, while a terminal boot preserves that Run for ADR-0230's
+    boot-readiness read path.
     """
     if job.state is not JobState.FAILED:
         return
+    state_values = (
+        _INSTALL_RUN_COMPENSATION_STATE_VALUES
+        if job.kind is JobKind.INSTALL
+        else _RUN_COMPENSATION_STATE_VALUES
+    )
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "UPDATE runs SET state = %s, failure_category = %s, failing_job_id = %s "
@@ -918,7 +929,7 @@ async def _mark_run_failed(
                 category.value,
                 job.id,
                 run_id,
-                list(_RUN_COMPENSATION_STATE_VALUES),
+                list(state_values),
             ),
         )
         row = await cur.fetchone()
