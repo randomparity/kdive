@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-09-13)
+Accepted (2026-09-13)
 
 - **Issue:** #2345
 
