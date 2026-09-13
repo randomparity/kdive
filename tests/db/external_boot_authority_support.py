@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import psycopg
-import pytest
-from psycopg.conninfo import make_conninfo
-from psycopg.sql import SQL, Identifier, Literal
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from tests.conftest import _RoleDsns as _RoleDsns  # noqa: F401
 
-_LOGIN_PASSWORD = "external-boot-authority-test"  # pragma: allowlist secret
 _PLAN = "sha256:" + "a" * 64
 _JOURNAL = "sha256:" + "b" * 64
 _QUIESCENCE = "sha256:" + "c" * 64
@@ -31,20 +27,6 @@ _COMMIT_SIGNATURE = (
     "commit_external_boot_authority_result(bytea,uuid,integer,uuid,bigint,uuid,uuid,uuid,"
     "text,text,text,text,text,text,bigint,text,text,jsonb)"
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _RoleDsns:
-    parameters: dict[str, str]
-    logins: dict[str, str]
-
-    def __call__(self, role: str) -> str:
-        parameters = {
-            **self.parameters,
-            "user": self.logins[role],
-            "password": _LOGIN_PASSWORD,
-        }
-        return make_conninfo(**parameters)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,33 +62,6 @@ def _apply_through(conn: psycopg.Connection, version: str) -> None:
 def _apply_version(conn: psycopg.Connection, version: str) -> None:
     migration = next(item for item in migrate.discover_migrations() if item.version == version)
     conn.execute(migration.sql.encode())
-
-
-@pytest.fixture
-def authority_role_dsns(migrated_url: str) -> Iterator[_RoleDsns]:
-    """Create unique LOGIN principals for the migration's non-login roles."""
-    with psycopg.connect(migrated_url, autocommit=True) as conn:
-        suffix = uuid4().hex[:16]
-        logins = {
-            role: f"kdive_eba_{role.removeprefix('kdive_')}_{suffix}"
-            for role in (
-                "kdive_server",
-                "kdive_worker",
-                "kdive_reconciler",
-                "kdive_provider_authority",
-            )
-        }
-        for role, login in logins.items():
-            conn.execute(
-                SQL("CREATE ROLE {} LOGIN PASSWORD {} IN ROLE {}").format(
-                    Identifier(login), Literal(_LOGIN_PASSWORD), Identifier(role)
-                )
-            )
-        try:
-            yield _RoleDsns(dict(conn.info.get_parameters()), logins)
-        finally:
-            for login in logins.values():
-                conn.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
 
 
 def _activation_evidence(system_id: UUID, run_id: UUID, activation_id: UUID) -> tuple[Jsonb, Jsonb]:

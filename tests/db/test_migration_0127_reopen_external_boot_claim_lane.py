@@ -22,9 +22,6 @@ from tests.db.external_boot_authority_support import (
     _RoleDsns,
     _seed_case,
 )
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 
 _CLAIM_FUNCTIONS = (
     "public.claim_worker_job(text,bytea,interval,text[])",

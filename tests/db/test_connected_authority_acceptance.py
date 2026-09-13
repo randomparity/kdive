@@ -58,9 +58,6 @@ from kdive.providers.ports.external_boot import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
 from tests.db.external_boot_authority_support import _allocate, _RoleDsns, _seed_case
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 from tests.providers.contract.plans import ACTIVATION_ID, sample_plan_data
 from tests.providers.external_boot_authority.tls_support import _tls_material
 

@@ -24,9 +24,6 @@ from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePo
 from kdive.reconciler.repairs.systems import repair_orphaned_systems
 from kdive.security.authz.rbac import Role
 from tests.db.external_boot_authority_support import _RoleDsns
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 from tests.mcp import systems_support
 
 _DIGEST = "sha256:" + "a" * 64

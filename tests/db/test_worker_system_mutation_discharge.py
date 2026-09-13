@@ -30,9 +30,6 @@ from psycopg.sql import SQL, Identifier, Literal
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
 from tests.db.external_boot_authority_support import _RoleDsns
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 from tests.db.remote_module_attempt_obligations_support import _attempt, _seed
 
 _NON_MEMBER_PASSWORD = "worker-discharge-non-member"  # pragma: allowlist secret

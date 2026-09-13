@@ -17,9 +17,6 @@ from kdive.providers.external_boot_authority.host import HostReadinessError, che
 from kdive.providers.external_boot_authority.protocol import JournalPhase
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from tests.db.external_boot_authority_support import _RoleDsns
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 
 _DIGEST = "sha256:" + "d" * 64
 _FUNCTIONS = {
