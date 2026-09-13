@@ -351,8 +351,8 @@ stack-up:
     # --wait-timeout is required now the backends carry `restart: on-failure` (ADR-0449):
     # a container that keeps failing cycles Exited -> Restarting instead of settling, so
     # without a bound the convergence poll can block indefinitely rather than reporting.
-    docker compose up -d --wait --wait-timeout 120 postgres minio oidc
-    docker compose run --rm minio-init
+    docker compose up -d --wait --wait-timeout 120 postgres seaweedfs oidc
+    docker compose run --rm seaweedfs-init
     ./scripts/live-stack/apply-migrations.sh
     echo "Backends healthy and schema migrated."
     echo "App tier, for IN-NETWORK clients: just compose-up"

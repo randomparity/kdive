@@ -13,7 +13,7 @@ log_dir="${KDIVE_STACK_LOG_DIR:-${repo_root}/.live-stack-logs}"
 # Canonical backend compose services. NEVER the kdive:dev app tier (migrate/server/worker/
 # reconciler) — the host processes own that tier.
 # shellcheck disable=SC2034 # consumed by sourcing scripts
-KDIVE_BACKEND_SERVICES=(postgres minio minio-init oidc)
+KDIVE_BACKEND_SERVICES=(postgres seaweedfs seaweedfs-init oidc)
 
 # The local-libvirt provider connects here (KDIVE_LIBVIRT_URI, default qemu:///system) and
 # stores per-System qcow2 overlays under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking
