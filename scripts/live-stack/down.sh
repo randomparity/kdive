@@ -3,9 +3,10 @@
 # Tear down the local kdive infrastructure: stop host processes + compose backends.
 # Plain teardown keeps state (the compose data volumes + any running kdive-* domains).
 # `--wipe` is a full reset: it drops the compose data volumes -- kdive-pgdata,
-# kdive-minio-data, kdive-build, kdive-install (ADR-0552) -- AND reaps
+# kdive-seaweedfs-data, kdive-build, kdive-install (ADR-0552) -- AND reaps
 # kdive-provisioned libvirt domains and their qcow2 overlays (these live outside compose,
 # so a DB wipe alone would orphan them).
+# The prior kdive-minio-data volume is intentionally preserved: SeaweedFS never reuses it.
 # libvirt itself is left enabled and running (host service; not cycled per teardown).
 #
 # Usage:
