@@ -27,9 +27,6 @@ from kdive.services.remote_module_attempt_preparation import (
 from tests.db.external_boot_authority_support import (
     _RoleDsns,
 )
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 from tests.db.remote_module_attempt_obligations_support import _evidence
 
 

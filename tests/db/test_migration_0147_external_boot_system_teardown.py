@@ -36,7 +36,6 @@ from tests.db.external_boot_authority_support import (
     _allocate,
     _RoleDsns,
     _seed_case,
-    authority_role_dsns,  # noqa: F401
 )
 
 _ACK_DIGEST = "sha256:" + "b" * 64

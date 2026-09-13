@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Generator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Any, cast
 from uuid import uuid4
 
 import psycopg
@@ -31,16 +30,8 @@ from kdive.providers.ports.external_boot import (
 from tests.db.conftest import _migrated_db as _migrated_db  # noqa: F401
 from tests.db.conftest import migrated_url as migrated_url  # noqa: F401
 from tests.db.conftest import postgres_url as postgres_url  # noqa: F401
-from tests.db.external_boot_authority_support import authority_role_dsns as _role_dsns
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
-
-
-@pytest.fixture
-def authority_role_dsns(migrated_url: str) -> Generator[Callable[[str], str]]:
-    fixture = cast(Any, _role_dsns).__wrapped__(migrated_url)
-    yield next(fixture)
-    fixture.close()
 
 
 @asynccontextmanager

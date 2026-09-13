@@ -36,11 +36,17 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
+import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
+from psycopg.sql import SQL, Identifier, Literal
+from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 import kdive.jobs.assembly as job_assembly_module
@@ -65,6 +71,22 @@ os.environ.setdefault("KDIVE_S3_BUCKET", _DUMMY_S3_BUCKET)
 # ``minio.test`` placeholder makes every live object-store call fail name resolution.
 _S3_ENDPOINT_URL = os.environ["KDIVE_S3_ENDPOINT_URL"]
 _S3_BUCKET = os.environ["KDIVE_S3_BUCKET"]
+_LOGIN_PASSWORD = "external-boot-authority-test"  # pragma: allowlist secret
+
+
+@dataclass(frozen=True, slots=True)
+class _RoleDsns:
+    parameters: dict[str, str]
+    logins: dict[str, str]
+
+    def __call__(self, role: str) -> str:
+        return make_conninfo(
+            **{
+                **self.parameters,
+                "user": self.logins[role],
+                "password": _LOGIN_PASSWORD,
+            }
+        )
 
 
 def _offline_object_store_assembly(
@@ -124,6 +146,46 @@ def sandbox_systems_toml(
 def s3_backend_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", _S3_ENDPOINT_URL)
     monkeypatch.setenv("KDIVE_S3_BUCKET", _S3_BUCKET)
+
+
+@pytest.fixture
+def authority_role_dsns(migrated_url: str) -> Iterator[_RoleDsns]:
+    """Create unique LOGIN principals for the migration's non-login roles."""
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        suffix = uuid4().hex[:16]
+        logins = {
+            role: f"kdive_eba_{role.removeprefix('kdive_')}_{suffix}"
+            for role in (
+                "kdive_server",
+                "kdive_worker",
+                "kdive_reconciler",
+                "kdive_provider_authority",
+            )
+        }
+        for role, login in logins.items():
+            conn.execute(
+                SQL("CREATE ROLE {} LOGIN PASSWORD {} IN ROLE {}").format(
+                    Identifier(login), Literal(_LOGIN_PASSWORD), Identifier(role)
+                )
+            )
+        try:
+            yield _RoleDsns(dict(conn.info.get_parameters()), logins)
+        finally:
+            for login in logins.values():
+                conn.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
+
+
+@pytest.fixture
+async def kdive_worker_pool(authority_role_dsns: _RoleDsns) -> AsyncIterator[AsyncConnectionPool]:
+    """Yield an open pool connected as the kdive_worker LOGIN principal."""
+    pool = AsyncConnectionPool(
+        authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+    )
+    await pool.open()
+    try:
+        yield pool
+    finally:
+        await pool.close()
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -115,9 +115,6 @@ from kdive.services.remote_module_authority_preparation import (
     prepare_remote_module_on_authority_host,
 )
 from tests.db.external_boot_authority_support import _RoleDsns
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
     _FakeAgentExec,
     _materialization,

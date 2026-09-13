@@ -70,9 +70,6 @@ from kdive.services.runs import steps as run_steps
 from kdive.services.runs.admission import RunCreateResult
 from kdive.services.runs.liveness import Liveness
 from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,
-)
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.lifecycle.runs_support import (

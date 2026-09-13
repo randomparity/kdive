@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, LiteralString, cast
+from typing import Any, LiteralString
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import psycopg
@@ -28,7 +28,6 @@ from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     ExternalBootAuthorityService,
 )
-from tests.db.external_boot_authority_support import authority_role_dsns as _role_dsns_fixture
 from tests.db_waits import wait_until_backend_waiting
 from tests.jobs.handlers.external_boot.seeding import (
     AUTHORITY_INSTANCE,
@@ -38,13 +37,6 @@ from tests.jobs.handlers.external_boot.seeding import (
     store_identity,
 )
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
-
-
-@pytest.fixture
-def authority_role_dsns(migrated_url: str) -> Any:
-    fixture = cast(Any, _role_dsns_fixture).__wrapped__(migrated_url)
-    yield next(fixture)
-    fixture.close()
 
 
 async def _scalar(

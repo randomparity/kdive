@@ -7,10 +7,9 @@ import hashlib
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import psycopg
-import pytest
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
@@ -39,7 +38,6 @@ from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.db.external_boot_authority_support import authority_role_dsns as _role_dsns_fixture
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
@@ -85,13 +83,6 @@ class _FaultAuthorityAdapter:
             OpaqueProviderRef(ref=f"authority/{request.authority_id}"),
         )
         return self._observation(request)
-
-
-@pytest.fixture
-def authority_role_dsns(migrated_url: str) -> Any:
-    fixture = cast(Any, _role_dsns_fixture).__wrapped__(migrated_url)
-    yield next(fixture)
-    fixture.close()
 
 
 @asynccontextmanager

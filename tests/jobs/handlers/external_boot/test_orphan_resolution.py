@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Callable, Generator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -64,7 +64,6 @@ from kdive.providers.ports.external_boot import (
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.db.external_boot_authority_support import authority_role_dsns as _authority_role_dsns
 from tests.mcp.lifecycle.runs_support import pool
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.external_boot_support import _metadata as _local_metadata
@@ -72,13 +71,6 @@ from tests.reconciler.conftest import connect, seed_run, seed_system
 from tests.services.external_boot.conftest import seed_activation
 
 _DIGEST = "sha256:" + "a" * 64
-
-
-@pytest.fixture
-def authority_role_dsns(migrated_url: str) -> Generator[Callable[[str], str]]:
-    fixture = cast(Any, _authority_role_dsns).__wrapped__(migrated_url)
-    yield next(fixture)
-    fixture.close()
 
 
 @asynccontextmanager
