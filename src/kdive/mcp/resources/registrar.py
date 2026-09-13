@@ -253,6 +253,46 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "(kdump, direct-kernel) before provisioning."
         ),
     ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/investigations.md",
+        source="docs/guide/toolsets/investigations.md",
+        content_file="toolsets-investigations.md",
+        name="toolset-investigations",
+        title="investigations toolset",
+        description="How investigations.* tools organize and preserve an experiment.",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/allocations.md",
+        source="docs/guide/toolsets/allocations.md",
+        content_file="toolsets-allocations.md",
+        name="toolset-allocations",
+        title="allocations toolset",
+        description="How allocations.* tools reserve and release investigation capacity.",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/resources.md",
+        source="docs/guide/toolsets/resources.md",
+        content_file="toolsets-resources.md",
+        name="toolset-resources",
+        title="resources toolset",
+        description="How resources.* tools discover and manage provider capacity.",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/jobs.md",
+        source="docs/guide/toolsets/jobs.md",
+        content_file="toolsets-jobs.md",
+        name="toolset-jobs",
+        title="jobs toolset",
+        description="How jobs.* tools observe and cancel durable asynchronous work.",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/vmcore.md",
+        source="docs/guide/toolsets/vmcore.md",
+        content_file="toolsets-vmcore.md",
+        name="toolset-vmcore",
+        title="vmcore toolset",
+        description="How vmcore.fetch captures a crashed guest for later analysis.",
+    ),
 )
 
 
