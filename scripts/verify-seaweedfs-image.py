@@ -29,7 +29,7 @@ def _client(endpoint: str):
         endpoint_url=endpoint,
         region_name="us-east-1",
         aws_access_key_id="kdive-proof",
-        aws_secret_access_key="kdive-proof-secret",
+        aws_secret_access_key="kdive-proof-secret",  # pragma: allowlist secret — test only
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
 
