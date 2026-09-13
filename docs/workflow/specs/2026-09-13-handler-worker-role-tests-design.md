@@ -9,14 +9,19 @@ handlers, schema, or platform error translation.
 
 ## Decision
 
-[ADR-0651](../../adr/0651-handler-tests-use-worker-role-pools.md) owns the boundary: a converted
-test passes the shared `kdive_worker_pool` to the handler act phase, while its fixture setup and
-postcondition reads remain on owner connections. Helpers that previously accepted one owner pool
-for both purposes gain explicit owner/worker inputs when necessary.
+[ADR-0651](../../adr/0651-handler-tests-use-worker-role-pools.md) owns the boundary: one LOGIN
+set is created per xdist worker session, while a function-scoped pool connects that principal to
+each current migrated database. A converted test passes that `kdive_worker_pool` to the handler
+act phase, while fixture setup and postcondition reads remain on owner connections. Helpers that
+previously accepted one owner pool for both purposes gain explicit owner/worker inputs when
+necessary.
 
-The conversion covers each `tests/jobs/handlers/` file that constructs an owner-backed pool for a
-handler invocation. Files that only use `migrated_url` to seed, inspect, or test non-handler
-helpers remain owner-only and are named in the implementation inventory.
+`tests/jobs/handlers/worker_role_inventory.json` classifies every one of the 34 handler test
+modules. A `worker-act` record names each handler-act source location; `owner-only` records name
+the source-backed reason no handler act connection exists; package fixtures are separately marked.
+Its structural test rejects a missing module, duplicate path, invalid class, or an owner-backed
+act source. Files that only use `migrated_url` to seed, inspect, or test non-handler helpers remain
+owner-only with that explicit evidence.
 
 ## Acceptance criteria
 
@@ -24,16 +29,20 @@ helpers remain owner-only and are named in the implementation inventory.
    owner connection where the worker lacks the required privilege.
 2. A controlled grant-less handler write raises raw `psycopg.errors.InsufficientPrivilege` through
    a converted handler test, and the controlled fault is removed before delivery.
-3. The handler test tree passes in its normal xdist topology. The PR records before/after timings
-   and does not introduce per-test role creation.
-4. Any discovered production grant leak is reported as evidence and is not repaired in this PR.
+3. The checked inventory covers all 34 handler test modules and names every converted worker act
+   path or a source-backed owner-only reason.
+4. The handler test tree passes in its normal xdist topology. The PR records before/after timings
+   and creates/drops LOGIN roles once per xdist worker session, never per test.
+5. Any newly discovered production grant leak parks this branch with its failing evidence and is
+   reported, not repaired in this PR.
 
 ## Failure handling
 
 An `InsufficientPrivilege` raised by a converted test is evidence of a missing production grant.
-The test remains red until the responsible issue is recorded; this issue does not widen grants or
-map the exception. The shared fixture closes the worker pool and drops its LOGIN principals after
-each fixture lifetime.
+This issue does not widen grants or map the exception. The run records the failing handler, SQL
+operation, and test, then parks before handoff so no red test is represented as mergeable. The
+session fixture drops its LOGIN principals when that xdist worker exits; each function-scoped pool
+closes at test completion.
 
 ## Verification
 

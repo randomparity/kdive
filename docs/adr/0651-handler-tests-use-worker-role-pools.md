@@ -8,17 +8,25 @@ Proposed
 
 Job handlers run with the `kdive_worker` database role, but handler tests have commonly passed a
 pool connected by `migrated_url`, which is the migration owner. That owner bypasses grants, so a
-handler write that production rejects can pass in the test suite.
+handler write that production rejects can pass in the test suite. The handler tree contains 34
+test modules; its conversion needs an explicit classification, because a text match cannot tell a
+seed connection from a handler act connection.
 
 Issue #2347 requires handler-test setup to retain owner access while each handler invocation uses
-the real worker LOGIN fixture introduced by #2346. The fixture creates cluster-global roles, so
-the conversion must avoid per-test principal creation.
+the real worker LOGIN fixture introduced by #2346. LOGIN roles are cluster-global, so creating a
+principal per converted test would queue behind the global role lock under xdist.
 
 ## Decision
 
-Use the shared `kdive_worker_pool` fixture for the act phase of converted handler tests. Keep
-`migrated_url` connections for setup and post-condition observation only. Test helpers that need
-both phases accept distinct owner and worker connections/pools rather than hiding role selection.
+Create one uniquely named LOGIN set per xdist worker session after that worker's migrated schema
+exists. Build a function-scoped DSN adapter from the current `migrated_url`, and open a
+function-scoped `kdive_worker_pool` from it for the act phase. This keeps each test database in
+its DSN while limiting cluster-global CREATE/DROP ROLE work to once per worker session.
+
+Keep `migrated_url` connections for setup and post-condition observation only. Test helpers that
+need both phases accept distinct owner and worker connections/pools rather than hiding role
+selection. A checked 34-module inventory records each test module's worker act paths or the
+reason it is owner-only.
 
 Replace owner-backed handler pools in the affected handler-test files; do not retain an
 owner-execution compatibility path for their handler calls.
@@ -28,6 +36,8 @@ owner-execution compatibility path for their handler calls.
 Converted tests exercise the same database grant boundary as the worker process. Existing seed and
 inspection helpers can continue to use the migration owner. Test signatures and helpers become
 explicit about the owner/worker boundary, and a missing worker grant fails the relevant test.
+If conversion finds an unrecorded missing grant, this branch is parked with its failing evidence;
+reporting the leak does not make a red handler test mergeable.
 
 ## Considered & rejected
 
@@ -35,6 +45,6 @@ explicit about the owner/worker boundary, and a missing worker grant fails the r
   documents that the production failure passed owner-backed handler tests; a separate test cannot
   make each handler's normal act path observe its own grants.
 - **Create a worker LOGIN in every handler test.** verified: issue #2347 identifies the
-  cluster-global role lock and its xdist queue; #2346 already supplies a shared fixture.
+  cluster-global role lock and its xdist queue; one login set per xdist worker avoids that queue.
 - **Add an owner-role compatibility switch to each handler helper.** judgment: it preserves the
   blind execution path the conversion is intended to remove.

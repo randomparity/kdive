@@ -7,18 +7,23 @@ database grants or handler behavior.
 
 ## Task 1 — inventory and conversion boundary
 
-Identify every handler-test file that opens `migrated_url` as the pool supplied to a job handler.
-For each, preserve owner setup and assertions while passing `kdive_worker_pool` to the act phase.
-Keep the worker fixture function-scoped; do not create additional roles.
+Create a session-scoped, xdist-worker-local LOGIN set after migrations and a function-scoped DSN
+adapter/pool for each current migrated database. Identify every handler-test module and add a
+checked `worker_role_inventory.json` record: worker-act records cite every handler-act source
+location; owner-only records cite the source-backed reason; package fixtures are marked directly.
+For each worker-act path, preserve owner setup and assertions while passing `kdive_worker_pool` to
+the act phase. Do not create or drop a LOGIN principal per test.
 
-**Verification:** focused structural search confirms no converted handler invocation receives an
-owner-backed pool; a focused file test proves its handler succeeds with seeded owner data.
+**Verification:** the structural inventory test rejects a missing module, duplicate path, invalid
+classification, and owner-backed worker-act source; a focused file test proves its handler succeeds
+with owner-seeded data.
 
 ## Task 2 — privilege regression proof
 
 Add one focused handler regression that invokes a write lacking `kdive_worker` permission and
 asserts raw `InsufficientPrivilege`. Make the controlled fault red, revert it, and retain the green
-test against the normal schema.
+test against the normal schema. An unrecorded real grant failure parks this branch with its exact
+test, handler, and SQL-operation evidence; it is not fixed or treated as merge-ready here.
 
 **Verification:** the controlled fault fails the focused test with `InsufficientPrivilege`; after
 reversion the exact test passes.
