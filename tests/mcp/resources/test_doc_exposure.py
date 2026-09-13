@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +15,6 @@ from pydantic import AnyUrl
 
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.middleware import doc_exposure
-from kdive.mcp.resources import registrar
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 from kdive.security.authz.errors import AuthError
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -147,16 +145,14 @@ def test_read_allows_all_audience_doc_for_anyone(monkeypatch: pytest.MonkeyPatch
     assert asyncio.run(mw.on_read_resource(ctx, _call_next)) == "ok"
 
 
-def _gated_app(monkeypatch: pytest.MonkeyPatch) -> FastMCP:
-    """A real ``build_app`` whose doc set carries one ``audience="operator"`` fixture.
+def _gated_app() -> FastMCP:
+    """Build the real app with the registered Phase 3 operator index.
 
     No auth context is installed, so ``_is_elevated`` fails closed and the caller is a
     non-platform principal on every plane.
     """
-    fixture = replace(
-        DOC_RESOURCES[0], uri=_OPERATOR_URI, name="agent-index-operator", audience="operator"
-    )
-    monkeypatch.setattr(registrar, "DOC_RESOURCES", (*DOC_RESOURCES, fixture))
+    entry = next(entry for entry in DOC_RESOURCES if entry.uri == _OPERATOR_URI)
+    assert entry.audience == "operator"
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     return build_app(pool, verifier=verifier(), secret_registry=SecretRegistry())
 
@@ -180,12 +176,12 @@ def _wire_error(app: FastMCP, uri: str) -> ErrorData:
     return raised.value.error
 
 
-def test_operator_doc_denied_end_to_end_through_built_app(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_operator_doc_denied_end_to_end_through_built_app() -> None:
     # A non-platform caller must neither see nor read an operator-audience doc through the real
     # middleware chain. The read answers in the resources plane's own vocabulary — FastMCP's
     # `NotFoundError`, the same class its own component-auth filter yields — so the two arms
     # agree instead of the read confirming what the listing concealed (ADR-0499).
-    app = _gated_app(monkeypatch)
+    app = _gated_app()
 
     async def _listed() -> set[str]:
         return {str(r.uri) for r in await app.list_resources()}
@@ -196,30 +192,48 @@ def test_operator_doc_denied_end_to_end_through_built_app(monkeypatch: pytest.Mo
         asyncio.run(app.read_resource(_OPERATOR_URI))
 
 
-def test_denied_operator_doc_read_is_not_an_internal_error_on_the_wire(
+def test_registered_operator_index_is_listed_and_readable_to_platform_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The real Phase 3 index is exposed to a caller with a platform role."""
+    monkeypatch.setattr(
+        doc_exposure,
+        "request_context",
+        lambda: _Ctx(platform_roles={"platform_operator"}),
+    )
+    app = _gated_app()
+
+    async def _read_index() -> str:
+        listed = {str(resource.uri) for resource in await app.list_resources()}
+        assert _OPERATOR_URI in listed
+        result = await app.read_resource(_OPERATOR_URI)
+        content = result.contents[0].content
+        assert isinstance(content, str)
+        return content
+
+    assert "Operating a KDIVE platform" in asyncio.run(_read_index())
+
+
+def test_denied_operator_doc_read_is_not_an_internal_error_on_the_wire() -> None:
     # The defect #1682 actually produced, reproduced through a real client before the fix was
     # written: the bare `AuthorizationError` matched no `except` in `_read_resource_mcp`,
     # escaped to the SDK's `Server._handle_request` catch-all, and arrived as
     # `code=0, message="<uri> requires a platform role"` — the internal-error shape, leaking
     # the gate. -32002 is `resources/read`'s not-found code, the answer the listing implies.
-    error = _wire_error(_gated_app(monkeypatch), _OPERATOR_URI)
+    error = _wire_error(_gated_app(), _OPERATOR_URI)
     assert error.code == -32002
     # Independent of the code: `_read_resource_mcp` interpolates the exception into the wire
     # message, so a `NotFoundError` naming the gate would still carry code -32002 and leak.
     assert "role" not in error.message.lower()
 
 
-def test_denied_and_absent_doc_reads_are_indistinguishable_on_the_wire(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_denied_and_absent_doc_reads_are_indistinguishable_on_the_wire() -> None:
     # The no-leak property, asserted as an equality against real behaviour rather than as a
     # hand-written expectation: a gated doc and a URI that was never registered must produce
     # the same code and the same message modulo the URI itself. Otherwise `resources/read`
     # stays an existence oracle for a doc `on_list_resources` deliberately hid (ADR-0097's
     # no-leak invariant, applied to this plane by ADR-0499).
-    app = _gated_app(monkeypatch)
+    app = _gated_app()
     gated = _wire_error(app, _OPERATOR_URI)
     absent = _wire_error(app, _ABSENT_URI)
 
