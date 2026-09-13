@@ -137,7 +137,7 @@ class RunState(StrEnum):
     booted. Install and boot progress live in the ``run_steps`` ledger and are surfaced by
     ``runs.get`` as ``data.steps``. A terminal install failure may fail a build-succeeded
     Run; a terminal boot failure preserves ``succeeded`` for ``boot_readiness`` evidence
-    (ADR-0230).
+    instead.
     """
 
     CREATED = "created"
