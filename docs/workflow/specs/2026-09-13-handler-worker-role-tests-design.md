@@ -10,11 +10,11 @@ handlers, schema, or platform error translation.
 ## Decision
 
 [ADR-0651](../../adr/0651-handler-tests-use-worker-role-pools.md) owns the boundary: one LOGIN
-set is created per xdist worker session, while a function-scoped pool connects that principal to
-each current migrated database. A converted test passes that `kdive_worker_pool` to the handler
-act phase, while fixture setup and postcondition reads remain on owner connections. Helpers that
-previously accepted one owner pool for both purposes gain explicit owner/worker inputs when
-necessary.
+set is created per xdist worker session under the existing maintenance-database role lock, while a
+function-scoped pool connects that principal to each current migrated database. The same lock
+protects teardown. A converted test passes that `kdive_worker_pool` to the handler act phase,
+while fixture setup and postcondition reads remain on owner connections. Helpers that previously
+accepted one owner pool for both purposes gain explicit owner/worker inputs when necessary.
 
 `tests/jobs/handlers/worker_role_inventory.json` classifies every one of the 34 handler test
 modules. A `worker-act` record names each handler-act source location; `owner-only` records name
@@ -35,6 +35,8 @@ owner-only with that explicit evidence.
    and creates/drops LOGIN roles once per xdist worker session, never per test.
 5. Any newly discovered production grant leak parks this branch with its failing evidence and is
    reported, not repaired in this PR.
+6. Focused fixture tests prove role lifecycle uses the cluster-global role lock for both creation
+   and teardown.
 
 ## Failure handling
 
