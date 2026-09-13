@@ -41,8 +41,8 @@ from tests.support import xdist_backend
 # silently change the image (ADR-0505 shape, #1921). To update: `docker pull` the
 # new tag and replace the digest. If the tag stops resolving, swap to a Chainguard
 # MinIO rebuild or a localstack S3 fixture (ADR-0017).
-_MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"  # noqa: E501  # RELEASE.2025-09-07T16-13-09Z
-_MINIO_PORT = 9000
+_MINIO_IMAGE = "ghcr.io/randomparity/kdive-seaweedfs@sha256:6a4e9f013ecd9c1f86136ed3d3c7eb089c8eb13ff3eee83044ab2a2950f7ce6c"  # noqa: E501
+_MINIO_PORT = 8333
 _ROOT_USER = "kdive-test"
 _ROOT_PASSWORD = "kdive-test-secret"  # disposable local test container credential
 _REGION = "us-east-1"
@@ -89,9 +89,9 @@ def _start_minio(labels: Mapping[str, str]) -> tuple[str, str]:
     xdist_backend.sweep_stale_backend_containers()
     container = (
         DockerContainer(_MINIO_IMAGE)
-        .with_command("server /data")
-        .with_env("MINIO_ROOT_USER", _ROOT_USER)
-        .with_env("MINIO_ROOT_PASSWORD", _ROOT_PASSWORD)
+        .with_command("mini -dir=/data")
+        .with_env("S3_ACCESS_KEY", _ROOT_USER)
+        .with_env("S3_SECRET_KEY", _ROOT_PASSWORD)
         .with_exposed_ports(_MINIO_PORT)
         .with_kwargs(labels=dict(labels))
     )
