@@ -48,6 +48,8 @@ Add one canonical purpose guide per derived namespace. Each guide names every li
 namespace, explains its operational purpose and role boundary, and directs the reader to the
 tool schema for parameters. `DOC_RESOURCES` registers the index and seven guides from fixed
 literal paths with `audience="operator"`; the generator copies them into package snapshots.
+`docs/README.md` lists both the investigation and operator workflow indexes so the human-facing
+inventory matches the served resource set.
 
 Tests assert the complete derived operator resource set, their operator audience and
 registration/read-back, middleware exposure to platform-role callers and denial to callers with
