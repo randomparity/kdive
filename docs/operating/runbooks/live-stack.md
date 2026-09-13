@@ -94,13 +94,13 @@ just stack-up
 ```
 
 This waits for the three long-running backends — Postgres, MinIO, and the mock OIDC issuer
-— to be **healthy**, runs the one-shot `minio-init` to completion (creating the
+— to be **healthy**, runs the one-shot `seaweedfs-init` to completion (creating the
 `kdive-artifacts` bucket, enabling bucket-wide versioning, and verifying `Enabled`, MFA Delete
 off, and no MinIO prefix/folder exclusions), and applies database migrations.
 
 > The recipe scopes `docker compose up --wait` to the long-running backends and runs
-> `minio-init` separately, because `--wait` treats a run-to-completion service's exit as a
-> wait failure. `minio-init`'s exit code still propagates, so a bucket creation, version enable,
+> `seaweedfs-init` separately, because `--wait` treats a run-to-completion service's exit as a
+> wait failure. `seaweedfs-init`'s exit code still propagates, so a bucket creation, version enable,
 > or version-policy verification failure fails `just stack-up` before any KDIVE process starts.
 
 For an external bucket, the runtime identity needs `s3:GetObjectVersion`,

@@ -10,7 +10,7 @@
 services:
   postgres:
     ports: !reset []
-  minio:
+  seaweedfs:
     ports: !reset []
   oidc:
     ports: !reset []
