@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (2026-09-13)
 
 - **Issue:** #2345
 
