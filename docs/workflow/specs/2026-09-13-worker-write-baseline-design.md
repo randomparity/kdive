@@ -21,8 +21,9 @@ identifies either its direct table path or `SECURITY DEFINER` function; and `gra
 identifies the table or function grant. `route` is `direct` or `security-definer`; `verdict` is
 `covered`, `definer-mediated`, or `LEAK`. A no-write handler has an explicit empty `writes` list.
 The top-level sorted `confirmed_leaks` list must equal the identities of `LEAK` rows, so `[]` is a
-durable zero-leak result. The guide cites the worker-grant migrations and names the audit's
-handler-only boundary.
+durable zero-leak result. Every write row has `role: kdive_worker`; a non-worker role is invalid
+because server and reconciler paths are excluded. The guide cites the worker-grant migrations and
+names the audit's handler-only boundary.
 
 The implementation is analysis-only. It changes no runtime source, database schema, role grant,
 handler behavior, database connection, or migration. A discovered `LEAK` is recorded and handed
@@ -64,8 +65,8 @@ or alter a `LEAK`. Those require their owning work items and role-bound integrat
 3. The baseline is valid JSON with a declared format version, stable ordering, and no duplicate
    handler or write identity.
 4. The focused test rejects malformed data, missing handler coverage, duplicate identities,
-   mismatched leak lists, and any handler, write, authority, or grant evidence that no longer
-   carries its recorded fragment.
+   non-worker roles, mismatched leak lists, and any handler, write, authority, or grant evidence
+   that no longer carries its recorded fragment.
 5. The guide identifies the grant-matrix evidence, `SECURITY DEFINER` interpretation, scope, and
    refresh procedure.
 6. No production code or migrations change.

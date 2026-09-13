@@ -24,7 +24,8 @@ registered job kind has one entry. Every reachable database write records a stab
 table, operation, handler-call source, write source, connection role, direct or `SECURITY
 DEFINER` authority source, grant source, and grant verdict: `covered`, `definer-mediated`, or
 `LEAK`. The top-level confirmed-leak list must equal the sorted identities of all `LEAK` rows;
-an empty list is the explicit zero-leak result.
+an empty list is the explicit zero-leak result. Every write row's connection role is exactly
+`kdive_worker`; other roles are outside this baseline.
 
 The structural test validates the manifest shape, unique and sorted entries, complete active
 handler-kind coverage, leak-list reconciliation, and each cited evidence location. A contributor
