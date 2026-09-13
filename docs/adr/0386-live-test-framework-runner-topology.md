@@ -1,6 +1,6 @@
 # ADR 0386 — Live-test framework and arch-additive runner topology
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted (2026-09-13) <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-07-18
 - **Deciders:** Maintainer (randomparity), Claude Code
 
