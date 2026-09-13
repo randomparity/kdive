@@ -43,11 +43,18 @@ just compose-up   # builds the image, runs the backends + migrate, then gates th
 The four supported worker lifecycle recipes are `just compose-up`, `just compose-stop`,
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
-destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
-artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
+destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-seaweedfs-data`
+(the artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
 Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
 The operator-side lifecycle wrapper binds the exact full container ID to a
 random nonce in Postgres before start and records retained terminal inspect evidence before removal.
+
+### MinIO transition
+
+`kdive-minio-data` is incompatible input for SeaweedFS. Stop the old stack and retain that volume
+unchanged as a rollback artifact, then start the new stack with an empty `kdive-seaweedfs-data`
+volume. Do not mount, reuse, or convert the old volume; export/import needs a separately approved
+operator procedure.
 Compose does not run a persistent lifecycle-witness service. Raw Compose/Docker lifecycle commands
 and host-launched workers bypass that chain and are unsupported. On a database failure, the wrapper
 leaves the never-started or terminal worker retained; restore Postgres and retry.
