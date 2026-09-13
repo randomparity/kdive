@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import LiteralString
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg import AsyncConnection
+from psycopg.errors import InsufficientPrivilege
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
@@ -138,23 +141,28 @@ def _pool(url: str) -> AsyncConnectionPool:
     return AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
 
 
-def test_resume_commits_paused_to_ready(migrated_url: str) -> None:
+def test_resume_commits_paused_to_ready(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     async def scenario() -> None:
-        pool = _pool(migrated_url)
-        await pool.open()
+        owner_pool = _pool(migrated_url)
+        worker_pool = _pool(authority_role_dsns("kdive_worker"))
+        await owner_pool.open()
+        await worker_pool.open()
         try:
-            sid = await _seed_system(pool, SystemState.PAUSED)
+            sid = await _seed_system(owner_pool, SystemState.PAUSED)
             control = _FakeControl()
             resolver = provider_resolver(controller=control)
-            async with pool.connection() as conn:
+            async with worker_pool.connection() as conn:
                 result = await power_handler(conn, _resume_job(sid), resolver=resolver)
+            async with owner_pool.connection() as conn:
                 assert await _sys_state(conn, sid) is SystemState.READY
             # The handler returns the resolved system id and tags the provider kind for metrics.
             assert result == str(sid)
             assert take_provider_kind() == "local-libvirt"
             assert control.calls == [("kdive-x", PowerAction.RESUME)]
             # Exactly one paused->ready audit row, with the exact tool/object/transition/args.
-            rows = await _fetch_audit(pool, sid)
+            rows = await _fetch_audit(owner_pool, sid)
             assert rows == [
                 (
                     "control.power",
@@ -164,95 +172,152 @@ def test_resume_commits_paused_to_ready(migrated_url: str) -> None:
                 )
             ]
         finally:
-            await pool.close()
+            await worker_pool.close()
+            await owner_pool.close()
 
     asyncio.run(scenario())
 
 
-def test_resume_uses_derived_domain_when_unnamed(migrated_url: str) -> None:
+def test_resume_uses_derived_domain_when_unnamed(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     # A System with no stored domain_name resolves the domain via domain_name_for(system.id);
     # the derived name (not None/some other id) is what the provider resume is driven with.
     async def scenario() -> None:
-        pool = _pool(migrated_url)
-        await pool.open()
+        owner_pool = _pool(migrated_url)
+        worker_pool = _pool(authority_role_dsns("kdive_worker"))
+        await owner_pool.open()
+        await worker_pool.open()
         try:
-            sid = await _seed_system(pool, SystemState.PAUSED, domain_name=None)
+            sid = await _seed_system(owner_pool, SystemState.PAUSED, domain_name=None)
             control = _FakeControl()
             resolver = provider_resolver(controller=control)
-            async with pool.connection() as conn:
+            async with worker_pool.connection() as conn:
                 await power_handler(conn, _resume_job(sid), resolver=resolver)
             assert control.calls == [(domain_name_for(sid), PowerAction.RESUME)]
         finally:
-            await pool.close()
+            await worker_pool.close()
+            await owner_pool.close()
 
     asyncio.run(scenario())
 
 
-def test_resume_skips_state_and_audit_when_already_ready_after_power(migrated_url: str) -> None:
+def test_resume_skips_state_and_audit_when_already_ready_after_power(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     # If a concurrent delivery commits paused->ready while control.power runs, the handler's
     # re-read under the lock sees READY (not PAUSED) and must skip the state write AND the audit:
     # the guard is `system is not None AND state is PAUSED`, never a lone existence check.
     async def scenario() -> None:
-        pool = _pool(migrated_url)
-        await pool.open()
+        owner_pool = _pool(migrated_url)
+        worker_dsn = authority_role_dsns("kdive_worker")
+        worker_pool = _pool(worker_dsn)
+        await owner_pool.open()
+        await worker_pool.open()
         try:
-            sid = await _seed_system(pool, SystemState.PAUSED)
-            control = _ResumesConcurrently(migrated_url, sid)
+            sid = await _seed_system(owner_pool, SystemState.PAUSED)
+            control = _ResumesConcurrently(worker_dsn, sid)
             resolver = provider_resolver(controller=control)
-            async with pool.connection() as conn:
+            async with worker_pool.connection() as conn:
                 result = await power_handler(conn, _resume_job(sid), resolver=resolver)
+            async with owner_pool.connection() as conn:
                 assert await _sys_state(conn, sid) is SystemState.READY
             assert result == str(sid)
             assert control.calls == [("kdive-x", PowerAction.RESUME)]
             # No second paused->ready audit row: the concurrent delivery already owned it.
-            assert await _fetch_audit(pool, sid) == []
+            assert await _fetch_audit(owner_pool, sid) == []
         finally:
-            await pool.close()
+            await worker_pool.close()
+            await owner_pool.close()
 
     asyncio.run(scenario())
 
 
-def test_failed_resume_leaves_paused_for_retry(migrated_url: str) -> None:
+def test_failed_resume_leaves_paused_for_retry(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     # A control.power fault must NOT condemn a healthy paused guest to FAILED: it re-raises (the
     # job retries) and leaves the System PAUSED — a determinate, recoverable landing.
     async def scenario() -> None:
-        pool = _pool(migrated_url)
-        await pool.open()
+        owner_pool = _pool(migrated_url)
+        worker_pool = _pool(authority_role_dsns("kdive_worker"))
+        await owner_pool.open()
+        await worker_pool.open()
         try:
-            sid = await _seed_system(pool, SystemState.PAUSED)
+            sid = await _seed_system(owner_pool, SystemState.PAUSED)
             err = CategorizedError("boom", category=ErrorCategory.CONTROL_FAILURE)
             resolver = provider_resolver(controller=_FakeControl(error=err))
-            async with pool.connection() as conn:
+            async with worker_pool.connection() as conn:
                 raised = False
                 try:
                     await power_handler(conn, _resume_job(sid), resolver=resolver)
                 except CategorizedError:
                     raised = True
                 assert raised
+            async with owner_pool.connection() as conn:
                 assert await _sys_state(conn, sid) is SystemState.PAUSED
         finally:
-            await pool.close()
+            await worker_pool.close()
+            await owner_pool.close()
 
     asyncio.run(scenario())
 
 
-def test_resume_redelivered_after_commit_is_noop(migrated_url: str) -> None:
+def test_resume_redelivered_after_commit_is_noop(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     # A resume job only exists because admission saw PAUSED; a worker-time READY means a prior
     # delivery already committed paused->ready, so the re-run is an idempotent no-op success — not
     # a terminal refusal that would dead-letter a resume that actually succeeded.
     async def scenario() -> None:
-        pool = _pool(migrated_url)
-        await pool.open()
+        owner_pool = _pool(migrated_url)
+        worker_pool = _pool(authority_role_dsns("kdive_worker"))
+        await owner_pool.open()
+        await worker_pool.open()
         try:
-            sid = await _seed_system(pool, SystemState.READY)
+            sid = await _seed_system(owner_pool, SystemState.READY)
             control = _FakeControl()
             resolver = provider_resolver(controller=control)
-            async with pool.connection() as conn:
+            async with worker_pool.connection() as conn:
                 result = await power_handler(conn, _resume_job(sid), resolver=resolver)
                 assert result == str(sid)
+            async with owner_pool.connection() as conn:
                 assert await _sys_state(conn, sid) is SystemState.READY  # untouched
             assert control.calls == []  # never touched the guest
         finally:
-            await pool.close()
+            await worker_pool.close()
+            await owner_pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_resume_surfaces_a_missing_worker_update_grant(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """The converted handler act phase exposes a worker-role grant regression raw."""
+
+    async def scenario() -> None:
+        owner_pool = _pool(migrated_url)
+        worker_pool = _pool(authority_role_dsns("kdive_worker"))
+        await owner_pool.open()
+        await worker_pool.open()
+        try:
+            sid = await _seed_system(owner_pool, SystemState.PAUSED)
+            async with owner_pool.connection() as owner:
+                await owner.execute("REVOKE UPDATE ON systems FROM kdive_worker")
+            try:
+                async with worker_pool.connection() as worker:
+                    with pytest.raises(InsufficientPrivilege):
+                        await power_handler(
+                            worker,
+                            _resume_job(sid),
+                            resolver=provider_resolver(controller=_FakeControl()),
+                        )
+            finally:
+                async with owner_pool.connection() as owner:
+                    await owner.execute("GRANT UPDATE ON systems TO kdive_worker")
+        finally:
+            await worker_pool.close()
+            await owner_pool.close()
 
     asyncio.run(scenario())

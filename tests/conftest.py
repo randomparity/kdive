@@ -57,6 +57,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory
 from kdive.store.objectstore import ObjectStore
 from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as a conftest hook
+from tests.db.conftest import _cluster_global_role_lock, _MigratedWorkerDb
 
 # Direct object-store boundary tests still need a complete configuration at collection time.
 # ``setdefault`` yields to a real ``KDIVE_S3_*`` in the developer's shell.
@@ -148,31 +149,47 @@ def s3_backend_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_S3_BUCKET", _S3_BUCKET)
 
 
-@pytest.fixture
-def authority_role_dsns(migrated_url: str) -> Iterator[_RoleDsns]:
-    """Create unique LOGIN principals for the migration's non-login roles."""
-    with psycopg.connect(migrated_url, autocommit=True) as conn:
-        suffix = uuid4().hex[:16]
-        logins = {
-            role: f"kdive_eba_{role.removeprefix('kdive_')}_{suffix}"
-            for role in (
-                "kdive_server",
-                "kdive_worker",
-                "kdive_reconciler",
-                "kdive_provider_authority",
-            )
-        }
+@pytest.fixture(scope="session")
+def authority_role_logins(
+    _migrated_db: _MigratedWorkerDb, postgres_url: str
+) -> Iterator[dict[str, str]]:
+    """Create one locked LOGIN set per xdist worker after its role schema exists."""
+    suffix = uuid4().hex[:16]
+    logins = {
+        role: f"kdive_eba_{role.removeprefix('kdive_')}_{suffix}"
+        for role in (
+            "kdive_server",
+            "kdive_worker",
+            "kdive_reconciler",
+            "kdive_provider_authority",
+        )
+    }
+    with (
+        _cluster_global_role_lock(postgres_url),
+        psycopg.connect(_migrated_db.url, autocommit=True) as conn,
+    ):
         for role, login in logins.items():
             conn.execute(
                 SQL("CREATE ROLE {} LOGIN PASSWORD {} IN ROLE {}").format(
                     Identifier(login), Literal(_LOGIN_PASSWORD), Identifier(role)
                 )
             )
-        try:
-            yield _RoleDsns(dict(conn.info.get_parameters()), logins)
-        finally:
+    try:
+        yield logins
+    finally:
+        with (
+            _cluster_global_role_lock(postgres_url),
+            psycopg.connect(_migrated_db.url, autocommit=True) as conn,
+        ):
             for login in logins.values():
                 conn.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
+
+
+@pytest.fixture
+def authority_role_dsns(migrated_url: str, authority_role_logins: dict[str, str]) -> _RoleDsns:
+    """Bind the xdist worker's shared LOGINs to this test's migrated database."""
+    with psycopg.connect(migrated_url) as conn:
+        return _RoleDsns(dict(conn.info.get_parameters()), authority_role_logins)
 
 
 @pytest.fixture

@@ -244,6 +244,7 @@ async def _seed_system(conn: AsyncConnection) -> UUID:
 
 def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
     migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
 ) -> None:
     async def _run() -> tuple[list[tuple[list[str], str]], Path | None, bool | None]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
@@ -269,6 +270,12 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
                     seen_key_path = Path(argv[argv.index("-i") + 1])
                     seen_key_existed = seen_key_path.exists()
 
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 result = await authorize_ssh_key_handler(
                     conn,
                     job,
@@ -291,7 +298,9 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
     assert key_path is not None and not key_path.exists()  # and cleaned up after
 
 
-def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
+def test_handler_resolves_endpoint_by_domain_name(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     # The connector resolves the live libvirt domain by name, so the handler must pass the
     # System's `kdive-<id>` domain name, not the bare id (regression for the live-proof bug where
     # the bare id raised VIR_ERR_NO_DOMAIN -> spurious ssh_not_provisioned).
@@ -305,6 +314,12 @@ def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
                 resolver = _resolver(("127.0.0.1", 22022))
                 connector = resolver.binding_for_system.return_value.runtime.connector
 
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 await authorize_ssh_key_handler(
                     conn,
                     job,
@@ -322,7 +337,9 @@ def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
     assert domain_name == f"kdive-{system_id}"
 
 
-def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> None:
+def test_handler_ssh_failure_propagates_transport_failure(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     def _boom(_argv: list[str], _key: str) -> None:
         raise CategorizedError("ssh down", category=ErrorCategory.TRANSPORT_FAILURE)
 
@@ -334,6 +351,12 @@ def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> 
                 await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 with pytest.raises(CategorizedError) as excinfo:
                     await authorize_ssh_key_handler(
                         conn,
@@ -479,7 +502,9 @@ def test_unreachable_preflight_failure_context_carries_console_tail(
     assert tail_calls == [(system_id, registry)]
 
 
-def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:
+def test_handler_no_bootstrap_key_is_configuration_error(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     """No key row (System predates ADR-0289 or was never provisioned) fails closed."""
 
     async def _run() -> None:
@@ -489,6 +514,12 @@ def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> N
                 system_id = await _seed_system(conn)  # no ensure_system_bootstrap_key call
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 with pytest.raises(CategorizedError) as excinfo:
                     await authorize_ssh_key_handler(
                         conn,

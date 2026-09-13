@@ -13,6 +13,8 @@ import asyncio
 import gzip
 import hashlib
 import struct
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -41,6 +43,17 @@ from kdive.store.objectstore import ObjectStore
 from tests.clock import STORE_MTIME
 
 _CONSOLE = b"console-line payload bytes\n" * 6000  # ~158 KiB -> several rotation parts (64 KiB)
+_WORKER_DSN: ContextVar[str] = ContextVar("console_rotate_worker_dsn")
+
+
+@pytest.fixture(autouse=True)
+def _bind_worker_dsn(authority_role_dsns: Callable[[str], str]) -> Iterator[None]:
+    """Run this module's handler act helpers as the real worker LOGIN."""
+    token = _WORKER_DSN.set(authority_role_dsns("kdive_worker"))
+    try:
+        yield
+    finally:
+        _WORKER_DSN.reset(token)
 
 
 class _FakeStore:
@@ -129,7 +142,11 @@ async def _seed_system(pool: AsyncConnectionPool, system_id: UUID, state: str) -
 
 
 async def _run_handler(pool: AsyncConnectionPool, store: _FakeStore, job: Job) -> str | None:
-    async with pool.connection() as conn:
+    del pool
+    async with (
+        AsyncConnectionPool(_WORKER_DSN.get(), min_size=1, max_size=2, open=False) as worker_pool,
+        worker_pool.connection() as conn,
+    ):
         return await console_rotate.console_rotate_handler(
             conn,
             job,
@@ -527,7 +544,11 @@ async def _run_probing(pool: AsyncConnectionPool, store: _LockProbingStore, job:
     ``pg_advisory_xact_lock`` would outlive every block regardless of where the PUTs sit
     (ADR-0506/ADR-0516). Only under the worker's dispatch does releasing the lock mean anything.
     """
-    async with pool.connection() as conn:
+    del pool
+    async with (
+        AsyncConnectionPool(_WORKER_DSN.get(), min_size=1, max_size=2, open=False) as worker_pool,
+        worker_pool.connection() as conn,
+    ):
         await conn.set_autocommit(True)
         store.backend_pid = conn.info.backend_pid
         try:

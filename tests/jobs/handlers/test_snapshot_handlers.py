@@ -7,9 +7,12 @@ ledger/state transitions are exercised without a live guest.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -51,6 +54,44 @@ from tests.mcp.systems_support import (
 from tests.support.object_store import INERT_OBJECT_STORE
 
 _DT = datetime(2026, 7, 17, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _bind_worker_handler_calls(
+    authority_role_dsns: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Replace every direct handler act in this module with its worker-login execution."""
+    worker_dsn = authority_role_dsns("kdive_worker")
+
+    def via_worker(handler: Any) -> Any:
+        async def call(_owner: AsyncConnection, *args: Any, **kwargs: Any) -> Any:
+            worker_pool = _pool(worker_dsn)
+            await worker_pool.open()
+            try:
+                async with worker_pool.connection() as worker:
+                    try:
+                        result = await handler(worker, *args, **kwargs)
+                    except Exception as error:
+                        captured = error
+                    else:
+                        captured = None
+                if captured is not None:
+                    raise captured
+                return result
+            finally:
+                await worker_pool.close()
+
+        return call
+
+    for name in (
+        "snapshot_handler",
+        "restore_handler",
+        "snapshot_delete_handler",
+        "teardown_handler",
+        "reprovision_handler",
+    ):
+        monkeypatch.setitem(globals(), name, via_worker(globals()[name]))
+    yield
 
 
 class _FakeSnapshotter:
@@ -249,7 +290,8 @@ def test_snapshot_provider_error_marks_row_failed(migrated_url: str) -> None:
                     raised = True
                     assert exc.terminal is True  # a failed capture dead-letters, does not retry
                 assert raised
-                assert await _snap_state(conn, snap_id) is SnapshotState.FAILED
+                async with pool.connection() as observer:
+                    assert await _snap_state(observer, snap_id) is SnapshotState.FAILED
         finally:
             await pool.close()
 
@@ -374,18 +416,19 @@ def test_restore_provider_error_fails_the_system(migrated_url: str) -> None:
                     raised = True
                     assert exc.terminal is True  # dead-letters; a retry must not report success
                 assert raised
-                assert await _sys_state(conn, sid) is SystemState.FAILED
-                # The failure audits systems.restore with the restoring->failed transition.
-                assert await _audit_rows(conn, sid) == [
-                    (
-                        "systems.restore",
-                        "systems",
-                        sid,
-                        "restoring->failed",
-                        args_digest({"system_id": str(sid)}),
-                        "proj",
-                    ),
-                ]
+                async with pool.connection() as observer:
+                    assert await _sys_state(observer, sid) is SystemState.FAILED
+                    # The failure audits systems.restore with the restoring->failed transition.
+                    assert await _audit_rows(observer, sid) == [
+                        (
+                            "systems.restore",
+                            "systems",
+                            sid,
+                            "restoring->failed",
+                            args_digest({"system_id": str(sid)}),
+                            "proj",
+                        ),
+                    ]
         finally:
             await pool.close()
 

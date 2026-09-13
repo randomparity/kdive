@@ -21,6 +21,7 @@ import json
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,17 @@ def _checksum(seed: bytes) -> str:
 _CHECKSUM = _checksum(b"rootfs")
 _TOKEN = rootfs_object_token(_CHECKSUM)
 _CHECKSUM_Y = _checksum(b"rootfs-y")
+_WORKER_DSN: ContextVar[str] = ContextVar("rootfs_reclaim_worker_dsn")
+
+
+@pytest.fixture(autouse=True)
+def _bind_worker_dsn(authority_role_dsns: Callable[[str], str]) -> Iterator[None]:
+    """Route this module's handler act helpers through the real worker LOGIN."""
+    token = _WORKER_DSN.set(authority_role_dsns("kdive_worker"))
+    try:
+        yield
+    finally:
+        _WORKER_DSN.reset(token)
 
 
 class _RecordingStore:
@@ -236,7 +248,8 @@ async def _run_handler(
     rootfs_dir: Path,
     uploads: Path,
 ) -> str | None:
-    conn = await connect(migrated_url)
+    del migrated_url
+    conn = await connect(_WORKER_DSN.get())
     try:
         return await reclaim_investigation_rootfs_handler(
             conn,
@@ -305,7 +318,7 @@ def test_rootfs_delete_runs_after_row_commit_and_investigation_unlock(
         rootfs_dir, uploads = _dirs(tmp_path)
         _stage(uploads, inv)
         observations: list[tuple[int, bool]] = []
-        handler = await connect(migrated_url)
+        handler = await connect(_WORKER_DSN.get())
 
         def _observe_delete() -> None:
             with psycopg.connect(migrated_url, autocommit=True) as observer:
@@ -734,7 +747,7 @@ def test_investigation_lock_serializes_a_concurrent_bind(migrated_url: str, tmp_
         store = _RecordingStore()
 
         binder = await connect(migrated_url)
-        handler_conn = await connect(migrated_url)
+        handler_conn = await connect(_WORKER_DSN.get())
         handler: asyncio.Task[str | None] | None = None
         try:
             async with (

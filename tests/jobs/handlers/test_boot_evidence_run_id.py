@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -49,7 +50,9 @@ def _stored(system_id: UUID, run_id: UUID, etag: str) -> StoredArtifact:
     return StoredArtifact(key, etag, Sensitivity.REDACTED, "console", version_id="test-version")
 
 
-def test_boot_evidence_row_carries_run_id(migrated_url: str) -> None:
+def test_boot_evidence_row_carries_run_id(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     """The console-<run_id> row persists run_id = that Run, exactly."""
     system_id, run_id = uuid4(), uuid4()
 
@@ -58,9 +61,16 @@ def test_boot_evidence_row_carries_run_id(migrated_url: str) -> None:
             await pool.open()
             async with pool.connection() as conn:
                 await _seed_run(conn, system_id, run_id)
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 artifact = await boot_evidence._upsert_console_artifact_row(
                     conn, system_id, run_id, _stored(system_id, run_id, "etag-1"), b"boot bytes"
                 )
+            async with pool.connection() as conn:
                 row = await (
                     await conn.execute("SELECT run_id FROM artifacts WHERE id = %s", (artifact.id,))
                 ).fetchone()
@@ -69,7 +79,9 @@ def test_boot_evidence_row_carries_run_id(migrated_url: str) -> None:
     assert asyncio.run(_run()) == run_id
 
 
-def test_boot_evidence_recapture_keeps_run_id(migrated_url: str) -> None:
+def test_boot_evidence_recapture_keeps_run_id(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     """A same-Run re-capture (changed etag) refreshes the row and keeps its run_id."""
     system_id, run_id = uuid4(), uuid4()
 
@@ -78,6 +90,12 @@ def test_boot_evidence_recapture_keeps_run_id(migrated_url: str) -> None:
             await pool.open()
             async with pool.connection() as conn:
                 await _seed_run(conn, system_id, run_id)
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
                 first = await boot_evidence._upsert_console_artifact_row(
                     conn, system_id, run_id, _stored(system_id, run_id, "etag-1"), b"boot bytes"
                 )
@@ -85,6 +103,7 @@ def test_boot_evidence_recapture_keeps_run_id(migrated_url: str) -> None:
                     conn, system_id, run_id, _stored(system_id, run_id, "etag-2"), b"boot bytes"
                 )
                 assert second.id == first.id  # same Run re-capture refreshes its own row
+            async with pool.connection() as conn:
                 row = await (
                     await conn.execute("SELECT run_id FROM artifacts WHERE id = %s", (second.id,))
                 ).fetchone()
