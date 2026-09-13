@@ -17,7 +17,13 @@ import platform
 import shutil
 from collections.abc import Awaitable, Callable
 
-from kdive.diagnostics.checks import MULTIARCH_GDB_ID, Check
+from kdive.diagnostics.checks import (
+    DEPMOD_TOOLCHAIN_ID,
+    GUEST_ARCH_ACCEL_ID,
+    MULTIARCH_GDB_ID,
+    PSERIES_FADUMP_ID,
+    Check,
+)
 from kdive.diagnostics.contributions.depmod_toolchain import (
     depmod_toolchain_worker_check,
     depmod_toolchain_worker_descriptor,
@@ -152,6 +158,12 @@ def _unavailable_worker_checks() -> list[WorkerVantageDescriptor]:
 def diagnostic_contribution() -> DiagnosticProviderContribution:
     return DiagnosticProviderContribution(
         provider=_LOCAL_PROVIDER,
+        worker_vantage_ids=(
+            MULTIARCH_GDB_ID,
+            PSERIES_FADUMP_ID,
+            GUEST_ARCH_ACCEL_ID,
+            DEPMOD_TOOLCHAIN_ID,
+        ),
         enabled=lambda: True,
         checks=no_checks,
         unavailable_worker_checks=_unavailable_worker_checks,

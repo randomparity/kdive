@@ -100,7 +100,7 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
     RunState: {
         RunState.CREATED: {RunState.RUNNING, RunState.CANCELED},
         RunState.RUNNING: {RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELED},
-        RunState.SUCCEEDED: set(),
+        RunState.SUCCEEDED: {RunState.FAILED},
         RunState.FAILED: set(),
         RunState.CANCELED: set(),
     },

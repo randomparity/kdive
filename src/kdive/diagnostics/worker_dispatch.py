@@ -157,7 +157,7 @@ class JobWorkerCheckDispatcher:
     def _from_terminal(self, job: Job) -> list[CheckResult]:
         if job.state is JobState.SUCCEEDED:
             try:
-                results = deserialize_results(job.result_ref)
+                results = deserialize_results(job.result_ref, allowed_ids=self._worker_check_ids)
             except ResultCodecError as exc:
                 _log.error("diagnostics job %s returned a malformed result: %s", job.id, exc)
                 return _unavailable(

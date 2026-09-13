@@ -184,6 +184,25 @@ def test_provider_diagnostics_registration_includes_local_and_remote_libvirt() -
     assert by_provider["remote-libvirt"].unavailable_worker_checks
 
 
+def test_static_worker_vantage_ids_match_constructed_production_checks(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Static registration must cover emitted worker checks without descriptor fan-out."""
+    from typing import cast
+
+    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
+    from kdive.providers.ports.authority import AuthorityRequestSender
+
+    _with_remote_instance(monkeypatch, tmp_path)
+    contributions = diagnostic_provider_contributions(
+        lambda _binding: cast(AuthorityRequestSender, object())
+    )
+
+    assert {c.provider: set(c.worker_vantage_ids) for c in contributions} == {
+        c.provider: {check.id for check in c.worker_checks()} for c in contributions
+    }
+
+
 def test_contribution_names_the_remote_libvirt_provider() -> None:
     # The contribution must carry the provider name so its rows attribute to remote-libvirt.
     assert remote_contribution.diagnostic_contribution().provider == "remote-libvirt"
@@ -361,6 +380,7 @@ def test_with_egress_assembles_provider_supplied_egress_check(monkeypatch, tmp_p
 
     contribution = DiagnosticProviderContribution(
         provider="provider-a",
+        worker_vantage_ids=(),
         enabled=_enabled,
         checks=_no_checks,
         unavailable_worker_checks=tuple,
@@ -522,6 +542,7 @@ def _enabled_worker_contribution(
 
     return DiagnosticProviderContribution(
         provider=provider,
+        worker_vantage_ids=(worker_check_id,),
         enabled=_enabled,
         checks=_no_checks,
         unavailable_worker_checks=_unavailable_worker_checks,
