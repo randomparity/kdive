@@ -71,7 +71,7 @@ def _bind_worker_handler_calls(
                 async with worker_pool.connection() as worker:
                     try:
                         result = await handler(worker, *args, **kwargs)
-                    except BaseException as error:
+                    except Exception as error:
                         captured = error
                     else:
                         captured = None
