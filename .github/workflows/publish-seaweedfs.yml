@@ -55,7 +55,8 @@ jobs:
           tags: ghcr.io/randomparity/kdive-seaweedfs:4.46-${{ github.sha }}
           provenance: false
           sbom: false
-      - env: {DIGEST: ${{ steps.build.outputs.digest }}}
+      - env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
           platforms="$(docker buildx imagetools inspect "ghcr.io/randomparity/kdive-seaweedfs@${DIGEST}" --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')"
