@@ -19,14 +19,15 @@ runs through the INSERT successfully.
 
 Migration-history contracts name the discovered tail, so their four affected test modules advance
 with the migration. The existing worker-fence privilege matrix adds `image_catalog` only to the
-worker INSERT set. That matrix proves the new INSERT and continues to reject every other table
-privilege for the worker role.
+worker INSERT set while retaining its existing SELECT and UPDATE expectations. That matrix proves
+the new INSERT and continues to reject DELETE, REFERENCES, TRIGGER, and TRUNCATE for the worker
+role on that table.
 
 ## Constraints
 
 - Scope is migration 0154 and image-build worker-role evidence only.
-- The grant is table-specific and operation-specific: no UPDATE, DELETE, SELECT, schema, or role
-  membership changes are added.
+- The grant adds only INSERT; existing SELECT and UPDATE authority remains unchanged, and no
+  DELETE, schema, or role-membership authority is added.
 - ADR-0653 remains the governing decision; no new architectural decision is introduced.
 
 ## Threat model
@@ -44,5 +45,6 @@ publish inputs; those are existing worker and publish-service controls.
   public.image_catalog, INSERT)`.
 - The worker-role handler proof registers an image and stores its object.
 - The four migration-history contracts end with `0154_worker_image_catalog_insert.sql`.
-- The worker-fence matrix allows only the new worker INSERT privilege on `image_catalog`.
+- The worker-fence matrix adds the new worker INSERT expectation while retaining existing SELECT
+  and UPDATE expectations on `image_catalog`.
 - The baseline and inventory remain structurally valid and declare no image-catalog INSERT leak.

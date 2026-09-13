@@ -9,8 +9,8 @@ Tech stack: PostgreSQL migrations, Python 3.14, pytest, psycopg.
 ## Global Constraints
 
 - Scope is migration 0154 and image-build worker-role evidence only.
-- The grant is table-specific and operation-specific: no UPDATE, DELETE, SELECT, schema, or role
-  membership changes are added.
+- The grant adds only INSERT; existing SELECT and UPDATE authority remains unchanged, and no
+  DELETE, schema, or role-membership authority is added.
 - ADR-0653 remains the governing decision; no new architectural decision is introduced.
 
 Expected implementation size: 28–42 changed lines (M) — one SQL grant, two JSON declarations,
@@ -48,10 +48,13 @@ Provides the effective INSERT authority consumed by the catalog guard and worker
 - Contract: migration history has the expected 0154 tail. Mode: focused-test. Red observation:
   adding migration 0154 without advancing the hard-coded tails makes the equality assertions end
   at 0153. Green command: `just test-verbose tests/db/test_migrate.py tests/db/test_migration_0102_build_gc_cursors.py tests/db/test_migration_0091_system_object_sweep_cursors.py tests/db/test_migration_0115_capture_reap_state.py`.
-- Contract: worker authority is INSERT-only on image_catalog. Mode: focused-test. Red observation:
+- Contract: worker authority adds only INSERT on image_catalog. Mode: focused-test. Red observation:
   before the matrix entry is added, the migrated worker privilege matrix expects INSERT to be
-  absent; a broad grant still fails its DELETE, REFERENCES, SELECT, TRIGGER, TRUNCATE, and UPDATE
-  checks. Green command: `just test-verbose tests/db/test_worker_fence_authority.py::test_runtime_roles_receive_data_access_without_crossing_fence_authority`.
+  absent; the matrix retains existing SELECT and UPDATE and rejects DELETE, REFERENCES, TRIGGER,
+  and TRUNCATE. Green command: `just test-verbose tests/db/test_worker_fence_authority.py::test_runtime_roles_receive_data_access_without_crossing_fence_authority`.
+- Contract: baseline evidence remains structurally valid. Mode: focused-test. Red observation: a
+  malformed migration evidence path, line, text, verdict, or confirmed-leaks list fails the
+  baseline validator. Green command: `just test-verbose tests/jobs/test_worker_write_baseline.py::test_committed_baseline_is_complete_and_valid`.
 
 ### Steps
 
@@ -67,8 +70,9 @@ Provides the effective INSERT authority consumed by the catalog guard and worker
 
 ### Acceptance criteria
 
-Only the intended INSERT privilege is granted; migration history, the migrated guard, baseline
-structure, full worker privilege matrix, and actual worker-role publish path all pass.
+Only the intended INSERT privilege is added; existing SELECT and UPDATE authority is retained;
+migration history, the migrated guard, baseline structure, full worker privilege matrix, and the
+actual worker-role publish path all pass.
 
 ### Rollback
 
