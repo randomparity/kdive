@@ -16,12 +16,12 @@ def _isolate_root(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
 
 
 def test_override_env_selects_endpoint_and_creds(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KDIVE_TEST_S3_URL", "http://minio.example:9000")
+    monkeypatch.setenv("KDIVE_TEST_S3_URL", "http://seaweedfs.example:8333")
     monkeypatch.delenv("KDIVE_TEST_S3_ACCESS_KEY", raising=False)
     endpoint, access, secret = store_conftest._select_s3_endpoint()
-    assert endpoint == "http://minio.example:9000"
-    assert access == "minioadmin"  # pragma: allowlist secret - compose defaults
-    assert secret == "minioadmin"  # pragma: allowlist secret - compose defaults
+    assert endpoint == "http://seaweedfs.example:8333"
+    assert access == "kdive"  # pragma: allowlist secret - compose defaults
+    assert secret == "kdive-demo-secret"  # pragma: allowlist secret - compose defaults
 
 
 def test_bucket_name_is_per_worker_unique() -> None:
@@ -33,7 +33,7 @@ def test_bucket_name_is_per_worker_unique() -> None:
 def test_override_selected_without_starting_a_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    monkeypatch.setenv("KDIVE_TEST_S3_URL", "http://minio.example:9000")
+    monkeypatch.setenv("KDIVE_TEST_S3_URL", "http://seaweedfs.example:8333")
 
     def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise AssertionError("override path must not start a container")
@@ -44,7 +44,7 @@ def test_override_selected_without_starting_a_container(
         _access,
         _secret,
     ):
-        assert endpoint == "http://minio.example:9000"
+        assert endpoint == "http://seaweedfs.example:8333"
 
 
 def test_require_docker_reraises_start_failure(

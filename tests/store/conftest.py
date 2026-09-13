@@ -1,9 +1,10 @@
 """Disposable-MinIO fixtures for the object-store tests (ADR-0017, ADR-0401).
 
 ``minio_store`` yields an :class:`ObjectStore` bound to a per-worker bucket on a
-MinIO shared for the whole run. It first honors ``KDIVE_TEST_S3_URL`` (a running
-MinIO/S3, e.g. ``just compose-up``, credentials ``KDIVE_TEST_S3_ACCESS_KEY`` /
-``KDIVE_TEST_S3_SECRET_KEY`` defaulting to the compose ``minioadmin`` root); with no
+SeaweedFS S3 endpoint shared for the whole run. It first honors ``KDIVE_TEST_S3_URL``
+(a running SeaweedFS/S3 endpoint, e.g. ``just compose-up``), with credentials
+``KDIVE_TEST_S3_ACCESS_KEY`` / ``KDIVE_TEST_S3_SECRET_KEY`` defaulting to the Compose
+``kdive`` account; with no
 override it lazily starts one shared testcontainer coordinated across xdist workers
 (``tests/support/xdist_backend``). Each worker owns a ``kdive-test-<worker>-<token>``
 bucket; ``key_ns`` gives each test a unique key prefix within it. When Docker is
@@ -14,8 +15,7 @@ container path a killed run strands the container itself; the next run to start 
 it, keyed to a lock the owning run holds while alive, so a concurrent suite's container is
 never taken (ADR-0551, #1910).
 
-MinIO's official image is archived (final tag pinned below); if it stops resolving,
-swap in localstack or a Chainguard MinIO rebuild (ADR-0017).
+The KDIVE-built SeaweedFS image is pinned to its immutable OCI index digest.
 """
 
 from __future__ import annotations
@@ -35,24 +35,20 @@ from botocore.exceptions import BotoCoreError, ClientError
 from kdive.store.objectstore import ObjectStore
 from tests.support import xdist_backend
 
-# MinIO's official images are archived; the last tag actually pushed to Docker Hub
-# is RELEASE.2025-09-07T16-13-09Z (the later source-only 2025-10-15 patch was never
-# published as an image). Pinned to the manifest-list digest so a re-tag cannot
-# silently change the image (ADR-0505 shape, #1921). To update: `docker pull` the
-# new tag and replace the digest. If the tag stops resolving, swap to a Chainguard
-# MinIO rebuild or a localstack S3 fixture (ADR-0017).
+# The image is pinned to its OCI index digest so a re-tag cannot silently change the
+# tested backend. To update, pull the new published digest and replace this value.
 _MINIO_IMAGE = "ghcr.io/randomparity/kdive-seaweedfs@sha256:6a4e9f013ecd9c1f86136ed3d3c7eb089c8eb13ff3eee83044ab2a2950f7ce6c"  # noqa: E501
 _MINIO_PORT = 8333
 _ROOT_USER = "kdive-test"
 _ROOT_PASSWORD = "kdive-test-secret"  # disposable local test container credential
 _REGION = "us-east-1"
 _READY_TIMEOUT_S = 60.0
-_DEFAULT_S3_ACCESS_KEY = "minioadmin"  # just compose-up MinIO root
-_DEFAULT_S3_SECRET_KEY = "minioadmin"  # pragma: allowlist secret - local dev only
+_DEFAULT_S3_ACCESS_KEY = "kdive"  # just compose-up SeaweedFS account
+_DEFAULT_S3_SECRET_KEY = "kdive-demo-secret"  # pragma: allowlist secret - local dev only
 
 
 def _await_ready(client: Any) -> None:
-    """Poll ``list_buckets`` until MinIO answers or the timeout elapses."""
+    """Poll ``list_buckets`` until SeaweedFS answers or the timeout elapses."""
     deadline = time.monotonic() + _READY_TIMEOUT_S
     last_exc: Exception | None = None
     while time.monotonic() < deadline:
@@ -62,11 +58,11 @@ def _await_ready(client: Any) -> None:
         except (BotoCoreError, ClientError, OSError) as exc:
             last_exc = exc
             time.sleep(0.5)
-    raise RuntimeError(f"MinIO not ready within {_READY_TIMEOUT_S}s: {last_exc}")
+    raise RuntimeError(f"SeaweedFS not ready within {_READY_TIMEOUT_S}s: {last_exc}")
 
 
 def _select_s3_endpoint() -> tuple[str, str, str]:
-    """Return (endpoint, access_key, secret_key) for an override MinIO, if set."""
+    """Return (endpoint, access_key, secret_key) for an override S3 endpoint, if set."""
     endpoint = os.environ["KDIVE_TEST_S3_URL"]
     access = os.environ.get("KDIVE_TEST_S3_ACCESS_KEY", _DEFAULT_S3_ACCESS_KEY)
     secret = os.environ.get("KDIVE_TEST_S3_SECRET_KEY", _DEFAULT_S3_SECRET_KEY)
