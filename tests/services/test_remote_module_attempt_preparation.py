@@ -22,7 +22,6 @@ from kdive.domain.remote_module_attempt_preparation import (
 )
 from kdive.services.remote_module_attempt_preparation import (
     ModuleAttemptObligationVerificationError,
-    open_module_attempt_preparation,
     run_verified_module_attempt_preparation,
 )
 from tests.db.external_boot_authority_support import (
@@ -81,41 +80,6 @@ async def _open_pool(dsn: str, *, size: int = 2) -> AsyncConnectionPool:
     pool = AsyncConnectionPool(dsn, min_size=1, max_size=size, open=False)
     await pool.open()
     return pool
-
-
-def test_server_returns_only_committed_replayable_request(
-    migrated_url: str, authority_role_dsns: _RoleDsns
-) -> None:
-    async def _run() -> None:
-        repo = RemoteModuleAttemptObligationRepository()
-        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
-            attempt = await _seed(admin)
-        async with await _open_pool(authority_role_dsns("kdive_server")) as server:
-            first = await open_module_attempt_preparation(server, repo, attempt)
-            second = await open_module_attempt_preparation(server, repo, attempt)
-        assert first.to_canonical_json() == second.to_canonical_json()
-        async with await psycopg.AsyncConnection.connect(migrated_url) as observer:
-            assert await repo.mutation_obligation_is_open(observer, attempt) is True
-
-    asyncio.run(_run())
-
-
-def test_server_does_not_reopen_discharged_obligation(
-    migrated_url: str, authority_role_dsns: _RoleDsns
-) -> None:
-    async def _run() -> None:
-        repo = RemoteModuleAttemptObligationRepository()
-        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
-            attempt = await _seed(admin)
-        async with await _open_pool(authority_role_dsns("kdive_server")) as server:
-            request = await open_module_attempt_preparation(server, repo, attempt)
-            assert request == _request(attempt)
-            async with server.connection() as conn, conn.transaction():
-                assert await repo.discharge_mutation_obligation(conn, attempt, reason="restored")
-            with pytest.raises(ModuleAttemptObligationVerificationError):
-                await open_module_attempt_preparation(server, repo, attempt)
-
-    asyncio.run(_run())
 
 
 @pytest.mark.parametrize("case", ["missing", "mismatch", "discharged"])

@@ -1,4 +1,4 @@
-"""Server-owned external-boot preparation re-entry (ADR-0595)."""
+"""Locked external-boot preparation re-entry (ADR-0595)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from kdive.providers.fault_inject.lifecycle.external_boot import (
     PreparationInterrupted,
 )
 from kdive.providers.ports.external_boot import OpaqueProviderRef
-from kdive.services.external_boot.preparation import prepare_external_boot
+from kdive.services.external_boot.preparation import _prepare_external_boot_locked
 from tests.jobs.handlers.external_boot.vehicle import synthetic_plan
 from tests.mcp.lifecycle import runs_support
 from tests.services.external_boot.conftest import seed_activation
@@ -43,7 +43,6 @@ async def _assert_interrupted_preparation_reenters(
             )
         provider.interrupt_after_receipt(interrupted_phase)
         arguments = {
-            "pool": pool,
             "repository": ExternalBootActivationRepository(),
             "ports": provider,
             "plan": plan,
@@ -57,8 +56,10 @@ async def _assert_interrupted_preparation_reenters(
         }
 
         with pytest.raises(PreparationInterrupted):
-            await prepare_external_boot(**arguments)
-        prepared = await prepare_external_boot(**arguments)
+            async with pool.connection() as conn, conn.transaction():
+                await _prepare_external_boot_locked(conn=conn, **arguments)
+        async with pool.connection() as conn, conn.transaction():
+            prepared = await _prepare_external_boot_locked(conn=conn, **arguments)
 
         assert prepared.state is ExternalBootActivationState.PREPARED
         assert prepared.materialization is not None
