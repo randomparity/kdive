@@ -346,20 +346,26 @@ def _pool(url: str) -> AsyncConnectionPool:
 
 
 async def _run_handler(
-    pool: AsyncConnectionPool, job: Job, *, secret_registry: SecretRegistry | None = None
+    worker_dsn: str,
+    job: Job,
+    *,
+    resolver=None,
+    secret_registry: SecretRegistry | None = None,
 ) -> str | None:
-    resolver = provider_resolver()
-    async with pool.connection() as conn:
+    async with _pool(worker_dsn) as worker_pool, worker_pool.connection() as conn:
         return await watch_for_crash_handler(
             conn,
             job,
-            resolver=resolver,
+            resolver=resolver or provider_resolver(),
             secret_registry=secret_registry or SecretRegistry(),
         )
 
 
 def test_handler_fired_returns_verdict_with_slice(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
     log = tmp_path / "console.log"
@@ -380,12 +386,8 @@ def test_handler_fired_returns_verdict_with_slice(
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.READY)
-            resolver = provider_resolver()
-            async with pool.connection() as conn:
-                ref = await watch_for_crash_handler(
-                    conn, _job(system_id, 5.0), resolver=resolver, secret_registry=SecretRegistry()
-                )
-                provider_kind = take_provider_kind()
+            ref = await _run_handler(authority_role_dsns("kdive_worker"), _job(system_id, 5.0))
+            provider_kind = take_provider_kind()
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
                     "SELECT tool, object_kind, transition, args_digest FROM audit_log "
@@ -414,7 +416,10 @@ def test_handler_fired_returns_verdict_with_slice(
 
 
 def test_handler_not_ready_raises_configuration_error(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
@@ -424,7 +429,7 @@ def test_handler_not_ready_raises_configuration_error(
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.PROVISIONING)
-            await _run_handler(pool, _job(system_id, 5.0))
+            await _run_handler(authority_role_dsns("kdive_worker"), _job(system_id, 5.0))
 
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(_go())
@@ -434,7 +439,10 @@ def test_handler_not_ready_raises_configuration_error(
 
 
 def test_handler_unsupported_provider_raises_capability_configuration_error(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A provider that does not advertise supports_crash_watch is refused with a capability-shaped
     # configuration_error (ADR-0427), not an identity check.
@@ -446,11 +454,11 @@ def test_handler_unsupported_provider_raises_capability_configuration_error(
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.READY)
-            resolver = provider_resolver(supports_crash_watch=False)
-            async with pool.connection() as conn:
-                await watch_for_crash_handler(
-                    conn, _job(system_id, 5.0), resolver=resolver, secret_registry=SecretRegistry()
-                )
+            await _run_handler(
+                authority_role_dsns("kdive_worker"),
+                _job(system_id, 5.0),
+                resolver=provider_resolver(supports_crash_watch=False),
+            )
 
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(_go())
@@ -459,7 +467,10 @@ def test_handler_unsupported_provider_raises_capability_configuration_error(
 
 
 def test_handler_not_fired_at_deadline(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
     log = tmp_path / "console.log"
@@ -470,7 +481,7 @@ def test_handler_not_fired_at_deadline(
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.READY)
-            return await _run_handler(pool, _job(system_id, 0.001))
+            return await _run_handler(authority_role_dsns("kdive_worker"), _job(system_id, 0.001))
 
     result_ref = asyncio.run(_go())
     assert result_ref is not None
@@ -480,7 +491,7 @@ def test_handler_not_fired_at_deadline(
 
 
 def test_handler_remote_fires_via_console_read_seam(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, authority_role_dsns: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A remote provider (console.reader_factory set, ADR-0433) watches the console through the
     # ADR-0429 strict read seam instead of a worker-local file. The seam's cumulative bytes grow
@@ -494,11 +505,11 @@ def test_handler_remote_fires_via_console_read_seam(
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.READY)
-            resolver = provider_resolver(console_reader=reader)
-            async with pool.connection() as conn:
-                ref = await watch_for_crash_handler(
-                    conn, _job(system_id, 5.0), resolver=resolver, secret_registry=SecretRegistry()
-                )
+            ref = await _run_handler(
+                authority_role_dsns("kdive_worker"),
+                _job(system_id, 5.0),
+                resolver=provider_resolver(console_reader=reader),
+            )
             return ref, reader.calls, system_id
 
     ref, reader_calls, system_id = asyncio.run(_go())
@@ -511,7 +522,7 @@ def test_handler_remote_fires_via_console_read_seam(
 
 
 def test_handler_remote_unpumped_console_retries_to_not_fired(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, authority_role_dsns: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Unlike one-shot SysRq, crash-watch is a poll loop: an un-pumped console (pumped=False) is not
     # fatal — the loop keeps polling the window and returns not_fired at the deadline (ADR-0433), so
@@ -523,14 +534,11 @@ def test_handler_remote_unpumped_console_retries_to_not_fired(
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.READY)
-            resolver = provider_resolver(console_reader=reader)
-            async with pool.connection() as conn:
-                return await watch_for_crash_handler(
-                    conn,
-                    _job(system_id, 0.001),
-                    resolver=resolver,
-                    secret_registry=SecretRegistry(),
-                )
+            return await _run_handler(
+                authority_role_dsns("kdive_worker"),
+                _job(system_id, 0.001),
+                resolver=provider_resolver(console_reader=reader),
+            )
 
     ref = asyncio.run(_go())
     assert ref is not None
@@ -540,7 +548,10 @@ def test_handler_remote_unpumped_console_retries_to_not_fired(
 
 
 def test_handler_reads_console_for_its_own_system(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The handler must resolve the console log path for THIS System's id; a hardcoded/None id would
     # watch the wrong (or no) guest's console. Record the id console_log_path is called with.
@@ -559,7 +570,7 @@ def test_handler_reads_console_for_its_own_system(
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.READY)
-            await _run_handler(pool, _job(system_id, 0.001))
+            await _run_handler(authority_role_dsns("kdive_worker"), _job(system_id, 0.001))
             return system_id
 
     system_id = asyncio.run(_go())
