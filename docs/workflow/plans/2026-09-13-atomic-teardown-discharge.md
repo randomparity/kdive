@@ -9,8 +9,8 @@ The post-provider locked transaction discharges obligations and publishes `torn_
 **Tech stack.** Python 3.14, PostgreSQL migrations, `pytest`, `uv`. Decision:
 `docs/adr/0650-atomic-ordinary-teardown-terminal-commit.md`.
 
-Expected implementation size: 280–420 changed lines (M) — state/migration consumers, generated
-references, and focused integration and adversarial proof.
+Expected implementation size: 360–520 changed lines (M) — state/migration consumers, bounded
+reconciliation replay, generated references, and focused integration and adversarial proof.
 
 ## Global Constraints
 
@@ -27,6 +27,7 @@ references, and focused integration and adversarial proof.
 | `src/kdive/domain/capacity/state.py` | State value, legal edges, rootfs classification. |
 | `src/kdive/db/schema/0153_system_tearing_down_state.sql` | Add the state to the database constraint. |
 | `src/kdive/jobs/handlers/systems.py` | Fence before provider call, compensate a slow provision, and atomically finalize. |
+| `src/kdive/reconciler/repairs/systems.py` | Requeue a stalled ordinary teardown without reviving cancellation. |
 | direct state-set consumers | Correct capacity, reconciliation, console, and public-state classification. |
 | focused tests and generated references | Prove behavior and publish the returned state. |
 
@@ -71,7 +72,26 @@ or lacks `tearing_down`. Green:
 provider call; implement the final atomic transaction; run the focused suite. Provider failure must
 leave `tearing_down`; do not discharge early.
 
-## Task 3 — Preserve the race and regenerate public artifacts
+## Task 3 — Repair a stalled ordinary teardown
+
+**Files.** Modify `src/kdive/reconciler/repairs/systems.py`, `src/kdive/reconciler/loop.py`, and
+add focused reconciler tests.
+
+**Interfaces.** A capped reconciler lane selects `TEARING_DOWN` Systems with no active
+(`queued`/`running`) or canceled ordinary teardown job. Under the System lock it rechecks the
+fence and job activity, then creates or recycles only a failed/succeeded teardown row with the
+same dedup key. Canceled rows remain canceled and do not consume the candidate limit.
+
+**Verification.** Mode: focused-test. Add a failing test for a live-allocation System with a failed
+teardown row, then assert it is reset to `queued` with attempt zero. Assert active and canceled
+jobs are untouched. Green: `just test-verbose tests/reconciler/test_stalled_teardown_recovery.py`
+exits 0.
+
+**Steps.** Add the failing cases and observe red; implement the capped locked repair and register it
+after abandoned-job repair; rerun the focused suite. The repair must not transition the System or
+broaden external-boot behavior.
+
+## Task 4 — Preserve the race and regenerate public artifacts
 
 **Files.** Modify `tests/adversarial/test_provider_state_races.py` only as needed for the new
 intermediate assertion; regenerate committed CLI/MCP reference artifacts with repository recipes.
