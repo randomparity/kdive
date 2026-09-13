@@ -60,11 +60,11 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
         SystemState.PROVISIONING: {
             SystemState.READY,
             SystemState.FAILED,
-            SystemState.TORN_DOWN,
+            SystemState.TEARING_DOWN,
         },
         SystemState.READY: {
             SystemState.CRASHING,
-            SystemState.TORN_DOWN,
+            SystemState.TEARING_DOWN,
             SystemState.REPROVISIONING,
             SystemState.RESTORING,
             SystemState.FAILED,
@@ -73,16 +73,17 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
         SystemState.RESTORING: {
             SystemState.READY,
             SystemState.PAUSED,
-            SystemState.TORN_DOWN,
+            SystemState.TEARING_DOWN,
             SystemState.FAILED,
         },
-        SystemState.PAUSED: {SystemState.READY, SystemState.TORN_DOWN, SystemState.FAILED},
+        SystemState.PAUSED: {SystemState.READY, SystemState.TEARING_DOWN, SystemState.FAILED},
         SystemState.CRASHING: {
             SystemState.CRASHED,
             SystemState.FAILED,
-            SystemState.TORN_DOWN,
+            SystemState.TEARING_DOWN,
         },
-        SystemState.CRASHED: {SystemState.TORN_DOWN, SystemState.FAILED},
+        SystemState.CRASHED: {SystemState.TEARING_DOWN, SystemState.FAILED},
+        SystemState.TEARING_DOWN: {SystemState.TORN_DOWN},
         SystemState.TORN_DOWN: set(),
         SystemState.FAILED: set(),
     },
@@ -226,10 +227,10 @@ def test_system_reprovision_cycle_edges_are_legal() -> None:
 
 
 def test_force_crash_edge_is_legal_teardown_skip_is_not() -> None:
-    # The force_crash path is now two-step: ready -> crashing -> crashed -> torn_down (#1078).
+    # The force_crash path enters its teardown fence before the terminal state (#1078).
     assert can_transition(SystemState.READY, SystemState.CRASHING) is True
     assert can_transition(SystemState.CRASHING, SystemState.CRASHED) is True
-    assert can_transition(SystemState.CRASHED, SystemState.TORN_DOWN) is True
+    assert can_transition(SystemState.CRASHED, SystemState.TEARING_DOWN) is True
     # The direct ready -> crashed edge is removed: force_crash goes through crashing.
     assert can_transition(SystemState.READY, SystemState.CRASHED) is False
     # A System cannot un-crash back to ready.
@@ -238,7 +239,7 @@ def test_force_crash_edge_is_legal_teardown_skip_is_not() -> None:
 
 def test_system_crashing_edges() -> None:
     assert can_transition(SystemState.CRASHING, SystemState.FAILED)
-    assert can_transition(SystemState.CRASHING, SystemState.TORN_DOWN)
+    assert can_transition(SystemState.CRASHING, SystemState.TEARING_DOWN)
     # crashing cannot go back to ready (evidence-first; recovery is to crashed).
     assert not can_transition(SystemState.CRASHING, SystemState.READY)
 
@@ -251,10 +252,10 @@ def test_system_restore_and_pause_edges_are_legal() -> None:
     assert can_transition(SystemState.RESTORING, SystemState.PAUSED) is True
     assert can_transition(SystemState.RESTORING, SystemState.FAILED) is True
     assert can_transition(SystemState.PAUSED, SystemState.READY) is True
-    assert can_transition(SystemState.PAUSED, SystemState.TORN_DOWN) is True
+    assert can_transition(SystemState.PAUSED, SystemState.TEARING_DOWN) is True
     assert can_transition(SystemState.PAUSED, SystemState.FAILED) is True
-    # Both restoring and paused hold a live domain, so teardown can reap them (like crashing).
-    assert can_transition(SystemState.RESTORING, SystemState.TORN_DOWN) is True
+    # Both restoring and paused hold a live domain, so teardown can fence and reap them.
+    assert can_transition(SystemState.RESTORING, SystemState.TEARING_DOWN) is True
     # A restore cannot jump straight past its fence, and paused is not a crash/reprovision path.
     assert can_transition(SystemState.READY, SystemState.PAUSED) is False
     assert can_transition(SystemState.PAUSED, SystemState.CRASHING) is False

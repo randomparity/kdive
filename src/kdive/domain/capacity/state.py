@@ -73,9 +73,10 @@ class SystemState(StrEnum):
     ``ready → restoring → {ready|paused|failed}``: a running restore returns to ``ready``, a
     ``start_paused`` restore lands in ``paused`` (the guest's vCPUs are suspended, awaiting
     ``control.power(resume)`` back to ``ready``), and an interrupted/failed revert goes to
-    ``failed``. Both ``restoring`` and ``paused`` also accept ``torn_down`` — they hold a live
-    domain, so teardown can reap them (mirroring ``crashing``). ``paused`` is a resting state, not
-    ``ready``, so the ``ready ⇒ running`` invariant the snapshot/SSH tools rely on holds.
+    ``failed``. Ordinary teardown first enters ``tearing_down`` from any state with a domain, then
+    reaches ``torn_down`` only after provider cleanup and its mutation obligations commit
+    together. ``paused`` is a resting state, not ``ready``, so the ``ready ⇒ running`` invariant
+    the snapshot/SSH tools rely on holds.
     """
 
     PROVISIONING = "provisioning"
@@ -85,6 +86,7 @@ class SystemState(StrEnum):
     PAUSED = "paused"
     CRASHING = "crashing"
     CRASHED = "crashed"
+    TEARING_DOWN = "tearing_down"
     TORN_DOWN = "torn_down"
     FAILED = "failed"
 
@@ -102,6 +104,7 @@ ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES: frozenset[SystemState] = frozenset(
         SystemState.PROVISIONING,
         SystemState.REPROVISIONING,
         SystemState.RESTORING,
+        SystemState.TEARING_DOWN,
     }
 )
 
@@ -242,12 +245,12 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
     },
     SystemState: {
         SystemState.PROVISIONING: frozenset(
-            {SystemState.READY, SystemState.FAILED, SystemState.TORN_DOWN}
+            {SystemState.READY, SystemState.FAILED, SystemState.TEARING_DOWN}
         ),
         SystemState.READY: frozenset(
             {
                 SystemState.CRASHING,
-                SystemState.TORN_DOWN,
+                SystemState.TEARING_DOWN,
                 SystemState.REPROVISIONING,
                 SystemState.RESTORING,
                 SystemState.FAILED,
@@ -258,17 +261,18 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
             {
                 SystemState.READY,
                 SystemState.PAUSED,
-                SystemState.TORN_DOWN,
+                SystemState.TEARING_DOWN,
                 SystemState.FAILED,
             }
         ),
         SystemState.PAUSED: frozenset(
-            {SystemState.READY, SystemState.TORN_DOWN, SystemState.FAILED}
+            {SystemState.READY, SystemState.TEARING_DOWN, SystemState.FAILED}
         ),
         SystemState.CRASHING: frozenset(
-            {SystemState.CRASHED, SystemState.FAILED, SystemState.TORN_DOWN}
+            {SystemState.CRASHED, SystemState.FAILED, SystemState.TEARING_DOWN}
         ),
-        SystemState.CRASHED: frozenset({SystemState.TORN_DOWN, SystemState.FAILED}),
+        SystemState.CRASHED: frozenset({SystemState.TEARING_DOWN, SystemState.FAILED}),
+        SystemState.TEARING_DOWN: frozenset({SystemState.TORN_DOWN}),
         SystemState.TORN_DOWN: frozenset(),
         SystemState.FAILED: frozenset(),
     },

@@ -89,6 +89,7 @@ _NON_TERMINAL_SYSTEM = (
     SystemState.PAUSED,  # start_paused restore: a live System still holds a quota slot (ADR-0378)
     SystemState.CRASHING,  # mid-force_crash: still holds a quota slot (#1078)
     SystemState.CRASHED,
+    SystemState.TEARING_DOWN,  # provider teardown is retryable but admission is fenced (#2370)
 )
 type LockedAllocationSystem = tuple[AsyncConnection, Allocation, System | None]
 

@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import (
     SNAPSHOTS,
     SYSTEMS,
@@ -26,7 +27,7 @@ from kdive.domain.capacity.state import IllegalTransition, SnapshotState, System
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
-from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
+from kdive.domain.lifecycle.rules import PROVISION_SUPERSEDED_SYSTEM_STATES
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
@@ -332,7 +333,7 @@ async def _execute_system_lifecycle_call(
         exc.terminal = True
         raise
     current = await commit_result(conn, job, system, profile, domain_name)
-    if current in TERMINAL_SYSTEM_STATES:
+    if current in PROVISION_SUPERSEDED_SYSTEM_STATES:
         await asyncio.to_thread(runtime.provisioner.teardown, domain_name)
         _log.info("%s of system %s superseded by teardown; domain reaped", operation, system.id)
     else:
@@ -388,7 +389,7 @@ async def provision_handler(
     runtime = binding.runtime
     provisioner = runtime.provisioner
     if system.state is not SystemState.PROVISIONING:
-        if system.state in TERMINAL_SYSTEM_STATES:
+        if system.state in PROVISION_SUPERSEDED_SYSTEM_STATES:
             await asyncio.to_thread(
                 provisioner.teardown, system.domain_name or domain_name_for(system_id)
             )
@@ -670,6 +671,29 @@ async def _reclaim_snapshots(
         await delete_snapshots_for_system(conn, system_id)
 
 
+async def _finalize_teardown(
+    conn: AsyncConnection,
+    job: Job,
+    system_id: UUID,
+) -> None:
+    """Publish the terminal System state with its worker mutation discharge."""
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        current = await SYSTEMS.get(conn, system_id)
+        if current is None or current.state is not SystemState.TEARING_DOWN:
+            return
+        obligations = RemoteModuleAttemptObligationRepository()
+        await obligations.worker_discharge_system_mutation_obligations(conn, system_id)
+        await SYSTEMS.update_state(conn, system_id, SystemState.TORN_DOWN)
+        await audit_transition(
+            conn,
+            job,
+            project=current.project,
+            object_id=system_id,
+            transition="tearing_down->torn_down",
+            tool="systems.teardown",
+        )
+
+
 async def teardown_handler(
     conn: AsyncConnection,
     job: Job,
@@ -697,26 +721,16 @@ async def teardown_handler(
                 terminal=True,
             )
         domain_name = system.domain_name or domain_name_for(system_id)
-        if system.state is not SystemState.TORN_DOWN:
-            old = system.state
-            # This terminal admission fence prevents a slow provision from committing a new domain
-            # after teardown's provider reap has begun (ADR-0025 §5).
-            await SYSTEMS.update_state(conn, system_id, SystemState.TORN_DOWN)
-            await audit_transition(
-                conn,
-                job,
-                project=system.project,
-                object_id=system_id,
-                transition=f"{old.value}->torn_down",
-                tool="systems.teardown",
-            )
+        if system.state not in {SystemState.TEARING_DOWN, SystemState.TORN_DOWN}:
+            await SYSTEMS.update_state(conn, system_id, SystemState.TEARING_DOWN)
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
     provisioner = binding.runtime.provisioner
     await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
     await asyncio.to_thread(provisioner.teardown, domain_name)
-    # Provider teardown completed, so a cancellation/failure before core cleanup cannot erase
-    # mutation-retention evidence. The helper's System lock serializes exact-System discharge.
+    await _finalize_teardown(conn, job, system_id)
+    # Provider teardown and the terminal/discharge transaction completed, so a cancellation or
+    # failure during core cleanup cannot expose a terminal System with retained mutations.
     # The investigation-scoped uploaded rootfs (ADR-0441) is a SHARED, investigation-owned base
     # reused across Systems, so teardown no longer reclaims it — the object + staged file + row are
     # reclaimed by the close-driven/TTL reconciler sweeps under the overlay-absence liveness gate
@@ -732,7 +746,7 @@ async def teardown_handler(
         artifact_store,
         system_id,
         reclaim_snapshot_ledger=False,
-        discharge_mutation_obligations=True,
+        discharge_mutation_obligations=False,
     )
     return str(system_id)
 

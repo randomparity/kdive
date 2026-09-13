@@ -419,11 +419,11 @@ def test_concurrent_double_teardown_is_idempotent(migrated_url: str) -> None:
                 assert all(r == system_id for r in results)
                 assert await _system_state(pool, system_id) == "torn_down"
                 assert prov.live == set(), f"iteration {i}: leaked domain {prov.live}"
-                # Exactly one ready->torn_down audit transition despite two runs.
+                # Exactly one terminal transition despite two teardown runs.
                 async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute(
                         "SELECT count(*) AS n FROM audit_log "
-                        "WHERE object_id = %s AND transition = 'ready->torn_down'",
+                        "WHERE object_id = %s AND transition = 'tearing_down->torn_down'",
                         (UUID(system_id),),
                     )
                     row = await cur.fetchone()

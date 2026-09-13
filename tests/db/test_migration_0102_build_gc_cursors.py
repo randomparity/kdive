@@ -66,4 +66,5 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0150", "0150_exhausted_acknowledged_authority_claim.sql"),
         ("0151", "0151_fix_exhausted_acknowledged_retry_attempt_id.sql"),
         ("0152", "0152_worker_system_mutation_discharge.sql"),
+        ("0153", "0153_system_tearing_down_state.sql"),
     ]
