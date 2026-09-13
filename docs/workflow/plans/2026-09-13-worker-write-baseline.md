@@ -38,7 +38,8 @@ Each handler has `job_kind` and `writes`; each write has `id`, `table`, `operati
 `handler_source`, `write_source`, `role`, `route`, `authority_source`, `grant_source`, and
 `verdict`. Every evidence source carries a `path`, `line`, and expected `text`. The top level has
 `confirmed_leaks`, sorted and exactly equal to the `id` values of `LEAK` rows. Later test code
-consumes this exact shape.
+consumes this exact shape. Every write row has exactly `role: kdive_worker`; server and reconciler
+rows are invalid.
 
 **Verification inventory:**
 
@@ -50,6 +51,8 @@ consumes this exact shape.
   Green: the same focused command passes.
 - Contract: confirmed leaks are explicit. Mode: focused-test. Expected red: remove or add an id in
   `confirmed_leaks`; green: the same focused command passes.
+- Contract: the baseline is worker-only. Mode: focused-test. Expected red: mutate a row's role to
+  `kdive_server`; green: the same focused command passes.
 
 **Steps:**
 
@@ -84,7 +87,8 @@ returns deterministic violation strings for tests. No production import is intro
 
 1. Add isolated mutation tests that prove each validator arm fails.
 2. Validate committed JSON against `JobKind`, reconcile `confirmed_leaks`, and check every cited
-   handler, write, authority, and grant file/line contains its recorded fragment.
+   handler, write, authority, and grant file/line contains its recorded fragment. Reject every
+   role other than `kdive_worker`.
 3. Run `uv run python -m pytest tests/jobs/test_worker_write_baseline.py -q`; expect all focused
    cases to pass.
 
