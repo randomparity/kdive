@@ -21,12 +21,17 @@ that OCI index contains linux/amd64, linux/arm64, and linux/ppc64le. Values may 
 as an explicit operator choice. They run `weed mini` with a dedicated SeaweedFS data volume and
 an authenticated S3 endpoint on port 8333.
 
-The initializer is a repository-owned Python entry point, added under `scripts/`, run from the
+The initializer is a repository-owned packaged Python module under `src/kdive`, run with
+`python -m` from the
 already-owned, pinned KDIVE application image (which has the locked boto3 dependency). Compose's
 one-shot and Helm's Job/barrier invoke that same entry point with the bundled endpoint and
 credentials. Its retry count and delay are explicit constants; it creates the bucket idempotently,
 enables versioning, verifies `Status=Enabled`, and exits non-zero for any connection, create, or
 status failure. No companion client image is introduced.
+
+Anonymous OCI-token and manifest retrieval for the pinned reference returns the required three
+platforms. A stale local GHCR credential can make `docker buildx imagetools` report 403; that is
+not evidence that the public manifest is unavailable and does not add an imagePullSecret contract.
 
 Compose replaces the `minio` and `minio-init` service names, endpoint, environment names, health
 probe, dependency barriers, ports, and volume with SeaweedFS equivalents. The default image is the

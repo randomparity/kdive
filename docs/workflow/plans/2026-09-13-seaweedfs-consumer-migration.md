@@ -2,7 +2,7 @@
 
 1. Inventory existing Compose, Helm, fixture, matrix, and operator MinIO references; retain
    Python/external-S3 references outside the approved closure.
-2. Add one repository-owned boto3 readiness/versioning initializer and test its bounded retry,
+2. Add one packaged `src/kdive` boto3 readiness/versioning module, invoked with `python -m`, and test its bounded retry,
    idempotent create, enabled-status, and failure behavior; invoke it from the existing KDIVE
    application image in both deployment paths.
 3. Replace Compose service, endpoint, volume, dependencies, and focused config/live tests with
