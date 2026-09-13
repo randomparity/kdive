@@ -16,15 +16,16 @@ the resources that belong to it. Read each tool's schema for argument shapes and
 
 ## Associate work
 
-- `investigations.link` associates an existing Allocation, System, or Run with the Investigation.
-  Link work once it is part of the same experiment rather than inferring membership from names.
-- `investigations.unlink` removes an incorrect association; it does not delete or tear down the
-  linked object.
+- `investigations.link` upserts an external tracker reference with its `tracker`, `id`, and URL.
+  Use it to connect an issue, ticket, or other outside record to the Investigation.
+- `investigations.unlink` removes that external tracker reference by its `tracker` and `id`; it
+  does not delete the outside record.
 - `investigations.complete_rootfs_upload` finalizes an Investigation-scoped rootfs upload after
   the signed upload completes. Use its checksum only with a System profile bound to this
   Investigation.
 - `investigations.close` records the Investigation's conclusion when the work is finished. Close
   the record only after any evidence or resources that need it have been linked.
 
-Use `allocations`, `systems`, and `runs` for the operations themselves. This guide explains when
-to use each investigation tool; the tool schema owns parameters and response details.
+Allocation, System, and Run lifecycles are associated through their respective creation flows; use
+`allocations`, `systems`, and `runs` for those operations. This guide explains when to use each
+investigation tool; the tool schema owns parameters and response details.
