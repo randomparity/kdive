@@ -62,6 +62,38 @@ closed for `audience="operator"` when authentication cannot establish a platform
 guides disclose only tool names and documented role requirements; they contain no secrets,
 operational endpoints, or executable content.
 
+## Threat model
+
+### Boundary inventory
+
+The changed boundary is MCP resource listing and reads: a caller-controlled resource request
+reaches the existing `DocExposureMiddleware`, which looks up the literal resource URI's
+`audience` in the fixed registry. The change adds eight entries on the already-gated side of
+that boundary. Canonical Markdown crosses the build-time snapshot generator into package data;
+it is repository-authored, not request supplied.
+
+### Actor model
+
+An authenticated project-only caller and an unauthenticated or malformed-auth caller must not
+learn the operator index or its guide URIs. A caller holding any platform role may read the
+operator set, consistent with ADR-0284. A repository contributor can author canonical docs but
+cannot select runtime paths beyond the reviewed literal allowlist.
+
+### Controls
+
+`DocResource.audience="operator"` is the registration marker for every new entry; the existing
+middleware filters list responses and rejects direct reads when `ctx.platform_roles` is empty or
+unavailable. The registrar reads only a fixed `content_file` below its package content directory,
+and the snapshot and citation guards reject missing content or a link to an unregistered served
+resource. Exposure tests cover both list and direct-read denial, so a registration omission or
+audience typo is observable before merge.
+
+### Explicitly out of scope
+
+This work does not change token verification, platform-role semantics, tool execution RBAC,
+provider gating, or authorization-denial responses. Those controls already govern the boundary;
+changing them would exceed the frozen Phase 3 documentation scope.
+
 ## Verification
 
 Run the focused doc-resource and exposure tests, regenerate and check snapshots, then run the
