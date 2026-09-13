@@ -17,6 +17,11 @@ The image-build handler test stages its job as the migration owner, then invokes
 handler over a `kdive_worker` login. A registered row and stored object prove the worker-role path
 runs through the INSERT successfully.
 
+Migration-history contracts name the discovered tail, so their four affected test modules advance
+with the migration. The existing worker-fence privilege matrix adds `image_catalog` only to the
+worker INSERT set. That matrix proves the new INSERT and continues to reject every other table
+privilege for the worker role.
+
 ## Constraints
 
 - Scope is migration 0154 and image-build worker-role evidence only.
@@ -38,4 +43,6 @@ publish inputs; those are existing worker and publish-service controls.
 - The migrated-catalog grant guard observes `has_table_privilege(kdive_worker,
   public.image_catalog, INSERT)`.
 - The worker-role handler proof registers an image and stores its object.
+- The four migration-history contracts end with `0154_worker_image_catalog_insert.sql`.
+- The worker-fence matrix allows only the new worker INSERT privilege on `image_catalog`.
 - The baseline and inventory remain structurally valid and declare no image-catalog INSERT leak.

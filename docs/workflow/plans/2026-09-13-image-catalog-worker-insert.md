@@ -13,8 +13,8 @@ Tech stack: PostgreSQL migrations, Python 3.14, pytest, psycopg.
   membership changes are added.
 - ADR-0653 remains the governing decision; no new architectural decision is introduced.
 
-Expected implementation size: 16–28 changed lines (M) — one SQL grant, two JSON declarations,
-and one worker-role test adaptation.
+Expected implementation size: 28–42 changed lines (M) — one SQL grant, two JSON declarations,
+one worker-role test adaptation, four migration-tail assertions, and one privilege-matrix entry.
 
 ## File map
 
@@ -23,6 +23,11 @@ and one worker-role test adaptation.
 - `tests/jobs/handlers/worker_role_inventory.json`: declare the direct write for ADR-0653's guard.
 - `tests/jobs/worker_write_baseline.json`: replace the known leak with migration evidence.
 - `tests/jobs/test_image_build_handler.py`: invoke the existing success flow as `kdive_worker`.
+- `tests/db/test_migrate.py`, `tests/db/test_migration_0102_build_gc_cursors.py`,
+  `tests/db/test_migration_0091_system_object_sweep_cursors.py`, and
+  `tests/db/test_migration_0115_capture_reap_state.py`: advance each discovered migration tail.
+- `tests/db/test_worker_fence_authority.py`: add `image_catalog` only to
+  `_WORKER_MUTATIONS["INSERT"]`.
 
 ## Task 1: declare and prove the privilege
 
@@ -40,6 +45,13 @@ Provides the effective INSERT authority consumed by the catalog guard and worker
 - Contract: image-build publish succeeds as worker. Mode: focused-test. Red observation: without
   migration 0154, the handler's catalog insert raises PostgreSQL insufficient privilege. Green
   command: `just test-verbose tests/jobs/test_image_build_handler.py::test_worker_role_handler_builds_validates_publishes_registered`.
+- Contract: migration history has the expected 0154 tail. Mode: focused-test. Red observation:
+  adding migration 0154 without advancing the hard-coded tails makes the equality assertions end
+  at 0153. Green command: `just test-verbose tests/db/test_migrate.py tests/db/test_migration_0102_build_gc_cursors.py tests/db/test_migration_0091_system_object_sweep_cursors.py tests/db/test_migration_0115_capture_reap_state.py`.
+- Contract: worker authority is INSERT-only on image_catalog. Mode: focused-test. Red observation:
+  before the matrix entry is added, the migrated worker privilege matrix expects INSERT to be
+  absent; a broad grant still fails its DELETE, REFERENCES, SELECT, TRIGGER, TRUNCATE, and UPDATE
+  checks. Green command: `just test-verbose tests/db/test_worker_fence_authority.py::test_runtime_roles_receive_data_access_without_crossing_fence_authority`.
 
 ### Steps
 
@@ -48,12 +60,15 @@ Provides the effective INSERT authority consumed by the catalog guard and worker
 3. Update the baseline record's migration line/text, verdict, and confirmed-leak list.
 4. Stage a job with the migration owner, reconnect through `authority_role_dsns("kdive_worker")`,
    and assert the existing publish result remains registered and stored.
-5. Run the focused tests, then `just lint` and `just type`.
+5. Advance the four migration-history tails with `("0154", "0154_worker_image_catalog_insert.sql")`.
+6. Add `image_catalog` only to `_WORKER_MUTATIONS["INSERT"]`, preserving every other role and
+   operation set.
+7. Run all focused checks above, then `just lint` and `just type`.
 
 ### Acceptance criteria
 
-Only the intended INSERT privilege is granted; the migrated guard, baseline structure, and actual
-worker-role publish path all pass.
+Only the intended INSERT privilege is granted; migration history, the migrated guard, baseline
+structure, full worker privilege matrix, and actual worker-role publish path all pass.
 
 ### Rollback
 
