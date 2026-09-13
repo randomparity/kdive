@@ -32,6 +32,7 @@ import boto3
 import psycopg
 import pytest
 from botocore.client import Config as BotoConfig
+from botocore.exceptions import ClientError
 
 pytestmark = pytest.mark.live_stack
 
@@ -214,6 +215,53 @@ def _s3_when_ready(endpoint: str, *, deadline_s: float = 60.0):  # noqa: ANN202 
             time.sleep(0.2)
 
 
+def _s3_bucket_when_visible(client, bucket: str, *, deadline_s: float = 60.0) -> int:  # noqa: ANN202 - botocore client
+    """Wait until a newly created bucket is observable through its S3 head operation."""
+    deadline = time.monotonic() + deadline_s
+    while True:
+        try:
+            status = client.head_bucket(Bucket=bucket)["ResponseMetadata"]["HTTPStatusCode"]
+            if status == 200:
+                return status
+        except Exception:  # noqa: BLE001 - the local S3 service can lag after a volume reset
+            pass
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"S3 bucket {bucket!r} did not become visible before the deadline")
+        time.sleep(0.2)
+
+
+def test_bucket_visibility_waits_for_the_created_bucket(monkeypatch) -> None:
+    class _Client:
+        responses = iter(
+            (
+                ClientError({"Error": {"Code": "NoSuchBucket"}}, "HeadBucket"),
+                {"ResponseMetadata": {"HTTPStatusCode": 200}},
+            )
+        )
+
+        def head_bucket(self, *, Bucket: str):  # noqa: N803 - S3 operation keyword
+            response = next(self.responses)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    assert _s3_bucket_when_visible(_Client(), "fresh-bucket") == 200
+
+    assert sleeps == [0.2]
+
+
+def test_bucket_visibility_fails_at_its_deadline() -> None:
+    class _Client:
+        def head_bucket(self, *, Bucket: str):  # noqa: N803 - S3 operation keyword
+            raise ClientError({"Error": {"Code": "NoSuchBucket"}}, "HeadBucket")
+
+    with pytest.raises(AssertionError, match="did not become visible"):
+        _s3_bucket_when_visible(_Client(), "fresh-bucket", deadline_s=0)
+
+
 @contextmanager
 def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
     token = uuid.uuid4().hex[:12]
@@ -327,7 +375,8 @@ def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None
                 ("after-wipe",)
             ]
         s3 = _s3_when_ready(endpoint)
-        buckets = {entry["Name"] for entry in s3.list_buckets()["Buckets"]}
-        assert bucket not in buckets
+        with pytest.raises(ClientError) as missing_bucket:
+            s3.get_object(Bucket=bucket, Key=_MARKER_KEY)
+        assert missing_bucket.value.response["Error"]["Code"] in {"NoSuchBucket", "NoSuchKey"}
         s3.create_bucket(Bucket=bucket)
-        assert bucket in {entry["Name"] for entry in s3.list_buckets()["Buckets"]}
+        assert _s3_bucket_when_visible(s3, bucket) == 200
