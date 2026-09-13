@@ -31,7 +31,7 @@ DSNs are always wired separately through Secret refs.
        (demo.minio.service.type) to make the bundled object store usable off-cluster. */ -}}
 {{- .Values.config.KDIVE_S3_ENDPOINT_URL -}}
 {{- else if .Values.bundledBackends -}}
-{{- printf "http://%s-minio:9000" (include "kdive.fullname" .) -}}
+{{- printf "http://%s-seaweedfs:8333" (include "kdive.fullname" .) -}}
 {{- else -}}
 {{- .Values.config.KDIVE_S3_ENDPOINT_URL -}}
 {{- end -}}
