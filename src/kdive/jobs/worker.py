@@ -30,11 +30,11 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg import Error as PsycopgError
 from psycopg.errors import InsufficientPrivilege
-from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
@@ -65,12 +65,8 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 _log = logging.getLogger(__name__)
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
-_RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
-_INSTALL_RUN_COMPENSATION_STATES = (*_RUN_COMPENSATION_STATES, RunState.SUCCEEDED)
-_RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
-_INSTALL_RUN_COMPENSATION_STATE_VALUES = tuple(
-    state.value for state in _INSTALL_RUN_COMPENSATION_STATES
-)
+_RUN_COMPENSATION_STATES = frozenset({RunState.CREATED, RunState.RUNNING})
+_INSTALL_RUN_COMPENSATION_STATES = _RUN_COMPENSATION_STATES | {RunState.SUCCEEDED}
 _CLAIM_LOOP_FAILURE_REASON = re.compile(
     r"(?:pool-timeout|timeout|postgres-(?:[A-Z0-9]{5}|unknown)|unexpected)"
 )
@@ -908,32 +904,25 @@ async def _mark_run_failed(
     Assumes the caller holds the transaction and the Run's advisory lock
     (:func:`_fail_job_and_run`). A requeued job — or one whose ``worker_id`` fence missed, which
     ``queue.fail`` reports by returning it still ``running`` — leaves the Run untouched. The
-    ``state = ANY(...)`` guard keeps an already-terminal Run terminal. A terminal install may
+    The repository guard keeps an already-terminal Run terminal. A terminal install may
     transition a build-succeeded Run, while a terminal boot preserves that Run for ADR-0230's
     boot-readiness read path.
     """
     if job.state is not JobState.FAILED:
         return
-    state_values = (
-        _INSTALL_RUN_COMPENSATION_STATE_VALUES
+    eligible_states = (
+        _INSTALL_RUN_COMPENSATION_STATES
         if job.kind is JobKind.INSTALL
-        else _RUN_COMPENSATION_STATE_VALUES
+        else _RUN_COMPENSATION_STATES
     )
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "UPDATE runs SET state = %s, failure_category = %s, failing_job_id = %s "
-            "WHERE id = %s AND state = ANY(%s) "
-            "RETURNING id",
-            (
-                RunState.FAILED.value,
-                category.value,
-                job.id,
-                run_id,
-                list(state_values),
-            ),
-        )
-        row = await cur.fetchone()
-    if row is not None:
+    changed = await RUNS.record_terminal_failure(
+        conn,
+        run_id,
+        category,
+        job.id,
+        eligible_states=eligible_states,
+    )
+    if changed:
         _log.info("job %s terminal failure compensated run %s", job.id, run_id)
 
 

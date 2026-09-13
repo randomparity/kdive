@@ -3,8 +3,9 @@
 ## Goal and architecture
 
 Restore the shared `succeeded -> failed` Run edge and the worker's matching compensation guard.
-Worker finalization already holds the Run lock, finalizes the job, and writes Run failure fields in
-one transaction; `runs.get` already maps a failed Run to the failure envelope.
+Worker finalization already holds the Run lock and finalizes the job in one transaction; the
+repository owns the matching guarded Run failure write. `runs.get` already maps a failed Run to
+the failure envelope.
 
 ## Tech stack and constraints
 
@@ -12,24 +13,29 @@ Python 3.14, psycopg, pytest, and `just`. Preserve ADR-0179, the worker fence an
 ADR-0185 retry recycling. Add no migration, public response shape, tool parameter, retry-policy,
 or boot behavior.
 
-Expected implementation size: 30–65 changed lines (M) — operation-specific worker guards plus
-focused state, terminal, retryable, and boot-preservation assertions.
+Expected implementation size: 80–140 changed lines (M) — an atomic guarded repository helper,
+operation-specific worker eligibility, and focused state, terminal, retryable, boot-preservation,
+and guard-rejection assertions.
 
 ## Task — Restore and prove the terminal transition
 
-Files: `src/kdive/domain/capacity/state.py`, `src/kdive/jobs/worker.py`,
-`tests/domain/test_state.py`, `tests/jobs/test_worker.py`, and
+Files: `src/kdive/domain/capacity/state.py`, `src/kdive/db/repositories.py`,
+`src/kdive/jobs/worker.py`, `tests/domain/test_state.py`, `tests/db/test_repositories.py`,
+`tests/jobs/test_worker.py`, and
 `tests/mcp/lifecycle/test_runs_tools.py` if the existing worker test cannot reach `runs.get`.
 
-Interfaces: consume `RunState`, `can_transition`, `_fail_job_and_run`, and existing lifecycle
-fixtures. Produce the legal `succeeded -> failed` edge for terminal install compensation while
-retaining the `JobState.FAILED` and worker-fence guards; preserve terminal boot's ADR-0230 read
-path.
+Interfaces: consume `RunState`, `can_transition`, `RUNS.record_terminal_failure`,
+`_fail_job_and_run`, and existing lifecycle fixtures. Produce the legal `succeeded -> failed`
+edge for terminal install compensation while retaining the `JobState.FAILED` and worker-fence
+guards; preserve terminal boot's ADR-0230 read path.
 
 Verification:
 
 - Mode: focused-test. Contract: `can_transition(RunState.SUCCEEDED, RunState.FAILED)` is true.
   Expected red: the current assertion is false. Green: `just test-verbose tests/domain/test_state.py`
+  exits 0.
+- Mode: focused-test. Contract: a repository terminal failure write rejects an illegal Run source.
+  Green: `just test-verbose tests/db/test_repositories.py::test_record_terminal_run_failure_rejects_an_illegal_source`
   exits 0.
 - Mode: focused-test. Contract: terminal install failure writes `failed`, category, and failing job;
   a requeue keeps the Run `succeeded`. Expected red: terminal result remains `succeeded`. Green:
@@ -48,10 +54,10 @@ Steps:
 
 1. Add `RunState.FAILED` to `RunState.SUCCEEDED` in both the production table and its exhaustive
    test oracle.
-2. Allow `RunState.SUCCEEDED` only for terminal install compensation; retain the boot-readiness
-   exception and all other guards.
-3. Add terminal-install, terminal-boot-preservation, and retryable worker proof and, only if
-   absent there, an MCP read-path proof.
+2. Add a repository helper that locks, applies the central transition guard, and writes terminal
+   failure metadata atomically; allow `RunState.SUCCEEDED` only for terminal install compensation.
+3. Add terminal-install, terminal-boot-preservation, retryable worker, and repository-guard proof
+   and, only if absent there, an MCP read-path proof.
 4. Run the focused commands, then `just lint`, `just type`, `just test`, and `just ci` before
    handoff.
 
