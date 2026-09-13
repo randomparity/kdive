@@ -14,9 +14,13 @@ unchanged. The pass stays bounded at 100 candidates and returns discharged oblig
 ## Design
 
 The existing `repair_leaked_mutation_obligations` candidate query changes from one terminal state to
-the two terminal states `torn_down` and `failed`. Its locked re-read remains necessary because a
-teardown can appear after candidate selection. Once locked and still eligible, the existing
-idempotent system-wide terminal-escape discharge marks only currently open mutation obligations.
+the two terminal states `torn_down` and `failed`, but a failed candidate is eligible only when no
+external-boot activation is restricting that System. The existing restriction means a state outside
+`recovered`, `abandoned`, and `torn_down`, or cleanup not complete. It is the durable recovery-owner
+predicate: the sole runtime obligation opener requires its activation to be `preparing` and not
+cleaned. The locked re-read repeats teardown, state, and activation eligibility. Activation creation
+uses that same System lock, so a new owner cannot appear between the re-read and discharge commit.
+The existing idempotent system-wide terminal-escape discharge then marks only open obligations.
 
 The existing repair catalog position after abandoned-job recovery is retained. Failed Systems have
 no new transition and no provider operation: this is durable obligation repair only.
@@ -30,8 +34,8 @@ successful discharge returns zero and does not rewrite the immutable discharge e
 ## Verification
 
 Focused reconciler integration tests seed failed Systems with open obligations and prove discharge,
-failed-only selection, teardown deferral, real reconciler-role execution, and idempotency. Existing
-ready-System and torn-down-System tests remain the regression boundary.
+failed-only selection, live-activation and teardown deferral, real reconciler-role execution, and
+idempotency. Existing ready-System and torn-down-System tests remain the regression boundary.
 
 ## Alternatives
 

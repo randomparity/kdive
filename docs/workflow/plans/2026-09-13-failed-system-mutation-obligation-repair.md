@@ -7,9 +7,9 @@ Postgres, pytest, and the repository's `just` recipes.
 
 ## Global Constraints
 
-Keep the 100-candidate bound, stable order, teardown settle guard, per-candidate isolation, fixed
-`terminal_escape` reason, and no new schema, privilege, provider, or MCP surface. ADR-0652 starts
-Proposed and becomes Accepted only with this completed implementation.
+Keep the 100-candidate bound, stable order, teardown settle guard, restricting-activation guard,
+per-candidate isolation, fixed `terminal_escape` reason, and no new schema, privilege, provider, or
+MCP surface. ADR-0652 starts Proposed and becomes Accepted only with this completed implementation.
 
 Expected implementation size: 25–55 changed lines (M) — one candidate-query contract and focused
 integration tests in the established repair module.
@@ -25,7 +25,8 @@ integration tests in the established repair module.
 
 ### Verification
 
-- Contract: an open obligation on a failed System is a candidate while a ready System is not.
+- Contract: an open obligation on an eligible failed System is a candidate while a ready System is
+  not.
   Mode: focused-test. Red: the new failed-System test returns zero against the current query.
   Green: `just test-verbose tests/reconciler/test_leaked_mutation_obligation_repair.py` passes.
 
@@ -35,8 +36,10 @@ Consumes `SystemState` and `_LEAKED_MUTATION_CANDIDATES_SQL`; preserves
 `repair_leaked_mutation_obligations(conn) -> int` for the repair catalog and callers.
 
 1. Change the query state predicate to bind both `SystemState.TORN_DOWN.value` and
-   `SystemState.FAILED.value` without changing ordering, limit, or teardown predicate.
-2. Update the function docstring to state that it repairs both terminal states.
+   `SystemState.FAILED.value`; add the existing restricting-activation predicate without changing
+   ordering, limit, or teardown predicate.
+2. Update the function docstring to state that it repairs both terminal states only after the
+   external-boot recovery owner is absent.
 3. Add a failed-System test using the existing `_seed_open_obligation(..., system_state=FAILED)`
    helper; assert one discharge and `terminal_escape`.
 4. Run the focused test command and expect all selected tests to pass.
@@ -45,7 +48,8 @@ Consumes `SystemState` and `_LEAKED_MUTATION_CANDIDATES_SQL`; preserves
 
 ### Verification
 
-- Contract: a failed candidate with an active teardown stays open; a second pass is idempotent.
+- Contract: a failed candidate with an active teardown or restricting activation stays open; a
+  second pass is idempotent.
   Mode: focused-test. Red: removing the retained teardown predicate discharges the active-job row.
   Green: `just test-verbose tests/reconciler/test_leaked_mutation_obligation_repair.py` passes.
 
@@ -55,8 +59,12 @@ Consumes the existing teardown-job seed helper and discharge read helper; preser
 candidate-count and logging contract as the torn-down lane.
 
 1. Parameterize the active-teardown deferral test across `torn_down` and `failed` System states.
-2. Parameterize the second-pass no-op test across those terminal states.
-3. Run `just test-changed`, `just lint`, and `just type`; expect each command to pass.
+2. Seed a `preparing` external-boot activation for a failed System and assert that the repair
+   leaves its obligation open; remove that restricting owner and assert the next pass discharges it.
+3. Drive activation creation from a concurrent connection while the repair holds its System lock;
+   assert the activation cannot become a new recovery owner before the locked recheck commits.
+4. Parameterize the second-pass no-op test across those terminal states.
+5. Run `just test-changed`, `just lint`, and `just type`; expect each command to pass.
 
 ## Completion
 
