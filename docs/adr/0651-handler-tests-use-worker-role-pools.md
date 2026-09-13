@@ -1,4 +1,4 @@
-# ADR-0651: Handler tests use worker-role pools
+# 0651 — Handler tests use worker-role pools
 
 ## Status
 
