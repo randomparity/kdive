@@ -135,8 +135,9 @@ class RunState(StrEnum):
 
     ``succeeded`` means the **build** step succeeded — not that the kernel is installed or
     booted. Install and boot progress live in the ``run_steps`` ledger and are surfaced by
-    ``runs.get`` as ``data.steps``. A failed install/boot step fails the Run to
-    ``failed``.
+    ``runs.get`` as ``data.steps``. A terminal install failure may fail a build-succeeded
+    Run; a terminal boot failure preserves ``succeeded`` for ``boot_readiness`` evidence
+    instead.
     """
 
     CREATED = "created"
@@ -284,7 +285,7 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
     RunState: {
         RunState.CREATED: frozenset({RunState.RUNNING, RunState.CANCELED}),
         RunState.RUNNING: frozenset({RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELED}),
-        RunState.SUCCEEDED: frozenset(),
+        RunState.SUCCEEDED: frozenset({RunState.FAILED}),
         RunState.FAILED: frozenset(),
         RunState.CANCELED: frozenset(),
     },

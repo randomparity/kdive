@@ -302,6 +302,49 @@ class StatefulRepository[M: DomainModel, S: StrEnum](Repository[M]):
             return await cur.fetchone() is not None
 
 
+class RunRepository(StatefulRepository[Run, RunState]):
+    """Run persistence with its atomic terminal-failure transition."""
+
+    async def record_terminal_failure(
+        self,
+        conn: AsyncConnection,
+        run_id: UUID,
+        category: ErrorCategory,
+        failing_job_id: UUID,
+        *,
+        eligible_states: frozenset[RunState],
+    ) -> bool:
+        """Record terminal failure metadata when ``run_id`` is eligible to fail.
+
+        The row lock and transition guard keep the state edge and failure metadata in one
+        transaction. An ineligible terminal Run is intentionally unchanged.
+
+        A missing Run, like an ineligible terminal Run, is intentionally unchanged. This lets a
+        malformed job payload dead-letter without manufacturing a second worker failure.
+
+        Raises:
+            IllegalTransition: An eligible source state cannot transition to ``failed``.
+        """
+        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT state FROM runs WHERE id = %s FOR UPDATE", (run_id,))
+            row = await cur.fetchone()
+            if row is None:
+                return False
+            current = RunState(row["state"])
+            if current not in eligible_states:
+                return False
+            ensure_transition(current, RunState.FAILED)
+            await cur.execute(
+                "UPDATE runs SET state = %s, failure_category = %s, failing_job_id = %s "
+                "WHERE id = %s RETURNING id",
+                (RunState.FAILED.value, category.value, failing_job_id, run_id),
+            )
+            updated = await cur.fetchone()
+        if updated is None:  # Invariant: the row was held under FOR UPDATE.
+            raise RuntimeError(f"UPDATE of runs id {run_id} returned no row")
+        return True
+
+
 class KeyedRepository[M: BaseModel](Repository[M]):
     """A `Repository` for a natural-key table that supports `upsert`.
 
@@ -427,7 +470,7 @@ SYSTEMS = StatefulRepository(
 INVESTIGATIONS = StatefulRepository(
     Investigation, "investigations", InvestigationState, json_columns=frozenset({"external_refs"})
 )
-RUNS = StatefulRepository(
+RUNS = RunRepository(
     Run,
     "runs",
     RunState,
