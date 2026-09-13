@@ -621,7 +621,7 @@ def test_run_once_retryable_category_still_requeues(migrated_url: str) -> None:
         (JobKind.BOOT, RunState.SUCCEEDED, RunState.SUCCEEDED),
     ],
 )
-def test_terminal_run_job_failure_marks_owning_run_failed(
+def test_terminal_run_job_failure_applies_operation_specific_transition(
     migrated_url: str, kind: JobKind, run_state: RunState, expected_run_state: RunState
 ) -> None:
     async def _run() -> None:
