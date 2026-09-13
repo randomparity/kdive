@@ -119,7 +119,7 @@ _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
 #
 # `-n auto` runs the suite in parallel via pytest-xdist; workers share one Postgres and one
-# MinIO container per run (xdist_backend). `--maxprocesses=16` caps the worker count on
+# SeaweedFS container per run (xdist_backend). `--maxprocesses=16` caps the worker count on
 # high-CPU-count machines (e.g. 128-logical-CPU ppc64le POWER hosts where -n auto falls back
 # to multiprocessing.cpu_count()=128 when psutil is absent): saturating a single shared
 # container causes timing-sensitive tests to flap. The flag lives here, not in addopts,
@@ -420,7 +420,7 @@ build release="false":
 changelog:
     uvx {{GIT_CLIFF}} --output CHANGELOG.md
 
-# Start the operator backing services (Postgres + MinIO + mock OIDC) for a live run.
+# Start the operator backing services (Postgres + SeaweedFS + mock OIDC) for a live run.
 compose-up:
     KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.lifecycle.compose.compose_worker_lifecycle up # pragma: allowlist secret — local dev only
 

@@ -183,7 +183,7 @@ uv tool install rust-just
 uv tool install prek
 ```
 
-The full `just ci` gate additionally exercises Docker (disposable Postgres/MinIO via
+The full `just ci` gate additionally exercises Docker (disposable Postgres/SeaweedFS via
 testcontainers). Tests that need Docker skip cleanly when it is absent unless
 `KDIVE_REQUIRE_DOCKER=1` is set. Install Docker Engine from your distribution, or from
 [Docker's official apt repository](https://docs.docker.com/engine/install/ubuntu/) on

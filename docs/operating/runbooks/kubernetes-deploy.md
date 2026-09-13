@@ -33,7 +33,7 @@ For other worker-fence releases, use the [staged procedure](#staged-worker-fence
 - **External backends** the cluster can reach: Postgres, an S3-compatible object store
   (MinIO/AWS S3), and an OIDC issuer. For a throwaway demo instead, the first-party bundled-backend
   path (`-f deploy/helm/kdive/values-demo.yaml`, verified with `helm test`) stands up in-chart
-  Postgres/MinIO/mock-OIDC on `emptyDir` — see the
+  Postgres/SeaweedFS/mock-OIDC on `emptyDir` — see the
   [chart README](../../../deploy/helm/kdive/README.md#bundled-backends-demo-only). It is `emptyDir`-only
   and **not** for anything you want to keep.
 - A `StorageClass` for the worker's build/install PVCs (microk8s: `microk8s enable
@@ -69,7 +69,7 @@ see the [compose README](../../../deploy/compose/README.md#image-provenance--ver
 ## 2. Stand up the external backends
 
 Bring up Postgres, the object store, and the OIDC issuer however your environment provides them
-(managed services, an in-cluster Postgres/MinIO you operate, etc.), and note the values the chart
+(managed services, an in-cluster Postgres/SeaweedFS you operate, etc.), and note the values the chart
 needs (step 4). The object store needs a bucket (default `kdive-artifacts`). The migrate Job
 (step 4) applies the schema against the Postgres you supply — the database must exist and be
 reachable first.
@@ -1735,7 +1735,7 @@ kubectl get pods -l app.kubernetes.io/name=kdive
 > via `envFrom` at start. A `helm upgrade` that changes a `config.*` value now rolls the
 > server/worker/reconciler automatically — their pod templates carry a `checksum/config`
 > annotation (ADR-0134) that changes with the ConfigMap, so the rollout picks up the new values
-> with no manual `kubectl rollout restart`. The bundled Postgres/MinIO backends carry no such
+> with no manual `kubectl rollout restart`. The bundled Postgres/SeaweedFS backends carry no such
 > annotation, so a config change never rolls their `emptyDir` pods (which would wipe demo data).
 > The external-path ConfigMap is also a pre-upgrade hook, so `helm upgrade --no-hooks` **skips**
 > it — use a hooked upgrade for config changes.
@@ -1872,7 +1872,7 @@ load evidence when reporting persistent drops rather than assuming a larger pool
 
 ## 7. Architecture: one object store, three consumers
 
-There is exactly **one** object store (S3/MinIO) in a deployment, and **three different parties
+There is exactly **one** S3-compatible object store in a deployment, and **three different parties
 read and write it** over presigned URLs whose host is `KDIVE_S3_ENDPOINT_URL`: the in-cluster
 **worker**, an **external uploader** (an agent that built a kernel locally and uploads it via
 `runs.complete_build`), and the **remote-libvirt guest** (which `curl`s the kernel bundle on
@@ -1890,7 +1890,7 @@ flowchart LR
       REC["reconciler"]
       PG[("Postgres")]
       OIDC["OIDC issuer"]
-      S3[("MinIO — the ONE object store<br/>KDIVE_S3_ENDPOINT_URL")]
+      S3[("S3-compatible store — the ONE object store<br/>KDIVE_S3_ENDPOINT_URL")]
     end
     subgraph HOST["Remote host (qemu+tls)"]
       LV["libvirtd / virtproxyd :16514"]
