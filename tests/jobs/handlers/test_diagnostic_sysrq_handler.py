@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -45,6 +47,19 @@ from kdive.store.objectstore import ObjectStore
 from tests.clock import STORE_MTIME
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
+
+_WORKER_DSN: ContextVar[str] = ContextVar("diagnostic_sysrq_worker_dsn")
+
+
+@pytest.fixture(autouse=True)
+def _bind_worker_dsn(authority_role_dsns: Callable[[str], str]) -> Iterator[None]:
+    """Run this module's handler act helpers as the real worker LOGIN."""
+    token = _WORKER_DSN.set(authority_role_dsns("kdive_worker"))
+    try:
+        yield
+    finally:
+        _WORKER_DSN.reset(token)
+
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -198,7 +213,11 @@ async def _run(
     secret_registry: SecretRegistry | None = None,
 ) -> str | None:
     resolver = provider_resolver(controller=control)
-    async with pool.connection() as conn:
+    del pool
+    async with (
+        AsyncConnectionPool(_WORKER_DSN.get(), min_size=1, max_size=2, open=False) as worker_pool,
+        worker_pool.connection() as conn,
+    ):
         return await diagnostic_sysrq.diagnostic_sysrq_handler(
             conn,
             job,
@@ -688,7 +707,11 @@ async def _run_probing(pool, store, control, job):
     (ADR-0506/ADR-0516). Only under the worker's dispatch does releasing the lock mean anything.
     """
     resolver = provider_resolver(controller=control)
-    async with pool.connection() as conn:
+    del pool
+    async with (
+        AsyncConnectionPool(_WORKER_DSN.get(), min_size=1, max_size=2, open=False) as worker_pool,
+        worker_pool.connection() as conn,
+    ):
         await conn.set_autocommit(True)
         store.backend_pid = conn.info.backend_pid
         try:
