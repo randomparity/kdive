@@ -23,7 +23,7 @@
 # one-shot and the three `server`/`worker`/`reconciler` processes, all built from the
 # repo Dockerfile and wired purely through `KDIVE_*`. Inside the compose network the
 # app services reach the backends by service name on their CONTAINER ports
-# (postgres:5432, oidc:8080, minio:9000) — not the host-published ports above, which
+# (postgres:5432, oidc:8080, seaweedfs:8333) — not the host-published ports above, which
 # are for a server run on the host. See deploy/compose/README.md for the bring-up.
 
 # Shared aux readiness-probe cadence (ADR-0090 §5), merged into each app service's
@@ -40,15 +40,14 @@ x-backends: &backends
   KDIVE_OIDC_ISSUER: http://oidc:8080/default
   KDIVE_OIDC_JWKS_URI: http://oidc:8080/default/jwks
   KDIVE_OIDC_AUDIENCE: kdive
-  KDIVE_S3_ENDPOINT_URL: http://minio:9000
+  KDIVE_S3_ENDPOINT_URL: http://seaweedfs:8333
   KDIVE_S3_BUCKET: kdive-artifacts
   KDIVE_S3_REGION: us-east-1
   # kdive's object store signs with boto3's default credential chain (the standard AWS_*
   # vars, objectstore.py), so the app tier authenticates to MinIO with its root creds —
   # without these the server/worker /readyz MinIO check can never pass. Matches the
-  # minio service's MINIO_ROOT_USER / MINIO_ROOT_PASSWORD above.
-  AWS_ACCESS_KEY_ID: minioadmin  # pragma: allowlist secret — local dev only
-  AWS_SECRET_ACCESS_KEY: minioadmin  # pragma: allowlist secret — local dev only
+  AWS_ACCESS_KEY_ID: kdive  # pragma: allowlist secret — local dev only
+  AWS_SECRET_ACCESS_KEY: kdive-demo-secret  # pragma: allowlist secret — local dev only
 
 services:
   postgres:
@@ -87,57 +86,39 @@ services:
       # host-file bind mounts in this file carry it for the same reason.
       - ./deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro,z
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+  seaweedfs:
+    image: ${KDIVE_SEAWEEDFS_IMAGE:-kdive-seaweedfs:dev}
+    build: ./deploy/seaweedfs
     # Policed like the app tier: without this, a recreate that outlives the backend leaves
     # the app services restarting against something that can never answer. `on-failure`
     # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
     # section 4) and does not make this dev-credential backend boot-persistent.
     restart: on-failure
-    command: server /data --console-address ":9001"
+    command: ["mini", "-dir=/data"]
     # The image declares VOLUME /data; naming it keeps the artifacts bucket across a plain
     # `down` instead of orphaning an anonymous volume per `up` (ADR-0552).
     volumes:
-      - kdive-minio-data:/data
+      - kdive-seaweedfs-data:/data
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin # pragma: allowlist secret — local dev only
+      S3_ACCESS_KEY: kdive  # pragma: allowlist secret — local dev only
+      S3_SECRET_KEY: kdive-demo-secret # pragma: allowlist secret — local dev only
     ports:
-      - "${KDIVE_MINIO_PORT:-127.0.0.1:9000}:9000"
-      - "${KDIVE_MINIO_CONSOLE_PORT:-127.0.0.1:9001}:9001"
+      - "${KDIVE_SEAWEEDFS_PORT:-127.0.0.1:8333}:8333"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8333/"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   # Creates the artifacts bucket, enables bucket-wide versioning, verifies it, then exits.
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+  seaweedfs-init:
+    image: ${KDIVE_IMAGE:-kdive:dev}
+    build: .
     depends_on:
-      minio:
+      seaweedfs:
         condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        bucket=local/kdive-artifacts
-        mc alias set local http://minio:9000 minioadmin minioadmin
-        mc mb --ignore-existing "$$bucket"
-        mc version enable "$$bucket"
-        version_info=$$(mc version info --json "$$bucket")
-        # Pinned mc omits ExcludedPrefixes when empty; compatible variants may emit [].
-        # Its /bin/sh is Bash 5.1, whose [[ =~ ]] can anchor the complete compact reply.
-        versioning_pattern='^\{"Op":"info","status":"success",'
-        versioning_pattern+='"url":"[^"[:space:]]+",'
-        versioning_pattern+='"versioning":\{"status":"Enabled","MFADelete":""'
-        versioning_pattern+='(,"ExcludedPrefixes":\[\])?\}\}$$'
-        if [[ ! "$$version_info" =~ $$versioning_pattern ]]; then
-          echo "MinIO bucket versioning is incompatible." >&2
-          echo "Require Enabled, MFA Delete off, and no excluded prefixes." >&2
-          exit 1
-        fi
+    command: ["python", "-m", "kdive.store.initialize_bucket"]
+    environment: *backends
 
   # Multi-arch mock OIDC issuer. The upstream ghcr.io/navikt/mock-oauth2-server is amd64/arm64
   # only, breaking `docker compose up` on a POWER host, so kdive mirrors it (deploy/mock-oidc,
@@ -249,7 +230,7 @@ services:
         condition: service_completed_successfully
       role-bootstrap:
         condition: service_completed_successfully
-      minio-init:
+      seaweedfs-init:
         condition: service_completed_successfully
       oidc:
         condition: service_started
@@ -307,7 +288,7 @@ services:
         condition: service_completed_successfully
       role-bootstrap:
         condition: service_completed_successfully
-      minio-init:
+      seaweedfs-init:
         condition: service_completed_successfully
 
   reconciler:
@@ -341,7 +322,7 @@ services:
         condition: service_completed_successfully
       role-bootstrap:
         condition: service_completed_successfully
-      minio-init:
+      seaweedfs-init:
         condition: service_completed_successfully
 
   # Opt-in metrics collection (ADR-0189). Behind the `obs` profile so the turnkey
@@ -414,4 +395,5 @@ volumes:
   kdive-build:
   kdive-install:
   kdive-pgdata:
-  kdive-minio-data:
+  # Retain kdive-minio-data manually as a rollback artifact; SeaweedFS never mounts it.
+  kdive-seaweedfs-data:
