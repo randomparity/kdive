@@ -73,7 +73,8 @@ is built, not pulled per-arch; arch notes live in the `Role` column). Handling t
 | Image | Role | amd64 | arm64 | ppc64le | Handling |
 |---|---|:---:|:---:|:---:|---|
 | `postgres:17` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
-| `kdive-seaweedfs:dev` | core backend (SeaweedFS 4.46 source-pinned image; published OCI index proof in #2446) | — | — | — | build-local |
+| `minio/minio:RELEASE.2025-04-22T22-12-26Z` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
+| `minio/mc:RELEASE.2025-04-16T18-13-26Z` | core (bucket-init one-shot) | ✅ | ✅ | ✅ | rely-on-upstream |
 | `kdive-mock-oidc:dev` | core backend (OIDC mock; built in-repo from the upstream jar, #1183 / ADR-0357) | — | — | — | build-local |
 | `prom/prometheus:v3.12.0` | observability (`obs` profile) | ✅ | ✅ | ✅ | rely-on-upstream |
 | `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ | accept-gap |
@@ -181,3 +182,11 @@ on Quay confirmed the pinned test manifest still publishes amd64, arm64, and ppc
   multi-arch mirror is the working path.
 - **Rebuild the OIDC issuer from Kotlin source for ppc64le.** Unnecessary — the upstream jar
   is arch-neutral bytecode; repackaging it onto a multi-arch JRE base avoids a source build.
+
+### Accepted update (2026-09-13): bundled SeaweedFS evidence (#2445)
+
+The bundled object-store implementation now uses `kdive-seaweedfs:dev`, built from the
+source-pinned SeaweedFS 4.46 implementation recorded in ADR-0647. The published OCI index
+proof from #2446 covers linux/amd64, linux/arm64, and linux/ppc64le. This update replaces the
+retired bundled MinIO runtime; it does not alter this ADR's original Decision or its historical
+matrix observations.
