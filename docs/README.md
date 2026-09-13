@@ -20,7 +20,9 @@ Start here if someone already operates a KDIVE server for you.
 
 The [generated tool reference](guide/reference/index.md) owns exact parameters and tool
 contracts.
-The [agent workflow index](guide/agent-index.md) and toolset guides are also served over MCP.
+The [agent workflow index](guide/agent-index.md), [operator workflow index](guide/agent-index-operator.md),
+and their toolset guides are also served over MCP. The operator index is available only to callers
+holding a platform role.
 
 ## Run KDIVE — operators
 

@@ -13,6 +13,7 @@ import pytest
 from fastmcp import FastMCP
 
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.mcp.exposure import CLASSIFIED_TOOLS
 from kdive.mcp.resources import registrar
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.resources.registrar import DOC_RESOURCES, audience_by_uri, register
@@ -41,6 +42,10 @@ def _resolver(kinds: Iterable[ResourceKind]) -> ProviderResolver:
 
 _ALL_KINDS = _resolver(ResourceKind)
 
+_OPERATOR_TOOLSET_NAMESPACES = frozenset(
+    {"accounting", "audit", "inventory", "ops", "reports", "secrets", "shapes"}
+)
+
 
 def test_doc_resources_default_to_all_audience_and_no_kind() -> None:
     for entry in DOC_RESOURCES:
@@ -59,6 +64,31 @@ def test_audience_by_uri_covers_every_entry() -> None:
     expected.add(str(AnyUrl(EXTERNAL_BUILD_CONTRACT_URI)))
     assert set(mapping) == expected
     assert all(v in {"all", "operator"} for v in mapping.values())
+
+
+def test_operator_docs_cover_every_unserved_elevated_namespace() -> None:
+    """ADR-0284 Phase 3 documents the live elevated namespaces absent from Phase 2."""
+    by_name = {entry.name: entry for entry in DOC_RESOURCES}
+    expected_names = {"agent-index-operator"} | {
+        f"toolset-{namespace}" for namespace in _OPERATOR_TOOLSET_NAMESPACES
+    }
+    assert expected_names <= set(by_name)
+
+    missing: list[str] = []
+    for namespace in _OPERATOR_TOOLSET_NAMESPACES:
+        entry = by_name[f"toolset-{namespace}"]
+        assert entry.audience == "operator"
+        text = (_ROOT / entry.source).read_text(encoding="utf-8")
+        for tool in CLASSIFIED_TOOLS:
+            if tool.startswith(f"{namespace}.") and tool not in text:
+                missing.append(f"{entry.source}: {tool}")
+
+    index = by_name["agent-index-operator"]
+    assert index.audience == "operator"
+    index_text = (_ROOT / index.source).read_text(encoding="utf-8")
+    for namespace in _OPERATOR_TOOLSET_NAMESPACES:
+        assert by_name[f"toolset-{namespace}"].uri in index_text
+    assert not missing, "operator toolset docs omit live tools:\n" + "\n".join(missing)
 
 
 def test_register_returns_count_and_lists_every_uri_verbatim() -> None:

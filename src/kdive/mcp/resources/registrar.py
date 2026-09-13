@@ -36,6 +36,7 @@ _JSON = "application/json"
 
 # Named so a tool response can cite this doc in ``refs`` without repeating the literal (#2342).
 AGENT_INDEX_DOC_URI = "resource://kdive/docs/guide/agent-index.md"
+AGENT_OPERATOR_INDEX_DOC_URI = "resource://kdive/docs/guide/agent-index-operator.md"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +171,83 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "Entry point for an agent: the typical investigation session mapped to toolsets, "
             "with a per-toolset guide link. Named in the server instructions."
         ),
+    ),
+    DocResource(
+        uri=AGENT_OPERATOR_INDEX_DOC_URI,
+        source="docs/guide/agent-index-operator.md",
+        content_file="agent-index-operator.md",
+        name="agent-index-operator",
+        title="Operating a KDIVE platform",
+        description=(
+            "Entry point for platform-role callers: maintenance, accounting, audit, inventory, "
+            "reports, secret references, and shapes."
+        ),
+        audience="operator",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/accounting.md",
+        source="docs/guide/toolsets/accounting.md",
+        content_file="toolsets-accounting.md",
+        name="toolset-accounting",
+        title="accounting toolset",
+        description="How accounting tools estimate, report, and administer project limits.",
+        audience="operator",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/audit.md",
+        source="docs/guide/toolsets/audit.md",
+        content_file="toolsets-audit.md",
+        name="toolset-audit",
+        title="audit toolset",
+        description="How authorized callers query accountable operation history.",
+        audience="operator",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/inventory.md",
+        source="docs/guide/toolsets/inventory.md",
+        content_file="toolsets-inventory.md",
+        name="toolset-inventory",
+        title="inventory toolset",
+        description="How platform roles inspect inventory and clear authorized overrides.",
+        audience="operator",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/ops.md",
+        source="docs/guide/toolsets/ops.md",
+        content_file="toolsets-ops.md",
+        name="toolset-ops",
+        title="ops toolset",
+        description="How platform roles diagnose, reconcile, tune, and recover operations.",
+        audience="operator",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/reports.md",
+        source="docs/guide/toolsets/reports.md",
+        content_file="toolsets-reports.md",
+        name="toolset-reports",
+        title="reports toolset",
+        description="How authorized callers generate bounded usage and accounting reports.",
+        audience="operator",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/secrets.md",
+        source="docs/guide/toolsets/secrets.md",
+        content_file="toolsets-secrets.md",
+        name="toolset-secrets",
+        title="secrets toolset",
+        description=(
+            "How platform operators inspect secret references without reading secret values."
+        ),
+        audience="operator",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/shapes.md",
+        source="docs/guide/toolsets/shapes.md",
+        content_file="toolsets-shapes.md",
+        name="toolset-shapes",
+        title="shapes toolset",
+        description="How platform operators maintain shared capacity shapes and cost classes.",
+        audience="operator",
     ),
     DocResource(
         uri="resource://kdive/docs/guide/toolsets/runs.md",
