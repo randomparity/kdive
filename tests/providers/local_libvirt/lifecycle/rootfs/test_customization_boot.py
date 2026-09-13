@@ -34,6 +34,35 @@ def test_fail_marker():
     assert C(b"dnf: No match\nkdive-customize-failed\n") is CustomizeVerdict.FAILED
 
 
+@pytest.mark.parametrize(
+    "console",
+    [
+        b"systemd[1]: Failed to start up manager.\n[!!!!!!] Freezing execution.\n",
+        b"[!!!!!!] Freezing execution.\nsystemd[1]: Failed to start up manager.\n",
+    ],
+)
+def test_terminal_manager_freeze_fails(console: bytes):
+    assert C(console) is CustomizeVerdict.FAILED
+
+
+@pytest.mark.parametrize(
+    "console",
+    [
+        b"systemd[1]: Failed to start up manager.\n",
+        b"[!!!!!!] Freezing execution.\n",
+    ],
+)
+def test_partial_manager_freeze_signature_is_pending(console: bytes):
+    assert C(console) is CustomizeVerdict.PENDING
+
+
+def test_ok_marker_wins_over_terminal_manager_freeze():
+    assert (
+        C(b"Failed to start up manager.\nFreezing execution.\nkdive-customize-ok\n")
+        is CustomizeVerdict.OK
+    )
+
+
 def test_genuine_oops_fails():
     assert C(b"Oops: 0000 [#1] SMP\n") is CustomizeVerdict.FAILED
 
@@ -170,6 +199,27 @@ def test_genuine_fault_raises():
     seams = _seams_reading(b"Oops: 0000 [#1]\n")
     with pytest.raises(CategorizedError):
         run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
+
+
+def test_terminal_manager_freeze_raises_without_sleeping():
+    events: list[str] = []
+    console = b"Failed to start up manager.\nFreezing execution.\n"
+    seams = CustomizationBootSeams(
+        prepare_console=lambda _bid: events.append("prepare"),
+        open_conn=lambda: FakeConn(events),
+        create_transient=lambda _c, _x: _record_create(events),
+        read_console=lambda _bid: console,
+        domain_settled=lambda _bid: False,
+        sleep=lambda _s: events.append("sleep"),
+        window_polls=lambda _a: 10,
+    )
+    with pytest.raises(CategorizedError) as ei:
+        run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
+    assert ei.value.category is ErrorCategory.PROVISIONING_FAILURE
+    tail = ei.value.details["console_tail"]
+    assert isinstance(tail, str)
+    assert "Failed to start up manager" in tail
+    assert "sleep" not in events
 
 
 def test_settled_without_ok_marker_fails():

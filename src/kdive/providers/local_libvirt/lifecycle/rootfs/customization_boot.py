@@ -75,6 +75,11 @@ _GENUINE_FAULT = re.compile(
     r"|KFENCE:"
 )
 
+_TERMINAL_MANAGER_FREEZE_LINES = (
+    "Failed to start up manager",
+    "Freezing execution",
+)
+
 
 class CustomizeVerdict(StrEnum):
     OK = "ok"
@@ -91,7 +96,8 @@ def classify_customization_console(data: bytes) -> CustomizeVerdict:
     """Classify a customization-boot console capture as ok, failed, or pending.
 
     Order matters: the ok marker wins outright; otherwise the fail marker or a genuine
-    kernel fault means failed; otherwise the boot is still pending.
+    kernel fault, or the observed terminal systemd manager-freeze pair means failed; otherwise
+    the boot is still pending.
     """
     text = data.decode("utf-8", errors="replace")
     if _line_present(text, OK_MARKER):
@@ -99,6 +105,8 @@ def classify_customization_console(data: bytes) -> CustomizeVerdict:
     if _line_present(text, FAIL_MARKER):
         return CustomizeVerdict.FAILED
     if _GENUINE_FAULT.search(text):
+        return CustomizeVerdict.FAILED
+    if all(line in text for line in _TERMINAL_MANAGER_FREEZE_LINES):
         return CustomizeVerdict.FAILED
     return CustomizeVerdict.PENDING
 
