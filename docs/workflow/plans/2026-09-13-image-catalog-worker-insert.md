@@ -78,4 +78,6 @@ actual worker-role publish path all pass.
 
 ### Rollback
 
-Reverting the migration and matching declarations restores the former authority boundary.
+Before deployment, reverting the migration and matching declarations restores the former authority
+boundary. After deployment, revoke INSERT in a new forward migration and update the matching
+inventory, baseline, and worker-fence expectations; never edit an applied migration.
