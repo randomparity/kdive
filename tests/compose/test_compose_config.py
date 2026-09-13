@@ -228,7 +228,8 @@ def test_compose_config_is_valid() -> None:
 
 def test_seaweedfs_initializer_uses_packaged_module() -> None:
     initializer = _services()["seaweedfs-init"]
-    assert initializer["command"] == ["python", "-m", "kdive.store.initialize_bucket"]
+    assert initializer["entrypoint"] == ["python"]
+    assert initializer["command"] == ["-m", "kdive.store.initialize_bucket"]
     assert initializer["environment"]["KDIVE_S3_ENDPOINT_URL"] == "http://seaweedfs:8333"
 
 

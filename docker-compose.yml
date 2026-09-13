@@ -117,7 +117,8 @@ services:
     depends_on:
       seaweedfs:
         condition: service_healthy
-    command: ["python", "-m", "kdive.store.initialize_bucket"]
+    entrypoint: ["python"]
+    command: ["-m", "kdive.store.initialize_bucket"]
     environment: *backends
 
   # Multi-arch mock OIDC issuer. The upstream ghcr.io/navikt/mock-oauth2-server is amd64/arm64
