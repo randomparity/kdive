@@ -14,6 +14,8 @@ import asyncio
 import hashlib
 import shutil
 import struct
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +50,18 @@ from tests.integration._seed import seed_granted_allocation, seed_running_run, s
 from tests.mcp.systems_support import provider_resolver
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
+_WORKER_DSN: ContextVar[str] = ContextVar("capture_traffic_worker_dsn")
+
+
+@pytest.fixture(autouse=True)
+def _bind_worker_dsn(authority_role_dsns: Callable[[str], str]) -> Iterator[None]:
+    """Run this module's handler act helpers as the real worker LOGIN."""
+    token = _WORKER_DSN.set(authority_role_dsns("kdive_worker"))
+    try:
+        yield
+    finally:
+        _WORKER_DSN.reset(token)
+
 
 # A minimal valid 1-record little-endian pcap (24-byte header + 1 record of 4 payload bytes).
 _PCAP_HEADER = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
@@ -313,7 +327,11 @@ async def _run_with_spy(pool, store, capturer, job, *, loop_spy, monkeypatch):
     """Drive the handler with a stubbed loop; the capturer owns its own dest path (no patching)."""
     resolver = provider_resolver(traffic_capturer=capturer)
     monkeypatch.setattr(capture_traffic, "run_capture_loop", loop_spy)
-    async with pool.connection() as conn:
+    del pool
+    async with (
+        _pool(_WORKER_DSN.get()) as worker_pool,
+        worker_pool.connection() as conn,
+    ):
         return await capture_traffic.capture_traffic_handler(
             conn,
             job,
