@@ -12,8 +12,8 @@ Python 3.14, psycopg, pytest, and `just`. Preserve ADR-0179, the worker fence an
 ADR-0185 retry recycling. Add no migration, public response shape, tool parameter, retry-policy,
 or boot behavior.
 
-Expected implementation size: 25–50 changed lines (M) — two production edits plus focused state,
-worker, and read-path assertions.
+Expected implementation size: 30–65 changed lines (M) — operation-specific worker guards plus
+focused state, terminal, retryable, and boot-preservation assertions.
 
 ## Task — Restore and prove the terminal transition
 
