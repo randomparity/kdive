@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.diagnostics.checks import (
+    AUTHORITY_READINESS_ID,
     DEPMOD_TOOLCHAIN_ID,
     GDBSTUB_ACL_ID,
     GUEST_ARCH_ACCEL_ID,
@@ -98,6 +99,22 @@ def test_guest_arch_accel_id_survives_roundtrip() -> None:
     assert result.status is CheckStatus.PASS
 
 
+def test_authority_readiness_id_survives_roundtrip() -> None:
+    src = [
+        CheckResult(
+            AUTHORITY_READINESS_ID,
+            CheckStatus.ERROR,
+            "authority unavailable",
+            provider="remote-libvirt",
+            failure_category=ErrorCategory.READINESS_FAILURE,
+        )
+    ]
+    [result] = deserialize_results(serialize_results(src))
+    assert result.check_id == AUTHORITY_READINESS_ID
+    assert result.status is CheckStatus.ERROR
+    assert result.failure_category is ErrorCategory.READINESS_FAILURE
+
+
 def test_depmod_toolchain_id_survives_roundtrip() -> None:
     src = [
         CheckResult(
@@ -128,6 +145,7 @@ def test_allowed_ids_matches_registered_worker_vantage_descriptors() -> None:
     expected_ids = {
         PROVIDER_TLS_ID,
         GDBSTUB_ACL_ID,
+        AUTHORITY_READINESS_ID,
         MULTIARCH_GDB_ID,
         pseries_fadump_worker_descriptor().id,
         guest_arch_accel_worker_descriptor().id,

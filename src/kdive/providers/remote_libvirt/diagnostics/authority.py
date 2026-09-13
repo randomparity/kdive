@@ -3,11 +3,16 @@
 import asyncio
 from collections.abc import Callable
 
-from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
+from kdive.diagnostics.checks import (
+    AUTHORITY_READINESS_ID,
+    Check,
+    CheckResult,
+    CheckStatus,
+    Vantage,
+)
 from kdive.domain.errors import ErrorCategory
 from kdive.providers.ports.authority import AuthorityRequestSender
 
-AUTHORITY_READINESS_ID = "provider_authority"
 _HEALTH_BUDGET_SECONDS = 5.0
 
 

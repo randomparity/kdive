@@ -24,6 +24,7 @@ from kdive.domain.errors import ErrorCategory
 SECRET_REF_ID = "secret_ref"
 PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
+AUTHORITY_READINESS_ID = "provider_authority"
 REACHABILITY_ID = "remote_libvirt_reachability"
 BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
 MULTIARCH_GDB_ID = "multiarch_gdb"
