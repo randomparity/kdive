@@ -130,6 +130,11 @@ guide for snapshot and restore requirements.
 | debug | GDB and live-introspection sessions | resource://kdive/docs/guide/toolsets/debug.md |
 | systems | Provision, reprovision, snapshot, and reach a system over SSH | resource://kdive/docs/guide/toolsets/systems.md |
 | images | Pick a base image and read its capabilities | resource://kdive/docs/guide/toolsets/images.md |
+| investigations | Organize an experiment and its linked work | resource://kdive/docs/guide/toolsets/investigations.md |
+| allocations | Reserve and release investigation capacity | resource://kdive/docs/guide/toolsets/allocations.md |
+| resources | Discover and manage provider capacity | resource://kdive/docs/guide/toolsets/resources.md |
+| jobs | Wait for or cancel durable asynchronous work | resource://kdive/docs/guide/toolsets/jobs.md |
+| vmcore | Capture a crashed guest's vmcore | resource://kdive/docs/guide/toolsets/vmcore.md |
 | introspect | Non-halting live or offline drgn introspection | resource://kdive/docs/guide/toolsets/introspect.md |
 | control | Watch for crashes, induce a crash, send a SysRq, or drive power | resource://kdive/docs/guide/toolsets/control.md |
 | postmortem | Capture a vmcore, then triage or analyze it | resource://kdive/docs/guide/toolsets/postmortem.md |

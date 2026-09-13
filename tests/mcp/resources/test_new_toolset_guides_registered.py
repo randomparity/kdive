@@ -17,7 +17,16 @@ from pathlib import Path
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_NEW_TOOLSETS = ("introspect", "postmortem", "control")
+_NEW_TOOLSETS = (
+    "investigations",
+    "allocations",
+    "resources",
+    "jobs",
+    "vmcore",
+    "introspect",
+    "postmortem",
+    "control",
+)
 
 
 def test_new_toolset_guides_are_allowlisted() -> None:
