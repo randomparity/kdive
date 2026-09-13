@@ -28,6 +28,7 @@ generated snapshots, and focused resource tests.
 - Regenerate matching files in `src/kdive/mcp/resources/_content/`.
 - Modify `tests/mcp/resources/test_doc_resources.py` and `tests/mcp/resources/test_doc_exposure.py`
   for registration, completeness, and role-gated exposure contracts.
+- Modify `docs/README.md` to list both served workflow indexes.
 - Modify `docs/adr/0284-agent-facing-workflow-docs.md` only to change its status after Phase 3
   contracts pass.
 
@@ -73,9 +74,10 @@ Steps:
 
 1. Replace synthetic-only assertions with coverage of the actual registered operator index and
    operator resource set while retaining the existing fail-closed middleware cases.
-2. Run `just resources-docs` and inspect generated snapshot paths, then run
+2. Add the operator-index pointer to `docs/README.md` so its served-doc inventory is accurate.
+3. Run `just resources-docs` and inspect generated snapshot paths, then run
    `just resources-docs-check`.
-3. Run both focused test modules and expect all selected tests to pass.
+4. Run both focused test modules and expect all selected tests to pass.
 
 Acceptance: the gates are demonstrated against a real operator resource and every generated
 snapshot matches canonical source.
