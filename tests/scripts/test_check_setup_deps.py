@@ -37,11 +37,12 @@ def _run(
     tmp_path: Path,
     extra_env: dict[str, str] | None = None,
     args: list[str] | None = None,
+    os_release_like: str = "",
 ) -> subprocess.CompletedProcess[str]:
     """Run the checker with a forced distro and a controlled PATH."""
     assert BASH is not None, "bash is required to run the checker"
     os_release = tmp_path / "os-release"
-    os_release.write_text(f"ID={os_release_id}\n")
+    os_release.write_text(f'ID={os_release_id}\nID_LIKE="{os_release_like}"\n')
     env = {
         "PATH": path,
         "KDIVE_OS_RELEASE": str(os_release),
@@ -224,6 +225,7 @@ def _run_with_uname(
     present: tuple[str, ...],
     tmp_path: Path,
     extra_env: dict[str, str] | None = None,
+    os_release_like: str = "",
 ) -> subprocess.CompletedProcess[str]:
     """Run the checker with a stubbed ``uname -m`` and a controlled set of present binaries.
 
@@ -237,7 +239,13 @@ def _run_with_uname(
     _stub(bindir, "uname", f"#!/bin/sh\necho {host_arch}\n")
     for tool in ("uv", "pkg-config", *present):
         _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
-    return _run(distro_id, str(bindir), tmp_path, extra_env=extra_env)
+    return _run(
+        distro_id,
+        str(bindir),
+        tmp_path,
+        extra_env=extra_env,
+        os_release_like=os_release_like,
+    )
 
 
 def test_advisory_shows_host_arch_first(tmp_path: Path) -> None:
@@ -824,6 +832,44 @@ def test_redhat_nativeness_is_symmetric_on_a_ppc64le_host(tmp_path: Path) -> Non
     result = _run_with_uname("fedora", "ppc64le", (), tmp_path)
     assert "guest arch ppc64le: not available; install qemu-kvm for native guests" in result.stdout
     assert "guest arch x86_64: not available; install qemu-system-x86 for" in result.stdout
+
+
+def test_el_ppc64le_does_not_offer_an_unavailable_native_emulator(tmp_path: Path) -> None:
+    """Default EL ppc64le repos have no native-emulator package to offer."""
+    result = _run_with_uname(
+        "rocky",
+        "ppc64le",
+        (),
+        tmp_path,
+        os_release_like="rhel centos fedora",
+    )
+
+    assert (
+        "guest arch ppc64le: not available; default EL ppc64le repositories provide no native "
+        "emulator package"
+    ) in result.stdout
+    assert "qemu-kvm" not in result.stdout
+    assert "qemu-kvm" not in result.stderr
+
+
+@skip_if_root
+def test_el_ppc64le_yes_does_not_install_an_unavailable_native_emulator(tmp_path: Path) -> None:
+    """The explicit EL limitation stays outside the opt-in package-manager argv."""
+    bindir = _bin(tmp_path)
+    log = tmp_path / "dnf.log"
+    _stub(bindir, "uname", "#!/bin/sh\necho ppc64le\n")
+    _stub(bindir, "dnf", f'#!/bin/sh\necho "$@" >> "{log}"\nexit 0')
+    _sudo_stub(bindir, tmp_path / "sudo.log")
+
+    _run(
+        "rocky",
+        str(bindir),
+        tmp_path,
+        args=["-y"],
+        os_release_like="rhel centos fedora",
+    )
+
+    assert "qemu-kvm" not in log.read_text()
 
 
 def test_nativeness_rule_does_not_touch_debian(tmp_path: Path) -> None:
