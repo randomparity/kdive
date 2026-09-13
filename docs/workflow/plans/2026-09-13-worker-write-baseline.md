@@ -34,24 +34,30 @@ writes, structural assertions, and a short provenance guide.
 **Files:** create `tests/jobs/worker_write_baseline.json`.
 
 **Interfaces:** The file is a JSON object with `format_version: 1` and a sorted `handlers` list.
-Each handler has `job_kind` and `writes`; each write has `table`, `operation`, `source`, `role`,
-`route`, and `verdict`. Later test code consumes this exact shape.
+Each handler has `job_kind` and `writes`; each write has `id`, `table`, `operation`,
+`handler_source`, `write_source`, `role`, `route`, `authority_source`, `grant_source`, and
+`verdict`. Every evidence source carries a `path`, `line`, and expected `text`. The top level has
+`confirmed_leaks`, sorted and exactly equal to the `id` values of `LEAK` rows. Later test code
+consumes this exact shape.
 
 **Verification inventory:**
 
 - Contract: every active handler has one explicit record. Mode: focused-test. Expected red:
   remove a handler record and the coverage assertion names its job kind. Green:
   `uv run python -m pytest tests/jobs/test_worker_write_baseline.py -q` passes.
-- Contract: each write states grant evidence. Mode: focused-test. Expected red: alter one route or
-  verdict to an unsupported value and schema validation fails. Green: the same focused command
-  passes.
+- Contract: each write states handler, write, authority, and grant evidence. Mode: focused-test.
+  Expected red: alter one evidence fragment or route to an unsupported value and validation fails.
+  Green: the same focused command passes.
+- Contract: confirmed leaks are explicit. Mode: focused-test. Expected red: remove or add an id in
+  `confirmed_leaks`; green: the same focused command passes.
 
 **Steps:**
 
 1. Enumerate handler registrations from `src/kdive/jobs/assembly.py` and registrar modules.
 2. Trace each registered handler into direct handler SQL and repository calls; classify all writes
    with the grant matrix and `SECURITY DEFINER` function bodies.
-3. Write sorted JSON records, retaining empty `writes` lists for handlers with no database write.
+3. Write sorted JSON records, retaining empty `writes` lists for handlers with no database write
+   and a `confirmed_leaks` list equal to the sorted `LEAK` identities.
 4. Run the focused test after Task 2 adds it; expect one passing committed-manifest case.
 
 **Acceptance criteria:** no active job kind is absent; no record leaves table, operation, source,
@@ -71,14 +77,14 @@ returns deterministic violation strings for tests. No production import is intro
   handler or write identity in a copied manifest; green: focused module passes committed data.
 - Contract: complete active job-kind coverage. Mode: focused-test. Expected red: remove one entry;
   green: focused module passes committed data.
-- Contract: cited source is still a matching write. Mode: focused-test. Expected red: replace a
-  copied source line with a non-write line; green: focused module passes committed data.
+- Contract: cited evidence remains meaningful. Mode: focused-test. Expected red: replace a copied
+  handler, write, authority, or grant fragment; green: focused module passes committed data.
 
 **Steps:**
 
 1. Add isolated mutation tests that prove each validator arm fails.
-2. Validate committed JSON against `JobKind` and check the source file/line contains the recorded
-   operation and table name.
+2. Validate committed JSON against `JobKind`, reconcile `confirmed_leaks`, and check every cited
+   handler, write, authority, and grant file/line contains its recorded fragment.
 3. Run `uv run python -m pytest tests/jobs/test_worker_write_baseline.py -q`; expect all focused
    cases to pass.
 
@@ -104,7 +110,8 @@ refresh workflow; it makes no runtime promise.
 1. Describe the handler-only boundary, classifications, grant-matrix source migrations, and how
    to refresh source lines after an intentional change.
 2. Link the guide from the contributor section in `docs/README.md`.
-3. Run `just docs-links`, `just lint`, `just type`, the focused test, and finally
+3. Mark ADR-0649 Accepted only after Tasks 1 and 2 are complete. Run `just docs-links`, `just
+   lint`, `just type`, the focused test, and finally
    `just ci > /tmp/kdive-2345-ci.log 2>&1 < /dev/null`; expect exit 0 from each.
 
 **Acceptance criteria:** a reviewer can reproduce the classification evidence without treating

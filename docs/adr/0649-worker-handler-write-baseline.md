@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-09-13)
+Proposed (2026-09-13)
 
 - **Issue:** #2345
 
@@ -20,23 +20,27 @@ so a newly registered handler cannot be silently outside the audit.
 ## Decision
 
 Store a versioned JSON manifest under `tests/jobs/` and validate it with a structural test. Each
-registered job kind has one entry. Every reachable database write records the table, operation,
-source `file:line`, connection role, direct or `SECURITY DEFINER` route, and grant verdict:
-`covered`, `definer-mediated`, or `LEAK`.
+registered job kind has one entry. Every reachable database write records a stable identity, the
+table, operation, handler-call source, write source, connection role, direct or `SECURITY
+DEFINER` authority source, grant source, and grant verdict: `covered`, `definer-mediated`, or
+`LEAK`. The top-level confirmed-leak list must equal the sorted identities of all `LEAK` rows;
+an empty list is the explicit zero-leak result.
 
 The structural test validates the manifest shape, unique and sorted entries, complete active
-handler-kind coverage, and that each recorded source location still names the recorded write.
-A contributor guide explains the sweep boundary, grant-matrix sources, and how to refresh a
-record after an intentional handler-write change.
+handler-kind coverage, leak-list reconciliation, and each cited evidence location. A contributor
+guide explains the sweep boundary, grant-matrix sources, and how to refresh a record after an
+intentional handler-write change.
 
 ## Consequences
 
 - The baseline is executable test data, not a runtime registry or source of authorization.
-- A moved or altered recorded write makes the focused test fail until its evidence is refreshed.
+- A moved or altered handler, write, authority, or grant evidence location makes the focused test
+  fail until its evidence is refreshed.
 - A new active job kind makes the focused test fail until it is explicitly classified, including
   a no-write entry.
 - The first baseline may report no additional `LEAK`; remediation remains owned by a separate
   issue when one is found.
+- This ADR becomes Accepted only with the manifest, test, and guide in the implementation PR.
 
 ## Considered & rejected
 
