@@ -194,8 +194,13 @@ def test_build_app_registers_doc_resources() -> None:
 
     async def _run() -> None:
         listed = {str(r.uri) for r in await app.list_resources()}
-        assert {e.uri for e in DOC_RESOURCES} <= listed
+        all_audience = {entry.uri for entry in DOC_RESOURCES if entry.audience == "all"}
+        operator_audience = {entry.uri for entry in DOC_RESOURCES if entry.audience == "operator"}
+        assert all_audience <= listed
+        assert not operator_audience & listed
         for entry in DOC_RESOURCES:
+            if entry.audience == "operator":
+                continue
             result = await app.read_resource(entry.uri)
             served = result.contents[0].content
             assert isinstance(served, str)

@@ -24,6 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TOOLSET_RE = re.compile(r"toolsets/(?P<ns>[a-z_]+)\.md$")
 _AGENT_INDEX = _REPO_ROOT / "docs/guide/agent-index.md"
 _BACKTICKED_TOOL_RE = re.compile(r"`([a-z_]+\.[a-z_]+)`")
+_DURABLE_WITNESS_TOOLS = {"ops.build_uses_list", "ops.recover_build_use"}
 
 
 def _live_tool_names() -> set[str]:
@@ -55,7 +56,8 @@ def test_each_served_toolset_doc_names_exactly_its_namespace_tools() -> None:
         expected = {tool for tool in live if tool.startswith(f"{namespace}.")}
         assert expected, f"{path.name} documents namespace {namespace!r} with no live tools"
         missing = expected - named
-        stale = named - expected
+        conditional = _DURABLE_WITNESS_TOOLS if namespace == "ops" else set()
+        stale = named - expected - conditional
         assert not missing, f"{path.name} omits live {namespace} tools: {sorted(missing)}"
         assert not stale, f"{path.name} names non-live {namespace} tools: {sorted(stale)}"
 
