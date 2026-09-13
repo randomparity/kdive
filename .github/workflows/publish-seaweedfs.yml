@@ -2,10 +2,10 @@ name: publish-seaweedfs
 
 on:
   pull_request:
-    paths: [deploy/seaweedfs/**, docker-compose.seaweedfs.yml, scripts/verify-seaweedfs-image.py]
+    paths: [.github/workflows/publish-seaweedfs.yml, deploy/seaweedfs/**, docker-compose.seaweedfs.yml, scripts/verify-seaweedfs-image.py]
   push:
     branches: [main]
-    paths: [deploy/seaweedfs/**, docker-compose.seaweedfs.yml, scripts/verify-seaweedfs-image.py]
+    paths: [.github/workflows/publish-seaweedfs.yml, deploy/seaweedfs/**, docker-compose.seaweedfs.yml, scripts/verify-seaweedfs-image.py]
   workflow_dispatch:
 
 permissions:
