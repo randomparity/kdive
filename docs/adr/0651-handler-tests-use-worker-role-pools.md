@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-09-13)
 
 ## Context
 
@@ -25,10 +25,10 @@ Build a function-scoped DSN adapter from the current `migrated_url`, and open a 
 `kdive_worker_pool` from it for the act phase. This keeps each test database in its DSN while
 limiting cluster-global CREATE/DROP ROLE work to once per worker session.
 
-Keep `migrated_url` connections for setup and post-condition observation only. Test helpers that
-need both phases accept distinct owner and worker connections/pools rather than hiding role
-selection. A checked 34-module inventory records each test module's worker act paths or the
-reason it is owner-only.
+Keep `migrated_url` connections for setup and post-condition observation only. Tests either pass
+the role DSN explicitly to their act helper or bind it in a module-local fixture used only by the
+act helpers; neither form retains an owner-execution fallback. A checked 34-module inventory
+records each test module's worker act paths or the reason it is owner-only.
 
 Replace owner-backed handler pools in the affected handler-test files; do not retain an
 owner-execution compatibility path for their handler calls.

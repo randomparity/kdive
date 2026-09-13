@@ -12,9 +12,10 @@ handlers, schema, or platform error translation.
 [ADR-0651](../../adr/0651-handler-tests-use-worker-role-pools.md) owns the boundary: one LOGIN
 set is created per xdist worker session under the existing maintenance-database role lock, while a
 function-scoped pool connects that principal to each current migrated database. The same lock
-protects teardown. A converted test passes that `kdive_worker_pool` to the handler act phase,
-while fixture setup and postcondition reads remain on owner connections. Helpers that previously
-accepted one owner pool for both purposes gain explicit owner/worker inputs when necessary.
+protects teardown. A converted test passes `kdive_worker_pool` to the handler act phase or opens
+an equivalent function-scoped pool from the role DSN, while fixture setup and postcondition reads
+remain on owner connections. High-volume legacy modules bind that DSN in a test-local fixture so
+their shared act helpers cannot retain an owner-execution fallback.
 
 `tests/jobs/handlers/worker_role_inventory.json` classifies every one of the 34 handler test
 modules. A `worker-act` record names each handler-act source location; `owner-only` records name
