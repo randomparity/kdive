@@ -8,10 +8,11 @@ Restore ADR-0179: a terminal install job failure changes a build-succeeded Run t
 ## Design
 
 Add `failed` as the `succeeded` Run state's sole successor in the central adjacency table and
-include `succeeded` in the worker compensation guard. The existing transaction, Run advisory
-lock-before-job-lock order, worker fence, category, and failing-job writes remain unchanged.
-Only a `JobState.FAILED` result compensates the Run; a requeue or fence miss leaves it unchanged.
-No read code changes: `runs.get` already renders failed Runs through `_failed_envelope`.
+allow that source state only for terminal install compensation. The existing transaction, Run
+advisory lock-before-job-lock order, worker fence, category, and failing-job writes remain
+unchanged. A terminal boot failure keeps its build-succeeded Run for ADR-0230's
+`boot_readiness` read path. A requeue or fence miss leaves either Run unchanged. No read code
+changes: `runs.get` already renders failed Runs through `_failed_envelope`.
 
 ## Constraints
 
@@ -20,8 +21,8 @@ No read code changes: `runs.get` already renders failed Runs through `_failed_en
 
 ## Evidence
 
-Test the central edge, terminal worker finalization fields, retryable non-terminal behavior, and
-the existing `runs.get` failure envelope after finalization.
+Test the central edge, terminal install finalization fields, retryable non-terminal behavior,
+terminal boot preservation, and the existing `runs.get` failure envelope after finalization.
 
 ## Rejected alternatives
 
