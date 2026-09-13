@@ -45,5 +45,6 @@ def test_pre_overlay_set_is_the_documented_states() -> None:
         SystemState.PROVISIONING,
         SystemState.REPROVISIONING,
         SystemState.RESTORING,
+        SystemState.TEARING_DOWN,
     }
     assert expected == ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES

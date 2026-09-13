@@ -559,7 +559,7 @@ def test_teardown_handler_deletes_key_row(migrated_url: str) -> None:
     tool, object_kind, _oid, transition, _digest, project = audit[0]
     assert tool == "systems.teardown"
     assert object_kind == "systems"
-    assert transition == "ready->torn_down"
+    assert transition == "tearing_down->torn_down"
     assert project == "proj"
 
 
@@ -597,7 +597,7 @@ def test_teardown_discharge_unblocks_worker_module_reap(migrated_url: str) -> No
 
 
 def test_failed_teardown_keeps_module_attempt_for_worker_reap(migrated_url: str) -> None:
-    async def _run() -> tuple[ModuleAttempt, list[ModuleVolumeKey]]:
+    async def _run() -> tuple[ModuleAttempt, SystemState, list[ModuleVolumeKey]]:
         async with _pool(migrated_url) as pool:
             system_id = await _seed_system(
                 pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
@@ -616,9 +616,10 @@ def test_failed_teardown_keeps_module_attempt_for_worker_reap(migrated_url: str)
                     await systems_handlers.teardown_handler(
                         conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
                     )
-            return attempt, await _worker_reap_owners(pool)
+            return attempt, (await _system(pool, system_id)).state, await _worker_reap_owners(pool)
 
-    attempt, owners = asyncio.run(_run())
+    attempt, state, owners = asyncio.run(_run())
+    assert state is SystemState.TEARING_DOWN
     assert owners == [
         ModuleVolumeKey(str(attempt.system_id), str(attempt.run_id), attempt.operation_nonce, kind)
         for kind in ("source.ext4", "scratch.ext4")
@@ -642,7 +643,7 @@ def test_teardown_discharge_rollback_keeps_module_attempt_for_worker_reap(
         fault,
     )
 
-    async def _run() -> tuple[ModuleAttempt, list[ModuleVolumeKey]]:
+    async def _run() -> tuple[ModuleAttempt, SystemState, list[ModuleVolumeKey]]:
         async with _pool(migrated_url) as pool:
             system_id = await _seed_system(
                 pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
@@ -661,9 +662,10 @@ def test_teardown_discharge_rollback_keeps_module_attempt_for_worker_reap(
                     await systems_handlers.teardown_handler(
                         conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
                     )
-            return attempt, await _worker_reap_owners(pool)
+            return attempt, (await _system(pool, system_id)).state, await _worker_reap_owners(pool)
 
-    attempt, owners = asyncio.run(_run())
+    attempt, state, owners = asyncio.run(_run())
+    assert state is SystemState.TEARING_DOWN
     assert owners == [
         ModuleVolumeKey(str(attempt.system_id), str(attempt.run_id), attempt.operation_nonce, kind)
         for kind in ("source.ext4", "scratch.ext4")
