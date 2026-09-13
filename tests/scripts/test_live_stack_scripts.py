@@ -1647,7 +1647,8 @@ def test_restart_host_processes_starts_ordinary_daemons_and_lifecycle_workers() 
 def test_worker_lifecycle_receives_worker_member_dsn_and_s3_endpoint() -> None:
     # sudo resets the environment, so the root worker re-sources env.sh and would re-default any
     # relocated backend port. The resolved DB + S3 endpoints must be forwarded into the sudo shell
-    # so a KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT override reaches the worker, not just the same-user
+    # so a KDIVE_POSTGRES_PORT/KDIVE_SEAWEEDFS_PORT override reaches the worker, not just the
+    # same-user
     # server/reconciler. The forward must appear inside the `sudo bash -c` block.
     lifecycle = (ROOT / "scripts/live-stack/worker-lifecycle.sh").read_text()
     assert '"worker_database_url": os.environ["KDIVE_WORKER_DATABASE_URL"]' in lifecycle

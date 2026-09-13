@@ -1,7 +1,7 @@
 """Guard: disposable-backend test fixture images are pinned to digests, not bare tags (#1921).
 
 `tests/db/conftest.py` and `tests/store/conftest.py` each declare a module-level image
-constant (``_POSTGRES_IMAGE``, ``_MINIO_IMAGE``). A mutable tag like ``postgres:17``
+constant (``_POSTGRES_IMAGE``, ``_SEAWEEDFS_IMAGE``). A mutable tag like ``postgres:17``
 silently shifts to a new minor release on re-pull without any diff to explain it — the
 schema-test gate becomes an assertion about an unknown Postgres version. Pinning to a
 manifest-list digest makes the backend version part of the tree, so a pull that lands a
@@ -30,7 +30,7 @@ _DIGEST_PIN = re.compile(r"@sha256:[0-9a-f]{64}")
 # The two fixture files and the constant they must each contain.
 _FIXTURES: list[tuple[Path, str]] = [
     (_TESTS / "db" / "conftest.py", "_POSTGRES_IMAGE"),
-    (_TESTS / "store" / "conftest.py", "_MINIO_IMAGE"),
+    (_TESTS / "store" / "conftest.py", "_SEAWEEDFS_IMAGE"),
 ]
 
 
