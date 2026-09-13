@@ -114,8 +114,8 @@ refresh workflow; it makes no runtime promise.
 1. Describe the handler-only boundary, classifications, grant-matrix source migrations, and how
    to refresh source lines after an intentional change.
 2. Link the guide from the contributor section in `docs/README.md`.
-3. Mark ADR-0649 Accepted only after Tasks 1 and 2 are complete. Run `just docs-links`, `just
-   lint`, `just type`, the focused test, and finally
+3. Keep ADR-0649 Proposed until the implementation PR merges, when the merge ratifies it. Run
+   `just docs-links`, `just lint`, `just type`, the focused test, and finally
    `just ci > /tmp/kdive-2345-ci.log 2>&1 < /dev/null`; expect exit 0 from each.
 
 **Acceptance criteria:** a reviewer can reproduce the classification evidence without treating

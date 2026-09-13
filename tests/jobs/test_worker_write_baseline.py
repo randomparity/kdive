@@ -1,4 +1,4 @@
-"""Structural checks for the worker-handler write baseline (ADR-0649, #2345)."""
+"""Structural checks for the worker-handler write baseline (#2345)."""
 
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-09-13)
+Proposed
 
 - **Issue:** #2345
 
@@ -41,7 +41,8 @@ intentional handler-write change.
   a no-write entry.
 - The first baseline may report no additional `LEAK`; remediation remains owned by a separate
   issue when one is found.
-- This ADR becomes Accepted only with the manifest, test, and guide in the implementation PR.
+- This ADR becomes Accepted only when the implementation PR containing the manifest, test, and
+  guide merges.
 
 ## Considered & rejected
 
