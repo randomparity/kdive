@@ -21,9 +21,9 @@ spec:
           image: {{ .Values.demo.seaweedfs.image }}
           args: ["mini", "-dir=/data"]
           env:
-            - name: MINIO_ROOT_USER
+            - name: S3_ACCESS_KEY
               value: {{ .Values.demoCredentials.minio.rootUser | quote }}
-            - name: MINIO_ROOT_PASSWORD
+            - name: S3_SECRET_KEY
               value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
           ports:
             - containerPort: 8333

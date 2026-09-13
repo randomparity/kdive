@@ -241,26 +241,15 @@ initContainers:
 {{- if .Values.bundledBackends }}
   - name: verify-seaweedfs-versioning
     image: {{ include "kdive.image" . }}
-    command:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        bucket="local/$MC_BUCKET"
-        until python -m kdive.store.initialize_bucket; do
-          echo "waiting for minio..."; sleep 3
-        done
-        until version_info=$(mc version info --json "$bucket"); do
-          echo "waiting for MinIO bucket..."; sleep 3
-        done
+    command: ["python", "-m", "kdive.store.initialize_bucket"]
     env:
-      - name: MC_CONFIG_DIR
-        value: /tmp/.mc
-      - name: MC_BUCKET
+      - name: KDIVE_S3_BUCKET
         value: {{ .Values.config.KDIVE_S3_BUCKET | quote }}
-      - name: MC_USER
+      - name: KDIVE_S3_ENDPOINT_URL
+        value: {{ include "kdive.s3Endpoint" . | quote }}
+      - name: AWS_ACCESS_KEY_ID
         value: {{ .Values.demoCredentials.minio.rootUser | quote }}
-      - name: MC_PASS
+      - name: AWS_SECRET_ACCESS_KEY
         value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
 {{- end }}
 {{- end -}}
