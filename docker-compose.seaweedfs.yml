@@ -1,0 +1,16 @@
+# Optional image-only proof path for ADR-0647. It does not alter the MinIO-backed stack.
+services:
+  seaweedfs:
+    image: ${KDIVE_SEAWEEDFS_IMAGE:-kdive-seaweedfs:dev}
+    build: ./deploy/seaweedfs
+    environment:
+      AWS_ACCESS_KEY_ID: kdive-dev
+      AWS_SECRET_ACCESS_KEY: kdive-dev-secret # pragma: allowlist secret — local dev only
+      S3_BUCKET: kdive-artifacts
+    ports:
+      - "${KDIVE_SEAWEEDFS_PORT:-127.0.0.1:8333}:8333"
+    volumes:
+      - kdive-seaweedfs-data:/data
+
+volumes:
+  kdive-seaweedfs-data:
