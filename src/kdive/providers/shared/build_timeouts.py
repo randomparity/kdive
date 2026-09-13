@@ -10,10 +10,10 @@ into a concrete provider package: ``tests/providers/test_provider_boundaries.py`
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 
 import kdive.config as config
+from kdive.diagnostics.contributions.guest_arch_accel import kvm_probe_for_uri
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 
 #: The unscaled budget for one slow rootfs build tool on a worker host with usable KVM.
@@ -64,13 +64,7 @@ def _worker_host_kvm_usable() -> bool:
     present where this returns ``False``. Converging all of them onto one openability test is
     #2410's job; this fixes the budget that silently took the wrong branch.
     """
-    node = config.env_snapshot().get(_KVM_NODE_ENV) or _DEFAULT_KVM_NODE
-    try:
-        fd = os.open(node, os.O_RDWR)
-    except OSError:
-        return False
-    os.close(fd)
-    return True
+    return kvm_probe_for_uri("")()
 
 
 def appliance_budget_s(base_s: int, *, kvm_present: Callable[[], bool] | None = None) -> int:
@@ -92,7 +86,7 @@ def appliance_budget_s(base_s: int, *, kvm_present: Callable[[], bool] | None = 
     unit-tested without a real ``/dev/kvm``; the default probe (:func:`_worker_host_kvm_usable`)
     runs per call, so it answers for the host as it is when the tool runs.
     """
-    probe = kvm_present if kvm_present is not None else _worker_host_kvm_usable
+    probe = kvm_present if kvm_present is not None else kvm_probe_for_uri("")
     if probe():
         return base_s
     return int(base_s * config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER))
