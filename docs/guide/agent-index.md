@@ -6,7 +6,8 @@ served guides. Read a tool's current schema for its parameters and return fields
 ## Reaching tools
 
 By default, agent clients see a small core catalog. Use `tools.search` to discover other
-capabilities, then request the chosen tool's schema with `detail="full"` and a small `limit`.
+capabilities, then request a chosen tool's argument names, types, and required flags with
+`detail="parameters"`; reserve `detail="full"` for its complete description and input schema.
 When you know the names, `tools.search(names=["runs.install"])` returns their full descriptions
 and input schemas directly (1–10 names per call). Call a tool through
 `tools.invoke(name, arguments)`, or directly when your client exposes it.
