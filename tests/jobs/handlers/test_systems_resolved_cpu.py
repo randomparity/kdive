@@ -8,6 +8,7 @@ domain); a local write lands only while the System is in ``{PROVISIONING, READY}
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -107,13 +108,17 @@ async def _seed_ready_system(conn: psycopg.AsyncConnection) -> System:
     return await SYSTEMS.update_state(conn, sysm.id, SystemState.READY)
 
 
-def test_local_provisioner_persists_resolved_cpu(migrated_url: str) -> None:
+def test_local_provisioner_persists_resolved_cpu(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             sysm = await _seed_ready_system(conn)
+        async with await _connect(authority_role_dsns("kdive_worker")) as conn:
             await _persist_local_resolved_cpu(
                 conn, sysm, _runtime(_StubProvisioner(_RESOLVED)), ResourceKind.LOCAL_LIBVIRT
             )
+        async with await _connect(migrated_url) as conn:
             reloaded = await SYSTEMS.get(conn, sysm.id)
             assert reloaded is not None
             assert reloaded.resolved_cpu == _RESOLVED
@@ -121,13 +126,17 @@ def test_local_provisioner_persists_resolved_cpu(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_local_read_failure_persists_null(migrated_url: str) -> None:
+def test_local_read_failure_persists_null(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             sysm = await _seed_ready_system(conn)
+        async with await _connect(authority_role_dsns("kdive_worker")) as conn:
             await _persist_local_resolved_cpu(
                 conn, sysm, _runtime(_StubProvisioner(None)), ResourceKind.LOCAL_LIBVIRT
             )
+        async with await _connect(migrated_url) as conn:
             reloaded = await SYSTEMS.get(conn, sysm.id)
             assert reloaded is not None
             assert reloaded.resolved_cpu is None
@@ -135,15 +144,19 @@ def test_local_read_failure_persists_null(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_remote_binding_writes_nothing(migrated_url: str) -> None:
+def test_remote_binding_writes_nothing(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             sysm = await _seed_ready_system(conn)
+        async with await _connect(authority_role_dsns("kdive_worker")) as conn:
             # A remote binding must not write (it would clobber the mint snapshot with NULL); the
             # stub returns a value but the kind gate skips the write entirely.
             await _persist_local_resolved_cpu(
                 conn, sysm, _runtime(_StubProvisioner(_RESOLVED)), ResourceKind.REMOTE_LIBVIRT
             )
+        async with await _connect(migrated_url) as conn:
             reloaded = await SYSTEMS.get(conn, sysm.id)
             assert reloaded is not None
             assert reloaded.resolved_cpu is None
