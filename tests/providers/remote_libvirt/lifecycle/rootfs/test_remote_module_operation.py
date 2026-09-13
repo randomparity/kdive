@@ -26,7 +26,10 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.domain.remote_module_attempt_preparation import (
+    ModuleAttemptObligationReceiptV1,
+    ModuleAttemptPreparationRequestV1,
+)
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
@@ -63,7 +66,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 )
 from kdive.services.remote_module_attempt_preparation import (
     ModuleAttemptObligationVerificationError,
-    open_module_attempt_preparation,
 )
 from kdive.services.remote_module_operation import RemoteModuleOperationRuntime
 from kdive.services.remote_module_phases import (
@@ -761,7 +763,15 @@ def test_real_receipt_guards_two_real_volume_creates(
                 authority_role_dsns("kdive_worker"), min_size=1, max_size=1
             ) as worker,
         ):
-            receipt = await open_module_attempt_preparation(server, repository, attempt)
+            async with server.connection() as conn, conn.transaction():
+                await repository.open_mutation_obligation(conn, attempt)
+            receipt = ModuleAttemptPreparationRequestV1(
+                module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+                    system_id=attempt.system_id,
+                    run_id=attempt.run_id,
+                    operation_nonce=attempt.operation_nonce,
+                )
+            )
             runtime = RemoteModuleOperationRuntime(
                 worker,
                 repository,
@@ -1188,7 +1198,15 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
                 authority_role_dsns("kdive_worker"), min_size=1, max_size=1
             ) as worker,
         ):
-            receipt = await open_module_attempt_preparation(server, repository, attempt)
+            async with server.connection() as conn, conn.transaction():
+                await repository.open_mutation_obligation(conn, attempt)
+            receipt = ModuleAttemptPreparationRequestV1(
+                module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+                    system_id=attempt.system_id,
+                    run_id=attempt.run_id,
+                    operation_nonce=attempt.operation_nonce,
+                )
+            )
 
             def preparation_runtime() -> RemoteModuleOperationRuntime:
                 async def read(
