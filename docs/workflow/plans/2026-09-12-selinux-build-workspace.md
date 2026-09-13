@@ -71,9 +71,10 @@ modify `tests/scripts/test_selinux_label.py`.
    existing recursive descendant suffix only after the literal base is complete. This preserves arbitrary valid workspace
    names while keeping the rule to that path and descendants.
 3. Add a small Python source-contract test that reads `build-image.sh`, finds `realpath -m`, the
-   workspace creation, helper call, and `build-fs --image` text, and asserts their byte offsets are
-   increasing and the helper and CLI both use the canonical `workspace` value. This proves the
-   ordering and shared-value contract without attempting a privileged image build.
+   workspace creation, helper call, the exact `--workspace "${workspace}"` operand, and
+   `build-fs --image` text. Assert their byte offsets are increasing, with the workspace operand
+   before the image operand. This proves the ordering and shared-value contract without attempting
+   a privileged image build.
 
    ```python
    from pathlib import Path
@@ -86,13 +87,15 @@ modify `tests/scripts/test_selinux_label.py`.
            'mkdir -p "${workspace}"'
        ) < source.index(
            'kdive_label_svirt_image "${workspace}"'
-       ) < source.index('build-fs --image "${name}"')
+       ) < source.index('--workspace "${workspace}"') < source.index(
+           'build-fs --image "${name}"'
+       )
    ```
 
-4. Extend `test_selinux_label.py` with a directory such as `/tmp/kdive.build[1]` and assert the
-   stub records an escaped dot and brackets before the helper's existing descendant suffix. This
-   is red for direct interpolation and proves the literal fcontext boundary without a real policy
-   store.
+4. Extend `test_selinux_label.py` with a parameterized directory name that contains each of
+   `\\ . ^ $ * + ? ( ) [ ] { } |`, including a literal backslash. Assert the stub records each
+   escaped character before the helper's existing descendant suffix. This is red for direct
+   interpolation and proves the complete literal fcontext boundary without a real policy store.
 5. Run both focused test modules. Expected result: all selected tests pass.
 
 ## Task 2 — align operator guidance
