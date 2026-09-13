@@ -71,24 +71,23 @@ modify `tests/scripts/test_selinux_label.py`.
    existing recursive descendant suffix only after the literal base is complete. This preserves arbitrary valid workspace
    names while keeping the rule to that path and descendants.
 3. Add a small Python source-contract test that reads `build-image.sh`, finds `realpath -m`, the
-   workspace creation, helper call, the exact `--workspace "${workspace}"` operand, and
-   `build-fs --image` text. Assert their byte offsets are increasing, with the workspace operand
-   before the image operand. This proves the ordering and shared-value contract without attempting
-   a privileged image build.
+   workspace creation, helper call, and the exact `build-fs --image "${name}" --workspace
+   "${workspace}"` invocation. Assert their byte offsets are increasing. This proves the ordering
+   and shared-value contract without attempting a privileged image build.
 
    ```python
    from pathlib import Path
 
    SCRIPT = Path(__file__).resolve().parents[2] / "examples/local-libvirt/build-image.sh"
 
+
    def test_workspace_is_canonicalized_and_labeled_before_build_fs() -> None:
        source = SCRIPT.read_text(encoding="utf-8")
-       assert source.index('realpath -m -- "${workspace}"') < source.index(
-           'mkdir -p "${workspace}"'
-       ) < source.index(
-           'kdive_label_svirt_image "${workspace}"'
-       ) < source.index('--workspace "${workspace}"') < source.index(
-           'build-fs --image "${name}"'
+       assert (
+           source.index('realpath -m -- "${workspace}"')
+           < source.index('mkdir -p "${workspace}"')
+           < source.index('kdive_label_svirt_image "${workspace}"')
+           < source.index('build-fs --image "${name}" --workspace "${workspace}"')
        )
    ```
 

@@ -16,8 +16,18 @@
 #   `set -euo pipefail` does not continue as though the label had been applied.
 
 kdive_label_svirt_image() {
-  local directory="${1%/}" pattern
-  pattern="${directory}(/.*)?"
+  local directory="${1%/}" escaped_directory="" character index pattern
+
+  for ((index = 0; index < ${#directory}; index++)); do
+    character="${directory:index:1}"
+    case "${character}" in
+    \\ | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|')
+      escaped_directory+="\\${character}"
+      ;;
+    *) escaped_directory+="${character}" ;;
+    esac
+  done
+  pattern="${escaped_directory}(/.*)?"
 
   command -v getenforce >/dev/null 2>&1 || return 0
   [[ "$(getenforce)" == "Enforcing" ]] || return 0

@@ -78,7 +78,7 @@ def _bindir(
 def _run(directory: str, bindir: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     assert BASH is not None, "bash is required to run the helper"
     return subprocess.run(
-        [BASH, "-c", f'source "{HELPER}"; kdive_label_svirt_image "{directory}"'],
+        [BASH, "-c", f'source "{HELPER}"; kdive_label_svirt_image "$1"', "bash", directory],
         env={"PATH": str(bindir)},
         capture_output=True,
         text=True,
@@ -119,6 +119,23 @@ def test_strips_a_trailing_slash_from_the_pattern(tmp_path: Path) -> None:
     assert _log_lines(tmp_path) == [
         "semanage fcontext -a -t svirt_image_t /var/lib/kdive/rootfs(/.*)?",
         "restorecon -R /var/lib/kdive/rootfs",
+    ]
+
+
+def test_escapes_fcontext_metacharacters(tmp_path: Path) -> None:
+    """A caller path is a literal fcontext prefix, not a regular-expression fragment."""
+    bindir = _bindir(tmp_path)
+    directory = r"/tmp/kdive\\.^$*+?()[]{}|"
+    metacharacters = frozenset(r"\\.^$*+?()[]{}|")
+    escaped_directory = "".join(
+        f"\\{character}" if character in metacharacters else character for character in directory
+    )
+
+    _run(directory, bindir)
+
+    assert _log_lines(tmp_path) == [
+        f"semanage fcontext -a -t svirt_image_t {escaped_directory}(/.*)?",
+        f"restorecon -R {directory}",
     ]
 
 

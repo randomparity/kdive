@@ -76,8 +76,8 @@ examples/local-libvirt/install-host.sh
 examples/local-libvirt/up.sh
 
 # 2. Build and register a guest image (once; re-run per extra distro you want to boot).
-#    On an SELinux-enforcing host, read the SELinux note in docs/operating/providers/
-#    local-libvirt.md first: host labeling covers provisioning, not this build.
+#    On an SELinux-enforcing host, build-image.sh labels its resolved workspace before the
+#    customization boot; install-host.sh supplies the semanage prerequisite.
 examples/local-libvirt/build-image.sh fedora-kdive-ready-44
 
 # 3. In the shell you launch your MCP client from, export a fresh token:
