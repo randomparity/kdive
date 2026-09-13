@@ -25,9 +25,6 @@ from tests.db.external_boot_authority_support import (
     _RoleDsns,
     _seed_case,
 )
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 
 _DIGEST = "sha256:" + "d" * 64
 _NONCE = "0" * 32

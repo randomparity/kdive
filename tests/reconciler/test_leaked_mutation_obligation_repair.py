@@ -41,9 +41,6 @@ from kdive.reconciler.repairs import systems as repairs_systems
 from kdive.reconciler.repairs.systems import repair_leaked_mutation_obligations
 from kdive.services.systems.authority_owned import _teardown_dedup_key
 from tests.db.external_boot_authority_support import _RoleDsns
-from tests.db.external_boot_authority_support import (
-    authority_role_dsns as authority_role_dsns,  # noqa: F401
-)
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
 
 _NONCE = "0" * 32

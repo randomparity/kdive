@@ -7,7 +7,7 @@ import hashlib
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal, LiteralString, cast
+from typing import Any, Literal, LiteralString
 from uuid import uuid4
 
 import psycopg
@@ -42,7 +42,6 @@ from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.db.external_boot_authority_support import authority_role_dsns as _role_dsns_fixture
 from tests.jobs.handlers.external_boot.conftest import resolver_for
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
@@ -98,13 +97,6 @@ class _ReleaseFaultAuthorityAdapter:
             self.entered.set()
             await self.release.wait()
         return self._observation(request)
-
-
-@pytest.fixture
-def authority_role_dsns(migrated_url: str) -> Any:
-    fixture = cast(Any, _role_dsns_fixture).__wrapped__(migrated_url)
-    yield next(fixture)
-    fixture.close()
 
 
 @asynccontextmanager
