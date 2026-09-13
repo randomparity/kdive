@@ -8,7 +8,7 @@ and all TCG deadline changes remain excluded.
 
 ## Steps
 
-1. Add one narrow classifier predicate requiring both terminal manager lines. Keep the existing
+1. Add line-aware predicates requiring both full terminal manager lines. Keep the existing
    precedence: ok marker, explicit fail marker, existing genuine kernel faults, terminal manager
    pair, then pending.
 2. Add focused tests for the complete pair, each partial line remaining pending, and successful

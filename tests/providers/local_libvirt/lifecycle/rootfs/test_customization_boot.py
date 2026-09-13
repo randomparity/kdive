@@ -37,8 +37,8 @@ def test_fail_marker():
 @pytest.mark.parametrize(
     "console",
     [
-        b"systemd[1]: Failed to start up manager.\n[!!!!!!] Freezing execution.\n",
-        b"[!!!!!!] Freezing execution.\nsystemd[1]: Failed to start up manager.\n",
+        b"[!!!!!!] Failed to start up manager.\n[ 1083.237850] systemd[1]: Freezing execution.\n",
+        b"[ 1083.237850] systemd[1]: Freezing execution.\n[!!!!!!] Failed to start up manager.\n",
     ],
 )
 def test_terminal_manager_freeze_fails(console: bytes):
@@ -48,8 +48,8 @@ def test_terminal_manager_freeze_fails(console: bytes):
 @pytest.mark.parametrize(
     "console",
     [
-        b"systemd[1]: Failed to start up manager.\n",
-        b"[!!!!!!] Freezing execution.\n",
+        b"[!!!!!!] Failed to start up manager.\n",
+        b"[ 1083.237850] systemd[1]: Freezing execution.\n",
     ],
 )
 def test_partial_manager_freeze_signature_is_pending(console: bytes):
@@ -58,8 +58,22 @@ def test_partial_manager_freeze_signature_is_pending(console: bytes):
 
 def test_ok_marker_wins_over_terminal_manager_freeze():
     assert (
-        C(b"Failed to start up manager.\nFreezing execution.\nkdive-customize-ok\n")
+        C(
+            b"[!!!!!!] Failed to start up manager.\n"
+            b"[ 1083.237850] systemd[1]: Freezing execution.\n"
+            b"kdive-customize-ok\n"
+        )
         is CustomizeVerdict.OK
+    )
+
+
+def test_package_prose_with_manager_freeze_phrases_is_pending():
+    assert (
+        C(
+            b"changelog: [!!!!!!] Failed to start up manager. See the release notes.\n"
+            b"example: [ 1083.237850] systemd[1]: Freezing execution.\n"
+        )
+        is CustomizeVerdict.PENDING
     )
 
 
@@ -203,7 +217,10 @@ def test_genuine_fault_raises():
 
 def test_terminal_manager_freeze_raises_without_sleeping():
     events: list[str] = []
-    console = b"Failed to start up manager.\nFreezing execution.\n"
+    console = (
+        b"[!!!!!!] Failed to start up manager.\n"
+        b"[ 1083.237850] systemd[1]: Freezing execution.\n"
+    )
     seams = CustomizationBootSeams(
         prepare_console=lambda _bid: events.append("prepare"),
         open_conn=lambda: FakeConn(events),

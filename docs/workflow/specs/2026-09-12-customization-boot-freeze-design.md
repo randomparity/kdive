@@ -11,7 +11,8 @@ stop the KDIVE wait and preserve the existing `provisioning_failure` error categ
 ## Scope
 
 Extend only the customization-console backstop classifier. A console is terminal for this defect
-only when it contains both observed lines, in either position in the accumulated console. The
+only when it contains both full observed terminal lines: the `[!!!!!!]` manager-start failure and
+the timestamped `systemd[1]` freeze line, in either position in the accumulated console. The
 success marker remains authoritative. A matched terminal pair follows the existing failed-verdict
 path, which emits the bounded console tail, tears down the transient domain, and does not sleep
 or consume the remaining poll budget.

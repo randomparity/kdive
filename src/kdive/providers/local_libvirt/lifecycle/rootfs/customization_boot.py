@@ -75,9 +75,12 @@ _GENUINE_FAULT = re.compile(
     r"|KFENCE:"
 )
 
-_TERMINAL_MANAGER_FREEZE_LINES = (
-    "Failed to start up manager",
-    "Freezing execution",
+_MANAGER_START_FAILURE = re.compile(
+    r"^\[!!!!!!\][^\S\n]+Failed to start up manager\.[^\S\n]*$", re.MULTILINE
+)
+_MANAGER_FREEZE = re.compile(
+    r"^\[[^\S\n]*\d+\.\d+\][^\S\n]+systemd\[1\]: Freezing execution\.[^\S\n]*$",
+    re.MULTILINE,
 )
 
 
@@ -106,7 +109,7 @@ def classify_customization_console(data: bytes) -> CustomizeVerdict:
         return CustomizeVerdict.FAILED
     if _GENUINE_FAULT.search(text):
         return CustomizeVerdict.FAILED
-    if all(line in text for line in _TERMINAL_MANAGER_FREEZE_LINES):
+    if _MANAGER_START_FAILURE.search(text) and _MANAGER_FREEZE.search(text):
         return CustomizeVerdict.FAILED
     return CustomizeVerdict.PENDING
 
