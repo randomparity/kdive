@@ -6,17 +6,14 @@ from typing import NoReturn
 from uuid import UUID
 
 from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.external_boot_activations import (
     CasResult,
     CasStatus,
     ExternalBootActivationRepository,
 )
-from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.external_boot_activation import ExternalBootActivation
-from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPlan,
@@ -48,81 +45,6 @@ def _applied(result: CasResult) -> ExternalBootActivation:
     if result.status is not CasStatus.APPLIED or result.activation is None:
         _lost_cas(result.status)
     return result.activation
-
-
-async def prepare_external_boot(
-    *,
-    pool: AsyncConnectionPool,
-    repository: ExternalBootActivationRepository,
-    ports: ExternalBootPreparationPorts,
-    plan: ExternalBootPlan,
-    activation_id: UUID,
-    system_id: UUID,
-    operation_owner_id: UUID,
-    authority_generation: int,
-    authority: OpaqueProviderRef,
-    materialize_operation_identity: str,
-    prepare_operation_identity: str,
-) -> ExternalBootActivation:
-    """Observe durable receipts and execute only preparation phases still absent."""
-    async with (
-        pool.connection() as conn,
-        conn.transaction(),
-        advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
-    ):
-        return await _prepare_external_boot_locked(
-            conn=conn,
-            repository=repository,
-            ports=ports,
-            plan=plan,
-            activation_id=activation_id,
-            system_id=system_id,
-            operation_owner_id=operation_owner_id,
-            authority_generation=authority_generation,
-            authority=authority,
-            materialize_operation_identity=materialize_operation_identity,
-            prepare_operation_identity=prepare_operation_identity,
-        )
-
-
-async def prepare_external_boot_for_admission(
-    conn: AsyncConnection,
-    *,
-    repository: ExternalBootActivationRepository,
-    resolver: ProviderResolver,
-    plan: ExternalBootPlan,
-    activation_id: UUID,
-    provider_kind: str,
-    authority_instance: str,
-) -> ExternalBootActivation:
-    """Prepare one activation through its production provider binding before job admission."""
-    activation = await repository.get(conn, activation_id)
-    if activation is None:
-        raise PreparationStaleError("external-boot activation was not found")
-    provider = await resolver.binding_for_system(conn, activation.system_id)
-    if provider.kind.value != provider_kind:
-        raise PreparationStaleError("external-boot preparation provider binding is stale")
-    ports = provider.runtime.external_boot_preparation
-    if ports is None:
-        raise PreparationStaleError("external-boot preparation port is not configured")
-    operation_prefix = (
-        f"external-boot/{activation.id}/{activation.operation_owner_id}/"
-        f"{activation.authority_generation}"
-    )
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, activation.system_id):
-        return await _prepare_external_boot_locked(
-            conn=conn,
-            repository=repository,
-            ports=ports,
-            plan=plan,
-            activation_id=activation.id,
-            system_id=activation.system_id,
-            operation_owner_id=activation.operation_owner_id,
-            authority_generation=activation.authority_generation,
-            authority=OpaqueProviderRef(ref=authority_instance),
-            materialize_operation_identity=f"{operation_prefix}/materialize",
-            prepare_operation_identity=f"{operation_prefix}/prepare",
-        )
 
 
 async def _prepare_external_boot_locked(

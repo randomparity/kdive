@@ -13,7 +13,6 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.remote_module_attempt_preparation import (
-    ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
 )
 
@@ -24,31 +23,6 @@ class ModuleAttemptObligationVerificationError(RuntimeError):
 
 def _verification_failed() -> ModuleAttemptObligationVerificationError:
     return ModuleAttemptObligationVerificationError("module-attempt obligation verification failed")
-
-
-async def open_module_attempt_preparation(
-    pool: AsyncConnectionPool,
-    repository: RemoteModuleAttemptObligationRepository,
-    attempt: ModuleAttempt,
-) -> ModuleAttemptPreparationRequestV1:
-    """Commit an open obligation before returning its dispatchable request."""
-    try:
-        async with pool.connection() as conn, conn.transaction():
-            await repository.open_mutation_obligation(conn, attempt)
-            if not await repository.mutation_obligation_is_open(conn, attempt):
-                raise _verification_failed()
-    except ModuleAttemptObligationVerificationError:
-        raise
-    except psycopg.Error:
-        raise _verification_failed() from None
-
-    return ModuleAttemptPreparationRequestV1(
-        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
-            system_id=attempt.system_id,
-            run_id=attempt.run_id,
-            operation_nonce=attempt.operation_nonce,
-        )
-    )
 
 
 async def run_verified_module_attempt_preparation[ResultT](
