@@ -11,7 +11,8 @@ and confirmation requirements named by each tool schema.
   transfer.
 - `ops.export_systems_toml` exports the reconciled systems inventory for a platform operator.
 - `ops.jobs_list` lists platform jobs to diagnose queue or worker state.
-- `ops.build_uses_list` lists tracked build-use records before attempting recovery.
+- `ops.build_uses_list` lists tracked build-use records before attempting recovery. It is present
+  only when the deployment has a durable worker-death witness.
 - `ops.tool_trail` reads the cross-tenant tool trail for a `platform_auditor`.
 
 ## Reconcile and tune
@@ -27,7 +28,8 @@ and confirmation requirements named by each tool schema.
 ## Recover destructive exceptions
 
 - `ops.recover_build_use` recovers an eligible build-use record after confirming the recorded
-  state and recovery preconditions.
+  state and recovery preconditions. It is present only when the deployment has a durable
+  worker-death witness.
 - `ops.resolve_recovery_orphan` resolves an external-boot recovery orphan and requires
   `platform_admin`.
 - `ops.force_release` releases capacity through the break-glass path and requires
