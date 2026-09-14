@@ -10,7 +10,6 @@ from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 from pydantic import SecretStr
@@ -45,7 +44,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_state import SlotState, SlotStore
 from kdive.providers.core.resolver import ProviderBinding
-from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.local_libvirt.composition import build_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.external_boot.routing import (
     AuthorityReservationGeometry,
@@ -1744,7 +1743,7 @@ def test_generated_worker_environment_satisfies_local_authority_reservation_geom
     config_registry.load(environment)
 
     assert authority_reservation_geometry(
-        ProviderBinding(ResourceKind.LOCAL_LIBVIRT, cast(ProviderRuntime, object()))
+        ProviderBinding(ResourceKind.LOCAL_LIBVIRT, build_runtime(secret_registry=SecretRegistry()))
     ) == AuthorityReservationGeometry("authority-recovery-store", 4096, 8192)
 
 

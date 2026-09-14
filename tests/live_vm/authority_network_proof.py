@@ -26,7 +26,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.jobs.authority_sender import authority_sender_factory
+from kdive.providers.assembly.authority import authority_sender_factory
 from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend

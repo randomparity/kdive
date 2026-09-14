@@ -24,54 +24,25 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
-    AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
-    AuthorityPreparationResponseV1,
 )
 from kdive.providers.ports.authority import AuthorityRequestSender
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.ports.module_operation import (
+    ModuleAuthority,
+    ModuleBeginRequest,
+    ModuleCompletion,
+    ModuleLifecycleRequest,
+    ModulePreparationRequest,
+    PreparationExecutor,
     RemoteDeviceIdentityPort,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
-    RemoteModuleOperationV1,
-    identity_for,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
 )
 from kdive.services.remote_module_volume_preparation import (
     prepare_verified_remote_module_attempt,
 )
 
 
-class RemoteModulePreparationAuthority(AuthorityRequestSender, Protocol):
-    async def observe_authority(
-        self, request: AuthorityMutationRequestV1, *, deadline: float
-    ) -> AuthorityObservationV1: ...
-
-    async def execute_preparation(
-        self, request: AuthorityPreparationMutationRequestV1, *, deadline: float
-    ) -> AuthorityPreparationResponseV1: ...
-
-    async def open_remote_module_attempt(
-        self, request: RemoteModulePreparationBeginRequestV1, *, deadline: float
-    ) -> RemoteModulePreparationBeginResponseV1: ...
-
-    async def execute_remote_module_preparation(
-        self, request: RemoteModuleVolumePreparationRequestV1, *, deadline: float
-    ) -> RemoteModuleTerminalPreparationResponseV1: ...
-
-    async def execute_remote_module_lifecycle(
-        self, request: RemoteModuleLifecycleRequestV1, *, deadline: float
-    ) -> RemoteModuleLifecycleResponseV1: ...
+class RemoteModulePreparationAuthority(AuthorityRequestSender, ModuleAuthority, Protocol):
+    """The worker's typed authority sender and provider module capability."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,36 +51,33 @@ class RemoteModulePreparationInputs:
 
 
 def _terminal_evidence(
-    operation: RemoteModuleOperationV1,
-    response: RemoteModuleTerminalPreparationResponseV1 | RemoteModuleLifecycleResponseV1,
+    response: ModuleCompletion,
 ) -> ModuleAttemptTerminalEvidence:
-    typed_operation = (
-        response.operation if isinstance(response, RemoteModuleLifecycleResponseV1) else operation
-    )
+    typed_operation = response.operation
     recovery = response.recovery
     if recovery.installed_entry_count is None or recovery.installed_content_bytes is None:
         raise ValueError("remote module lifecycle recovery lacks installed counts")
     return ModuleAttemptTerminalEvidence(
-        terminal_operation=typed_operation.model_dump(mode="json"),
-        terminal_operation_identity=identity_for(typed_operation),
-        terminal_result=response.result.model_dump(mode="json"),
-        terminal_result_identity=identity_for(response.result),
+        terminal_operation=typed_operation.evidence.document,
+        terminal_operation_identity=typed_operation.evidence.identity,
+        terminal_result=response.result.document,
+        terminal_result_identity=response.result.identity,
         baseline_operation_identity=recovery.operation_identity,
         baseline_result_identity=recovery.result_identity,
         installed_entry_count=recovery.installed_entry_count,
         installed_content_bytes=recovery.installed_content_bytes,
-        recovery_reference=recovery.model_dump(mode="json"),
+        recovery_reference=recovery.document,
     )
 
 
 def _restored_evidence(
-    response: RemoteModuleLifecycleResponseV1,
+    response: ModuleCompletion,
 ) -> ModuleAttemptRestoredEvidence:
     return ModuleAttemptRestoredEvidence(
-        restored_operation=response.operation.model_dump(mode="json"),
-        restored_operation_identity=identity_for(response.operation),
-        restored_result=response.result.model_dump(mode="json"),
-        restored_result_identity=identity_for(response.result),
+        restored_operation=response.operation.evidence.document,
+        restored_operation_identity=response.operation.evidence.identity,
+        restored_result=response.result.document,
+        restored_result_identity=response.result.identity,
     )
 
 
@@ -119,19 +87,19 @@ async def prepare_remote_module_on_authority_host(
     repository: RemoteModuleAttemptObligationRepository,
     sender: RemoteModulePreparationAuthority,
     inputs: RemoteModulePreparationInputs,
-    executor: RemoteModulePreparationExecutor,
+    executor: PreparationExecutor | None,
     job_id: UUID,
     job_attempt: int,
     incarnation_credential: SecretStr,
     deadline: float,
-) -> RemoteModuleTerminalPreparationResponseV1:
+) -> ModuleCompletion:
     """Open exact server evidence, then retain worker verification through remote completion."""
     remaining = deadline - asyncio.get_running_loop().time()
     budget_seconds = min(900, math.floor(remaining))
     if budget_seconds < 1:
         raise TimeoutError("remote module preparation deadline expired")
     begin = await sender.open_remote_module_attempt(
-        RemoteModulePreparationBeginRequestV1(
+        ModuleBeginRequest(
             authority=inputs.authority,
             budget_seconds=budget_seconds,
         ),
@@ -150,7 +118,7 @@ async def prepare_remote_module_on_authority_host(
         or operation.release != authority.plan.module_obligation.release
     ):
         raise ValueError("authority-derived remote module operation differs from worker plan")
-    remote_request = RemoteModuleVolumePreparationRequestV1(
+    remote_request = ModulePreparationRequest(
         authority=authority,
         operation=operation,
     )
@@ -165,7 +133,7 @@ async def prepare_remote_module_on_authority_host(
         attempt: ModuleAttempt,
         identity: RemoteDeviceIdentityPort,
         check_deadline: Callable[[], None],
-    ) -> RemoteModuleTerminalPreparationResponseV1:
+    ) -> ModuleCompletion:
         del identity
         if attempt != expected:
             raise ValueError("remote module verified attempt changed")
@@ -189,7 +157,6 @@ async def prepare_remote_module_on_authority_host(
                 result = await sender.execute_remote_module_preparation(
                     remote_request, deadline=transport_deadline
                 )
-                result.validate_terminal_for(operation, authority)
                 return result
             except CategorizedError as exc:
                 terminal_failure = (
@@ -219,9 +186,9 @@ async def prepare_remote_module_on_authority_host(
     async def commit_result(
         connection: AsyncConnection,
         attempt: ModuleAttempt,
-        result: RemoteModuleTerminalPreparationResponseV1,
+        result: ModuleCompletion,
     ) -> None:
-        evidence = _terminal_evidence(operation, result)
+        evidence = _terminal_evidence(result)
         existing = await repository.read_terminal_evidence(connection, attempt)
         if existing is not None and existing != evidence:
             raise CategorizedError(
@@ -264,13 +231,13 @@ async def execute_remote_module_lifecycle_on_authority_host(
     worker_context: ModuleAttemptWorkerWriteContext,
     action: Literal["restore", "reap"],
     deadline: float,
-) -> RemoteModuleLifecycleResponseV1:
+) -> ModuleCompletion:
     """Retain the System verifier until authenticated completion and fenced evidence commit."""
     remaining = deadline - asyncio.get_running_loop().time()
     budget_seconds = min(300, math.floor(remaining))
     if budget_seconds < 1:
         raise TimeoutError("remote module lifecycle deadline expired before dispatch")
-    request = RemoteModuleLifecycleRequestV1(
+    request = ModuleLifecycleRequest(
         authority=authority,
         action=action,
         budget_seconds=budget_seconds,
@@ -299,7 +266,7 @@ async def execute_remote_module_lifecycle_on_authority_host(
                 category=ErrorCategory.CONFLICT,
             )
 
-    async def observe_completion() -> RemoteModuleLifecycleResponseV1:
+    async def observe_completion() -> ModuleCompletion:
         indeterminate = False
 
         async def wait_before_retry() -> None:
@@ -405,7 +372,7 @@ async def execute_remote_module_lifecycle_on_authority_host(
                     category=ErrorCategory.CONFLICT,
                 )
         else:
-            if retained_terminal != _terminal_evidence(response.operation, response):
+            if retained_terminal != _terminal_evidence(response):
                 raise CategorizedError(
                     "remote module teardown completion differs from PREP evidence",
                     category=ErrorCategory.CONFLICT,

@@ -600,7 +600,7 @@ def test_stale_provider_embedded_client_executes_complete_valid_setup(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     import kdive.config as config_registry
-    import kdive.jobs.authority_sender as sender_module
+    import kdive.providers.assembly.authority as sender_module
     import kdive.providers.external_boot_authority.journal as journal_module
     import kdive.providers.external_boot_authority.local_client as local_module
     import kdive.providers.external_boot_authority.protocol as protocol_module

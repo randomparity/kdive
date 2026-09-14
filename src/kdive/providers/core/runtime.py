@@ -17,7 +17,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
-from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.ports.authority import AuthorityCapability
 from kdive.providers.ports.console import ConsoleSnapshotter, RemoteConsoleReader
 from kdive.providers.ports.debug import (
     AttachSeam,
@@ -190,7 +190,7 @@ class ProviderRuntime:
     # an administrative repair cannot turn an opaque caller reference into arbitrary provider I/O.
     external_boot_recovery_objects: ExternalBootRecoveryObjectPorts | None = None
     # Internal worker route, not an advertised provider operation (ADR-0606).
-    authority: AuthorityRequestSender | None = None
+    authority: AuthorityCapability | None = None
 
     def __post_init__(self) -> None:
         _require_capability_port_parity(

@@ -339,6 +339,7 @@ class ProviderComposition:
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
         local_reaper: InfraReaper | None = None,
+        local_authority_sender: AuthorityRequestSender | None = None,
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
         | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
@@ -347,7 +348,9 @@ class ProviderComposition:
                 kind=ResourceKind.LOCAL_LIBVIRT,
                 enabled=lambda: _local_libvirt_enabled(enable_local_libvirt),
                 runtime_factory=lambda: local_composition.build_runtime(
-                    secret_registry=self._secret_registry, store=self._object_store
+                    secret_registry=self._secret_registry,
+                    store=self._object_store,
+                    authority_sender=local_authority_sender,
                 ),
                 discovery_registration_factory=local_composition.discovery_registration,
                 infra_reaper_factory=lambda: local_reaper or local_composition.build_reaper(),
@@ -407,6 +410,7 @@ class ProviderComposition:
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
         local_reaper: InfraReaper | None = None,
+        local_authority_sender: AuthorityRequestSender | None = None,
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
         | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
@@ -418,6 +422,7 @@ class ProviderComposition:
                 enable_local_libvirt=enable_local_libvirt,
                 local_reaper=local_reaper,
                 authority_sender_factory=authority_sender_factory,
+                local_authority_sender=local_authority_sender,
             )
             if descriptor.enabled()
         )
@@ -428,6 +433,7 @@ class ProviderComposition:
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        local_authority_sender: AuthorityRequestSender | None = None,
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
         | None = None,
     ) -> ProviderResolver:
@@ -445,6 +451,7 @@ class ProviderComposition:
                 enable_remote_libvirt=enable_remote_libvirt,
                 enable_local_libvirt=enable_local_libvirt,
                 authority_sender_factory=authority_sender_factory,
+                local_authority_sender=local_authority_sender,
             )
         }
         return ProviderResolver(runtimes)

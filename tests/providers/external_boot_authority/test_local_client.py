@@ -218,7 +218,7 @@ def test_local_binding_is_disabled_only_when_all_worker_settings_are_absent() ->
 def test_malformed_local_binding_never_exposes_config_values(
     variable: str, raw: str, tmp_path: Path
 ) -> None:
-    from kdive.jobs.authority_sender import local_authority_sender_factory
+    from kdive.providers.assembly.authority import local_authority_sender_factory
 
     config_registry.load({variable: raw})
     with pytest.raises(CategorizedError, match="authority: invalid-binding") as caught:
@@ -282,7 +282,7 @@ def test_worker_local_binding_matches_provisioned_authority_socket_and_refs() ->
 async def test_local_sender_factory_borrows_active_credential_at_encode(
     tmp_path: Path,
 ) -> None:
-    from kdive.jobs.authority_sender import local_authority_sender_factory
+    from kdive.providers.assembly.authority import local_authority_sender_factory
 
     material = _tls_material(tmp_path, "authority-a")
     socket_path = tmp_path / "authority.sock"
@@ -319,7 +319,7 @@ async def test_local_sender_factory_borrows_active_credential_at_encode(
 
 
 async def test_stale_credential_is_closed_and_redacted(tmp_path: Path) -> None:
-    from kdive.jobs.authority_sender import local_authority_sender_factory
+    from kdive.providers.assembly.authority import local_authority_sender_factory
 
     material = _tls_material(tmp_path, "authority-a")
     socket_path = tmp_path / "authority.sock"
@@ -353,7 +353,7 @@ async def test_stale_credential_is_closed_and_redacted(tmp_path: Path) -> None:
 
 
 def test_local_sender_factory_accepts_only_validated_binding() -> None:
-    from kdive.jobs.authority_sender import local_authority_sender_factory
+    from kdive.providers.assembly.authority import local_authority_sender_factory
 
     assert tuple(inspect.signature(local_authority_sender_factory).parameters) == (
         "secret_backend",
@@ -425,7 +425,7 @@ async def test_local_transport_rejects_malformed_or_truncated_response(
     ],
 )
 async def test_local_sender_preserves_closed_peer_rejections(tmp_path: Path, reason: str) -> None:
-    from kdive.jobs.authority_sender import local_authority_sender_factory
+    from kdive.providers.assembly.authority import local_authority_sender_factory
 
     material = _tls_material(tmp_path, "authority-a")
     socket_path = tmp_path / "authority.sock"

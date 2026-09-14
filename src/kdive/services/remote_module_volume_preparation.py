@@ -20,11 +20,9 @@ from kdive.providers.external_boot_authority.device_identity import (
     build_remote_device_identity_port,
 )
 from kdive.providers.ports.authority import AuthorityRequestSender
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.ports.module_operation import (
+    PreparationExecutor,
     RemoteDeviceIdentityPort,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
 )
 from kdive.services.remote_module_attempt_preparation import (
     run_verified_module_attempt_preparation,
@@ -54,7 +52,7 @@ async def prepare_verified_remote_module_attempt[ResultT](
     repository: RemoteModuleAttemptObligationRepository,
     request: ModuleAttemptPreparationRequestV1,
     expected_attempt: ModuleAttempt,
-    executor: RemoteModulePreparationExecutor,
+    executor: PreparationExecutor | None,
     authority: AuthorityRequestSender | None,
     preparation_deadline: float,
     operation: SynchronousPreparation[ResultT] | None,
@@ -112,6 +110,7 @@ async def prepare_verified_remote_module_attempt[ResultT](
                 raise cancelled from None
             return task.result()
         assert operation is not None
+        assert executor is not None
         return await executor.run(lambda: operation(attempt, identity, check_deadline))
 
     return await run_verified_module_attempt_preparation(

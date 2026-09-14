@@ -72,6 +72,7 @@ from kdive.providers.external_boot_authority.service import (
 )
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
+from kdive.providers.ports.authority import AuthorityCapability
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
@@ -760,7 +761,16 @@ def test_remote_preparing_calls_typed_module_authority_before_phase_commit(
         )
         base = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
         resolver = ProviderResolver(
-            {ResourceKind.REMOTE_LIBVIRT: replace(base, authority=cast(Any, authority))}
+            {
+                ResourceKind.REMOTE_LIBVIRT: replace(
+                    base,
+                    authority=AuthorityCapability(
+                        authority_instance="remote-authority",
+                        sender=cast(Any, authority),
+                        modules=cast(Any, authority),
+                    ),
+                )
+            }
         )
         ports = replace(
             _ports(case, resolver=resolver),

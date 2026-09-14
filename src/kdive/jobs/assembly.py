@@ -14,7 +14,6 @@ import kdive.config as config
 from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs.authority_sender import AuthorityRequestSender, authority_sender_factory
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.external_boot_authority_client import (
@@ -22,7 +21,6 @@ from kdive.jobs.external_boot_authority_client import (
     ExternalBootClientFactory,
     authority_system_sender_factory,
     external_boot_client_factory,
-    recovery_orphan_authority_sender_factory,
 )
 from kdive.jobs.handlers import (
     diagnostics,
@@ -39,9 +37,15 @@ from kdive.jobs.handlers.external_boot import orphan
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.handlers.system_authority import AuthoritySystemWorkerPorts
 from kdive.jobs.models import HandlerRegistry
+from kdive.providers.assembly.authority import (
+    authority_sender_factory,
+    local_authority_sender_factory,
+    recovery_orphan_authority_sender_factory,
+)
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import ModuleVolumeReaper
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import secret_backend_from_env
 from kdive.store.assembly import ObjectStoreAssembly
@@ -78,7 +82,13 @@ def build_worker_handler_assembly(
         secret_backend_from_env(registry=composition.secret_registry),
         lambda: assembly.incarnation_credential,
     )
-    resolver = composition.build_provider_resolver(authority_sender_factory=sender_factory)
+    local_sender = local_authority_sender_factory(
+        secret_backend_from_env(registry=composition.secret_registry),
+        lambda: assembly.incarnation_credential,
+    )
+    resolver = composition.build_provider_resolver(
+        authority_sender_factory=sender_factory, local_authority_sender=local_sender
+    )
     supervisor = CaptureOperationSupervisor(
         launcher=GatedCaptureLauncher(
             runtime_root=Path(config.require(BUILD_WORKSPACE)) / "capture-operations"
@@ -101,18 +111,12 @@ def build_worker_handler_assembly(
             authority_sender_factory=sender_factory
         ),
         pool=pool,
-        external_boot_client_factory=external_boot_client_factory(
-            secret_backend_from_env(registry=composition.secret_registry),
-            lambda: assembly.incarnation_credential,
-        ),
+        external_boot_client_factory=external_boot_client_factory(),
         recovery_orphan_authority_sender_factory=recovery_orphan_authority_sender_factory(
             secret_backend_from_env(registry=composition.secret_registry),
             lambda: assembly.incarnation_credential,
         ),
-        authority_system_sender_factory=authority_system_sender_factory(
-            secret_backend_from_env(registry=composition.secret_registry),
-            lambda: assembly.incarnation_credential,
-        ),
+        authority_system_sender_factory=authority_system_sender_factory(),
     )
     return assembly
 

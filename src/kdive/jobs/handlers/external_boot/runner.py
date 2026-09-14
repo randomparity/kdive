@@ -261,31 +261,25 @@ async def _materialize_preparing(
     materialize = phase_request("materialize")
     prepare = phase_request("prepare")
     await execute_phase(materialize)
-    if context.marker.provider_kind == "remote-libvirt":
-        from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-            RemoteModulePreparationExecutor,
-        )
+    authority = context.binding.runtime.authority
+    if authority is not None and authority.modules is not None:
         from kdive.services.remote_module_authority_preparation import (
             RemoteModulePreparationInputs,
         )
 
         if context.authority_executor is None or ports.pool is None:
             raise _refuse("remote module authority preparation is not configured")
-        module_executor = RemoteModulePreparationExecutor()
-        try:
-            await prepare_remote_module_on_authority_host(
-                pool=ports.pool,
-                repository=_MODULE_ATTEMPTS,
-                sender=cast(Any, context.authority_executor),
-                inputs=RemoteModulePreparationInputs(authority=prepare),
-                executor=module_executor,
-                job_id=context.job.id,
-                job_attempt=context.job.attempt,
-                incarnation_credential=context.incarnation_credential,
-                deadline=asyncio.get_running_loop().time() + 300.0,
-            )
-        finally:
-            module_executor.shutdown()
+        await prepare_remote_module_on_authority_host(
+            pool=ports.pool,
+            repository=_MODULE_ATTEMPTS,
+            sender=cast(Any, context.authority_executor),
+            inputs=RemoteModulePreparationInputs(authority=prepare),
+            executor=None,
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            incarnation_credential=context.incarnation_credential,
+            deadline=asyncio.get_running_loop().time() + 300.0,
+        )
     await execute_phase(prepare)
     refreshed = await _ACTIVATIONS.get(conn, context.marker.activation_id)
     if refreshed is None or refreshed.state is not ExternalBootActivationState.PREPARED:

@@ -63,7 +63,7 @@ from pathlib import Path
 
 import kdive.config as config_registry
 from kdive.domain.errors import CategorizedError
-from kdive.jobs.authority_sender import local_authority_sender_factory
+from kdive.providers.assembly.authority import local_authority_sender_factory
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.local_client import local_authority_binding
 from kdive.providers.external_boot_authority.protocol import (

@@ -4803,7 +4803,9 @@ def test_authority_staging_worker_uses_payload_without_root_table_access(
                 result = await _install_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                    resolver=provider_resolver(
+                        profile_policy=LOCAL_PROFILE_POLICY, authority_sender=object()
+                    ),
                 )
 
             async with admin.connection() as conn:
@@ -4840,7 +4842,9 @@ def test_legacy_authority_install_without_root_snapshot_requests_reenqueue(
                     await _install_handler(
                         conn,
                         job,
-                        resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                        resolver=provider_resolver(
+                            profile_policy=LOCAL_PROFILE_POLICY, authority_sender=object()
+                        ),
                     )
             step_exists = await _run_step_row_exists(admin, run_id, "install")
 
