@@ -164,11 +164,14 @@ def test_all_missing_emits_required_hint_per_distro(
     assert f"{manager} prek" not in result.stderr
 
 
-def test_redhat_unavailable_tools_use_manual_hints_and_name_crb(tmp_path: Path) -> None:
+@pytest.mark.parametrize("distro_id", ["fedora", "rhel"])
+def test_redhat_unavailable_tools_use_manual_hints_and_name_crb(
+    distro_id: str, tmp_path: Path
+) -> None:
     """EL-only package gaps stay out of the collapsed RedHat install line."""
     empty = tmp_path / "empty-bin"
     empty.mkdir()
-    result = _run("fedora", str(empty), tmp_path)
+    result = _run(distro_id, str(empty), tmp_path)
 
     assert result.returncode == 1, result.stderr
     dnf_lines = [line for line in result.stderr.splitlines() if "dnf install" in line]
@@ -182,6 +185,17 @@ def test_redhat_unavailable_tools_use_manual_hints_and_name_crb(tmp_path: Path) 
         "libvirt-devel: sudo dnf config-manager --set-enabled crb (Enterprise Linux only)"
         in result.stderr
     )
+
+
+@pytest.mark.parametrize("distro_id", ["fedora", "rhel"])
+def test_installed_libvirt_headers_do_not_emit_missing_dependency(
+    distro_id: str, tmp_path: Path
+) -> None:
+    result = _run(distro_id, str(_bin(tmp_path)), tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "libvirt-devel" not in result.stderr
+    assert "config-manager --set-enabled crb" not in result.stderr
 
 
 def test_unknown_distro_falls_back_to_generic_hint(tmp_path: Path) -> None:
