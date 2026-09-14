@@ -1657,6 +1657,12 @@ def test_installer_clears_only_proven_stale_selected_tuple(tmp_path: Path) -> No
     assert 'runuser -u "$operator"' in source
 
 
+def test_installer_launches_session_libvirt_with_unlimited_process_limits() -> None:
+    source = _text(INSTALLER)
+
+    assert 'prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator"' in source
+
+
 def test_installer_adopts_complete_matching_live_tuple(tmp_path: Path) -> None:
     socket_path = tmp_path / "libvirt-sock"
     pid_path = tmp_path / "libvirtd.pid"

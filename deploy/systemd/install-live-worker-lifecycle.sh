@@ -729,14 +729,10 @@ _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_d
 libvirt_tuple_action="$_libvirt_tuple_action"
 _restore_libvirt_runtime
 if [[ $libvirt_tuple_action == start ]]; then
-  # Launch with an explicit core-file limit rather than whatever the escalation path left. The
-  # daemon raises RLIMIT_CORE on the QEMU processes it starts, so it cannot start a domain when
-  # its own hard limit is lower than the value it asks for — it fails with "cannot limit core
-  # file size of process N to ...: Operation not permitted", which reads like a QEMU fault
-  # rather than an inherited limit. Classic sudo zeroes RLIMIT_CORE, so every RedHat-family host
-  # reaches this line with a 0 hard limit; Ubuntu 26.04's sudo-rs does not, which is why the
-  # Debian path never hit it. We are root here, so raising the hard limit is permitted.
-  prlimit --core=unlimited -- runuser -u "$operator" -- \
+  # Launch with explicit core and memlock limits rather than whatever the escalation path left.
+  # The session daemon starts QEMU workloads and needs to pass both limits through. We are root
+  # here, so raising their hard limits is permitted before runuser drops privileges.
+  prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator" -- \
     env XDG_RUNTIME_DIR=/run/kdive/live-libvirt \
     "$_libvirt_executable" --daemon --config "/etc/kdive/$_libvirt_config" \
     --pid-file "$libvirt_pid_path"
