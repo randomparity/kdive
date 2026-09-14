@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import libvirt
 import pytest
@@ -19,6 +19,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_result_reader
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV1,
     RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
@@ -39,7 +40,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedVolume,
     StorageConn,
 )
-from kdive.services.remote_module_operation import RemoteModuleOperationRuntime
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Clock,
     DeadlineAwareExecutor,
@@ -49,6 +49,9 @@ from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_sup
     NONCE,
     RUN_ID,
     SYSTEM_ID,
+)
+from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_support import (
+    _operation as operation_document,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_support import (
     _result as result_document,
@@ -298,8 +301,7 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
     async def read(recovery: RemoteModuleRecoveryRefV1, deadline: float) -> bytes | None:
         return await async_reader.read_recovery_async(recovery, deadline=deadline)
 
-    runtime = RemoteModuleOperationRuntime(cast(Any, None), cast(Any, None), read)
-    operation = runtime._operation_from_result(result_value)
+    operation = RemoteModuleOperationV1.model_validate(operation_document())
     recovery = RemoteModuleRecoveryRefV2.model_validate(
         {
             "system_id": result_value.system_id,
@@ -317,7 +319,7 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
             "source_capacity_bytes": 4096,
         }
     )
-    assert asyncio.run(runtime.reopen_result(recovery, 10.0)) == result_value
+    assert asyncio.run(read(recovery, 10.0)) == result
     assert observed["deadline"] == 10
     preparation.shutdown()
 

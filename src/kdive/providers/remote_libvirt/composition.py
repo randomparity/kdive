@@ -56,9 +56,14 @@ from kdive.providers.infra.reaping import (
     InfraReaper,
     ModuleVolumeReaper,
 )
-from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.ports.authority import (
+    AuthorityCapability,
+    AuthorityRequestSender,
+    AuthorityReservationGeometry,
+)
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
+from kdive.providers.remote_libvirt.authority_client import RemoteModuleAuthorityAdapter
 from kdive.providers.remote_libvirt.config import (
     RemoteAuthorityBinding,
     RemoteLibvirtConfig,
@@ -401,17 +406,33 @@ def _rebind_for_resource(
     authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
 ) -> Callable[[str], ProviderRuntime]:
     def rebind(resource_name: str) -> ProviderRuntime:
-        sender = None
-        if authority_sender_factory is not None:
-            binding = remote_config_for_resource(resource_name).authority
-            if binding is not None:
-                sender = authority_sender_factory(binding)
+        binding = remote_config_for_resource(resource_name).authority
+        authority = None
+        if binding is not None:
+            geometry = None
+            if (
+                binding.store_identity is not None
+                and binding.recovery_reserve_bytes is not None
+                and binding.recovery_max_bytes is not None
+            ):
+                geometry = AuthorityReservationGeometry(
+                    binding.store_identity,
+                    binding.recovery_reserve_bytes,
+                    binding.recovery_max_bytes,
+                )
+            sender = None if authority_sender_factory is None else authority_sender_factory(binding)
+            authority = AuthorityCapability(
+                authority_instance=binding.authority_instance,
+                geometry=geometry,
+                sender=sender,
+                modules=None if sender is None else RemoteModuleAuthorityAdapter(sender),
+            )
         return build_runtime(
             secret_registry=secret_registry,
             store=store,
             config_factory=lambda: remote_config_for_resource(resource_name),
             authority_sender_factory=authority_sender_factory,
-            _authority=sender,
+            _authority=authority,
         )
 
     return rebind
@@ -436,7 +457,7 @@ def build_runtime(
     config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
     | None = None,
-    _authority: AuthorityRequestSender | None = None,
+    _authority: AuthorityCapability | None = None,
 ) -> ProviderRuntime:
     """Build remote-libvirt ports; buildable without operator config (ADR-0076).
 

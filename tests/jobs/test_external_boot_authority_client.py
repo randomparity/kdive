@@ -15,11 +15,37 @@ from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
 from kdive.providers.core.resolver import ProviderBinding
-from kdive.providers.external_boot_authority.local_client import LocalAuthorityBinding
 from kdive.providers.external_boot_authority.transport import _dispatch
-from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
+from kdive.providers.ports.authority import AuthorityCapability
 from tests.jobs.handlers.external_boot.support import marker_fields
 from tests.providers.external_boot_authority.service_support import _mutation, _service
+
+
+@pytest.mark.parametrize("kind", [ResourceKind.LOCAL_LIBVIRT, ResourceKind.REMOTE_LIBVIRT])
+def test_client_uses_only_the_bound_runtime_route(
+    kind: ResourceKind, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sender = cast(AuthorityRequestSender, object())
+    capability = AuthorityCapability(authority_instance="provider-1", sender=sender)
+    if kind is ResourceKind.LOCAL_LIBVIRT:
+        from kdive.providers.local_libvirt import composition
+
+        monkeypatch.setattr(
+            composition,
+            "local_authority_binding",
+            lambda: SimpleNamespace(authority_instance="provider-1"),
+        )
+        capability = composition.build_authority_capability(sender)
+    binding = ProviderBinding(kind, cast(Any, SimpleNamespace(authority=capability)), "resource-a")
+    marker = ExternalBootAuthorityMarkerV1.model_validate(marker_fields(provider_kind=kind.value))
+    factory = clients.external_boot_client_factory()
+
+    client = factory(binding, marker, 321.0)
+
+    assert client.sender is sender
+    assert client.deadline == 321.0
+    with pytest.raises(CategorizedError, match="binding-mismatch"):
+        factory(binding, marker.model_copy(update={"authority_instance": "other"}), 321.0)
 
 
 @pytest.mark.anyio
@@ -46,77 +72,58 @@ async def test_one_client_keeps_deadline_through_ack_and_observation(tmp_path: P
     repository.current = True
     await client.observe(_mutation(takeover))
     assert deadlines == [123.0, 123.0]
-    with pytest.raises(CategorizedError, match="binding-mismatch"):
-        await client.observe(_mutation(takeover).model_copy(update={"system_id": uuid4()}))
+    mismatches = {
+        "system_id": uuid4(),
+        "activation_id": uuid4(),
+        "run_id": uuid4(),
+        "plan_identity": "sha256:" + "f" * 64,
+        "purpose": "release",
+        "provider_kind": "remote-libvirt",
+        "authority_instance": "other",
+    }
+    for name, value in mismatches.items():
+        assert getattr(marker, name) != value
+        with pytest.raises(CategorizedError, match="binding-mismatch"):
+            await client.observe(_mutation(takeover).model_copy(update={name: value}))
     assert deadlines == [123.0, 123.0]
 
 
-def test_local_client_freezes_one_configured_route_at_invocation(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("capability", "resource_name", "kind", "reason"),
+    [
+        (None, "resource-a", ResourceKind.REMOTE_LIBVIRT, "binding-mismatch"),
+        (
+            SimpleNamespace(authority_instance="provider-1", sender=None),
+            "resource-a",
+            ResourceKind.REMOTE_LIBVIRT,
+            "binding-unavailable",
+        ),
+        (
+            SimpleNamespace(authority_instance="other", sender=object()),
+            "resource-a",
+            ResourceKind.REMOTE_LIBVIRT,
+            "binding-mismatch",
+        ),
+        (
+            SimpleNamespace(authority_instance="provider-1", sender=object()),
+            None,
+            ResourceKind.REMOTE_LIBVIRT,
+            "binding-unavailable",
+        ),
+        (
+            SimpleNamespace(authority_instance="provider-1", sender=object()),
+            "resource-a",
+            ResourceKind.LOCAL_LIBVIRT,
+            "binding-mismatch",
+        ),
+    ],
+)
+def test_unavailable_or_mismatched_runtime_route_is_refused(
+    capability: object, resource_name: str | None, kind: ResourceKind, reason: str
 ) -> None:
-    binding = LocalAuthorityBinding(
-        "provider-1", Path("/run/test-authority.sock"), "ca", "cert", "key"
-    )
-    reads: list[str] = []
-    selected: list[LocalAuthorityBinding] = []
-    sender = cast(AuthorityRequestSender, object())
-
-    def configuration() -> LocalAuthorityBinding:
-        reads.append("configuration")
-        return binding
-
-    def local_sender(_secrets: Any, _borrow: Any, *, binding: LocalAuthorityBinding):
-        selected.append(binding)
-        return sender
-
-    monkeypatch.setattr(clients, "local_authority_binding", configuration)
-    monkeypatch.setattr(clients, "local_authority_sender_factory", local_sender)
-    factory = clients.external_boot_client_factory(cast(Any, None), lambda: SecretStr("test"))
-    assert reads == []
-    marker = ExternalBootAuthorityMarkerV1.model_validate(marker_fields())
-    runtime = ProviderBinding(ResourceKind.LOCAL_LIBVIRT, cast(Any, None), "resource-a")
-    result = factory(runtime, marker, 123.0)
-    assert reads == ["configuration"]
-    assert selected == [binding]
-    assert result.sender is sender
-    assert result.deadline == 123.0
-    with pytest.raises(CategorizedError, match="binding-mismatch"):
-        factory(runtime, marker.model_copy(update={"authority_instance": "other"}), 123.0)
-    assert selected == [binding]
-
-
-def test_remote_route_is_selected_by_resolved_resource_not_marker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bindings = {
-        name: RemoteAuthorityBinding(name, "192.0.2.1", 9443, "ca", "cert", "key")
-        for name in ("resource-a", "resource-b")
-    }
-    selected: list[RemoteAuthorityBinding] = []
-
-    def sender(binding: RemoteAuthorityBinding) -> AuthorityRequestSender:
-        selected.append(binding)
-        return cast(AuthorityRequestSender, object())
-
-    monkeypatch.setattr(clients, "authority_sender_factory", lambda *_: sender)
-    monkeypatch.setattr(
-        clients,
-        "remote_config_for_resource",
-        lambda name: SimpleNamespace(authority=bindings[name]),
-    )
-    factory = clients.external_boot_client_factory(cast(Any, None), lambda: SecretStr("test"))
+    binding = ProviderBinding(kind, cast(Any, SimpleNamespace(authority=capability)), resource_name)
     marker = ExternalBootAuthorityMarkerV1.model_validate(
-        marker_fields(provider_kind="remote-libvirt", authority_instance="resource-a")
+        marker_fields(provider_kind="remote-libvirt")
     )
-    factory(
-        ProviderBinding(ResourceKind.REMOTE_LIBVIRT, cast(Any, None), "resource-a"),
-        marker,
-        123.0,
-    )
-    with pytest.raises(CategorizedError, match="binding-mismatch"):
-        factory(
-            ProviderBinding(ResourceKind.REMOTE_LIBVIRT, cast(Any, None), "resource-b"),
-            marker,
-            123.0,
-        )
-    assert selected == [bindings["resource-a"]]
+    with pytest.raises(CategorizedError, match=reason):
+        clients.external_boot_client_factory()(binding, marker, 123.0)

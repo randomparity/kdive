@@ -134,6 +134,13 @@ attached to the Allocation or System instead of assuming local-libvirt. Cloud, b
 PowerVM providers remain future work on this typed runtime seam. Composition is centralized in
 `src/kdive/providers/assembly/composition.py`.
 
+`ProviderRuntime.authority` is one Resource-bound capability (ADR-0654). Provider
+composition supplies the fixed authority instance and reservation geometry, plus the
+worker sender and optional module operations. Shared worker code validates operation
+markers and borrows its incarnation credential while encoding each request. Provider
+adapters own concrete routes and remote codecs; services retain database evidence,
+System locks, and recovery sequencing through neutral ports.
+
 The capability registry from ADR-0009/ADR-0022 is historical design context, not an
 in-tree prototype or the live dispatch path. It is not used for job routing,
 destructive-op gating, or reconciler behavior. ADR-0063 records this narrowing

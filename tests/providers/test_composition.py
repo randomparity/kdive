@@ -950,7 +950,10 @@ def test_resolver_threads_shared_registry_into_provider_runtimes(
     real_remote = composition.remote_composition.build_runtime
     real_remote_disc = composition.remote_composition.discovery_registration
 
-    def _local(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
+    def _local(
+        *, secret_registry: SecretRegistry, store: ObjectStore, authority_sender: object
+    ) -> ProviderRuntime:
+        assert authority_sender is None
         seen["local"] = secret_registry
         return real_local(secret_registry=secret_registry, store=store)
 

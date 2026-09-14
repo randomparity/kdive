@@ -125,10 +125,11 @@ def test_rebind_for_resource_threads_resource_name_into_provisioner(
     registry = SecretRegistry()
     runtime = composition.build_runtime(secret_registry=registry)
     bound = runtime.for_resource("host-b")
+    assert seen == ["host-b"]  # Resource-bound authority metadata is snapshotted now.
     # The provisioner resolves its connection config lazily; pull it to trigger the factory.
     cfg = bound.provisioner._connections.config()  # ty: ignore[unresolved-attribute]
     assert cfg.uri == "qemu+tls://host-b.example/system"
-    assert seen == ["host-b"]
+    assert seen == ["host-b", "host-b"]
     # The rebind must also thread the original secret_registry into the rebound runtime, not None.
     assert bound.installer._secret_registry is registry  # ty: ignore[unresolved-attribute]
 

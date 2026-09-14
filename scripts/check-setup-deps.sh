@@ -228,6 +228,10 @@ require_header() {
   local tier="$1" label="$2" module="$3" distro="$4"
   command_exists pkg-config && pkg-config --exists "${module}" 2>/dev/null && return
   note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
+  # Fedora and EL use libvirt-devel; on EL it may require enabling CRB.
+  if [[ "${module}" == libvirt && ("${distro}" == fedora || "${distro}" == el) ]]; then
+    note_manual "${tier}" "libvirt-devel" "sudo dnf config-manager --set-enabled crb (Enterprise Linux only)"
+  fi
 }
 
 join_by_comma() {
@@ -418,9 +422,6 @@ probe_all() {
   require_tool required uv "curl -LsSf https://astral.sh/uv/install.sh | sh"
   require_command required pkg-config "${distro}"
   require_header required libvirt-headers libvirt "${distro}"
-  # Fedora and EL use libvirt-devel; on EL it is in CRB rather than the enabled repositories.
-  [[ "${distro}" != fedora && "${distro}" != el ]] ||
-    note_manual required "libvirt-devel" "sudo dnf config-manager --set-enabled crb (Enterprise Linux only)"
   # libvirt-python and any wheel-less C/Rust extension (e.g. pydantic-core, grpcio on
   # arches without prebuilt wheels) compile against the Python development headers.
   require_header required python-headers python3 "${distro}"

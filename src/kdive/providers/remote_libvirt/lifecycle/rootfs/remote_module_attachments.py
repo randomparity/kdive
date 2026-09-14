@@ -10,13 +10,14 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID
 
 import libvirt
 from defusedxml.common import DefusedXmlException
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity, RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import (
     MAX_LIBVIRT_XML_DOCUMENTS,
     XmlEnumerationBudget,
@@ -112,25 +113,6 @@ class StoragePool(Protocol):
 class AttachmentConn(Protocol):
     def listAllDomains(self, flags: int = 0) -> Sequence[Domain]: ...  # noqa: N802
     def storagePoolLookupByName(self, name: str) -> StoragePool: ...  # noqa: N802
-
-
-@dataclass(frozen=True, slots=True)
-class RemoteDeviceIdentity:
-    """Opaque physical identity returned by the remote host."""
-
-    kind: Literal["inode", "block"]
-    primary: int
-    secondary: int
-
-
-class RemoteDeviceIdentityPort(Protocol):
-    """Resolve one remote-host path within the preparation deadline.
-
-    Implementations return no path and must bound each call by their enclosing preparation
-    deadline; an operational timeout raises a redacted ``INFRASTRUCTURE_FAILURE``.
-    """
-
-    def identity(self, path: str) -> RemoteDeviceIdentity | None: ...
 
 
 class HostStatDeviceIdentity:

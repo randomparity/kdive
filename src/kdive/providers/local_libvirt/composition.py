@@ -36,6 +36,13 @@ from kdive.providers.external_boot_authority.host import (
     AuthorityHostConfig,
     validate_credential_paths,
 )
+from kdive.providers.external_boot_authority.local_client import local_authority_binding
+from kdive.providers.external_boot_authority.settings import (
+    AUTHORITY_INSTANCE,
+    AUTHORITY_RECOVERY_MAX_BYTES,
+    AUTHORITY_RECOVERY_RESERVE_BYTES,
+    AUTHORITY_STORE_IDENTITY,
+)
 from kdive.providers.infra.reaping import CaptureReaper, InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
@@ -96,6 +103,11 @@ from kdive.providers.local_libvirt.settings import (
     LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
     LIBVIRT_RECOVERY_ROOT,
     LIBVIRT_URI,
+)
+from kdive.providers.ports.authority import (
+    AuthorityCapability,
+    AuthorityRequestSender,
+    AuthorityReservationGeometry,
 )
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
@@ -339,8 +351,36 @@ def build_external_boot(
     return LocalLibvirtExternalBoot(io)
 
 
+def build_authority_capability(
+    sender: AuthorityRequestSender | None,
+) -> AuthorityCapability | None:
+    """Snapshot server metadata or the configured worker route without opening transport."""
+    instance = config.get(AUTHORITY_INSTANCE)
+    if sender is not None:
+        binding = local_authority_binding()
+        instance = None if binding is None else binding.authority_instance
+    store = config.get(AUTHORITY_STORE_IDENTITY)
+    reserve = config.get(AUTHORITY_RECOVERY_RESERVE_BYTES)
+    maximum = config.get(AUTHORITY_RECOVERY_MAX_BYTES)
+    geometry = None
+    if (
+        store is not None
+        and reserve is not None
+        and maximum is not None
+        and reserve == config.get(LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES)
+    ):
+        geometry = AuthorityReservationGeometry(store, reserve, maximum)
+    if instance is None and geometry is None and sender is None:
+        return None
+    return AuthorityCapability(
+        instance, geometry, sender, missing_route_reason="authority_route_mismatch"
+    )
+
+
 def _rebind_for_resource(
-    secret_registry: SecretRegistry, store: ObjectStore
+    secret_registry: SecretRegistry,
+    store: ObjectStore,
+    authority_sender: AuthorityRequestSender | None,
 ) -> Callable[[str], ProviderRuntime]:
     """Per-Resource rebind factory (ADR-0187/0313), mirroring remote-libvirt's shape.
 
@@ -350,7 +390,10 @@ def _rebind_for_resource(
 
     def rebind(resource_name: str) -> ProviderRuntime:
         return build_runtime(
-            secret_registry=secret_registry, store=store, resource_name=resource_name
+            secret_registry=secret_registry,
+            store=store,
+            resource_name=resource_name,
+            authority_sender=authority_sender,
         )
 
     return rebind
@@ -362,6 +405,7 @@ def build_runtime(
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     resource_name: str | None = None,
     external_boot_io: LocalExternalBootIO | None = None,
+    authority_sender: AuthorityRequestSender | None = None,
 ) -> ProviderRuntime:
     """Build local-libvirt provider ports without opening live provider connections.
 
@@ -389,6 +433,7 @@ def build_runtime(
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
     external_boot = build_external_boot(external_boot_io)
     return ProviderRuntime(
+        authority=build_authority_capability(authority_sender),
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=provisioner,
         installer=install,
@@ -444,7 +489,7 @@ def build_runtime(
         # Per-Resource rebind (ADR-0187/0313, #1031): bind the operator guest_egress opt-in for the
         # allocated Resource by name. Previously unset (identity) — local now resolves per op.
         binding=ResourceBindingCapabilities(
-            rebind_for_resource=_rebind_for_resource(secret_registry, store)
+            rebind_for_resource=_rebind_for_resource(secret_registry, store, authority_sender)
         ),
         # Internal RAM+disk/disk-only domain snapshots (ADR-0378, #1254). Matches
         # ``support.supports_snapshots``; a snapshot-incapable provider leaves both unset.

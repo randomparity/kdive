@@ -15,7 +15,6 @@ from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import AuthoritySystemSenderFactory
 from kdive.jobs.handlers.system_reclaim import (
     RetiredKeyBatchDeleter,
@@ -23,6 +22,7 @@ from kdive.jobs.handlers.system_reclaim import (
 )
 from kdive.jobs.payloads import SystemPayload, TeardownPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,
     AuthoritySystemMarkerV1,

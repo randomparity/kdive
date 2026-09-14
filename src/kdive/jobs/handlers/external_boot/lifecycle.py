@@ -100,12 +100,18 @@ async def _execute_remote_module_lifecycle(
     request: AuthorityMutationRequestV1,
     executor: ExternalBootAuthorityExecutor,
 ) -> None:
-    if context.marker.provider_kind != "remote-libvirt" or request.operation not in {
-        AuthorityOperation.RECOVER,
-        AuthorityOperation.RESOLVE_CONFLICT,
-        AuthorityOperation.CLEANUP,
-        AuthorityOperation.TEARDOWN,
-    }:
+    authority = context.binding.runtime.authority
+    if (
+        authority is None
+        or authority.modules is None
+        or request.operation
+        not in {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.RESOLVE_CONFLICT,
+            AuthorityOperation.CLEANUP,
+            AuthorityOperation.TEARDOWN,
+        }
+    ):
         return
     from kdive.db.remote_module_attempt_obligations import (
         ModuleAttemptWorkerWriteContext,

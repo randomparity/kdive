@@ -14,15 +14,6 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityResponseV1,
     decode_device_identity_response,
 )
-from kdive.providers.external_boot_authority.local_client import (
-    LocalAuthorityBinding,
-    _AuthorityUnixTransport,
-    local_authority_binding,
-)
-from kdive.providers.external_boot_authority.network_client import (
-    _AuthorityNetworkTransport,
-    _resolve_tls_material,
-)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
@@ -44,15 +35,6 @@ from kdive.providers.external_boot_authority.transport import (
     Operation,
     encode_request_envelope,
 )
-from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
-)
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,
     AuthoritySystemExecutionV1,
@@ -60,7 +42,6 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemResponseV1,
     AuthoritySystemTakeoverRequestV1,
 )
-from kdive.security.secrets.secrets import SecretBackend
 
 _PEER_REASONS = frozenset(
     {
@@ -249,31 +230,14 @@ class AuthorityRequestSender:
         )
         return _decode_response(response, AuthorityTeardownResponseV1)
 
-    async def execute_remote_module_preparation(
-        self, request: RemoteModuleVolumePreparationRequestV1, *, deadline: float
-    ) -> RemoteModuleTerminalPreparationResponseV1:
-        """Run one closed remote-module preparation on the Resource-bound authority host."""
+    async def _request[Value: BaseModel](
+        self, operation: Operation, request: BaseModel, model: type[Value], *, deadline: float
+    ) -> Value:
+        """Encode a closed provider request using the current worker credential."""
         response = await self._transport_factory()._request_frame(
-            self._encode("execute-remote-module-preparation", request), deadline=deadline
+            self._encode(operation, request), deadline=deadline
         )
-        return _decode_response(response, RemoteModuleTerminalPreparationResponseV1)
-
-    async def execute_remote_module_lifecycle(
-        self, request: RemoteModuleLifecycleRequestV1, *, deadline: float
-    ) -> RemoteModuleLifecycleResponseV1:
-        response = await self._transport_factory()._request_frame(
-            self._encode("execute-remote-module-lifecycle", request), deadline=deadline
-        )
-        return _decode_response(response, RemoteModuleLifecycleResponseV1)
-
-    async def open_remote_module_attempt(
-        self, request: RemoteModulePreparationBeginRequestV1, *, deadline: float
-    ) -> RemoteModulePreparationBeginResponseV1:
-        """Anchor one PREPARE phase and return its authority-opened module-attempt receipt."""
-        response = await self._transport_factory()._request_frame(
-            self._encode("begin-remote-module-preparation", request), deadline=deadline
-        )
-        return _decode_response(response, RemoteModulePreparationBeginResponseV1)
+        return _decode_response(response, model)
 
     async def resolve_recovery_orphan(
         self, request: AuthorityRecoveryOrphanDispositionRequestV1, *, deadline: float
@@ -307,35 +271,3 @@ class AuthorityRequestSender:
             self._encode("execute-conflict-resolution", request), deadline=deadline
         )
         return _decode_response(response, AuthorityObservationV1)
-
-
-def authority_sender_factory(
-    secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
-) -> Callable[[RemoteAuthorityBinding], AuthorityRequestSender]:
-    """Capture the selected binding and existing owners; resolve no authority material."""
-
-    def build(binding: RemoteAuthorityBinding) -> AuthorityRequestSender:
-        return AuthorityRequestSender(
-            lambda: _AuthorityNetworkTransport(
-                binding, _resolve_tls_material(binding, secret_backend)
-            ),
-            borrow,
-        )
-
-    return build
-
-
-def local_authority_sender_factory(
-    secret_backend: SecretBackend,
-    borrow: Callable[[], SecretStr],
-    *,
-    binding: LocalAuthorityBinding | None = None,
-) -> AuthorityRequestSender | None:
-    """Build the configured worker-local sender without accepting a caller route."""
-    binding = binding if binding is not None else local_authority_binding()
-    if binding is None:
-        return None
-    return AuthorityRequestSender(
-        lambda: _AuthorityUnixTransport(binding, _resolve_tls_material(binding, secret_backend)),
-        borrow,
-    )

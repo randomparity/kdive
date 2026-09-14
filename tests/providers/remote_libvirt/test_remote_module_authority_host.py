@@ -26,6 +26,10 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
 )
+from kdive.providers.remote_libvirt.authority_client import (
+    RemoteModuleAuthorityAdapter,
+    module_completion,
+)
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
     RemoteModuleLifecycleRequestV1,
@@ -357,6 +361,12 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     appliance = ApplianceConn([], clock)
     durable_result = _result(operation)
     current_result = [durable_result]
+
+    def read_scratch(volume: PreparedVolume, deadline: float) -> bytes:
+        del deadline
+        assert not storage.pool.volumes[volume.name].deleted
+        return current_result[0].to_wire_bytes()
+
     volume_config = RemoteModuleVolumePreparation(
         storage=storage,
         pool_name="systems",
@@ -384,7 +394,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
             operation.root_volume.identity,
             4096,
         ),
-        read_scratch_result=lambda _volume, _deadline: current_result[0].to_wire_bytes(),
+        read_scratch_result=read_scratch,
         inspect_attachments=lambda: detached,
         secret_registry=SecretRegistry(),
         deadline_executor=Executor(),
@@ -491,9 +501,16 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
             return True
 
     class Sender:
-        async def execute_remote_module_lifecycle(
-            self, candidate: RemoteModuleLifecycleRequestV1, *, deadline: float
+        async def _request(
+            self,
+            operation: str,
+            candidate: RemoteModuleLifecycleRequestV1,
+            model: object,
+            *,
+            deadline: float,
         ) -> RemoteModuleLifecycleResponseV1:
+            assert operation == "execute-remote-module-lifecycle"
+            assert model is RemoteModuleLifecycleResponseV1
             assert deadline >= asyncio.get_running_loop().time()
             return await durable_host.execute_lifecycle(candidate)
 
@@ -504,15 +521,15 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
         restored = await execute_remote_module_lifecycle_on_authority_host(
             connection=cast(Any, worker_connection),
             repository=cast(Any, repository),
-            sender=cast(Any, Sender()),
+            sender=cast(Any, RemoteModuleAuthorityAdapter(cast(Any, Sender()))),
             authority=restore_request.authority,
             preparation=preparation,
             worker_context=worker_context,
             action="restore",
             deadline=asyncio.get_running_loop().time() + 10,
         )
-        assert restored.operation == restored_operation
-        assert restored.result == restored_result
+        assert restored.operation.evidence.document == restored_operation.model_dump(mode="json")
+        assert restored.result.document == restored_result.model_dump(mode="json")
         assert not restored.volumes_absent
     else:
         current_result[0] = durable_result
@@ -528,7 +545,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     reaped = await execute_remote_module_lifecycle_on_authority_host(
         connection=cast(Any, worker_connection),
         repository=cast(Any, repository),
-        sender=cast(Any, Sender()),
+        sender=cast(Any, RemoteModuleAuthorityAdapter(cast(Any, Sender()))),
         authority=reap_request.authority,
         preparation=preparation,
         worker_context=worker_context,
@@ -536,8 +553,12 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
         deadline=asyncio.get_running_loop().time() + 10,
     )
     assert reaped.volumes_absent
-    assert reaped.operation == (restored_operation if restore_first else operation)
-    assert reaped.result == (restored_result if restore_first else durable_result)
+    assert reaped.operation.evidence.document == (
+        restored_operation if restore_first else operation
+    ).model_dump(mode="json")
+    assert reaped.result.document == (
+        restored_result if restore_first else durable_result
+    ).model_dump(mode="json")
     assert storage.pool.volumes[source_name].deleted
     assert storage.pool.volumes[scratch_name].deleted
     reaping_name = render_module_volume_name(
@@ -556,13 +577,11 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     replay = await DurableRemoteModuleVolumePreparationHost(restarted_store, host).execute(request)
     assert replay == response
     assert appliance.created_flags is None
-    assert (
-        await DurableRemoteModuleVolumePreparationHost(restarted_store, host).execute_lifecycle(
-            reap_request
-        )
-        == reaped
-    )
+    replayed_lifecycle = await DurableRemoteModuleVolumePreparationHost(
+        restarted_store, host
+    ).execute_lifecycle(reap_request)
+    assert module_completion(replayed_lifecycle.operation, replayed_lifecycle) == reaped
     if restored is not None:
-        assert identity_for(restored.operation) == identity_for(reaped.operation)
+        assert restored.operation.evidence.identity == reaped.operation.evidence.identity
     restarted_store.close()
     executor.shutdown()

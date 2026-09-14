@@ -481,8 +481,11 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
     class _FakeComposition:
         secret_registry = caller_registry
 
-        def build_provider_resolver(self, *, authority_sender_factory: object) -> object:
+        def build_provider_resolver(
+            self, *, authority_sender_factory: object, local_authority_sender: object
+        ) -> object:
             assert callable(authority_sender_factory)
+            assert local_authority_sender is None
             return resolver
 
         def build_worker_module_volume_reaper(self, *, authority_sender_factory: object) -> object:

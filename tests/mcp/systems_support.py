@@ -177,6 +177,7 @@ def provider_resolver(
     external_boot: object | None = None,
     external_boot_preparation: object | None = None,
     external_boot_recovery_objects: object | None = None,
+    authority_sender: object | None = None,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -198,7 +199,10 @@ def provider_resolver(
     fault-inject *port* here is what makes it usable without the fault-inject *kind*.
     """
     unused_port = cast(Any, object())
+    from kdive.providers.local_libvirt.composition import build_authority_capability
+
     runtime = ProviderRuntime(
+        authority=build_authority_capability(cast(Any, authority_sender)),
         profile_policy=cast(
             Any, profile_policy if profile_policy is not None else TEST_PROFILE_POLICY
         ),

@@ -54,8 +54,15 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.ports.module_operation import (
+    ModuleBeginResponse,
+    ModuleCompletion,
+    ModulePreparationRequest,
+)
 from kdive.providers.remote_libvirt import external_boot_authority
 from kdive.providers.remote_libvirt import external_boot_materialization as materialization_module
+from kdive.providers.remote_libvirt.authority_client import module_completion
+from kdive.providers.remote_libvirt.authority_client import module_operation as operation_view
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
     DurableRemoteModuleVolumePreparationHost,
@@ -65,7 +72,6 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootRecoveryRecord,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationHost,
     RemoteModuleVolumePreparationRequestV1,
@@ -92,8 +98,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
-    RemoteModuleResultV1,
-    identity_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -115,6 +119,11 @@ from kdive.services.remote_module_authority_preparation import (
     prepare_remote_module_on_authority_host,
 )
 from tests.db.external_boot_authority_support import _RoleDsns
+from tests.providers.remote_libvirt.authority_module_support import (
+    _prepared_volumes,
+    _remote_preparation_request,
+    _terminal_response,
+)
 from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
     _FakeAgentExec,
     _materialization,
@@ -122,10 +131,6 @@ from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
     _replies,
     _source_xml,
 )
-from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
-    operation as module_operation,
-)
-from tests.support.external_boot_plan import external_boot_plan
 
 
 def test_concrete_remote_materializer_binds_and_publishes_private_volume_names(
@@ -640,126 +645,6 @@ async def test_remote_cleanup_changed_nonce_fails_before_provider_mutation() -> 
     executor.shutdown()
 
 
-def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
-    operation = module_operation()
-    system_id = UUID(operation.system_id)
-    run_id = UUID(operation.run_id)
-    plan = external_boot_plan(system_id, run_id)
-    operation = operation.model_copy(
-        update={
-            "plan_identity": plan.identity,
-            "release": plan.module_obligation.release,
-            "source_manifest": plan.module_obligation.source_manifest,
-        }
-    )
-    authority = AuthorityPreparationMutationRequestV1(
-        authority_id=uuid4(),
-        generation=1,
-        system_id=system_id,
-        activation_id=uuid4(),
-        run_id=run_id,
-        plan_identity=plan.identity,
-        purpose="activate",
-        operation="prepare",
-        provider_kind="remote-libvirt",
-        authority_instance="remote-a",
-        operation_identity="prepare-op",
-        operation_digest="sha256:" + "c" * 64,
-        attempt_id=uuid4(),
-        expected_source_identity="source-a",
-        intended_target_identity="target-a",
-        recovery_objects=(),
-        plan=plan,
-    )
-    return RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
-
-
-def _prepared_volumes(request: RemoteModuleVolumePreparationRequestV1) -> PreparedModuleVolumes:
-    common = {
-        "pool": "modules",
-        "system_id": request.operation.system_id,
-        "run_id": request.operation.run_id,
-        "operation_nonce": request.operation.operation_nonce,
-    }
-    return PreparedModuleVolumes(
-        source=PreparedVolume(
-            **common,
-            name=render_module_volume_name(
-                request.operation.system_id,
-                request.operation.run_id,
-                request.operation.operation_nonce,
-                "source.ext4",
-            ),
-            purpose="source",
-            digest=request.operation.source_manifest,
-            capacity_bytes=4096,
-        ),
-        scratch=PreparedVolume(
-            **common,
-            name=render_module_volume_name(
-                request.operation.system_id,
-                request.operation.run_id,
-                request.operation.operation_nonce,
-                "scratch.ext4",
-            ),
-            purpose="scratch",
-            digest="sha256:" + "0" * 64,
-            capacity_bytes=8192,
-        ),
-    )
-
-
-def _terminal_response(
-    request: RemoteModuleVolumePreparationRequestV1,
-) -> RemoteModuleTerminalPreparationResponseV1:
-    operation = request.operation
-    volumes = _prepared_volumes(request)
-    result = RemoteModuleResultV1(
-        status="success",
-        phase="installed",
-        system_id=operation.system_id,
-        run_id=operation.run_id,
-        plan_identity=operation.plan_identity,
-        operation_nonce=operation.operation_nonce,
-        appliance_image_digest=operation.appliance_image_digest,
-        release=operation.release,
-        root_volume_key=operation.root_volume.key,
-        root_volume_identity=operation.root_volume.identity,
-        source_manifest=operation.source_manifest,
-        installed_manifest=operation.source_manifest,
-        capture_absent=True,
-        entry_count=1,
-        content_bytes=3,
-    )
-    authority = request.authority
-    authority_ref = OpaqueProviderRef(
-        ref=f"authority/{authority.authority_id}/{authority.generation}/{authority.attempt_id}"
-    )
-    base = RemoteModuleVolumePreparationResponseV1.from_prepared(volumes)
-    return RemoteModuleTerminalPreparationResponseV1(
-        source=base.source,
-        scratch=base.scratch,
-        result=result,
-        recovery=RemoteModuleRecoveryRefV2(
-            system_id=operation.system_id,
-            run_id=operation.run_id,
-            plan_identity=operation.plan_identity,
-            operation_nonce=operation.operation_nonce,
-            pool=OpaqueProviderRef(ref=volumes.source.pool),
-            root_volume=OpaqueProviderRef(ref=operation.root_volume.key),
-            source_volume=OpaqueProviderRef(ref=volumes.source.name),
-            scratch_volume=OpaqueProviderRef(ref=volumes.scratch.name),
-            source_capacity_bytes=volumes.source.capacity_bytes,
-            operation_identity=identity_for(operation),
-            result_identity=identity_for(result),
-            installed_entry_count=1,
-            installed_content_bytes=3,
-            appliance_image_digest=operation.appliance_image_digest,
-            authority_identity=RemoteModuleRecoveryRefV2.identity_for_authority(authority_ref),
-        ),
-    )
-
-
 def _module_lifecycle_request(
     request: RemoteModuleVolumePreparationRequestV1,
     *,
@@ -857,7 +742,7 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
 ) -> None:
     async def run() -> None:
         request = _remote_preparation_request()
-        response = _terminal_response(request)
+        response = module_completion(request.operation, _terminal_response(request))
         backing = RemoteModuleAttemptObligationRepository()
         async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
             attempt = await _seed_remote_attempt(admin, request)
@@ -895,17 +780,20 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
         class Sender:
             async def open_remote_module_attempt(
                 self, _begin: object, *, deadline: float
-            ) -> RemoteModulePreparationBeginResponseV1:
+            ) -> ModuleBeginResponse:
                 assert deadline > asyncio.get_running_loop().time()
-                return RemoteModulePreparationBeginResponseV1(
-                    preparation=preparation, operation=request.operation
+                return ModuleBeginResponse(
+                    preparation=preparation, operation=operation_view(request.operation)
                 )
 
             async def execute_remote_module_preparation(
-                self, candidate: RemoteModuleVolumePreparationRequestV1, *, deadline: float
-            ) -> RemoteModuleTerminalPreparationResponseV1:
+                self, candidate: ModulePreparationRequest, *, deadline: float
+            ) -> ModuleCompletion:
                 nonlocal calls, observer_task
-                assert candidate == request
+                assert candidate.authority == request.authority
+                assert candidate.operation.evidence.document == request.operation.model_dump(
+                    mode="json"
+                )
                 assert deadline > asyncio.get_running_loop().time()
                 observer_task = cast(asyncio.Task[object], asyncio.current_task())
                 calls += 1
@@ -974,7 +862,7 @@ def test_asyncio_run_shutdown_waits_for_late_prep_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _remote_preparation_request()
-    response = _terminal_response(request)
+    response = module_completion(request.operation, _terminal_response(request))
     attempt = ModuleAttempt(
         request.authority.system_id,
         request.authority.run_id,
@@ -1014,18 +902,21 @@ def test_asyncio_run_shutdown_waits_for_late_prep_completion(
     class Sender:
         async def open_remote_module_attempt(
             self, _begin: object, *, deadline: float
-        ) -> RemoteModulePreparationBeginResponseV1:
+        ) -> ModuleBeginResponse:
             assert deadline > asyncio.get_running_loop().time()
-            return RemoteModulePreparationBeginResponseV1(
+            return ModuleBeginResponse(
                 preparation=preparation,
-                operation=request.operation,
+                operation=operation_view(request.operation),
             )
 
         async def execute_remote_module_preparation(
-            self, candidate: RemoteModuleVolumePreparationRequestV1, *, deadline: float
-        ) -> RemoteModuleTerminalPreparationResponseV1:
+            self, candidate: ModulePreparationRequest, *, deadline: float
+        ) -> ModuleCompletion:
             nonlocal calls
-            assert candidate == request
+            assert candidate.authority == request.authority
+            assert candidate.operation.evidence.document == request.operation.model_dump(
+                mode="json"
+            )
             assert deadline > asyncio.get_running_loop().time()
             calls += 1
             if calls == 1:
@@ -1602,7 +1493,10 @@ async def test_worker_lifecycle_stops_on_authenticated_predispatch_refusal() -> 
 
 
 @pytest.mark.anyio
-async def test_worker_reap_requires_retained_terminal_evidence_before_dispatch() -> None:
+@pytest.mark.parametrize("missing", ["obligation", "terminal", "restored"])
+async def test_worker_reap_requires_retained_terminal_evidence_before_dispatch(
+    missing: str,
+) -> None:
     preparation_request = _remote_preparation_request()
     preparation = ModuleAttemptPreparationRequestV1(
         module_attempt_obligation=ModuleAttemptObligationReceiptV1(
@@ -1616,22 +1510,33 @@ async def test_worker_reap_requires_retained_terminal_evidence_before_dispatch()
         async def reap_obligation_is_open(self, connection: object, attempt: ModuleAttempt) -> bool:
             assert connection is worker_connection
             assert attempt.operation_nonce == preparation_request.operation.operation_nonce
-            return False
+            return missing != "obligation"
+
+        async def read_terminal_evidence(self, *_args: object) -> None:
+            assert missing == "terminal"
+
+        async def read_restored_evidence(self, *_args: object) -> None:
+            assert missing == "restored"
 
     class Sender:
         async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> None:
             raise AssertionError("reap reached authority without retained evidence")
 
     worker_connection = object()
-    with pytest.raises(CategorizedError, match="reap obligation is not retained"):
+    expected = {
+        "obligation": "reap obligation is not retained",
+        "terminal": "teardown requires retained PREP evidence",
+        "restored": "cleanup requires retained restored evidence",
+    }
+    with pytest.raises(CategorizedError, match=expected[missing]):
         await execute_remote_module_lifecycle_on_authority_host(
             connection=cast(Any, worker_connection),
             repository=cast(Any, Repository()),
             sender=cast(Any, Sender()),
             authority=_module_lifecycle_request(
                 preparation_request,
-                purpose="teardown",
-                operation="teardown",
+                purpose="release" if missing == "restored" else "teardown",
+                operation="cleanup" if missing == "restored" else "teardown",
                 action="reap",
             ).authority,
             preparation=preparation,
@@ -1661,7 +1566,8 @@ async def test_worker_lifecycle_keeps_later_denial_indeterminate_until_matching_
             operation_nonce=preparation_request.operation.operation_nonce,
         )
     )
-    response = _restored_response(preparation_request)
+    wire_response = _restored_response(preparation_request)
+    response = module_completion(wire_response.operation, wire_response)
     later_denial = asyncio.Event()
     host_release = asyncio.Event()
     calls = 0
@@ -1676,7 +1582,7 @@ async def test_worker_lifecycle_keeps_later_denial_indeterminate_until_matching_
     class Sender:
         async def execute_remote_module_lifecycle(
             self, *_args: object, **_kwargs: object
-        ) -> RemoteModuleLifecycleResponseV1:
+        ) -> ModuleCompletion:
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -1798,7 +1704,8 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
             operation_nonce=preparation_request.operation.operation_nonce,
         )
     )
-    response = _restored_response(preparation_request)
+    wire_response = _restored_response(preparation_request)
+    response = module_completion(wire_response.operation, wire_response)
     second = asyncio.Event()
     release = asyncio.Event()
     observer_task: asyncio.Task[object] | None = None
@@ -1814,7 +1721,7 @@ async def test_worker_lifecycle_keeps_ambiguous_stale_reply_indeterminate() -> N
     class Sender:
         async def execute_remote_module_lifecycle(
             self, *_args: object, **_kwargs: object
-        ) -> RemoteModuleLifecycleResponseV1:
+        ) -> ModuleCompletion:
             nonlocal calls, observer_task
             observer_task = cast(asyncio.Task[object], asyncio.current_task())
             calls += 1

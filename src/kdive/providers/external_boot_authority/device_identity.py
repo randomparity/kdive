@@ -17,7 +17,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.protocol import MAX_MESSAGE_BYTES
 
 if TYPE_CHECKING:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    from kdive.providers.ports.module_operation import (
         RemoteDeviceIdentity,
     )
 
@@ -142,7 +142,7 @@ class RemoteAuthorityDeviceIdentity:
         self._clock = clock
 
     def identity(self, path: str) -> RemoteDeviceIdentity | None:
-        from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+        from kdive.providers.ports.module_operation import (
             RemoteDeviceIdentity,
         )
 
@@ -246,7 +246,7 @@ class RemoteDeviceIdentityService:
             raise
         if result is None:
             return DeviceIdentityAbsentV1()
-        from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+        from kdive.providers.ports.module_operation import (
             RemoteDeviceIdentity,
         )
 

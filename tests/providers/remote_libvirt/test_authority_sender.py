@@ -26,7 +26,6 @@ from kdive.providers.external_boot_authority.device_identity import (
 from kdive.providers.external_boot_authority.network_client import _AuthorityNetworkTransport
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
-    AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
 )
@@ -176,87 +175,29 @@ async def test_sender_encodes_preparation_request_and_requires_closed_response()
 
 
 async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation() -> None:
-    authority = _preparation_request().model_copy(update={"operation": AuthorityOperation.PREPARE})
-    operation = {
-        "operation": "capture_install",
-        "system_id": str(authority.system_id),
-        "run_id": str(authority.run_id),
-        "plan_identity": authority.plan_identity,
-        "operation_nonce": authority.attempt_id.hex,
-        "release": authority.plan.module_obligation.release,
-        "root_volume": {"key": "root-volume", "identity": "sha256:" + "1" * 64},
-        "source_manifest": authority.plan.module_obligation.source_manifest,
-        "appliance_image_digest": "sha256:" + "2" * 64,
-    }
-    remote_request = RemoteModuleVolumePreparationRequestV1(
-        authority=authority, operation=operation
+    from kdive.providers.ports.module_operation import ModulePreparationRequest
+    from kdive.providers.remote_libvirt.authority_client import (
+        RemoteModuleAuthorityAdapter,
+        module_completion,
+        module_operation,
     )
-    response = RemoteModuleTerminalPreparationResponseV1.model_validate(
+    from tests.providers.remote_libvirt.authority_module_support import (
+        _remote_preparation_request,
+        _terminal_response,
+    )
+
+    remote_request = _remote_preparation_request()
+    authority = remote_request.authority
+    response = _terminal_response(remote_request)
+    expected_envelope = json.dumps(
         {
-            "source": {
-                "pool": "pool",
-                "name": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
-                f"{authority.attempt_id.hex}-source.ext4",
-                "system_id": str(authority.system_id),
-                "run_id": str(authority.run_id),
-                "operation_nonce": authority.attempt_id.hex,
-                "purpose": "source",
-                "digest": authority.plan.module_obligation.source_manifest,
-                "capacity_bytes": 4096,
-            },
-            "scratch": {
-                "pool": "pool",
-                "name": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
-                f"{authority.attempt_id.hex}-scratch.ext4",
-                "system_id": str(authority.system_id),
-                "run_id": str(authority.run_id),
-                "operation_nonce": authority.attempt_id.hex,
-                "purpose": "scratch",
-                "digest": "sha256:" + "0" * 64,
-                "capacity_bytes": 4096,
-            },
-            "result": {
-                "status": "success",
-                "phase": "installed",
-                "system_id": str(authority.system_id),
-                "run_id": str(authority.run_id),
-                "plan_identity": authority.plan_identity,
-                "operation_nonce": authority.attempt_id.hex,
-                "appliance_image_digest": "sha256:" + "2" * 64,
-                "release": authority.plan.module_obligation.release,
-                "root_volume_key": "root-volume",
-                "root_volume_identity": "sha256:" + "1" * 64,
-                "source_manifest": authority.plan.module_obligation.source_manifest,
-                "installed_manifest": authority.plan.module_obligation.source_manifest,
-                "capture_absent": True,
-                "entry_count": 1,
-                "content_bytes": 1,
-            },
-            "recovery": {
-                "system_id": str(authority.system_id),
-                "run_id": str(authority.run_id),
-                "plan_identity": authority.plan_identity,
-                "operation_nonce": authority.attempt_id.hex,
-                "pool": {"ref": "pool"},
-                "root_volume": {"ref": "root-volume"},
-                "source_volume": {
-                    "ref": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
-                    f"{authority.attempt_id.hex}-source.ext4"
-                },
-                "scratch_volume": {
-                    "ref": f"kdive-mod-{authority.system_id}-{authority.run_id}-"
-                    f"{authority.attempt_id.hex}-scratch.ext4"
-                },
-                "source_capacity_bytes": 4096,
-                "operation_identity": "sha256:" + "3" * 64,
-                "result_identity": "sha256:" + "4" * 64,
-                "installed_entry_count": 1,
-                "installed_content_bytes": 1,
-                "appliance_image_digest": "sha256:" + "2" * 64,
-                "authority_identity": "sha256:" + "5" * 64,
-            },
-        }
-    )
+            "operation": "execute-remote-module-preparation",
+            "credential": "remote-module-incarnation",
+            "request": remote_request.model_dump(mode="json", by_alias=True),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
     class ModuleService:
         failed = False
@@ -293,17 +234,22 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
             async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
                 return AuthenticatedPeer("worker")
 
+            assert envelope == expected_envelope
             return await transport._dispatch(
                 envelope, authenticate, None, remote_module_service=ModuleService()
             )
 
     sender = _sender(Backend(), lambda: SecretStr("remote-module-incarnation"))
-    assert (
-        await sender.execute_remote_module_preparation(remote_request, deadline=123.0) == response
+    adapter = RemoteModuleAuthorityAdapter(sender)
+    neutral_request = ModulePreparationRequest(
+        authority, module_operation(remote_request.operation)
+    )
+    assert await adapter.execute_remote_module_preparation(neutral_request, deadline=123.0) == (
+        module_completion(remote_request.operation, response)
     )
     ModuleService.failed = True
     with pytest.raises(CategorizedError, match="remote-module-failed") as failed:
-        await sender.execute_remote_module_preparation(remote_request, deadline=123.0)
+        await adapter.execute_remote_module_preparation(neutral_request, deadline=123.0)
     assert failed.value.category is ErrorCategory.CONFLICT
     assert failed.value.details == {"completion": "failed-after-mutation"}
 
@@ -343,9 +289,6 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "execute_system_operation",
         "execute_preparation",
         "execute_teardown",
-        "execute_remote_module_preparation",
-        "execute_remote_module_lifecycle",
-        "open_remote_module_attempt",
         "execute_conflict_resolution",
         "observe_authority",
         "observe_running",
@@ -429,15 +372,17 @@ def test_resource_rebinding_selects_its_own_closed_route(monkeypatch: pytest.Mon
     first = runtime.for_resource("resource-a")
     second = runtime.for_resource("resource-b")
     assert first.authority is not second.authority
+    assert first.authority is not None and second.authority is not None
+    assert first.authority.authority_instance == "resource-a"
+    assert second.authority.authority_instance == "resource-b"
+    assert first.authority.sender is not second.authority.sender
     assert selected == [configs["resource-a"].authority, configs["resource-b"].authority]
     configs["resource-a"] = replace(configs["resource-a"], authority=None)
     assert runtime.for_resource("resource-a").authority is None
-    assert (
-        composition.build_runtime(secret_registry=SecretRegistry())
-        .for_resource("resource-b")
-        .authority
-        is None
-    )
+    server = composition.build_runtime(secret_registry=SecretRegistry()).for_resource("resource-b")
+    assert server.authority is not None
+    assert server.authority.authority_instance == "resource-b"
+    assert server.authority.sender is None
 
 
 @pytest.mark.parametrize("material", ["missing", "malformed"])
@@ -445,7 +390,7 @@ async def test_authority_material_failure_does_not_block_rebinding_power_or_tear
     material: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from kdive.domain.operations.jobs import PowerAction
-    from kdive.jobs.authority_sender import authority_sender_factory
+    from kdive.providers.assembly.authority import authority_sender_factory
     from kdive.providers.remote_libvirt.connection import transport as libvirt_transport
     from kdive.providers.remote_libvirt.diagnostics.authority import AuthorityReadinessCheck
     from kdive.providers.remote_libvirt.lifecycle import control
@@ -492,12 +437,13 @@ async def test_authority_material_failure_does_not_block_rebinding_power_or_tear
     runtime.controller.power(domain.name(), PowerAction.ON)
     runtime.provisioner.teardown(domain.name())
     assert domain.calls == ["create", "destroy", "undefine"]
-    assert runtime.authority is not None
+    assert runtime.authority is not None and runtime.authority.sender is not None
     with pytest.raises(
         CategorizedError, match="^authority: tls-(secret-unavailable|material-invalid)$"
     ):
-        await runtime.authority.health(deadline=asyncio.get_running_loop().time() + 1)
-    result = await AuthorityReadinessCheck(lambda: runtime.authority).run()
+        await runtime.authority.sender.health(deadline=asyncio.get_running_loop().time() + 1)
+    capability = runtime.authority
+    result = await AuthorityReadinessCheck(lambda: capability.sender).run()
     assert result.failure_category is ErrorCategory.READINESS_FAILURE
     assert result.data == {"readiness": "unavailable"}
     assert "private" not in str(result)
@@ -508,7 +454,7 @@ async def test_authority_material_failure_does_not_block_rebinding_power_or_tear
 async def test_standing_route_retains_only_references_and_materializes_each_typed_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.jobs import authority_sender
+    from kdive.providers.assembly import authority as authority_sender
 
     backend = FileRefBackend(tmp_path, SecretRegistry())
     binding = RemoteAuthorityBinding("authority-a", "192.0.2.1", 9443, "ca", "cert", "key")

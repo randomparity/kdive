@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -15,20 +16,20 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.external_boot import routing
 
 
-def test_local_route_uses_the_worker_client_binding_not_runtime_authority(
+def test_local_route_uses_the_composed_runtime_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The local runtime intentionally owns no authority sender."""
-    runtime = local_composition.build_runtime(secret_registry=SecretRegistry())
-    assert runtime.authority is None
     monkeypatch.setattr(
-        routing,
+        local_composition,
         "local_authority_binding",
         lambda: LocalAuthorityBinding(
             "local-authority", Path("/run/authority.sock"), "ca", "cert", "key"
         ),
     )
 
+    runtime = local_composition.build_runtime(
+        secret_registry=SecretRegistry(), authority_sender=cast(Any, object())
+    )
     routing.require_worker_authority_route(
         ProviderBinding(ResourceKind.LOCAL_LIBVIRT, runtime), "local-authority"
     )
@@ -41,8 +42,10 @@ def test_local_route_uses_the_worker_client_binding_not_runtime_authority(
 def test_local_route_refuses_missing_or_mismatched_worker_binding(
     monkeypatch: pytest.MonkeyPatch, binding: LocalAuthorityBinding | None
 ) -> None:
-    runtime = local_composition.build_runtime(secret_registry=SecretRegistry())
-    monkeypatch.setattr(routing, "local_authority_binding", lambda: binding)
+    monkeypatch.setattr(local_composition, "local_authority_binding", lambda: binding)
+    runtime = local_composition.build_runtime(
+        secret_registry=SecretRegistry(), authority_sender=cast(Any, object())
+    )
 
     with pytest.raises(CategorizedError) as raised:
         routing.require_worker_authority_route(
@@ -56,7 +59,6 @@ def test_local_route_refuses_missing_or_mismatched_worker_binding(
 def test_local_route_propagates_a_partial_client_binding_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = local_composition.build_runtime(secret_registry=SecretRegistry())
     partial = CategorizedError(
         "authority: incomplete-local-binding", category=ErrorCategory.CONFIGURATION_ERROR
     )
@@ -64,18 +66,20 @@ def test_local_route_propagates_a_partial_client_binding_failure(
     def incomplete() -> LocalAuthorityBinding:
         raise partial
 
-    monkeypatch.setattr(routing, "local_authority_binding", incomplete)
+    monkeypatch.setattr(local_composition, "local_authority_binding", incomplete)
 
     with pytest.raises(CategorizedError) as raised:
-        routing.require_worker_authority_route(
-            ProviderBinding(ResourceKind.LOCAL_LIBVIRT, runtime), "local-authority"
+        local_composition.build_runtime(
+            secret_registry=SecretRegistry(), authority_sender=cast(Any, object())
         )
 
     assert raised.value is partial
 
 
-def test_remote_route_still_requires_its_runtime_sender(monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime = local_composition.build_runtime(secret_registry=SecretRegistry())
+def test_remote_route_still_requires_its_runtime_sender() -> None:
+    from kdive.providers.remote_libvirt import composition as remote_composition
+
+    runtime = remote_composition.build_runtime(secret_registry=SecretRegistry())
     binding = ProviderBinding(ResourceKind.REMOTE_LIBVIRT, runtime, "remote")
 
     with pytest.raises(CategorizedError) as raised:
