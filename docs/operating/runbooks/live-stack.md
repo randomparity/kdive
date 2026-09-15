@@ -78,13 +78,18 @@ workers on the host so they can access KVM and libvirt.
     strictly fail-closed.
 - The installed contract publishes one explicit operator-owned session URI:
   `qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock` on the Debian-family
-  runner (`virtqemud-sock` is selected on the modular-daemon family). Every host-local libvirt
-  consumer a bring-up entry point starts reads the published value from
-  `/etc/kdive/live-worker-libvirt.env` — server, reconciler, workers, the `virsh` gates, and
-  teardown alike. None of them may fall back to `qemu:///system` while that contract is installed:
-  a server on a different endpoint than the worker finds no domain for a healthy System, and
-  `systems.ssh_info` then reports `ssh_not_provisioned` (#2480). `scripts/live-stack/env.sh` and
-  `scripts/live-stack/lib.sh` resolve it, so any entry point that sources either agrees.
+  runner (`virtqemud-sock` is selected on the modular-daemon family). `scripts/live-stack/env.sh`
+  and `scripts/live-stack/lib.sh` read that published value, so every host-local libvirt consumer
+  a bring-up entry point starts — server, reconciler, workers, the `virsh` gates, teardown — lands
+  on one endpoint rather than splitting by entry point (#2480). A server on a different endpoint
+  than the worker finds no domain for a healthy System, and `systems.ssh_info` then reports
+  `ssh_not_provisioned`.
+
+  **Leave `KDIVE_LIBVIRT_URI` unset on a provisioned host.** It is honored verbatim and is the one
+  thing that still splits the two: `worker-lifecycle.sh` reads the published contract directly and
+  ignores the override, so presetting it moves the daemons off the worker's socket and reproduces
+  that failure with nothing to warn you. The override exists for a host whose contract file is
+  broken, where it is the only way to run teardown at all.
 - The VM fixtures built (below).
 - If you run a **published** kdive image from `ghcr.io/randomparity/kdive` rather than a
   locally built one, verify its signature first. The release workflow cosign-signs each

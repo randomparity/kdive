@@ -952,6 +952,34 @@ def test_live_stack_env_resolves_one_libvirt_endpoint(
     assert result.stdout == expected
 
 
+@pytest.mark.parametrize("target", ("missing", "live-worker-libvirt.env"))
+def test_a_symlink_at_the_contract_path_is_refused_not_downgraded(
+    tmp_path: Path, target: str
+) -> None:
+    """A symlink occupying the contract path must abort, never resolve qemu:///system.
+
+    `-e` follows symlinks, so a *dangling* one reads as absent and would take the default branch
+    -- a silent downgrade to the very endpoint the split is about, reached through the one
+    condition require_exact_libvirt_env exists to refuse. A symlink to a valid contract is
+    refused by that check either way; both shapes belong here so the gate cannot be narrowed
+    back to `-e` alone without one of them going red.
+    """
+    contract, staged = _published_contract(tmp_path)
+    link = tmp_path / "linked.env"
+    link.symlink_to(tmp_path / target)
+    staged["LIBVIRT_ENV"] = str(link)
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        'printf %s "${KDIVE_LIBVIRT_URI-unset}"',
+        staged,
+    )
+    assert result.returncode != 0
+    assert result.stdout != "qemu:///system"
+    assert "untrusted metadata" in result.stderr
+    assert "export KDIVE_LIBVIRT_URI" in result.stderr
+    assert contract.exists()
+
+
 def test_server_and_worker_receive_the_same_libvirt_endpoint(tmp_path: Path) -> None:
     """The endpoint agreement #2480 asks for, asserted as agreement rather than as a substring
     of either script: the server-side value is read out of the environment
@@ -1908,14 +1936,15 @@ def test_role_bootstrap_runs_with_the_container_internal_migration_dsn() -> None
 
 def _ensure_session_libvirtd(tmp_path: Path) -> subprocess.CompletedProcess[str]:
     """Source the real lib.sh and run ensure_session_libvirtd against staged paths."""
-    (tmp_path / "lib.sh").write_text(
-        (ROOT / "scripts/live-stack/lib.sh").read_text(), encoding="utf-8"
-    )
+    for name in ("lib.sh", "libvirt-uri.sh"):
+        (tmp_path / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
+        )
     args = (
         f'"{tmp_path / "libvirtd-stub"}" "{tmp_path / "libvirtd-live.conf"}" '
         f'"{tmp_path / "run/kdive/live-libvirt"}"'
     )
-    return subprocess.run(
+    result = subprocess.run(
         [
             "bash",
             "-c",
@@ -1928,6 +1957,11 @@ def _ensure_session_libvirtd(tmp_path: Path) -> subprocess.CompletedProcess[str]
         check=False,
         env=dict(os.environ),
     )
+    # `bash -c` carries no `set -e`, so a lib.sh that half-sourced would be invisible: every
+    # assertion below is about ensure_session_libvirtd's own behavior and would still pass. The
+    # staged copy must bring every sibling lib.sh sources.
+    assert "No such file or directory" not in result.stderr, result.stderr
+    return result
 
 
 @contextmanager

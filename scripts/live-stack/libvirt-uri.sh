@@ -6,9 +6,15 @@
 # `readonly` aborted the second source with "readonly variable" before the body ran, which under
 # the callers' `set -euo pipefail` took the whole shell down.
 #
-# LIBVIRT_ENV is therefore overridable, which is what lets a test stage the contract outside /etc.
-# That grants a caller nothing it does not already have: an explicit KDIVE_LIBVIRT_URI is honored
-# verbatim below and bypasses this file's URI allowlist outright.
+# LIBVIRT_ENV is therefore overridable. It is a test-staging seam, not an operator knob: no
+# KDIVE_ prefix, no row in the generated config reference, and deliberately so — it names a path,
+# not a runtime setting kdive.config reads. What bounds a redirect is the validation the path
+# still faces, not the override: require_exact_libvirt_env demands a non-symlink regular file that
+# `stat` reports root:root 0644, and load_published_libvirt_uri demands its entire content be one
+# KDIVE_LIBVIRT_URI line naming one of the two URIs in LIBVIRT_SOCKET_URIS. So the widest outcome
+# a redirect can reach is a value that was already correct. Do not state the bound as "an explicit
+# KDIVE_LIBVIRT_URI bypasses the allowlist anyway": that is true of resolve_libvirt_uri only, and
+# worker-lifecycle.sh calls load_published_libvirt_uri directly, where no such bypass exists.
 : "${LIBVIRT_ENV:=/etc/kdive/live-worker-libvirt.env}"
 LIBVIRT_SOCKET_URIS=(
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock'
@@ -53,15 +59,27 @@ load_published_libvirt_uri() {
 # inherited environment, so an unexported value reached neither and both fell back to the
 # in-process qemu:///system default while the worker used the published URI.
 #
-# A contract file that is present but fails validation returns non-zero rather than falling back.
-# Under the callers' `set -e` that aborts bring-up, which is the point: a silent downgrade to
+# Anything occupying the contract path but failing validation returns non-zero rather than falling
+# back. Under the callers' `set -e` that aborts them, which is the point: a silent downgrade to
 # qemu:///system is exactly the server/worker split this resolves, and it would happen under the
-# one condition — an untrusted /etc file — where it matters most. Set KDIVE_LIBVIRT_URI explicitly
-# to proceed anyway (teardown on a host whose contract is broken, say).
+# one condition — an untrusted /etc file — where it matters most. The gate is `-e || -L` rather
+# than `-e` alone because `-e` follows symlinks, so a dangling one would take the else branch and
+# downgrade silently while a symlink to a valid contract is rejected.
+#
+# stack-down.sh and stack-status.sh source lib.sh before doing any of their own work, so that
+# abort takes teardown and status with it. The override named in the message is the way out, and
+# the message says which value because a wrong one is worse than the abort: kdive_domains() would
+# query a daemon holding no kdive domains, the destroy/undefine loop would iterate over nothing,
+# and `stack-down.sh --wipe` would still remove the overlays those domains are running on.
 resolve_libvirt_uri() {
   if [[ -z "${KDIVE_LIBVIRT_URI:-}" ]]; then
-    if [[ -e "$LIBVIRT_ENV" ]]; then
-      KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)" || return 1
+    if [[ -e "$LIBVIRT_ENV" || -L "$LIBVIRT_ENV" ]]; then
+      KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)" || {
+        echo "to proceed anyway, export KDIVE_LIBVIRT_URI naming the endpoint the kdive domains" \
+          "actually live on — a value naming any other daemon leaves them defined while" \
+          "'stack-down.sh --wipe' still removes their overlays" >&2
+        return 1
+      }
     else
       KDIVE_LIBVIRT_URI=qemu:///system
     fi
