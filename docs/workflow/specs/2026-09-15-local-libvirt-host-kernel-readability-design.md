@@ -56,8 +56,11 @@ satisfies.
   the preceding task does not already set. Both the fixed worker accounts
   (`local_worker_host/tasks/worker_accounts.yml`) and the operator login account
   (`libvirt_stack/tasks/main.yml`) are already `kvm` members, so `0640 root:kvm` reaches both
-  readers. The RedHat and Suse families ship these files world-readable and are left alone,
-  which is also what keeps the RHEL/Rocky guestfs limit untouched.
+  readers. Fedora ships these files world-readable (`0755 root:root`, confirmed on Fedora 44),
+  so relabelling there would narrow them. Rocky and RHEL do ship `0600` like Debian, but
+  build-fs is unavailable on that family regardless — no matching Python 3.14
+  `python3-guestfs` binding — so the guard stays keyed to the family where the relabel both
+  applies and helps, and the RHEL/Rocky guestfs limit stays untouched.
 - `scripts/check-setup-deps.sh` gains `BOOT_DIR` (overridable by `KDIVE_BOOT_DIR`, mirroring
   `check-local-libvirt.sh`) and a `probe_boot_kernels` future-tier entry whose remedy names
   `just prepare-local-libvirt-host` first — with the `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` the
@@ -94,6 +97,13 @@ Out of scope, with owners:
 - The `§4b` citations in accepted ADR-0214 and ADR-0393. Both sit in a `## Context` section,
   and `.github/scripts/profiles/adr.sh` makes every non-Status section of a merged record
   append-only, so correcting them takes a superseding record. Owner: those records.
+- Rocky and RHEL local-libvirt hosts, which ship `/boot/vmlinuz-*` `0600` and are skipped by
+  the family guard, so their kernels stay unreadable. Owner: the `install.md`
+  platform-support table, which already records that build-fs is unavailable on that family.
+  Keying the relabel on the observed mode instead (`ansible.builtin.find` supports
+  `mode: "0600"` with `exact_mode: true`) would cover them and remove the family key: a
+  follow-up candidate, not adopted here because it widens the outcome past the frozen
+  charter and buys that family nothing while the binding is still missing.
 - `_KERNEL_REMEDIATION` in `src/kdive/images/planes/_build_common.py`, which still tells an
   operator `sudo chmod 0644 /boot/vmlinuz-*` when build-fs fails. That wording comes from
   ADR-0222's Decision, so correcting it takes a superseding record, and `src/kdive/` is
@@ -152,14 +162,16 @@ Debian-family hosts, from `root:root 0600` to `root:kvm 0640`. `probe_boot_kerne
 and reads a directory the invoking user already selects through `KDIVE_BOOT_DIR`.
 
 **Actor model.** The untrusted party is a local unprivileged uid on the prepared host that is
-not in `kvm`. The design trusts `kvm` membership, which the same play grants only to the named
-operator account and the eight fixed worker accounts, and trusts root for the relabel, which
-Ansible already holds in this play.
+not in `kvm`. The design trusts `kvm` membership. The play adds the named operator account and
+the eight fixed worker accounts to that group; it does not control who else the host already
+put there, so the trust is in the host's existing `kvm` roster as much as in the play's own
+additions. It trusts root for the relabel, which Ansible already holds in this play.
 
 **Control per boundary.** The widened boundary is controlled by the group, not the mode: `0640
 root:kvm` grants read to `kvm` members only, so a uid outside `kvm` gains nothing it did not
 have at `0600`. The Debian-family `when` guard is the control preventing the same task
-*narrowing* a RedHat or Suse host. Removing the `chmod 0644` remedy from
+*narrowing* a Fedora or Suse host, which ship these world-readable. On a Debian host already
+at `0644` the task narrows to `0640`, which is the direction the invariant above wants. Removing the `chmod 0644` remedy from
 `check-local-libvirt.sh` is the control that stops an operator widening the boundary by hand.
 The probe neither escalates nor mutates, and on failure prints a path it was given plus a
 remedy — no file content.

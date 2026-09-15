@@ -3,8 +3,12 @@
 # appliance by copying a host kernel as the INVOKING user, so build-fs dies with an opaque
 # "supermin exited with error status 1" (ADR-0222, #694/#1156, #2479) — probed by
 # check-local-libvirt.sh as a FAIL and by check-setup-deps.sh as a future-tier hint.
-# RedHat and Suse ship these world-readable; relabelling there would NARROW them, so the
-# block is guarded to the family that has the defect.
+# Fedora ships these world-readable (0755 root:root), so relabelling there would NARROW them.
+# Rocky and RHEL do ship 0600 like Debian, but build-fs is unavailable on that family anyway:
+# their system Python provides no matching 3.14 python3-guestfs binding, which the
+# platform-support table in docs/operating/install.md owns. So the guard stays keyed to the
+# family where the relabel both applies and helps. Narrowing an already-0644 Debian host to
+# 0640 is the intended direction, not a regression -- no path here may reach 0644.
 - name: Make the Debian-family host kernels readable for guest-image builds
   when: ansible_facts['os_family'] == 'Debian'
   tags: [boot_kernels]
