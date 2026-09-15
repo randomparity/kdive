@@ -411,9 +411,6 @@ probe_guestfs() {
 # `-r` is true for uid 0 whatever the mode, so the remedy says which user the probe read as.
 probe_boot_kernels() {
   local k remedy
-  # The one-off needs kvm membership too: the mode grants read through the group, and a new
-  # membership only reaches a process started from a fresh login session.
-  remedy="run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* && sudo usermod -aG kvm \"\$USER\" (then start a new login session)"
   # A BOOT_DIR this user cannot list hides every kernel from the glob below, which would
   # otherwise read as "no kernels present" and report nothing — the state this probe exists
   # to catch. Check the directory before trusting an empty match.
@@ -422,6 +419,9 @@ probe_boot_kernels() {
       "${BOOT_DIR} is not listable by this user (this probe reads as the invoking user), so libguestfs cannot reach a host kernel and no guest image can be built — run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode; a one-off glob cannot help here because your shell cannot expand it inside an unlistable directory"
     return
   fi
+  # The one-off needs kvm membership too: the mode grants read through the group, and a new
+  # membership only reaches a process started from a fresh login session.
+  remedy="run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* && sudo usermod -aG kvm \"\$USER\" (then start a new login session)"
   for k in "${BOOT_DIR}"/vmlinuz-* "${BOOT_DIR}"/vmlinux-*; do
     [[ -e "${k}" ]] || continue # no-match glob stays literal under no-nullglob; skip it
     [[ -r "${k}" ]] && continue
