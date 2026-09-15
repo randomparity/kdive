@@ -314,6 +314,9 @@ arch_needs_rust() {
 # is informational, not a missing-dependency report.
 # The KVM device node backing native acceleration; override for tests (mirrors check-local-libvirt.sh).
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
+# libguestfs builds its supermin appliance by copying a host kernel out of this directory as the
+# INVOKING user. Overridable for tests, mirroring KDIVE_KVM_NODE and check-local-libvirt.sh.
+readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 
 print_cross_arch_advisory() {
   local host="$1" distro="$2" arch binary pkg native native_path
@@ -400,6 +403,22 @@ probe_guestfs() {
   esac
 }
 
+# Debian and Ubuntu ship /boot/vmlinuz-* root:root 0600, so build-fs dies with an opaque
+# "supermin exited with error status 1" before any image can be built (ADR-0222, #2479).
+# Fedora ships them world-readable. Report-only: a privileged /boot mutation is outside this
+# script's remediation contract (ADR-0393), and the recipe named below declares it instead.
+# `-r` is true for uid 0 whatever the mode, so the remedy says which user the probe read as.
+probe_boot_kernels() {
+  local k
+  for k in "${BOOT_DIR}"/vmlinuz-* "${BOOT_DIR}"/vmlinux-*; do
+    [[ -e "${k}" ]] || continue # no-match glob stays literal under no-nullglob; skip it
+    [[ -r "${k}" ]] && continue
+    note_manual future "host kernel readability" \
+      "a kernel under ${BOOT_DIR} is not readable (this probe reads as the invoking user), so libguestfs cannot build its appliance and no guest image can be built — run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-*"
+    return
+  done
+}
+
 # Populate every tier accumulator from a fresh probe of the host. Called once at startup and again
 # after fixes (re-verification), so it resets the arrays first (bash caches command lookups, so the
 # caller runs `hash -r` before the second call). distro/host_arch are resolved once above (they do
@@ -475,6 +494,7 @@ probe_all() {
   require_header future libdw-headers libdw "${distro}"
   require_header future libkdumpfile-headers libkdumpfile "${distro}"
   probe_guestfs "${distro}"
+  probe_boot_kernels
 
   # Wheel-less arches (ppc64le) build drgn from source — its vendored libdrgn uses autotools, so
   # `uv sync --group live` fails at `autoreconf` without autoconf/automake/libtool. libtool the
@@ -634,7 +654,7 @@ fi
 print_cross_arch_advisory "${host_arch}" "${distro}"
 
 if ((${#manual_hints[@]} > 0)); then
-  printf "\nTooling not provided by your distribution:\n" >&2
+  printf "\nManual fixes your distribution's packages do not supply:\n" >&2
   printf "    %s\n" "${manual_hints[@]}" >&2
 fi
 
@@ -644,7 +664,7 @@ if ((${#required_commands[@]} > 0)); then
 fi
 
 if ((${#recommended_commands[@]} + ${#future_commands[@]} > 0)); then
-  printf "\nRequired dependencies are present; optional items above are not yet needed.\n"
+  printf "\nRequired dependencies are present. The items above are not needed for the core dev loop; the live_vm and guest-image tiers do need them.\n"
 else
   printf "Setup dependencies are present.\n"
 fi
