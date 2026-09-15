@@ -1,4 +1,4 @@
-"""Replay and evidence ordering for retained systemd worker slots."""
+"""Replay and evidence ordering for retained systemd worker slots (ADR-0574, ADR-0657)."""
 
 from __future__ import annotations
 
@@ -175,6 +175,10 @@ class FakeRuntime:
         self.stop_budgets: list[float] = []
         self.inactive_checks: list[tuple[str, float]] = []
         self.systemd_deadlines: list[tuple[str, Deadline]] = []
+        # Units `systemctl stop` cannot clear. A unit left `failed` keeps its InvocationID until
+        # `systemctl reset-failed`, which nothing in the coordinator runs, so `stop_retained` is a
+        # no-op on it and the identity `require_inactive` rejects survives the cleanup.
+        self.unstoppable: set[str] = set()
 
     def require_inactive(self, unit: str, deadline: Deadline) -> None:
         self.systemd_deadlines.append(("require-inactive", deadline))
@@ -237,7 +241,8 @@ class FakeRuntime:
         self.stop_budgets.append(deadline.remaining())
         self.stopped.append(unit)
         self.events.append(f"systemd:stop:{unit}")
-        self.current.pop(unit, None)
+        if unit not in self.unstoppable:
+            self.current.pop(unit, None)
 
     def reset(self, unit: str, deadline: Deadline) -> None:
         self.systemd_deadlines.append(("reset", deadline))
@@ -669,6 +674,8 @@ def test_same_boot_successor_invocation_retires_the_retained_incarnation() -> No
 
 
 def test_start_reconciles_a_restarted_unit_and_replaces_the_slot() -> None:
+    # A successor `systemctl stop` can clear, so activation reaches an inactive unit with an empty
+    # identity. The failed-successor case the strict gate actually produces is the next test.
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
     runtime.current[started.unit] = _observation(1, "populated", invocation_id="f" * 32)
@@ -681,6 +688,29 @@ def test_start_reconciles_a_restarted_unit_and_replaces_the_slot() -> None:
     assert authority.terminations == [(started.incarnation, "killed")]
     assert stores[0].state is not None and stores[0].state.phase is SlotPhase.STARTED
     assert stores[0].state.generation != started.generation
+
+
+def test_start_retires_a_restarted_slot_whose_successor_unit_stays_failed() -> None:
+    # The residual ADR-0657 discloses and #2488 owns. Under the strict gate binding the successor
+    # invocation exits non-zero, so its unit keeps ActiveState=failed and its InvocationID;
+    # `systemctl stop` is a no-op on such a unit and nothing runs `systemctl reset-failed`. The
+    # retained binding is still retired through the contract, which is what this change delivers,
+    # but `require_inactive` then refuses to activate a replacement.
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(started.unit)
+
+    response = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
+    )
+
+    assert authority.terminations == [(started.incarnation, "killed")]
+    assert stores[0].state is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
 
 
 def test_successor_invocation_exit_facts_are_not_attributed_to_the_retained_one() -> None:
@@ -812,6 +842,30 @@ def test_start_stops_slots_above_a_reduced_worker_count() -> None:
     }
 
 
+def test_foreign_unit_observation_is_refused_without_evidence() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(2, "populated")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert authority.terminations == []
+    assert stores[0].state == started
+
+
+def test_unknown_membership_on_the_retained_invocation_is_not_terminal_evidence() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "unknown")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == ("dependency_unavailable", "restore_systemd")
+    assert authority.terminations == []
+    assert stores[0].state == started
+
+
 def test_same_boot_unit_absence_is_not_terminal_evidence() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
@@ -827,10 +881,17 @@ def test_same_boot_unit_absence_is_not_terminal_evidence() -> None:
     assert stores[0].state == started
 
 
-def test_reboot_maps_exact_retained_binding_to_killed() -> None:
+@pytest.mark.parametrize("live_cgroup", (False, True))
+def test_reboot_maps_exact_retained_binding_to_killed(live_cgroup: bool) -> None:
+    # The prior boot's cgroup cannot survive a reboot, so the boot-ID rule decides both an absent
+    # unit and one whose properties still look live, before membership is ever read.
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
-    runtime.current[started.unit] = _boot_observation(1, boot_id=_NEXT_BOOT_ID)
+    runtime.current[started.unit] = (
+        _observation(1, "populated", boot_id=_NEXT_BOOT_ID)
+        if live_cgroup
+        else _boot_observation(1, boot_id=_NEXT_BOOT_ID)
+    )
 
     response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
 
