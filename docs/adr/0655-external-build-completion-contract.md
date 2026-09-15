@@ -30,16 +30,29 @@ not a number the measurement chose, and it is the most likely proximate cause of
 ## Decision
 
 Pending the measurement. The rule that selects it is fixed here so the conclusion is
-falsifiable either way:
+falsifiable either way, and it is the charter's rule rather than one this design invents:
 
-**Synchronous completion is retained only if the 2-GB row's `total_ms` is at most 50% of the
-30 000 ms supported budget.** Otherwise durable asynchronous finalization is required and #2319
+**Synchronous completion is retained only if the larger bundle's `total_ms` meets the 30 000 ms
+supported budget.** Otherwise durable asynchronous finalization is required and #2319
 implements it.
+
+No margin factor is built into the rule. Issue #2318's outcome says "meets the supported client
+request budget"; a factor the charter does not supply would decide the in-between case on this
+design's authority instead. Where the measured total lands close enough to the budget that
+headroom matters, that is recorded below as a labelled judgement, not folded into the threshold.
 
 Whichever branch the evidence selects, this record then defines retry and idempotency,
 cancellation, upload-window fencing (preserving the object-identity and remint fencing at
 `src/kdive/services/runs/complete_build.py:553-586`), publication ownership, and recovery after
 transport interruption.
+
+The finalization measurement instrumentation this decision rests on is **retained permanently**,
+not gated to the measurement run: every deployment running a `server` process emits one
+`external_build_finalization_measured` record per finalization attempt. Finalization is a rare
+operator-initiated action rather than a hot path, and the phase attribution an operator needs to
+diagnose a slow finalization in production is the attribution #2314 could not produce. The
+record's payload shape is frozen by a closed-vocabulary test and joins the ADR-0014 / ADR-0090
+log schema without amending it.
 
 ## Consequences
 
@@ -48,7 +61,10 @@ are named here because the evidence behind it is bounded:
 
 - **A ppc64le confirmation.** No ppc64le bundle or cross-toolchain exists on the measurement
   host, so the recorded rows are x86_64 only. The measurement harness is arch-parameterized and
-  re-runs unchanged under `KDIVE_PPC64LE_BUNDLE`.
+  re-runs unchanged under `KDIVE_PPC64LE_BUNDLE`. The unrun arm is owned by
+  [debt record 0015](../debt/0015-ppc64le-finalization-measurement-unrun.md), which outlives
+  issue #2318 — the issue closes with this pull request, so without that record this reopening
+  condition would have no surviving owner.
 - **A network-attached object store.** The measured rows come from a SeaweedFS container on the
   same host, reached over loopback, so the per-request latency term is near zero. Against a
   network-attached endpoint that term becomes `store_requests × RTT` and phase dominance can

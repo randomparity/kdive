@@ -475,7 +475,21 @@ Env contract the driver reads:
 | `KDIVE_MEASUREMENT_OUT` | unset → stdout only | path to append JSON rows to |
 | `KDIVE_MEASUREMENT_STAGE_DIR` | pytest `tmp_path` | where `combined_kernel_tar` stages; see step 7 |
 | `KDIVE_MEASUREMENT_TIMEOUT_S` | `1800` | the timeout the driver **sets**, so the run completes |
-| `KDIVE_SUPPORTED_BUDGET_S` | `30` | the budget the decision is **tested against** |
+
+The budget the decision is tested against is **not** an environment variable. Define it as a
+module constant in `measurement.py`:
+
+```python
+SUPPORTED_BUDGET_S = 30.0
+"""MCP's default client request timeout, which `LiveStackClient.over_http` does not override.
+
+A constant rather than an env var on purpose: the spec and ADR 0655 both rest on this being a
+property of the shipped client, so a knob would let the environment running the proof move the
+threshold the accepted decision rests on.
+"""
+```
+
+Record it in every row alongside the timeout actually used.
 
 ### Verification
 
@@ -549,7 +563,7 @@ Env contract the driver reads:
       the tar's `size_bytes` and **no** `chunks` (both classes are under the 5 GiB
       `SINGLE_PUT_MAX_BYTES`), then `put_presigned(item, tar)`;
    f. build the MCP client with `timeout=KDIVE_MEASUREMENT_TIMEOUT_S`, record both that value and
-      `KDIVE_SUPPORTED_BUDGET_S`, and time `runs.complete_build(run_id=...)` with
+      the `SUPPORTED_BUDGET_S` constant, and time `runs.complete_build(run_id=...)` with
       `time.monotonic()` around the call;
    g. read the server record with `read_measurement_record`, asserting it is present and its
       `run_id` matches;
@@ -569,8 +583,12 @@ Env contract the driver reads:
    **not** assert a duration threshold — the driver measures, it does not gate. Comparing against
    the supported budget is Task 4's job.
 
-9. Add the seven env vars to the table in `docs/guide/reference/config.md`, matching the
-   surrounding rows' wording and column order.
+9. Add only the **three new** env vars — `KDIVE_MEASUREMENT_OUT`, `KDIVE_MEASUREMENT_STAGE_DIR`,
+   and `KDIVE_MEASUREMENT_TIMEOUT_S` — to the table in `docs/guide/reference/config.md`,
+   matching the surrounding rows' wording and column order. Do **not** re-add
+   `KDIVE_KERNEL_SRC` (`config.md:19`), `KDIVE_PPC64LE_BUNDLE` (`config.md:312`), or
+   `KDIVE_STACK_LOG_DIR` (`config.md:383`): all three are already documented, and this table is
+   gated. Then run `just config-docs-check` and `just env-docs-check`; both must exit 0.
 
 10. Add a section to `docs/operating/runbooks/live-testing.md` naming the driver, its env
     contract, the staging-space requirement, and the exact command, beside the existing tier
@@ -593,7 +611,8 @@ Env contract the driver reads:
   from #1146 documented in the docstring.
 - The driver sets `build_profile.arch` and `target_kind`, and is `live_stack`-marked so
   `just test` does not collect it.
-- `docs/guide/reference/config.md` documents all seven env vars.
+- `docs/guide/reference/config.md` gains exactly the three new env vars and no duplicate rows;
+  `just config-docs-check` and `just env-docs-check` exit 0.
 - `just lint` and `just type` exit 0.
 
 ---
@@ -628,6 +647,17 @@ Provides to Task 4: the measured rows, as the proof record's table.
    ("the `live_vm` debug toolchain and store-script deps"). Add `make` and `tar` to all three
    per-family lists in `deploy/ansible/roles/libvirt_stack/defaults/main.yml`
    (`libvirt_stack_packages_debian`, `_redhat`, `_suse`); the package name is the same on each.
+
+   **State the provenance accurately: this is a pre-existing gap, not one this harness
+   introduces.** The existing live-stack spine already calls `combined_kernel_tar` at
+   `spine.py:505`, and neither binary appears in any of the three lists today, so the
+   undeclared dependency predates this change. Charter criterion 6 conditions on "any **new**
+   host prerequisite the harness introduces", which this is not. The edit still belongs here —
+   this change depends on both binaries, so it repairs the gap rather than inheriting it — but
+   the proof record and this plan say "pre-existing undeclared dependency, repaired here", never
+   "prerequisite introduced by this change". The role choice is separately confirmed:
+   `deploy/ansible/playbooks/runner.yml` applies `libvirt_stack` and does **not** apply
+   `local_worker_host` (the one role that already declares `make`), so no applied role covers it.
 
    Do this whether or not the local run needs it. A conditional "only if the run failed" edit
    evaluates false on an already-warmed dev box and leaves the next clean reprovision without
@@ -726,11 +756,25 @@ Constraints. Provides: the accepted decision #2319 reads.
 
 1. Read the two rows. Identify which phase dominates each.
 
-2. Apply the decision rule, stated numerically so the conclusion is falsifiable: **synchronous
-   completion is selected only if the 2-GB row's `total_ms` is at most 50% of the 30 000 ms
-   supported budget** (that is, ≤ 15 000 ms). Otherwise durable asynchronous finalization is
-   required. The threshold is the MCP client default this repository's own harness runs at, not
-   a number the measurement chose; state that provenance in `## Context`.
+2. Apply the charter's own rule, verbatim: **synchronous completion is retained only if the
+   larger bundle's `total_ms` meets the 30 000 ms supported budget.** Otherwise durable
+   asynchronous finalization is required. The threshold is the MCP client default this
+   repository's own harness runs at, not a number the measurement chose; state that provenance
+   in `## Context`.
+
+   Do **not** impose a margin factor as the rule. An earlier draft required clearing 50% of the
+   budget, which has no charter provenance and would decide the in-between case — a `total_ms`
+   between 15 s and 30 s — against the charter's plain reading, activating #2319 on evidence the
+   charter resolves the other way. If the measured total lands close enough to 30 s that
+   headroom matters, say so as a labelled engineering judgement in `## Considered & rejected`,
+   citing the design's own accepted failure class that each row is a single observation rather
+   than a distribution. A judgement recorded as a judgement is fine; one disguised as a
+   threshold is not.
+
+   **This task's ADR body gets its review at step 6**, the branch review over the whole diff —
+   the design review saw only the `Proposed` shell, because an evidence-selected decision cannot
+   be written before the evidence exists. Do not treat the earlier design review as covering the
+   five contract definitions written here.
 
 3. Write `docs/adr/0655-external-build-completion-contract.md` with exactly the five sections
    `## Status`, `## Context`, `## Decision`, `## Consequences`, `## Considered & rejected`.
@@ -775,5 +819,14 @@ Constraints. Provides: the accepted decision #2319 reads.
 
 ## Deferrals
 
-None. Every finding from both design-review passes was accepted and fixed in the artifacts; no
-deferral record or tracker issue is owed.
+One, owned by a record in this change:
+
+- **The ppc64le measurement arm has not been run** — charter exclusion 6. Owner:
+  `docs/debt/0015-ppc64le-finalization-measurement-unrun.md` (Open, review-by 2026-12-14). The
+  harness is parameterized and merged; resolving it is one `pytest` invocation once a bundle
+  exists. ADR 0655 names it as a reopening condition, so the deferral must outlive issue #2318,
+  which closes with this pull request — that is why it is a record rather than a line in the
+  charter.
+
+Every finding from both design-review passes was accepted and fixed in the artifacts; none of
+those became a deferral.

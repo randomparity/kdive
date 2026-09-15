@@ -51,6 +51,13 @@ record the decision.
 ### What this builds
 
 1. **Finalization measurement instrumentation** (`src/kdive/services/runs/complete_build.py`).
+   **Permanent and always-on**, not gated to the measurement: one record per finalization
+   attempt in every deployment that runs a `server` process. That lifetime is a deliberate
+   choice, not an oversight of the two-row measurement it also serves — finalization is a rare
+   operator-initiated action rather than a hot path, so one log line costs nothing, and the
+   attribution an operator needs to diagnose a slow finalization in production is exactly the
+   attribution #2314 lacked. ADR 0655 `## Consequences` records it as retained operational
+   observability, and Validation row 7 freezes the payload's shape accordingly.
    One structured log record per finalization attempt — success *and* every failure — carrying
    `run_id`, the four phase durations, the semaphore wait separated from the scan it gates, the
    object-store request count and byte total, and the outcome. Phase timing wraps the existing
@@ -204,7 +211,9 @@ model's redaction invariant.
    `server` process runs.
 6. The driver records, for each bundle: queue wait, object-store request count and bytes, scan
    time, publication time, deployed revision, **the 30 s supported client request budget and the
-   larger timeout the driver set**, and final outcome.
+   larger timeout the driver set**, and final outcome. The budget is a module constant, not an
+   environment variable: it is a property of the shipped client, and a knob would let the
+   environment running the proof move the threshold the accepted decision rests on.
 7. The proof record carries measured rows for the 103-MB and 2-GB x86_64 classes and names, for
    each, the bundle's actual compressed byte size and member count, its kernel tree and config
    derivation, the host CPU count, the object-store deployment shape and observed mean
@@ -216,11 +225,16 @@ model's redaction invariant.
    (`tests/integration/test_live_stack.py:1023-1035`), which skips in both branches and also
    requires `initrd.img`: a measurement harness must not silently produce no row, and the
    measurement arm boots nothing, so it needs no initrd.
-9. ADR 0655 is Accepted and decides synchronous versus durable asynchronous completion by a
-   stated numeric rule against the 30 s budget: synchronous only if the 2-GB row's `total_ms`
-   clears it with margin. It defines retry/idempotency, cancellation, upload-window fencing,
-   publication ownership, and transport-interruption recovery, and names both reopening
-   conditions — the outstanding ppc64le confirmation and a network-attached object store.
+9. ADR 0655 is Accepted and decides synchronous versus durable asynchronous completion by the
+   charter's own rule: synchronous is retained only if the larger bundle's `total_ms` **meets
+   the 30 000 ms supported budget**. Any headroom requirement beyond that is recorded as a
+   labelled engineering judgement in `## Considered & rejected`, never as a silent threshold —
+   the charter says "meets", and a margin factor the charter does not supply would decide the
+   in-between case on the design's authority rather than the charter's. It defines
+   retry/idempotency, cancellation, upload-window fencing, publication ownership, and
+   transport-interruption recovery, and names both reopening conditions — the outstanding
+   ppc64le confirmation (owned by `docs/debt/0015-ppc64le-finalization-measurement-unrun.md`)
+   and a network-attached object store.
 10. `make` and GNU `tar` — the binaries `combined_kernel_tar` invokes — are declared in the
     Ansible role that owns the build-host layer, unconditionally, not only if the local run
     happened to need them.

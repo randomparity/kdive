@@ -28,8 +28,19 @@ numbers appear in every row.
 | Object-store deployment shape | SeaweedFS container on the same host, reached over loopback (`KDIVE_BACKEND_SERVICES`, `scripts/live-stack/lib.sh`) |
 | Staging filesystem and free space | _pending_ |
 | Kernel source | linux 7.2.6 (`cdn.kernel.org`, stable) |
-| 103-MB-class config derivation | host distro config, `olddefconfig`, module signing and trusted keyrings disabled, `DEBUG_INFO` off |
-| 2-GB-class config derivation | `allmodconfig`, `olddefconfig`, module signing and trusted keyrings disabled, `DEBUG_INFO` + `DEBUG_INFO_DWARF5` on |
+| Both classes' base config | the measurement host's distro config (`/boot/config-<uname -r>`), `olddefconfig`, with module signing and the system trusted/revocation keyrings disabled — this tree has no distro signing key |
+| The one variable between them | whether modules carry DWARF debug info |
+| Small class | `CONFIG_DEBUG_INFO_NONE=y` |
+| Large class | `CONFIG_DEBUG_INFO=y` (the distro config's `DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT`) |
+
+Using one config and one variable is deliberate: it makes the two rows differ in bundle size
+rather than in an unrelated kernel configuration, so the attribution can be compared across them.
+
+Note on reproducing the small class: `CONFIG_DEBUG_INFO` is a bare bool selected by the "Debug
+information" choice, and the distro config carries `DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y`.
+Enabling the `NONE` member alone does not clear it — `olddefconfig` re-resolves the choice back
+to the toolchain default. Every non-`NONE` member has to be disabled explicitly, and the
+resulting `.config` verified, or the build silently produces the large tree.
 
 ## Rows
 
@@ -73,6 +84,14 @@ rest are recorded by the driver.
   checkout, so the compilers and headers that produced them are not covered by the Ansible
   declaration this change makes for the driver's own host binaries (`make` and GNU `tar`, in
   `deploy/ansible/roles/libvirt_stack`). Disclosed rather than silent.
+- **Those two binaries were a pre-existing undeclared dependency, repaired here — not one this
+  harness introduced.** The existing live-stack spine already invokes `combined_kernel_tar`
+  (`tests/integration/live_stack/spine.py:505`), and neither `make` nor `tar` appeared in any of
+  `libvirt_stack`'s three per-family package lists. This change depends on both, so it repairs
+  the gap; it does not get credit for discharging an obligation that predates it.
+- **`modules_install` does not strip.** `combined_kernel_tar` runs the plain recipe, so both
+  bundles carry unstripped modules. The sizes below are what this repository's own upload lane
+  produces, not a tuned figure.
 
 ## Reproducing
 
