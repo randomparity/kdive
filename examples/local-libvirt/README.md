@@ -57,7 +57,7 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `demo-up.sh` insist on it.
 | File | Purpose |
 |------|---------|
 | `install-host.sh` | Compatibility caller for the canonical host-preparation recipe in the installation guide. |
-| `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, the published session `KDIVE_LIBVIRT_URI`, and an XDG log directory. Source it; don't run it. |
+| `env.sh` | Sources the live-stack env (which resolves the published session `KDIVE_LIBVIRT_URI`), then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, and an XDG log directory. Source it; don't run it. |
 | `demo-up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/stack-services.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
 | `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `svirt_image_t` on SELinux hosts (ADR-0640), append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
 | `demo-down.sh` | `scripts/live-stack/stack-down.sh` with the example env: retires the lifecycle workers through the witness, stops the daemons and the compose backends, keeps state. `--wipe` also drops the data volumes and reaps kdive domains. |
@@ -125,8 +125,10 @@ examples/local-libvirt/demo-down.sh --wipe   # ...or also drop the database, the
   slots and stops its own daemons before starting again, so `demo-up.sh` is the restart command;
   anything foreign holding the MCP port fails it loudly instead of losing the bind race.
 - **Session libvirt, not `qemu:///system`.** The installer publishes one operator-owned session
-  daemon; `env.sh` exports it as `KDIVE_LIBVIRT_URI`, so `build-fs`, the preflight, the daemons,
-  and the workers all see the same domains. Files QEMU and virtlogd write belong to you, which
+  daemon; `scripts/live-stack/env.sh` (sourced by this example's `env.sh`) exports it as
+  `KDIVE_LIBVIRT_URI`, so `build-fs`, the preflight, the daemons, and the workers all see the
+  same domains — and so does a bare `scripts/live-stack/stack-services.sh` run outside this
+  example. Files QEMU and virtlogd write belong to you, which
   is what lets a non-root worker confirm boots and read console logs (ADR-0223).
 - **`.mcp.json` is merged, not clobbered.** If the file already exists its first version is
   backed up to `.mcp.json.bak` (never overwritten on re-run, so the original is preserved), and

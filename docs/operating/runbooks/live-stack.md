@@ -78,8 +78,13 @@ workers on the host so they can access KVM and libvirt.
     strictly fail-closed.
 - The installed contract publishes one explicit operator-owned session URI:
   `qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock` on the Debian-family
-  runner (`virtqemud-sock` is selected on the modular-daemon family). Use the published value from
-  `/etc/kdive/live-worker-libvirt.env`; worker accounts must not fall back to `qemu:///system`.
+  runner (`virtqemud-sock` is selected on the modular-daemon family). Every host-local libvirt
+  consumer a bring-up entry point starts reads the published value from
+  `/etc/kdive/live-worker-libvirt.env` — server, reconciler, workers, the `virsh` gates, and
+  teardown alike. None of them may fall back to `qemu:///system` while that contract is installed:
+  a server on a different endpoint than the worker finds no domain for a healthy System, and
+  `systems.ssh_info` then reports `ssh_not_provisioned` (#2480). `scripts/live-stack/env.sh` and
+  `scripts/live-stack/lib.sh` resolve it, so any entry point that sources either agrees.
 - The VM fixtures built (below).
 - If you run a **published** kdive image from `ghcr.io/randomparity/kdive` rather than a
   locally built one, verify its signature first. The release workflow cosign-signs each

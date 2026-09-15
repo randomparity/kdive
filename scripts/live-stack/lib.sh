@@ -58,10 +58,14 @@ live_stack_backends_up() {
   docker compose run --rm seaweedfs-init
 }
 
-# The local-libvirt provider connects here (KDIVE_LIBVIRT_URI, default qemu:///system) and
-# stores per-System qcow2 overlays under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking
-# and qemu-img overlays — NO libvirt network or storage pool is involved.
-KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
+# The local-libvirt provider connects at KDIVE_LIBVIRT_URI and stores per-System qcow2 overlays
+# under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking and qemu-img overlays — NO libvirt
+# network or storage pool is involved. The endpoint is resolved and exported by libvirt-uri.sh,
+# which env.sh calls too, so stack-down.sh (which sources only this file) and the bare
+# stack-services.sh invocation reach the same daemon as the lifecycle worker.
+# shellcheck source=scripts/live-stack/libvirt-uri.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/libvirt-uri.sh"
+resolve_libvirt_uri
 export KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 
 # Arches for which grafana publishes no upstream manifest (ADR-0356 accept-gap, #1261); it ships

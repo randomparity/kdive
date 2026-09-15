@@ -863,6 +863,172 @@ def test_live_stack_rootfs_default_reaches_child_processes() -> None:
     assert result.stdout == "/var/lib/kdive/rootfs"
 
 
+_PUBLISHED_URI = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+
+
+def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """Stage a `live-worker-libvirt.env` fixture and the environment that reaches it.
+
+    ``require_exact_libvirt_env`` demands root:root 0644, which no test can produce for a file it
+    owns, so a `stat` shim answers that one probe. The fixture's *content* still goes through the
+    real parser and its URI allowlist; only the ownership probe is staged. ``LIBVIRT_ENV`` is
+    overridable for exactly this reason, and it grants a caller nothing an explicit
+    ``KDIVE_LIBVIRT_URI`` does not already grant it.
+    """
+    contract = tmp_path / "live-worker-libvirt.env"
+    contract.write_text(f"KDIVE_LIBVIRT_URI={_PUBLISHED_URI}\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stat_stub = bin_dir / "stat"
+    stat_stub.write_text("#!/bin/sh\nprintf '0:0:644\\n'\n", encoding="utf-8")
+    stat_stub.chmod(0o755)
+    return contract, _libvirt_env(LIBVIRT_ENV=str(contract), PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+
+def _libvirt_env(**overrides: str) -> dict[str, str]:
+    """The ambient environment with ``KDIVE_LIBVIRT_URI`` *removed*, plus `overrides`.
+
+    Removed rather than emptied: bash keeps the export attribute of a variable it inherited, so
+    an inherited empty value would make an unexported assignment look exported and every export
+    assertion below would pass against the very defect they exist to catch. It also keeps these
+    tests host-independent on a provisioned box, where the value is ambient.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "KDIVE_LIBVIRT_URI"}
+    env.update(overrides)
+    return env
+
+
+def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Source `script` and run `snippet` under exactly `env` (no ambient merge)."""
+    return subprocess.run(
+        ["bash", "-c", f'source "{script}"\n{snippet}'],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_live_stack_libvirt_uri_reaches_child_processes(tmp_path: Path) -> None:
+    """#2480: the assignment carried no `export`, so `restart_host_processes`' server and
+    reconciler forks never received it and fell back to the in-process qemu:///system default
+    while the lifecycle worker used the published session URI."""
+    result = _sourced(
+        ROOT / "scripts/live-stack/lib.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        _libvirt_env(LIBVIRT_ENV=str(tmp_path / "absent" / "live-worker-libvirt.env")),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "qemu:///system"
+
+
+@pytest.mark.parametrize(
+    ("preset", "published", "expected"),
+    [
+        ("", False, "qemu:///system"),
+        ("", True, _PUBLISHED_URI),
+        # An explicit caller value wins over both, published contract or not.
+        ("qemu:///system", True, "qemu:///system"),
+        ("qemu+ssh://elsewhere/system", False, "qemu+ssh://elsewhere/system"),
+    ],
+)
+def test_live_stack_env_resolves_one_libvirt_endpoint(
+    tmp_path: Path, preset: str, published: bool, expected: str
+) -> None:
+    """env.sh set no libvirt endpoint at all before #2480, so the bare runbook invocation of
+    stack-services.sh left the daemons on a different endpoint from the worker's. Reading the
+    value back out of a child process also proves it is exported, not merely assigned."""
+    contract, staged = _published_contract(tmp_path)
+    if not published:
+        contract.unlink()
+    if preset:
+        staged["KDIVE_LIBVIRT_URI"] = preset
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
+
+
+def test_server_and_worker_receive_the_same_libvirt_endpoint(tmp_path: Path) -> None:
+    """The endpoint agreement #2480 asks for, asserted as agreement rather than as a substring
+    of either script: the server-side value is read out of the environment
+    ``restart_host_processes`` actually forks with, and the worker-side value comes from
+    ``load_published_libvirt_uri`` -- the same call ``worker-lifecycle.sh request start`` makes
+    to fill ``KDIVE_LIFECYCLE_LIBVIRT_URI`` in the worker's unit environment."""
+    _, staged = _published_contract(tmp_path)
+    lifecycle = tmp_path / "scripts/live-stack"
+    lifecycle.mkdir(parents=True)
+    (lifecycle / "worker-lifecycle.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (lifecycle / "worker-lifecycle.sh").chmod(0o755)
+    server_side = tmp_path / "server-endpoint"
+    worker_side = tmp_path / "worker-endpoint"
+    python = tmp_path / "python"
+    python.write_text(
+        '#!/bin/sh\ncase "$*" in *server*) printf \'%s\' "${KDIVE_LIBVIRT_URI-unset}"'
+        ' > "$KDIVE_DAEMON_PROBE" ;; esac\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+
+    staged.update(KDIVE_DAEMON_PROBE=str(server_side), KDIVE_STATUS_PROBE=str(worker_side))
+    result = _sourced(
+        ROOT / "scripts/live-stack/lib.sh",
+        f'repo_root="{tmp_path}"\n'
+        f'py="{python}"\n'
+        f'log_dir="{tmp_path / "logs"}"\n'
+        "stop_daemons() { :; }\n"
+        "require_free_http_port() { :; }\n"
+        "wait_for_daemons_to_settle() { :; }\n"
+        "restart_host_processes\n"
+        'printf %s "$(load_published_libvirt_uri)" > "$KDIVE_STATUS_PROBE"\n',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not server_side.exists():
+        time.sleep(0.05)
+    assert server_side.read_text(encoding="utf-8") == worker_side.read_text(encoding="utf-8")
+    assert worker_side.read_text(encoding="utf-8") == _PUBLISHED_URI
+
+
+def test_libvirt_uri_parser_is_safe_to_source_twice() -> None:
+    """lib.sh, env.sh and worker-lifecycle.sh each source this file, and the example sources the
+    second through the first, so more than one source per shell is ordinary. `readonly` made the
+    second one abort the shell with "readonly variable" before the body ran."""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set -euo pipefail\nsource "{LIBVIRT_URI}"\nsource "{LIBVIRT_URI}"\n'
+            'printf %s "$LIBVIRT_ENV"',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "/etc/kdive/live-worker-libvirt.env"
+    assert "readonly" not in result.stderr
+
+
+def test_local_libvirt_example_env_resolves_the_published_endpoint(tmp_path: Path) -> None:
+    """The example wrapper keeps working once the live-stack env owns the resolution: it must
+    still source cleanly under `set -euo pipefail` (demo-up.sh sources it first and does nothing
+    otherwise) and still reach its own values past the shared block."""
+    _, staged = _published_contract(tmp_path)
+    staged.pop("KDIVE_PROJECT", None)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s|%s" "${KDIVE_LIBVIRT_URI-unset}" "${KDIVE_PROJECT-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{_PUBLISHED_URI}|demo"
+
+
 def test_client_urls_derive_from_the_configurable_ports() -> None:
     # The port var must be the SINGLE source of truth: the client-facing DSN/endpoint defaults must
     # reference the port var, not a second hardcoded literal that could silently drift from compose.
@@ -1873,7 +2039,10 @@ def _remediation_gate_fires(tmp_path: Path, *, list_ok: bool, nodedev_list_ok: b
     True means
     stack-services.sh would enter its remediation branch for this virsh behavior (#2401)."""
     lib_sh_copy = tmp_path / "lib.sh"
-    lib_sh_copy.write_text((ROOT / "scripts/live-stack/lib.sh").read_text(), encoding="utf-8")
+    for name in ("lib.sh", "libvirt-uri.sh"):
+        (tmp_path / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
+        )
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -2027,13 +2196,7 @@ def test_lifecycle_uri_is_parsed_as_literal_data(
         (ROOT / "scripts/live-stack/env.sh").read_text(), encoding="utf-8"
     )
     wrapper.write_text(LIFECYCLE.read_text(), encoding="utf-8")
-    (tmp_path / "libvirt-uri.sh").write_text(
-        LIBVIRT_URI.read_text().replace(
-            "readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env",
-            f"readonly LIBVIRT_ENV={tmp_path / 'libvirt.env'}",
-        ),
-        encoding="utf-8",
-    )
+    (tmp_path / "libvirt-uri.sh").write_text(LIBVIRT_URI.read_text(), encoding="utf-8")
     uri_file = tmp_path / "libvirt.env"
     canary = tmp_path / "unsafe"
     uri_file.write_text(content.replace("TMP_CANARY", str(canary)), encoding="utf-8")
@@ -2049,6 +2212,11 @@ def test_lifecycle_uri_is_parsed_as_literal_data(
         capture_output=True,
         text=True,
         check=False,
+        # LIBVIRT_ENV points the parser at the staged file (it is overridable since #2480, which
+        # replaced the string surgery this test used to do). A preset KDIVE_LIBVIRT_URI keeps
+        # source-time resolution off the staged file, whose test-owned metadata it would reject;
+        # the explicit `load_published_libvirt_uri` call below is what this test is about.
+        env={**os.environ, "LIBVIRT_ENV": str(uri_file), "KDIVE_LIBVIRT_URI": "qemu:///system"},
     )
     assert (result.returncode == 0) is success, result.stderr
     assert not canary.exists()
@@ -2156,7 +2324,7 @@ def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> Non
     setup = source[: source.index('echo "=== compose')]
     database = source[source.index('echo "=== database') : source.index('echo "=== libvirt')]
     status.write_text(setup + database + "exit 0\n", encoding="utf-8")
-    for name in ("lib.sh", "env.sh"):
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
         (tmp_path / name).write_text(
             (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
         )
@@ -2204,9 +2372,10 @@ def test_onboard_aliases_each_cli_invocation_to_its_own_authority(tmp_path: Path
     """
     onboard_dir = tmp_path / "scripts/live-stack"
     onboard_dir.mkdir(parents=True)
-    (onboard_dir / "env.sh").write_text(
-        (ROOT / "scripts/live-stack/env.sh").read_text(), encoding="utf-8"
-    )
+    for name in ("env.sh", "libvirt-uri.sh"):
+        (onboard_dir / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
+        )
     onboard = onboard_dir / "onboard.sh"
     source = (ROOT / "scripts/live-stack/onboard.sh").read_text()
     # The mint heredoc imports kdive; the stub never sees it, so end the script after the last
@@ -2576,7 +2745,7 @@ def _stub_live_stack_scripts(root: Path, *, oidc_image: str | None) -> Path:
     """
     live_stack = root / "scripts" / "live-stack"
     live_stack.mkdir(parents=True)
-    for name in ("stack-services.sh", "lib.sh"):
+    for name in ("stack-services.sh", "lib.sh", "libvirt-uri.sh"):
         shutil.copy(ROOT / "scripts" / "live-stack" / name, live_stack / name)
         (live_stack / name).chmod(0o755)
     export_line = f'export KDIVE_OIDC_IMAGE="{oidc_image}"\n' if oidc_image is not None else ""
