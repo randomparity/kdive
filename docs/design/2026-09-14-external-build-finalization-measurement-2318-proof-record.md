@@ -5,18 +5,52 @@ x86_64 kernel bundle. Written to settle the completion-contract decision recorde
 [ADR-0655](../adr/0655-external-build-completion-contract.md), which parent #2314 could not make
 from the reports it had.
 
-Both rows were recorded on 2026-09-15 against deployed commit `4883cfdce`. They select durable
-asynchronous finalization: the large bundle's `total_ms` is **39 146 ms against a 30 000 ms
-supported budget**, and it does so *below* the compressed-size ceiling the contract itself
-enforces.
+Both rows were recorded on 2026-09-15 against deployed commit `25997d7e0`. They retain
+synchronous completion: the large bundle's `total_ms` is **34 820 ms against a 300 000 ms
+supported budget**, and the largest bundle the contract accepts extrapolates to ~40.5 s.
+
+> **An earlier revision of this record reported the budget as 30 000 ms and selected the
+> opposite decision.** That figure was wrong — see below — and the error was caught by the
+> adversarial review of this branch, not by anything in the change. The correction is recorded
+> here rather than quietly applied, because a reader comparing this record against #2314's
+> reports needs to know which number moved.
 
 ## Supported client request budget
 
-**30 seconds.** `LiveStackClient.over_http` (`src/kdive/mcp/dev_harness.py:203-208`) passes no
-timeout, and fastmcp 3.4.4 preserves MCP's 30-second default for regular operations. The driver
-runs under a deliberately larger timeout so the large arm can complete and be measured at all; the
-30-second figure is the threshold the decision is tested against, never a bound on the run. Both
-numbers appear in every row.
+**300 seconds**, and it is the httpx **read** timeout.
+
+`LiveStackClient.over_http` (`src/kdive/mcp/dev_harness.py:203-208`) and the CLI transport
+(`src/kdive/cli/transport.py:83`) both build `Client(transport)` with no timeout override, which
+leaves `read_timeout_seconds` as `None`. Two things follow:
+
+- `StreamableHttpTransport.connect_session` constructs an `httpx.Timeout` only when
+  `read_timeout_seconds` is set. With `None` it falls through to the MCP SDK's
+  `create_mcp_http_client`, whose default is
+  `Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)`.
+- `BaseSession.send_request`, with both the request and session read timeouts `None`, calls
+  `anyio.fail_after(None)` — there is no session-level request timeout at all.
+
+So the bound on a long finalization is `read`, 300 s. **The 30-second figure this record
+previously carried is the `connect` default**, which a request that has been running for
+30 seconds cleared long ago.
+
+Confirmed end-to-end rather than only by reading the libraries: `LiveStackClient.over_http`,
+built exactly as this record cites it and with no timeout override, completed a **35.3-second**
+finalization of the 1.85 GB bundle against the live stack. A 30-second bound would have failed
+it.
+
+This is checked by `test_supported_budget_matches_the_shipped_client`
+(`tests/integration/live_stack/test_measurement_readout.py`), which reads the effective value off
+a client rather than comparing the constant to itself — the shape of the earlier test, which
+asserted `SUPPORTED_BUDGET_S == 30.0` and therefore could not fail however the SDK behaved.
+
+**What 300 s does and does not cover.** It is what the clients *this repository ships* enforce.
+An external agent using its own MCP client may set a shorter one, and the server cannot see or
+raise it. The decision below is scoped accordingly, and ADR-0655 names that as a reopening
+condition.
+
+The driver runs under a deliberately larger timeout (`KDIVE_MEASUREMENT_TIMEOUT_S`, 1 800 s) so a
+finalization that *would* breach the budget is recorded rather than truncated at it.
 
 ## The contract's own size ceiling
 
@@ -29,19 +63,20 @@ was 2 509 255 859 bytes and `runs.complete_build` rejected it with
 `build_failure: kernel bundle exceeds the external-boot compressed byte limit`
 (`max_bytes: 2147483648`). The tree was then pruned (below) and re-measured.
 
-The ceiling bounds the worst case synchronous finalization could ever face, which is what makes
-the large row decisive rather than merely suggestive: the measured bundle is *smaller* than the
-largest bundle the contract accepts, and already exceeds the budget.
+The ceiling is what makes the large row decisive rather than merely suggestive: it bounds the
+worst case synchronous finalization can ever face, so the extrapolation below is to a real
+maximum and not to an open-ended one.
 
 ## Environment
 
 | Fact | Value |
 |---|---|
-| Deployed revision (`/readyz`) | version `0.4.1`, commit `4883cfdce`, `is_release: false`, started `2026-09-15T03:22:30Z` |
+| Deployed revision (`/readyz`) | version `0.4.1`, commit `25997d7e0`, `is_release: false`, started `2026-09-15T04:20:48Z` |
 | Host CPU count | 48 (Intel Xeon w7-2495X) |
 | Host RAM | 250 GiB |
 | Host kernel | `7.2.5-200.fc44.x86_64` (Fedora 44) |
 | Object-store deployment shape | SeaweedFS container on the same host, reached over loopback (`KDIVE_BACKEND_SERVICES`, `scripts/live-stack/lib.sh`) |
+| Observed mean per-request store latency | 3.70 ms (small row), 5.18 ms (large row) — `store_wait_ms / store_requests` |
 | Staging filesystem and free space | btrfs on local NVMe; 1.9 TB total, 938 GB free at measurement time |
 | Kernel source | linux 7.2.6 (`cdn.kernel.org`, stable) |
 | Both classes' base config | the measurement host's distro config (`/boot/config-<uname -r>`), `olddefconfig`, with module signing and the system trusted/revocation keyrings disabled — this tree has no distro signing key |
@@ -77,10 +112,10 @@ constant across the two rows.
 
 ### Why the large tree is pruned
 
-The unpruned debug-info module tree yields a 2 509 255 859-byte bundle, above
-the 2 GiB ceiling. To measure the large class at all, `drivers/gpu` (85 modules) and
-`drivers/media` (689 modules) were removed from the build tree and from `modules.order` before
-`modules_install`, leaving 4253 of 5027 modules and 5.96 GB of unstripped `.ko` (from 8.10 GB).
+The unpruned debug-info module tree yields a 2 509 255 859-byte bundle, above the 2 GiB ceiling.
+To measure the large class at all, `drivers/gpu` (85 modules) and `drivers/media` (689 modules)
+were removed from the build tree and from `modules.order` before `modules_install`, leaving 4253
+of 5027 modules and 5.96 GB of unstripped `.ko` (from 8.10 GB).
 
 This changes the bundle's size, which is the variable under study, and its member count. It does
 not change the per-byte work: every remaining member is hashed and traversed exactly as before.
@@ -93,68 +128,109 @@ rest are recorded by the driver.
 | Field | Small class | Large class |
 |---|---|---|
 | arch | x86_64 | x86_64 |
-| bundle compressed bytes | 150 756 575 (151 MB) | 1 845 478 181 (1845 MB) |
+| bundle compressed bytes | 150 753 887 (151 MB) | 1 845 478 477 (1845 MB) |
 | bundle member count | 6153 | 5249 |
-| supported budget (ms) | 30 000 | 30 000 |
+| supported budget (ms) | 300 000 | 300 000 |
 | driver timeout (ms) | 1 800 000 | 1 800 000 |
-| client elapsed (ms) | 3860.466 | 39 238.139 |
-| `prepare_ms` _(server)_ | 0.301 | 0.288 |
+| client elapsed (ms) | 3447.245 | 34 941.486 |
+| `prepare_ms` _(server)_ | 0.453 | 0.436 |
 | `reassemble_ms` _(server)_ | 0.000 | 0.000 |
-| `queue_wait_ms` _(server)_ | 0.007 | 0.003 |
-| `scan_ms` _(server)_ | 3815.883 | 39 141.133 |
-| `publish_ms` _(server)_ | 7.336 | 4.962 |
-| `total_ms` _(server)_ | 3823.596 | **39 146.446** |
+| `queue_wait_ms` _(server)_ | 0.008 | 0.006 |
+| `scan_ms` _(server)_ | 3393.337 | 34 810.534 |
+| `publish_ms` _(server)_ | 6.806 | 9.207 |
+| `total_ms` _(server)_ | 3400.669 | **34 820.252** |
 | `store_requests` _(server)_ | 121 | 1335 |
-| `store_bytes` _(server)_ | 498 407 071 | 5 590 960 497 |
+| `store_bytes` _(server)_ | 498 399 007 | 5 590 961 385 |
+| `store_wait_ms` _(server)_ | 448.103 | 6914.497 |
 | read amplification (`store_bytes` ÷ bundle bytes) | 3.31× | 3.03× |
-| scan time ÷ store requests (ms) | 31.54 | 29.32 |
+| mean per-request store latency (ms) | 3.70 | 5.18 |
+| store wait as a share of the scan | 13.2% | 19.9% |
+| share of the supported budget | 1.1% | 11.6% |
 | `chunked` _(server)_ | false | false |
 | `outcome` _(server)_ | succeeded | succeeded |
 
-The last derived row is work per request, not store round-trip latency: on a loopback object
-store the round trip is near zero, so almost all of it is decompression and hashing. See the
-first reopening condition in ADR-0655.
-
 ### What the rows say
 
-**Scanning is the whole cost.** `scan_ms` is 99.80% of `total_ms` for the small bundle and
-99.99% for the large one. Preparation, queue wait and publication together are 7.6 ms and 5.3 ms
-— under a quarter of one percent in both. Optimising anything but the scan cannot move the
-outcome.
+**Both bundles finalize well inside the budget.** The large one uses 11.6% of it — 8.6×
+headroom. At its measured rate (18.87 ns per compressed byte) a bundle at the 2 GiB ceiling
+would take about **40.5 s**, still 7.4× under. Applying the charter's rule — synchronous
+completion is retained if the larger bundle's `total_ms` meets the supported budget — retains
+synchronous completion, and the ceiling makes that conclusion cover every bundle the contract
+accepts rather than only the one measured.
 
-**Queue wait was not the cause.** `queue_wait_ms` is 0.007 ms and 0.003 ms. These runs were
+**Scanning is the whole cost.** `scan_ms` is 99.78% of `total_ms` for the small bundle and
+99.97% for the large one. Preparation, queue wait and publication together are 7.3 ms and 9.6 ms.
+Any future optimisation that is not the scan cannot move the number.
+
+**Queue wait was not the cause.** `queue_wait_ms` is 0.008 ms and 0.006 ms. These runs were
 uncontended, so this measures the uncontended floor rather than the behaviour under load; what it
 rules out is the reading that #2314's timeouts were semaphore starvation on an otherwise idle
-server.
+server. Contention is a separate matter, and it is the sharpest limit this record found — see
+below.
 
-**The scan is linear in bundle size.** 25.36 ns per compressed byte for the small bundle and
-21.21 ns for the large one — a 12.2× size increase produced a 10.2× time increase. Nothing about
-the cost curve flattens with size.
+**The scan is linear in bundle size.** 22.56 ns per compressed byte for the small bundle and
+18.87 ns for the large one — a 12.2× size increase produced a 10.2× time increase. Nothing about
+the cost curve flattens with size, so the extrapolation to the ceiling is a straight line through
+two points rather than an assumption.
 
-**The validator reads the object about three times over.** `_validate_kernel_bundle` decompresses
-a prefix bounded by `_KERNEL_TAR_SCAN_MAX_BYTES` (128 MiB, `validation.py:56`), then three
-separate end-to-end passes follow: `_preflight_external_boot_archive` (`validation.py:642`),
-`_scan_external_boot_archive` (`validation.py:547`), and `_digest_object` (called at
-`validation.py:445`). Two of the three fully decompress the archive. This is the read
+**The validator reads the object about three times over.** `_validate_kernel_bundle`
+decompresses a prefix bounded by `_KERNEL_TAR_SCAN_MAX_BYTES` (128 MiB, `validation.py:56`), then
+three separate end-to-end passes follow: `_preflight_external_boot_archive`
+(`validation.py:642`), `_scan_external_boot_archive` (`validation.py:547`), and `_digest_object`
+(called at `validation.py:445`). Two of the three fully decompress the archive. This is the read
 amplification #2314 established analytically, now measured at 3.31× and 3.03× of the compressed
 object.
 
-**The budget is exceeded below the contract's own ceiling.** The large bundle is 1 845 478 181
-bytes; the ceiling is 2 147 483 648. At the large arm's measured rate the ceiling-sized bundle
-would take roughly 45.6 s — about 1.5× the budget. Every bundle the contract accepts between
-those two sizes is worse than the row recorded here, not better.
+**Object-store round trips are a fifth of the scan, on loopback.** 6914 ms of the large row's
+34 811 ms scan is time inside the store, at 5.18 ms per request across 1335 requests. The other
+27 896 ms is decompression, hashing and parsing. That split is what makes the network-store
+question answerable: holding the work term fixed, an object store adding **~199 ms** per request
+over loopback would put the measured bundle at the budget, and **~167 ms** would put a
+ceiling-sized bundle there. Those are large numbers for a round trip, which is why the decision
+holds — but they are not unreachable, and they are the reason the split is recorded rather than
+inferred.
+
+**Concurrency is the binding limit, not size.** `_EXTERNAL_BUILD_VALIDATION_SLOTS` is
+`asyncio.Semaphore(1)` (`src/kdive/services/runs/complete_build.py:47`), so simultaneous
+finalizations serialize: the *n*-th caller's request spans roughly *n* scans. At the
+ceiling-sized 40.5 s that puts the eighth concurrent finalization past 300 s, and at the measured
+34.8 s the ninth. This is not measured here — every row is uncontended — and it is the one place
+the budget is reachable on the deployment that was measured.
+
+## Reconciling with #2314's reported timeouts
+
+#2314 records six request timeouts across 103-MB and 2-GB ppc64le bundles. Nothing in these rows
+reproduces that, and this record does not claim to explain it. What it can say:
+
+- These rows are **after** #2317, which landed the 4 MiB read-ahead buffer (`_RANGE_CHUNK_BYTES`,
+  `validation.py:57`). #2314's reports predate it, and a smaller read unit multiplies the 1335
+  requests measured here directly.
+- They are on a **loopback** object store at 3.7–5.2 ms per request. Against a network-attached
+  endpoint the request count is the multiplier, which is the interaction the previous section
+  quantifies.
+- They are **x86_64**, and #2314's were ppc64le.
+- The client that produced them is not identified in #2314, and a client with a shorter timeout
+  than the 300 s established above would time out where this harness does not.
+
+Each is a live candidate; this measurement discriminates between none of them. That is a gap in
+what #2318 establishes, not a finding against #2314.
 
 ## What these rows do not establish
 
-- **No universal size threshold.** #2314 and #2318 both exclude one. On this host and deployment
-  shape the measured rate crosses 30 000 ms at roughly 1.41 GB, and the extrapolation to the
-  2 GiB ceiling above uses the same rate — both are properties of these two rows on this machine,
-  not a general boundary. A different host, object store, or module mix moves them.
-- **No decompression-only attribution.** Elapsed scan time covers range reads, gzip and tar
-  traversal, sha256 over both the compressed object and the decompressed members, and the ELF
-  parse. The record does not apportion it to decompression.
+- **No universal size threshold.** #2314 and #2318 both exclude one. The extrapolation to the
+  2 GiB ceiling above is a property of these two rows on this machine and this deployment shape,
+  not a general boundary. A different host, object store, or module mix moves it.
+- **No decompression-only attribution.** The scan's non-store time covers gzip and tar traversal,
+  sha256 over both the compressed object and the decompressed members, and the ELF parse. The
+  record separates store wait from that total; it does not apportion the remainder to
+  decompression.
 - **Uncontended only.** One finalization at a time, so `queue_wait_ms` reflects an idle
-  `_EXTERNAL_BUILD_VALIDATION_SLOTS`. Concurrent finalizations are not measured.
+  `_EXTERNAL_BUILD_VALIDATION_SLOTS`. The concurrency limit noted above is arithmetic on the
+  measured serial cost, not an observation.
+- **One observation per class.** Neither row was repeated, so neither carries a variance
+  estimate. At 11.6% of the budget the large row would have to be off by more than 8× to change
+  the decision, which is why one sample is accepted here; nothing in these rows supports a
+  claim about the spread.
 - **Both bundles are single-PUT.** Each is under `SINGLE_PUT_MAX_BYTES` (5 GiB,
   `src/kdive/artifacts/uploads/uploads.py:9`), so no chunk reassembly is in the measured path and
   `reassemble_ms` is 0. The chunked path is instrumented but unmeasured here.

@@ -33,14 +33,19 @@ The finalization path has four phases with distinct costs, and nothing today sep
 ### The supported client request budget
 
 `LiveStackClient.over_http` (`src/kdive/mcp/dev_harness.py:203-208`) builds
-`StreamableHttpTransport(url=..., headers=...)` and `Client(transport)` with no timeout override.
-fastmcp 3.4.4 then preserves MCP's 30-second default for regular operations. **30 s is therefore
-the supported client request budget** this design tests against — a repository-observable value,
-not one the harness picks. It is also the most likely proximate cause of #2314's reported
-timeouts.
+`StreamableHttpTransport(url=..., headers=...)` and `Client(transport)` with no timeout override,
+leaving `read_timeout_seconds` as `None`. The transport then falls through to the MCP SDK's
+`create_mcp_http_client`, whose default is `Timeout(connect=30.0, read=300.0, write=30.0,
+pool=30.0)`, and `BaseSession.send_request` applies no session-level timeout when both are
+`None`. A long finalization is bounded by **read**: **300 s is the supported client request
+budget** this design tests against — a repository-observable value, not one the harness picks.
+
+The 30-second connect default is not it, and mistaking the two is a live hazard: an earlier
+revision of this design named 30 s, and the resulting ADR selected the opposite branch. The
+constant is therefore verified against a constructed client rather than asserted.
 
 A measurement bounded by that budget would truncate itself, so the driver raises *its own*
-timeout to complete the work and records the 30 s budget separately as the threshold. The two
+timeout to complete the work and records the budget separately as the threshold. The two
 numbers are distinct and both appear in every row.
 
 ## Scope
@@ -75,7 +80,7 @@ record the decision.
 3. **The proof record** — the measured rows for the 103-MB and 2-GB x86_64 bundle classes, with
    environment provenance sufficient to re-run them elsewhere.
 
-4. **ADR 0655** — the completion contract, decided *from* those rows against the 30 s budget. Its
+4. **ADR 0655** — the completion contract, decided *from* those rows against the supported budget. Its
    decision is evidence-selected, so it is written in the build phase after the measurements
    exist, not here.
 
@@ -152,7 +157,9 @@ a log line on the ordinary finalization path.
 - Redaction: the record carries only a `run_id`, integers, floats, and a fixed outcome
   vocabulary — no key, no path, no version id, no operator-supplied string.
 - The finalization result: instrumentation must not change what `complete_build` returns, what it
-  commits, or the upload-window and object-identity fencing at `complete_build.py:553-586`.
+  commits, or the upload-window and object-identity fencing — the `advisory_xact_lock` deadline
+  refresh, `upload_window_replaced`, and `_require_unreaped_window` in `complete_build.py`. Named
+  by symbol: a line range in a record outlives the numbering of the branch that wrote it.
 - Measurement honesty: a phase duration that silently includes another phase makes the ADR wrong.
   The semaphore wait is recorded separately from the scan it gates, which is the single
   attribution #2314 could not make. An attempt that failed is never recorded as a success.
@@ -169,11 +176,16 @@ a log line on the ordinary finalization path.
   latency term is near zero. Against a network-attached S3 endpoint that term becomes
   `store_requests × RTT`, and phase dominance can invert. Accepted **not** because dominance is
   portable — it is not — but because the decision is explicitly scoped to the measured deployment
-  shape: the row records that shape and the observed mean per-request latency, and ADR 0655 names
-  a network-attached store whose latency makes scan dominate as a result that reopens it.
+  shape: the row records that shape, and `store_wait_ms` records the time actually spent inside
+  the store, so the observed mean per-request latency is a recorded fact rather than an
+  assumption. ADR 0655 turns that into a quantified reopening condition — how much per-request
+  latency a network-attached endpoint would have to add to reach the budget.
 - *Each row is a single observation, not a distribution.* Accepted: repetition at the 2-GB size
-  costs hours, and the decision rests on whether the total clears a 30 s budget by an order of
-  magnitude, not on variance.
+  costs hours, and the margin decides the case rather than the variance. The measured large row
+  is 11.6% of the supported budget, so it would have to be wrong by more than 8x to select the
+  other branch — a spread no single-host repetition would plausibly reveal. State the observed
+  margin in the proof record rather than leaving the acceptance to rest on an adjective; if a
+  future run lands close to the budget, this class does not cover it and the arm is repeated.
 - *The ppc64le arm is unmeasured here.* Accepted by the charter's exclusion 6, with the owner
   named. ADR 0655 states what a ppc64le result would have to show to reopen the decision.
 - *The driver requires a running live stack and skips cleanly without one.* Accepted: it is
@@ -210,7 +222,7 @@ model's redaction invariant.
 5. The record is recoverable from a line produced by `format_log_record_json`, the serializer the
    `server` process runs.
 6. The driver records, for each bundle: queue wait, object-store request count and bytes, scan
-   time, publication time, deployed revision, **the 30 s supported client request budget and the
+   time, publication time, deployed revision, **the supported client request budget and the
    larger timeout the driver set**, and final outcome. The budget is a module constant, not an
    environment variable: it is a property of the shipped client, and a knob would let the
    environment running the proof move the threshold the accepted decision rests on.
@@ -227,7 +239,7 @@ model's redaction invariant.
    measurement arm boots nothing, so it needs no initrd.
 9. ADR 0655 is Accepted and decides synchronous versus durable asynchronous completion by the
    charter's own rule: synchronous is retained only if the larger bundle's `total_ms` **meets
-   the 30 000 ms supported budget**. Any headroom requirement beyond that is recorded as a
+   the supported budget established above**. Any headroom requirement beyond that is recorded as a
    labelled engineering judgement in `## Considered & rejected`, never as a silent threshold —
    the charter says "meets", and a margin factor the charter does not supply would decide the
    in-between case on the design's authority rather than the charter's. It defines

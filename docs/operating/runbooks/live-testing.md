@@ -304,9 +304,11 @@ Three things about it differ from the boot proofs:
   bundle. `tmp_path` is rooted at the system temp directory, commonly tmpfs, and pytest keeps
   the last three runs — so set `KDIVE_MEASUREMENT_STAGE_DIR` to real disk for a large bundle.
 - **Two timeouts, deliberately separate.** `KDIVE_MEASUREMENT_TIMEOUT_S` (default 1800) is what
-  the driver runs under so a large bundle completes. The supported client budget it is measured
-  *against* is 30 s — MCP's default, which `LiveStackClient.over_http` does not override — and
-  that is a module constant, not a knob.
+  the driver runs under, so a finalization that would breach the budget is still recorded rather
+  than truncated at it. The supported client budget it is measured *against* is 300 s — the
+  read timeout the MCP SDK applies when `LiveStackClient.over_http` passes none — and that is a
+  module constant, not a knob. The 30 s figure is the *connect* default and is not the request
+  bound; `test_supported_budget_matches_the_shipped_client` reads the real one off a client.
 
 The `ppc64le` arm runs the same code under `KDIVE_PPC64LE_BUNDLE`. Unset, it skips; set but
 lacking `kernel.tar.gz`, it raises rather than skipping, because a measurement that silently

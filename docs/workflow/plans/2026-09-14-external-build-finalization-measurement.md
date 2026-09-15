@@ -48,10 +48,17 @@ Transcribed from the spec and `AGENTS.md`, values included.
 - **Error taxonomy**: pick the most specific existing `kdive.domain.errors.ErrorCategory`.
 - **Redaction**: every payload value is a UUID string, an integer, a float, a bool, or a member
   of a fixed vocabulary. No store key, object path, version id, or operator-supplied string.
-- **The supported client request budget is 30 seconds.** `LiveStackClient.over_http`
-  (`src/kdive/mcp/dev_harness.py:203-208`) passes no timeout, and fastmcp 3.4.4 preserves MCP's
-  30 s default for regular operations. This is the decision threshold. It is **not** the timeout
-  the driver runs under — a driver bounded by it could not measure a 2-GB bundle at all.
+- **The supported client request budget is 300 seconds.** `LiveStackClient.over_http`
+  (`src/kdive/mcp/dev_harness.py:203-208`) passes no timeout, so the MCP SDK applies
+  `Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)` and no session-level timeout; a long
+  finalization is bounded by **read**. This is the decision threshold. It is **not** the timeout
+  the driver runs under — a driver bounded by it could not record a finalization that breached it.
+
+  > **Correction (2026-09-15).** This constraint originally read "30 seconds", taking the
+  > *connect* default for the request bound. Tasks 3 and 4 were executed against the wrong
+  > threshold and the resulting ADR selected the opposite branch; the branch review caught it and
+  > the arms were re-run. The rest of this plan is left as written — it is the point-in-time
+  > record of what was planned — but every artifact it produced carries the corrected figure.
 - **Measured constants already in the tree** (do not re-derive): `_RANGE_CHUNK_BYTES = 4 * 1024 *
   1024` (`build_artifacts/validation.py:57`); `SINGLE_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024`
   (`artifacts/uploads/uploads.py:9`); `_EXTERNAL_BUILD_VALIDATION_SLOTS = asyncio.Semaphore(1)`

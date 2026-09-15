@@ -11,10 +11,11 @@ ADR-0655 decides the external-build completion contract from measured rows recor
 **x86_64 only**. The measurement harness it rests on is arch-parameterized on both axes that
 matter — the `arch` passed to `combined_kernel_tar`, which selects the boot member, and the
 Run's `build_profile["arch"]`, which is what `_build_arch`
-(`src/kdive/services/runs/complete_build.py:454`) hands to the ADR-0343 per-arch check — and
+(`src/kdive/services/runs/complete_build.py`, named by symbol because this branch moved
+its line) hands to the ADR-0343 per-arch check — and
 the ppc64le arm runs the same code under `KDIVE_PPC64LE_BUNDLE`. It has never executed.
 
-ADR-0655 names the outstanding ppc64le confirmation as one of three conditions that reopen its
+ADR-0655 names the outstanding ppc64le confirmation as one of four conditions that reopen its
 decision. That makes the decision's own stated validity depend on an arm nobody is booked to
 run: issue #2318 closes with the pull request that writes the ADR, so without this record the
 reopening condition has no surviving owner and becomes unreachable in practice.
@@ -23,7 +24,7 @@ The exposure is not symmetric with the x86_64 rows. Finalization cost is driven 
 member count — gzip/tar traversal, sha256 over the compressed object and the decompressed
 members, and the ELF parse — and target architecture affects only the boot-member check and the
 banner scan. So the x86_64 attribution is expected to carry, and the two recorded rows are
-consistent with that: scan time tracked bundle size near-linearly (25.4 ns and 21.2 ns per
+consistent with that: scan time tracked bundle size near-linearly (22.6 ns and 18.9 ns per
 compressed byte across a 12× size range), which is what a bytes-driven cost looks like.
 "Expected to carry" is still a hypothesis about a different architecture, and this record exists
 to keep it visible until it is measured.
