@@ -26,10 +26,14 @@ changes. Stack: Python 3.14, `uv`, pytest, `ruff`, `ty`, `just`.
 - Before `git commit`: `just format` for Python-only changes. For a commit also touching Markdown,
   `git diff --cached --name-only` first, then `prek run`, then re-add exactly those paths — never
   `git add -A` or `git add -u`.
-- `adr-status-check` (`justfile:472-473`, in `just ci`) fails a `Proposed` ADR cited from `src/` or
-  `tests/`, so ADR-0657 is `Accepted` in this PR. `.github/scripts/check-records.sh:349` reports
-  `E-BANNER-COUNT` for a second resolution banner and ADR-0574 already carries one, so its change
-  here is an appended amendment block, never a banner. No ADR index row exists (ADR-0504).
+- `docs/adr/README.md:24-25` requires the PR that flips an ADR to `Accepted` to add its citations
+  across `src/` and `tests/` in the same change; `adr-status-check` (`justfile:472-473`, in
+  `just ci`) enforces the other direction, failing a `Proposed` ADR that is already cited there. So
+  ADR-0657 is `Accepted` in this PR and the citation lands with it.
+- ADR-0657 supersedes only part of ADR-0574, and `docs/adr/README.md` directs a partial supersession
+  to an appended amendment. Do not write a `> **Superseded by …**` banner: it is the form
+  `.github/scripts/profiles/adr.sh:47-49` recognizes for a record that no longer governs, and
+  ADR-0574's other decisions stay in force. No ADR index row exists (ADR-0504).
 - Every focused green command below has the same form — write `<case>` and run it verbatim:
   `uv run python -m pytest tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py::<case> -q`,
   expecting `1 passed`. `<module>` below means that same file.
@@ -130,8 +134,8 @@ dataclasses in `src/kdive/processes/lifecycle/systemd/systemd_worker_runtime.py`
            return "killed"
    ```
 
-6. Extend the module docstring at line 1 of the same file to cite the record, so
-   `adr-status-check` sees ADR-0657 cited from `src/`:
+6. Extend the module docstring at line 1 of the same file so the accepted record is cited from
+   `src/`, as `docs/adr/README.md:24-25` requires:
 
    ```python
    """Replay-safe coordination for retained systemd worker incarnations (ADR-0574, ADR-0657)."""
@@ -140,10 +144,13 @@ dataclasses in `src/kdive/processes/lifecycle/systemd/systemd_worker_runtime.py`
 7. Re-run step 4's command. Expect `3 passed`.
 8. Run `uv run python -m pytest tests/processes/lifecycle/systemd/ -q`. Expect every test in the
    directory to pass.
+9. `just format`, then commit. Task 2 makes and reverts controlled faults in this same file, so its
+   revert must have a committed baseline to return to; leaving this edit uncommitted is how it gets
+   silently thrown away.
 
 **Acceptance criteria.** `_terminal_observation` returns `"killed"` for a same-boot successor
 invocation and raises nothing; the three tests above pass; no other rule in the function is edited;
-the module docstring cites ADR-0657.
+the module docstring cites ADR-0657; the change is committed before Task 2 begins.
 
 ## Task 2 — pin the rules that must not change
 
@@ -170,6 +177,12 @@ red is produced by the named controlled fault in `_terminal_observation`, revert
 - *`membership == "unknown"` on the retained invocation raises `SystemdUnavailable`.* Case
   `test_unknown_membership_on_the_retained_invocation_is_not_terminal_evidence`. Fault: delete the
   `membership == "unknown"` line; `_outcome` then runs and the response is `ok`.
+- *`membership == "populated"` on the retained invocation is not terminal.* Case
+  `test_stop_commits_evidence_before_unit_and_state_cleanup`, already in the module and unchanged.
+  Fault: make the `populated` branch fall through to `_outcome`; `stop` then publishes evidence
+  without signalling, and the test's exact `events` list loses its `systemd:signal-terminate` and
+  `systemd:observe-empty` entries. This is the entry that covers Success criterion 3's `populated`
+  rule; no new test is written for it.
 
 **Steps**
 
@@ -196,12 +209,18 @@ red is produced by the named controlled fault in `_terminal_observation`, revert
    Expect `4 passed`.
 5. Verify each new test bites. One at a time, make the controlled fault named in that test's
    Verification entry in `_terminal_observation`, run the same command, observe the named test red,
-   then `git checkout -- src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py` and
-   re-run to observe green. Record which fault produced which red.
+   then revert with `git checkout -- src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py`
+   and re-run to observe green. This reverts to Task 1 step 9's commit, which is why that commit is
+   a prerequisite: with Task 1 still uncommitted the same command would silently discard the
+   `return "killed"` edit, and all four tests in step 4's filter decide before the changed line, so
+   they would stay green and hide the loss until `just ci`. After the last revert, confirm with
+   `git status --short src/` that nothing under `src/` is modified.
+6. Run `uv run python -m pytest tests/processes/lifecycle/systemd/ -q` and confirm the Task 1 tests
+   are still present and passing, which is the second check that step 5 left the change intact.
 
 **Acceptance criteria.** Four tests cover the foreign-unit, boot-ID, absent-boot and
 membership-`unknown` rules; each was observed red under a controlled fault and green after revert;
-no source file is left modified by step 5.
+`git status --short src/` is empty after step 5 and the Task 1 tests still pass.
 
 ## Task 3 — record the amendment in ADR-0574 and clear the guardrails
 
@@ -215,18 +234,20 @@ written with the design; this task is the edit to the record it amends, plus the
 - *ADR-0657 is `Accepted` while `src/` cites it, and ADR-0574's amendment satisfies the records
   gate.* Green: `just adr-status-check` → exit 0, and `git fetch origin main` then `just records` →
   exit 0. Red: leaving ADR-0657 `Proposed` makes `adr-status-check` report it as
-  cited-but-unaccepted; writing the ADR-0574 edit as a second `> **Superseded by …**` banner makes
-  `just records` report `E-BANNER-COUNT`.
+  cited-but-unaccepted; changing any existing line of ADR-0574 rather than appending makes
+  `just records` report `E-REWRITE`.
 - *The branch satisfies the repository's PR gate.* Green:
   `just ci > /tmp/ci-2485.log 2>&1 < /dev/null` → exit 0. Red: any lint, type, or test failure
   introduced by Tasks 1-3.
 
 **Steps**
 
-1. In `docs/adr/0574-systemd-supervises-host-worker-incarnations.md`, append the block below to the
-   `## Decision` section, immediately after the paragraph ending "It never applies this rule when
-   the boot ID is unreadable or unchanged." Its heading is the form `docs/adr/README.md` requires,
-   and its link target is a sibling filename because ADR-0574 sits in the same directory.
+1. In `docs/adr/0574-systemd-supervises-host-worker-incarnations.md`, insert the block below into
+   the `## Decision` section immediately after the paragraph ending "absence within the same host
+   boot is never termination evidence." — the claim the amendment says it qualifies, and the
+   adjacency both existing amendments in that file keep. Its heading is the form
+   `docs/adr/README.md` requires, and its link target is a sibling filename because ADR-0574 sits
+   in the same directory. Once merged, `E-REWRITE` makes the placement permanent.
 
 ```markdown
 ### Amendment (2026-09-15): a successor invocation is terminal evidence (#2485)
@@ -262,6 +283,13 @@ No deferral is recorded at plan time; one accepted during review is added here w
 record path or tracker issue before the build resumes.
 
 Acceptance criterion 4 — proof on a provisioned systemd host with the installed contract — cannot
-be reached from a workstation, because unit tests cannot exercise a `daemon-reexec` or an
-out-of-band restart. The run implementing this plan states in the pull-request body which arms it
-ran and that the provisioned-host proof is outstanding.
+be reached from a workstation, because unit tests cannot exercise an out-of-band restart of an
+installed unit. The run implementing this plan states in the pull-request body which arms it ran
+and that the provisioned-host proof is outstanding.
+
+The residual the design discloses is also outside this plan: after `stop` retires a restarted slot,
+the unit stays `failed` with its `InvocationID` retained, so the next `start` returns
+`conflict / operator_recovery` from `require_inactive` until an operator runs
+`systemctl reset-failed` or #2488's recovery operation lands. That residual is not introduced here
+— any non-zero worker exit already reaches it — and its root cause, `stop_retained` being unable to
+clear a failed unit, is outside this change's surface.

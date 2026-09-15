@@ -8,8 +8,8 @@ Issue #2485. Epic #2484 (R1, R6). Decision record:
 `_terminal_observation` (`src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py`) is
 the single place deciding whether a retained slot has terminal evidence. When the retained unit
 reports a different `INVOCATION_ID` on the retained boot — what an out-of-band `systemctl restart`,
-`daemon-reexec`, or `needrestart` sweep produces — it raises `LifecycleConflict("systemd invocation
-does not match retained state")`. Every lifecycle caller reaches that function, so `start`,
+a `needrestart` sweep, or unattended upgrades produce — it raises `LifecycleConflict("systemd
+invocation does not match retained state")`. Every lifecycle caller reaches that function, so `start`,
 `status`, and `stop` all fail with `conflict / operator_recovery` and the slot cannot be reconciled
 through the shipped contract.
 
@@ -30,8 +30,10 @@ observes the raise. Files changed:
 - `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`.
 - `docs/adr/0657-a-successor-invocation-is-terminal-evidence.md` — new.
 - `docs/adr/0574-systemd-supervises-host-worker-incarnations.md` — one appended amendment block
-  under `## Decision`. Not a second banner: `.github/scripts/check-records.sh:349` reports
-  `E-BANNER-COUNT` for a second resolution banner, and ADR-0574 already carries one for ADR-0582.
+  under `## Decision`, adjacent to the claim it qualifies. Not a supersession banner: this is a
+  partial supersession, which `docs/adr/README.md` directs to an amendment, and the
+  `> **Superseded by …**` form recognized by `.github/scripts/profiles/adr.sh:47-49` would misstate
+  a record whose other decisions stay in force.
 
 Out of scope, with owners: gate behaviour under `deploy/systemd/**` (#2486); the `_map_failure`
 message split (#2487); a `recover` operation (#2488); operator documentation and the diagnostics
@@ -41,9 +43,10 @@ siblings implement; this change implements neither.
 ## Success
 
 1. A retained slot in `GATED`, `REGISTERED`, or `STARTED` whose unit reports a successor
-   invocation on the retained boot reconciles through `stop` and through `start`: terminal
-   evidence commits for the retained binding, the slot files are removed, and no
-   `LifecycleConflict` is returned.
+   invocation on the retained boot is retired through `stop` and through `start`: terminal evidence
+   commits for the retained binding, the fence is released, the slot files are removed, and no
+   `LifecycleConflict` is returned. This is retirement, not a return to service — see the residual
+   below, which is #2488's.
 2. The outcome published for that slot is `killed`, and the successor's `result`,
    `exec_main_status`, and `membership` are not read.
 3. Each of the four named unchanged rules — foreign unit, bound phase without an exact
@@ -80,13 +83,24 @@ concurrent live-stack flows (ADR-0574:42-46 already excludes that).
   successor gate exits before `exec` under the strict binding, and `KillMode=control-group` takes
   the prior cgroup down with the unit.
 - `killed` does not distinguish an out-of-band restart from another unobservable termination:
-  bounded, and the distinguishing signal is the gate disposition #2486 emits.
+  bounded and, at merge, undistinguished anywhere. The gate emits one string
+  (`release marker binding invariant failed`) for a restart and for tampering alike, and the
+  coordinator logs nothing on the new path. A distinguishable disposition is #2486's, per epic
+  #2484 R2; until it lands the evidence is the journal and the slot's own timeline.
 - A successor invocation observed between `signal_terminate` and the terminal poll: bounded, the
   unit is `Restart=no`, and the outcome for the retained binding is `killed` either way.
 
 **Covered elsewhere.** Gate behaviour after a restart — #2486, under ADR-0657. Residual slots this
 rule cannot reach (unreadable invocation identity, absent unit) — #2488. Misattributed conflict and
-authority messages — #2487. Operator procedure for `operator_recovery` — #2489.
+authority messages — #2487. Operator procedure for `operator_recovery` — #2489. And the residual
+this rule reaches but cannot finish — #2488: the successor's gate exits non-zero, leaving
+`ActiveState=failed` with its `InvocationID` retained; `stop_retained`'s `systemctl stop` is a
+no-op on a failed unit (reproduced on systemd 259: only `reset-failed` clears it), nothing in the
+coordinator calls `reset-failed`, and `require_inactive` demands an empty `InvocationID`, so the
+next `start` returns `conflict / operator_recovery` until an operator runs `systemctl reset-failed`
+or #2488's recovery operation clears it. Not introduced here — any worker exiting non-zero already
+leaves the same failed unit behind the same no-op — and anticipated by epic #2484, whose first
+success criterion is satisfiable under the strict branch only once #2488 merges.
 
 ## Threat model
 
