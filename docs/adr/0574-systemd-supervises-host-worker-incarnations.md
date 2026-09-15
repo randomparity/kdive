@@ -8,6 +8,10 @@ Accepted (2026-08-21)
 > (2026-08-27): the native client checks protocol compatibility and runs checkout code as the fixed
 > worker account instead of requiring an exact installed Git revision.
 
+> **Partially superseded by [0657](0657-a-successor-invocation-is-terminal-evidence.md)**
+> (2026-09-15): a successor invocation reported for the retained unit on the retained boot is
+> terminal evidence for the retained invocation. See the amendment below.
+
 ## Context
 
 ADR-0533 requires an authority to register each worker incarnation before startup, deliver its
@@ -64,6 +68,17 @@ that exact invocation to become empty. The witness publishes the mapped terminal
 the lifecycle-witness database role before resetting the unit or removing the credential and state.
 A database or systemd failure retains those objects for an idempotent retry; absence within the same
 host boot is never termination evidence.
+
+### Amendment (2026-09-15): a successor invocation is terminal evidence (#2485)
+
+This amendment qualifies only the preceding claim that absence within the same host boot is never
+termination evidence. [ADR-0657](0657-a-successor-invocation-is-terminal-evidence.md) decides that
+a *different* invocation identity reported for the retained unit on the retained boot is the
+presence of a successor rather than absence, and therefore proves the retained invocation ended:
+the witness records the retained incarnation as `killed`. Absence itself is unchanged — an
+observation carrying no invocation identity on the retained boot still yields no termination
+evidence — and ADR-0574's gate marker binding, credential, witness, and cleanup decisions remain
+in force.
 
 The boot ID is part of the immutable binding because a host restart destroys every process and
 cgroup from the prior boot. When retained state names a different boot ID, the witness records that
