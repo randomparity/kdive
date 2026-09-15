@@ -497,6 +497,18 @@ def _fleet(
     return stores, runtime, authority, clock, events
 
 
+def _assert_retained_binding_retired(authority: FakeAuthority, state: SlotState) -> None:
+    """Assert the retained binding was retired as ``killed``, and never the successor's.
+
+    A coordinator that released the observed invocation instead would publish the same
+    incarnation and the same outcome, so only the binding separates the two.
+    """
+    assert authority.terminations == [(state.incarnation, "killed")]
+    assert authority.terminated_bindings == [
+        (state.incarnation, state.boot_id, state.invocation_id)
+    ]
+
+
 def test_start_mints_unique_generation_and_credential_per_slot() -> None:
     stores, runtime, authority, clock, _ = _fleet()
     response = _run(
@@ -671,12 +683,7 @@ def test_same_boot_successor_invocation_retires_the_retained_incarnation() -> No
     response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
 
     assert response.ok
-    assert authority.terminations == [(started.incarnation, "killed")]
-    # The retained binding, never the successor's: a coordinator that released the observed
-    # invocation instead would publish the same incarnation and the same outcome.
-    assert authority.terminated_bindings == [
-        (started.incarnation, started.boot_id, started.invocation_id)
-    ]
+    _assert_retained_binding_retired(authority, started)
     assert runtime.signaled == []
     assert runtime.stopped == [started.unit]
     assert stores[0].state is None
@@ -695,12 +702,7 @@ def test_start_reconciles_a_restarted_unit_and_replaces_the_slot() -> None:
     )
 
     assert response.ok
-    assert authority.terminations == [(started.incarnation, "killed")]
-    # The retained binding, never the successor's: a coordinator that released the observed
-    # invocation instead would publish the same incarnation and the same outcome.
-    assert authority.terminated_bindings == [
-        (started.incarnation, started.boot_id, started.invocation_id)
-    ]
+    _assert_retained_binding_retired(authority, started)
     assert stores[0].state is not None and stores[0].state.phase is SlotPhase.STARTED
     assert stores[0].state.generation != started.generation
 
@@ -722,12 +724,7 @@ def test_start_retires_a_restarted_slot_whose_successor_unit_stays_failed() -> N
         _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
     )
 
-    assert authority.terminations == [(started.incarnation, "killed")]
-    # The retained binding, never the successor's: a coordinator that released the observed
-    # invocation instead would publish the same incarnation and the same outcome.
-    assert authority.terminated_bindings == [
-        (started.incarnation, started.boot_id, started.invocation_id)
-    ]
+    _assert_retained_binding_retired(authority, started)
     assert stores[0].state is None
     assert not stores[0].environment and not stores[0].credential and not stores[0].release
     assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
@@ -762,12 +759,7 @@ def test_successor_invocation_exit_facts_are_not_attributed_to_the_retained_one(
     response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
 
     assert response.ok
-    assert authority.terminations == [(started.incarnation, "killed")]
-    # The retained binding, never the successor's: a coordinator that released the observed
-    # invocation instead would publish the same incarnation and the same outcome.
-    assert authority.terminated_bindings == [
-        (started.incarnation, started.boot_id, started.invocation_id)
-    ]
+    _assert_retained_binding_retired(authority, started)
 
 
 def test_partial_start_rolls_back_only_slots_activated_by_this_request() -> None:

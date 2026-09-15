@@ -31,10 +31,11 @@ records the retained incarnation as `killed` rather than refusing the slot. A sy
 at most one invocation at a time and is assigned a new `INVOCATION_ID` only when it changes from an
 inactive state into an activating or active one, so a different identity for the same unit on the
 same boot is the *presence of a successor*, which entails that the retained cycle already ended.
-That is why the rule does not contradict ADR-0574's same-boot rule, which governs *absence*: an observation
-carrying no invocation identity at all on the retained boot still raises `SystemdUnavailable`, and
-a differing boot ID still yields `killed`. No second discriminator — a "newer than the retained
-one" check — is added, for the reason recorded in the first rejected alternative below.
+That is why the rule does not contradict ADR-0574's same-boot rule, which governs *absence*: an
+observation carrying no invocation identity at all on the retained boot still raises
+`SystemdUnavailable`, and a differing boot ID still yields `killed`. No second discriminator — a
+"newer than the retained one" check — is added, for the reason recorded in the first rejected
+alternative below.
 
 **The outcome is `killed`, never a mapped result.** The successor's `Result`, `ExecMainStatus`, and
 cgroup membership describe the successor, so they are never mapped onto the retained incarnation.
@@ -104,17 +105,17 @@ it qualifies.
 - **Require the current invocation to be newer than the retained one.** verified: `systemd.exec(5)`
   `$INVOCATION_ID` (systemd 259) states a new ID is assigned only when the unit changes from an
   inactive state into an activating or active state, so the reported identity is the unit's current
-  cycle and cannot be older than a retained one for the same unit on the same boot. `UnitObservation`
-  (`src/kdive/processes/lifecycle/systemd/systemd_worker_runtime.py`) carries no timestamp, so the
-  check would need a new observation field to express a property already entailed.
+  cycle and cannot be older than a retained one for the same unit on the same boot.
+  `UnitObservation` (`src/kdive/processes/lifecycle/systemd/systemd_worker_runtime.py`) carries no
+  timestamp, so the check would need a new observation field to express a property already entailed.
 - **Keep the `LifecycleConflict` and recover only through a new operation.** judgment: it leaves the
   shipped `start`/`status`/`stop` contract unable to retire a slot it created, and leaves the
   database fence reachable only by an operator `UPDATE`.
 - **Map the observed `Result`/`ExecMainStatus` onto the retained incarnation.** verified: those
   fields are read from the unit's current properties, which after a restart belong to the successor.
 - **Treat same-boot absence as terminal too, for symmetry.** judgment: absence is consistent with a
-  live invocation systemd cannot currently report, which is the case ADR-0574's same-boot rule refuses to guess
-  at; the successor's presence is what carries the proof here.
+  live invocation systemd cannot currently report, which is the case ADR-0574's same-boot rule
+  refuses to guess at; the successor's presence is what carries the proof here.
 - **Re-derive the gate marker for the current `INVOCATION_ID`.** verified: the marker comparison in
   `_wait_for_release` (`deploy/systemd/bin/kdive-live-worker-gate`) is the only check binding a
   release to the invocation that was registered; accepting any invocation for a retained generation
