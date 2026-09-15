@@ -1,4 +1,4 @@
-"""Replay and evidence ordering for retained systemd worker slots."""
+"""Replay and evidence ordering for retained systemd worker slots (ADR-0574, ADR-0657)."""
 
 from __future__ import annotations
 
@@ -175,6 +175,10 @@ class FakeRuntime:
         self.stop_budgets: list[float] = []
         self.inactive_checks: list[tuple[str, float]] = []
         self.systemd_deadlines: list[tuple[str, Deadline]] = []
+        # Units `systemctl stop` cannot clear. A unit left `failed` keeps its InvocationID until
+        # `systemctl reset-failed`, which nothing in the coordinator runs, so `stop_retained` is a
+        # no-op on it and the identity `require_inactive` rejects survives the cleanup.
+        self.unstoppable: set[str] = set()
 
     def require_inactive(self, unit: str, deadline: Deadline) -> None:
         self.systemd_deadlines.append(("require-inactive", deadline))
@@ -237,7 +241,8 @@ class FakeRuntime:
         self.stop_budgets.append(deadline.remaining())
         self.stopped.append(unit)
         self.events.append(f"systemd:stop:{unit}")
-        self.current.pop(unit, None)
+        if unit not in self.unstoppable:
+            self.current.pop(unit, None)
 
     def reset(self, unit: str, deadline: Deadline) -> None:
         self.systemd_deadlines.append(("reset", deadline))
@@ -272,6 +277,10 @@ class FakeAuthority:
         self.fail_register = False
         self.reject_termination = False
         self.terminations: list[tuple[str, TerminationOutcome]] = []
+        # The incarnation carries only unit and generation, so `terminations` alone cannot tell
+        # evidence published for the retained invocation from evidence published for a successor's.
+        # PostgreSQL rejects the wrong binding; this records what was actually offered to it.
+        self.terminated_bindings: list[tuple[str, str | None, str | None]] = []
 
     async def register(self, state: SlotState, credential_hash: bytes) -> None:
         assert credential_hash == bytes.fromhex(state.credential_hash)
@@ -286,6 +295,7 @@ class FakeAuthority:
             raise EvidenceRejected("database rejected exact evidence")
         assert state.incarnation in self.registered
         self.terminations.append((state.incarnation, outcome))
+        self.terminated_bindings.append((state.incarnation, state.boot_id, state.invocation_id))
 
 
 def _state(
@@ -487,6 +497,18 @@ def _fleet(
     return stores, runtime, authority, clock, events
 
 
+def _assert_retained_binding_retired(authority: FakeAuthority, state: SlotState) -> None:
+    """Assert the retained binding was retired as ``killed``, and never the successor's.
+
+    A coordinator that released the observed invocation instead would publish the same
+    incarnation and the same outcome, so only the binding separates the two.
+    """
+    assert authority.terminations == [(state.incarnation, "killed")]
+    assert authority.terminated_bindings == [
+        (state.incarnation, state.boot_id, state.invocation_id)
+    ]
+
+
 def test_start_mints_unique_generation_and_credential_per_slot() -> None:
     stores, runtime, authority, clock, _ = _fleet()
     response = _run(
@@ -653,18 +675,91 @@ def test_start_replays_database_commit_with_same_generation() -> None:
     assert authority.terminations[0][0] == gated.incarnation
 
 
-def test_stale_same_boot_invocation_is_refused_without_signaling_or_cleanup() -> None:
+def test_same_boot_successor_invocation_retires_the_retained_incarnation() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
     runtime.current[started.unit] = _observation(1, "populated", invocation_id="f" * 32)
 
     response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
 
-    assert response.code == "conflict"
+    assert response.ok
+    _assert_retained_binding_retired(authority, started)
     assert runtime.signaled == []
-    assert runtime.stopped == []
-    assert stores[0].state == started
-    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert runtime.stopped == [started.unit]
+    assert stores[0].state is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+
+
+def test_start_reconciles_a_restarted_unit_and_replaces_the_slot() -> None:
+    # A successor `systemctl stop` can clear, so activation reaches an inactive unit with an empty
+    # identity. The failed-successor case the strict gate actually produces is the next test.
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "populated", invocation_id="f" * 32)
+
+    response = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
+    )
+
+    assert response.ok
+    _assert_retained_binding_retired(authority, started)
+    assert stores[0].state is not None and stores[0].state.phase is SlotPhase.STARTED
+    assert stores[0].state.generation != started.generation
+
+
+def test_start_retires_a_restarted_slot_whose_successor_unit_stays_failed() -> None:
+    # The residual ADR-0657 discloses and #2488 owns. Under the strict gate binding the successor
+    # invocation exits non-zero, so its unit keeps ActiveState=failed and its InvocationID;
+    # `systemctl stop` is a no-op on such a unit and nothing runs `systemctl reset-failed`. The
+    # retained binding is still retired through the contract, which is what this change delivers,
+    # but `require_inactive` then refuses to activate a replacement.
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(started.unit)
+
+    response = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
+    )
+
+    _assert_retained_binding_retired(authority, started)
+    assert stores[0].state is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+
+
+def test_out_of_band_replacement_is_logged_before_the_slot_files_are_deleted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "populated", invocation_id="f" * 32)
+
+    with caplog.at_level("WARNING"):
+        response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert response.ok
+    assert "retained worker invocation was replaced out of band" in caplog.text
+    assert started.unit in caplog.text
+    assert "f" * 32 in caplog.text
+    # The outcome alone cannot carry this: it is the same `killed` any unobservable termination
+    # gets, and the slot files that would hold the timeline are gone by the time the call returns.
+    assert stores[0].state is None
+
+
+def test_successor_invocation_exit_facts_are_not_attributed_to_the_retained_one() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=2
+    )
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert response.ok
+    _assert_retained_binding_retired(authority, started)
 
 
 def test_partial_start_rolls_back_only_slots_activated_by_this_request() -> None:
@@ -783,6 +878,30 @@ def test_start_stops_slots_above_a_reduced_worker_count() -> None:
     }
 
 
+def test_foreign_unit_observation_is_refused_without_evidence() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(2, "populated")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert authority.terminations == []
+    assert stores[0].state == started
+
+
+def test_unknown_membership_on_the_retained_invocation_is_not_terminal_evidence() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "unknown")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == ("dependency_unavailable", "restore_systemd")
+    assert authority.terminations == []
+    assert stores[0].state == started
+
+
 def test_same_boot_unit_absence_is_not_terminal_evidence() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
@@ -798,10 +917,17 @@ def test_same_boot_unit_absence_is_not_terminal_evidence() -> None:
     assert stores[0].state == started
 
 
-def test_reboot_maps_exact_retained_binding_to_killed() -> None:
+@pytest.mark.parametrize("live_cgroup", (False, True))
+def test_reboot_maps_exact_retained_binding_to_killed(live_cgroup: bool) -> None:
+    # The prior boot's cgroup cannot survive a reboot, so the boot-ID rule decides both an absent
+    # unit and one whose properties still look live, before membership is ever read.
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
-    runtime.current[started.unit] = _boot_observation(1, boot_id=_NEXT_BOOT_ID)
+    runtime.current[started.unit] = (
+        _observation(1, "populated", boot_id=_NEXT_BOOT_ID)
+        if live_cgroup
+        else _boot_observation(1, boot_id=_NEXT_BOOT_ID)
+    )
 
     response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
 
