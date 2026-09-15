@@ -243,9 +243,10 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
 
     Both tokens carry the operator CLI's OIDC ``azp`` so the connection takes the
     ``OPERATOR_DIRECT`` profile and ``tools/list`` returns the full RBAC-visible catalog
-    (ADR-0456). Under the agent profile the gateway clips both catalogs to ``CORE_TOOLS``
-    first, which would leave the RBAC filter's own effect unobservable — the sibling test
-    above covers that profile.
+    (ADR-0456). Under the agent profile both catalogs are clipped to ``CORE_TOOLS`` first, and
+    every gated tool this test probes for sits outside the core set, so neither catalog would
+    contain them and the probes could not demonstrate the filter. The sibling test above
+    proves the filter under that profile, against the core set instead.
     """
     issuer = require_issuer()
     base_url = require_stack()
