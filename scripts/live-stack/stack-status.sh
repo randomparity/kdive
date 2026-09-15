@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Read-only health report for the local kdive infrastructure. No side effects.
-# Usage: scripts/live-stack/status.sh
+# Usage: scripts/live-stack/stack-status.sh
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -90,18 +90,25 @@ workers on the host so they can access KVM and libvirt.
 ## 1. Bring up the backends
 
 ```bash
-just stack-up
+just stack-backends
 ```
 
-This waits for the three long-running backends — Postgres, SeaweedFS, and the mock OIDC issuer
+This is not a prerequisite for step 4: `scripts/live-stack/stack-services.sh` brings the backends
+up itself through the same code path, so running both is redundant. Use `just stack-backends` when
+the backends are all you want — an in-network Compose app tier, a schema inspection, a bucket
+check — and go straight to step 4 otherwise.
+
+It waits for the three long-running backends — Postgres, SeaweedFS, and the mock OIDC issuer
 — to be **healthy**, runs the one-shot `seaweedfs-init` to completion (creating the
 `kdive-artifacts` bucket, enabling bucket-wide versioning, and verifying `Enabled`), and applies
 database migrations.
 
-> The recipe scopes `docker compose up --wait` to the long-running backends and runs
+> The bring-up path scopes `docker compose up --wait` to the long-running backends and runs
 > `seaweedfs-init` separately, because `--wait` treats a run-to-completion service's exit as a
 > wait failure. `seaweedfs-init`'s exit code still propagates, so a bucket creation or versioning
-> verification failure fails `just stack-up` before any KDIVE process starts.
+> verification failure fails `just stack-backends` before any KDIVE process starts. That
+> scoping lives in `live_stack_backends_up` in `scripts/live-stack/lib.sh`, which is the one
+> implementation both this recipe and `stack-services.sh` reach (ADR-0655).
 
 For an external bucket, the runtime identity needs `s3:GetObjectVersion`,
 `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. Complete the
@@ -258,30 +265,30 @@ phase's diagnostics if packaging, provisioning, or boot fails.
 From a source checkout, run the convenience wrapper:
 
 ```bash
-scripts/live-stack/up.sh
+scripts/live-stack/stack-services.sh
 ```
 
 Systemd retains each exact worker invocation, while server and reconciler remain ordinary host
 processes. Each process waits up to ten seconds at start for its first database connection and
-exits if it cannot get one, so `up.sh` waits past that budget and fails if either ordinary daemon
+exits if it cannot get one, so `stack-services.sh` waits past that budget and fails if either ordinary daemon
 exits or the requested worker slots do not report `started`. If it fails, read
 `.live-stack-logs/*.log` for server/reconciler and run
 `scripts/live-stack/worker-lifecycle.sh diagnostics` for the retained worker invocations:
 `no database connection within` there means the backend was unreachable, or its
-credentials or database name are wrong. Recovery is re-running `up.sh` once the backend answers.
+credentials or database name are wrong. Recovery is re-running `stack-services.sh` once the backend answers.
 
-`up.sh` is idempotent and also ensures the backends and libvirt are up; a no-VM API-only loop uses
-`scripts/live-stack/up.sh --skip-libvirt` through the same installed worker units. It also runs
-one synchronous `reconcile-systems` pass before starting the host processes, so a completed `up.sh`
+`stack-services.sh` is idempotent and also ensures the backends and libvirt are up; a no-VM API-only loop uses
+`scripts/live-stack/stack-services.sh --skip-libvirt` through the same installed worker units. It also runs
+one synchronous `reconcile-systems` pass before starting the host processes, so a completed `stack-services.sh`
 guarantees the catalog is populated and every on-disk `<name>.config` sibling is uploaded with
 `kernel_config_key` set (ADR-0336) — rather than waiting for the reconciler daemon's next loop.
 
 Use the lifecycle scripts as one supported host flow:
 
 ```bash
-scripts/live-stack/up.sh
-scripts/live-stack/status.sh
-scripts/live-stack/down.sh
+scripts/live-stack/stack-services.sh
+scripts/live-stack/stack-status.sh
+scripts/live-stack/stack-down.sh
 ```
 
 Serialize the complete interval from `up` through `down`: one live-stack flow owns one host. The
@@ -321,15 +328,15 @@ The default MCP URL is `http://127.0.0.1:8000/mcp`. Override the bind address wi
 >
 > Use the compose app tier for in-network clients only. For the suite, the CLI, or anything that
 > provisions a local VM, run the app tier as **host processes** via
-> [`scripts/live-stack/up.sh`](../../../scripts/live-stack/up.sh) — the path at the top of this
+> [`scripts/live-stack/stack-services.sh`](../../../scripts/live-stack/stack-services.sh) — the path at the top of this
 > section, and the one both `live.yml` gates use.
 
-### The app tier does not hot-reload — re-run `up.sh` after editing source
+### The app tier does not hot-reload — re-run `stack-services.sh` after editing source
 
 The three host processes are plain Python; they load your source once, at start. Editing a file
 under `src/kdive/` does **not** reach a running server, worker or reconciler. Driving the suite
 against a process that predates your own fix produces a green (or a red) that means nothing —
-this is the local half of issue #1630. Re-run `scripts/live-stack/up.sh` after any source change;
+this is the local half of issue #1630. Re-run `scripts/live-stack/stack-services.sh` after any source change;
 it is idempotent and restarts the app tier in place.
 
 The suite now checks this for you (§5).
@@ -354,7 +361,7 @@ confusing test failure:
 | verdict | meaning | what happens |
 |---|---|---|
 | `fresh` | the process is at `HEAD` and started after your last edit | runs, silently |
-| `stale_restart` | at `HEAD`, but an **uncommitted** `src/kdive` change is newer than its start | **skips** — run `scripts/live-stack/up.sh` |
+| `stale_restart` | at `HEAD`, but an **uncommitted** `src/kdive` change is newer than its start | **skips** — run `scripts/live-stack/stack-services.sh` |
 | `behind` | the deployed commit is an ancestor of `HEAD` | warns, names the commit distance |
 | `diverged` | not an ancestor of `HEAD` (other branch, or `HEAD` rewritten) | warns |
 | `unknown` | the process reports no build, or is not answering | warns |
@@ -393,16 +400,16 @@ use it as a substitute for that host setup.
 ## 7. Teardown
 
 ```bash
-scripts/live-stack/down.sh          # stop host processes + backends, keep state
-scripts/live-stack/down.sh --force  # also SIGKILL host processes left after the grace period
-scripts/live-stack/down.sh --wipe   # full reset: drop DB/SeaweedFS volumes AND reap kdive-* domains/overlays
+scripts/live-stack/stack-down.sh          # stop host processes + backends, keep state
+scripts/live-stack/stack-down.sh --force  # also SIGKILL host processes left after the grace period
+scripts/live-stack/stack-down.sh --wipe   # full reset: drop DB/SeaweedFS volumes AND reap kdive-* domains/overlays
 ```
 
-`down.sh --force` is an operator recovery when graceful lifecycle stop cannot converge. It can end
+`stack-down.sh --force` is an operator recovery when graceful lifecycle stop cannot converge. It can end
 remaining host processes, but it cannot publish exact worker termination evidence. The retained
 database incarnation and any artifact fences may therefore be stranded until an operator repairs
 or explicitly reconciles them. Prefer restoring the failed dependency and retrying plain
-`down.sh`; force recovery trades cleanup for lost evidence.
+`stack-down.sh`; force recovery trades cleanup for lost evidence.
 
-`down.sh --wipe` drops the Postgres and SeaweedFS volumes and reaps all `kdive-*` libvirt domains
-and their overlay disks, so the next `up.sh` starts from a clean schema and an empty bucket.
+`stack-down.sh --wipe` drops the Postgres and SeaweedFS volumes and reaps all `kdive-*` libvirt domains
+and their overlay disks, so the next `stack-services.sh` starts from a clean schema and an empty bucket.

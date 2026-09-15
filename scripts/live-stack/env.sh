@@ -7,7 +7,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Host-published ports for the compose backends. Each is the single source of truth for BOTH the
 # compose publish side (docker-compose.yml reads the same ${VAR:-default}) and the client-facing
 # URLs below, so one override moves the container's host port and the DSN/endpoint that reach it in
-# lockstep. Exported so the `docker compose` subprocess up.sh spawns inherits them. The
+# lockstep. Exported so the `docker compose` subprocess stack-services.sh spawns inherits them. The
 # container-INTERNAL ports never move (a service always binds its canonical port inside its netns);
 # only the host mapping does — so an operator whose host already runs e.g. Postgres on 5432 or a
 # vLLM on 8000 can relocate kdive's mapping without touching any container.

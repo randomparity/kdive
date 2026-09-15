@@ -23,7 +23,7 @@ run the same recipes locally rather than reinventing the underlying command:
 
 | task | runs |
 |------|------|
-| `just setup` | check host deps, `uv sync --locked`, install + run git hooks |
+| `just setup` | check host deps, `uv sync --locked`, stage the capture-bootstrap manifest, install + run git hooks |
 | `just lint` | `ruff check` + `ruff format --check` |
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
@@ -32,9 +32,11 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
 | `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, doc-link guards, all generated-artifact checks, then the suite |
-| `just compose-up` / `compose-down` | Postgres + MinIO + mock-OIDC backing services for a live run |
-| `just stack-up` | bring the live-stack backends up healthy + print host-process env (see runbook) |
+| `just stack-backends` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated |
+| `just compose-up` | the **containerized** tier — backends *plus* `server`/`reconciler`, then the `worker` created and started through the lifecycle witness (`--profile managed-worker`) |
+| `just compose-stop` / `compose-down` | stop that tier; `compose-stop` keeps the named volumes, `compose-down` adds `--volumes` and drops the database and object store |
 | `just test-live-stack` | the `live_stack` suite; skips cleanly when the stack/fixtures are absent |
+| `just onboard` | fund the demo project (budget/quota) and mint a token against a running stack |
 
 Run a single test: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py::test_request_under_cap_grants -q`
 
@@ -112,6 +114,44 @@ It is the canonical map of the three live test tiers (`live_stack`, `live_vm`,
 environment contract, and the hard-won quirks (`qemu:///session` vs system, a
 short session-mode socket path via `XDG_CONFIG_HOME`, modular daemons, per-mode
 confinement).
+
+**Starting a stack (and which "stack" you mean).** Three bring-up paths exist and they are
+not interchangeable. Pick by what you need to run:
+
+| You want | Run | What you get |
+|----------|-----|--------------|
+| `just test-live-stack` / `just test-live-tcg` on a host that provisions real VMs | `scripts/live-stack/stack-services.sh`, then `just onboard` | backends + schema, then libvirt and the host processes, then a funded `demo` project + token |
+| a no-VM API loop against the host processes | `scripts/live-stack/stack-services.sh --skip-libvirt` | same, minus VM provisioning; still needs the installed worker units |
+| the app tier in containers, for in-network clients | `just compose-up` | `server`/`worker`/`reconciler` as Compose services |
+| a developer workstation driving KDIVE from an MCP client | `examples/local-libvirt/demo-up.sh` | the same `scripts/live-stack/stack-services.sh` bring-up, wrapped with host preflight, `onboard.sh`, and an `.mcp.json` merge into the kernel tree |
+
+`scripts/live-stack/stack-services.sh` runs the backends itself, so there is no separate
+backends step ahead of it. `just stack-backends` is that same script stopped early
+(`--stage backends`): Postgres, SeaweedFS, and the mock OIDC issuer up, the one-shot
+`seaweedfs-init` run to completion (bucket + versioning), and migrations applied. It is **not**
+a running stack. `scripts/live-stack/stack-services.sh` is what starts libvirt and the app tier — `server`
+and `reconciler` as ordinary operator-owned host processes, workers in the fixed
+`kdive-live-worker@1..8.service` units through the installed lifecycle socket, with no
+direct-process fallback (ADR-0574). That host contract is installed by the `live_vm_host` Ansible
+role or `deploy/systemd/install-live-worker-lifecycle.sh`, not by the recipes above.
+
+`just compose-up` is a different deployment, not a shortcut to the one the live suites need:
+its containers get a different OIDC issuer identity than a host-minted token carries (401), and
+they have no `/dev/kvm` or libvirt socket. Don't reach for it to satisfy a live tier.
+
+The local-libvirt `just` recipes are host preparation and onboarding, not stack bring-up:
+`just check-local-libvirt` (report-only preflight), `just prepare-local-libvirt-host` (the Ansible
+host play; needs `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` in the environment), and
+`just setup-local-libvirt` (seed the demo project's budget/quota). The remote-libvirt pair is
+`just check-remote-libvirt HOST` / `just setup-remote-libvirt HOST`, with
+`just test-live-remote` (the `live_vm_remote` provider-op family) and `just test-live-stack-remote`
+(only the remote arm of `live_stack`) as its test recipes — see
+[`docs/operating/runbooks/remote-live-stack.md`](docs/operating/runbooks/remote-live-stack.md).
+
+The bring-up details, failure diagnosis, and teardown live in
+[`docs/operating/runbooks/live-stack.md`](docs/operating/runbooks/live-stack.md) and
+[`scripts/live-stack/README.md`](scripts/live-stack/README.md); the app tier does not hot-reload,
+so re-run `scripts/live-stack/stack-services.sh` after editing source.
 
 `just type` is whole-tree on purpose: scoping `ty` to `src` once let a test-tree type
 error merge green, so `tests/` is type-checked only here. Don't narrow it back.
@@ -211,7 +251,12 @@ a concrete test/failure-path opt-in provider; remote-libvirt is an operator-conf
 opt-in provider wired through the same resolver/runtime seam. A provider still implements
 narrow port protocols for the planes it supports (Discovery, Provisioning, Install,
 Connect, Debug, Control, Retrieve; Allocation is core, not a provider plane), but runtime
-code calls those typed ports directly. Kernel compilation runs in the caller's environment;
+code calls those typed ports directly. `ProviderRuntime` (`providers/core/runtime.py`) carries
+the required ports as fields and the optional capability ports — console, snapshot, traffic
+capture, external boot, authority — as `None`-able ones. `support: ProviderSupport` defaults
+fail closed (an unwired provider advertises nothing), and `__post_init__` enforces
+capability/port parity, so advertising a capability without wiring its port raises at assembly
+rather than at call time. Kernel compilation runs in the caller's environment;
 KDIVE consumes uploaded builds through `runs.complete_build` (ADR-0316).
 
 The old `CapabilityRegistry` / `OpContract` dispatch design now exists only in historical
@@ -283,8 +328,14 @@ and constraint an agent must know, and does not invite a pattern the behavior di
 - **Architecture decisions are ADRs** (`docs/adr/`, `NNNN-kebab-title.md`, monotonic
   numbers never reused). Don't change an accepted decision in place — write a new ADR that
   supersedes it. Most source modules cite the ADR(s) they implement in their docstring;
-  follow the citation when changing behavior. Spec → plan → implementation cycles live
-  under `docs/design/`, `docs/archive/plans/`, and `docs/archive/superpowers/`.
+  follow the citation when changing behavior. Current spec → plan → implementation cycles land
+  in `docs/workflow/specs/` and `docs/workflow/plans/` (dated `YYYY-MM-DD-<slug>[-design].md`);
+  `docs/design/`, `docs/specs/`, and `docs/superpowers/` hold earlier generations of the same
+  artifacts and `docs/archive/` the retired ones. A merged plan is a point-in-time record — do
+  not treat one as current guidance.
+- **Deferred work is a numbered record** (`docs/debt/`, same `NNNN-kebab-title.md` shape as an
+  ADR). `just records` is the gate; it compares against `origin/main`, so `git fetch origin main`
+  first.
 - **Releasing** — see [`docs/development/releasing.md`](docs/development/releasing.md) and
   [ADR-0041](docs/adr/0041-versioning-release-process.md) (SemVer, milestone→minor,
   tag-driven release).
@@ -308,7 +359,9 @@ and constraint an agent must know, and does not invite a pattern the behavior di
 - **`live_vm` tests** are skipped by default (marker in `pyproject.toml`); they need an
   operator-provided KVM/nested-virt host with libvirt and a kdump-enabled guest image, and
   run only as a manually-dispatched self-hosted CI job. Unit/service tests depend only on
-  disposable Postgres + MinIO + mock OIDC.
+  disposable Postgres + SeaweedFS + mock OIDC. (SeaweedFS replaced MinIO as the S3-compatible
+  backend; some fixture and symbol names — `minio_store`, `tests/store/test_minio_store_fixture.py`
+  — still carry the old name and are not evidence of a second backend.)
 - **`live_stack` tests** drive the spine over the real MCP HTTP transport against the portable
   three-role host stack (`server`/`worker`/`reconciler`) + the compose backends; they do not run
   the Kubernetes-only `lifecycle-witness`. Operator bring-up is in
@@ -334,7 +387,13 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   property-based (hypothesis) race tests, `tests/integration/` holds the end-to-end
   milestone exercises.
 - Ruff line length 100, lint set `E,F,I,UP,B,SIM`. `ty` runs with strict defaults (no
-  project-wide relaxations); the unstubbed C-extension deps (`libvirt-python`, `drgn`)
-  suppress `unresolved-import` with a scoped per-site ignore.
+  project-wide relaxations); the operator-provided C extensions (`drgn`, `libguestfs`) suppress
+  `unresolved-import` with a scoped per-site ignore, and the files importing them are the only
+  `[[tool.ty.overrides]]` entry (`unused-ignore-comment` off, because those directives are used
+  in CI and unused on a host that has the extensions).
 - Runtime env vars are `KDIVE_*` (`KDIVE_DATABASE_URL`, `KDIVE_OIDC_*`, `KDIVE_S3_*`,
-  `KDIVE_HTTP_HOST/PORT`, `KDIVE_LOG_LEVEL`); see `docker-compose.yml` for a working set.
+  `KDIVE_HTTP_HOST/PORT`, `KDIVE_LOG_LEVEL`). The generated
+  [config reference](docs/guide/reference/config.md) is the full list (`just config-docs` to
+  regenerate, `just config-docs-check` and `just env-docs-check` gate it); `docker-compose.yml`
+  shows a working set. A `KDIVE_*` env read outside `kdive.config` fails `just config-guard`
+  (ADR-0087) — test-only vars live under `tests/` for that reason.

@@ -82,7 +82,7 @@ check_tcg() {
   require_set KDIVE_STACK_BASE_URL
   require_set KDIVE_OIDC_ISSUER
   # No shared KDIVE_DATABASE_URL since #1929: env.sh exports one DSN per authority instead, and
-  # the tcg spine consumes all four (up.sh's apply-migrations + host daemons + worker fleet run
+  # the tcg spine consumes all four (stack-services.sh's apply-migrations + host daemons + worker fleet run
   # from them), so gate on the four-authority set (#2046).
   require_set KDIVE_MIGRATION_DATABASE_URL
   require_set KDIVE_SERVER_DATABASE_URL

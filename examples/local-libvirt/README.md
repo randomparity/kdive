@@ -24,7 +24,7 @@ demo walkthrough below. Otherwise:
 
 - A KVM host with `libvirt` and a running `libvirtd`/`virtqemud`, the `default` network
   active, and your user in the `libvirt` group.
-- Docker with a reachable daemon (for the Postgres / MinIO / mock-OIDC backends).
+- Docker with a reachable daemon (for the Postgres / SeaweedFS / mock-OIDC backends).
 - The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`. There is no
   PyPI wheel yet; the checkout is the install, and the scripts here run from it.
 - The fixed live-worker lifecycle contract installed for this checkout and your user
@@ -35,20 +35,20 @@ demo walkthrough below. Otherwise:
 - A kdive-ready guest image at `/var/lib/kdive/rootfs/local/<name>.qcow2`, declared in
   `systems.toml` so an agent can provision it by catalog name. `build-image.sh` builds and
   registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
-  backends up, so run it after `up.sh`.
+  backends up, so run it after `demo-up.sh`.
 - A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
 - Local kdump capture requires drgn/libguestfs in the installed lifecycle worker environment,
   `/opt/kdive-live-worker-lifecycle/.venv`. The lifecycle installer/host role owns that environment.
   The checkout preflight probes `KDIVE_PYTHON`; it does not certify the installed worker's imports.
 
-`up.sh` runs the preflight first and stops with an actionable message if anything is
-missing. The kdump-only `guestfs`/`drgn` check is the one exception: `up.sh` runs the preflight
+`demo-up.sh` runs the preflight first and stops with an actionable message if anything is
+missing. The kdump-only `guestfs`/`drgn` check is the one exception: `demo-up.sh` runs the preflight
 with `KDIVE_PREFLIGHT_KDUMP=optional`, so that gap prints as a `WARN` with the fix and the
 bring-up continues — provision, build, boot, debug, and the other capture methods do not need
-it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
+it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `demo-up.sh` insist on it.
 
-> **Day-to-day development?** `scripts/live-stack/up.sh` / `down.sh` / `status.sh` are the
-> underlying host-lifecycle scripts; `up.sh` here adds the preflight, the project funding, and
+> **Day-to-day development?** `scripts/live-stack/stack-services.sh` / `stack-down.sh` / `stack-status.sh` are the
+> underlying host-lifecycle scripts; `demo-up.sh` here adds the preflight, the project funding, and
 > the `.mcp.json` merge on top of them, and is idempotent, so re-running it is the normal way to
 > restart the stack after editing source (the daemons do not hot-reload).
 
@@ -58,9 +58,9 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `up.sh` insist on it.
 |------|---------|
 | `install-host.sh` | Compatibility caller for the canonical host-preparation recipe in the installation guide. |
 | `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, the published session `KDIVE_LIBVIRT_URI`, and an XDG log directory. Source it; don't run it. |
-| `up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/up.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
+| `demo-up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/stack-services.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
 | `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `svirt_image_t` on SELinux hosts (ADR-0640), append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
-| `down.sh` | `scripts/live-stack/down.sh` with the example env: retires the lifecycle workers through the witness, stops the daemons and the compose backends, keeps state. `--wipe` also drops the data volumes and reaps kdive domains. |
+| `demo-down.sh` | `scripts/live-stack/stack-down.sh` with the example env: retires the lifecycle workers through the witness, stops the daemons and the compose backends, keeps state. `--wipe` also drops the data volumes and reaps kdive domains. |
 | `mint-token.sh` | Print an admin developer token for `KDIVE_PROJECT` to stdout. |
 | `mcp.json` | The MCP client config installed into the kernel tree; reads the token from `${KDIVE_TOKEN}` (holds no secret). |
 
@@ -73,7 +73,7 @@ KDIVE_CHECKOUT="$PWD"    # run this block from the KDIVE checkout
 examples/local-libvirt/install-host.sh
 
 # 1. Bring everything up (no sudo: the lifecycle contract from step 0 does the privileged part).
-examples/local-libvirt/up.sh
+examples/local-libvirt/demo-up.sh
 
 # 2. Build and register a guest image (once; re-run per extra distro you want to boot).
 #    On an SELinux-enforcing host, build-image.sh labels its resolved workspace before the
@@ -84,13 +84,13 @@ examples/local-libvirt/build-image.sh fedora-kdive-ready-44
 export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 
 # 4. Open your MCP client in the kernel tree — it reads the installed .mcp.json:
-cd ~/src/linux            # the .mcp.json up.sh installed lives here
+cd ~/src/linux            # the .mcp.json demo-up.sh installed lives here
 # ...launch your MCP client (it connects to http://127.0.0.1:8000/mcp as Bearer $KDIVE_TOKEN)
 
 # 5. When finished, return to KDIVE and stop the stack (data is kept):
 cd "$KDIVE_CHECKOUT"
-examples/local-libvirt/down.sh
-examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the bucket, and kdive domains
+examples/local-libvirt/demo-down.sh
+examples/local-libvirt/demo-down.sh --wipe   # ...or also drop the database, the bucket, and kdive domains
 ```
 
 ## Tokens
@@ -116,13 +116,13 @@ examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the buck
 
 ## How bring-up and teardown behave
 
-- **Settle gate.** `scripts/live-stack/up.sh` waits past each daemon's own start budget and
+- **Settle gate.** `scripts/live-stack/stack-services.sh` waits past each daemon's own start budget and
   fails if the server or reconciler exits, or if the witness does not report exactly the
   requested worker slots (`KDIVE_WORKER_COUNT`, default 1) as started. Daemon logs are under
   `KDIVE_STACK_LOG_DIR`; worker diagnostics come from
   `scripts/live-stack/worker-lifecycle.sh diagnostics` (the units are retained by systemd).
 - **Re-running replaces the fleet.** Bring-up asks the witness to retire any retained worker
-  slots and stops its own daemons before starting again, so `up.sh` is the restart command;
+  slots and stops its own daemons before starting again, so `demo-up.sh` is the restart command;
   anything foreign holding the MCP port fails it loudly instead of losing the bind race.
 - **Session libvirt, not `qemu:///system`.** The installer publishes one operator-owned session
   daemon; `env.sh` exports it as `KDIVE_LIBVIRT_URI`, so `build-fs`, the preflight, the daemons,
@@ -133,7 +133,7 @@ examples/local-libvirt/down.sh --wipe   # ...or also drop the database, the buck
   only the `kdive` server entry is replaced — any other MCP servers and top-level keys you
   configured are kept. A missing file is created from the template. The step is idempotent and
   runs last, so a missing kernel tree leaves a working stack behind.
-- **Teardown goes through the witness.** `down.sh` retires the worker slots, stops the daemons
+- **Teardown goes through the witness.** `demo-down.sh` retires the worker slots, stops the daemons
   (SIGTERM, then `--force` for SIGKILL), and stops the compose backends. Plain teardown keeps
   the data volumes and any running kdive domains; `--wipe` drops both.
 
@@ -146,7 +146,7 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
-| `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `up.sh` refuses. |
+| `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `demo-up.sh` refuses. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for checkout commands, server, and reconciler; fixed workers use their installed lifecycle venv. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
 | `KDIVE_TOKEN_TTL` | `2592000` (30d) | Lifetime in seconds of the token `mint-token.sh` issues; inherited from `scripts/live-stack/env.sh`. Minimum `1`; no enforced maximum. |
@@ -154,7 +154,7 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_WORKER_COUNT` | `1` | Lifecycle worker slots to start (1–8); workers are the job-concurrency unit. |
 | `KDIVE_SKIP_OBS` | `1` | `0` also brings up Prometheus/Grafana with the backends. |
 | `KDIVE_BUILD_IMAGE_WORKSPACE` | `~/.local/share/kdive/build/images` | User-writable `build-fs --workspace` for `build-image.sh` (the build-fs default under `/var/lib/kdive/build` is root-owned). |
-| `KDIVE_LOCAL_ROLE_BOOTSTRAP` | `1` | `up.sh` runs the compose `role-bootstrap` one-shot so the per-process database login members exist; `0` skips it for externally provisioned members. |
+| `KDIVE_LOCAL_ROLE_BOOTSTRAP` | `1` | `demo-up.sh` runs the compose `role-bootstrap` one-shot so the per-process database login members exist; `0` skips it for externally provisioned members. |
 | `KDIVE_SYSTEMS_TOML` | `~/.config/kdive/systems.toml` | Optional declarative inventory the reconciler loads. Absent by default (a quiet no-op) — see [Optional inventory](#optional-inventory-systemstoml). The default is CWD-independent; set this to point at a file elsewhere. |
 
 The daemon logs live under the XDG state dir (`$XDG_STATE_HOME`, default

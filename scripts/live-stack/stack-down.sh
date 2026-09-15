@@ -10,10 +10,10 @@
 # libvirt itself is left enabled and running (host service; not cycled per teardown).
 #
 # Usage:
-#   scripts/live-stack/down.sh            stop the stack, keep state
-#   scripts/live-stack/down.sh --force    SIGKILL daemons remaining after the grace period
-#   scripts/live-stack/down.sh --wipe     also wipe DB + reap kdive domains/overlays
-#   scripts/live-stack/down.sh --wipe --yes   skip the confirmation prompt
+#   scripts/live-stack/stack-down.sh            stop the stack, keep state
+#   scripts/live-stack/stack-down.sh --force    SIGKILL daemons remaining after the grace period
+#   scripts/live-stack/stack-down.sh --wipe     also wipe DB + reap kdive domains/overlays
+#   scripts/live-stack/stack-down.sh --wipe --yes   skip the confirmation prompt
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,7 +43,7 @@ if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
   # An interactive prompt needs a tty; under the agent `!` prefix (or any piped stdin) `read`
   # gets EOF and would silently abort. Require --yes instead of hanging/aborting confusingly.
   if [[ ! -t 0 ]]; then
-    echo "non-interactive stdin: re-run as 'down.sh --wipe --yes' to confirm" >&2
+    echo "non-interactive stdin: re-run as 'stack-down.sh --wipe --yes' to confirm" >&2
     exit 1
   fi
   read -r -p "Type 'wipe' to proceed: " confirm

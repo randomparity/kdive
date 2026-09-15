@@ -8,7 +8,8 @@
 # same change" discipline (AGENTS.md) is auditable rather than silent — add packages here if a
 # remote proof ever grows a genuine host-tool need.
 
-# Container runtime for the #1293 self-hosted job's on-box compose stack (scripts/live-stack/up.sh).
+# Container runtime for the #1293 self-hosted job's on-box compose stack
+# (scripts/live-stack/stack-services.sh).
 # docker-compose-v2 provides `docker compose` (the plugin) on Ubuntu 26.04.
 live_vm_host_docker_packages:
   - docker.io

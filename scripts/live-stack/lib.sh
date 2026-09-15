@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the local live-stack lifecycle scripts (up.sh, down.sh, status.sh).
+# Shared helpers for the local live-stack lifecycle scripts (stack-services.sh, stack-down.sh, stack-status.sh).
 # SOURCED, never executed: it defines variables and functions and must have no side effects
 # beyond that. Consumers source env.sh themselves when they need the KDIVE_* runtime config.
 
@@ -15,6 +15,49 @@ log_dir="${KDIVE_STACK_LOG_DIR:-${repo_root}/.live-stack-logs}"
 # shellcheck disable=SC2034 # consumed by sourcing scripts
 KDIVE_BACKEND_SERVICES=(postgres seaweedfs seaweedfs-init oidc)
 
+# The subset `--wait` may cover. `docker compose up --wait` treats ANY container exit as a
+# wait failure, so including the run-to-completion seaweedfs-init here would make a healthy
+# stack report failure. The one-shot runs separately, below, where its exit status propagates.
+# shellcheck disable=SC2034 # consumed by sourcing scripts
+KDIVE_BACKEND_LONG_RUNNING=(postgres seaweedfs oidc)
+
+# Bring the compose backends up and prove the artifacts bucket. Sourced-only (this file runs
+# nothing at source time); callers invoke it explicitly. No arguments; requires `docker` on PATH
+# and the repo root as cwd. Returns 0 when the three long-running backends are healthy and the
+# artifacts bucket exists and is versioned; non-zero otherwise, propagating the one-shot's status.
+live_stack_backends_up() {
+  # When KDIVE_OIDC_IMAGE is unset the oidc service builds from ./deploy/mock-oidc (ADR-0357).
+  # Pre-build it so the following `up` finds kdive-mock-oidc:dev locally instead of attempting
+  # a doomed pull against a local-only tag, which prints a "pull access denied" warning that
+  # reads as a hard failure. Skip when the image exists: its inputs change rarely and
+  # `compose build` re-contacts the registry on every call even when fully cached. The skip is
+  # announced so an operator editing deploy/mock-oidc knows to remove the tag to force one.
+  if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
+    if docker image inspect kdive-mock-oidc:dev >/dev/null 2>&1; then
+      echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc" >&2
+    else
+      docker compose build oidc
+    fi
+  fi
+
+  # --wait-timeout is required because the backends carry `restart: on-failure`
+  # (docker-compose.yml): a container that keeps failing cycles Exited -> Restarting instead of
+  # settling, so without a bound the convergence poll can block indefinitely rather than
+  # reporting.
+  # Two of the three deployments are non-interactive CI actors that cannot run `docker compose
+  # ps` themselves, and --wait's timeout names no service — where the postgres poll this
+  # replaces named its own. Dump the table so the job log carries the same signal.
+  if ! docker compose up -d --wait --wait-timeout 120 "${KDIVE_BACKEND_LONG_RUNNING[@]}"; then
+    docker compose ps >&2
+    return 1
+  fi
+
+  # Creates the bucket, enables versioning, verifies Enabled, then exits. `run --rm` so a
+  # failure here fails bring-up: the replaced `up -d` form never surfaced this exit status,
+  # and a missing bucket then surfaced much later as a worker store check (ADR-0655).
+  docker compose run --rm seaweedfs-init
+}
+
 # The local-libvirt provider connects here (KDIVE_LIBVIRT_URI, default qemu:///system) and
 # stores per-System qcow2 overlays under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking
 # and qemu-img overlays — NO libvirt network or storage pool is involved.
@@ -22,7 +65,7 @@ KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 export KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 
 # Arches for which grafana publishes no upstream manifest (ADR-0356 accept-gap, #1261); it ships
-# amd64 + arm64 only. On a listed arch, up.sh skips grafana and brings prometheus (which does
+# amd64 + arm64 only. On a listed arch, stack-services.sh skips grafana and brings prometheus (which does
 # publish ppc64le) up on its own, so a missing-manifest pull can't abort the metrics store.
 GRAFANA_UNSUPPORTED_ARCHES=(ppc64le)
 
@@ -176,7 +219,7 @@ require_free_http_port() {
     echo "ERROR: KDIVE_HTTP_PORT ${port} is already in use — the kdive server cannot bind it:"
     echo "  ${holder}"
     echo "Free that port, or relocate the stack, e.g.:"
-    echo "    KDIVE_HTTP_PORT=8001 scripts/live-stack/up.sh"
+    echo "    KDIVE_HTTP_PORT=8001 scripts/live-stack/stack-services.sh"
   } >&2
   return 1
 }
@@ -269,7 +312,7 @@ restart_host_processes() {
 # the stack up: each daemon waits up to POOL_OPEN_TIMEOUT_SECONDS for its first database
 # connection and exits if it cannot get one, plus a bounded pool teardown (ADR-0449, ~11s total).
 # The former flat `sleep 5` returned while a doomed daemon was still in the process table, so
-# status.sh reported three healthy processes and up.sh exited 0 for a stack that vanished seconds
+# stack-status.sh reported three healthy processes and stack-services.sh exited 0 for a stack that vanished seconds
 # later. The most reachable trigger is an unavailable role-specific database: that kills a daemon
 # outright instead of showing up as a not-ready /readyz.
 DAEMON_SETTLE_SECONDS=15
@@ -343,7 +386,7 @@ nodedev_ok() {
 
 # Operator-owned dedicated session libvirt daemon (#2032). The live_vm_host role provisions a
 # dedicated session daemon for the runner account (config /etc/kdive/libvirtd-live.conf, runtime
-# root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. up.sh's
+# root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. stack-services.sh's
 # recovery path starts this same daemon directly as the invoking user — the runner service account
 # has no sudo and the Debian-family runner ships no virtqemud, so a system-daemon fallback can
 # never work there.
@@ -376,7 +419,7 @@ ensure_session_libvirtd() {
 
 # The host prerequisites a local-libvirt provision actually needs. Returns 0 iff all are
 # PRESENT (existence only — ownership/writability is the lifecycle witness's concern, not testable
-# reliably as the invoking user). up.sh creates the dirs before calling this.
+# reliably as the invoking user). stack-services.sh creates the dirs before calling this.
 provision_prereqs_ok() {
   local rc=0 staging="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
   command -v qemu-img >/dev/null 2>&1 || {

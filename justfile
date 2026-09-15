@@ -269,7 +269,7 @@ test-live:
 
 # --strict-markers fails a mis-marked test; pytest exit 5 ("no tests collected") is tolerated as a
 # clean skip, other codes propagate. Needs the foreign qemu emulator (e.g. qemu-system-ppc64) AND a
-# running stack (`just stack-up` + fixtures); the tests skip cleanly without either.
+# running stack (`just stack-backends` + fixtures); the tests skip cleanly without either.
 #
 # Run the emulated foreign-arch (TCG) tier: the four ppc64le provision→boot→crash→retrieve proofs.
 test-live-tcg:
@@ -314,53 +314,15 @@ test-live-remote:
 stack-migrate:
     ./scripts/live-stack/apply-migrations.sh
 
-# Bring up the live-stack backing services healthy, then migrate the schema and print the
-# host-process startup step. Reuses the compose backends; host processes stay outside compose.
+# Bring up the compose backends, create and verify the artifacts bucket, and migrate the
+# schema. This is NOT a running stack: scripts/live-stack/stack-services.sh starts libvirt and
+# the host processes, and `just onboard` funds a project. See docs/operating/runbooks/live-stack.md.
 #
-# `--wait` is scoped to the three long-running backends: it treats ANY container exit as a wait
-# failure, so the one-shot `seaweedfs-init` (creates the bucket, then exits 0) would make a healthy
-# stack report exit 1. Run that init separately to completion — its exit code still propagates,
-# so a real bucket-creation failure fails the recipe.
-stack-up:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # A plain `if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then ...` recipe line runs in its OWN shell
-    # (just's default per-line execution) and inherits only the caller's environment, so
-    # env.sh's ppc64le-under-qemu auto-detection (the only place KDIVE_OIDC_IMAGE is set,
-    # ADR-0358) never reached it (#2400). A shebang-body recipe shares one shell across every
-    # line instead — the same pattern test-live-stack uses — so sourcing env.sh here makes
-    # the pre-build check below and compose's own image selection read one source.
-    # shellcheck disable=SC1091 # repo-relative env script
-    source scripts/live-stack/env.sh
-    # Pre-build oidc when using the local build path (KDIVE_OIDC_IMAGE unset). ADR-0357
-    # has compose build kdive-mock-oidc:dev from ./deploy/mock-oidc; without this pre-build,
-    # `compose up` first tries to PULL that local-only tag and prints a confusing "pull
-    # access denied" warning before falling back to build. Skip the build entirely when the
-    # image already exists — the Dockerfile inputs (pom.xml + Dockerfile) change rarely and
-    # `docker compose build` re-contacts the registry on every call even when fully cached.
-    # The skip is announced (not silent) so an operator editing deploy/mock-oidc knows to
-    # `docker rmi kdive-mock-oidc:dev` to force a rebuild. Skipped entirely when
-    # KDIVE_OIDC_IMAGE is set (that's the pull path, ADR-0358).
-    if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then
-      if docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then
-        echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc"
-      else
-        docker compose build oidc
-      fi
-    fi
-    # --wait-timeout is required now the backends carry `restart: on-failure` (ADR-0449):
-    # a container that keeps failing cycles Exited -> Restarting instead of settling, so
-    # without a bound the convergence poll can block indefinitely rather than reporting.
-    docker compose up -d --wait --wait-timeout 120 postgres seaweedfs oidc
-    docker compose run --rm seaweedfs-init
-    ./scripts/live-stack/apply-migrations.sh
-    echo "Backends healthy and schema migrated."
-    echo "App tier, for IN-NETWORK clients: just compose-up"
-    echo "For the live suites, the CLI, or any local-libvirt VM: scripts/live-stack/up.sh"
-    echo "  (compose containers get a different OIDC issuer identity than a host-minted token"
-    echo "   carries -> 401, and no /dev/kvm or libvirt socket -> no local VM. See the runbook.)"
-    echo "MCP URL: http://127.0.0.1:8000/mcp"
-    echo "Full runbook: docs/operating/runbooks/live-stack.md"
+# One line, because the bring-up script owns the backend readiness contract (ADR-0655): the
+# recipe and the script were two implementations of it, and only the recipe's propagated the
+# bucket one-shot's exit status.
+stack-backends:
+    ./scripts/live-stack/stack-services.sh --stage backends
 
 # Print a bearer token from the bundled Helm-demo mock-OIDC issuer (Kubernetes):
 #   export KDIVE_TOKEN=$(just demo-token)                  # full admin grant (default)
@@ -369,7 +331,7 @@ stack-up:
 demo-token *ARGS:
     @./scripts/demo-token.sh {{ARGS}}
 
-# Run the live_stack suite (needs `just stack-up` + VM fixtures). --strict-markers fails a
+# Run the live_stack suite (needs `just stack-backends` + VM fixtures). --strict-markers fails a
 # mis-marked test instead of silently deselecting; pytest exit 5 ("no tests collected", e.g.
 # the marked driver not yet present) is tolerated as a clean skip, other codes propagate.
 test-live-stack:
