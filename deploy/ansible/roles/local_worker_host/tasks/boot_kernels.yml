@@ -7,6 +7,7 @@
 # block is guarded to the family that has the defect.
 - name: Make the Debian-family host kernels readable for guest-image builds
   when: ansible_facts['os_family'] == 'Debian'
+  tags: [boot_kernels]
   block:
     - name: Find the host kernels under /boot (vmlinuz-* x86_64, vmlinux-* ppc64le)
       ansible.builtin.find:
@@ -27,15 +28,25 @@
       loop_control:
         label: "{{ item.path }}"
 
-    - name: Verify every worker can read every host kernel
-      # Declaring the mode does not prove convergence: the read also needs the account to
-      # exist and to be in kvm. live_vm_host/tasks/verify.yml runs the same check.
-      ansible.builtin.command: "/bin/sh -c 'test -r {{ item.1.path }}'"
-      become: true
-      become_user: "{{ item.0 }}"
-      loop: >-
-        {{ live_vm_host_worker_accounts
-           | product(local_worker_host_boot_kernels.files) | list }}
-      loop_control:
-        label: "{{ item.0 }} -> {{ item.1.path }}"
-      changed_when: false
+    - name: Read the kvm group the relabel grants read through
+      ansible.builtin.getent:
+        database: group
+        key: kvm
+      register: local_worker_host_kvm_group
+
+    - name: Verify every worker account is in the kvm group
+      # The mode above grants read through the group, so an account outside kvm still cannot
+      # read the kernel and build-fs still fails. Checked as group membership rather than by
+      # running a read AS each worker (the shape live_vm_host/tasks/verify.yml uses): this
+      # role's own play is `connection: local` with an unprivileged connection user, where
+      # escalating to a DIFFERENT unprivileged account makes ansible-core fall back to
+      # setfacl — `pipelining = True` lives under [ssh_connection] in ansible.cfg, which the
+      # local connection does not read — and no role this play runs declares the `acl`
+      # package. live_vm_host can run that read because it declares acl and connects by ssh.
+      ansible.builtin.assert:
+        that:
+          - item in local_worker_host_kvm_group.ansible_facts.getent_group['kvm'][2].split(',')
+        fail_msg: >-
+          {{ item }} is not in the kvm group, so it cannot read the relabelled host kernels
+          and build-fs will still fail; re-run this role's worker_accounts.yml.
+      loop: "{{ live_vm_host_worker_accounts }}"

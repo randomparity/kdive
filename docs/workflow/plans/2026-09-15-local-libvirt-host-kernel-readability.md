@@ -11,8 +11,8 @@ existing `note_manual` tier accumulator; prose and remedy-string corrections acr
 docs, one runbook and both preflight scripts. Provisioning lands first so the probe names a path
 provisioning satisfies.
 
-Tech stack: Ansible (`ansible.builtin.find`, `ansible.builtin.file`, `ansible.builtin.command`
-under `become_user`), Bash 4.3+ (`local -n` namerefs), pytest driving both scripts as
+Tech stack: Ansible (`ansible.builtin.find`, `ansible.builtin.file`, `ansible.builtin.getent`,
+`ansible.builtin.assert`), Bash 4.3+ (`local -n` namerefs), pytest driving both scripts as
 subprocesses with stubbed PATH and env overrides.
 
 Spec: `docs/workflow/specs/2026-09-15-local-libvirt-host-kernel-readability-design.md`.
@@ -37,8 +37,7 @@ Transcribed from the spec and `AGENTS.md`:
 - Ruff line length 100. Doc style: "Milestone" never "Sprint"; avoid "critical", "robust",
   "comprehensive", "essential", "significant", "elegant".
 - No `src/kdive/` change. No new ADR: the mode composes `live_vm_host`'s accepted
-  `0640 root:kvm` choice and per-account read check with `guest_image_prereqs`'s accepted
-  Debian-family guard.
+  `0640 root:kvm` choice with `guest_image_prereqs`'s accepted Debian-family guard.
 - **Do not edit any merged ADR.** `.github/scripts/profiles/adr.sh` sets
   `APPEND_ONLY_SECTIONS="*"`, so `just records` raises `E-REWRITE` for any line dropped from a
   merged record's non-`Status` section. The `§4b` citations in ADR-0214 and ADR-0393 stay.
@@ -49,7 +48,7 @@ Transcribed from the spec and `AGENTS.md`:
 
 | Path | Owns now | Owns after |
 |---|---|---|
-| `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml` | — (new) | the Debian-family `/boot` relabel and its per-account read check |
+| `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml` | — (new) | the Debian-family `/boot` relabel and its `kvm` membership assertion |
 | `deploy/ansible/roles/local_worker_host/tasks/main.yml` | role task ordering | same, plus the `boot_kernels.yml` import |
 | `scripts/check-setup-deps.sh` | tiered host-dependency report | same, plus `BOOT_DIR` + `probe_boot_kernels`, widened hint heading, honest closing line, corrected runbook pointers |
 | `scripts/operations/check-local-libvirt.sh` | live-host preflight | same, with the `chmod 0644` remedy replaced and three runbook pointers corrected |
@@ -82,8 +81,8 @@ used only inside the new file. Later work relies on the path
 
 **Verification.**
 
-- Contract: the role declares the Debian-guarded `0640 root:kvm` relabel and its per-account
-  read check, and `main.yml` imports it. Mode: `focused-test`. Observable: the two role YAML
+- Contract: the role declares the Debian-guarded `0640 root:kvm` relabel and its `kvm`
+  membership assertion, and `main.yml` imports it. Mode: `focused-test`. Observable: the two role YAML
   files read as text from `tests/deploy/test_live_worker_provisioning.py`. Expected red:
   `FileNotFoundError` on the new task file. Green:
   `uv run python -m pytest tests/deploy/test_live_worker_provisioning.py -q -k boot_kernel`.
@@ -108,9 +107,11 @@ used only inside the new file. Later work relies on the path
        assert 'mode: "0644"' not in tasks
        # RedHat and Suse ship these world-readable and must not be narrowed.
        assert "ansible_facts['os_family'] == 'Debian'" in tasks
-       # Declaring the mode is not proving it: verify as each worker account, the way
-       # live_vm_host/tasks/verify.yml does for the same relabel.
-       assert "become_user" in tasks
+       # Declaring the mode is not proving it: the read is granted through the group, so
+       # the membership is checked too -- NOT by a read as each worker (live_vm_host's
+       # shape), which needs the undeclared acl package on this connection: local play.
+       assert "become_user" not in tasks
+       assert "getent" in tasks
        assert "live_vm_host_worker_accounts" in tasks
        assert "boot_kernels.yml" in (LOCAL_WORKER / "tasks" / "main.yml").read_text()
    ```
@@ -150,19 +151,28 @@ used only inside the new file. Later work relies on the path
          loop_control:
            label: "{{ item.path }}"
 
-       - name: Verify every worker can read every host kernel
-         # Declaring the mode does not prove convergence: group membership needs the account to
-         # exist and to be in kvm. live_vm_host/tasks/verify.yml runs the same check.
-         ansible.builtin.command: "/bin/sh -c 'test -r {{ item.1.path }}'"
-         become: true
-         become_user: "{{ item.0 }}"
-         loop: >-
-           {{ live_vm_host_worker_accounts
-              | product(local_worker_host_boot_kernels.files) | list }}
-         loop_control:
-           label: "{{ item.0 }} -> {{ item.1.path }}"
-         changed_when: false
+       - name: Read the kvm group the relabel grants read through
+         ansible.builtin.getent:
+           database: group
+           key: kvm
+         register: local_worker_host_kvm_group
+
+       - name: Verify every worker account is in the kvm group
+         # The mode grants read through the group, so an account outside kvm still cannot read
+         # the kernel. Membership rather than a read AS each worker: this play is
+         # connection: local with an unprivileged connection user, where escalating to another
+         # unprivileged account falls back to setfacl (pipelining sits under [ssh_connection],
+         # which the local connection does not read) and no role this play runs declares acl.
+         ansible.builtin.assert:
+           that:
+             - item in local_worker_host_kvm_group.ansible_facts.getent_group['kvm'][2].split(',')
+           fail_msg: >-
+             {{ item }} is not in the kvm group, so it cannot read the relabelled host kernels
+             and build-fs will still fail; re-run this role's worker_accounts.yml.
+         loop: "{{ live_vm_host_worker_accounts }}"
    ```
+
+   Tag the block `tags: [boot_kernels]` so the family guard can be driven in check mode.
 
 4. In `deploy/ansible/roles/local_worker_host/tasks/main.yml`, insert after the
    `Prepare fixed worker accounts` import:
@@ -476,7 +486,8 @@ shell helpers and `KVM_NODE` in `scripts/check-setup-deps.sh`; `LOCAL_WORKER`/`R
 `tests/deploy/test_live_worker_provisioning.py`; `_bin`, `_run`, `skip_if_root` and the four
 named test cases in the two script test modules; `live_vm_host_worker_accounts` in
 `deploy/ansible/roles/local_worker_host/defaults/main.yml`; and the per-account read check in
-`deploy/ansible/roles/live_vm_host/tasks/verify.yml` that Task 1 step 3 follows.
+`deploy/ansible/roles/live_vm_host/tasks/verify.yml`, which Task 1 step 3 deliberately does
+not reuse (branch review pass 1: it needs the undeclared `acl` package on a local connection).
 
 Deferrals carried into implementation: none. Follow-up candidates recorded in the spec's
 out-of-scope list: the `§4b` citations in merged ADR-0214 and ADR-0393, and the four other

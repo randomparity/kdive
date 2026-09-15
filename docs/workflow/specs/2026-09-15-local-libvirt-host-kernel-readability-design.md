@@ -41,13 +41,19 @@ satisfies.
 
 - New `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml`, imported from that
   role's `main.yml` after `worker_accounts.yml`. It finds `/boot/vmlinuz-*` and
-  `/boot/vmlinux-*`, sets `group: kvm`, `mode: "0640"`, and then verifies as each worker
-  account that every kernel is readable — all guarded to the Debian family. This composes
+  `/boot/vmlinux-*`, sets `group: kvm`, `mode: "0640"`, and then asserts that every fixed
+  worker account is in `kvm` — all guarded to the Debian family. This composes
   decisions already in the tree rather than making new ones: `live_vm_host` chose
   `0640 root:kvm` over ADR-0222's prose `chmod 0644` so the mode stays group-scoped instead of
-  undoing `/boot` hardening for every local uid, pairs it with a per-account read check
-  (`live_vm_host/tasks/verify.yml`), and `guest_image_prereqs` guards the same file on the
-  Debian family. Both the fixed worker accounts
+  undoing `/boot` hardening for every local uid, and `guest_image_prereqs` guards the same file
+  on the Debian family. The membership assertion stands in for `live_vm_host`'s per-account
+  read check (`live_vm_host/tasks/verify.yml`), which cannot be reused here: this play is
+  `connection: local` with an unprivileged connection user, so escalating to a different
+  unprivileged account makes ansible-core fall back to `setfacl` — `pipelining = True` sits
+  under `[ssh_connection]` in `deploy/ansible/ansible.cfg`, which the local connection does
+  not read — and no role this play runs declares the `acl` package that `live_vm_host` and
+  `provider_authority_host` declare for exactly that reason. Membership is the only variable
+  the preceding task does not already set. Both the fixed worker accounts
   (`local_worker_host/tasks/worker_accounts.yml`) and the operator login account
   (`libvirt_stack/tasks/main.yml`) are already `kvm` members, so `0640 root:kvm` reaches both
   readers. The RedHat and Suse families ship these files world-readable and are left alone,
@@ -157,13 +163,14 @@ upgrades — accepted above. Hardening `/boot` beyond the distro default.
 ## Success
 
 1. Applying `local-libvirt-host.yml` to a Debian-family host with `0600` kernels leaves every
-   `/boot/vmlinuz-*` and `/boot/vmlinux-*` at `root:kvm 0640` and fails the play if any worker
-   account still cannot read one; a second apply reports no change. The task changes nothing on
-   a RedHat or Suse host.
+   `/boot/vmlinuz-*` and `/boot/vmlinux-*` at `root:kvm 0640` and fails the play if any fixed
+   worker account is outside `kvm`; a second apply reports no change. The task changes nothing
+   on a RedHat or Suse host. The readability the relabel and the membership together establish
+   is proven on a live Debian-family host, not by the local gate.
 2. `scripts/check-setup-deps.sh`, **run as a non-root user**, reports the host-kernel entry and
-   names `just prepare-local-libvirt-host` when `BOOT_DIR` holds an unreadable kernel, and
-   reports nothing for `/boot` when it holds a readable one or does not exist. Its exit status
-   is unchanged in all three cases.
+   names `just prepare-local-libvirt-host` when `BOOT_DIR` holds an unreadable kernel or is
+   itself unlistable, and reports nothing for `/boot` when it holds a readable one or does not
+   exist. Its exit status is unchanged in every case.
 3. No `section 4b` or `§4b` pointer remains in `scripts/check-setup-deps.sh` or
    `scripts/operations/check-local-libvirt.sh`, and each replacement names a heading present in
    `four-method-live-run.md`.
@@ -177,7 +184,8 @@ upgrades — accepted above. Hardening `/boot` beyond the distro default.
 
 | Contract | Mode |
 |---|---|
-| `local_worker_host` declares the Debian-guarded `0640 root:kvm` relabel, the per-account read check, and the `main.yml` import | `focused-test` — `tests/deploy/test_live_worker_provisioning.py`, new cases reading the role YAML |
+| `local_worker_host` declares the Debian-guarded `0640 root:kvm` relabel, the `kvm` membership assertion, and the `main.yml` import | `focused-test` — `tests/deploy/test_live_worker_provisioning.py`, new case reading the role YAML |
+| The relabel block skips every non-Debian family | `focused-test` — `deploy/ansible/tests/run-local-worker-host.py`, new check-mode case driving injected RedHat and Suse facts (verified to bite: removing the `when` guard fails it) |
 | `check-setup-deps.sh` reports an unreadable `BOOT_DIR` kernel with the recipe remedy, exit unchanged | `focused-test` — `tests/scripts/test_check_setup_deps.py`, new case driving `KDIVE_BOOT_DIR` |
 | `check-setup-deps.sh` stays silent for a readable or absent `BOOT_DIR` | `focused-test` — `tests/scripts/test_check_setup_deps.py`, two new cases |
 | The widened manual-hint heading | `focused-test` — updated assertion in `tests/scripts/test_check_setup_deps.py` |

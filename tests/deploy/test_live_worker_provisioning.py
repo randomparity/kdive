@@ -2103,8 +2103,12 @@ def test_local_worker_declares_boot_kernel_readability() -> None:
     assert 'mode: "0644"' not in tasks
     # RedHat and Suse ship these world-readable and must not be narrowed.
     assert "ansible_facts['os_family'] == 'Debian'" in tasks
-    # Declaring the mode is not proving it: verify as each worker account, the way
-    # live_vm_host/tasks/verify.yml does for the same relabel.
-    assert "become_user" in tasks
+    # Declaring the mode is not proving it: the read is granted through the group, so the
+    # membership is checked too. NOT via a per-account `become_user` read (live_vm_host's
+    # shape) — this role's play is connection: local with an unprivileged connection user,
+    # where becoming another unprivileged account falls back to setfacl and no role this
+    # play runs declares the `acl` package.
+    assert "become_user" not in tasks
+    assert "getent" in tasks
     assert "live_vm_host_worker_accounts" in tasks
     assert "boot_kernels.yml" in _text(LOCAL_WORKER / "tasks" / "main.yml")
