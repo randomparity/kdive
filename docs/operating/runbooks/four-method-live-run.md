@@ -19,4 +19,6 @@ may use a different interpreter. Follow the
 [fixed worker lifecycle contract](../../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract)
 and its host provisioning. A successful import check in `KDIVE_PYTHON` alone does not prove
 that the installed worker has drgn/libguestfs. Reprovision the owning environment rather than
-copying incompatible native bindings between Python versions.
+copying a native binding between *differing* Python versions; that is the case
+`scripts/check-setup-deps.sh` also refuses, ABI-checking both interpreters before it links
+anything.

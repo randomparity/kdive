@@ -52,6 +52,10 @@ def _run(
         # it unset would make these tests read the host and fail on exactly the distros this
         # change exists to support. Tests that want it present override it via extra_env.
         "KDIVE_QEMU_LIBEXEC": str(tmp_path / "absent-qemu-kvm"),
+        # Pin the host-kernel probe at an absent directory for the same reason: its default is
+        # the real /boot, and a runner shipping 0600 kernels would otherwise add a hint to
+        # every case in this module. Tests that want kernels present override it.
+        "KDIVE_BOOT_DIR": str(tmp_path / "absent-boot"),
         **(extra_env or {}),
     }
     return subprocess.run(
@@ -410,6 +414,8 @@ def test_interactive_accept_uses_plain_sudo(tmp_path: Path) -> None:
         "KDIVE_OS_RELEASE": str(os_release),
         "HOME": str(tmp_path),
         "KDIVE_PYTHON": str(venv_py),
+        # Not via _run, so pin the host-kernel probe here too (see _run for why).
+        "KDIVE_BOOT_DIR": str(tmp_path / "absent-boot"),
     }
     assert BASH is not None
     controller, worker = pty.openpty()
@@ -665,7 +671,7 @@ def test_ppc64le_missing_rust_fails_with_rustup_hint(tmp_path: Path) -> None:
     assert result.returncode == 1, result.stdout
     assert "Required dependencies missing" in result.stderr
     # rustup is a manual hint (not a distro package line): label + rustup command together.
-    assert "Tooling not provided by your distribution" in result.stderr
+    assert "Manual fixes your distribution's packages do not supply" in result.stderr
     assert "rustc/cargo: curl" in result.stderr
     assert "sh.rustup.rs" in result.stderr
     # It must not be routed to a distro package-manager install line.
@@ -786,6 +792,9 @@ def test_guestfs_hint_names_the_venv_symlink_remedy(tmp_path: Path) -> None:
 
     assert "symlink" in result.stderr, result.stderr
     assert "four-method-live-run.md" in result.stderr, result.stderr
+    # The old "section 4b" pointer named a heading that no longer exists in that runbook.
+    assert "Wire the worker venv" in result.stderr, result.stderr
+    assert "section 4b" not in result.stderr, result.stderr
 
 
 def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None:
@@ -820,6 +829,8 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
             "KDIVE_OS_RELEASE": str(os_release),
             "HOME": str(tmp_path),
             "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            # Not via _run, so pin the host-kernel probe here too (see _run for why).
+            "KDIVE_BOOT_DIR": str(tmp_path / "absent-boot"),
         },
         capture_output=True,
         text=True,
@@ -934,3 +945,88 @@ def test_future_tier_install_line_names_qemu_kvm_on_redhat(tmp_path: Path) -> No
     future = [ln for ln in result.stderr.splitlines() if ln.strip().startswith("dnf install")][-1]
     assert "qemu-kvm" in future
     assert "qemu-system-x86 " not in f"{future} "
+
+
+# ── /boot kernel readability (ADR-0222, #2479) ───────────────────────────────
+
+
+def _boot(tmp_path: Path, *, readable: bool) -> Path:
+    """A fake /boot holding one kernel, readable or not by the invoking user."""
+    d = tmp_path / "boot"
+    d.mkdir()
+    kernel = d / "vmlinuz-6.8.0-124-generic"
+    kernel.write_text("")
+    kernel.chmod(0o644 if readable else 0o000)
+    return d
+
+
+@skip_if_root
+def test_unreadable_boot_kernel_reports_the_provisioning_remedy(tmp_path: Path) -> None:
+    """Debian/Ubuntu 0600 kernels break every guest-image build (ADR-0222, #2479), so
+    check-deps must say so and route the operator at the recipe that declares the mode.
+
+    Non-root only: `[[ -r ]]` is true for uid 0 whatever the mode, which is why the remedy
+    string says the probe reads as the invoking user.
+    """
+    result = _run(
+        "debian",
+        str(_bin(tmp_path)),
+        tmp_path,
+        extra_env={"KDIVE_BOOT_DIR": str(_boot(tmp_path, readable=False))},
+    )
+
+    assert "host kernel readability" in result.stderr, result.stderr
+    assert "just prepare-local-libvirt-host" in result.stderr, result.stderr
+    assert "reads as the invoking user" in result.stderr, result.stderr
+    # A future-tier hint must not change the exit status (ADR-0393: warn only).
+    assert result.returncode == 0, result.stdout
+
+
+def test_readable_boot_kernel_reports_nothing(tmp_path: Path) -> None:
+    """A readable kernel is the Fedora default and the post-provisioning Debian state."""
+    result = _run(
+        "debian",
+        str(_bin(tmp_path)),
+        tmp_path,
+        extra_env={"KDIVE_BOOT_DIR": str(_boot(tmp_path, readable=True))},
+    )
+
+    assert "host kernel readability" not in result.stderr, result.stderr
+
+
+def test_absent_boot_dir_reports_nothing(tmp_path: Path) -> None:
+    """An unusual /boot layout must skip the probe, not fail on the literal glob."""
+    result = _run(
+        "debian",
+        str(_bin(tmp_path)),
+        tmp_path,
+        extra_env={"KDIVE_BOOT_DIR": str(tmp_path / "no-such-boot")},
+    )
+
+    assert "host kernel readability" not in result.stderr, result.stderr
+
+
+@skip_if_root
+def test_unlistable_boot_dir_reports_the_provisioning_remedy(tmp_path: Path) -> None:
+    """A /boot the invoking user cannot list hides every kernel from the glob, so a probe that
+    only globbed would read it as "no kernels present" and stay silent — the state it exists
+    to catch. The one-off glob cannot help here, so this branch must not offer one."""
+    d = tmp_path / "boot"
+    d.mkdir()
+    (d / "vmlinuz-6.8.0-124-generic").write_text("")
+    d.chmod(0o000)
+    try:
+        result = _run(
+            "debian",
+            str(_bin(tmp_path)),
+            tmp_path,
+            extra_env={"KDIVE_BOOT_DIR": str(d)},
+        )
+    finally:
+        d.chmod(0o755)  # restore so pytest can clean the tmp tree up
+
+    assert "host kernel readability" in result.stderr, result.stderr
+    assert "is not listable by this user" in result.stderr, result.stderr
+    assert "just prepare-local-libvirt-host" in result.stderr, result.stderr
+    assert "sudo chgrp kvm" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stdout

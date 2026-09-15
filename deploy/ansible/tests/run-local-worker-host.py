@@ -266,3 +266,41 @@ for distribution, family, selected in (
 ):
     package_route(distribution, family, selected)
 print("ok packages: check mode routes each supported family to only its package task")
+
+
+def boot_kernel_guard(distribution: str, family: str) -> None:
+    """RedHat and Suse ship /boot kernels world-readable; relabelling there would NARROW
+    them, so the block must skip on every family except Debian (ADR-0222, #2479).
+
+    Only the skip arm is driven here: on a Debian-facts run the block would reach the kvm
+    membership assertion, which needs the fixed worker accounts this checkout does not have.
+    """
+    facts = {
+        "ansible_facts": {
+            "distribution": distribution,
+            "distribution_version": "probe",
+            "os_family": family,
+        },
+        "local_worker_host_operator_user": operator,
+    }
+    result = playbook(probe, "--check", "--tags", "boot_kernels", "-e", json.dumps(facts))
+    heading = (
+        "TASK [local_worker_host : Find the host kernels under /boot "
+        "(vmlinuz-* x86_64, vmlinux-* ppc64le)]"
+    )
+    require(heading in result.stdout, f"{distribution} omitted the host-kernel find task")
+    section = result.stdout.split(heading, 1)[1].split("\nTASK [", 1)[0]
+    require(
+        "skipping: [localhost]" in section,
+        f"{distribution} entered the Debian-only host-kernel relabel",
+    )
+
+
+for distribution, family in (
+    ("Fedora", "RedHat"),
+    ("Rocky", "RedHat"),
+    ("openSUSE Tumbleweed", "Suse"),
+    ("SLES", "Suse"),
+):
+    boot_kernel_guard(distribution, family)
+print("ok boot kernels: the /boot relabel skips every non-Debian family")
