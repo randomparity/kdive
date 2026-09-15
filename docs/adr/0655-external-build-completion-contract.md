@@ -84,11 +84,21 @@ it costs a full second scan — and since attempts across Runs also serialize be
 
 ### Cancellation
 
-A finalization ends by completing, by its upload window lapsing, or by the caller disconnecting.
-There is no separate cancel: publication is a single transactional commit
-(`_finalize_external_build`'s `conn.transaction()`), so before it nothing is published and after
-it the Run has succeeded. No state exposes a partially published build, and nothing a caller does
-mid-scan can produce one.
+**There is no cancellation, and this record does not promise one.** Two halves, and they differ:
+
+- *Safety holds.* Publication is a single transactional commit
+  (`_finalize_external_build`'s `conn.transaction()`), so before it nothing is published and
+  after it the Run has succeeded. No state exposes a partially published build, and nothing a
+  caller does mid-scan can produce one.
+- *Liveness does not.* The scan runs under `asyncio.to_thread`, which hands the work to a pool
+  thread that has no cancellation point. A caller that disconnects, or an awaiting task that is
+  cancelled, does not stop the scan — it runs to completion regardless, and the `finally` that
+  releases `_EXTERNAL_BUILD_VALIDATION_SLOTS` fires while that thread is still working. So a
+  disconnect-and-retry cycle can put more scans in flight than the semaphore's count suggests,
+  which makes the concurrency arithmetic below optimistic rather than conservative.
+
+Adding real cancellation means giving the validator a cooperative check, which is validator
+behaviour and outside this issue's surface. It is named here so the gap is a known one.
 
 ### Upload-window fencing
 
@@ -127,11 +137,17 @@ expiry path already directs callers there.
 
 The finalization measurement instrumentation this decision rests on is **retained permanently**,
 not gated to the measurement run: every deployment running a `server` process emits one
-`external_build_finalization_measured` record per finalization attempt, carrying the phase split
+`external_build_finalization_measured` record per finalization attempt **that reaches the
+service**, carrying the phase split
 and `store_requests`, `store_bytes` and `store_wait_ms`. Those three count the **validation
 pass** — `_CountingStore` wraps the store validation reads, not the one chunk reassembly uses —
 so on a chunked finalization reassembly I/O appears in `reassemble_ms` and in none of the three.
-Stated here because "permanent observability" should not be read as "all store traffic". Finalization is a rare
+Stated here because "permanent observability" should not be read as "all store traffic".
+
+The sequential-retry short-circuit above returns from the tool handler before the service is
+constructed, so it emits no record. That is the intended reading of "per attempt that reaches the
+service": a retry that costs nothing is not a measurement, and an operator counting records is
+counting scans. Finalization is a rare
 operator-initiated action rather than a hot path, and the phase attribution an operator needs to
 diagnose a slow finalization is the attribution #2314 could not produce. The record's payload
 shape is frozen by a closed-vocabulary test and joins the ADR-0014 / ADR-0090 log schema without
@@ -142,8 +158,8 @@ It is also the instrument that would falsify this decision, which is the main re
 ## Consequences
 
 - **The public contract is unchanged.** `runs.complete_build` keeps meaning "wait for the
-  answer", and the tool docstring at
-  `src/kdive/mcp/tools/lifecycle/runs/registrar.py:511-534` stays accurate. #2319 is not
+  answer", and the tool's own docstring in
+  `src/kdive/mcp/tools/lifecycle/runs/registrar.py` stays accurate. #2319 is not
   activated by this evidence and should be closed or held against the conditions below rather
   than implemented on it.
 - **Concurrency is the binding limit, not size.** `_EXTERNAL_BUILD_VALIDATION_SLOTS` is
@@ -151,7 +167,9 @@ It is also the instrument that would falsify this decision, which is the main re
   the *n*-th caller's request spans roughly *n* scans. At the ceiling-sized 40.5 s the eighth
   concurrent finalization passes 300 s. Every measured row is uncontended, so this is arithmetic
   on the serial cost rather than an observation — and it is the first thing to measure if
-  finalization timeouts are reported again.
+  finalization timeouts are reported again. It is also optimistic: because an abandoned scan
+  keeps running after its slot is released (see *Cancellation*), real contention can exceed what
+  the semaphore count implies.
 - **Read amplification is unchanged and remains the obvious lever.** The validator makes a capped
   128 MiB prefix scan plus three end-to-end passes (`_preflight_external_boot_archive`,
   `_scan_external_boot_archive`, `_digest_object`), measured at 3.03× the compressed object.

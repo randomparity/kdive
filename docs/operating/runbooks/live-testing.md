@@ -295,7 +295,7 @@ uv run python -m pytest tests/integration/test_finalization_measurement.py \
   -m live_stack -k x86_64 -q
 ```
 
-Three things about it differ from the boot proofs:
+Four things about it differ from the boot proofs:
 
 - **It needs no libvirt and no System.** The Run is created unbound, so `--skip-libvirt`
   bring-up is enough and nothing is provisioned.

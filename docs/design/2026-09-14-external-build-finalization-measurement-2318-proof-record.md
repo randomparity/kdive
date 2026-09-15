@@ -85,6 +85,7 @@ maximum and not to an open-ended one.
 | Host kernel | `7.2.5-200.fc44.x86_64` (Fedora 44) |
 | Object-store deployment shape | SeaweedFS container on the same host, reached over loopback (`KDIVE_BACKEND_SERVICES`, `scripts/live-stack/lib.sh`) |
 | Observed mean per-request store latency | 3.70 ms (small row), 5.18 ms (large row) — `store_wait_ms / store_requests` |
+| Storage tier those reads actually hit | page cache, not disk — see below |
 | Staging filesystem and free space | btrfs on local NVMe; 1.9 TB total, 938 GB free at measurement time |
 | Kernel source | linux 7.2.6 (`cdn.kernel.org`, stable) |
 | Both classes' base config | the measurement host's distro config (`/boot/config-<uname -r>`), `olddefconfig`, with module signing and the system trusted/revocation keyrings disabled — this tree has no distro signing key |
@@ -95,6 +96,15 @@ maximum and not to an open-ended one.
 
 Using one config and one variable is deliberate: it makes the two rows differ in bundle size
 rather than in an unrelated kernel configuration, so the attribution can be compared across them.
+
+**The measured store latency is a warm-cache figure.** The driver PUTs the bundle and calls
+`runs.complete_build` immediately after, so validation reads 5.59 GB out of a 1.85 GB object
+seconds after it was written, on a host with 250 GiB of RAM. Those reads came from the page
+cache: 3.70 and 5.18 ms per request is loopback HTTP plus a memory copy, not loopback HTTP plus
+NVMe. This is not instrumented — it follows from the sequence — and it is disclosed because it is
+the *floor* of the store term, which makes the network-store reopening condition below an
+upper-bound estimate of how much latency it would take to reach the budget rather than a
+conservative one.
 
 Note on reproducing the small class: `CONFIG_DEBUG_INFO` is a bare bool selected by the "Debug
 information" choice, and the distro config carries `DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y`.
