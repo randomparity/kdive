@@ -102,10 +102,16 @@ def _deployed_revision() -> dict[str, Any]:
     addr = os.environ.get(_HEALTH_ENV, _DEFAULT_HEALTH_ADDR)
     with urlopen(f"http://{addr}/readyz", timeout=10) as response:  # noqa: S310  loopback only
         body = json.loads(response.read().decode())
-    deployed = body.get("deployed_version", body)
+    # /readyz nests the deployed build under "version":
+    #   {"ready": true, "checks": {...}, "version": {"version", "commit", "is_release",
+    #    "started_at"}}
+    deployed = body.get("version")
+    if not isinstance(deployed, dict):
+        raise RuntimeError(f"/readyz carried no deployed-version object: {body!r}")
     return {
         "version": deployed.get("version"),
         "commit": deployed.get("commit"),
+        "is_release": deployed.get("is_release"),
         "started_at": deployed.get("started_at"),
     }
 
@@ -202,7 +208,10 @@ def test_external_build_finalization_is_measured(arch: str, tmp_path: Path) -> N
                 ),
                 "create-run-upload",
             )
-            await put_presigned(env, tar)
+            # The presigned URL is on the per-artifact item, not the envelope.
+            by_name = {item.data.get("name"): item for item in env.items}
+            assert "kernel" in by_name, "create_run_upload returned no 'kernel' item"
+            await put_presigned(by_name["kernel"], tar)
 
             started = time.monotonic()
             env = ok(await scalar(op, "runs.complete_build", run_id=run_id), "complete-build")
@@ -240,6 +249,7 @@ def test_external_build_finalization_is_measured(arch: str, tmp_path: Path) -> N
                 "deployed_version": deployed["version"],
                 "deployed_commit": deployed["commit"],
                 "deployed_started_at": deployed["started_at"],
+                "deployed_is_release": deployed["is_release"],
                 "host_cpu_count": os.cpu_count(),
                 "host_machine": platform.machine(),
             }
