@@ -260,8 +260,11 @@ expecting `1 passed`.
    counting = _CountingStore(_VersionPinnedStore(store, exact_versions))
    counts.append(counting)
    return validate_external_artifacts(
-       counting, manifest=manifest, keys=keys,
-       declared_build_id=declared_build_id, arch=arch,
+       counting,
+       manifest=manifest,
+       keys=keys,
+       declared_build_id=declared_build_id,
+       arch=arch,
    )
    ```
 
@@ -280,7 +283,11 @@ expecting `1 passed`.
            validated = await asyncio.to_thread(
                self._validate_complete_build,
                list(prepared.manifest_row.entries),
-               prepared.keys, build_id, arch, final_versions, counts,
+               prepared.keys,
+               build_id,
+               arch,
+               final_versions,
+               counts,
            )
    except CategorizedError as exc:
        raise CompleteBuildValidationError(exc) from exc
@@ -302,12 +309,20 @@ expecting `1 passed`.
            prepared = await self._prepare(conn, run)
        chunked = prepared.has_chunks
        validated = await self._validate_uploads(
-           conn, run.id, prepared, build_id=build_id, arch=_build_arch(run),
-           timer=timer, counts=counts,
+           conn,
+           run.id,
+           prepared,
+           build_id=build_id,
+           arch=_build_arch(run),
+           timer=timer,
+           counts=counts,
        )
        with timer.phase("publish"):
            return await _finalize_external_build(
-               conn, ctx, validated, cmdline=cmdline,
+               conn,
+               ctx,
+               validated,
+               cmdline=cmdline,
                source_provenance=source_provenance,
                object_store_factory=self.object_store_factory,
            )
@@ -374,10 +389,14 @@ expecting `1 passed`.
       (`complete_build.py:248-257`), so no counter is ever created and `store_requests` would be
       permanently 0 whether or not the instrumentation works. Build that one test on a finalizer
       constructed **without** `validate_complete_build`, over an `object_store_factory` returning
-      a recording store. Reuse `_combined_kernel_tar`, `_boot_elf`, and `_FakeStore` from
-      `tests/providers/local_libvirt/test_validate_external_artifacts.py` (lines 27, 92, 120)
-      rather than writing a second bundle builder; import them or lift them into a shared helper
-      if that module's privates are awkward to import.
+      a recording store that serves `valid_combined_kernel_tar()` — the public helper already in
+      `tests/mcp/complete_build_support.py:41`, which returns a structurally valid x86_64 bundle
+      (gzip tar with a `HdrS` `boot/vmlinuz` and a `lib/modules/6.9.0/` tree). Use that rather
+      than the private `_combined_kernel_tar`/`_boot_elf`/`_FakeStore` in
+      `tests/providers/local_libvirt/test_validate_external_artifacts.py`: the support module is
+      the shared surface this test tree already imports from, and reaching into another module's
+      privates would couple two test modules for no gain. The recording store still has to be
+      written here — it wraps the bundle bytes with `head`/`get_range` and counts both.
 
 12. Confirm each test fails for its stated red reason against the unmodified source before
     implementing.
@@ -432,6 +451,7 @@ class MeasurementRow:
     store_bytes: int
     chunked: bool
     outcome: str
+
 
 def read_measurement_record(log_path: Path, run_id: str) -> MeasurementRow | None: ...
 def bundle_for_arch(arch: str, dest_dir: Path) -> Path: ...
