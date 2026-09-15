@@ -653,18 +653,47 @@ def test_start_replays_database_commit_with_same_generation() -> None:
     assert authority.terminations[0][0] == gated.incarnation
 
 
-def test_stale_same_boot_invocation_is_refused_without_signaling_or_cleanup() -> None:
+def test_same_boot_successor_invocation_retires_the_retained_incarnation() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
     runtime.current[started.unit] = _observation(1, "populated", invocation_id="f" * 32)
 
     response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
 
-    assert response.code == "conflict"
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "killed")]
     assert runtime.signaled == []
-    assert runtime.stopped == []
-    assert stores[0].state == started
-    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert runtime.stopped == [started.unit]
+    assert stores[0].state is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+
+
+def test_start_reconciles_a_restarted_unit_and_replaces_the_slot() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "populated", invocation_id="f" * 32)
+
+    response = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
+    )
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "killed")]
+    assert stores[0].state is not None and stores[0].state.phase is SlotPhase.STARTED
+    assert stores[0].state.generation != started.generation
+
+
+def test_successor_invocation_exit_facts_are_not_attributed_to_the_retained_one() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=2
+    )
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "killed")]
 
 
 def test_partial_start_rolls_back_only_slots_activated_by_this_request() -> None:

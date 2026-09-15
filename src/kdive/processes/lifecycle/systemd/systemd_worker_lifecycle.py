@@ -1,4 +1,4 @@
-"""Replay-safe coordination for retained systemd worker incarnations."""
+"""Replay-safe coordination for retained systemd worker incarnations (ADR-0574, ADR-0657)."""
 
 from __future__ import annotations
 
@@ -663,7 +663,12 @@ def _terminal_observation(
     if isinstance(observation, BootObservation):
         raise SystemdUnavailable("worker invocation is absent on the retained boot")
     if observation.invocation_id != state.invocation_id:
-        raise LifecycleConflict("systemd invocation does not match retained state")
+        # A unit carries one invocation at a time and is assigned a new INVOCATION_ID only when it
+        # leaves an inactive state, so a successor identity on the retained boot proves the
+        # retained invocation ended. Its own exit facts went with it, and the observed result and
+        # membership describe the successor, so neither is mapped here (ADR-0657, amending
+        # ADR-0574; absence, which ADR-0574:65-66 governs, is still refused three lines above).
+        return "killed"
     if observation.membership == "unknown":
         raise SystemdUnavailable("worker cgroup membership is unavailable")
     if observation.membership == "populated":
