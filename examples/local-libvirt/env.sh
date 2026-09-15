@@ -39,19 +39,11 @@ export KDIVE_MAX_SYS="${KDIVE_MAX_SYS:-4}"
 # default (30d) shared with `just onboard`, not a second one that drifts. Override in the
 # caller's environment to change it.
 
-# The libvirt endpoint. The fixed worker lifecycle (install-host.sh runs its root installer)
-# publishes one operator-owned session daemon in /etc/kdive/live-worker-libvirt.env; every
-# libvirt consumer on the host — build-fs, the preflight, the daemons, the workers — must share
-# that daemon, so read it the way scripts/live-stack/worker-lifecycle.sh does (parsed as data,
-# never sourced as shell). Before the contract is installed the file is absent and the
-# live-stack default (qemu:///system) stands; stack-services.sh then fails at the lifecycle witness with the
-# fix. An explicit KDIVE_LIBVIRT_URI in the caller's environment wins either way.
-# shellcheck source=scripts/live-stack/libvirt-uri.sh
-source "${repo_root}/scripts/live-stack/libvirt-uri.sh"
-if [[ -z "${KDIVE_LIBVIRT_URI:-}" && -f "${LIBVIRT_ENV}" ]]; then
-  KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
-  export KDIVE_LIBVIRT_URI
-fi
+# KDIVE_LIBVIRT_URI and LIBVIRT_ENV come from the live-stack env sourced above, which resolves
+# the published session endpoint for every entry point since #2480 — this example is no longer
+# the only path that does it. demo-up.sh still reads both: it refuses to run until the
+# lifecycle contract is installed, where the live-stack default (qemu:///system) would stand.
+
 # Session-mode libvirt clients want a runtime dir; an interactive login has one, a bare ssh
 # command or nohup may not (the shape .github/workflows/live.yml uses).
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
