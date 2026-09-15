@@ -27,7 +27,9 @@ from kdive.config.cli_settings import CLI_CLIENT_ID
 from kdive.mcp.dev_harness import (
     AUDIENCE,
     LiveStackClient,
+    LiveStackToolError,
     _build_claims,
+    _tool_error_text,
     make_keypair,
     mint,
     mint_token,
@@ -42,6 +44,7 @@ _PROJECT = "proj-a"
 # (subject, roles map, platform_roles) per role token the smoke exercises.
 _ROLE_SUBJECTS = (
     ("viewer-proj-a", {_PROJECT: "viewer"}, None),
+    ("contributor-proj-a", {_PROJECT: "contributor"}, None),
     ("operator-proj-a", {_PROJECT: "operator"}, None),
     ("admin-proj-a", {_PROJECT: "admin"}, None),
     ("auditor", {_PROJECT: "viewer"}, ["platform_auditor"]),
@@ -93,12 +96,13 @@ def test_inmemory_tier_agent_catalog_is_core_tools_clipped_by_rbac() -> None:
     """The catalog the live tier asserts over HTTP, derived here without a transport.
 
     Both sides are spelled out rather than compared back to ``CORE_TOOLS``: the live
-    assertion follows drift on purpose, so something has to notice the drift. These are the
-    two catalogs the ADR-0456 proof record measured over the wire — six names for a viewer,
-    nine for a contributor (``docs/design/2026-07-27-mcp-exposure-profiles-proof-record-1582.md``
-    §1) — so a change to ``CORE_TOOLS`` membership or to a core tool's required scope reddens
-    ``just ci`` and sends the change back to ADR-0268 §4, instead of silently moving what the
-    live tier proves.
+    assertion follows drift on purpose, so something has to notice the drift. The
+    contributor's nine names are what the ADR-0456 proof record measured over the wire
+    (``docs/design/2026-07-27-mcp-exposure-profiles-proof-record-1582.md`` §1, which minted no
+    viewer token); the viewer's six are that same set clipped by RBAC, derived here. So a
+    change to ``CORE_TOOLS`` membership or to a core tool's required scope reddens ``just ci``
+    and sends the change back to ADR-0456 §2, instead of silently moving what the live tier
+    proves.
     """
     viewer = _expected_agent_catalog({_PROJECT: "viewer"}, None)
     assert viewer == {
@@ -109,9 +113,12 @@ def test_inmemory_tier_agent_catalog_is_core_tools_clipped_by_rbac() -> None:
         "runs.list",
         "allocations.wait",
     }
-    contributor = _expected_agent_catalog({_PROJECT: "operator"}, None)
+    contributor = _expected_agent_catalog({_PROJECT: "contributor"}, None)
     assert contributor == viewer | {"runs.create", "allocations.request", "systems.provision"}
     assert viewer < contributor
+    # The tool the live tier reaches through the gateway has to stay outside the core set,
+    # or its absence from an agent's catalog stops being the thing that test proves.
+    assert _UNADVERTISED_TOOL not in CORE_TOOLS
     # Holding a platform role does not buy the contributor-gated core tools (ADR-0456 §1).
     assert _expected_agent_catalog({_PROJECT: "viewer"}, ["platform_auditor"]) == viewer
 
@@ -157,10 +164,19 @@ async def _invoke_through_gateway(base_url: str, token: str, tool: str) -> ToolR
     positional-only, so the gateway's own ``name`` argument cannot be passed through it.
     ``tools.invoke`` returns the inner tool's structured content verbatim, so the payload
     parsed here is ``resources.list``'s own ``ToolResponse`` dump.
+
+    ``raise_on_error=False`` for the same reason ``LiveStackClient.call_tool`` passes it:
+    ``tools.invoke`` re-raises anything that is not a ``CategorizedError``, so a degraded
+    dependency inside the inner tool would otherwise surface as a bare fastmcp ``ToolError``
+    with neither the tool name nor the role under test attached.
     """
     transport = StreamableHttpTransport(url=base_url, headers={"Authorization": f"Bearer {token}"})
     async with Client(transport) as client:
-        result = await client.call_tool("tools.invoke", {"name": tool, "arguments": {}})
+        result = await client.call_tool(
+            "tools.invoke", {"name": tool, "arguments": {}}, raise_on_error=False
+        )
+    if getattr(result, "is_error", False):
+        raise LiveStackToolError(tool, _tool_error_text(result))
     payload = result.structured_content
     assert payload is not None, f"{tool} through tools.invoke returned no structured content"
     return ToolResponse.model_validate(payload)
@@ -192,13 +208,17 @@ def test_live_stack_tier_agent_catalog_is_gateway_clipped_over_http() -> None:
             )
             async with LiveStackClient.over_http(base_url, token) as client:
                 names = set(await client.list_tools())
+            # The catalog is the gateway clip, so _UNADVERTISED_TOOL's absence follows from
+            # this equality; the sibling in-memory test pins it out of CORE_TOOLS.
             assert names == _expected_agent_catalog(roles, platform_roles), subject
-            assert _UNADVERTISED_TOOL not in names
             envelope = await _invoke_through_gateway(base_url, token, _UNADVERTISED_TOOL)
             assert envelope.error_category is None, (
                 f"{_UNADVERTISED_TOOL} through tools.invoke failed for {subject}: "
                 f"{envelope.error_category} {envelope.detail}"
             )
+            # The envelope has to be the inner tool's, not one tools.invoke built itself:
+            # resources.list answers with ToolResponse.collection("resources", "ok", ...).
+            assert (envelope.object_id, envelope.status) == ("resources", "ok"), subject
 
     asyncio.run(_run())
 
