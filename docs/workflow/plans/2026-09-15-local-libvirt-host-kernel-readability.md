@@ -311,7 +311,7 @@ the readonly `BOOT_DIR` and `probe_boot_kernels()`, taking no arguments, called 
        [[ -e "${k}" ]] || continue # no-match glob stays literal under no-nullglob; skip it
        [[ -r "${k}" ]] && continue
        note_manual future "host kernel readability" \
-         "a kernel under ${BOOT_DIR} is not readable (this probe reads as the invoking user), so libguestfs cannot build its appliance and no guest image can be built — run 'just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-*"
+         "a kernel under ${BOOT_DIR} is not readable (this probe reads as the invoking user), so libguestfs cannot build its appliance and no guest image can be built — run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-*"
        return
      done
    }
@@ -403,15 +403,22 @@ spec Success 3 and 4; last, because it names what Tasks 1 and 2 built. Touches *
    runbook §4b.` becomes `The exact logic is in that runbook's "Wire the worker venv" section.`;
    and the future-tier comment citing `four-method-live-run.md §4b` names the same section.
 
-6. In `scripts/operations/check-local-libvirt.sh`, replace all three occurrences of
-   `— see docs/operating/runbooks/four-method-live-run.md section 4b` with
+6. In `scripts/operations/check-local-libvirt.sh`, repoint the **two venv-binding** occurrences
+   (lines 261 and 265) of `— see docs/operating/runbooks/four-method-live-run.md section 4b` to
    `— see docs/operating/runbooks/four-method-live-run.md, "Wire the worker venv (drgn + libguestfs)"`.
+   The third occurrence is on the `INSTALL_STAGING` remedy (line 281), which that section does
+   not cover: **drop** the ` — see docs/operating/runbooks/four-method-live-run.md section 4b`
+   clause there rather than repointing it. The `sudo install -d -o "$USER" …` remedy is
+   self-contained without it.
 
 7. In the same script, replace the host-kernel remedy string with:
 
    ```bash
-       "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): run 'just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* (the glob matches both arches; re-apply after a kernel upgrade)"
+       "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* (the glob matches both arches; re-apply after a kernel upgrade)"
    ```
+
+   The recipe needs that variable: `justfile:55` exits 2 without it, so a remedy naming the
+   bare recipe would fail when followed.
 
 8. Re-run the command from step 4; expect green.
 

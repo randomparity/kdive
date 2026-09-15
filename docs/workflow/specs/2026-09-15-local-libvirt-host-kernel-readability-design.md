@@ -54,8 +54,10 @@ satisfies.
   which is also what keeps the RHEL/Rocky guestfs limit untouched.
 - `scripts/check-setup-deps.sh` gains `BOOT_DIR` (overridable by `KDIVE_BOOT_DIR`, mirroring
   `check-local-libvirt.sh`) and a `probe_boot_kernels` future-tier entry whose remedy names
-  `just prepare-local-libvirt-host` first and a direct `chgrp`/`chmod` second, and states that
-  it reads as the invoking user. The manual-hint heading widens to cover a host-state entry,
+  `just prepare-local-libvirt-host` first — with the `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` the
+  recipe requires (`justfile:55` exits 2 without it), so the remedy works when followed — and a
+  direct `chgrp`/`chmod` second, and states that the probe reads as the invoking user. The
+  manual-hint heading widens to cover a host-state entry,
   and the closing line stops calling the live and guest-image tier items "not yet needed". No
   tier reclassification and no exit-code change: ADR-0393's warn-only `future` tier is
   unchanged.
@@ -65,8 +67,10 @@ satisfies.
 - Docs: `local-libvirt.md` and `install.md` name the recipe that performs the relabel. The
   runbook's closing sentence is disambiguated to say it forbids copying a binding between
   *differing* Python versions — which is what `maybe_link_guestfs` already refuses — so the
-  tooling and the runbook visibly agree. The six "section 4b" pointers in the two scripts name
-  the section that exists.
+  tooling and the runbook visibly agree. Five of the six "section 4b" pointers in the two
+  scripts name the section that exists; the sixth sits on the install-staging remedy in
+  `check-local-libvirt.sh`, which the venv-wiring section does not cover, so that dangling
+  pointer is dropped rather than repointed — the remedy reads correctly without it.
 
 Out of scope, with owners:
 
@@ -84,8 +88,8 @@ Out of scope, with owners:
   and `.github/scripts/profiles/adr.sh` makes every non-Status section of a merged record
   append-only, so correcting them takes a superseding record. Owner: those records.
 - The four other `install-host.sh` attributions in `local-libvirt.md` (CRB, the Docker remedy,
-  SELinux labelling, the python3.14 install) and the matching ADR-0640 reference. Owner: the
-  example walkthrough.
+  SELinux labelling, the python3.14 install) and the matching ADR-0640 reference. No verified
+  owner: reported as a follow-up candidate rather than claimed as owned elsewhere.
 
 No `src/kdive/` change: `baseline_kernel.py` is correct as written.
 
