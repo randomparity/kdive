@@ -185,7 +185,10 @@ def test_live_job_loads_the_provisioned_libvirt_uri_without_hardcoding(job: str)
     assert "load_published_libvirt_uri" in runs
     assert "scripts/live-stack/libvirt-uri.sh" in runs
     parser = (_ROOT / "scripts/live-stack/libvirt-uri.sh").read_text()
-    assert "readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env" in parser
+    # The published path is the parser's default, not a literal the job supplies. `readonly` gave
+    # way to `:=` in #2480 so the file survives the second source per shell that lib.sh, env.sh and
+    # worker-lifecycle.sh together make ordinary; the default itself is what this pins.
+    assert ': "${LIBVIRT_ENV:=/etc/kdive/live-worker-libvirt.env}"' in parser
     assert 'KDIVE_LIBVIRT_URI="qemu:///session"' not in runs
     assert "KDIVE_LIBVIRT_URI=qemu:///session" not in runs
 

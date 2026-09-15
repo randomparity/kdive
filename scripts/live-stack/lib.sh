@@ -58,10 +58,14 @@ live_stack_backends_up() {
   docker compose run --rm seaweedfs-init
 }
 
-# The local-libvirt provider connects here (KDIVE_LIBVIRT_URI, default qemu:///system) and
-# stores per-System qcow2 overlays under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking
-# and qemu-img overlays — NO libvirt network or storage pool is involved.
-KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
+# The local-libvirt provider connects at KDIVE_LIBVIRT_URI and stores per-System qcow2 overlays
+# under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking and qemu-img overlays — NO libvirt
+# network or storage pool is involved. The endpoint is resolved and exported by libvirt-uri.sh,
+# which env.sh calls too, so stack-down.sh (which sources only this file) and the bare
+# stack-services.sh invocation reach the same daemon as the lifecycle worker.
+# shellcheck source=scripts/live-stack/libvirt-uri.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/libvirt-uri.sh"
+resolve_libvirt_uri
 export KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 
 # Arches for which grafana publishes no upstream manifest (ADR-0356 accept-gap, #1261); it ships
@@ -378,8 +382,18 @@ libvirt_ok() {
 
 # Node-device enumeration reachable (#2401). Onboarding's resource discovery
 # (VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV) needs this to work; under the modular daemon model
-# that requires virtnodedevd specifically, while a monolithic libvirtd (the session-daemon
-# recovery path) answers it without a separate unit.
+# that requires virtnodedevd specifically, while a monolithic libvirtd answers it without a
+# separate unit.
+#
+# "The session-daemon recovery path is monolithic libvirtd" used to be part of that sentence and
+# is no longer true of every host. ensure_session_libvirtd starts whichever daemon the published
+# URI names, which is virtqemud on the Red Hat and SUSE families — modular, so it needs
+# virtnodedevd separately. docs/design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md
+# records that exact failure against a session virtqemud
+# (`Failed to connect socket to '/var/run/libvirt/virtnodedevd-sock'`), fixed by enabling
+# virtnodedevd.socket by hand. Since #2480 a bare bring-up on such a host reaches this gate by the
+# session branch, which does not enable that unit; closing that is stack-services.sh's, not this
+# file's. The Debian-family runner is unaffected — its session daemon is the monolithic libvirtd.
 nodedev_ok() {
   virsh -c "$KDIVE_LIBVIRT_URI" nodedev-list >/dev/null 2>&1
 }
@@ -397,10 +411,21 @@ nodedev_ok() {
 # callers must die rather than fall back to a system daemon on this path. Positional overrides
 # (binary, config, runtime root) exist only so tests can stage the contract.
 ensure_session_libvirtd() {
-  local bin="${1:-/usr/sbin/libvirtd}"
-  local conf="${2:-/etc/kdive/libvirtd-live.conf}"
+  # The lifecycle installer picks the daemon by distro family and installs only that family's
+  # config: libvirtd + libvirtd-live.conf on the Debian family, virtqemud + virtqemud-live.conf on
+  # the Red Hat and SUSE families (install-live-worker-lifecycle.sh). Hardcoding libvirtd made this
+  # branch name three paths a Red Hat-family host has never had — harmless while only the demo
+  # entry point resolved the published URI, reachable from every entry point since #2480. The
+  # published URI carries the choice in its socket basename, which is the only signal available
+  # here: the config is under /etc/kdive, which the invoking user cannot enumerate reliably.
+  local daemon=libvirtd
+  if [[ "${KDIVE_LIBVIRT_URI:-}" == *virtqemud-sock ]]; then
+    daemon=virtqemud
+  fi
+  local bin="${1:-/usr/sbin/${daemon}}"
+  local conf="${2:-/etc/kdive/${daemon}-live.conf}"
   local runtime="${3:-/run/kdive/live-libvirt}"
-  local pidfile="$runtime/libvirt/libvirtd.pid" pid=""
+  local pidfile="$runtime/libvirt/${daemon}.pid" pid=""
   if [[ -r "$pidfile" ]]; then
     pid="$(tr -d '[:space:]' <"$pidfile" 2>/dev/null || true)"
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
