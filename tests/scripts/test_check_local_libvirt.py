@@ -179,6 +179,9 @@ def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
     # The hint must point at both fixes: the live group and the libguestfs binding.
     assert "uv sync --group live" in result.stderr
     assert "python3-libguestfs" in result.stderr
+    # The old "section 4b" pointer named a heading that no longer exists in that runbook.
+    assert "Wire the worker venv" in result.stderr, result.stderr
+    assert "section 4b" not in result.stderr, result.stderr
 
 
 def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
@@ -310,7 +313,13 @@ def test_unreadable_host_kernel_fails_with_chmod_hint(tmp_path: Path) -> None:
     # on the semantic content — the fix command and the boot dir it targets — not the literal
     # `/boot/vmlinuz-*` string, which is neither what the script prints nor what a ppc64le
     # operator would need to type.
-    assert f"chmod 0644 {boot}/vmlinu?-*" in result.stderr
+    # 0640 root:kvm, matching what `just prepare-local-libvirt-host` declares — a 0644 remedy
+    # here would hand the operator a wider mode than provisioning establishes (#2479).
+    assert "just prepare-local-libvirt-host" in result.stderr
+    assert f"chgrp kvm {boot}/vmlinu?-*" in result.stderr
+    assert f"chmod 0640 {boot}/vmlinu?-*" in result.stderr
+    assert f"chmod 0644 {boot}" not in result.stderr
+    assert "dpkg-statoverride" not in result.stderr
 
 
 def test_readable_host_kernel_passes(tmp_path: Path) -> None:
@@ -456,3 +465,21 @@ def test_unsupported_host_arch_reports_unsupported_and_skips_native_qemu(tmp_pat
     assert "host arch aarch64 is not a supported kdive provisioning arch" in out
     assert "qemu-system-x86_64 not found" not in result.stderr
     assert "qemu-system-ppc64 not found" not in result.stderr
+
+
+def test_unlistable_boot_dir_fails_the_kernel_probe(tmp_path: Path) -> None:
+    """An unlistable /boot must fail, not skip: the glob finds nothing, and the `found=0`
+    skip would otherwise report OK on the exact host state the probe exists to catch (#2479).
+    check-setup-deps.sh's probe_boot_kernels carries the same guard."""
+    bindir, py = _healthy_bin(tmp_path)
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-6.8.0-124-generic").write_text("")
+    boot.chmod(0o000)
+    try:
+        result = _run(_healthy_env(tmp_path, bindir, py, boot))
+    finally:
+        boot.chmod(0o755)  # restore so pytest can clean the tmp tree up
+
+    assert result.returncode == 1, result.stdout
+    assert "is not readable by this user" in result.stderr, result.stderr

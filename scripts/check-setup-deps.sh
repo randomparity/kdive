@@ -314,6 +314,9 @@ arch_needs_rust() {
 # is informational, not a missing-dependency report.
 # The KVM device node backing native acceleration; override for tests (mirrors check-local-libvirt.sh).
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
+# libguestfs builds its supermin appliance by copying a host kernel out of this directory as the
+# INVOKING user. Overridable for tests, mirroring KDIVE_KVM_NODE and check-local-libvirt.sh.
+readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 
 print_cross_arch_advisory() {
   local host="$1" distro="$2" arch binary pkg native native_path
@@ -361,7 +364,8 @@ host_arch="$(uname -m 2>/dev/null || true)"
 # RPM platlib, /usr/lib64/python3.N/site-packages, which is NOT what `sysconfig.get_path("purelib")`
 # reports there — that is the /usr/local pip prefix, so a purelib fallback reports the binding
 # absent and offers a package install instead of the symlink). An interpreter that cannot import
-# it yields an empty dir, which reads as `absent`. The exact logic in runbook §4b. Overridable.
+# it yields an empty dir, which reads as `absent`. The exact logic is in the
+# "Wire the worker venv" section of docs/operating/runbooks/four-method-live-run.md. Overridable.
 guestfs_sys_site() {
   local d="${KDIVE_GUESTFS_SYS_SITE:-/usr/lib/python3/dist-packages}"
   [[ -e "${d}/guestfs.py" ]] ||
@@ -396,8 +400,35 @@ probe_guestfs() {
   detect_guestfs_state
   case "${GUESTFS_STATE}" in
   absent) note_package future python3-guestfs "$(package_for python3-guestfs "${distro}")" ;;
-  unlinked) manual_hints+=("python3-guestfs: present system-wide but not importable in the venv — symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md section 4b") ;;
+  unlinked) manual_hints+=("python3-guestfs: present system-wide but not importable in the venv — symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\"") ;;
   esac
+}
+
+# Debian and Ubuntu ship /boot/vmlinuz-* root:root 0600, so build-fs dies with an opaque
+# "supermin exited with error status 1" before any image can be built (ADR-0222, #2479).
+# Fedora ships them world-readable. Report-only: a privileged /boot mutation is outside this
+# script's remediation contract (ADR-0393), and the recipe named below declares it instead.
+# `-r` is true for uid 0 whatever the mode, so the remedy says which user the probe read as.
+probe_boot_kernels() {
+  local k remedy
+  # A BOOT_DIR this user cannot list hides every kernel from the glob below, which would
+  # otherwise read as "no kernels present" and report nothing — the state this probe exists
+  # to catch. Check the directory before trusting an empty match.
+  if [[ -d "${BOOT_DIR}" ]] && { [[ ! -r "${BOOT_DIR}" ]] || [[ ! -x "${BOOT_DIR}" ]]; }; then
+    note_manual future "host kernel readability" \
+      "${BOOT_DIR} is not listable by this user (this probe reads as the invoking user), so libguestfs cannot reach a host kernel and no guest image can be built — run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode; a one-off glob cannot help here because your shell cannot expand it inside an unlistable directory"
+    return
+  fi
+  # The one-off needs kvm membership too: the mode grants read through the group, and a new
+  # membership only reaches a process started from a fresh login session.
+  remedy="run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* && sudo usermod -aG kvm \"\$USER\" (then start a new login session)"
+  for k in "${BOOT_DIR}"/vmlinuz-* "${BOOT_DIR}"/vmlinux-*; do
+    [[ -e "${k}" ]] || continue # no-match glob stays literal under no-nullglob; skip it
+    [[ -r "${k}" ]] && continue
+    note_manual future "host kernel readability" \
+      "a kernel under ${BOOT_DIR} is not readable (this probe reads as the invoking user), so libguestfs cannot build its appliance and no guest image can be built — ${remedy}"
+    return
+  done
 }
 
 # Populate every tier accumulator from a fresh probe of the host. Called once at startup and again
@@ -471,10 +502,11 @@ probe_all() {
 
   # The four-method live run needs the libguestfs Python binding on the WORKER host (kdump
   # capture; ADR-0203) plus libdw + libkdumpfile so drgn can build with debuginfo support and
-  # open kdump-compressed vmcores (see four-method-live-run.md §4b and the POWER runbook §1).
+  # open kdump-compressed vmcores (see four-method-live-run.md, "Wire the worker venv", and the POWER runbook §1).
   require_header future libdw-headers libdw "${distro}"
   require_header future libkdumpfile-headers libkdumpfile "${distro}"
   probe_guestfs "${distro}"
+  probe_boot_kernels
 
   # Wheel-less arches (ppc64le) build drgn from source — its vendored libdrgn uses autotools, so
   # `uv sync --group live` fails at `autoreconf` without autoconf/automake/libtool. libtool the
@@ -634,7 +666,7 @@ fi
 print_cross_arch_advisory "${host_arch}" "${distro}"
 
 if ((${#manual_hints[@]} > 0)); then
-  printf "\nTooling not provided by your distribution:\n" >&2
+  printf "\nManual fixes your distribution's packages do not supply:\n" >&2
   printf "    %s\n" "${manual_hints[@]}" >&2
 fi
 
@@ -644,7 +676,7 @@ if ((${#required_commands[@]} > 0)); then
 fi
 
 if ((${#recommended_commands[@]} + ${#future_commands[@]} > 0)); then
-  printf "\nRequired dependencies are present; optional items above are not yet needed.\n"
+  printf "\nRequired dependencies are present. The tiers above are not needed for the core dev loop: Recommended is what \`just ci\` runs, and Future is what the live_vm and guest-image tiers need.\n"
 else
   printf "Setup dependencies are present.\n"
 fi

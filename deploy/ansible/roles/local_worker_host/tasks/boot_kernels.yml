@@ -1,0 +1,72 @@
+---
+# Debian and Ubuntu ship /boot/vmlinuz-* root:root 0600. libguestfs builds its supermin
+# appliance by copying a host kernel as the INVOKING user, so build-fs dies with an opaque
+# "supermin exited with error status 1" (ADR-0222, #694/#1156, #2479) — probed by
+# check-local-libvirt.sh as a FAIL and by check-setup-deps.sh as a future-tier hint.
+# Fedora ships these world-readable (0755 root:root), so relabelling there would NARROW them.
+# Rocky and RHEL do ship 0600 like Debian, but build-fs is unavailable on that family anyway:
+# their system Python provides no matching 3.14 python3-guestfs binding, which the
+# platform-support table in docs/operating/install.md owns. So the guard stays keyed to the
+# family where the relabel both applies and helps. Narrowing an already-0644 Debian host to
+# 0640 is the intended direction, not a regression -- no path here may reach 0644.
+- name: Make the Debian-family host kernels readable for guest-image builds
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [boot_kernels]
+  block:
+    # The group is a precondition of the relabel, so it is established before the mutation
+    # rather than after it: otherwise the file task below fails first with chgrp's own error
+    # and the actionable message here is only ever reached on a host with no kernels at all.
+    - name: Read the kvm group the relabel grants read through
+      # fail_key: false so a missing group reaches the assertion below with an actionable
+      # message instead of getent's "One or more supplied key could not be found"; the same
+      # form this role's preflight.yml uses for its operator lookup.
+      ansible.builtin.getent:
+        database: group
+        key: kvm
+        fail_key: false
+      register: local_worker_host_kvm_group
+
+    - name: Require the kvm group the relabel grants read through
+      ansible.builtin.assert:
+        that:
+          - local_worker_host_kvm_group.ansible_facts.getent_group.get('kvm') is not none
+        fail_msg: >-
+          the kvm group does not exist on this host, so the relabel cannot grant the fixed
+          worker accounts read access; apply libvirt_stack (the qemu/libvirt packages create
+          it) before local_worker_host.
+
+    - name: Verify every worker account is in the kvm group
+      # The mode below grants read through the group, so an account outside kvm still cannot
+      # read the kernel and build-fs still fails. Checked as group membership rather than by
+      # running a read AS each worker (the shape live_vm_host/tasks/verify.yml uses): this
+      # role's own play is `connection: local` with an unprivileged connection user, where
+      # escalating to a DIFFERENT unprivileged account makes ansible-core fall back to
+      # setfacl — `pipelining = True` lives under [ssh_connection] in ansible.cfg, which the
+      # local connection does not read — and no role this play runs declares the `acl`
+      # package. live_vm_host can run that read because it declares acl and connects by ssh.
+      ansible.builtin.assert:
+        that:
+          - item in local_worker_host_kvm_group.ansible_facts.getent_group['kvm'][2].split(',')
+        fail_msg: >-
+          {{ item }} is not in the kvm group, so it cannot read the relabelled host kernels
+          and build-fs will still fail; re-run this role's worker_accounts.yml.
+      loop: "{{ live_vm_host_worker_accounts }}"
+
+    - name: Find the host kernels under /boot (vmlinuz-* x86_64, vmlinux-* ppc64le)
+      ansible.builtin.find:
+        paths: /boot
+        patterns: ["vmlinuz-*", "vmlinux-*"]
+      register: local_worker_host_boot_kernels
+
+    - name: Make the host kernels kvm-group-readable for the worker accounts
+      # 0640 root:kvm, not 0644: live_vm_host made the same choice for the same file so the
+      # relaxation stays group-scoped. The fixed worker accounts (worker_accounts.yml) and the
+      # operator login account (libvirt_stack) are both already in kvm. A kernel UPGRADE
+      # installs a fresh 0600 file under a new name: re-run the recipe afterwards.
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        group: kvm
+        mode: "0640"
+      loop: "{{ local_worker_host_boot_kernels.files }}"
+      loop_control:
+        label: "{{ item.path }}"
