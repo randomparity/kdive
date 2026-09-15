@@ -279,6 +279,48 @@ including the host-process env block, is in the
 `qemu+tls://` libvirt host instead, use the
 [remote live-stack runbook](remote-live-stack.md).
 
+#### Finalization measurement (#2318)
+
+One `live_stack` driver measures `runs.complete_build` rather than exercising a boot:
+`tests/integration/test_finalization_measurement.py`. It records the phase attribution — queue
+wait, archive scan, publication, object-store request count and bytes — that ADR-0656's
+completion-contract decision rests on.
+
+```
+scripts/live-stack/stack-services.sh --skip-libvirt   # the Run is unbound: no System, no VM
+KDIVE_KERNEL_SRC=/path/to/built/tree \
+KDIVE_MEASUREMENT_STAGE_DIR=/path/on/real/disk \
+KDIVE_MEASUREMENT_OUT=/path/to/rows.jsonl \
+uv run python -m pytest tests/integration/test_finalization_measurement.py \
+  -m live_stack -k x86_64 -q
+```
+
+Four things about it differ from the boot proofs:
+
+- **It needs no libvirt and no System.** The Run is created unbound, so `--skip-libvirt`
+  bring-up is enough and nothing is provisioned.
+- **The staging directory matters.** `combined_kernel_tar` runs `make modules_install` beside
+  the tar it cuts, and a distro-config tree with debug info stages ~7.6 GB to produce a ~2.5 GB
+  bundle. `tmp_path` is rooted at the system temp directory, commonly tmpfs, and pytest keeps
+  the last three runs — so set `KDIVE_MEASUREMENT_STAGE_DIR` to real disk for a large bundle.
+- **A distro-config debug tree will not finalize as built.** That ~2.5 GB bundle is above the
+  2 GiB accepted ceiling (`_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES`) and is rejected, and the
+  distro default `CONFIG_KERNEL_ZSTD=y` is rejected separately by the defect filed as #2476. The
+  tree has to be pruned and relinked with `CONFIG_KERNEL_GZIP=y` first; the exact steps are in
+  [the proof record](../../design/2026-09-14-external-build-finalization-measurement-2318-proof-record.md),
+  under "## Reproducing".
+- **Two timeouts, deliberately separate.** `KDIVE_MEASUREMENT_TIMEOUT_S` (default 1800) is what
+  the driver runs under, so a finalization that would breach the budget is still recorded rather
+  than truncated at it. The supported client budget it is measured *against* is 300 s — the
+  read timeout the MCP SDK applies when `LiveStackClient.over_http` passes none — and that is a
+  module constant, not a knob. The 30 s figure is the *connect* default and is not the request
+  bound; `test_supported_budget_matches_the_shipped_client` reads the real one off a client.
+
+The `ppc64le` arm runs the same code under `KDIVE_PPC64LE_BUNDLE`. Unset, it skips; set but
+lacking `kernel.tar.gz`, it raises rather than skipping, because a measurement that silently
+produces no row is indistinguishable from one nobody started. That arm is unrun and owned by
+[debt record 0015](../../debt/0015-ppc64le-finalization-measurement-unrun.md).
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
@@ -731,3 +773,4 @@ before workers are released. The required free capacity per worker is that ceili
 the configured simultaneous-activation count. If the observed value is lower, provisioning stops
 and external boot is not advertised. Increase the filesystem capacity or lower admitted
 concurrency, then rerun provisioning.
+ovisioning.

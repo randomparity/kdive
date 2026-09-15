@@ -33,6 +33,7 @@ rotation instead of accumulating in ``/tmp`` until the filesystem runs out of in
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -54,6 +55,7 @@ import kdive.mcp.assembly.app as mcp_app_module
 from kdive.assembly import ProcessAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs import complete_build
 from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory
 from kdive.store.objectstore import ObjectStore
 from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as a conftest hook
@@ -248,6 +250,33 @@ def reset_config() -> Iterator[None]:
     config.reset()
     yield
     config.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_external_build_validation_slots() -> Iterator[None]:
+    """Give every test a fresh external-build validation semaphore.
+
+    ``complete_build._EXTERNAL_BUILD_VALIDATION_SLOTS`` is a module-level
+    ``asyncio.Semaphore`` built at import time. ``Semaphore.acquire`` reaches ``_get_loop()``
+    only on the *contended* path — an uncontended acquire just decrements the counter — so the
+    object stays unbound until some test actually waits on it, and then binds to that test's
+    loop. Every test here drives the service through its own ``asyncio.run``, i.e. a new loop,
+    so the next test that contends it dies with ``RuntimeError: ... is bound to a different
+    event loop``.
+
+    That makes the failure order-dependent, which under ``xdist --dist worksteal`` means it
+    depends on how tests happen to be distributed: the same suite passes or fails by luck of
+    scheduling, and adding an unrelated test to ``tests/services/runs`` is enough to flip it.
+
+    Rebinding a fresh semaphore per test contains the leak at its source. This is test
+    isolation only: production builds one loop per process and holds the semaphore for its
+    lifetime, which is correct, and the counter is always released by ``_validate_uploads``'s
+    ``finally`` before a test ends.
+    """
+    original = complete_build._EXTERNAL_BUILD_VALIDATION_SLOTS
+    complete_build._EXTERNAL_BUILD_VALIDATION_SLOTS = asyncio.Semaphore(1)
+    yield
+    complete_build._EXTERNAL_BUILD_VALIDATION_SLOTS = original
 
 
 @pytest.fixture(autouse=True)

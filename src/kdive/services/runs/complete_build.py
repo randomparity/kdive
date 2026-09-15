@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -21,7 +24,7 @@ from kdive.artifacts.uploads import upload_manifest
 from kdive.artifacts.uploads.reassembly import reassemble_chunked
 from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
-from kdive.build_artifacts.validation import validate_external_artifacts
+from kdive.build_artifacts.validation import ValidatorStore, validate_external_artifacts
 from kdive.config.core_settings import (
     BUILD_ARTIFACT_RETENTION_DAYS,
     UPLOAD_TTL_SECONDS,
@@ -42,6 +45,36 @@ from kdive.services.runs.steps import existing_build_result as _existing_build_r
 
 _log = logging.getLogger(__name__)
 _EXTERNAL_BUILD_VALIDATION_SLOTS = asyncio.Semaphore(1)
+
+_MEASUREMENT_EVENT = "external_build_finalization_measured"
+"""Message prefix of the per-finalization measurement record (#2318, ADR-0656).
+
+Retained in every deployment, not gated to a measurement run: finalization is a rare
+operator-initiated action rather than a hot path, and the phase attribution an operator needs
+to diagnose a slow finalization is exactly what #2314's reports lacked.
+"""
+
+
+class _PhaseTimer:
+    """Accumulate per-phase monotonic durations for one finalization attempt."""
+
+    def __init__(self) -> None:
+        self._started = time.monotonic()
+        self._phases: dict[str, float] = {}
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        start = time.monotonic()
+        try:
+            yield
+        finally:
+            self._phases[name] = self._phases.get(name, 0.0) + (time.monotonic() - start)
+
+    def ms(self, name: str) -> float:
+        return round(self._phases.get(name, 0.0) * 1000.0, 3)
+
+    def total_ms(self) -> float:
+        return round((time.monotonic() - self._started) * 1000.0, 3)
 
 
 class ExternalBuildStore(Protocol):
@@ -153,22 +186,58 @@ class CompleteBuildFinalizer:
         cmdline: str | None,
         source_provenance: dict[str, str | bool | list[str]] | None = None,
     ) -> BuildStepResult:
-        """Validate uploads and finalize an external Run from ``created`` to ``succeeded``."""
+        """Validate uploads and finalize an external Run from ``created`` to ``succeeded``.
+
+        Emits one measurement record per attempt on every exit path (#2318). The ``except`` arms
+        below are the three *service* exception types this path actually raises — each a plain
+        ``Exception`` dataclass, not a ``CategorizedError`` — plus a catch-all, because a
+        finalization recorded as ``succeeded`` when it failed is worse than one not recorded:
+        the row would be read as measured evidence for the completion contract.
+        """
+        timer = _PhaseTimer()
+        counts: list[_CountingStore] = []
+        outcome = "succeeded"
+        chunked = False
         try:
-            prepared = await self._prepare(conn, run)
+            with timer.phase("prepare"):
+                prepared = await self._prepare(conn, run)
+            chunked = prepared.has_chunks
             validated = await self._validate_uploads(
-                conn, run.id, prepared, build_id=build_id, arch=_build_arch(run)
-            )
-            return await _finalize_external_build(
                 conn,
-                ctx,
-                validated,
-                cmdline=cmdline,
-                source_provenance=source_provenance,
-                object_store_factory=self.object_store_factory,
+                run.id,
+                prepared,
+                build_id=build_id,
+                arch=_build_arch(run),
+                timer=timer,
+                counts=counts,
             )
+            with timer.phase("publish"):
+                return await _finalize_external_build(
+                    conn,
+                    ctx,
+                    validated,
+                    cmdline=cmdline,
+                    source_provenance=source_provenance,
+                    object_store_factory=self.object_store_factory,
+                )
         except _CompleteBuildAlreadyRecorded as exc:
+            outcome = "already_recorded"
             return exc.result
+        except CompleteBuildValidationError as exc:
+            outcome = exc.error.category.value
+            raise
+        except CompleteBuildExpiredWindowError:
+            outcome = "upload_window_expired"
+            raise
+        except CompleteBuildConfigurationError as exc:
+            reason = exc.data.get("reason")
+            outcome = reason if isinstance(reason, str) else "configuration_error"
+            raise
+        except BaseException:
+            outcome = "unexpected"
+            raise
+        finally:
+            _log_measurement(run, timer, counts, outcome=outcome, chunked=chunked)
 
     async def _prepare(
         self,
@@ -200,22 +269,31 @@ class CompleteBuildFinalizer:
         *,
         build_id: str | None,
         arch: str,
+        timer: _PhaseTimer,
+        counts: list[_CountingStore],
     ) -> _ExternalBuildFinalization:
         window_deadline = prepared.manifest_row.deadline
         if prepared.store is not None:
-            window_deadline, chunk_heads, final_versions = await _reassemble_chunked_artifacts(
-                conn,
-                run_id,
-                prepared.run.investigation_id,
-                prepared.manifest_row,
-                prepared.store,
-            )
+            with timer.phase("reassemble"):
+                window_deadline, chunk_heads, final_versions = await _reassemble_chunked_artifacts(
+                    conn,
+                    run_id,
+                    prepared.run.investigation_id,
+                    prepared.manifest_row,
+                    prepared.store,
+                )
         else:
             chunk_heads = {}
             final_versions = {}
 
+        # Acquired explicitly rather than with `async with`, because the wait and the held
+        # region are two phases and the context manager cannot separate them — which is the
+        # single attribution #2314 could not make from its reports. The `finally` keeps the
+        # release unconditional, exactly as `async with` did.
+        with timer.phase("queue_wait"):
+            await _EXTERNAL_BUILD_VALIDATION_SLOTS.acquire()
         try:
-            async with _EXTERNAL_BUILD_VALIDATION_SLOTS:
+            with timer.phase("scan"):
                 validated = await asyncio.to_thread(
                     self._validate_complete_build,
                     list(prepared.manifest_row.entries),
@@ -223,9 +301,12 @@ class CompleteBuildFinalizer:
                     build_id,
                     arch,
                     final_versions,
+                    counts,
                 )
         except CategorizedError as exc:
             raise CompleteBuildValidationError(exc) from exc
+        finally:
+            _EXTERNAL_BUILD_VALIDATION_SLOTS.release()
 
         return _ExternalBuildFinalization(
             prepared.run,
@@ -250,12 +331,15 @@ class CompleteBuildFinalizer:
         declared_build_id: str | None,
         arch: str,
         exact_versions: Mapping[str, str],
+        counts: list[_CountingStore],
     ) -> ValidatedUpload:
         if self.validate_complete_build is not None:
             return self.validate_complete_build(manifest, keys, declared_build_id, arch=arch)
         store = self.object_store_factory()
+        counting = _CountingStore(_VersionPinnedStore(store, exact_versions))
+        counts.append(counting)
         return validate_external_artifacts(
-            _VersionPinnedStore(store, exact_versions),
+            counting,
             manifest=manifest,
             keys=keys,
             declared_build_id=declared_build_id,
@@ -285,6 +369,86 @@ class _VersionPinnedStore:
         if version_id is None:
             return self.store.get_range(key, start=start, length=length)
         return self.store.get_range(key, start=start, length=length, version_id=version_id)
+
+
+@dataclass(slots=True)
+class _CountingStore:
+    """Count the object-store requests, bytes, and wait time one validation pass issues (#2318).
+
+    Wraps the version-pinned store rather than replacing it: pinning decides *which* bytes are
+    read and this decides nothing, so composing them keeps each to one job. A ``head`` is one
+    request carrying no body; a ``get_range`` is one request carrying what it returned, so the
+    byte total is what the store actually transferred for validation.
+
+    ``wait_s`` is the summed wall time spent inside the wrapped store — the term that separates
+    a loopback deployment from a network-attached one. Without it the scan's elapsed time cannot
+    be split into work and round trips, and ``store_requests x RTT`` stays unevaluable on the
+    only rows that exist. It is measured at this boundary rather than around the whole scan
+    because that is the only place the two are separable.
+    """
+
+    store: ValidatorStore
+    requests: int = 0
+    bytes_read: int = 0
+    wait_s: float = 0.0
+
+    def head(self, key: str) -> HeadResult | None:
+        self.requests += 1
+        started = time.monotonic()
+        try:
+            return self.store.head(key)
+        finally:
+            self.wait_s += time.monotonic() - started
+
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        self.requests += 1
+        started = time.monotonic()
+        try:
+            data = self.store.get_range(key, start=start, length=length, version_id=version_id)
+        finally:
+            self.wait_s += time.monotonic() - started
+        self.bytes_read += len(data)
+        return data
+
+
+def _log_measurement(
+    run: Run,
+    timer: _PhaseTimer,
+    counts: Sequence[_CountingStore],
+    *,
+    outcome: str,
+    chunked: bool,
+) -> None:
+    """Emit one finalization measurement record (#2318).
+
+    The payload rides in the *message*, not a ``logging`` ``extra=`` attribute. Both
+    serializers this repository ships build a closed payload and merge only the
+    ``bind_context`` fields — ``JsonFormatter`` via ``_kdive_ctx``, and the OTel
+    ``format_log_record_json`` via ``_domain_context``, which keeps only ``CONTEXT_FIELDS`` —
+    and ``bind_context`` rejects any name outside that audited set. An attribute would be
+    dropped by both, silently.
+
+    Every value is a UUID string, a number, a bool, or a member of a fixed vocabulary, so the
+    record carries no store key, object path, version id, or operator-supplied string.
+    """
+    store_wait_s = sum(counter.wait_s for counter in counts)
+    payload = {
+        "run_id": str(run.id),
+        "prepare_ms": timer.ms("prepare"),
+        "reassemble_ms": timer.ms("reassemble"),
+        "queue_wait_ms": timer.ms("queue_wait"),
+        "scan_ms": timer.ms("scan"),
+        "publish_ms": timer.ms("publish"),
+        "total_ms": timer.total_ms(),
+        "store_requests": sum(counter.requests for counter in counts),
+        "store_bytes": sum(counter.bytes_read for counter in counts),
+        "store_wait_ms": round(store_wait_s * 1000.0, 3),
+        "chunked": chunked,
+        "outcome": outcome,
+    }
+    _log.info("%s %s", _MEASUREMENT_EVENT, json.dumps(payload, sort_keys=True))
 
 
 @dataclass(frozen=True, slots=True)
