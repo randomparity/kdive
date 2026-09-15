@@ -268,7 +268,7 @@ is not implemented by this phase; do not report these helper-level checks as rem
 ### `live_stack` — drive the running stack over HTTP
 
 ```
-just stack-backends          # backends healthy + schema migrated + host-process env
+just stack-backends          # backends healthy, bucket verified, schema migrated
 just test-live-stack   # runs -m live_stack; skips cleanly if the stack is absent
 ```
 
@@ -448,8 +448,9 @@ against a running `live_stack` on a KVM host. Recorded here because the 2026-07-
 run found a defect (#1522) the unit and service suites could not, and because the
 setup has several traps worth not rediscovering.
 
-Bring-up is the normal one — `just stack-backends`, then `scripts/live-stack/stack-services.sh`,
-then `just onboard` for a funded project and a token. Then, per ADR-0441:
+Bring-up is the normal one — `scripts/live-stack/stack-services.sh`, then `just onboard` for a
+funded project and a token. The script brings the backends up itself, so `just stack-backends`
+ahead of it is redundant. Then, per ADR-0441:
 
 | Arm | Drive | Assert |
 |-----|-------|--------|

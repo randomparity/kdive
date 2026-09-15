@@ -159,7 +159,7 @@ In `tests/scripts/test_live_workflow_shape.py`:
 # The negative lookbehind is load-bearing. Every replacement name embeds its predecessor
 # (`stack-down.sh`, `demo-up.sh`), and `-` is a word boundary, so the map-generating
 # `\bdown\.sh\b` matches inside the new name and the guard can never go green.
-_OLD_ENTRY_POINT_RE = re.compile(r"(?<![-\w/])(?:up|down|status)\.sh\b|(?<![-\w])stack-up\b")
+_OLD_ENTRY_POINT_RE = re.compile(r"(?<![-\w])(?:up|down|status)\.sh\b|(?<![-\w])stack-up\b")
 # This module necessarily contains the pattern it searches for, so it excludes itself.
 _SELF = "tests/scripts/test_live_workflow_shape.py"
 # Append-only records (the `records` gate) and point-in-time records keep citing the old

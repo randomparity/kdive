@@ -2747,3 +2747,16 @@ def test_stack_backends_recipe_delegates_to_the_script() -> None:
     body = body.split("\n\n", 1)[0]
     assert "stack-services.sh --stage backends" in body
     assert "docker compose" not in body
+
+
+def test_services_stage_reconciles_the_app_tier(tmp_path: Path) -> None:
+    """The default stage still removes any compose app-tier container before starting hosts.
+
+    Task 2 moved that `rm -sf` behind a stage gate, and the text guard in
+    tests/live_stack/test_up_invariants.py cannot see which condition it sits under — a gate that
+    is never true would leave a compose `server` holding port 8000 against the host process, whose
+    symptom is a 401 that reads as an auth bug. The run fails later on the fake checkout's absent
+    worker-lifecycle.sh; what is asserted is what reached `docker` before that.
+    """
+    _, log = _run_stack_services(tmp_path, "--stage", "services")
+    assert "rm -sf migrate server worker reconciler" in log.read_text()

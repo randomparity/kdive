@@ -41,6 +41,10 @@ def _compose_up_lines(text: str) -> list[str]:
 
 
 def test_up_reconciles_app_tier_before_start() -> None:
+    """The reconcile exists. That it is REACHED on the default `services` path is proved
+    behaviourally by tests/scripts/test_live_stack_scripts.py::
+    test_services_stage_reconciles_the_app_tier — this substring check cannot see the stage
+    gate the block now sits under."""
     text = _SERVICES.read_text()
     assert "rm -sf migrate server worker reconciler" in text
 
@@ -59,11 +63,16 @@ def test_bring_up_never_starts_the_app_tier(path: Path) -> None:
 
 
 def test_wait_set_excludes_the_one_shot() -> None:
-    """The `--wait` set and the full backend set are declared separately, and stay separate.
+    """`--wait` is applied to the long-running subset, never to the full backend set.
 
-    `docker compose up --wait` treats any container exit as a wait failure, so folding the
-    run-to-completion seaweedfs-init back into the wait set makes a healthy stack report failure.
+    `docker compose up --wait` treats any container exit as a wait failure, so waiting on the
+    run-to-completion seaweedfs-init makes a healthy stack report failure. Asserted against the
+    `--wait` line itself rather than the array declarations: two correct declarations with the
+    wrong one passed to `--wait` is exactly the regression, and a declaration check misses it.
     """
     text = _LIB.read_text()
     assert "KDIVE_BACKEND_LONG_RUNNING=(postgres seaweedfs oidc)" in text
-    assert "KDIVE_BACKEND_SERVICES=(postgres seaweedfs seaweedfs-init oidc)" in text
+    wait_lines = [ln for ln in _compose_up_lines(text) if "--wait" in ln]
+    assert len(wait_lines) == 1, wait_lines
+    assert "KDIVE_BACKEND_LONG_RUNNING[@]" in wait_lines[0], wait_lines[0]
+    assert "KDIVE_BACKEND_SERVICES" not in wait_lines[0], wait_lines[0]

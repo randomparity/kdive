@@ -103,10 +103,12 @@ It waits for the three long-running backends — Postgres, SeaweedFS, and the mo
 `kdive-artifacts` bucket, enabling bucket-wide versioning, and verifying `Enabled`), and applies
 database migrations.
 
-> The recipe scopes `docker compose up --wait` to the long-running backends and runs
+> The bring-up path scopes `docker compose up --wait` to the long-running backends and runs
 > `seaweedfs-init` separately, because `--wait` treats a run-to-completion service's exit as a
 > wait failure. `seaweedfs-init`'s exit code still propagates, so a bucket creation or versioning
-> verification failure fails `just stack-backends` before any KDIVE process starts.
+> verification failure fails `just stack-backends` before any KDIVE process starts. That
+> scoping lives in `live_stack_backends_up` in `scripts/live-stack/lib.sh`, which is the one
+> implementation both this recipe and `stack-services.sh` reach (ADR-0655).
 
 For an external bucket, the runtime identity needs `s3:GetObjectVersion`,
 `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. Complete the

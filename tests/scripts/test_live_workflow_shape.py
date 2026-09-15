@@ -950,7 +950,10 @@ def test_spine_body_is_delimited_before_execution(spine_of, file: str, delimiter
 # The negative lookbehind is load-bearing. Every replacement name embeds its predecessor
 # (`stack-down.sh`, `demo-up.sh`), and `-` is a word boundary, so a plain `\bdown\.sh\b` matches
 # inside the new name and the guard can never go green.
-_OLD_ENTRY_POINT_RE = re.compile(r"(?<![-\w/])(?:up|down|status)\.sh\b|(?<![-\w])stack-up\b")
+#
+# It excludes `-` and nothing else. Adding `/` would exclude `scripts/live-stack/up.sh` — the
+# path-qualified form Success criterion 2 enumerates and the one a dangling CI call site takes.
+_OLD_ENTRY_POINT_RE = re.compile(r"(?<![-\w])(?:up|down|status)\.sh\b|(?<![-\w])stack-up\b")
 # This module necessarily contains the pattern it searches for, so it excludes itself.
 _SELF = "tests/scripts/test_live_workflow_shape.py"
 # Append-only records (the `records` gate) and point-in-time records keep citing the old names

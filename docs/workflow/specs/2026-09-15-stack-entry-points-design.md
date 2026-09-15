@@ -48,7 +48,11 @@ flag the operator never passed. It is inert at that stage instead.
 
 `KDIVE_BACKEND_SERVICES` stays in `lib.sh` naming all four services for `stack-status.sh`. The
 backends stage names its three long-running services separately, because the one-shot must sit
-outside the `--wait` set.
+outside the `--wait` set. One consequence for the status report: `run --rm` removes the
+`seaweedfs-init` container, so its row — which the replaced `up -d` left behind as `Exited (0)` —
+is now absent after a bring-up. `docker compose ps` omits a service with no containers rather
+than erroring, and the row still appears for a `just compose-up` tier, so the array keeps all
+four.
 
 Old names are replaced outright — internal developer entry points, no external consumer, no
 alias. Every live reference is updated in this change.
@@ -66,7 +70,8 @@ Validation applies that same regex outside the record roots, so what proves the 
 pattern that defined it; no count is frozen here. The test adds one negative lookbehind the
 generating command does not need: every replacement name embeds its predecessor
 (`stack-down.sh`, `demo-up.sh`) and `-` is a word boundary, so after the rename `\bdown\.sh\b`
-matches inside the new name and the guard could never go green.
+matches inside the new name and the guard could never go green. It excludes `-` and nothing
+else: excluding `/` too would blind it to the path-qualified form this criterion enumerates.
 
 **Sweep rule.** Update a reference when the file is live surface: code, configuration, tests,
 CI, provisioning, `AGENTS.md`, and the operating guides under `docs/operating/` and
