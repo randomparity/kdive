@@ -792,6 +792,9 @@ def test_guestfs_hint_names_the_venv_symlink_remedy(tmp_path: Path) -> None:
 
     assert "symlink" in result.stderr, result.stderr
     assert "four-method-live-run.md" in result.stderr, result.stderr
+    # The old "section 4b" pointer named a heading that no longer exists in that runbook.
+    assert "Wire the worker venv" in result.stderr, result.stderr
+    assert "section 4b" not in result.stderr, result.stderr
 
 
 def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None:

@@ -364,7 +364,7 @@ host_arch="$(uname -m 2>/dev/null || true)"
 # RPM platlib, /usr/lib64/python3.N/site-packages, which is NOT what `sysconfig.get_path("purelib")`
 # reports there — that is the /usr/local pip prefix, so a purelib fallback reports the binding
 # absent and offers a package install instead of the symlink). An interpreter that cannot import
-# it yields an empty dir, which reads as `absent`. The exact logic in runbook §4b. Overridable.
+# it yields an empty dir, which reads as `absent`. The exact logic is in that runbook's "Wire the worker venv" section. Overridable.
 guestfs_sys_site() {
   local d="${KDIVE_GUESTFS_SYS_SITE:-/usr/lib/python3/dist-packages}"
   [[ -e "${d}/guestfs.py" ]] ||
@@ -399,7 +399,7 @@ probe_guestfs() {
   detect_guestfs_state
   case "${GUESTFS_STATE}" in
   absent) note_package future python3-guestfs "$(package_for python3-guestfs "${distro}")" ;;
-  unlinked) manual_hints+=("python3-guestfs: present system-wide but not importable in the venv — symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md section 4b") ;;
+  unlinked) manual_hints+=("python3-guestfs: present system-wide but not importable in the venv — symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\"") ;;
   esac
 }
 
@@ -490,7 +490,7 @@ probe_all() {
 
   # The four-method live run needs the libguestfs Python binding on the WORKER host (kdump
   # capture; ADR-0203) plus libdw + libkdumpfile so drgn can build with debuginfo support and
-  # open kdump-compressed vmcores (see four-method-live-run.md §4b and the POWER runbook §1).
+  # open kdump-compressed vmcores (see four-method-live-run.md, "Wire the worker venv", and the POWER runbook §1).
   require_header future libdw-headers libdw "${distro}"
   require_header future libkdumpfile-headers libkdumpfile "${distro}"
   probe_guestfs "${distro}"

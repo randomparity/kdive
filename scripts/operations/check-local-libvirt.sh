@@ -258,11 +258,11 @@ if _venv_imports_kdump_deps; then
 elif [[ "${KDUMP_PREFLIGHT}" == "optional" ]]; then
   note_warn \
     "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203); provision/build/boot and the other capture methods still work" \
-    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
+    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
 else
   note_fail \
     "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203)" \
-    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
+    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
 fi
 
 if _host_kernels_readable; then
@@ -270,7 +270,7 @@ if _host_kernels_readable; then
 else
   note_fail \
     "a host kernel under ${BOOT_DIR} (vmlinuz-* on x86_64, vmlinux-* on ppc64le) is not readable by this user (libguestfs build-fs appliance, ADR-0222)" \
-    "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): sudo chmod 0644 ${BOOT_DIR}/vmlinu?-* (matches both arches; re-apply after kernel upgrades, or use dpkg-statoverride)"
+    "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* (the glob matches both arches; re-apply after a kernel upgrade)"
 fi
 
 if _dir_writable "${INSTALL_STAGING}"; then
@@ -278,7 +278,7 @@ if _dir_writable "${INSTALL_STAGING}"; then
 else
   note_fail \
     "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \
-    "create it writable under a world-traversable path (NOT \$HOME, which a 0700 mode hides from the qemu user that boots the VM): sudo install -d -o \"\$USER\" ${INSTALL_STAGING} — see docs/operating/runbooks/four-method-live-run.md section 4b"
+    "create it writable under a world-traversable path (NOT \$HOME, which a 0700 mode hides from the qemu user that boots the VM): sudo install -d -o \"\$USER\" ${INSTALL_STAGING}"
 fi
 
 # Warn when the effective libvirt identity is non-root under qemu:///system: that identity

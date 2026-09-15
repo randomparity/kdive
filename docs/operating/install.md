@@ -217,8 +217,10 @@ just prepare-local-libvirt-host
 ```
 
 The recipe installs and configures the local virtualization stack, worker lifecycle, project venv,
-and guestfs binding. Start a new login session after it completes so group membership takes effect,
-then run `just check-local-libvirt`. Do not use `examples/local-libvirt/install-host.sh` as a
+guestfs binding, and — on Debian and Ubuntu, which ship them `root:root 0600` — the `/boot` kernel
+modes that guest-image builds need. A kernel upgrade installs a fresh `0600` kernel under a new
+name, so re-run the recipe after one. Start a new login session after it completes so group
+membership takes effect, then run `just check-local-libvirt`. Do not use `examples/local-libvirt/install-host.sh` as a
 second installer; it only calls this recipe for compatibility with the example walkthrough.
 
 | Family | Host-preparation status | Limits and proof strength |
