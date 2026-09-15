@@ -15,6 +15,49 @@ log_dir="${KDIVE_STACK_LOG_DIR:-${repo_root}/.live-stack-logs}"
 # shellcheck disable=SC2034 # consumed by sourcing scripts
 KDIVE_BACKEND_SERVICES=(postgres seaweedfs seaweedfs-init oidc)
 
+# The subset `--wait` may cover. `docker compose up --wait` treats ANY container exit as a
+# wait failure, so including the run-to-completion seaweedfs-init here would make a healthy
+# stack report failure. The one-shot runs separately, below, where its exit status propagates.
+# shellcheck disable=SC2034 # consumed by sourcing scripts
+KDIVE_BACKEND_LONG_RUNNING=(postgres seaweedfs oidc)
+
+# Bring the compose backends up and prove the artifacts bucket. Sourced-only (this file runs
+# nothing at source time); callers invoke it explicitly. No arguments; requires `docker` on PATH
+# and the repo root as cwd. Returns 0 when the three long-running backends are healthy and the
+# artifacts bucket exists and is versioned; non-zero otherwise, propagating the one-shot's status.
+live_stack_backends_up() {
+  # When KDIVE_OIDC_IMAGE is unset the oidc service builds from ./deploy/mock-oidc (ADR-0357).
+  # Pre-build it so the following `up` finds kdive-mock-oidc:dev locally instead of attempting
+  # a doomed pull against a local-only tag, which prints a "pull access denied" warning that
+  # reads as a hard failure. Skip when the image exists: its inputs change rarely and
+  # `compose build` re-contacts the registry on every call even when fully cached. The skip is
+  # announced so an operator editing deploy/mock-oidc knows to remove the tag to force one.
+  if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
+    if docker image inspect kdive-mock-oidc:dev >/dev/null 2>&1; then
+      echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc" >&2
+    else
+      docker compose build oidc
+    fi
+  fi
+
+  # --wait-timeout is required because the backends carry `restart: on-failure`
+  # (docker-compose.yml): a container that keeps failing cycles Exited -> Restarting instead of
+  # settling, so without a bound the convergence poll can block indefinitely rather than
+  # reporting.
+  # Two of the three deployments are non-interactive CI actors that cannot run `docker compose
+  # ps` themselves, and --wait's timeout names no service — where the postgres poll this
+  # replaces named its own. Dump the table so the job log carries the same signal.
+  if ! docker compose up -d --wait --wait-timeout 120 "${KDIVE_BACKEND_LONG_RUNNING[@]}"; then
+    docker compose ps >&2
+    return 1
+  fi
+
+  # Creates the bucket, enables versioning, verifies Enabled, then exits. `run --rm` so a
+  # failure here fails bring-up: the replaced `up -d` form never surfaced this exit status,
+  # and a missing bucket then surfaced much later as a worker store check (ADR-0655).
+  docker compose run --rm seaweedfs-init
+}
+
 # The local-libvirt provider connects here (KDIVE_LIBVIRT_URI, default qemu:///system) and
 # stores per-System qcow2 overlays under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking
 # and qemu-img overlays — NO libvirt network or storage pool is involved.

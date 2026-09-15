@@ -2563,14 +2563,22 @@ def _stub_docker_recording_invocations(bin_dir: Path, log: Path) -> None:
     stub.chmod(0o755)
 
 
-def _stub_live_stack_scripts(root: Path, *, oidc_image: str | None) -> None:
-    """Populate a fake `scripts/live-stack/` under `root` (a `just --working-directory`) so
-    `stack-backends` can run without a real live-stack checkout: a stand-in `env.sh` — the ONLY
-    place `KDIVE_OIDC_IMAGE` is set (ADR-0358) — exporting `oidc_image` when given (simulating
-    ppc64le-under-qemu auto-detection) or nothing (the undetected/x86_64 case), and a no-op
-    `apply-migrations.sh` so the recipe's tail does not need a real database."""
+def _stub_live_stack_scripts(root: Path, *, oidc_image: str | None) -> Path:
+    """Populate a fake checkout under `root` so the bring-up script's `backends` stage can run
+    without a live stack, and return the staged `stack-services.sh`.
+
+    The bring-up script and `lib.sh` are the REAL files — the stage gate and the readiness
+    contract are what these tests exercise. Everything the stage reaches outside them is a
+    stand-in: `env.sh`, the ONLY place `KDIVE_OIDC_IMAGE` is set (ADR-0358), exporting
+    `oidc_image` when given (simulating ppc64le-under-qemu auto-detection) or nothing (the
+    undetected/x86_64 case); a no-op `apply-migrations.sh` so the tail needs no database; and a
+    `.venv` interpreter so the preflight's `-x` check passes.
+    """
     live_stack = root / "scripts" / "live-stack"
     live_stack.mkdir(parents=True)
+    for name in ("stack-services.sh", "lib.sh"):
+        shutil.copy(ROOT / "scripts" / "live-stack" / name, live_stack / name)
+        (live_stack / name).chmod(0o755)
     export_line = f'export KDIVE_OIDC_IMAGE="{oidc_image}"\n' if oidc_image is not None else ""
     env_sh = live_stack / "env.sh"
     env_sh.write_text(f"#!/usr/bin/env bash\nset -euo pipefail\n{export_line}", encoding="utf-8")
@@ -2578,6 +2586,11 @@ def _stub_live_stack_scripts(root: Path, *, oidc_image: str | None) -> None:
     apply_migrations = live_stack / "apply-migrations.sh"
     apply_migrations.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     apply_migrations.chmod(0o755)
+    venv_python = root / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    venv_python.chmod(0o755)
+    return live_stack / "stack-services.sh"
 
 
 def _run_stack_up(
@@ -2635,3 +2648,102 @@ def test_stack_up_local_build_path_is_unchanged_when_env_sh_sets_nothing(tmp_pat
     invocations = log.read_text()
     assert "image inspect kdive-mock-oidc:dev" in invocations
     assert "compose build oidc" in invocations
+
+
+def _run_stack_services(
+    tmp_path: Path,
+    *args: str,
+    seaweedfs_init_status: int = 0,
+    env_extra: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Drive the real bring-up script in a fake checkout with a stubbed `docker`.
+
+    `seaweedfs_init_status` is what the stub returns for `run --rm seaweedfs-init`, so a test can
+    make the bucket one-shot fail without a store. Returns the result and the invocation log.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker.log"
+    log.touch()
+    stub = bin_dir / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf \'%s\\n\' "$*" >> "{log}"\n'
+        '[[ "$1 $2 $3" == "image inspect kdive-mock-oidc:dev" ]] && exit 1\n'
+        f'[[ "$*" == *"run --rm seaweedfs-init"* ]] && exit {seaweedfs_init_status}\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    script = _stub_live_stack_scripts(tmp_path, oidc_image=None)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    env.update(env_extra or {})
+    result = subprocess.run(
+        [str(script), *args], capture_output=True, text=True, check=False, env=env
+    )
+    return result, log
+
+
+def test_backends_stage_propagates_the_one_shot_failure(tmp_path: Path) -> None:
+    """A non-zero seaweedfs-init fails the stage (ADR-0655).
+
+    The replaced `up -d` form started the one-shot among the services and polled only postgres,
+    so a failed bucket creation was silent here and surfaced much later as a worker store check.
+    """
+    result, _ = _run_stack_services(tmp_path, "--stage", "backends", seaweedfs_init_status=7)
+    assert result.returncode != 0, result.stdout
+
+
+def test_backends_stage_waits_only_on_the_long_running_backends(tmp_path: Path) -> None:
+    """`--wait` treats any container exit as a wait failure, so the one-shot stays outside it."""
+    result, log = _run_stack_services(tmp_path, "--stage", "backends")
+    assert result.returncode == 0, result.stderr
+    wait = [ln for ln in log.read_text().splitlines() if "--wait" in ln]
+    assert len(wait) == 1, wait
+    assert wait[0].endswith("postgres seaweedfs oidc"), wait[0]
+    assert "seaweedfs-init" not in wait[0]
+
+
+def test_backends_stage_runs_neither_obs_nor_the_app_tier_reconcile(tmp_path: Path) -> None:
+    """Both are `services` phases: the backends-only path started neither, and the app-tier
+    `rm -sf` is destructive against the containerized tier."""
+    result, log = _run_stack_services(tmp_path, "--stage", "backends")
+    assert result.returncode == 0, result.stderr
+    invocations = log.read_text()
+    assert "rm -sf migrate server worker reconciler" not in invocations
+    assert "--profile obs" not in invocations
+    assert "role-bootstrap" not in invocations
+
+
+def test_backends_stage_is_inert_about_skip_obs(tmp_path: Path) -> None:
+    """KDIVE_SKIP_OBS defaults --skip-obs, so rejecting it would fail
+    `KDIVE_SKIP_OBS=1 just stack-backends` over a flag the operator never passed."""
+    result, _ = _run_stack_services(
+        tmp_path, "--stage", "backends", env_extra={"KDIVE_SKIP_OBS": "1"}
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    (
+        (("--stage", "nonsense"), "unknown --stage"),
+        (("--stage", "backends", "--skip-libvirt"), "does not reach the phase"),
+        (("--stage", "backends", "--reset-db"), "does not reach the phase"),
+    ),
+    ids=("unknown-stage", "skip-libvirt", "reset-db"),
+)
+def test_backends_stage_rejects_flags_it_cannot_reach(
+    tmp_path: Path, args: tuple[str, ...], expected: str
+) -> None:
+    result, _ = _run_stack_services(tmp_path, *args)
+    assert result.returncode == 2, result.stdout
+    assert expected in result.stderr
+
+
+def test_stack_backends_recipe_delegates_to_the_script() -> None:
+    """One implementation of the backend readiness contract, not two (ADR-0655)."""
+    body = _JUSTFILE.read_text(encoding="utf-8").split("\nstack-backends:\n", 1)[1]
+    body = body.split("\n\n", 1)[0]
+    assert "stack-services.sh --stage backends" in body
+    assert "docker compose" not in body

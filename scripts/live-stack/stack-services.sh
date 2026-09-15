@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 #
-# Bring up the WHOLE local kdive infrastructure, idempotently and in order:
+# Bring up the local kdive infrastructure, idempotently and in order:
 #   backends (compose) -> migrations (host) -> libvirt -> host processes -> status.
 # Run as the provisioned lifecycle-control operator (never UID 0). Libvirt bring-up is
 # unprivileged on a provisioned host (the dedicated session daemon, #2032); only a bare dev host
 # still elevates, via sudo, to socket-activate the system daemon.
 #
+# `--stage backends` stops after migrations: backends healthy, artifacts bucket created and
+# verified, schema migrated. That is what `just stack-backends` runs, so there is one
+# implementation and one backend readiness contract rather than two (ADR-0655).
+#
 # Usage:
 #   scripts/live-stack/stack-services.sh                 full bring-up
+#   scripts/live-stack/stack-services.sh --stage backends   backends + bucket + schema, then stop
 #   scripts/live-stack/stack-services.sh --reset-db      wipe the DB first (recovery from migration drift)
 #   scripts/live-stack/stack-services.sh --skip-obs      skip prometheus/grafana
 #   scripts/live-stack/stack-services.sh --skip-libvirt  backends + host processes only (no VM provisioning)
@@ -24,17 +29,43 @@ cd "$repo_root"
 reset_db=0
 skip_obs="${KDIVE_SKIP_OBS:-0}"
 skip_libvirt=0
-for arg in "$@"; do
-  case "$arg" in
+stage="services"
+# A `while`/`shift` loop, not `for arg in "$@"`: that word list is expanded once before the body
+# runs, so a shift inside it cannot consume `--stage`'s value token.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
   --reset-db) reset_db=1 ;;
   --skip-obs) skip_obs=1 ;;
   --skip-libvirt) skip_libvirt=1 ;;
+  --stage)
+    shift
+    stage="${1:-}"
+    case "$stage" in
+    backends | services) ;;
+    *)
+      echo "unknown --stage '${stage}': expected 'backends' or 'services'" >&2
+      exit 2
+      ;;
+    esac
+    ;;
   *)
-    echo "unknown argument: $arg (accepts --reset-db, --skip-obs, --skip-libvirt)" >&2
+    echo "unknown argument: $1 (accepts --stage, --reset-db, --skip-obs, --skip-libvirt)" >&2
     exit 2
     ;;
   esac
+  shift
 done
+# Reject only the flags whose phases the backends stage cannot reach. --skip-obs is deliberately
+# absent: it defaults from the documented KDIVE_SKIP_OBS, so rejecting it would fail
+# `KDIVE_SKIP_OBS=1 just stack-backends` over a flag the operator never passed. It is inert here.
+if [[ "$stage" == "backends" ]]; then
+  for flag in reset_db skip_libvirt; do
+    if [[ "${!flag}" == "1" ]]; then
+      echo "--stage backends does not reach the phase --${flag//_/-} controls" >&2
+      exit 2
+    fi
+  done
+fi
 if ((EUID == 0)); then
   echo "stack-services.sh must run as the provisioned lifecycle-control operator, not UID 0" >&2
   exit 1
@@ -57,30 +88,43 @@ command -v docker >/dev/null 2>&1 || {
   exit 1
 }
 
-banner "reconcile app tier (never run the kdive:dev containers)"
-# A subset `up -d` of the backends does not create the app tier, but a previously running
-# compose `server` would hold port 8000 against the host process. Remove any such container.
-docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
+# Destructive against the containerized tier, and it exists because host processes and a compose
+# `server` contend for port 8000 — a services concern. A backends-only bring-up must not run it.
+if [[ "$stage" == "services" ]]; then
+  banner "reconcile app tier (never run the kdive:dev containers)"
+  # A subset `up -d` of the backends does not create the app tier, but a previously running
+  # compose `server` would hold port 8000 against the host process. Remove any such container.
+  docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
+fi
 
 banner "backends"
-# When KDIVE_OIDC_IMAGE is unset, the oidc service builds from ./deploy/mock-oidc
-# (ADR-0357). Pre-build it explicitly so the subsequent `docker compose up` finds
-# kdive-mock-oidc:dev locally and skips a doomed pull attempt against that local-only
-# tag — which otherwise prints a "pull access denied" warning that looks like a hard
-# failure before compose falls back to build anyway. Skip the build when the image
-# already exists: the Dockerfile inputs (pom.xml + Dockerfile) change rarely, and
-# `docker compose build` re-contacts the registry on every invocation to resolve the
-# pinned base-image digests even when every layer is cached. The skip is announced (not
-# silent) so an operator editing deploy/mock-oidc knows to remove the tag to force a rebuild.
-if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
-  if ! docker image inspect kdive-mock-oidc:dev >/dev/null 2>&1; then
-    docker compose build oidc
-  else
-    echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc" >&2
-  fi
+live_stack_backends_up
+
+banner "migrations (host checkout = authoritative)"
+if ! bash "${here}/apply-migrations.sh"; then
+  echo >&2
+  echo "migration step failed. If this is the ADR-0015 immutable-migration guard (the DB's" >&2
+  echo "applied history diverges from this checkout), recover with:" >&2
+  echo "    scripts/live-stack/stack-services.sh --reset-db" >&2
+  exit 1
 fi
-docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
+
+if [[ "$stage" == "backends" ]]; then
+  banner "backends stage complete"
+  echo "Backends healthy, bucket verified, schema migrated."
+  echo "App tier, for IN-NETWORK clients: just compose-up"
+  echo "For libvirt and the host processes: scripts/live-stack/stack-services.sh"
+  echo "  (compose containers get a different OIDC issuer identity than a host-minted token"
+  echo "   carries -> 401, and no /dev/kvm or libvirt socket -> no local VM. See the runbook.)"
+  echo "MCP URL: http://127.0.0.1:8000/mcp"
+  echo "Full runbook: docs/operating/runbooks/live-stack.md"
+  exit 0
+fi
+
+# Observability is a services phase: the backends-only path never started prometheus, and
+# `just stack-backends` must not either. It sits after the stage gate for that reason.
 if [[ "$skip_obs" != "1" ]]; then
+  banner "observability"
   # Bring prometheus up on its own first: it publishes ppc64le and is the metrics store, so a
   # grafana failure (missing manifest, bad tag, registry outage) must never abort it. Grafana
   # ships no ppc64le manifest (ADR-0356 accept-gap), so skip it outright on POWER — otherwise its
@@ -97,24 +141,7 @@ if [[ "$skip_obs" != "1" ]]; then
     echo "WARNING: grafana failed to start; prometheus continues" >&2
   fi
 fi
-echo "waiting for postgres to report healthy ..."
-for _ in {1..30}; do
-  [[ "$(docker compose ps postgres --format '{{.Health}}' 2>/dev/null)" == "healthy" ]] && break
-  sleep 1
-done
-[[ "$(docker compose ps postgres --format '{{.Health}}' 2>/dev/null)" == "healthy" ]] || {
-  echo "postgres did not become healthy in time" >&2
-  exit 1
-}
 
-banner "migrations (host checkout = authoritative)"
-if ! bash "${here}/apply-migrations.sh"; then
-  echo >&2
-  echo "migration step failed. If this is the ADR-0015 immutable-migration guard (the DB's" >&2
-  echo "applied history diverges from this checkout), recover with:" >&2
-  echo "    scripts/live-stack/stack-services.sh --reset-db" >&2
-  exit 1
-fi
 banner "runtime-role bootstrap"
 # The compose app tier gates on the role-bootstrap one-shot (its depends_on in
 # docker-compose.yml), but this path runs the app tier as HOST processes and the backend set

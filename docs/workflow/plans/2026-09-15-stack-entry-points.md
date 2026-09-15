@@ -336,7 +336,7 @@ live_stack_backends_up() {
   # `compose build` re-contacts the registry on every call even when fully cached. The skip is
   # announced so an operator editing deploy/mock-oidc knows to remove the tag to force one.
   if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
-    if docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then
+    if docker image inspect kdive-mock-oidc:dev >/dev/null 2>&1; then
       echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc" >&2
     else
       docker compose build oidc
@@ -557,6 +557,8 @@ revert needs no data step. Compose volumes are untouched by either task.
 - The worker-lifecycle-contract consolidation (`live_vm_host` templates versus
   `deploy/systemd/install-live-worker-lifecycle.sh`), owner: a separate design cycle, not yet
   filed.
-- `.github/workflows/live.yml:523` asserts the bring-up script "owns the whole bring-up
+- ~~`.github/workflows/live.yml:523` asserts the bring-up script "owns the whole bring-up
   (backends + bucket ...)", which becomes true only once Task 2 lands. Verify that comment
-  reads correctly at the end of Task 2 rather than carrying it forward unread.
+  reads correctly at the end of Task 2 rather than carrying it forward unread.~~ Verified after
+  Task 2: the claim now holds in full, including "+ bucket", which was the part only Task 2's
+  `run --rm seaweedfs-init` made true. Comment kept, rewrapped for the longer name.

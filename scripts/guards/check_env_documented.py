@@ -46,9 +46,12 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_CLOUD_CFG_CONTENT",  # cloud-init drop-in body constant (ADR-0288), not an env var
         # A config-validation error message token in tests/mcp/core/test_app.py.
         "KDIVE_S3_ENDPOINT",
-        # Internal bash array constant in scripts/live-stack/lib.sh (unconditional assignment,
-        # never read as an env var by any process; consumers reference the array directly).
+        # Internal bash array constants in scripts/live-stack/lib.sh (unconditional assignment,
+        # never read as an env var by any process; consumers reference the arrays directly).
+        # _LONG_RUNNING is the subset `docker compose up --wait` may cover — it excludes the
+        # run-to-completion seaweedfs-init, whose exit --wait would read as a wait failure.
         "KDIVE_BACKEND_SERVICES",
+        "KDIVE_BACKEND_LONG_RUNNING",
         # Synthetic worker.env value in lifecycle test fixtures; never a real env read.
         "KDIVE_API_TOKEN",
         # Retired remote-libvirt inventory singletons (M2.6 #395); tests/guards/ asserts they

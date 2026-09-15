@@ -520,13 +520,14 @@ jobs:
           # is host-header-relative: a token minted here carries iss=http://localhost:8090/default,
           # while a compose `server` is configured iss=http://oidc:8080/default and JWTVerifier
           # rejects it with a 401 that looks like an auth bug rather than a topology one.
-          # stack-services.sh owns the whole bring-up (backends + bucket, migrations, libvirt, host processes,
-          # inventory reconcile), so it replaces `just stack-backends` outright. The fixed systemd
+          # stack-services.sh owns the whole bring-up (backends + bucket, migrations, libvirt,
+          # host processes, inventory reconcile), so it replaces `just stack-backends` outright. The fixed systemd
           # worker accounts use the operator-owned session libvirt socket; --skip-obs drops the
           # prometheus/grafana this gate never reads.
           scripts/live-stack/stack-services.sh --skip-obs
 
-          # stack-services.sh sources env.sh in its OWN process; source it here for the KDIVE_STACK_BASE_URL /
+          # stack-services.sh sources env.sh in its OWN process; source it here for the
+          # KDIVE_STACK_BASE_URL /
           # _OIDC_ISSUER / _DATABASE_URL / _S3_* / AWS_* minioadmin the suite reads. Sourcing it
           # rather than duplicating the values keeps them from drifting off the compose ports and
           # re-declaring the credential literals.
@@ -768,7 +769,8 @@ jobs:
           # systemd worker accounts use the operator-owned session libvirt socket, so the domain
           # and console log remain runner-owned/readable.
           scripts/live-stack/stack-services.sh --skip-obs
-          # stack-services.sh sources env.sh in its OWN process; source it here for KDIVE_S3_* + KDIVE_STACK_BASE_URL.
+          # stack-services.sh sources env.sh in its OWN process; source it here for
+          # KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
           # Keep the published URI exported for mint, preflight and pytest; env.sh honors it.

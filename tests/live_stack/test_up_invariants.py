@@ -58,6 +58,12 @@ def test_bring_up_never_starts_the_app_tier(path: Path) -> None:
             )
 
 
-def test_up_uses_the_canonical_backend_list() -> None:
-    text = _SERVICES.read_text()
-    assert "KDIVE_BACKEND_SERVICES" in text
+def test_wait_set_excludes_the_one_shot() -> None:
+    """The `--wait` set and the full backend set are declared separately, and stay separate.
+
+    `docker compose up --wait` treats any container exit as a wait failure, so folding the
+    run-to-completion seaweedfs-init back into the wait set makes a healthy stack report failure.
+    """
+    text = _LIB.read_text()
+    assert "KDIVE_BACKEND_LONG_RUNNING=(postgres seaweedfs oidc)" in text
+    assert "KDIVE_BACKEND_SERVICES=(postgres seaweedfs seaweedfs-init oidc)" in text
