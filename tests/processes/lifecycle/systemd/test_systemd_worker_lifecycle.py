@@ -733,6 +733,25 @@ def test_start_retires_a_restarted_slot_whose_successor_unit_stays_failed() -> N
     assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
 
 
+def test_out_of_band_replacement_is_logged_before_the_slot_files_are_deleted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "populated", invocation_id="f" * 32)
+
+    with caplog.at_level("WARNING"):
+        response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert response.ok
+    assert "retained worker invocation was replaced out of band" in caplog.text
+    assert started.unit in caplog.text
+    assert "f" * 32 in caplog.text
+    # The outcome alone cannot carry this: it is the same `killed` any unobservable termination
+    # gets, and the slot files that would hold the timeline are gone by the time the call returns.
+    assert stores[0].state is None
+
+
 def test_successor_invocation_exit_facts_are_not_attributed_to_the_retained_one() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})

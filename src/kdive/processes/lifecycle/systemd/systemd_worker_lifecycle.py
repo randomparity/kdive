@@ -668,6 +668,17 @@ def _terminal_observation(
         # retained invocation ended. Its own exit facts went with it, and the observed result and
         # membership describe the successor, so neither is mapped here (ADR-0657, amending
         # ADR-0574; absence, which ADR-0574's same-boot rule governs, is still refused above).
+        # Logged because this is the only trace an out-of-band restart leaves: the outcome is the
+        # same `killed` any unobservable termination gets, and the same request deletes the slot
+        # files that would otherwise carry the timeline.
+        _log.warning(
+            "retained worker invocation was replaced out of band unit=%s slot=%d "
+            "retained_invocation=%s observed_invocation=%s",
+            state.unit,
+            state.slot,
+            state.invocation_id,
+            observation.invocation_id,
+        )
         return "killed"
     if observation.membership == "unknown":
         raise SystemdUnavailable("worker cgroup membership is unavailable")

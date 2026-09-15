@@ -125,7 +125,8 @@ changed rule, and the authority re-verifies the exact retained binding before ac
 raising `EvidenceRejected` otherwise, which retains every host object and leaks no binding detail.
 
 **Explicitly out of scope.** A compromised root account — it already owns every object this
-contract protects. Tampering with retained slot files — root-owned, mode 0400, under a root-owned
+contract protects. Tampering with retained slot files — root-owned, mode 0600 for state and
+environment, 0400 for the credential and 0440 for the release marker, under a 0750
 directory, with `SlotStore` re-validating immutable fields. Gate-marker replay — held by the strict
 binding ADR-0657 keeps, implemented under #2486.
 
