@@ -103,7 +103,7 @@ def test_head_with_source_edited_after_startup_is_stale_restart() -> None:
     assert result.verdict is SkewVerdict.STALE_RESTART
     assert "300s after this process started" in result.detail
     assert "uncommitted source" in result.detail
-    assert "scripts/live-stack/up.sh" in result.detail
+    assert "scripts/live-stack/stack-services.sh" in result.detail
 
 
 def test_ancestor_commit_is_behind_and_names_the_distance() -> None:

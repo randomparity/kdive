@@ -4,7 +4,7 @@ Collapses the build -> boot -> attach -> stopped loop you re-walk when developin
 testing new ``debug.*`` tools into single commands. A run-local dev tool (mirrors
 ``scripts/coverage_campaign/drive.py``); not wired into CI.
 
-The stack must already be up (``scripts/live-stack/up.sh``). Examples::
+The stack must already be up (``scripts/live-stack/stack-services.sh``). Examples::
 
     # one command to a stopped gdbstub session (reuses a booted Run if one exists):
     uv run python scripts/operations/live-debug.py stopped --reuse

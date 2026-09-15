@@ -29,12 +29,12 @@ tracks aiming it at the operator's own host.
 
 1. Prepare the host: `examples/local-libvirt/install-host.sh`, then log out and back in so the new
    group memberships apply.
-2. Bring the stack up: `examples/local-libvirt/up.sh` (idempotent; runs the preflight first).
+2. Bring the stack up: `examples/local-libvirt/demo-up.sh` (idempotent; runs the preflight first).
 3. Build and register a guest image: `examples/local-libvirt/build-image.sh fedora-kdive-ready-44`.
 4. Mint a token and point an MCP client at the endpoint — see the
    [example walkthrough](../../../examples/local-libvirt/README.md#usage).
 5. [Onboard a project](../project-onboarding.md) with a budget and quota for anything beyond the
-   `demo` project `up.sh` funds.
+   `demo` project `demo-up.sh` funds.
 
 The [live-stack runbook](../runbooks/live-stack.md) owns service operation and diagnostics once the
 stack is up. The [configuration reference](../../guide/reference/config.md) owns runtime settings.
@@ -116,7 +116,7 @@ These are the points where the two families genuinely diverge, not just in packa
 ## Preflight
 
 From the checkout, `just check-local-libvirt` reports what is missing before the stack starts.
-`up.sh` runs it first and stops with an actionable message, with one exception: the kdump-only
+`demo-up.sh` runs it first and stops with an actionable message, with one exception: the kdump-only
 `guestfs`/`drgn` import check is downgraded to a `WARN` so bring-up continues without it. Export
 `KDIVE_PREFLIGHT_KDUMP=required` to make that check blocking.
 

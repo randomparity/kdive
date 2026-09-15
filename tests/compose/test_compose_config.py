@@ -541,7 +541,7 @@ def test_prometheus_tsdb_is_tmpfs_rather_than_a_named_volume() -> None:
     # orphaned, not dropped. tmpfs makes that decision true without adding a volume that
     # `just compose-down` cannot reach: that recipe runs a profile-less `down --volumes`,
     # which does not stop this profile-gated service, so a named volume here would survive
-    # every destructive path except `scripts/live-stack/down.sh --wipe`.
+    # every destructive path except `scripts/live-stack/stack-down.sh --wipe`.
     #
     # Every option is load-bearing, not decoration. The image runs as uid/gid 65534, and a
     # default-mode tmpfs (root-owned 0775) makes prometheus panic on its first write, so the

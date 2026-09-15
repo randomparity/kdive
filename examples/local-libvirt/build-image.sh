@@ -8,7 +8,7 @@
 # /var/lib/kdive/rootfs/local/NAME.qcow2 (+ its provenance sidecar); on an SELinux-enforcing
 # host the rootfs directory is labeled svirt_image_t so the confined domain can use it; a
 # `staged-path` [[image]] block is appended to systems.toml (skipped when one already declares
-# NAME) and `reconcile-systems` loads it into the catalog. Needs the backends up (up.sh) for
+# NAME) and `reconcile-systems` loads it into the catalog. Needs the backends up (stack-services.sh) for
 # the reconcile step. The catalog names come from fixtures/local-libvirt/rootfs_catalog.toml.
 set -euo pipefail
 

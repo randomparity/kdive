@@ -153,9 +153,13 @@ which needs host processes).
 In `tests/scripts/test_live_workflow_shape.py`:
 
 ```python
-# The same regex that generated the file map, so the guard's reach equals the problem's:
+# The regex that generated the file map, so the guard's reach equals the problem's:
 # path-qualified names AND bare basenames. A literal list would miss the latter.
-_OLD_ENTRY_POINT_RE = re.compile(r"\b(up|down|status)\.sh\b|\bstack-up\b")
+#
+# The negative lookbehind is load-bearing. Every replacement name embeds its predecessor
+# (`stack-down.sh`, `demo-up.sh`), and `-` is a word boundary, so the map-generating
+# `\bdown\.sh\b` matches inside the new name and the guard can never go green.
+_OLD_ENTRY_POINT_RE = re.compile(r"(?<![-\w/])(?:up|down|status)\.sh\b|(?<![-\w])stack-up\b")
 # This module necessarily contains the pattern it searches for, so it excludes itself.
 _SELF = "tests/scripts/test_live_workflow_shape.py"
 # Append-only records (the `records` gate) and point-in-time records keep citing the old
@@ -174,11 +178,7 @@ def _tracked_live_files() -> list[str]:
     out = subprocess.run(
         ["git", "ls-files"], cwd=_ROOT, capture_output=True, text=True, check=True
     ).stdout.splitlines()
-    return [
-        p
-        for p in out
-        if p not in ("CHANGELOG.md", _SELF) and not p.startswith(_RECORD_ROOTS)
-    ]
+    return [p for p in out if p not in ("CHANGELOG.md", _SELF) and not p.startswith(_RECORD_ROOTS)]
 
 
 def test_no_live_file_names_a_renamed_entry_point() -> None:

@@ -31,7 +31,7 @@ The [host environment script](../../scripts/live-stack/env.sh) also selects a pi
 when the variable is unset, the host reports `ppc64le`, and its device-tree model contains
 `emulated by qemu`. An explicitly empty variable preserves the local-build path.
 
-On that local path, `just stack-up` and `scripts/live-stack/up.sh` build only when the local tag
+On that local path, `just stack-backends` and `scripts/live-stack/stack-services.sh` build only when the local tag
 is absent. After editing the POM or Dockerfile, rebuild explicitly from the repository root:
 
 ```bash

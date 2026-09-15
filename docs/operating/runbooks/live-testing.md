@@ -268,11 +268,11 @@ is not implemented by this phase; do not report these helper-level checks as rem
 ### `live_stack` — drive the running stack over HTTP
 
 ```
-just stack-up          # backends healthy + schema migrated + host-process env
+just stack-backends          # backends healthy + schema migrated + host-process env
 just test-live-stack   # runs -m live_stack; skips cleanly if the stack is absent
 ```
 
-`just stack-up` reuses the compose backends (Postgres + SeaweedFS + mock-OIDC) and
+`just stack-backends` reuses the compose backends (Postgres + SeaweedFS + mock-OIDC) and
 keeps the host `server`/`worker`/`reconciler` outside compose. Full bring-up,
 including the host-process env block, is in the
 [live-stack runbook](live-stack.md). To drive a genuinely remote
@@ -355,7 +355,7 @@ overlay, kernel volume, or initrd volume from the invocation remains.
 ### `live_vm_tcg` — the emulated foreign-arch spine
 
 ```
-just stack-up          # the tier runs over the live-stack vehicle
+just stack-backends          # the tier runs over the live-stack vehicle
 just test-live-tcg     # -m live_vm_tcg; skips cleanly without the foreign emulator
 ```
 
@@ -448,7 +448,7 @@ against a running `live_stack` on a KVM host. Recorded here because the 2026-07-
 run found a defect (#1522) the unit and service suites could not, and because the
 setup has several traps worth not rediscovering.
 
-Bring-up is the normal one — `just stack-up`, then `scripts/live-stack/up.sh`,
+Bring-up is the normal one — `just stack-backends`, then `scripts/live-stack/stack-services.sh`,
 then `just onboard` for a funded project and a token. Then, per ADR-0441:
 
 | Arm | Drive | Assert |
@@ -551,7 +551,7 @@ only job-concurrency knob — worker *processes* are the concurrency unit, since
 single worker's claim loop runs one job at a time:
 
 ```bash
-KDIVE_WORKER_COUNT=2 scripts/live-stack/up.sh
+KDIVE_WORKER_COUNT=2 scripts/live-stack/stack-services.sh
 ```
 
 Values above 8 are refused, and the refusal is a hard bring-up failure rather than
@@ -565,7 +565,7 @@ arm is worthless against one worker, and it fails in exactly the silent way the
 old procedure did:
 
 ```bash
-scripts/live-stack/status.sh
+scripts/live-stack/stack-status.sh
 ```
 
 The `=== worker lifecycle ===` section must report slots 1 and 2 as `started`, with units

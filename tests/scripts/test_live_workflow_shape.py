@@ -549,7 +549,7 @@ def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condit
     assert "::${" not in diagnostic["run"]
     assert "exit 0" in diagnostic["run"]
     assert cleanup["if"] == "always()"
-    assert "scripts/live-stack/down.sh" in cleanup["run"]
+    assert "scripts/live-stack/stack-down.sh" in cleanup["run"]
     assert diagnostic_index < cleanup_index
 
 
@@ -692,16 +692,16 @@ def test_live_job_keeps_test_step_authoritative_before_diagnostics(job: str) -> 
 
 
 def test_both_live_jobs_start_the_app_tier_with_up_sh() -> None:
-    """One vehicle for both gates: the host-process path scripts/live-stack/up.sh owns.
+    """One vehicle for both gates: the host-process path scripts/live-stack/stack-services.sh owns.
 
     The native job has always used it. The tcg job briefly ran the app tier as compose services,
     which put the worker in a container with no libvirt and gave the server a different OIDC
-    issuer identity than the host-side test mints against. Pinning both jobs to up.sh keeps the
-    two gates from drifting onto different topologies again.
+    issuer identity than the host-side test mints against. Pinning both jobs to
+    stack-services.sh keeps the two gates from drifting onto different topologies again.
     """
     for job in ("tcg", "native"):
-        assert "scripts/live-stack/up.sh" in _job_run_blocks(job), (
-            f"the {job} job must start the app tier via up.sh (host processes), "
+        assert "scripts/live-stack/stack-services.sh" in _job_run_blocks(job), (
+            f"the {job} job must start the app tier via stack-services.sh (host processes), "
             "not as compose containers"
         )
 
@@ -732,22 +732,26 @@ def test_live_jobs_do_not_restore_the_retired_root_worker_mode() -> None:
 def test_tcg_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
     """Ordering: restart_host_processes captures KDIVE_KERNEL_SRC when it forks the worker.
 
-    up.sh's restart_host_processes reads KDIVE_KERNEL_SRC at fork time and defaults it to
-    ${HOME}/src/linux, which does not exist on a hosted runner. Exporting the fetched tree after
-    up.sh would leave the worker permanently pointed at that nonexistent path.
+    stack-services.sh's restart_host_processes reads KDIVE_KERNEL_SRC at fork time and defaults
+    it to ${HOME}/src/linux, which does not exist on a hosted runner. Exporting the fetched tree
+    after
+    stack-services.sh would leave the worker permanently pointed at that nonexistent path.
     """
     spine = _tcg_spine()
-    assert spine.index("fetch-kernel-tree.sh") < spine.index("scripts/live-stack/up.sh"), (
-        "KDIVE_KERNEL_SRC must be resolved before up.sh forks the worker, which captures it"
+    assert spine.index("fetch-kernel-tree.sh") < spine.index(
+        "scripts/live-stack/stack-services.sh"
+    ), (
+        "KDIVE_KERNEL_SRC must be resolved before stack-services.sh forks the worker, which "
+        "captures it"
     )
     assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in spine
 
 
 def test_native_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
     native = _job_run_blocks("native")
-    assert native.index("fetch-kernel-tree.sh") < native.index("scripts/live-stack/up.sh"), (
-        "KDIVE_KERNEL_SRC must be resolved before native up.sh forks the fixed worker"
-    )
+    assert native.index("fetch-kernel-tree.sh") < native.index(
+        "scripts/live-stack/stack-services.sh"
+    ), "KDIVE_KERNEL_SRC must be resolved before native stack-services.sh forks the fixed worker"
     assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in native
 
 
@@ -763,7 +767,7 @@ def test_hosted_lifecycle_proof_is_a_separate_no_skip_step_before_tcg() -> None:
 
     assert install_index < proof_index < spine_index
     assert "if" not in proof
-    assert "scripts/live-stack/up.sh --reset-db --skip-obs --skip-libvirt" in run
+    assert "scripts/live-stack/stack-services.sh --reset-db --skip-obs --skip-libvirt" in run
     assert "source scripts/live-stack/env.sh" in run
     assert "KDIVE_RUN_SYSTEMD_WORKER_PROOF=1" in run
     assert "tests/live_vm/test_systemd_worker_lifecycle.py" in run
@@ -776,7 +780,7 @@ def test_hosted_lifecycle_proof_uses_worker_accessible_absolute_kernel_source() 
     fetch = "scripts/fetch-kernel-tree.sh /var/lib/kdive/build/"
     assert fetch in run
     assert "export KDIVE_KERNEL_SRC" in run
-    assert run.index(fetch) < run.index("scripts/live-stack/up.sh")
+    assert run.index(fetch) < run.index("scripts/live-stack/stack-services.sh")
 
 
 def test_hosted_lifecycle_proof_cleanup_preserves_failure_diagnostics() -> None:
@@ -792,7 +796,7 @@ def test_hosted_lifecycle_proof_cleanup_preserves_failure_diagnostics() -> None:
 
     assert proof_index < cleanup_index < spine_index < diagnostic_index < final_index
     assert cleanup["if"] == "success()"
-    assert "scripts/live-stack/down.sh" in cleanup["run"]
+    assert "scripts/live-stack/stack-down.sh" in cleanup["run"]
     assert final["if"] == "always()"
 
 
@@ -855,8 +859,9 @@ def test_preclean_never_touches_state_roots_or_follows_symlinks() -> None:
 
 # --- hosted tcg spine: fund, alias, and never green-light an empty tier (#2048) ---------------
 #
-# Run 32577345199 concluded SUCCESS without ever invoking pytest: the spine ended at up.sh's
-# "next: fund a project" advisory and nothing failed on "proofs could not run". And once funded,
+# Run 32577345199 concluded SUCCESS without ever invoking pytest: the spine ended at
+# stack-services.sh's "next: fund a project" advisory and nothing failed on "proofs could not
+# run". And once funded,
 # the proof suite reads bare KDIVE_DATABASE_URL, which env.sh stopped exporting post-#2021 — so
 # every ppc64le proof would silently SKIP and the tier would still exit green.
 
@@ -898,7 +903,7 @@ def test_hosted_spine_fails_loud_on_a_zero_proof_tier() -> None:
 #
 # A stdin-fed spine (`bash -s` over a heredoc, or GitHub piping the run block to `bash {0}`)
 # is consumed incrementally: any child that drains stdin swallows the not-yet-read script
-# bytes. Run 32589578907's tcg tier exited 0 right after up.sh's banner — a
+# bytes. Run 32589578907's tcg tier exited 0 right after stack-services.sh's banner — a
 # libvirt-provisioning child had drained the heredoc feeding `bash -s`, so onboard,
 # preflight-tcg and pytest NEVER ran while the job read green.
 
@@ -937,3 +942,53 @@ def test_spine_body_is_delimited_before_execution(spine_of, file: str, delimiter
     assert closing is not None
     execute = f'/bin/bash -e -u -o pipefail "{file}"'
     assert closing.end() < spine.index(execute)
+
+
+# The regex that generated the rename's file map, so the guard's reach equals the problem's:
+# path-qualified names AND bare basenames. A literal list would miss the latter.
+#
+# The negative lookbehind is load-bearing. Every replacement name embeds its predecessor
+# (`stack-down.sh`, `demo-up.sh`), and `-` is a word boundary, so a plain `\bdown\.sh\b` matches
+# inside the new name and the guard can never go green.
+_OLD_ENTRY_POINT_RE = re.compile(r"(?<![-\w/])(?:up|down|status)\.sh\b|(?<![-\w])stack-up\b")
+# This module necessarily contains the pattern it searches for, so it excludes itself.
+_SELF = "tests/scripts/test_live_workflow_shape.py"
+# Append-only records (the `records` gate) and point-in-time records keep citing the old names
+# on purpose: ADR-0655 is where a reader learns the current ones.
+_RECORD_ROOTS = (
+    "docs/adr/",
+    "docs/debt/",
+    "docs/archive/",
+    "docs/superpowers/",
+    "docs/design/",
+    "docs/workflow/",
+)
+
+
+def _tracked_live_files() -> list[str]:
+    out = subprocess.run(
+        ["git", "ls-files"], cwd=_ROOT, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    return [p for p in out if p not in ("CHANGELOG.md", _SELF) and not p.startswith(_RECORD_ROOTS)]
+
+
+def test_no_live_file_names_a_renamed_entry_point() -> None:
+    offenders: list[str] = []
+    for path in _tracked_live_files():
+        full = _ROOT / path
+        if not full.is_file():
+            continue
+        try:
+            text = full.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if _OLD_ENTRY_POINT_RE.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert not offenders, "renamed entry points still referenced:\n" + "\n".join(offenders)
+
+
+def test_workflow_script_paths_exist() -> None:
+    workflow = _LIVE.read_text(encoding="utf-8")
+    for match in re.findall(r"scripts/live-stack/[\w.-]+\.sh", workflow):
+        assert (_ROOT / match).is_file(), f"live.yml names a missing script: {match}"

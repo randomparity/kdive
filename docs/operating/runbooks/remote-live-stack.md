@@ -156,7 +156,7 @@ Three operational notes:
 - **The app tier does not hot-reload.** Only the *libvirt host* is remote here; the kdive
   server, worker and reconciler are the same host processes from the
   [live-stack runbook](live-stack.md) §4, and they load your source once, at start. A source fix
-  does not reach a running worker until you re-run `scripts/live-stack/up.sh`. A remote spine
+  does not reach a running worker until you re-run `scripts/live-stack/stack-services.sh`. A remote spine
   driven against a worker that predates its own fix produced a meaningless green during #1610;
   the version-skew preflight (ADR-0482, live-stack runbook §5) now names that case at preflight
   time instead. `KDIVE_STACK_SKEW_POLICY=off` disables it.

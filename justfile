@@ -269,7 +269,7 @@ test-live:
 
 # --strict-markers fails a mis-marked test; pytest exit 5 ("no tests collected") is tolerated as a
 # clean skip, other codes propagate. Needs the foreign qemu emulator (e.g. qemu-system-ppc64) AND a
-# running stack (`just stack-up` + fixtures); the tests skip cleanly without either.
+# running stack (`just stack-backends` + fixtures); the tests skip cleanly without either.
 #
 # Run the emulated foreign-arch (TCG) tier: the four ppc64le provision→boot→crash→retrieve proofs.
 test-live-tcg:
@@ -314,14 +314,15 @@ test-live-remote:
 stack-migrate:
     ./scripts/live-stack/apply-migrations.sh
 
-# Bring up the live-stack backing services healthy, then migrate the schema and print the
-# host-process startup step. Reuses the compose backends; host processes stay outside compose.
+# Bring up the compose backends, create and verify the artifacts bucket, and migrate the
+# schema. This is NOT a running stack: scripts/live-stack/stack-services.sh starts libvirt and
+# the host processes, and `just onboard` funds a project. See docs/operating/runbooks/live-stack.md.
 #
 # `--wait` is scoped to the three long-running backends: it treats ANY container exit as a wait
 # failure, so the one-shot `seaweedfs-init` (creates the bucket, then exits 0) would make a healthy
 # stack report exit 1. Run that init separately to completion — its exit code still propagates,
 # so a real bucket-creation failure fails the recipe.
-stack-up:
+stack-backends:
     #!/usr/bin/env bash
     set -euo pipefail
     # A plain `if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then ...` recipe line runs in its OWN shell
@@ -356,7 +357,7 @@ stack-up:
     ./scripts/live-stack/apply-migrations.sh
     echo "Backends healthy and schema migrated."
     echo "App tier, for IN-NETWORK clients: just compose-up"
-    echo "For the live suites, the CLI, or any local-libvirt VM: scripts/live-stack/up.sh"
+    echo "For the live suites, the CLI, or any local-libvirt VM: scripts/live-stack/stack-services.sh"
     echo "  (compose containers get a different OIDC issuer identity than a host-minted token"
     echo "   carries -> 401, and no /dev/kvm or libvirt socket -> no local VM. See the runbook.)"
     echo "MCP URL: http://127.0.0.1:8000/mcp"
@@ -369,7 +370,7 @@ stack-up:
 demo-token *ARGS:
     @./scripts/demo-token.sh {{ARGS}}
 
-# Run the live_stack suite (needs `just stack-up` + VM fixtures). --strict-markers fails a
+# Run the live_stack suite (needs `just stack-backends` + VM fixtures). --strict-markers fails a
 # mis-marked test instead of silently deselecting; pytest exit 5 ("no tests collected", e.g.
 # the marked driver not yet present) is tolerated as a clean skip, other codes propagate.
 test-live-stack:

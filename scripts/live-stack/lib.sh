@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the local live-stack lifecycle scripts (up.sh, down.sh, status.sh).
+# Shared helpers for the local live-stack lifecycle scripts (stack-services.sh, stack-down.sh, stack-status.sh).
 # SOURCED, never executed: it defines variables and functions and must have no side effects
 # beyond that. Consumers source env.sh themselves when they need the KDIVE_* runtime config.
 
@@ -22,7 +22,7 @@ KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 export KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 
 # Arches for which grafana publishes no upstream manifest (ADR-0356 accept-gap, #1261); it ships
-# amd64 + arm64 only. On a listed arch, up.sh skips grafana and brings prometheus (which does
+# amd64 + arm64 only. On a listed arch, stack-services.sh skips grafana and brings prometheus (which does
 # publish ppc64le) up on its own, so a missing-manifest pull can't abort the metrics store.
 GRAFANA_UNSUPPORTED_ARCHES=(ppc64le)
 
@@ -176,7 +176,7 @@ require_free_http_port() {
     echo "ERROR: KDIVE_HTTP_PORT ${port} is already in use — the kdive server cannot bind it:"
     echo "  ${holder}"
     echo "Free that port, or relocate the stack, e.g.:"
-    echo "    KDIVE_HTTP_PORT=8001 scripts/live-stack/up.sh"
+    echo "    KDIVE_HTTP_PORT=8001 scripts/live-stack/stack-services.sh"
   } >&2
   return 1
 }
@@ -269,7 +269,7 @@ restart_host_processes() {
 # the stack up: each daemon waits up to POOL_OPEN_TIMEOUT_SECONDS for its first database
 # connection and exits if it cannot get one, plus a bounded pool teardown (ADR-0449, ~11s total).
 # The former flat `sleep 5` returned while a doomed daemon was still in the process table, so
-# status.sh reported three healthy processes and up.sh exited 0 for a stack that vanished seconds
+# stack-status.sh reported three healthy processes and stack-services.sh exited 0 for a stack that vanished seconds
 # later. The most reachable trigger is an unavailable role-specific database: that kills a daemon
 # outright instead of showing up as a not-ready /readyz.
 DAEMON_SETTLE_SECONDS=15
@@ -343,7 +343,7 @@ nodedev_ok() {
 
 # Operator-owned dedicated session libvirt daemon (#2032). The live_vm_host role provisions a
 # dedicated session daemon for the runner account (config /etc/kdive/libvirtd-live.conf, runtime
-# root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. up.sh's
+# root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. stack-services.sh's
 # recovery path starts this same daemon directly as the invoking user — the runner service account
 # has no sudo and the Debian-family runner ships no virtqemud, so a system-daemon fallback can
 # never work there.
@@ -376,7 +376,7 @@ ensure_session_libvirtd() {
 
 # The host prerequisites a local-libvirt provision actually needs. Returns 0 iff all are
 # PRESENT (existence only — ownership/writability is the lifecycle witness's concern, not testable
-# reliably as the invoking user). up.sh creates the dirs before calling this.
+# reliably as the invoking user). stack-services.sh creates the dirs before calling this.
 provision_prereqs_ok() {
   local rc=0 staging="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
   command -v qemu-img >/dev/null 2>&1 || {

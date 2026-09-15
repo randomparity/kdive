@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # One-command local-libvirt developer bring-up. Idempotent; safe to re-run.
 #
-# Brings up the whole stack through the maintained host flow (scripts/live-stack/up.sh: compose
+# Brings up the whole stack through the maintained host flow (scripts/live-stack/stack-services.sh: compose
 # backends, migrations, runtime-role bootstrap, the operator-owned session libvirt, the
 # server/reconciler daemons, the fixed lifecycle workers, one inventory reconcile), funds the
 # project and mints a token (scripts/live-stack/onboard.sh), and merges the MCP client config into
 # the kernel tree. Run it from anywhere — every path resolves from the repo.
 #
-#   examples/local-libvirt/up.sh
+#   examples/local-libvirt/demo-up.sh
 #
 # Then, in the shell you launch your MCP client from:
 #   export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
@@ -25,7 +25,7 @@ source "${example_dir}/env.sh"
 step() { printf '\n=== %s ===\n' "$1"; }
 
 if ((EUID == 0)); then
-  echo "run up.sh as the operator user install-host.sh prepared, not as root" >&2
+  echo "run demo-up.sh as the operator user install-host.sh prepared, not as root" >&2
   exit 1
 fi
 
@@ -54,10 +54,10 @@ KDIVE_PREFLIGHT_KDUMP="${KDIVE_PREFLIGHT_KDUMP:-optional}" \
   "${repo_root}/scripts/operations/check-local-libvirt.sh"
 
 # 3. The stack. Prometheus/grafana are not part of a first run; KDIVE_SKIP_OBS=0 brings them up.
-step "stack (scripts/live-stack/up.sh)"
+step "stack (scripts/live-stack/stack-services.sh)"
 stack_args=()
 [[ "${KDIVE_SKIP_OBS:-1}" == "1" ]] && stack_args+=(--skip-obs)
-"${repo_root}/scripts/live-stack/up.sh" "${stack_args[@]}"
+"${repo_root}/scripts/live-stack/stack-services.sh" "${stack_args[@]}"
 
 # 4. Fund the project (budget + quota rows, verified) and mint a token. Token-less bootstrap
 #    (raw INSERTs), the correct path for a single-developer box; the printed
@@ -122,8 +122,8 @@ local-libvirt stack is up.
   Kernel  : ${KDIVE_KERNEL_SRC}
   libvirt : ${KDIVE_LIBVIRT_URI}
   Logs    : ${KDIVE_STACK_LOG_DIR} (daemons); scripts/live-stack/worker-lifecycle.sh diagnostics (workers)
-  Status  : ${repo_root}/scripts/live-stack/status.sh
-  Stop    : ${example_dir}/down.sh
+  Status  : ${repo_root}/scripts/live-stack/stack-status.sh
+  Stop    : ${example_dir}/demo-down.sh
 
 Next, in the shell you launch your MCP client from:
   export KDIVE_TOKEN=\$(${example_dir}/mint-token.sh)

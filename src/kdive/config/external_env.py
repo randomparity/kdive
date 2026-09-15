@@ -581,8 +581,9 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_SKIP_OBS",
         "script",
         "0",
-        "When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability "
-        "tier; the essential backend services (postgres, seaweedfs, oidc) still start.",
+        "When set to 1, `scripts/live-stack/stack-services.sh` skips the prometheus/grafana "
+        "observability tier; the essential backend services (postgres, seaweedfs, oidc) still "
+        "start.",
     ),
     ExternalEnvVar(
         "KDIVE_WORKER_COUNT",
@@ -676,7 +677,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "required",
         "How `scripts/operations/check-local-libvirt.sh` treats the kdump-only libguestfs/drgn "
         "binding check: `required` fails the preflight, `optional` reports a warning. "
-        "`examples/local-libvirt/up.sh` defaults it to `optional`; CI and onboarding keep the "
+        "`examples/local-libvirt/demo-up.sh` defaults it to `optional`; CI and onboarding keep the "
         "hard gate.",
     ),
     ExternalEnvVar(

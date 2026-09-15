@@ -29,7 +29,7 @@ instead *raise* on a role denial, so this exposure-driven refusal is the seam's 
 boundary.
 
 Gated ``live_stack`` (ADR-0035 §4): it needs a running kdive stack plus a reachable OIDC issuer, so
-it skips cleanly in normal CI and runs only against a brought-up stack (``just stack-up`` +
+it skips cleanly in normal CI and runs only against a brought-up stack (``just stack-backends`` +
 ``just test-live-stack``). See ``docs/operating/runbooks/kdivectl.md``.
 """
 

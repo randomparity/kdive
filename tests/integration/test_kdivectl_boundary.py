@@ -21,7 +21,7 @@ audited — failing the denial-row assertion and silently hollowing out the exit
 
 Gated ``live_stack`` (the repo's spine-test marker, ADR-0035 §4): it needs a running kdive
 stack (server/worker/reconciler + Postgres/MinIO/OIDC) plus a reachable OIDC issuer, so it
-skips cleanly in normal CI and runs only against a brought-up stack (``just stack-up`` +
+skips cleanly in normal CI and runs only against a brought-up stack (``just stack-backends`` +
 ``just test-live-stack``). See ``docs/operating/runbooks/kdivectl.md``.
 """
 

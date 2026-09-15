@@ -573,7 +573,7 @@ def test_witness_stop_precedes_the_ordinary_host_daemon_stop(tmp_path: Path) -> 
     Plain teardown remains graceful-only. The explicit force option escalates after that grace
     period without asking the operator to reproduce pid discovery and privilege handling.
     """
-    text = (ROOT / "scripts/live-stack/down.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-down.sh").read_text()
     assert text.index('worker-lifecycle.sh" stop') < text.index("stop_daemons")
     # Not a bare `"wait" in stderr` — the pre-fix message already said "the ten-second wait only
     # warns", so that substring passes against the very message this test exists to reject.
@@ -598,7 +598,7 @@ def test_lifecycle_stop_failure_blocks_backend_teardown(tmp_path: Path) -> None:
     tells the operator to act on. The stub here returns two pids to the first scan and one to
     every scan after it, which is exactly that interleaving.
     """
-    text = (ROOT / "scripts/live-stack/down.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-down.sh").read_text()
     assert "unresolved evidence; backends remain up" in text
 
 
@@ -701,9 +701,9 @@ def test_force_stop_daemons_revalidates_a_pid_before_sigkill(tmp_path: Path) -> 
 
 
 def test_down_force_is_teardown_only_and_runs_after_the_graceful_stop() -> None:
-    """Bring-up keeps graceful signalling; only down.sh wires in escalation (#1733)."""
-    down = (ROOT / "scripts/live-stack/down.sh").read_text()
-    up = (ROOT / "scripts/live-stack/up.sh").read_text()
+    """Bring-up keeps graceful signalling; only stack-down.sh wires in escalation (#1733)."""
+    down = (ROOT / "scripts/live-stack/stack-down.sh").read_text()
+    up = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     assert down.index("stop_daemons\n") < down.index("force_stop_daemons\n")
     assert '[[ "$force" == "1" ]]' in down
     assert "force_stop_daemons" not in up
@@ -713,7 +713,7 @@ def test_down_force_stops_backends_only_after_forced_daemon_stop(tmp_path: Path)
     """The CLI executes the lifecycle stop and the supported force path before compose teardown."""
     script_dir = tmp_path / "scripts" / "live-stack"
     script_dir.mkdir(parents=True)
-    shutil.copy(ROOT / "scripts/live-stack/down.sh", script_dir / "down.sh")
+    shutil.copy(ROOT / "scripts/live-stack/stack-down.sh", script_dir / "stack-down.sh")
     events = tmp_path / "events"
     lifecycle = script_dir / "worker-lifecycle.sh"
     lifecycle.write_text(
@@ -729,7 +729,7 @@ def test_down_force_stops_backends_only_after_forced_daemon_stop(tmp_path: Path)
         encoding="utf-8",
     )
     result = subprocess.run(
-        ["bash", str(script_dir / "down.sh"), "--force"],
+        ["bash", str(script_dir / "stack-down.sh"), "--force"],
         capture_output=True,
         text=True,
         check=False,
@@ -742,7 +742,7 @@ def test_down_force_keeps_backends_up_when_forced_daemon_stop_fails(tmp_path: Pa
     """A failed SIGKILL path must not dismantle dependencies under a live worker."""
     script_dir = tmp_path / "scripts" / "live-stack"
     script_dir.mkdir(parents=True)
-    shutil.copy(ROOT / "scripts/live-stack/down.sh", script_dir / "down.sh")
+    shutil.copy(ROOT / "scripts/live-stack/stack-down.sh", script_dir / "stack-down.sh")
     events = tmp_path / "events"
     lifecycle = script_dir / "worker-lifecycle.sh"
     lifecycle.write_text(
@@ -758,7 +758,7 @@ def test_down_force_keeps_backends_up_when_forced_daemon_stop_fails(tmp_path: Pa
         encoding="utf-8",
     )
     result = subprocess.run(
-        ["bash", str(script_dir / "down.sh"), "--force"],
+        ["bash", str(script_dir / "stack-down.sh"), "--force"],
         capture_output=True,
         text=True,
         check=False,
@@ -769,13 +769,13 @@ def test_down_force_keeps_backends_up_when_forced_daemon_stop_fails(tmp_path: Pa
 
 def test_lifecycle_stop_failure_names_the_recovery_path(tmp_path: Path) -> None:
     """Waiting is not offered when the preceding SIGTERM never reached a worker."""
-    text = (ROOT / "scripts/live-stack/down.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-down.sh").read_text()
     assert "restore the failed dependency and retry" in text
 
 
 def test_lifecycle_force_path_states_its_evidence_limit(tmp_path: Path) -> None:
     """Host-wide stop failures must not change advice for checkout-scoped worker pids."""
-    text = (ROOT / "scripts/live-stack/down.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-down.sh").read_text()
     assert "cannot publish worker termination evidence" in text
 
 
@@ -876,9 +876,9 @@ def test_live_stack_scripts_are_strict_bash() -> None:
     for name in (
         "env.sh",
         "apply-migrations.sh",
-        "up.sh",
-        "down.sh",
-        "status.sh",
+        "stack-services.sh",
+        "stack-down.sh",
+        "stack-status.sh",
         "provision-queue-diagnostics.sh",
     ):
         text = (ROOT / "scripts/live-stack" / name).read_text()
@@ -1695,7 +1695,7 @@ def test_restart_host_processes_guards_the_port_after_stopping_daemons() -> None
 
 def test_up_starts_prometheus_independently_of_grafana() -> None:
     """Prometheus comes up in its own `compose up`, so a grafana failure can't abort it (#1261)."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     assert "up -d prometheus" in text, "prometheus must be brought up on its own"
     assert "grafana_supports_arch" in text, "grafana must be gated on host arch"
     assert "#1261" in text, "the skip must be traceable to its tracking issue"
@@ -1703,10 +1703,11 @@ def test_up_starts_prometheus_independently_of_grafana() -> None:
 
 def test_bring_up_converges_runtime_roles_after_migrations() -> None:
     """The live-stack path never runs the compose app tier (its backend set excludes the
-    role-bootstrap one-shot), so up.sh itself must converge the runtime login members — after
+    role-bootstrap one-shot), so stack-services.sh itself must converge the runtime login
+    members — after
     migrations create the NOLOGIN capabilities and before the host processes (and the installed
     worker fleet they activate) authenticate (#2036)."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     assert (
         text.index('banner "migrations')
         < text.index("docker compose run --rm --no-deps role-bootstrap")
@@ -1719,9 +1720,9 @@ def test_bring_up_converges_runtime_roles_after_migrations() -> None:
 
 def test_role_bootstrap_keeps_the_external_provisioning_escape_hatch() -> None:
     """KDIVE_LOCAL_ROLE_BOOTSTRAP=0 (externally provisioned, retained hosts) must keep its
-    no-database-mutation contract: up.sh skips the one-shot entirely instead of running it and
-    relying on the script's own =0 no-op (#2036)."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    no-database-mutation contract: stack-services.sh skips the one-shot entirely instead of
+    running it and relying on the script's own =0 no-op (#2036)."""
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     assert '[[ "${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}" == "1" ]]' in text, (
         "bring-up must honor the external-provisioning escape hatch"
     )
@@ -1729,12 +1730,13 @@ def test_role_bootstrap_keeps_the_external_provisioning_escape_hatch() -> None:
 
 def test_role_bootstrap_runs_with_the_container_internal_migration_dsn() -> None:
     """env.sh exports the host-facing migration DSN (localhost), which is unreachable from
-    inside the compose network; up.sh must unset it for the one-shot so the compose default
-    (postgres:5432) applies, without duplicating the development credential literal."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    inside the compose network; stack-services.sh must unset it for the one-shot so the compose
+    default (postgres:5432) applies, without duplicating the development credential literal."""
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     assert "env -u KDIVE_MIGRATION_DATABASE_URL" in text
     assert "postgresql://kdive-migration" not in text, (
-        "up.sh must not re-declare the migration DSN literal; the compose default owns it"
+        "stack-services.sh must not re-declare the migration DSN literal; the compose default "
+        "owns it"
     )
 
 
@@ -1828,7 +1830,7 @@ def test_ensure_session_libvirtd_fails_loud_naming_the_exact_paths(tmp_path: Pat
 
 def test_up_session_recovery_path_never_sudos_and_keeps_the_bare_host_fallback() -> None:
     """#2032: the dedicated-session branch recovers unprivileged; sudo stays bare-host-only."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     gate = text.index('*"live-libvirt"*')
     bare_host_branch = text.index("# Bare dev host")
     recovery = text[gate:bare_host_branch]
@@ -1840,7 +1842,7 @@ def test_up_session_recovery_path_never_sudos_and_keeps_the_bare_host_fallback()
 
 def test_up_bare_host_branch_enables_virtnodedevd_alongside_virtqemud() -> None:
     """#2401: onboarding's resource discovery needs virtnodedevd, not just virtqemud."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     bare_host_branch = text.index("# Bare dev host")
     libvirt_ok_gate = text.index("libvirt_ok || {", bare_host_branch)
     branch = text[bare_host_branch:libvirt_ok_gate]
@@ -1848,8 +1850,9 @@ def test_up_bare_host_branch_enables_virtnodedevd_alongside_virtqemud() -> None:
 
 
 def test_up_checks_virtnodedevd_reachability_and_names_the_unit_on_failure() -> None:
-    """#2401 acceptance: a missing daemon fails in up.sh naming the unit, not in discovery.py."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    """#2401 acceptance: a missing daemon fails in stack-services.sh naming the unit, not in
+    discovery.py."""
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     gate = text.index("libvirt_ok || {")
     check = text.index("nodedev_ok || {", gate)
     block = text[check : text.index("}", check)]
@@ -1857,16 +1860,18 @@ def test_up_checks_virtnodedevd_reachability_and_names_the_unit_on_failure() -> 
 
 
 def _up_remediation_gate_condition() -> str:
-    """The exact `if ...; then` line up.sh uses to decide whether to remediate libvirt."""
-    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    """The exact `if ...; then` line stack-services.sh uses to decide whether to remediate
+    libvirt."""
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     start = text.index("if ! libvirt_ok")
     return text[start : text.index("\n", start)]
 
 
 def _remediation_gate_fires(tmp_path: Path, *, list_ok: bool, nodedev_list_ok: bool) -> bool:
-    """Source the real lib.sh (so libvirt_ok/nodedev_ok are up.sh's own functions) with a
-    stubbed `virsh`, then evaluate up.sh's own extracted gate condition line. True means
-    up.sh would enter its remediation branch for this virsh behavior (#2401)."""
+    """Source the real lib.sh (so libvirt_ok/nodedev_ok are stack-services.sh's own functions)
+    with a stubbed `virsh`, then evaluate stack-services.sh's own extracted gate condition line.
+    True means
+    stack-services.sh would enter its remediation branch for this virsh behavior (#2401)."""
     lib_sh_copy = tmp_path / "lib.sh"
     lib_sh_copy.write_text((ROOT / "scripts/live-stack/lib.sh").read_text(), encoding="utf-8")
 
@@ -2077,8 +2082,8 @@ def test_role_database_dsns_are_never_env_program_arguments() -> None:
     for relative_path in (
         "scripts/live-stack/apply-migrations.sh",
         "scripts/live-stack/lib.sh",
-        "scripts/live-stack/status.sh",
-        "scripts/live-stack/up.sh",
+        "scripts/live-stack/stack-status.sh",
+        "scripts/live-stack/stack-services.sh",
     ):
         logical_lines = (ROOT / relative_path).read_text(encoding="utf-8").replace("\\\n", " ")
         for line in logical_lines.splitlines():
@@ -2146,8 +2151,8 @@ def test_apply_migrations_runs_with_runtime_role_dsns_scrubbed(tmp_path: Path) -
 
 
 def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> None:
-    status = tmp_path / "status.sh"
-    source = (ROOT / "scripts/live-stack/status.sh").read_text()
+    status = tmp_path / "stack-status.sh"
+    source = (ROOT / "scripts/live-stack/stack-status.sh").read_text()
     setup = source[: source.index('echo "=== compose')]
     database = source[source.index('echo "=== database') : source.index('echo "=== libvirt')]
     status.write_text(setup + database + "exit 0\n", encoding="utf-8")
@@ -2533,7 +2538,7 @@ def test_lifecycle_preflight_resolves_a_symlink_before_checking_ancestry(tmp_pat
 
 
 def test_down_blocks_backend_teardown_after_an_unresolved_lifecycle_stop() -> None:
-    text = (ROOT / "scripts/live-stack/down.sh").read_text()
+    text = (ROOT / "scripts/live-stack/stack-down.sh").read_text()
     assert text.index('worker-lifecycle.sh" stop') < text.index("stopping compose backends")
     assert "unresolved evidence; backends remain up" in text
     assert "may strand fences" in text
@@ -2545,7 +2550,7 @@ _JUST = shutil.which("just")
 
 def _stub_docker_recording_invocations(bin_dir: Path, log: Path) -> None:
     """Write a stub `docker` that appends every invocation to `log` and reports the local
-    `kdive-mock-oidc:dev` image as absent, so `stack-up`'s local-build branch (when taken)
+    `kdive-mock-oidc:dev` image as absent, so `stack-backends`'s local-build branch (when taken)
     always reaches `docker compose build oidc` rather than the "already cached" no-op."""
     stub = bin_dir / "docker"
     stub.write_text(
@@ -2560,7 +2565,7 @@ def _stub_docker_recording_invocations(bin_dir: Path, log: Path) -> None:
 
 def _stub_live_stack_scripts(root: Path, *, oidc_image: str | None) -> None:
     """Populate a fake `scripts/live-stack/` under `root` (a `just --working-directory`) so
-    `stack-up` can run without a real live-stack checkout: a stand-in `env.sh` — the ONLY
+    `stack-backends` can run without a real live-stack checkout: a stand-in `env.sh` — the ONLY
     place `KDIVE_OIDC_IMAGE` is set (ADR-0358) — exporting `oidc_image` when given (simulating
     ppc64le-under-qemu auto-detection) or nothing (the undetected/x86_64 case), and a no-op
     `apply-migrations.sh` so the recipe's tail does not need a real database."""
@@ -2578,8 +2583,8 @@ def _stub_live_stack_scripts(root: Path, *, oidc_image: str | None) -> None:
 def _run_stack_up(
     tmp_path: Path, *, oidc_image: str | None
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
-    """Drive the real `stack-up` recipe with a stubbed `docker` and a fake live-stack checkout,
-    and return its result plus the log of every `docker` invocation it made."""
+    """Drive the real `stack-backends` recipe with a stubbed `docker` and a fake live-stack
+    checkout, and return its result plus the log of every `docker` invocation it made."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "docker.log"
@@ -2588,7 +2593,14 @@ def _run_stack_up(
     _stub_live_stack_scripts(tmp_path, oidc_image=oidc_image)
     assert _JUST is not None
     result = subprocess.run(
-        [_JUST, "--justfile", str(_JUSTFILE), "--working-directory", str(tmp_path), "stack-up"],
+        [
+            _JUST,
+            "--justfile",
+            str(_JUSTFILE),
+            "--working-directory",
+            str(tmp_path),
+            "stack-backends",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -2597,12 +2609,13 @@ def _run_stack_up(
     return result, log
 
 
-@pytest.mark.skipif(_JUST is None, reason="just is required to drive the stack-up recipe")
+@pytest.mark.skipif(_JUST is None, reason="just is required to drive the stack-backends recipe")
 def test_stack_up_sources_env_sh_and_honors_its_oidc_image(tmp_path: Path) -> None:
     """The arch branch (#2400): when env.sh resolves `KDIVE_OIDC_IMAGE` — the
-    ppc64le-under-qemu case — `stack-up` must take ADR-0358's pull path without ever probing
-    or building the local `kdive-mock-oidc:dev` image. Before the fix, `stack-up` never sourced
-    env.sh, so this auto-detected value never reached the recipe and this assertion failed."""
+    ppc64le-under-qemu case — `stack-backends` must take ADR-0358's pull path without ever probing
+    or building the local `kdive-mock-oidc:dev` image. Before the fix, `stack-backends` never
+    sourced env.sh, so this auto-detected value never reached the recipe and this assertion
+    failed."""
     result, log = _run_stack_up(
         tmp_path, oidc_image="ghcr.io/randomparity/mock-oauth2-server@sha256:test"
     )
@@ -2612,10 +2625,10 @@ def test_stack_up_sources_env_sh_and_honors_its_oidc_image(tmp_path: Path) -> No
     assert "compose build oidc" not in invocations
 
 
-@pytest.mark.skipif(_JUST is None, reason="just is required to drive the stack-up recipe")
+@pytest.mark.skipif(_JUST is None, reason="just is required to drive the stack-backends recipe")
 def test_stack_up_local_build_path_is_unchanged_when_env_sh_sets_nothing(tmp_path: Path) -> None:
     """#2400 acceptance: "On x86_64 the local-build path is unchanged." When env.sh leaves
-    `KDIVE_OIDC_IMAGE` unset, `stack-up` must still probe for — and build when absent — the
+    `KDIVE_OIDC_IMAGE` unset, `stack-backends` must still probe for — and build when absent — the
     local `kdive-mock-oidc:dev` image, exactly as before sourcing env.sh was added."""
     result, log = _run_stack_up(tmp_path, oidc_image=None)
     assert result.returncode == 0, result.stderr

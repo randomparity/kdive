@@ -65,7 +65,7 @@ class SkewPolicy(StrEnum):
 #: not load, and the remedy is a single documented command.
 _DEFAULT_SKIPPING = frozenset({SkewVerdict.STALE_RESTART})
 
-_REMEDY = "restart the app tier: scripts/live-stack/up.sh"
+_REMEDY = "restart the app tier: scripts/live-stack/stack-services.sh"
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +288,7 @@ def readyz_urls(base_url: str, env: dict[str, str] | None = None) -> dict[str, s
 
     The aux listener is loopback/pod-local by contract (ADR-0090 §5), so this only reaches a
     stack whose processes share a host with the tests — which is exactly the live-stack tier's
-    topology (``scripts/live-stack/up.sh`` runs the app tier as host processes).
+    topology (``scripts/live-stack/stack-services.sh`` runs the app tier as host processes).
 
     An explicit ``KDIVE_HEALTH_BIND_ADDR`` wins for every process (the ADR-0090 §5 single
     source-of-truth contract), so the per-process default map does not apply and one URL is

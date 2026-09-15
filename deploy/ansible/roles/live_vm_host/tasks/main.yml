@@ -51,7 +51,7 @@
 
 - name: "Install Docker Engine + compose plugin (the self-hosted job's on-box stack, #1293)"
   # The self-hosted live_vm gate brings up the compose backends on the box via
-  # scripts/live-stack/up.sh; without a container runtime that step fails on a freshly
+  # scripts/live-stack/stack-services.sh; without a container runtime that step fails on a freshly
   # reprovisioned cattle runner. Declared here so the runner is stack-capable, not hand-installed.
   ansible.builtin.apt:
     name: "{{ live_vm_host_docker_packages }}"

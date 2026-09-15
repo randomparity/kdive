@@ -26,7 +26,7 @@ fi
 source "${repo_root}/scripts/live-stack/env.sh"
 
 # The project this example onboards and mints a token for. One name, threaded through the
-# seed step (up.sh) and the token claims (mint-token.sh) so they always agree. `demo` matches
+# seed step (demo-up.sh) and the token claims (mint-token.sh) so they always agree. `demo` matches
 # the walkthrough, `just onboard`, and the Kubernetes demo chart.
 export KDIVE_PROJECT="${KDIVE_PROJECT:-demo}"
 
@@ -44,7 +44,7 @@ export KDIVE_MAX_SYS="${KDIVE_MAX_SYS:-4}"
 # libvirt consumer on the host — build-fs, the preflight, the daemons, the workers — must share
 # that daemon, so read it the way scripts/live-stack/worker-lifecycle.sh does (parsed as data,
 # never sourced as shell). Before the contract is installed the file is absent and the
-# live-stack default (qemu:///system) stands; up.sh then fails at the lifecycle witness with the
+# live-stack default (qemu:///system) stands; stack-services.sh then fails at the lifecycle witness with the
 # fix. An explicit KDIVE_LIBVIRT_URI in the caller's environment wins either way.
 # shellcheck source=scripts/live-stack/libvirt-uri.sh
 source "${repo_root}/scripts/live-stack/libvirt-uri.sh"

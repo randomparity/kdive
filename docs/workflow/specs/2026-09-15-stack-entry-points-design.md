@@ -63,7 +63,10 @@ rg -l --hidden '\b(up|down|status)\.sh\b|\bstack-up\b' --glob '!.git/**' --glob 
 
 and classifies every hit against the rule below before any rename. The sweep test in
 Validation applies that same regex outside the record roots, so what proves the sweep is the
-pattern that defined it; no count is frozen here.
+pattern that defined it; no count is frozen here. The test adds one negative lookbehind the
+generating command does not need: every replacement name embeds its predecessor
+(`stack-down.sh`, `demo-up.sh`) and `-` is a word boundary, so after the rename `\bdown\.sh\b`
+matches inside the new name and the guard could never go green.
 
 **Sweep rule.** Update a reference when the file is live surface: code, configuration, tests,
 CI, provisioning, `AGENTS.md`, and the operating guides under `docs/operating/` and

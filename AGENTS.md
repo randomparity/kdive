@@ -32,7 +32,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
 | `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, doc-link guards, all generated-artifact checks, then the suite |
-| `just stack-up` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated |
+| `just stack-backends` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated |
 | `just compose-up` | the **containerized** tier — backends *plus* `server`/`reconciler`, then the `worker` created and started through the lifecycle witness (`--profile managed-worker`) |
 | `just compose-stop` / `compose-down` | stop that tier; `compose-stop` keeps the named volumes, `compose-down` adds `--volumes` and drops the database and object store |
 | `just test-live-stack` | the `live_stack` suite; skips cleanly when the stack/fixtures are absent |
@@ -120,14 +120,16 @@ not interchangeable. Pick by what you need to run:
 
 | You want | Run | What you get |
 |----------|-----|--------------|
-| `just test-live-stack` / `just test-live-tcg` on a host that provisions real VMs | `just stack-up`, then `scripts/live-stack/up.sh`, then `just onboard` | backends + schema, then libvirt and the host processes, then a funded `demo` project + token |
-| a no-VM API loop against the host processes | `just stack-up`, then `scripts/live-stack/up.sh --skip-libvirt` | same, minus VM provisioning; still needs the installed worker units |
+| `just test-live-stack` / `just test-live-tcg` on a host that provisions real VMs | `scripts/live-stack/stack-services.sh`, then `just onboard` | backends + schema, then libvirt and the host processes, then a funded `demo` project + token |
+| a no-VM API loop against the host processes | `scripts/live-stack/stack-services.sh --skip-libvirt` | same, minus VM provisioning; still needs the installed worker units |
 | the app tier in containers, for in-network clients | `just compose-up` | `server`/`worker`/`reconciler` as Compose services |
-| a developer workstation driving KDIVE from an MCP client | `examples/local-libvirt/up.sh` | the same `scripts/live-stack/up.sh` bring-up, wrapped with host preflight, `onboard.sh`, and an `.mcp.json` merge into the kernel tree |
+| a developer workstation driving KDIVE from an MCP client | `examples/local-libvirt/demo-up.sh` | the same `scripts/live-stack/stack-services.sh` bring-up, wrapped with host preflight, `onboard.sh`, and an `.mcp.json` merge into the kernel tree |
 
-So `just stack-up` alone is **not** a running stack: it brings up Postgres, SeaweedFS, and the
-mock OIDC issuer, runs the one-shot `seaweedfs-init` to completion (bucket + versioning), and
-applies migrations. `scripts/live-stack/up.sh` is what starts libvirt and the app tier — `server`
+`scripts/live-stack/stack-services.sh` runs the backends itself, so there is no separate
+backends step ahead of it. `just stack-backends` is that same script stopped early
+(`--stage backends`): Postgres, SeaweedFS, and the mock OIDC issuer up, the one-shot
+`seaweedfs-init` run to completion (bucket + versioning), and migrations applied. It is **not**
+a running stack. `scripts/live-stack/stack-services.sh` is what starts libvirt and the app tier — `server`
 and `reconciler` as ordinary operator-owned host processes, workers in the fixed
 `kdive-live-worker@1..8.service` units through the installed lifecycle socket, with no
 direct-process fallback (ADR-0574). That host contract is installed by the `live_vm_host` Ansible
@@ -149,7 +151,7 @@ host play; needs `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` in the environment), and
 The bring-up details, failure diagnosis, and teardown live in
 [`docs/operating/runbooks/live-stack.md`](docs/operating/runbooks/live-stack.md) and
 [`scripts/live-stack/README.md`](scripts/live-stack/README.md); the app tier does not hot-reload,
-so re-run `scripts/live-stack/up.sh` after editing source.
+so re-run `scripts/live-stack/stack-services.sh` after editing source.
 
 `just type` is whole-tree on purpose: scoping `ty` to `src` once let a test-tree type
 error merge green, so `tests/` is type-checked only here. Don't narrow it back.

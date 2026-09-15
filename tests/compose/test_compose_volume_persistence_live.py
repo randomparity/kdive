@@ -4,8 +4,8 @@ Drives the committed ``docker-compose.yml`` under a unique project name and free
 starting only the three services whose images declare a ``VOLUME``. None of them has a
 ``build:`` or a ``depends_on``, so nothing is built and no other service starts.
 
-The proof never invokes ``just compose-down`` or ``scripts/live-stack/down.sh``: both act on
-the *default* project, which is the operator's own stack, and ``down.sh --wipe`` additionally
+The proof never invokes ``just compose-down`` or ``scripts/live-stack/stack-down.sh``: both act on
+the *default* project, which is the operator's own stack, and ``stack-down.sh --wipe`` additionally
 destroys every ``kdive-*`` libvirt domain. Every ``--volumes`` call here names this run's own
 project.
 

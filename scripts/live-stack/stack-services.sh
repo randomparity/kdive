@@ -7,10 +7,10 @@
 # still elevates, via sudo, to socket-activate the system daemon.
 #
 # Usage:
-#   scripts/live-stack/up.sh                 full bring-up
-#   scripts/live-stack/up.sh --reset-db      wipe the DB first (recovery from migration drift)
-#   scripts/live-stack/up.sh --skip-obs      skip prometheus/grafana
-#   scripts/live-stack/up.sh --skip-libvirt  backends + host processes only (no VM provisioning)
+#   scripts/live-stack/stack-services.sh                 full bring-up
+#   scripts/live-stack/stack-services.sh --reset-db      wipe the DB first (recovery from migration drift)
+#   scripts/live-stack/stack-services.sh --skip-obs      skip prometheus/grafana
+#   scripts/live-stack/stack-services.sh --skip-libvirt  backends + host processes only (no VM provisioning)
 #
 set -euo pipefail
 
@@ -36,7 +36,7 @@ for arg in "$@"; do
   esac
 done
 if ((EUID == 0)); then
-  echo "up.sh must run as the provisioned lifecycle-control operator, not UID 0" >&2
+  echo "stack-services.sh must run as the provisioned lifecycle-control operator, not UID 0" >&2
   exit 1
 fi
 
@@ -44,7 +44,7 @@ banner() { printf '\n=== %s ===\n' "$1"; }
 
 if [[ "$reset_db" == "1" ]]; then
   banner "reset-db (down --wipe)"
-  "${here}/down.sh" --wipe --yes
+  "${here}/stack-down.sh" --wipe --yes
 fi
 
 banner "preflight"
@@ -112,7 +112,7 @@ if ! bash "${here}/apply-migrations.sh"; then
   echo >&2
   echo "migration step failed. If this is the ADR-0015 immutable-migration guard (the DB's" >&2
   echo "applied history diverges from this checkout), recover with:" >&2
-  echo "    scripts/live-stack/up.sh --reset-db" >&2
+  echo "    scripts/live-stack/stack-services.sh --reset-db" >&2
   exit 1
 fi
 banner "runtime-role bootstrap"
@@ -204,7 +204,7 @@ restart_host_processes
 
 banner "inventory reconcile (register images + upload kernel-config siblings to S3)"
 # The reconciler daemon reconciles systems.toml on its loop, but run it once synchronously here so a
-# completed up.sh GUARANTEES the catalog is fully populated — every declared image registered and
+# completed stack-services.sh GUARANTEES the catalog is fully populated — every declared image registered and
 # every on-disk `<name>.config` sibling uploaded with `kernel_config_key` set (ADR-0336) — rather
 # than leaving the configs to appear on a later daemon pass. Runs as the invoking user, after the
 # daemons start: the synchronous pass and the daemon's own pass are both `reconcile_images`, which
@@ -223,7 +223,7 @@ KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
 }
 
 banner "status"
-"${here}/status.sh"
+"${here}/stack-status.sh"
 
 banner "next: fund a project"
 echo "The stack is up but no project is funded yet. Seed budget/quota + mint a token with:"
