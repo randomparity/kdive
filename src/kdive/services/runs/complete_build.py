@@ -230,7 +230,7 @@ class CompleteBuildFinalizer:
             outcome = "upload_window_expired"
             raise
         except CompleteBuildConfigurationError as exc:
-            reason = exc.data.get("reason", "configuration_error")
+            reason = exc.data.get("reason")
             outcome = reason if isinstance(reason, str) else "configuration_error"
             raise
         except BaseException:
@@ -433,6 +433,7 @@ def _log_measurement(
     Every value is a UUID string, a number, a bool, or a member of a fixed vocabulary, so the
     record carries no store key, object path, version id, or operator-supplied string.
     """
+    store_wait_s = sum(counter.wait_s for counter in counts)
     payload = {
         "run_id": str(run.id),
         "prepare_ms": timer.ms("prepare"),
@@ -443,7 +444,7 @@ def _log_measurement(
         "total_ms": timer.total_ms(),
         "store_requests": sum(counter.requests for counter in counts),
         "store_bytes": sum(counter.bytes_read for counter in counts),
-        "store_wait_ms": round(sum(counter.wait_s for counter in counts) * 1000.0, 3),
+        "store_wait_ms": round(store_wait_s * 1000.0, 3),
         "chunked": chunked,
         "outcome": outcome,
     }
