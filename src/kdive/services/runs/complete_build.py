@@ -47,7 +47,7 @@ _log = logging.getLogger(__name__)
 _EXTERNAL_BUILD_VALIDATION_SLOTS = asyncio.Semaphore(1)
 
 _MEASUREMENT_EVENT = "external_build_finalization_measured"
-"""Message prefix of the per-finalization measurement record (#2318, ADR-0655).
+"""Message prefix of the per-finalization measurement record (#2318, ADR-0656).
 
 Retained in every deployment, not gated to a measurement run: finalization is a rare
 operator-initiated action rather than a hot path, and the phase attribution an operator needs

@@ -95,7 +95,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Client request timeout the #2318 finalization-measurement driver runs under, so a large "
         "bundle completes and a finalization that would breach the budget is recorded rather "
         "than truncated at it. Distinct from the 300-second supported client budget the "
-        "resulting decision is tested against (ADR-0655) -- the read timeout the MCP SDK applies "
+        "resulting decision is tested against (ADR-0656) -- the read timeout the MCP SDK applies "
         "when the shipped clients pass none -- which is a module constant rather than a knob so "
         "the environment running the proof cannot move the threshold the accepted decision rests "
         "on.",

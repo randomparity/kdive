@@ -1,4 +1,4 @@
-"""Measure external-build finalization over the real MCP path (#2318, ADR-0655).
+"""Measure external-build finalization over the real MCP path (#2318, ADR-0656).
 
 Drives `investigations.open` → `runs.create` → `artifacts.create_run_upload` → presigned PUT →
 `runs.complete_build` against the live stack, then correlates the server's measurement record

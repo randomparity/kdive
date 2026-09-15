@@ -1,4 +1,4 @@
-"""Readout for the external-build finalization measurement (#2318, ADR-0655).
+"""Readout for the external-build finalization measurement (#2318, ADR-0656).
 
 `runs.complete_build` emits one measurement record per finalization attempt
 (`complete_build._MEASUREMENT_EVENT`). The driver runs as an MCP client in a separate process

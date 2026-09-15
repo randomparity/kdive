@@ -82,7 +82,7 @@ Transcribed from the spec and `AGENTS.md`, values included.
 | `docs/guide/reference/config.md` | env var table | + the driver's env vars |
 | `docs/operating/runbooks/live-testing.md` | three live tiers | + how to run the measurement driver |
 | `docs/design/2026-09-14-external-build-finalization-measurement-2318-proof-record.md` | — | new: the measured rows |
-| `docs/adr/0655-external-build-completion-contract.md` | — | new: the decision |
+| `docs/adr/0656-external-build-completion-contract.md` | — | new: the decision |
 
 No file changes owner. `complete_build.py` already owns finalization sequencing, so the timing
 and counting are a clean extension with no caller migration and no obsolete path to remove.
@@ -766,7 +766,7 @@ Provides to Task 4: the measured rows, as the proof record's table.
 
 **Where this fits.** The decision #2318 exists to make, and #2319's gate.
 
-**Creates:** `docs/adr/0655-external-build-completion-contract.md`
+**Creates:** `docs/adr/0656-external-build-completion-contract.md`
 
 ### Interfaces
 
@@ -803,7 +803,7 @@ Constraints. Provides: the accepted decision #2319 reads.
    be written before the evidence exists. Do not treat the earlier design review as covering the
    five contract definitions written here.
 
-3. Write `docs/adr/0655-external-build-completion-contract.md` with exactly the five sections
+3. Write `docs/adr/0656-external-build-completion-contract.md` with exactly the five sections
    `## Status`, `## Context`, `## Decision`, `## Consequences`, `## Considered & rejected`.
    Set `- **Status:** Accepted` — the decision ships with this PR.
 

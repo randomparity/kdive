@@ -6,7 +6,7 @@
 
 ## Concern
 
-ADR-0655 decides the external-build completion contract from measured rows recorded on
+ADR-0656 decides the external-build completion contract from measured rows recorded on
 **x86_64 only**. The measurement harness it rests on is arch-parameterized on both axes that
 matter — the `arch` passed to `combined_kernel_tar`, which selects the boot member, and the
 Run's `build_profile["arch"]`, which is what `_build_arch`
@@ -14,7 +14,7 @@ Run's `build_profile["arch"]`, which is what `_build_arch`
 its line) hands to the ADR-0343 per-arch check — and
 the ppc64le arm runs the same code under `KDIVE_PPC64LE_BUNDLE`. It has never executed.
 
-ADR-0655 names the outstanding ppc64le confirmation as one of four conditions that reopen its
+ADR-0656 names the outstanding ppc64le confirmation as one of four conditions that reopen its
 decision. That makes the decision's own stated validity depend on an arm nobody is booked to
 run: issue #2318 closes with the pull request that writes the ADR, so without this record the
 reopening condition has no surviving owner and becomes unreachable in practice.
@@ -50,7 +50,7 @@ the arm is one `pytest` invocation against the already-merged driver, not new co
   `build_profile`, removes the only thing that makes this record cheap to resolve.
 - The arm must keep skipping cleanly when `KDIVE_PPC64LE_BUNDLE` is unset and raising when it is
   set but lacks `kernel.tar.gz`, so a future run cannot silently produce no row.
-- ADR-0655's `## Consequences` must keep naming the ppc64le confirmation as a reopening
+- ADR-0656's `## Consequences` must keep naming the ppc64le confirmation as a reopening
   condition for as long as this record is open.
 
 ## What would resolve it
@@ -68,13 +68,13 @@ against a live stack, then append the recorded row to
 `docs/design/2026-09-14-external-build-finalization-measurement-2318-proof-record.md`.
 
 Done when that row exists and one of two things is true: its phase attribution agrees with the
-x86_64 rows, in which case this record is resolved and ADR-0655 stands with the ppc64le
-reopening condition discharged; or it does not, in which case ADR-0655 is reopened by a
+x86_64 rows, in which case this record is resolved and ADR-0656 stands with the ppc64le
+reopening condition discharged; or it does not, in which case ADR-0656 is reopened by a
 superseding ADR and this record is resolved by pointing at it.
 
 ## Provenance
 
 target: tests/integration/test_finalization_measurement.py
 Deferred while implementing issue #2318 on 2026-09-14, under exclusion 6 of that issue's
-approved scope charter. Recorded because ADR-0655 makes the unrun arm a condition on its own
+approved scope charter. Recorded because ADR-0656 makes the unrun arm a condition on its own
 decision, and the issue that deferred it closes with the same pull request.

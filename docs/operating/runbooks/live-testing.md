@@ -283,11 +283,11 @@ including the host-process env block, is in the
 
 One `live_stack` driver measures `runs.complete_build` rather than exercising a boot:
 `tests/integration/test_finalization_measurement.py`. It records the phase attribution — queue
-wait, archive scan, publication, object-store request count and bytes — that ADR-0655's
+wait, archive scan, publication, object-store request count and bytes — that ADR-0656's
 completion-contract decision rests on.
 
 ```
-scripts/live-stack/up.sh --skip-libvirt   # the Run is unbound: no System, no VM
+scripts/live-stack/stack-services.sh --skip-libvirt   # the Run is unbound: no System, no VM
 KDIVE_KERNEL_SRC=/path/to/built/tree \
 KDIVE_MEASUREMENT_STAGE_DIR=/path/on/real/disk \
 KDIVE_MEASUREMENT_OUT=/path/to/rows.jsonl \
@@ -773,3 +773,4 @@ before workers are released. The required free capacity per worker is that ceili
 the configured simultaneous-activation count. If the observed value is lower, provisioning stops
 and external boot is not advertised. Increase the filesystem capacity or lower admitted
 concurrency, then rerun provisioning.
+ovisioning.

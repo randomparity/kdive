@@ -137,7 +137,7 @@ def test_supported_budget_matches_the_shipped_client() -> None:
 
     An earlier version of this test asserted `SUPPORTED_BUDGET_S == 30.0`: a literal compared
     to itself, which passed no matter what fastmcp or the MCP SDK did. It therefore could not
-    falsify the one claim ADR-0655's decision rests on — and did not, when the constant was
+    falsify the one claim ADR-0656's decision rests on — and did not, when the constant was
     30 s and the client's actual bound was 300 s. This builds the client the way
     `LiveStackClient.over_http` does, confirms it leaves the read timeout unset, and takes the
     budget from what the SDK then applies.
@@ -152,7 +152,7 @@ def test_supported_budget_matches_the_shipped_client() -> None:
     effective = create_mcp_http_client(headers={}).timeout
     assert effective.read == SUPPORTED_BUDGET_S, (
         f"the shipped client's read timeout is {effective.read}s, but the recorded supported "
-        f"budget is {SUPPORTED_BUDGET_S}s; ADR-0655's decision is graded against this number"
+        f"budget is {SUPPORTED_BUDGET_S}s; ADR-0656's decision is graded against this number"
     )
     connect = cast("float", effective.connect)
     assert connect < SUPPORTED_BUDGET_S, (

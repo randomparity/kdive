@@ -2,7 +2,7 @@
 
 Measured attribution for `runs.complete_build` over the real MCP path, for a small and a large
 x86_64 kernel bundle. Written to settle the completion-contract decision recorded in
-[ADR-0655](../adr/0655-external-build-completion-contract.md), which parent #2314 could not make
+[ADR-0656](../adr/0656-external-build-completion-contract.md), which parent #2314 could not make
 from the reports it had.
 
 Both rows were recorded on 2026-09-15 against deployed commit `25997d7e0`. They retain
@@ -54,7 +54,7 @@ asserted `SUPPORTED_BUDGET_S == 30.0` and therefore could not fail however the S
 
 **What 300 s does and does not cover.** It is what the clients *this repository ships* enforce.
 An external agent using its own MCP client may set a shorter one, and the server cannot see or
-raise it. The decision below is scoped accordingly, and ADR-0655 names that as a reopening
+raise it. The decision below is scoped accordingly, and ADR-0656 names that as a reopening
 condition.
 
 The driver runs under a deliberately larger timeout (`KDIVE_MEASUREMENT_TIMEOUT_S`, 1 800 s) so a
@@ -305,7 +305,7 @@ what #2318 establishes, not a finding against #2314.
 
 Recorded on 2026-09-15 against deployed commit `52bca7d5e` on a POWER9 host. This is the
 confirmation run owned by [debt record 0015](../debt/0015-ppc64le-finalization-measurement-unrun.md)
-and named as a reopening condition in ADR-0655.
+and named as a reopening condition in ADR-0656.
 
 ### Environment
 
@@ -379,10 +379,10 @@ is the same caveat the x86_64 rows carry.
 **Queue wait was uncontended.** `queue_wait_ms` is 0.008 ms — the same floor measured on
 x86_64. The uncontended floor is arch-independent.
 
-**The decision stands under ppc64le evidence.** ADR-0655's reopening condition is that the
+**The decision stands under ppc64le evidence.** ADR-0656's reopening condition is that the
 ppc64le row disagrees with the x86_64 attribution. It agrees: scan dominates, queue and
 publication are negligible, and the per-byte cost difference is a machine-speed factor, not a
-different attribution. ADR-0655 stands; debt record 0015 is resolved.
+different attribution. ADR-0656 stands; debt record 0015 is resolved.
 
 ## Reproducing
 
