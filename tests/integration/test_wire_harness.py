@@ -1,9 +1,15 @@
 """Three-tier wire smoke test (ADR-0044): in-memory / oidc_issuer / live_stack.
 
-The in-memory tier (Docker-free) covers the claim shape; the ``oidc_issuer`` tier is the
-standing claim-shape gate (real issuer + real verifier); the ``live_stack`` tier drives the
-per-role ``resources.list`` probe over real HTTP — the only tier where authenticated tool
-dispatch works (the in-memory transport carries no token).
+The in-memory tier (Docker-free) covers the claim shape and the agent-gateway catalog
+expectation; the ``oidc_issuer`` tier is the standing claim-shape gate (real issuer + real
+verifier); the ``live_stack`` tier drives both exposure profiles over real HTTP — the only
+tier where authenticated tool dispatch works (the in-memory transport carries no token).
+
+The two ``live_stack`` tests assert the accepted gateway contract (ADR-0268 §4, ADR-0456),
+not the pre-gateway flat catalog: a connection whose verified ``azp`` is not the configured
+``kdivectl`` client id is clipped to ``CORE_TOOLS``, and only the operator CLI's own client
+id sees the full RBAC-visible catalog. The proof record for that contract is
+``docs/design/2026-07-27-mcp-exposure-profiles-proof-record-1582.md``.
 """
 
 from __future__ import annotations
@@ -12,8 +18,12 @@ import asyncio
 
 import jwt  # PyJWT: decode a token's claims without verifying the signature
 import pytest
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 
+import kdive.config as config
+from kdive.config.cli_settings import CLI_CLIENT_ID
 from kdive.mcp.dev_harness import (
     AUDIENCE,
     LiveStackClient,
@@ -22,6 +32,9 @@ from kdive.mcp.dev_harness import (
     mint,
     mint_token,
 )
+from kdive.mcp.exposure import CORE_TOOLS, visible_tool_names
+from kdive.mcp.responses import ToolResponse
+from kdive.security.authz.context import context_from_claims
 from kdive.security.authz.rbac import Role, roles_from_claims
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 
@@ -33,6 +46,28 @@ _ROLE_SUBJECTS = (
     ("admin-proj-a", {_PROJECT: "admin"}, None),
     ("auditor", {_PROJECT: "viewer"}, ["platform_auditor"]),
 )
+# A tool deliberately outside CORE_TOOLS: absent from an agent's catalog, still reachable.
+_UNADVERTISED_TOOL = "resources.list"
+
+
+def _expected_agent_catalog(roles: dict[str, str], platform_roles: list[str] | None) -> set[str]:
+    """The names an agent-profile connection holding these grants sees from ``tools/list``.
+
+    Derived from the server's own classification map rather than pinned to a literal list:
+    the gateway clips a non-``kdivectl`` caller to ``rbac_visible & CORE_TOOLS``
+    (``mcp/middleware/exposure.py``), so a change to either ``CORE_TOOLS`` membership or a
+    core tool's required scope moves this expectation with it instead of silently
+    invalidating the live assertion.
+    """
+    claims = _build_claims(
+        subject="catalog-probe",
+        audience=AUDIENCE,
+        projects=[_PROJECT],
+        roles=roles,
+        platform_roles=platform_roles,
+        agent_session="sess-1",
+    )
+    return visible_tool_names(context_from_claims(claims), CORE_TOOLS)
 
 
 def test_inmemory_tier_claim_shapes_round_trip() -> None:
@@ -52,6 +87,33 @@ def test_inmemory_tier_claim_shapes_round_trip() -> None:
     )
     assert claims["platform_roles"] == ["platform_auditor"]  # flat array
     assert claims["roles"] == {_PROJECT: "viewer"}  # nested object
+
+
+def test_inmemory_tier_agent_catalog_is_core_tools_clipped_by_rbac() -> None:
+    """The catalog the live tier asserts over HTTP, derived here without a transport.
+
+    Both sides are spelled out rather than compared back to ``CORE_TOOLS``: the live
+    assertion follows drift on purpose, so something has to notice the drift. These are the
+    two catalogs the ADR-0456 proof record measured over the wire — six names for a viewer,
+    nine for a contributor (``docs/design/2026-07-27-mcp-exposure-profiles-proof-record-1582.md``
+    §1) — so a change to ``CORE_TOOLS`` membership or to a core tool's required scope reddens
+    ``just ci`` and sends the change back to ADR-0268 §4, instead of silently moving what the
+    live tier proves.
+    """
+    viewer = _expected_agent_catalog({_PROJECT: "viewer"}, None)
+    assert viewer == {
+        "tools.search",
+        "tools.invoke",
+        "session.whoami",
+        "runs.get",
+        "runs.list",
+        "allocations.wait",
+    }
+    contributor = _expected_agent_catalog({_PROJECT: "operator"}, None)
+    assert contributor == viewer | {"runs.create", "allocations.request", "systems.provision"}
+    assert viewer < contributor
+    # Holding a platform role does not buy the contributor-gated core tools (ADR-0456 §1).
+    assert _expected_agent_catalog({_PROJECT: "viewer"}, ["platform_auditor"]) == viewer
 
 
 @pytest.mark.oidc_issuer
@@ -88,10 +150,33 @@ def test_oidc_issuer_tier_mints_and_verifies_claim_shapes() -> None:
     asyncio.run(_run())
 
 
+async def _invoke_through_gateway(base_url: str, token: str, tool: str) -> ToolResponse:
+    """Call ``tool`` through ``tools.invoke`` over HTTP and parse the inner envelope.
+
+    Not routed through :meth:`LiveStackClient.call_tool`: its ``name`` parameter is not
+    positional-only, so the gateway's own ``name`` argument cannot be passed through it.
+    ``tools.invoke`` returns the inner tool's structured content verbatim, so the payload
+    parsed here is ``resources.list``'s own ``ToolResponse`` dump.
+    """
+    transport = StreamableHttpTransport(url=base_url, headers={"Authorization": f"Bearer {token}"})
+    async with Client(transport) as client:
+        result = await client.call_tool("tools.invoke", {"name": tool, "arguments": {}})
+    payload = result.structured_content
+    assert payload is not None, f"{tool} through tools.invoke returned no structured content"
+    return ToolResponse.model_validate(payload)
+
+
 @pytest.mark.live_stack
-def test_live_stack_tier_reads_resources_over_http_per_role() -> None:
-    """Over HTTP against a host-run server: list_tools + a resources.list per role, tokens
-    minted by the real issuer and validated through the server's verifier."""
+def test_live_stack_tier_agent_catalog_is_gateway_clipped_over_http() -> None:
+    """Over HTTP against a host-run server: the agent-profile catalog per role, and a tool
+    the catalog omits reached through the gateway.
+
+    Tokens carry no ``azp``, so every connection here takes the ``AGENT_GATEWAY`` profile
+    and ``tools/list`` returns exactly ``rbac_visible & CORE_TOOLS`` (ADR-0268 §4,
+    ADR-0456). ``resources.list`` is therefore absent, and ADR-0268's consequence — a
+    non-core tool stays reachable through ``tools.search`` + ``tools.invoke`` — is what
+    makes that acceptable, so this asserts the reach rather than only the absence.
+    """
     issuer = require_issuer()
     base_url = require_stack()
 
@@ -105,12 +190,15 @@ def test_live_stack_tier_reads_resources_over_http_per_role() -> None:
                 platform_roles=platform_roles,
                 agent_session="sess-1",
             )
-            client = LiveStackClient.over_http(base_url, token)
-            async with client:
-                names = await client.list_tools()
-                assert "resources.list" in names
-                result = await client.call_tool("resources.list")
-            assert isinstance(result, list)
+            async with LiveStackClient.over_http(base_url, token) as client:
+                names = set(await client.list_tools())
+            assert names == _expected_agent_catalog(roles, platform_roles), subject
+            assert _UNADVERTISED_TOOL not in names
+            envelope = await _invoke_through_gateway(base_url, token, _UNADVERTISED_TOOL)
+            assert envelope.error_category is None, (
+                f"{_UNADVERTISED_TOOL} through tools.invoke failed for {subject}: "
+                f"{envelope.error_category} {envelope.detail}"
+            )
 
     asyncio.run(_run())
 
@@ -122,9 +210,16 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
     are absent. This is the transport-level proof that the verified token resolves inside
     the ``on_list_tools`` hook over real HTTP — the filter never fires under the in-memory
     transport (which carries no token), so the live tier is the only place it is provable.
+
+    Both tokens carry the operator CLI's OIDC ``azp`` so the connection takes the
+    ``OPERATOR_DIRECT`` profile and ``tools/list`` returns the full RBAC-visible catalog
+    (ADR-0456). Under the agent profile the gateway clips both catalogs to ``CORE_TOOLS``
+    first, which would leave the RBAC filter's own effect unobservable — the sibling test
+    above covers that profile.
     """
     issuer = require_issuer()
     base_url = require_stack()
+    cli_client_id = config.require(CLI_CLIENT_ID)
 
     async def _names(
         subject: str, roles: dict[str, str], platform_roles: list[str] | None
@@ -136,6 +231,7 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
             roles=roles,
             platform_roles=platform_roles,
             agent_session="sess-1",
+            client_id=cli_client_id,
         )
         async with LiveStackClient.over_http(base_url, token) as client:
             return set(await client.list_tools())
@@ -146,6 +242,8 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
             "admin-scope", {_PROJECT: "admin"}, ["platform_operator", "platform_admin"]
         )
 
+        # The operator profile is in force, not the gateway's CORE_TOOLS clip.
+        assert not viewer <= CORE_TOOLS, "viewer catalog was clipped; azp did not take effect"
         # Public + viewer-gated reads are advertised to the viewer.
         assert {"projects.list", "jobs.wait", "systems.list"} <= viewer
         # Operator/admin/platform-gated tools are hidden from the viewer.
