@@ -12,6 +12,13 @@ libvirt_stack_packages_debian:
   # pull them in transitively the way Fedora's libvirt packages do.
   - python3-libvirt
   - python3-lxml
+  # `combined_kernel_tar` (tests/integration/live_stack/spine.py) shells out to `make`
+  # and a GNU `tar` supporting --transform when it cuts a combined kernel bundle. Both
+  # were a pre-existing undeclared dependency of the live-stack spine; the #2318
+  # finalization-measurement driver depends on them too, so they are declared here
+  # (AGENTS.md puts general build-host tools in this role, not live_vm_host).
+  - make
+  - tar
 libvirt_stack_packages_redhat:
   - libvirt
   - libvirt-client
@@ -23,6 +30,13 @@ libvirt_stack_packages_redhat:
   - libseccomp
   - python3-libvirt
   - python3-lxml
+  # `combined_kernel_tar` (tests/integration/live_stack/spine.py) shells out to `make`
+  # and a GNU `tar` supporting --transform when it cuts a combined kernel bundle. Both
+  # were a pre-existing undeclared dependency of the live-stack spine; the #2318
+  # finalization-measurement driver depends on them too, so they are declared here
+  # (AGENTS.md puts general build-host tools in this role, not live_vm_host).
+  - make
+  - tar
 libvirt_stack_packages_suse:
   - libvirt-daemon-qemu
   - libvirt-daemon-proxy
@@ -36,6 +50,13 @@ libvirt_stack_packages_suse:
   # Zypper capabilities select bindings for the distro's default Python ABI.
   - python3-libvirt-python
   - python3-lxml
+  # `combined_kernel_tar` (tests/integration/live_stack/spine.py) shells out to `make`
+  # and a GNU `tar` supporting --transform when it cuts a combined kernel bundle. Both
+  # were a pre-existing undeclared dependency of the live-stack spine; the #2318
+  # finalization-measurement driver depends on them too, so they are declared here
+  # (AGENTS.md puts general build-host tools in this role, not live_vm_host).
+  - make
+  - tar
 
 # The `live_vm_tcg` tier exercises ppc64le guests. EL distributions cannot install
 # their emulator, but Fedora can despite sharing Ansible's RedHat OS family.
