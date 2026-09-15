@@ -11,8 +11,8 @@ sweep. Specifically:
 1. ``artifacts.list(system_id)`` grows new ``console-part-*`` rows after the Run is terminal
    and a post-readiness workload keeps writing to the serial console.
 2. ``artifacts.get`` on the newest console-part inflates the gzip to plaintext containing the
-   unique post-readiness proof marker written via the qemu guest agent AFTER the boot step
-   completed and captured the frozen evidence.
+   unique post-readiness proof marker written over loopback SSH (local-libvirt domains carry no
+   qemu guest-agent channel) AFTER the boot step completed and captured the frozen evidence.
 3. ``artifacts.get`` on the frozen per-Run ``console-<run>`` evidence (``runs.get``
    ``refs["console"]``) does NOT contain that marker — proving it was captured before the
    workload and cannot have drifted post-hoc.
@@ -48,6 +48,7 @@ from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
     SpinePhaseError,
     await_system_state,
+    build_and_upload_kernel,
     drain_job,
     mint_role_token,
     ok,
@@ -125,11 +126,13 @@ def _provision_profile() -> dict[str, object]:
 
 
 def _build_profile() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
-        "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
-    }
+    """The Run build profile for the x86_64 spine (upload-only lane, ADR-0337).
+
+    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` + the
+    target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
+    (see ``build_and_upload_kernel``), not a server ``kernel_source_ref``/``config`` build.
+    """
+    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _emit_proof_lines(domain: libvirt.virDomain, key_path: Path, proof_marker: str) -> None:
@@ -362,7 +365,10 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                 )
                 run_id = env.object_id
 
-            for step in ("build", "install", "boot"):
+            async with phase("upload-build"):
+                await build_and_upload_kernel(op, run_id=run_id)
+
+            for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                     await drain_job(op, step, env.object_id)
