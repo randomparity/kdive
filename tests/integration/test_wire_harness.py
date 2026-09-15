@@ -116,6 +116,11 @@ def test_inmemory_tier_agent_catalog_is_core_tools_clipped_by_rbac() -> None:
     contributor = _expected_agent_catalog({_PROJECT: "contributor"}, None)
     assert contributor == viewer | {"runs.create", "allocations.request", "systems.provision"}
     assert viewer < contributor
+    # Pin the two remaining _ROLE_SUBJECTS shapes against the literal contributor set. Their
+    # expectation otherwise runs through the same role_satisfies chain the server uses, so a
+    # role-ordering regression would move both sides of those live rows together.
+    assert _expected_agent_catalog({_PROJECT: "operator"}, None) == contributor
+    assert _expected_agent_catalog({_PROJECT: "admin"}, None) == contributor
     # The tool the live tier reaches through the gateway has to stay outside the core set,
     # or its absence from an agent's catalog stops being the thing that test proves.
     assert _UNADVERTISED_TOOL not in CORE_TOOLS
@@ -157,7 +162,9 @@ def test_oidc_issuer_tier_mints_and_verifies_claim_shapes() -> None:
     asyncio.run(_run())
 
 
-async def _invoke_through_gateway(base_url: str, token: str, tool: str) -> ToolResponse:
+async def _invoke_through_gateway(
+    base_url: str, token: str, tool: str, subject: str
+) -> ToolResponse:
     """Call ``tool`` through ``tools.invoke`` over HTTP and parse the inner envelope.
 
     Not routed through :meth:`LiveStackClient.call_tool`: its ``name`` parameter is not
@@ -176,7 +183,7 @@ async def _invoke_through_gateway(base_url: str, token: str, tool: str) -> ToolR
             "tools.invoke", {"name": tool, "arguments": {}}, raise_on_error=False
         )
     if getattr(result, "is_error", False):
-        raise LiveStackToolError(tool, _tool_error_text(result))
+        raise LiveStackToolError(tool, f"as {subject}: {_tool_error_text(result)}")
     payload = result.structured_content
     assert payload is not None, f"{tool} through tools.invoke returned no structured content"
     return ToolResponse.model_validate(payload)
@@ -190,8 +197,9 @@ def test_live_stack_tier_agent_catalog_is_gateway_clipped_over_http() -> None:
     Tokens carry no ``azp``, so every connection here takes the ``AGENT_GATEWAY`` profile
     and ``tools/list`` returns exactly ``rbac_visible & CORE_TOOLS`` (ADR-0268 §4,
     ADR-0456). ``resources.list`` is therefore absent, and ADR-0268's consequence — a
-    non-core tool stays reachable through ``tools.search`` + ``tools.invoke`` — is what
-    makes that acceptable, so this asserts the reach rather than only the absence.
+    non-core tool stays reachable — is what makes that acceptable, so this asserts the
+    reach through ``tools.invoke`` rather than only the absence. The ``tools.search`` half
+    of that consequence is not covered here; it belongs with the live-tier sweep.
     """
     issuer = require_issuer()
     base_url = require_stack()
@@ -211,7 +219,7 @@ def test_live_stack_tier_agent_catalog_is_gateway_clipped_over_http() -> None:
             # The catalog is the gateway clip, so _UNADVERTISED_TOOL's absence follows from
             # this equality; the sibling in-memory test pins it out of CORE_TOOLS.
             assert names == _expected_agent_catalog(roles, platform_roles), subject
-            envelope = await _invoke_through_gateway(base_url, token, _UNADVERTISED_TOOL)
+            envelope = await _invoke_through_gateway(base_url, token, _UNADVERTISED_TOOL, subject)
             assert envelope.error_category is None, (
                 f"{_UNADVERTISED_TOOL} through tools.invoke failed for {subject}: "
                 f"{envelope.error_category} {envelope.detail}"
@@ -262,8 +270,16 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
             "admin-scope", {_PROJECT: "admin"}, ["platform_operator", "platform_admin"]
         )
 
-        # The operator profile is in force, not the gateway's CORE_TOOLS clip.
-        assert not viewer <= CORE_TOOLS, "viewer catalog was clipped; azp did not take effect"
+        # The operator profile is in force, not the gateway's CORE_TOOLS clip. Three causes
+        # reach this line — a server whose KDIVE_CLI_CLIENT_ID differs from this process's, a
+        # server-side config read that raised (the middleware falls back to the agent profile
+        # without saying so), and a genuine profile-resolution defect — so the message names
+        # the one an operator can act on first.
+        assert not viewer <= CORE_TOOLS, (
+            f"viewer catalog was clipped: the server did not resolve azp={cli_client_id!r} as "
+            "the operator CLI — check that the server process's KDIVE_CLI_CLIENT_ID matches "
+            "this one"
+        )
         # Public + viewer-gated reads are advertised to the viewer.
         assert {"projects.list", "jobs.wait", "systems.list"} <= viewer
         # Operator/admin/platform-gated tools are hidden from the viewer.
