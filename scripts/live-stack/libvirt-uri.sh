@@ -10,10 +10,15 @@
 # KDIVE_ prefix, no row in the generated config reference, and deliberately so — it names a path,
 # not a runtime setting kdive.config reads.
 #
-# A redirect to a file that IS there reaches the same validation /etc does — a non-symlink regular
-# file `stat` reports as root:root 0644, holding exactly one KDIVE_LIBVIRT_URI line naming one of
-# the two URIs in LIBVIRT_SOCKET_URIS — so it can only ever yield a value that was already
-# correct. A redirect to a path that is NOT there is a different matter: resolve_libvirt_uri reads
+# What bounds a redirect to a file that IS there is the allowlist in load_published_libvirt_uri:
+# the content must be exactly one KDIVE_LIBVIRT_URI line naming one of the two URIs in
+# LIBVIRT_SOCKET_URIS, and bash imports no array variables, so that array cannot be widened from
+# the environment either. A redirect can therefore only ever yield a value that was already
+# correct. The root:root 0644 probe in require_exact_libvirt_env is NOT part of that bound: it
+# shells out to `stat` through the caller's PATH, so a caller who can set LIBVIRT_ENV can answer
+# the probe too — which is exactly how the tests stage a contract. It guards a tampered /etc
+# entry, which is meaningful because /etc/kdive is root:root 0755, not the caller who chose the
+# path. A redirect to a path that is NOT there is a different matter: resolve_libvirt_uri reads
 # it as "no lifecycle contract installed" and resolves qemu:///system with no message, exactly as
 # it does on a bare dev host, because nothing here can tell the two apart. On a provisioned host
 # that is the server/worker split this file exists to prevent, so the seam is only safe for a
