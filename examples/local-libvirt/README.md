@@ -24,7 +24,7 @@ demo walkthrough below. Otherwise:
 
 - A KVM host with `libvirt` and a running `libvirtd`/`virtqemud`, the `default` network
   active, and your user in the `libvirt` group.
-- Docker with a reachable daemon (for the Postgres / MinIO / mock-OIDC backends).
+- Docker with a reachable daemon (for the Postgres / SeaweedFS / mock-OIDC backends).
 - The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`. There is no
   PyPI wheel yet; the checkout is the install, and the scripts here run from it.
 - The fixed live-worker lifecycle contract installed for this checkout and your user
