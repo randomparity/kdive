@@ -255,6 +255,13 @@ what #2318 establishes, not a finding against #2314.
 
 ## What these rows do not establish
 
+- **Both rows measured a kernel-only manifest.** Each declared exactly one artifact, `kernel`.
+  The upload contract also accepts `initrd` (digested in full, bounded at 512 MiB by
+  `_EXTERNAL_BOOT_INITRD_MAX_BYTES`), `vmlinux` (ranged reads for the build-id) and
+  `effective_config` — each adding store requests and hashing inside the same synchronous
+  request. The ~40.5 s ceiling figure is therefore a bound over bundle *size* for this manifest
+  shape, not over every manifest the contract accepts. At 7.4x headroom the omitted work is
+  absorbed, but it was not measured.
 - **No universal size threshold.** #2314 and #2318 both exclude one. The extrapolation to the
   2 GiB ceiling above is a property of these two rows on this machine and this deployment shape,
   not a general boundary. A different host, object store, or module mix moves it.

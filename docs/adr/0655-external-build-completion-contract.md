@@ -32,8 +32,12 @@ Four results decide this record:
 
 - A 1 845 478 477-byte bundle finalized in **34 820 ms** — 11.6% of the budget.
 - `_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES` is 2 GiB (`validation.py:59`), so the largest
-  bundle the contract accepts extrapolates to **~40.5 s** at the measured per-byte rate. The
-  ceiling turns one measurement into a bound over every accepted input.
+  **kernel bundle** the contract accepts extrapolates to **~40.5 s** at the measured per-byte
+  rate. The ceiling turns one measurement into a bound over every accepted bundle size — for the
+  kernel-only manifest both rows declared. The contract also accepts `initrd` (digested whole, up
+  to 512 MiB), `vmlinux` (ranged ELF reads) and `effective_config`, each adding store requests
+  and hashing to the same synchronous request. None was measured; the headroom absorbs them, but
+  the figure is not a bound over every accepted *manifest*.
 - Scanning is **99.97%** of the large bundle's total. Queue wait was 0.006 ms and publication
   9.207 ms.
 - Of the scan, **6914 ms** was time inside the object store across 1335 requests (5.18 ms each);
@@ -60,8 +64,10 @@ cannot quietly drop a property nobody wrote down.
 ### Shape
 
 One `runs.complete_build` request validates and publishes, and answers when it is done. A caller
-waits; it is not asked to poll. The measured cost is a property of the bundle, not of the
-deployment's mood, so the wait is bounded by size and the size is bounded by the contract.
+waits; it is not asked to poll. Uncontended, the measured cost is a property of the bundle rather
+than of the deployment's mood, so the wait is bounded by size and the size is bounded by the
+contract. Under simultaneous finalizations the semaphore turns that bound into a queue — see
+*Consequences*, where that is the first reopening condition.
 
 ### Retry and idempotency
 
