@@ -303,6 +303,12 @@ Three things about it differ from the boot proofs:
   the tar it cuts, and a distro-config tree with debug info stages ~7.6 GB to produce a ~2.5 GB
   bundle. `tmp_path` is rooted at the system temp directory, commonly tmpfs, and pytest keeps
   the last three runs — so set `KDIVE_MEASUREMENT_STAGE_DIR` to real disk for a large bundle.
+- **A distro-config debug tree will not finalize as built.** That ~2.5 GB bundle is above the
+  2 GiB accepted ceiling (`_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES`) and is rejected, and the
+  distro default `CONFIG_KERNEL_ZSTD=y` is rejected separately by the defect filed as #2476. The
+  tree has to be pruned and relinked with `CONFIG_KERNEL_GZIP=y` first; the exact steps are in
+  [the proof record](../../design/2026-09-14-external-build-finalization-measurement-2318-proof-record.md),
+  under "## Reproducing".
 - **Two timeouts, deliberately separate.** `KDIVE_MEASUREMENT_TIMEOUT_S` (default 1800) is what
   the driver runs under, so a finalization that would breach the budget is still recorded rather
   than truncated at it. The supported client budget it is measured *against* is 300 s — the

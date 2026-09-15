@@ -10,11 +10,14 @@ every row without changing what `complete_build` does.
 
 Two clocks, kept apart because conflating them is how the decision becomes unfalsifiable:
 
-- `SUPPORTED_BUDGET_S` (30 s) is MCP's default client request timeout, which
-  `LiveStackClient.over_http` does not override. It is the threshold ADR 0655 tests against.
+- `SUPPORTED_BUDGET_S` (300 s) is the read timeout the MCP SDK applies when the clients this
+  repository ships pass none, which `LiveStackClient.over_http` does not override. It is the
+  threshold ADR 0655 tests against. The 30-second figure is the *connect* default and is not the
+  request bound; an earlier revision of this harness took one for the other and the resulting
+  ADR selected the opposite branch.
 - `KDIVE_MEASUREMENT_TIMEOUT_S` (default 1800 s) is what *this driver* runs under, so a
-  multi-gigabyte bundle completes and can be measured at all. A driver bounded by 30 s would
-  truncate the very measurement that decides whether 30 s is enough.
+  finalization that would breach the budget is recorded rather than truncated at it. A driver
+  bounded by the budget could not measure the case that decides whether the budget is enough.
 
 The driver measures; it does not gate. It asserts the record is present, the outcome succeeded,
 and the phases sum within the total — never a duration threshold. Comparing against the budget
@@ -153,8 +156,8 @@ def test_external_build_finalization_is_measured(arch: str, tmp_path: Path) -> N
 
     async def _run() -> MeasurementRow:
         # Built here rather than via LiveStackClient.over_http: that helper passes no timeout,
-        # so it runs at MCP's 30 s default — which is the budget under test, and would cut the
-        # large arm off mid-measurement.
+        # so it runs at exactly the budget under test — which would cut off any arm that
+        # breached it, turning the one result that matters into a transport error.
         transport = StreamableHttpTransport(
             url=base_url, headers={"Authorization": f"Bearer {operator_token}"}
         )

@@ -42,9 +42,13 @@ Four results decide this record:
 ## Decision
 
 **Synchronous completion is retained.** The rule fixed before the measurement — synchronous
-completion is retained if the larger bundle's `total_ms` meets the supported budget — is met,
-with 8.6× headroom on the measured bundle and 7.4× on the largest one the contract accepts.
-Issue #2319's durable asynchronous finalization is **not** activated by this evidence.
+completion is retained if the larger bundle meets the supported budget — is met, with 8.6×
+headroom on the measured bundle and 7.4× on the largest one the contract accepts. Issue #2319's
+durable asynchronous finalization is **not** activated by this evidence.
+
+The budget is a client-side bound, so the rule is applied to the driver's `client_elapsed_ms`
+(34 941 ms), not to the server's `total_ms` (34 820 ms). The 121 ms between them is transit and
+envelope handling; both are recorded, and at this margin the choice changes nothing.
 
 No margin factor was applied, and none was needed in either direction: the charter reserved a
 labelled judgement for a total landing close to the budget, and 11.6% of it is not that case.
@@ -65,15 +69,18 @@ The idempotency key is the pair **(Run, upload-window identity)**. The window id
 the fencing token this service uses, and a client-supplied token would let two callers disagree
 about which attempt is which.
 
-A `complete_build` on a Run whose build step is already recorded returns that result rather than
-redoing the work — `existing_build_result` at `src/kdive/services/runs/complete_build.py:569-571`
-and `:656`. That is what makes a retry safe after any interruption, and it is load-bearing for
-the recovery property below rather than an optimisation.
+A **sequential** retry on a Run whose build step is already recorded returns that result without
+redoing the work. That is decided before the service is reached, by the `_existing_build_result`
+short-circuit in the tool handler (`src/kdive/mcp/tools/lifecycle/runs/complete_build.py`, named
+by symbol). It is load-bearing for the recovery property below rather than an optimisation.
 
-Concurrent attempts on one Run serialize behind the Run-scoped advisory lock and the second finds
-the result recorded. Attempts across Runs serialize behind
-`_EXTERNAL_BUILD_VALIDATION_SLOTS` — see *Consequences*, where that is the sharpest limit on
-this decision.
+A **concurrent** second attempt is a different case and this record does not claim otherwise: it
+gets past that short-circuit because nothing is recorded yet, repeats the scan, and is
+deduplicated at the publication commit, where the `RunState.SUCCEEDED` branch in
+`_finalize_external_build` returns the recorded result instead of publishing twice. Correct, but
+it costs a full second scan — and since attempts across Runs also serialize behind
+`_EXTERNAL_BUILD_VALIDATION_SLOTS`, that wasted scan is charged to every queued caller. See
+*Consequences*, where concurrency is the sharpest limit on this decision.
 
 ### Cancellation
 
@@ -121,7 +128,10 @@ expiry path already directs callers there.
 The finalization measurement instrumentation this decision rests on is **retained permanently**,
 not gated to the measurement run: every deployment running a `server` process emits one
 `external_build_finalization_measured` record per finalization attempt, carrying the phase split
-and `store_requests`, `store_bytes` and `store_wait_ms`. Finalization is a rare
+and `store_requests`, `store_bytes` and `store_wait_ms`. Those three count the **validation
+pass** — `_CountingStore` wraps the store validation reads, not the one chunk reassembly uses —
+so on a chunked finalization reassembly I/O appears in `reassemble_ms` and in none of the three.
+Stated here because "permanent observability" should not be read as "all store traffic". Finalization is a rare
 operator-initiated action rather than a hot path, and the phase attribution an operator needs to
 diagnose a slow finalization is the attribution #2314 could not produce. The record's payload
 shape is frozen by a closed-vocabulary test and joins the ADR-0014 / ADR-0090 log schema without

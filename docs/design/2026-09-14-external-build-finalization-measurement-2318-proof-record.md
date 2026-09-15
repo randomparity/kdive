@@ -34,10 +34,18 @@ So the bound on a long finalization is `read`, 300 s. **The 30-second figure thi
 previously carried is the `connect` default**, which a request that has been running for
 30 seconds cleared long ago.
 
-Confirmed end-to-end rather than only by reading the libraries: `LiveStackClient.over_http`,
-built exactly as this record cites it and with no timeout override, completed a **35.3-second**
-finalization of the 1.85 GB bundle against the live stack. A 30-second bound would have failed
-it.
+Confirmed end-to-end rather than only by reading the libraries. A **third, ad-hoc
+finalization** — not one of the two rows below — drove the 1 845 478 181-byte bundle through
+`LiveStackClient.over_http` built exactly as this record cites it, with no timeout override, on
+2026-09-15 against deployed commit `4883cfdce`. It completed in **35.286 s** (Run
+`8558c727-246f-4c1c-9502-a7bc4bf5445d`). A 30-second bound would have failed it.
+
+That run used a throwaway client script rather than the committed driver, so it is reproducible
+from its description — build `over_http`, pass no timeout, finalize a bundle that takes longer
+than 30 s — and not by re-running anything in this repository. The durable guard is the committed
+test below; this observation is recorded because a single end-to-end result is what actually
+refuted the earlier figure, and burying that would leave the correction resting on library
+reading alone.
 
 This is checked by `test_supported_budget_matches_the_shipped_client`
 (`tests/integration/live_stack/test_measurement_readout.py`), which reads the effective value off
@@ -125,7 +133,18 @@ not change the per-byte work: every remaining member is hashed and traversed exa
 One row per bundle. Fields marked _server_ come from the finalization measurement record; the
 rest are recorded by the driver.
 
-| Field | Small class | Large class |
+The class names identify the #2314 observations each row corresponds to; the recorded size is
+whatever the build produced, never the class name rounded. The small row came in at 151 MB
+against a class named 103 MB — 1.46× — because `modules_install` does not strip and this kernel's
+distro config builds more modules than whatever produced #2314's figure. Nothing in the
+attribution depends on hitting the class name; the bytes in the row are the bytes measured.
+
+The budget is a *client* bound, so the rule is applied to `client_elapsed_ms`, which the driver
+measures at the caller. It runs 121 ms above the server's `total_ms` on the large row — request
+and response transit plus envelope handling — and both numbers are recorded so the gap is
+visible rather than assumed away.
+
+| Field | 103-MB class | 2-GB class |
 |---|---|---|
 | arch | x86_64 | x86_64 |
 | bundle compressed bytes | 150 753 887 (151 MB) | 1 845 478 477 (1845 MB) |
@@ -168,10 +187,19 @@ rules out is the reading that #2314's timeouts were semaphore starvation on an o
 server. Contention is a separate matter, and it is the sharpest limit this record found — see
 below.
 
-**The scan is linear in bundle size.** 22.56 ns per compressed byte for the small bundle and
-18.87 ns for the large one — a 12.2× size increase produced a 10.2× time increase. Nothing about
-the cost curve flattens with size, so the extrapolation to the ceiling is a straight line through
-two points rather than an assumption.
+**The scan grows with bundle size, and two rows fix a two-term model.** 22.56 ns per compressed
+byte for the small bundle and 18.87 ns for the large one — a 12.2× size increase produced a 10.2×
+time increase. A single per-byte rate is not what these two rows determine, and the reason is a
+confound worth stating: the large row is pruned to 5249 members against the small row's 6153, so
+bytes and member count moved in *opposite* directions, and any fitted per-byte rate absorbs
+per-member cost.
+
+Solving both rows for `a x bytes + b x members` gives **18.59 ns/byte and 0.097 ms/member**. At
+the 2 GiB ceiling that is ~40.5 s with the small row's member count, and ~59 s at
+`_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS` (200 000, `validation.py:60`) — the worst case the contract
+admits on both axes at once. Both are far under 300 s, so the decision does not turn on which
+model is used; the two-term fit is recorded because the one-term version would be a claim two
+rows cannot carry.
 
 **The validator reads the object about three times over.** `_validate_kernel_bundle`
 decompresses a prefix bounded by `_KERNEL_TAR_SCAN_MAX_BYTES` (128 MiB, `validation.py:56`), then
@@ -227,13 +255,19 @@ what #2318 establishes, not a finding against #2314.
 - **Uncontended only.** One finalization at a time, so `queue_wait_ms` reflects an idle
   `_EXTERNAL_BUILD_VALIDATION_SLOTS`. The concurrency limit noted above is arithmetic on the
   measured serial cost, not an observation.
-- **One observation per class.** Neither row was repeated, so neither carries a variance
-  estimate. At 11.6% of the budget the large row would have to be off by more than 8× to change
-  the decision, which is why one sample is accepted here; nothing in these rows supports a
-  claim about the spread.
+- **One observation per class, and no variance estimate.** The large class was in fact
+  finalized twice — 34 941 ms as the recorded row and 35 286 ms in the ad-hoc budget
+  confirmation above, on different commits — which is agreement, not a distribution. At 11.6% of
+  the budget the large row would have to be off by more than 8× to change the decision, which is
+  why so few samples are accepted here; nothing in them supports a claim about the spread.
 - **Both bundles are single-PUT.** Each is under `SINGLE_PUT_MAX_BYTES` (5 GiB,
   `src/kdive/artifacts/uploads/uploads.py:9`), so no chunk reassembly is in the measured path and
   `reassemble_ms` is 0. The chunked path is instrumented but unmeasured here.
+- **`store_requests`, `store_bytes` and `store_wait_ms` count the validation pass only.**
+  `_CountingStore` wraps the store handed to validation, not the one reassembly uses. On a
+  chunked finalization the reassembly I/O therefore shows up in `reassemble_ms` and in none of
+  the three counters. That costs nothing on these rows — both are single-PUT — but a reader of a
+  chunked record must not treat the counters as the whole finalization's store traffic.
 - **ppc64le is not measured.** No ppc64le bundle or cross-toolchain exists on the measurement
   host. The harness is arch-parameterized and re-runs unchanged under `KDIVE_PPC64LE_BUNDLE`;
   the arm is owned by [debt record 0015](../debt/0015-ppc64le-finalization-measurement-unrun.md).
