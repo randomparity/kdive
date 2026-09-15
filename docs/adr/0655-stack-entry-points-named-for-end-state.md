@@ -71,18 +71,32 @@ grows from 30s to 120s. An operator whose object store was quietly failing will 
 start failing where it previously continued; that is the intent, not a regression.
 
 A `--wait` timeout reports generically rather than naming the unhealthy service, where the
-replaced postgres poll named its own. The remedy — read `docker compose ps` — is available to
-a terminal operator and not to the CI actor at `live.yml:413`, `:527`, `:770`.
+replaced postgres poll named its own. Because two of the three named deployments are
+non-interactive CI actors that cannot run the obvious remedy, the bring-up function dumps
+`docker compose ps` to stderr on a non-zero `--wait` rather than leaving the job log with a
+bare timeout.
 
 Merged ADRs, proof records under `docs/design/`, and archived plans keep citing
 `scripts/live-stack/up.sh` and `just stack-up`. They are point-in-time records and are not
 swept; this ADR is where a reader learns the current names.
 
-The text guards in `tests/live_stack/test_up_invariants.py` read `up.sh` by path and match
-`compose\b.*\bup\b`. They must follow the rename and gain a discriminator: the obs line
-(`up.sh:91`, `--profile obs`) stays and matches that regex, and `lib.sh:229` is a comment that
-matches it while passing only because `_APP_TIER` compares case-sensitively against the
-uppercase `KDIVE_WORKER_COUNT`.
+The text guards in `tests/live_stack/test_up_invariants.py` read one file — `up.sh` — by path,
+and match `compose\b.*\bup\b`. They must follow the rename, and they must also start reading
+`lib.sh`, because the backend `compose up` moves there and the invariant they protect is that
+no bring-up file starts the app tier. Reading `lib.sh` is what makes a discriminator
+necessary: `lib.sh:229` is a comment matching that regex whose text contains
+`KDIVE_WORKER_COUNT`, so a case-insensitive `worker` check fails on it. Skip comments; do not
+skip the observability line, which carries no app-tier name today and must stay guarded
+against one arriving.
+
+`just stack-backends` inherits three preconditions the `stack-up` recipe never had, because it
+now delegates to the bring-up script: a refusal to run as UID 0, a `.venv` interpreter check,
+and `docker compose rm -sf migrate server worker reconciler`. The first is a behavior change
+on a path that worked as root. The third is destructive and reaches the containerized tier, so
+it belongs to the `services` stage — host processes and compose containers contend for port
+8000, which is a services concern — and is gated there rather than run for a backends-only
+bring-up. The observability profile is likewise a `services` phase: `just stack-up` never
+started prometheus, and `just stack-backends` must not either.
 
 ## Considered & rejected
 

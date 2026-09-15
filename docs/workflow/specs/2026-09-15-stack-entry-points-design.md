@@ -34,12 +34,17 @@ implementation. Decision: [ADR-0655](../../adr/0655-stack-entry-points-named-for
 `stack-services.sh` takes `--stage backends|services`, default `services`. The `backends`
 stage pre-builds the mock-OIDC image when `KDIVE_OIDC_IMAGE` is unset, runs
 `up -d --wait --wait-timeout 120` over `postgres seaweedfs oidc`, runs `seaweedfs-init` via
-`run --rm` with its exit status propagated, and applies migrations. The `services` stage
-continues through role bootstrap, libvirt, host processes, inventory reconcile, status, and
-the existing "next: fund a project" guidance. `just stack-backends` is
-`stack-services.sh --stage backends`. Existing flags `--skip-libvirt`, `--skip-obs` and
-`--reset-db` keep their behavior and are rejected with a clear message under
-`--stage backends`, which reaches none of them.
+`run --rm` with its exit status propagated, and applies migrations. It does not run the
+observability profile or the app-tier reconcile, which `just stack-up` never did and which are
+`services` concerns: host processes and compose containers contend for port 8000. The
+`services` stage adds the app-tier reconcile, obs, role bootstrap, libvirt, host processes,
+inventory reconcile, status, and the existing "next: fund a project" guidance.
+`just stack-backends` is `stack-services.sh --stage backends`.
+
+`--reset-db` and `--skip-libvirt` are rejected under `--stage backends`, which reaches neither
+phase. `--skip-obs` is not rejected: it defaults from the documented `KDIVE_SKIP_OBS`
+environment variable, so rejecting it would fail `KDIVE_SKIP_OBS=1 just stack-backends` over a
+flag the operator never passed. It is inert at that stage instead.
 
 `KDIVE_BACKEND_SERVICES` stays in `lib.sh` naming all four services for `stack-status.sh`. The
 backends stage names its three long-running services separately, because the one-shot must sit
@@ -57,19 +62,23 @@ rg -l --hidden '\b(up|down|status)\.sh\b|\bstack-up\b' --glob '!.git/**' --glob 
 ```
 
 and classifies every hit against the rule below before any rename. The sweep test in
-Validation is what proves completeness; no count is frozen here.
+Validation applies that same regex outside the record roots, so what proves the sweep is the
+pattern that defined it; no count is frozen here.
 
 **Sweep rule.** Update a reference when the file is live surface: code, configuration, tests,
 CI, provisioning, `AGENTS.md`, and the operating guides under `docs/operating/` and
-`docs/guide/`. Never update an immutable record: `docs/adr/` and `docs/debt/` are append-only
-under the `records` gate, and `docs/archive/`, `docs/superpowers/`, `docs/design/` proof
-records and merged `docs/workflow/` plans are point-in-time. They keep citing the old paths;
-ADR-0655 is where a reader learns the current names.
+`docs/guide/`. Never update a record: `docs/adr/`, `docs/debt/`, `docs/archive/`,
+`docs/superpowers/`, `docs/design/` proof records and merged `docs/workflow/` plans are all
+point-in-time. No gate enforces this — `check-records.sh` checks that records keep their
+required fields and do not stop being records, and says a PR may still edit one — so the rule
+holds by intent, not by guardrail. Records keep citing the old paths; ADR-0655 is where a
+reader learns the current names.
 
 Out of scope: the onboarding-script collapse and the worker-lifecycle-contract consolidation
-(separate cycles); `just compose-up` and the containerized tier; `docker-compose.yml` service
-definitions, whose only match is a comment naming `down.sh`; Kubernetes bring-up;
-`onboard.sh`'s own behavior and stdout contract.
+(separate cycles); the containerized tier's own behavior; Kubernetes bring-up; `onboard.sh`'s
+behavior and stdout contract. `docker-compose.yml` is swept — its single comment at `:392`
+names `down.sh` — and `just compose-up` is touched only insofar as the `services` stage keeps
+the app-tier reconcile that removes its containers.
 
 ## Failure model
 
@@ -85,11 +94,12 @@ versioned. Renaming must not leave a dangling invocation in CI or provisioning, 
 failure is a red gate rather than a wrong result. `onboard.sh`'s stdout contract must survive
 unchanged, because `live.yml:553` evaluates it.
 
-**Accepted failure classes.** A `--wait` timeout reports generically rather than naming the
-unhealthy service; accepted for the terminal operator, who reads `docker compose ps` next.
-For the CI actors this is a real loss of signal, recorded in ADR-0655's Consequences and
-mitigated only by the job log. Worst-case backend wait grows 30s → 120s: bounded, and only on
-a stack that is already failing. Obs-profile failures stay warn-only, unchanged.
+**Accepted failure classes.** A `--wait` timeout names no service, where the replaced poll
+named postgres; accepted because the bring-up function dumps `docker compose ps` to stderr on
+that path, which reaches the CI actors as well as the terminal operator. Worst-case backend
+wait grows 30s → 120s: bounded, and only on a stack that is already failing. Obs-profile
+failures stay warn-only, unchanged. `just stack-backends` refusing UID 0 is a deliberate
+narrowing, not an accepted failure; it is in ADR-0655's Consequences.
 
 **Covered elsewhere.** Migration drift: ADR-0015 and `--reset-db`. Store protocol
 compatibility: the worker's own startup check. Stale references in historical records:
@@ -98,15 +108,16 @@ ADR-0655, by decision, not by sweep.
 ## Success
 
 1. `scripts/live-stack/stack-services.sh --stage backends` and `--stage services` both exist,
-   and `just stack-backends` invokes the former.
+   `just stack-backends` invokes the former, and the `backends` stage starts neither the
+   observability profile nor the app-tier reconcile.
 2. No file outside the not-swept set references `scripts/live-stack/up.sh`,
    `just stack-up`, `scripts/live-stack/{down,status}.sh`, or
    `examples/local-libvirt/{up,down}.sh`.
 3. A `seaweedfs-init` that exits non-zero fails `stack-services.sh --stage backends`, and so
    the `services` stage, which runs that stage first through the same code path.
-4. The app-tier guard reads the renamed script and does not match the retained `--profile obs`
-   line or a comment.
-5. `just ci` passes, and the three `live.yml` call sites name existing paths.
+4. The app-tier guard reads both `stack-services.sh` and `lib.sh`, matches case-insensitively,
+   and ignores comments only — the observability line stays guarded.
+5. The three `live.yml` call sites name existing paths, and `just ci` passes.
 
 ## Validation
 
@@ -119,20 +130,30 @@ ADR-0655, by decision, not by sweep.
   applied only to the three long-running backends. Same file, stubbed `docker` recording argv;
   assert the `--wait` invocation names `postgres seaweedfs oidc` and not `seaweedfs-init`. Red
   if the one-shot is folded back in.
-- **Stage selection** — Mode: `focused-test`. Contract: `--stage backends` stops before role
-  bootstrap; an unsupported stage and a `--skip-libvirt` under `--stage backends` both exit
-  non-zero. Same file, stubbed `docker`; assert on recorded argv and exit status.
-- **App-tier guard follows the rename and discriminates** — Mode: `focused-test`.
-  `tests/live_stack/test_up_invariants.py` retargeted at `stack-services.sh`, with the
-  predicate narrowed to non-comment lines matching `compose … up` that do not carry
-  `--profile obs`. Red while it reads `up.sh`; red on a naive predicate, which matches
-  `up.sh:91`.
+- **Stage selection** — Mode: `focused-test`. Contract: criterion 1. Same file, stubbed
+  `docker` recording argv: `--stage backends` records no `rm -sf` of the app tier, no
+  `--profile obs` invocation and no role bootstrap; an unsupported stage and `--skip-libvirt`
+  under `--stage backends` each exit 2; `KDIVE_SKIP_OBS=1 --stage backends` exits 0. Red before
+  the stage gate, and red if the obs or reconcile block is left ahead of it.
+- **App-tier guard covers both bring-up files** — Mode: `focused-test`. Contract: no bring-up
+  file starts the compose app tier. `tests/live_stack/test_up_invariants.py` reads
+  `stack-services.sh` and `lib.sh`, skips comment lines, and matches app-tier names
+  case-insensitively. Red while it reads only the removed `up.sh`. Confirm it bites by adding
+  `docker compose up -d server` to each file in turn and observing the failure.
 - **No dangling old references** — Mode: `focused-test`. Contract: Success criterion 2.
   `tests/scripts/test_live_workflow_shape.py`, new case walking tracked files outside the
-  not-swept set and asserting no match for the old names. Red before the sweep.
+  record roots and applying the same `\b(up|down|status)\.sh\b|\bstack-up\b` regex that
+  generated the file map, so bare basenames are caught and not only path-qualified names. The
+  guard excludes its own path, which necessarily contains the pattern. Red before the sweep.
 - **CI call sites resolve** — Mode: `focused-test`. Same file, assert every
   `scripts/live-stack/*.sh` path named in `.github/workflows/live.yml` exists on disk. Red if
   a rename misses a call site.
+- **Recipe delegates to the script** — Mode: `focused-test`. Contract: criterion 1's recipe
+  clause. `tests/scripts/test_live_stack_scripts.py`, asserting the `stack-backends` recipe
+  body invokes `stack-services.sh --stage backends` and contains no `docker compose`. Red
+  before the recipe is replaced.
+- **Whole gate** — Mode: `focused-test`. Contract: criterion 5's `just ci` clause.
+  `just ci > /tmp/ci.log 2>&1 < /dev/null`, run bare so the recipe's own exit status stands.
 - **Generated config reference** — Mode: `focused-test`. `just config-docs-check`, already a CI
   gate, fails until `docs/guide/reference/config.md` is regenerated from the edited
   `external_env.py`.
