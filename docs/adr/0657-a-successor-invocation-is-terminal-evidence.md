@@ -84,6 +84,13 @@ here: any worker exiting non-zero already leaves the same failed unit behind the
 `stop_retained` no-op. Epic #2484 anticipates it — under the strict branch its first success
 criterion is satisfiable only once #2488 merges.
 
+A `start` that ends that way reports the conflict and an empty slot list, so its response does not
+say that the retained incarnation was retired and its fence released before activation refused —
+the operator learns that from `status` or from the database, not from the failing call. Reporting
+it belongs to the response-taxonomy work in #2487 and the recovery operation in #2488; this record
+states the consequence rather than threading retired states through a failure path outside the
+rule this decision governs.
+
 An operator who restarts a unit deliberately while a worker is doing useful work now has that
 worker's incarnation retired on the next lifecycle request instead of blocking it. That is the
 intended trade: the worker is already gone, because the restart took its cgroup down.
