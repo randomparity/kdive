@@ -277,6 +277,10 @@ class FakeAuthority:
         self.fail_register = False
         self.reject_termination = False
         self.terminations: list[tuple[str, TerminationOutcome]] = []
+        # The incarnation carries only unit and generation, so `terminations` alone cannot tell
+        # evidence published for the retained invocation from evidence published for a successor's.
+        # PostgreSQL rejects the wrong binding; this records what was actually offered to it.
+        self.terminated_bindings: list[tuple[str, str | None, str | None]] = []
 
     async def register(self, state: SlotState, credential_hash: bytes) -> None:
         assert credential_hash == bytes.fromhex(state.credential_hash)
@@ -291,6 +295,7 @@ class FakeAuthority:
             raise EvidenceRejected("database rejected exact evidence")
         assert state.incarnation in self.registered
         self.terminations.append((state.incarnation, outcome))
+        self.terminated_bindings.append((state.incarnation, state.boot_id, state.invocation_id))
 
 
 def _state(
@@ -667,6 +672,11 @@ def test_same_boot_successor_invocation_retires_the_retained_incarnation() -> No
 
     assert response.ok
     assert authority.terminations == [(started.incarnation, "killed")]
+    # The retained binding, never the successor's: a coordinator that released the observed
+    # invocation instead would publish the same incarnation and the same outcome.
+    assert authority.terminated_bindings == [
+        (started.incarnation, started.boot_id, started.invocation_id)
+    ]
     assert runtime.signaled == []
     assert runtime.stopped == [started.unit]
     assert stores[0].state is None
@@ -686,6 +696,11 @@ def test_start_reconciles_a_restarted_unit_and_replaces_the_slot() -> None:
 
     assert response.ok
     assert authority.terminations == [(started.incarnation, "killed")]
+    # The retained binding, never the successor's: a coordinator that released the observed
+    # invocation instead would publish the same incarnation and the same outcome.
+    assert authority.terminated_bindings == [
+        (started.incarnation, started.boot_id, started.invocation_id)
+    ]
     assert stores[0].state is not None and stores[0].state.phase is SlotPhase.STARTED
     assert stores[0].state.generation != started.generation
 
@@ -708,6 +723,11 @@ def test_start_retires_a_restarted_slot_whose_successor_unit_stays_failed() -> N
     )
 
     assert authority.terminations == [(started.incarnation, "killed")]
+    # The retained binding, never the successor's: a coordinator that released the observed
+    # invocation instead would publish the same incarnation and the same outcome.
+    assert authority.terminated_bindings == [
+        (started.incarnation, started.boot_id, started.invocation_id)
+    ]
     assert stores[0].state is None
     assert not stores[0].environment and not stores[0].credential and not stores[0].release
     assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
@@ -724,6 +744,11 @@ def test_successor_invocation_exit_facts_are_not_attributed_to_the_retained_one(
 
     assert response.ok
     assert authority.terminations == [(started.incarnation, "killed")]
+    # The retained binding, never the successor's: a coordinator that released the observed
+    # invocation instead would publish the same incarnation and the same outcome.
+    assert authority.terminated_bindings == [
+        (started.incarnation, started.boot_id, started.invocation_id)
+    ]
 
 
 def test_partial_start_rolls_back_only_slots_activated_by_this_request() -> None:

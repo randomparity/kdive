@@ -263,13 +263,15 @@ in force.
 ```
 
 2. In the same file's `## Status` section, append a second partial-supersession line beneath the
-   existing ADR-0582 one, in that line's form:
-   `> **Partially superseded by [0657](0657-a-successor-invocation-is-terminal-evidence.md)**`
-   `> (2026-09-15): <one clause>`. This is what makes criterion 3's "marked amended or superseded"
-   visible in the status region rather than only in the body. It is gate-safe: the records gate's
+   existing ADR-0582 one, in that line's form — a block quote reading
+   `**Partially superseded by**`, the record's number as a link to its sibling filename, then the
+   date and one clause. This is what makes criterion 3's "marked amended or superseded" visible in
+   the status region rather than only in the body. It is gate-safe: the records gate's
    `BANNER_PREFIX` is `^> \*\*Superseded by` (`.github/scripts/profiles/adr.sh:47`), which matches
    neither line, so `E-BANNER-COUNT` cannot fire, and `## Status` is exempt from the append-only
-   comparison.
+   comparison. Do not write that link inside an inline code span here:
+   `scripts/check-doc-links.sh` strips fenced blocks whose fence starts at column 1 but not inline
+   spans, so it would resolve the target against `docs/workflow/plans/` and fail `docs-links`.
 3. Change nothing else in ADR-0574 — no rewrite of existing prose. `E-REWRITE` reports a changed
    line in a merged record, and after merge the amendment's placement is permanent.
 4. Confirm ADR-0657's `## Status` section reads `Accepted (2026-09-15)`.

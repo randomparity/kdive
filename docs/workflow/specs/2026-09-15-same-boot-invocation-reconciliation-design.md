@@ -49,9 +49,13 @@ siblings implement; this change implements neither.
    below, which is #2488's.
 2. The outcome published for that slot is `killed`, and the successor's `result`,
    `exec_main_status`, and `membership` are not read.
-3. Each of the four named unchanged rules — foreign unit, bound phase without an exact
-   invocation, differing boot ID, `BootObservation` on the retained boot — plus the two membership
-   rules behaves exactly as before, each pinned by a test.
+3. The four rules issue #2485 names — foreign unit, differing boot ID, `BootObservation` on the
+   retained boot, and the two membership rules — behave exactly as before, each pinned by a test
+   observed red under a controlled fault. The fifth rule in the function, a bound phase with no
+   exact invocation, gets no test: `SlotState.validate_identity`
+   (`src/kdive/processes/lifecycle/systemd/systemd_worker_state.py`) rejects a bound phase without
+   both identifiers, so the state that would reach it cannot be constructed and the rule is
+   unreachable defence in depth.
 4. ADR-0657 is `Accepted` and ADR-0574 carries an amendment naming it.
 5. `just ci` and `just records` are green.
 
@@ -62,17 +66,17 @@ control socket on a live-stack systemd host (`deploy/systemd/install-live-worker
 the `live_vm_host` Ansible role). No other actor reaches this code: workers never hold the
 lifecycle-witness authority (ADR-0536), and the Compose and Kubernetes deployments do not run this
 coordinator. Designed for the native and hosted live-VM hosts; not designed for a host running two
-concurrent live-stack flows (ADR-0574:42-46 already excludes that).
+concurrent live-stack flows, which ADR-0574's single-flow topology already excludes.
 
 **Invariants and assets at stake.**
 
 - Terminal evidence in `worker_incarnations` is durable and is what releases an artifact fence; a
   wrong `killed` row strands the fence of a live worker.
 - Evidence is published only for the exact retained binding (unit, generation, boot, invocation).
-- The gate's marker binding (ADR-0574:52-58) keeps a replayed marker from releasing an
+- The gate's marker binding, which ADR-0574 requires to equal both the retained generation
+  and the gate process's own `INVOCATION_ID`, keeps a replayed marker from releasing an
   unregistered generation.
-- The four unchanged rules in `_terminal_observation` are the fail-closed edges around the changed
-  one.
+- The unchanged rules in `_terminal_observation` are the fail-closed edges around the changed one.
 
 **Accepted failure classes.**
 

@@ -10,8 +10,9 @@ Accepted (2026-09-15)
 an exact unit, generation, boot ID, and invocation ID, and states two rules this record qualifies:
 the gate releases a worker only when the root-owned marker equals both the retained generation and
 systemd's `INVOCATION_ID` for the gate's own process, so the marker proves *this* invocation was
-registered (ADR-0574:52-58); and absence within the same host boot is never termination evidence
-(ADR-0574:65-66).
+registered; and absence within the same host boot is never termination evidence. Both claims are
+cited here by their wording rather than by line, because this change appends to ADR-0574 and would
+shift any number given.
 
 `kdive-live-worker@N.service` is restarted outside the lifecycle contract — a `needrestart` sweep,
 unattended upgrades, a manual `systemctl restart`. The unit comes back carrying a new
@@ -30,7 +31,7 @@ records the retained incarnation as `killed` rather than refusing the slot. A sy
 at most one invocation at a time and is assigned a new `INVOCATION_ID` only when it changes from an
 inactive state into an activating or active one, so a different identity for the same unit on the
 same boot is the *presence of a successor*, which entails that the retained cycle already ended.
-That is why the rule does not contradict ADR-0574:65-66, which governs *absence*: an observation
+That is why the rule does not contradict ADR-0574's same-boot rule, which governs *absence*: an observation
 carrying no invocation identity at all on the retained boot still raises `SystemdUnavailable`, and
 a differing boot ID still yields `killed`. No second discriminator — a "newer than the retained
 one" check — is added, for the reason recorded in the first rejected alternative below.
@@ -57,7 +58,7 @@ consequence this record relies on is narrower and is a property of the strict bi
 successor invocation's gate exits before it can `exec` the worker, so a successor never holds a
 running worker.
 
-**A `recover` operation clears facts, never evidence (#2488).** ADR-0574:130 calls force removal
+**A `recover` operation clears facts, never evidence (#2488).** ADR-0574 calls force removal
 "an operator recovery that may strand fences and cannot create termination evidence", and that
 holds. Such an operation may clear the on-disk slot facts and release the `worker_incarnations`
 fence for a slot proven dead; it may not fabricate a `TerminationOutcome`, attribute one
@@ -105,7 +106,7 @@ it qualifies.
 - **Map the observed `Result`/`ExecMainStatus` onto the retained incarnation.** verified: those
   fields are read from the unit's current properties, which after a restart belong to the successor.
 - **Treat same-boot absence as terminal too, for symmetry.** judgment: absence is consistent with a
-  live invocation systemd cannot currently report, which is the case ADR-0574:65-66 refuses to guess
+  live invocation systemd cannot currently report, which is the case ADR-0574's same-boot rule refuses to guess
   at; the successor's presence is what carries the proof here.
 - **Re-derive the gate marker for the current `INVOCATION_ID`.** verified: the marker comparison in
   `_wait_for_release` (`deploy/systemd/bin/kdive-live-worker-gate`) is the only check binding a

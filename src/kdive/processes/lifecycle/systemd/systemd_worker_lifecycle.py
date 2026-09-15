@@ -667,7 +667,7 @@ def _terminal_observation(
         # leaves an inactive state, so a successor identity on the retained boot proves the
         # retained invocation ended. Its own exit facts went with it, and the observed result and
         # membership describe the successor, so neither is mapped here (ADR-0657, amending
-        # ADR-0574; absence, which ADR-0574:65-66 governs, is still refused three lines above).
+        # ADR-0574; absence, which ADR-0574's same-boot rule governs, is still refused above).
         return "killed"
     if observation.membership == "unknown":
         raise SystemdUnavailable("worker cgroup membership is unavailable")
