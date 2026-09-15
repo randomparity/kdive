@@ -97,12 +97,13 @@ def test_inmemory_tier_agent_catalog_is_core_tools_clipped_by_rbac() -> None:
 
     Both sides are spelled out rather than compared back to ``CORE_TOOLS``: the live
     assertion follows drift on purpose, so something has to notice the drift. The
-    contributor's nine names are what the ADR-0456 proof record measured over the wire
-    (``docs/design/2026-07-27-mcp-exposure-profiles-proof-record-1582.md`` §1, which minted no
-    viewer token); the viewer's six are that same set clipped by RBAC, derived here. So a
-    change to ``CORE_TOOLS`` membership or to a core tool's required scope reddens ``just ci``
-    and sends the change back to ADR-0456 §2, instead of silently moving what the live tier
-    proves.
+    contributor's count is what the ADR-0456 proof record measured over the wire (nine,
+    exactly ``CORE_TOOLS`` —
+    ``docs/design/2026-07-27-mcp-exposure-profiles-proof-record-1582.md`` §1) and its §2
+    records the names; the record mints no viewer token, so the viewer's six are that same
+    set clipped by RBAC, derived here. A change to ``CORE_TOOLS`` membership or to a core
+    tool's required scope therefore reddens ``just ci`` and sends the change back to
+    ADR-0456 §2, instead of silently moving what the live tier proves.
     """
     viewer = _expected_agent_catalog({_PROJECT: "viewer"}, None)
     assert viewer == {
@@ -124,7 +125,8 @@ def test_inmemory_tier_agent_catalog_is_core_tools_clipped_by_rbac() -> None:
     # The tool the live tier reaches through the gateway has to stay outside the core set,
     # or its absence from an agent's catalog stops being the thing that test proves.
     assert _UNADVERTISED_TOOL not in CORE_TOOLS
-    # Holding a platform role does not buy the contributor-gated core tools (ADR-0456 §1).
+    # Holding a platform role does not buy the contributor-gated core tools: the RBAC rule is
+    # ADR-0148 §1's conservative union, as clipped to CORE_TOOLS by ADR-0268 §4.
     assert _expected_agent_catalog({_PROJECT: "viewer"}, ["platform_auditor"]) == viewer
 
 
@@ -258,7 +260,6 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
             projects=[_PROJECT],
             roles=roles,
             platform_roles=platform_roles,
-            agent_session="sess-1",
             client_id=cli_client_id,
         )
         async with LiveStackClient.over_http(base_url, token) as client:
@@ -271,10 +272,12 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
         )
 
         # The operator profile is in force, not the gateway's CORE_TOOLS clip. Three causes
-        # reach this line — a server whose KDIVE_CLI_CLIENT_ID differs from this process's, a
+        # redden this line — a server whose KDIVE_CLI_CLIENT_ID differs from this process's, a
         # server-side config read that raised (the middleware falls back to the agent profile
         # without saying so), and a genuine profile-resolution defect — so the message names
-        # the one an operator can act on first.
+        # the one an operator can act on first. It also passes vacuously against a server
+        # running with KDIVE_MCP_TOOL_GATEWAY off, since the middleware clips only when the
+        # gateway is on as well; the sibling test's set equality is what pins the toggle on.
         assert not viewer <= CORE_TOOLS, (
             f"viewer catalog was clipped: the server did not resolve azp={cli_client_id!r} as "
             "the operator CLI — check that the server process's KDIVE_CLI_CLIENT_ID matches "
