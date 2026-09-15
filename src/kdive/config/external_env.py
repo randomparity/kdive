@@ -73,6 +73,32 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "(#1144, epic #1139); unset (or no qemu-system-ppc64) → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_MEASUREMENT_OUT",
+        "test",
+        None,
+        "Path the #2318 finalization-measurement driver appends its JSON rows to, one object "
+        "per line; unset → rows are printed only.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_MEASUREMENT_STAGE_DIR",
+        "test",
+        "pytest tmp_path",
+        "Directory the #2318 finalization-measurement driver stages `modules_install` and the "
+        "combined tar into. A multi-gigabyte bundle stages a module tree of tens of GB, and the "
+        "default temp root is commonly tmpfs (RAM-backed) with pytest retaining the last three "
+        "runs, so point this at real disk for the large arm.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_MEASUREMENT_TIMEOUT_S",
+        "test",
+        "1800",
+        "Client request timeout the #2318 finalization-measurement driver runs under, so a large "
+        "bundle completes and can be measured at all. Distinct from the 30-second supported "
+        "client budget the resulting decision is tested against (ADR-0655), which is a module "
+        "constant rather than a knob so the environment running the proof cannot move the "
+        "threshold the accepted decision rests on.",
+    ),
+    ExternalEnvVar(
         "KDIVE_PPC64LE_BUNDLE",
         "test",
         None,

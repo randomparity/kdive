@@ -279,6 +279,40 @@ including the host-process env block, is in the
 `qemu+tls://` libvirt host instead, use the
 [remote live-stack runbook](remote-live-stack.md).
 
+#### Finalization measurement (#2318)
+
+One `live_stack` driver measures `runs.complete_build` rather than exercising a boot:
+`tests/integration/test_finalization_measurement.py`. It records the phase attribution — queue
+wait, archive scan, publication, object-store request count and bytes — that ADR-0655's
+completion-contract decision rests on.
+
+```
+scripts/live-stack/up.sh --skip-libvirt   # the Run is unbound: no System, no VM
+KDIVE_KERNEL_SRC=/path/to/built/tree \
+KDIVE_MEASUREMENT_STAGE_DIR=/path/on/real/disk \
+KDIVE_MEASUREMENT_OUT=/path/to/rows.jsonl \
+uv run python -m pytest tests/integration/test_finalization_measurement.py \
+  -m live_stack -k x86_64 -q
+```
+
+Three things about it differ from the boot proofs:
+
+- **It needs no libvirt and no System.** The Run is created unbound, so `--skip-libvirt`
+  bring-up is enough and nothing is provisioned.
+- **The staging directory matters.** `combined_kernel_tar` runs `make modules_install` beside
+  the tar it cuts, and a distro-config tree with debug info stages ~7.6 GB to produce a ~2.5 GB
+  bundle. `tmp_path` is rooted at the system temp directory, commonly tmpfs, and pytest keeps
+  the last three runs — so set `KDIVE_MEASUREMENT_STAGE_DIR` to real disk for a large bundle.
+- **Two timeouts, deliberately separate.** `KDIVE_MEASUREMENT_TIMEOUT_S` (default 1800) is what
+  the driver runs under so a large bundle completes. The supported client budget it is measured
+  *against* is 30 s — MCP's default, which `LiveStackClient.over_http` does not override — and
+  that is a module constant, not a knob.
+
+The `ppc64le` arm runs the same code under `KDIVE_PPC64LE_BUNDLE`. Unset, it skips; set but
+lacking `kernel.tar.gz`, it raises rather than skipping, because a measurement that silently
+produces no row is indistinguishable from one nobody started. That arm is unrun and owned by
+[debt record 0015](../../debt/0015-ppc64le-finalization-measurement-unrun.md).
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
