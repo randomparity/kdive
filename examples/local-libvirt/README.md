@@ -128,8 +128,8 @@ examples/local-libvirt/demo-down.sh --wipe   # ...or also drop the database, the
   daemon; `scripts/live-stack/env.sh` (sourced by this example's `env.sh`) exports it as
   `KDIVE_LIBVIRT_URI`, so `build-fs`, the preflight, the daemons, and the workers all see the
   same domains — and so does a bare `scripts/live-stack/stack-services.sh` run outside this
-  example. Files QEMU and virtlogd write belong to you, which
-  is what lets a non-root worker confirm boots and read console logs (ADR-0223).
+  example. Files QEMU and virtlogd write belong to you, which is what lets a non-root worker
+  confirm boots and read console logs (ADR-0223).
 - **`.mcp.json` is merged, not clobbered.** If the file already exists its first version is
   backed up to `.mcp.json.bak` (never overwritten on re-run, so the original is preserved), and
   only the `kdive` server entry is replaced — any other MCP servers and top-level keys you

@@ -866,25 +866,6 @@ def test_live_stack_rootfs_default_reaches_child_processes() -> None:
 _PUBLISHED_URI = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
 
 
-def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
-    """Stage a `live-worker-libvirt.env` fixture and the environment that reaches it.
-
-    ``require_exact_libvirt_env`` demands root:root 0644, which no test can produce for a file it
-    owns, so a `stat` shim answers that one probe. The fixture's *content* still goes through the
-    real parser and its URI allowlist; only the ownership probe is staged. ``LIBVIRT_ENV`` is
-    overridable for exactly this reason, and it grants a caller nothing an explicit
-    ``KDIVE_LIBVIRT_URI`` does not already grant it.
-    """
-    contract = tmp_path / "live-worker-libvirt.env"
-    contract.write_text(f"KDIVE_LIBVIRT_URI={_PUBLISHED_URI}\n", encoding="utf-8")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    stat_stub = bin_dir / "stat"
-    stat_stub.write_text("#!/bin/sh\nprintf '0:0:644\\n'\n", encoding="utf-8")
-    stat_stub.chmod(0o755)
-    return contract, _libvirt_env(LIBVIRT_ENV=str(contract), PATH=f"{bin_dir}:{os.environ['PATH']}")
-
-
 def _libvirt_env(**overrides: str) -> dict[str, str]:
     """The ambient environment with ``KDIVE_LIBVIRT_URI`` *removed*, plus `overrides`.
 
@@ -896,6 +877,26 @@ def _libvirt_env(**overrides: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k != "KDIVE_LIBVIRT_URI"}
     env.update(overrides)
     return env
+
+
+def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """Stage a `live-worker-libvirt.env` fixture and the environment that reaches it.
+
+    ``require_exact_libvirt_env`` demands root:root 0644, which no test can produce for a file it
+    owns, so a `stat` shim on PATH answers that one probe. The fixture's *content* still goes
+    through the real parser and its two-URI allowlist, which is what actually bounds a redirected
+    ``LIBVIRT_ENV`` -- the ownership probe is a PATH lookup and so is answerable by any caller who
+    can set ``LIBVIRT_ENV`` in the same invocation. It guards a tampered /etc entry, not the
+    caller who chose the path.
+    """
+    contract = tmp_path / "live-worker-libvirt.env"
+    contract.write_text(f"KDIVE_LIBVIRT_URI={_PUBLISHED_URI}\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stat_stub = bin_dir / "stat"
+    stat_stub.write_text("#!/bin/sh\nprintf '0:0:644\\n'\n", encoding="utf-8")
+    stat_stub.chmod(0o755)
+    return contract, _libvirt_env(LIBVIRT_ENV=str(contract), PATH=f"{bin_dir}:{os.environ['PATH']}")
 
 
 def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
