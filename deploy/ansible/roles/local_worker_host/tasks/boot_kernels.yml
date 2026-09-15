@@ -1,0 +1,41 @@
+---
+# Debian and Ubuntu ship /boot/vmlinuz-* root:root 0600. libguestfs builds its supermin
+# appliance by copying a host kernel as the INVOKING user, so build-fs dies with an opaque
+# "supermin exited with error status 1" (ADR-0222, #694/#1156, #2479) — probed by
+# check-local-libvirt.sh as a FAIL and by check-setup-deps.sh as a future-tier hint.
+# RedHat and Suse ship these world-readable; relabelling there would NARROW them, so the
+# block is guarded to the family that has the defect.
+- name: Make the Debian-family host kernels readable for guest-image builds
+  when: ansible_facts['os_family'] == 'Debian'
+  block:
+    - name: Find the host kernels under /boot (vmlinuz-* x86_64, vmlinux-* ppc64le)
+      ansible.builtin.find:
+        paths: /boot
+        patterns: ["vmlinuz-*", "vmlinux-*"]
+      register: local_worker_host_boot_kernels
+
+    - name: Make the host kernels kvm-group-readable for the worker accounts
+      # 0640 root:kvm, not 0644: live_vm_host made the same choice for the same file so the
+      # relaxation stays group-scoped. The fixed worker accounts (worker_accounts.yml) and the
+      # operator login account (libvirt_stack) are both already in kvm. A kernel UPGRADE
+      # installs a fresh 0600 file under a new name: re-run the recipe afterwards.
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        group: kvm
+        mode: "0640"
+      loop: "{{ local_worker_host_boot_kernels.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Verify every worker can read every host kernel
+      # Declaring the mode does not prove convergence: the read also needs the account to
+      # exist and to be in kvm. live_vm_host/tasks/verify.yml runs the same check.
+      ansible.builtin.command: "/bin/sh -c 'test -r {{ item.1.path }}'"
+      become: true
+      become_user: "{{ item.0 }}"
+      loop: >-
+        {{ live_vm_host_worker_accounts
+           | product(local_worker_host_boot_kernels.files) | list }}
+      loop_control:
+        label: "{{ item.0 }} -> {{ item.1.path }}"
+      changed_when: false

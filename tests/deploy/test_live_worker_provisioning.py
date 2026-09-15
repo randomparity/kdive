@@ -2087,3 +2087,24 @@ def test_external_boot_recovery_root_harness_runs_in_ci() -> None:
     assert harness.is_file()
     assert harness.stat().st_mode & stat.S_IXUSR
     assert "run-external-boot-recovery-root.sh" in _text(ROOT / "justfile")
+
+
+def test_local_worker_declares_boot_kernel_readability() -> None:
+    """Debian/Ubuntu ship /boot/vmlinuz-* root:root 0600 and libguestfs copies a host kernel
+    as the invoking user to build its supermin appliance (ADR-0222, #2479), so an undeclared
+    mode breaks the next clean reprovision of a local-libvirt host."""
+    tasks = _text(LOCAL_WORKER / "tasks" / "boot_kernels.yml")
+    assert "ansible.builtin.find" in tasks
+    assert 'patterns: ["vmlinuz-*", "vmlinux-*"]' in tasks
+    assert "group: kvm" in tasks
+    # 0640 root:kvm, not 0644: live_vm_host chose group scope over undoing /boot hardening
+    # for every local uid, and this role follows that choice.
+    assert 'mode: "0640"' in tasks
+    assert 'mode: "0644"' not in tasks
+    # RedHat and Suse ship these world-readable and must not be narrowed.
+    assert "ansible_facts['os_family'] == 'Debian'" in tasks
+    # Declaring the mode is not proving it: verify as each worker account, the way
+    # live_vm_host/tasks/verify.yml does for the same relabel.
+    assert "become_user" in tasks
+    assert "live_vm_host_worker_accounts" in tasks
+    assert "boot_kernels.yml" in _text(LOCAL_WORKER / "tasks" / "main.yml")

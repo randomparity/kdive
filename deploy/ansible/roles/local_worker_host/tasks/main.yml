@@ -21,6 +21,9 @@
 - name: Prepare fixed worker accounts
   ansible.builtin.import_tasks: worker_accounts.yml
 
+- name: Make the host kernels readable for guest-image builds
+  ansible.builtin.import_tasks: boot_kernels.yml
+
 - name: Prepare protected worker installation paths
   ansible.builtin.import_tasks: worker_install_dirs.yml
 
