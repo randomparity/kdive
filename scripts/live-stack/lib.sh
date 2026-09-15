@@ -401,10 +401,21 @@ nodedev_ok() {
 # callers must die rather than fall back to a system daemon on this path. Positional overrides
 # (binary, config, runtime root) exist only so tests can stage the contract.
 ensure_session_libvirtd() {
-  local bin="${1:-/usr/sbin/libvirtd}"
-  local conf="${2:-/etc/kdive/libvirtd-live.conf}"
+  # The lifecycle installer picks the daemon by distro family and installs only that family's
+  # config: libvirtd + libvirtd-live.conf on the Debian family, virtqemud + virtqemud-live.conf on
+  # the Red Hat and SUSE families (install-live-worker-lifecycle.sh). Hardcoding libvirtd made this
+  # branch name three paths a Red Hat-family host has never had — harmless while only the demo
+  # entry point resolved the published URI, reachable from every entry point since #2480. The
+  # published URI carries the choice in its socket basename, which is the only signal available
+  # here: the config is under /etc/kdive, which the invoking user cannot enumerate reliably.
+  local daemon=libvirtd
+  if [[ "${KDIVE_LIBVIRT_URI:-}" == *virtqemud-sock ]]; then
+    daemon=virtqemud
+  fi
+  local bin="${1:-/usr/sbin/${daemon}}"
+  local conf="${2:-/etc/kdive/${daemon}-live.conf}"
   local runtime="${3:-/run/kdive/live-libvirt}"
-  local pidfile="$runtime/libvirt/libvirtd.pid" pid=""
+  local pidfile="$runtime/libvirt/${daemon}.pid" pid=""
   if [[ -r "$pidfile" ]]; then
     pid="$(tr -d '[:space:]' <"$pidfile" 2>/dev/null || true)"
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then

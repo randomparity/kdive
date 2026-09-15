@@ -8,12 +8,17 @@
 #
 # LIBVIRT_ENV is therefore overridable. It is a test-staging seam, not an operator knob: no
 # KDIVE_ prefix, no row in the generated config reference, and deliberately so — it names a path,
-# not a runtime setting kdive.config reads. What bounds a redirect is the validation the path
-# still faces, not the override: require_exact_libvirt_env demands a non-symlink regular file that
-# `stat` reports root:root 0644, and load_published_libvirt_uri demands its entire content be one
-# KDIVE_LIBVIRT_URI line naming one of the two URIs in LIBVIRT_SOCKET_URIS. So the widest outcome
-# a redirect can reach is a value that was already correct. Do not state the bound as "an explicit
-# KDIVE_LIBVIRT_URI bypasses the allowlist anyway": that is true of resolve_libvirt_uri only, and
+# not a runtime setting kdive.config reads.
+#
+# A redirect to a file that IS there reaches the same validation /etc does — a non-symlink regular
+# file `stat` reports as root:root 0644, holding exactly one KDIVE_LIBVIRT_URI line naming one of
+# the two URIs in LIBVIRT_SOCKET_URIS — so it can only ever yield a value that was already
+# correct. A redirect to a path that is NOT there is a different matter: resolve_libvirt_uri reads
+# it as "no lifecycle contract installed" and resolves qemu:///system with no message, exactly as
+# it does on a bare dev host, because nothing here can tell the two apart. On a provisioned host
+# that is the server/worker split this file exists to prevent, so the seam is only safe for a
+# caller that stages a real file. Do not restate the bound as "an explicit KDIVE_LIBVIRT_URI
+# bypasses the allowlist anyway": that holds for resolve_libvirt_uri only, and
 # worker-lifecycle.sh calls load_published_libvirt_uri directly, where no such bypass exists.
 : "${LIBVIRT_ENV:=/etc/kdive/live-worker-libvirt.env}"
 LIBVIRT_SOCKET_URIS=(

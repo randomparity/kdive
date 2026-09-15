@@ -952,6 +952,30 @@ def test_live_stack_env_resolves_one_libvirt_endpoint(
     assert result.stdout == expected
 
 
+@pytest.mark.parametrize("metadata", ("1000:1000:644", "0:0:664", "0:1000:644"))
+def test_a_contract_not_owned_by_root_is_refused_not_downgraded(
+    tmp_path: Path, metadata: str
+) -> None:
+    """Cover the ownership leg of require_exact_libvirt_env, which this change made load-bearing.
+
+    Since #2480 that predicate decides whether resolve_libvirt_uri aborts the sourcing shell, so
+    it now gates stack-services.sh, stack-down.sh and stack-status.sh alike. Nothing exercised it
+    before: the one test that reached it stubbed it out. The `stat` shim the other tests use to
+    satisfy it is what makes the negative case testable here as well -- it prints the metadata
+    under test instead of the test user's real ownership.
+    """
+    _, staged = _published_contract(tmp_path)
+    (tmp_path / "bin" / "stat").write_text(f"#!/bin/sh\nprintf '{metadata}\\n'\n", encoding="utf-8")
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        'printf %s "${KDIVE_LIBVIRT_URI-unset}"',
+        staged,
+    )
+    assert result.returncode != 0
+    assert result.stdout != "qemu:///system"
+    assert "untrusted metadata" in result.stderr
+
+
 @pytest.mark.parametrize("target", ("missing", "live-worker-libvirt.env"))
 def test_a_symlink_at_the_contract_path_is_refused_not_downgraded(
     tmp_path: Path, target: str
@@ -1934,16 +1958,25 @@ def test_role_bootstrap_runs_with_the_container_internal_migration_dsn() -> None
     )
 
 
-def _ensure_session_libvirtd(tmp_path: Path) -> subprocess.CompletedProcess[str]:
-    """Source the real lib.sh and run ensure_session_libvirtd against staged paths."""
+def _ensure_session_libvirtd(
+    tmp_path: Path, daemon: str = "libvirtd", *, positional: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Source the real lib.sh and run ensure_session_libvirtd against staged paths.
+
+    `positional=False` drops the three overrides so the call exercises the defaults, which are
+    derived from the published URI's daemon family rather than hardcoded.
+    """
     for name in ("lib.sh", "libvirt-uri.sh"):
         (tmp_path / name).write_text(
             (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
         )
-    args = (
-        f'"{tmp_path / "libvirtd-stub"}" "{tmp_path / "libvirtd-live.conf"}" '
-        f'"{tmp_path / "run/kdive/live-libvirt"}"'
-    )
+    args = ""
+    if positional:
+        args = (
+            f'"{tmp_path / f"{daemon}-stub"}" "{tmp_path / f"{daemon}-live.conf"}" '
+            f'"{tmp_path / "run/kdive/live-libvirt"}"'
+        )
+    socket_name = "virtqemud-sock" if daemon == "virtqemud" else "libvirt-sock"
     result = subprocess.run(
         [
             "bash",
@@ -1955,7 +1988,12 @@ def _ensure_session_libvirtd(tmp_path: Path) -> subprocess.CompletedProcess[str]
         capture_output=True,
         text=True,
         check=False,
-        env=dict(os.environ),
+        env=_libvirt_env(
+            LIBVIRT_ENV=str(tmp_path / "no-contract.env"),
+            KDIVE_LIBVIRT_URI=(
+                f"qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/{socket_name}"
+            ),
+        ),
     )
     # `bash -c` carries no `set -e`, so a lib.sh that half-sourced would be invisible: every
     # assertion below is about ensure_session_libvirtd's own behavior and would still pass. The
@@ -1965,19 +2003,43 @@ def _ensure_session_libvirtd(tmp_path: Path) -> subprocess.CompletedProcess[str]
 
 
 @contextmanager
-def _session_daemon_stage(tmp_path: Path) -> Generator[Path]:
-    """Stage conf + runtime root and a libvirtd stub recording argv and XDG_RUNTIME_DIR."""
-    (tmp_path / "libvirtd-live.conf").write_text("# staged config\n", encoding="utf-8")
+def _session_daemon_stage(tmp_path: Path, daemon: str = "libvirtd") -> Generator[Path]:
+    """Stage conf + runtime root and a daemon stub recording argv and XDG_RUNTIME_DIR."""
+    (tmp_path / f"{daemon}-live.conf").write_text("# staged config\n", encoding="utf-8")
     (tmp_path / "run" / "kdive" / "live-libvirt").mkdir(parents=True)
-    calls = tmp_path / "libvirtd.calls"
-    stub = tmp_path / "libvirtd-stub"
+    calls = tmp_path / f"{daemon}.calls"
+    stub = tmp_path / f"{daemon}-stub"
     stub.write_text(
-        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >>"$(dirname "$0")/libvirtd.calls"\n'
-        'env | grep \'^XDG_RUNTIME_DIR=\' >>"$(dirname "$0")/libvirtd.calls"\n',
+        "#!/usr/bin/env bash\n"
+        f'printf \'%s\\n\' "$*" >>"$(dirname "$0")/{daemon}.calls"\n'
+        f'env | grep \'^XDG_RUNTIME_DIR=\' >>"$(dirname "$0")/{daemon}.calls"\n',
         encoding="utf-8",
     )
     stub.chmod(0o755)
     yield calls
+
+
+@pytest.mark.parametrize("daemon", ("libvirtd", "virtqemud"))
+def test_ensure_session_libvirtd_follows_the_published_daemon_family(
+    tmp_path: Path, daemon: str
+) -> None:
+    """#2480: every entry point now resolves the published URI, so this recovery branch is
+    reachable on Red Hat- and SUSE-family runners for the first time. The lifecycle installer
+    selects virtqemud there and installs only /etc/kdive/virtqemud-live.conf, so the former
+    hardcoded libvirtd defaults named a binary, a config and a pid file that host has never had.
+    The published URI's socket basename is what carries the family."""
+    bare = _ensure_session_libvirtd(tmp_path, daemon, positional=False)
+    assert bare.returncode == 1
+    assert f"daemon binary: /usr/sbin/{daemon} " in bare.stderr
+    assert f"config:        /etc/kdive/{daemon}-live.conf " in bare.stderr
+
+    # The pid file is never a positional override, so the success path is the only place its
+    # derived name is observable.
+    with _session_daemon_stage(tmp_path, daemon) as calls:
+        result = _ensure_session_libvirtd(tmp_path, daemon)
+        assert result.returncode == 0, result.stderr
+        expected_pid = tmp_path / f"run/kdive/live-libvirt/libvirt/{daemon}.pid"
+        assert f"--pid-file {expected_pid}" in calls.read_text(encoding="utf-8")
 
 
 def test_ensure_session_libvirtd_starts_the_operator_owned_daemon(tmp_path: Path) -> None:
