@@ -382,8 +382,18 @@ libvirt_ok() {
 
 # Node-device enumeration reachable (#2401). Onboarding's resource discovery
 # (VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV) needs this to work; under the modular daemon model
-# that requires virtnodedevd specifically, while a monolithic libvirtd (the session-daemon
-# recovery path) answers it without a separate unit.
+# that requires virtnodedevd specifically, while a monolithic libvirtd answers it without a
+# separate unit.
+#
+# "The session-daemon recovery path is monolithic libvirtd" used to be part of that sentence and
+# is no longer true of every host. ensure_session_libvirtd starts whichever daemon the published
+# URI names, which is virtqemud on the Red Hat and SUSE families — modular, so it needs
+# virtnodedevd separately. docs/design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md
+# records that exact failure against a session virtqemud
+# (`Failed to connect socket to '/var/run/libvirt/virtnodedevd-sock'`), fixed by enabling
+# virtnodedevd.socket by hand. Since #2480 a bare bring-up on such a host reaches this gate by the
+# session branch, which does not enable that unit; closing that is stack-services.sh's, not this
+# file's. The Debian-family runner is unaffected — its session daemon is the monolithic libvirtd.
 nodedev_ok() {
   virsh -c "$KDIVE_LIBVIRT_URI" nodedev-list >/dev/null 2>&1
 }

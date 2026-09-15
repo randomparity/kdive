@@ -71,18 +71,28 @@ load_published_libvirt_uri() {
 # than `-e` alone because `-e` follows symlinks, so a dangling one would take the else branch and
 # downgrade silently while a symlink to a valid contract is rejected.
 #
-# stack-down.sh and stack-status.sh source lib.sh before doing any of their own work, so that
-# abort takes teardown and status with it. The override named in the message is the way out, and
-# the message says which value because a wrong one is worse than the abort: kdive_domains() would
-# query a daemon holding no kdive domains, the destroy/undefine loop would iterate over nothing,
-# and `stack-down.sh --wipe` would still remove the overlays those domains are running on.
+# Every caller sources lib.sh or env.sh before doing any of its own work, so the abort takes the
+# whole invocation with it — including ones that need no libvirt at all (`stack-services.sh
+# --skip-libvirt`, apply-migrations.sh, onboard.sh) and the two that are most wanted when a host
+# is broken, stack-down.sh and stack-status.sh. Whether a libvirt-free entry point should survive
+# a broken contract is a scope question this change does not settle; the override below is the
+# way past it either way, which is why the message names it rather than only the cause.
+#
+# Two things the override does not fix, recorded here because the abort's own reasoning invites
+# the assumption that it does. A value naming the wrong daemon makes kdive_domains() query one
+# holding no kdive domains, so `stack-down.sh --wipe` reaps nothing and still removes the
+# overlays. And even under the right value the reap is not observable: stack-down.sh suffixes
+# its destroy, undefine and rm with `|| true`, so on the sudo-less provisioned service account all
+# three fail silently and teardown prints `done` having reaped nothing. Both belong to
+# stack-down.sh.
 resolve_libvirt_uri() {
   if [[ -z "${KDIVE_LIBVIRT_URI:-}" ]]; then
     if [[ -e "$LIBVIRT_ENV" || -L "$LIBVIRT_ENV" ]]; then
       KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)" || {
-        echo "to proceed anyway, export KDIVE_LIBVIRT_URI naming the endpoint the kdive domains" \
-          "actually live on — a value naming any other daemon leaves them defined while" \
-          "'stack-down.sh --wipe' still removes their overlays" >&2
+        echo "to proceed anyway, export KDIVE_LIBVIRT_URI with one of the values" \
+          "${LIBVIRT_ENV} is allowed to publish, or qemu:///system on a host with no" \
+          "lifecycle contract; a value naming a daemon the kdive domains do not live on" \
+          "leaves them defined while 'stack-down.sh --wipe' still removes their overlays" >&2
         return 1
       }
     else
