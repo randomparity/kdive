@@ -285,11 +285,9 @@ what #2318 establishes, not a finding against #2314.
   chunked finalization the reassembly I/O therefore shows up in `reassemble_ms` and in none of
   the three counters. That costs nothing on these rows — both are single-PUT — but a reader of a
   chunked record must not treat the counters as the whole finalization's store traffic.
-- **ppc64le is not measured.** No ppc64le bundle or cross-toolchain exists on the measurement
-  host. The harness is arch-parameterized and re-runs unchanged under `KDIVE_PPC64LE_BUNDLE`;
-  the arm is owned by [debt record 0015](../debt/0015-ppc64le-finalization-measurement-unrun.md).
-  ADR-0655 names the confirmation as a reopening condition rather than treating these rows as
-  standing in for it.
+- **ppc64le is measured below.** The confirmation run recorded on 2026-09-15 against
+  deployed commit `52bca7d5e` on a POWER9 host; see the [ppc64le row](#ppc64le-row) section.
+  [Debt record 0015](../debt/0015-ppc64le-finalization-measurement-unrun.md) is resolved.
 - **The kernel-build toolchain is outside the repository.** Both trees were built outside the
   checkout, so the compilers and headers that produced them are not covered by the Ansible
   declaration this change makes for the driver's own host binaries (`make` and GNU `tar`, in
@@ -302,6 +300,89 @@ what #2318 establishes, not a finding against #2314.
 - **`modules_install` does not strip.** `combined_kernel_tar` runs the plain recipe, so both
   bundles carry unstripped modules. The sizes above are what this repository's own upload lane
   produces, not a tuned figure.
+
+## ppc64le row
+
+Recorded on 2026-09-15 against deployed commit `52bca7d5e` on a POWER9 host. This is the
+confirmation run owned by [debt record 0015](../debt/0015-ppc64le-finalization-measurement-unrun.md)
+and named as a reopening condition in ADR-0655.
+
+### Environment
+
+| Fact | Value |
+|---|---|
+| Deployed revision (`/readyz`) | version `0.4.1`, commit `52bca7d5e`, `is_release: false`, started `2026-09-15T22:12:30Z` |
+| Host CPU count | 128 (POWER9, 2366 MHz) |
+| Host RAM | 251 GiB |
+| Host kernel | `7.0.0-31-generic` (Ubuntu resolute) |
+| Host machine | `ppc64le` |
+| Object-store deployment shape | SeaweedFS container on the same host, reached over loopback (`KDIVE_BACKEND_SERVICES`, `scripts/live-stack/lib.sh`) |
+| Observed mean per-request store latency | 13.53 ms — `store_wait_ms / store_requests` |
+| Storage tier those reads actually hit | page cache — driver PUTs the bundle and calls `runs.complete_build` immediately after |
+| Kernel source | linux 7.0.0 (`~/src/linux`, built tree, `CONFIG_KERNEL_GZIP=y`, `CONFIG_DEBUG_INFO=y`) |
+| Boot member (`boot/vmlinuz`) | `vmlinux` stripped with `strip -s` — 64 MiB ELF64-LE `EM_PPC64`, stripped |
+| Module staging | `make modules_install INSTALL_MOD_PATH=...` from the built tree; no pruning needed (bundle 2.0 GiB, under the 2 GiB ceiling) |
+| `KDIVE_PPC64LE_BUNDLE` | `/tmp/ppc64le-bundle` — `kernel.tar.gz` cut with `pigz`, `boot/vmlinuz` listed first, `lib/modules/*/vmlinuz` excluded |
+
+No `initrd.img` — the Run is unbound (no System, no VM), finalization only.
+
+### Row
+
+| Field | ppc64le (2-GB class) |
+|---|---|
+| arch | ppc64le |
+| bundle compressed bytes | 2 057 081 133 (2057 MB) |
+| bundle member count | 4696 |
+| supported budget (ms) | 300 000 |
+| driver timeout (ms) | 1 800 000 |
+| client elapsed (ms) | **112 304.059** |
+| `prepare_ms` _(server)_ | 4.102 |
+| `reassemble_ms` _(server)_ | 0.000 |
+| `queue_wait_ms` _(server)_ | 0.008 |
+| `scan_ms` _(server)_ | 112 153.008 |
+| `publish_ms` _(server)_ | 43.506 |
+| `total_ms` _(server)_ | **112 200.725** |
+| `store_requests` _(server)_ | 1484 |
+| `store_bytes` _(server)_ | 6 208 992 137 |
+| `store_wait_ms` _(server)_ | 20 083.233 |
+| read amplification (`store_bytes` ÷ bundle bytes) | 3.02× |
+| mean per-request store latency (ms) | 13.53 |
+| store wait as a share of the scan | 17.9% |
+| share of the supported budget | 37.4% |
+| `chunked` _(server)_ | false |
+| `outcome` _(server)_ | succeeded |
+
+### What the ppc64le row says
+
+**The phase attribution agrees with the x86_64 rows.** `scan_ms` is 99.96% of `total_ms`
+(112 153 ms of 112 201 ms). Preparation, queue wait and publication together are 47.6 ms —
+the same negligible-overhead shape as the x86_64 rows (7–10 ms there, slightly higher here
+due to the larger bundle). The prediction in debt record 0015 holds: bytes-driven cost
+dominates, and the two arches agree on which phases matter.
+
+**The per-byte scan rate is 54.52 ns/byte**, versus 18.87 ns/byte for the x86_64 large row
+(a 2.89× slower rate on POWER9 at 2366 MHz vs the x86_64 host at an Intel Xeon w7-2495X).
+The bundle is 11.5% larger than the x86_64 large row (2057 MB vs 1845 MB), and the scan time
+is 3.22× longer (112 153 ms vs 34 811 ms) — consistent with the higher per-byte rate on a
+slower-clocked POWER9.
+
+**The budget impact at 37.4% is material but not a threat to the decision.** The x86_64
+large row used 11.6% of the 300 s budget; the ppc64le row uses 37.4% — 2.67× more of the
+budget — with 1.63× headroom remaining. At the measured per-byte rate, a bundle at the
+2 GiB ceiling would take about 117 s, still 2.56× under the 300 s budget.
+
+**Store latency is higher than the x86_64 loopback figure.** 13.53 ms per request versus
+3.70–5.18 ms on x86_64. Both are page-cache reads on the same-host SeaweedFS — the difference
+is loopback HTTP overhead on POWER9 versus x86_64. This is a floor, not a disk figure, and it
+is the same caveat the x86_64 rows carry.
+
+**Queue wait was uncontended.** `queue_wait_ms` is 0.008 ms — the same floor measured on
+x86_64. The uncontended floor is arch-independent.
+
+**The decision stands under ppc64le evidence.** ADR-0655's reopening condition is that the
+ppc64le row disagrees with the x86_64 attribution. It agrees: scan dominates, queue and
+publication are negligible, and the per-byte cost difference is a machine-speed factor, not a
+different attribution. ADR-0655 stands; debt record 0015 is resolved.
 
 ## Reproducing
 

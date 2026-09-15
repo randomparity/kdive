@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2026-12-14
+> **Resolved by the ppc64le confirmation run recorded in docs/design/2026-09-14-external-build-finalization-measurement-2318-proof-record.md** (2026-09-15)
 
 ## Concern
 
