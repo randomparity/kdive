@@ -174,6 +174,10 @@ async def _invoke_through_gateway(
     ``tools.invoke`` returns the inner tool's structured content verbatim, so the payload
     parsed here is ``resources.list``'s own ``ToolResponse`` dump.
 
+    The transport construction below mirrors ``LiveStackClient.over_http`` and has to be kept
+    in step with it — this is the second place in the live tier that attaches a bearer to a
+    transport, and the only one outside the harness.
+
     ``raise_on_error=False`` for the same reason ``LiveStackClient.call_tool`` passes it:
     ``tools.invoke`` re-raises anything that is not a ``CategorizedError``, so a degraded
     dependency inside the inner tool would otherwise surface as a bare fastmcp ``ToolError``
