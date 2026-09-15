@@ -244,6 +244,7 @@ def test_external_build_finalization_is_measured(arch: str, tmp_path: Path) -> N
                 "total_ms": row.total_ms,
                 "store_requests": row.store_requests,
                 "store_bytes": row.store_bytes,
+                "store_wait_ms": row.store_wait_ms,
                 "chunked": row.chunked,
                 "outcome": row.outcome,
                 "deployed_version": deployed["version"],

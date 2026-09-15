@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+from mcp.shared._httpx_utils import create_mcp_http_client
 from opentelemetry.sdk._logs import ReadableLogRecord
 from opentelemetry.sdk._logs._internal import LogRecord
 from opentelemetry.sdk.resources import Resource
@@ -47,6 +50,7 @@ def _payload(run_id: str, **overrides: Any) -> dict[str, Any]:
         "total_ms": 1215.0,
         "store_requests": 42,
         "store_bytes": 4_196_910,
+        "store_wait_ms": 91.25,
         "chunked": False,
         "outcome": "succeeded",
     }
@@ -93,6 +97,7 @@ def test_reads_row_from_otel_exporter(tmp_path: Path) -> None:
     assert row.scan_ms == 1200.75
     assert row.store_requests == 42
     assert row.store_bytes == 4_196_910
+    assert row.store_wait_ms == 91.25
     assert row.chunked is False
     assert row.outcome == "succeeded"
     assert row.accounted_ms <= row.total_ms
@@ -127,9 +132,33 @@ def test_returns_the_last_attempt_for_a_run(tmp_path: Path) -> None:
     assert row.scan_ms == 1200.75
 
 
-def test_supported_budget_is_the_mcp_client_default() -> None:
-    """The decision threshold is 30 s and is a constant, not an environment knob."""
-    assert SUPPORTED_BUDGET_S == 30.0
+def test_supported_budget_matches_the_shipped_client() -> None:
+    """The threshold is read off a client built the way `over_http` builds one.
+
+    An earlier version of this test asserted `SUPPORTED_BUDGET_S == 30.0`: a literal compared
+    to itself, which passed no matter what fastmcp or the MCP SDK did. It therefore could not
+    falsify the one claim ADR-0655's decision rests on — and did not, when the constant was
+    30 s and the client's actual bound was 300 s. This builds the client the way
+    `LiveStackClient.over_http` does, confirms it leaves the read timeout unset, and takes the
+    budget from what the SDK then applies.
+    """
+    client = Client(
+        StreamableHttpTransport(url="http://127.0.0.1:1/mcp", headers={"Authorization": "x"})
+    )
+    assert client._session_kwargs.get("read_timeout_seconds") is None, (  # noqa: SLF001
+        "over_http passes no timeout; if that changed, the budget below is not what binds"
+    )
+
+    effective = create_mcp_http_client(headers={}).timeout
+    assert effective.read == SUPPORTED_BUDGET_S, (
+        f"the shipped client's read timeout is {effective.read}s, but the recorded supported "
+        f"budget is {SUPPORTED_BUDGET_S}s; ADR-0655's decision is graded against this number"
+    )
+    connect = cast("float", effective.connect)
+    assert connect < SUPPORTED_BUDGET_S, (
+        "the connect timeout is not the request bound; a finalization this long has already "
+        "connected, which is the confusion that produced the original 30 s figure"
+    )
 
 
 def test_ppc64le_arm_skips_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:

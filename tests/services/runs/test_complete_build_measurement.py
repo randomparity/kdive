@@ -20,6 +20,7 @@ import base64
 import hashlib
 import json
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -51,6 +52,7 @@ _EXPECTED_KEYS = {
     "total_ms",
     "store_requests",
     "store_bytes",
+    "store_wait_ms",
     "chunked",
     "outcome",
 }
@@ -281,6 +283,55 @@ def test_store_counts_match_issued_requests(
         assert store.requests > 0, "the validator issued no store requests; fixture is wrong"
         assert payload["store_requests"] == store.requests
         assert payload["store_bytes"] == store.bytes_served
+
+    asyncio.run(_run())
+
+
+def test_store_wait_measures_time_spent_in_the_store(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`store_wait_ms` is real store time, and it is a subset of the scan that contains it.
+
+    The point of the field is to separate round trips from work, so that `store_requests x RTT`
+    can be evaluated on a deployment other than the one measured. A field that stayed 0 under a
+    deliberately slow store would look exactly like the loopback case it is meant to
+    distinguish, so the fake delays every request and the assertion is against that delay.
+    """
+    delay_s = 0.005
+
+    class _SlowStore(_CountingValidationStore):
+        def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+            time.sleep(delay_s)
+            return super().head(key, version_id=version_id)
+
+        def get_range(
+            self, key: str, *, start: int, length: int, version_id: str | None = None
+        ) -> bytes:
+            time.sleep(delay_s)
+            return super().get_range(key, start=start, length=length, version_id=version_id)
+
+    async def _run() -> None:
+        blob = valid_combined_kernel_tar()
+        async with complete_build_support.pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(
+                pool,
+                entries=[ManifestEntry("kernel", _sha256_b64(blob), len(blob))],
+                ttl=timedelta(hours=1),
+            )
+            store = _SlowStore(blob, f"{_prefix(run_id)}kernel")
+            with caplog.at_level(logging.INFO, logger=_MEASUREMENT_LOGGER):
+                await complete_build(pool, run_id, _finalizer(object_store_factory=lambda: store))
+
+        payload = _only_measurement(caplog)
+        assert store.requests > 0, "the validator issued no store requests; fixture is wrong"
+        floor_ms = store.requests * delay_s * 1000.0 * 0.8
+        assert payload["store_wait_ms"] >= floor_ms, (
+            f"store_wait_ms {payload['store_wait_ms']} is below the {floor_ms}ms the fake "
+            f"slept across {store.requests} requests; the wait is not being measured"
+        )
+        assert payload["store_wait_ms"] <= payload["scan_ms"], (
+            "store wait cannot exceed the scan that issues every request it counts"
+        )
 
     asyncio.run(_run())
 

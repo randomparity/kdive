@@ -30,18 +30,30 @@ import pytest
 
 from kdive.services.runs.complete_build import _MEASUREMENT_EVENT
 
-SUPPORTED_BUDGET_S = 30.0
-"""MCP's default client request timeout, which `LiveStackClient.over_http` does not override.
+SUPPORTED_BUDGET_S = 300.0
+"""How long a `runs.complete_build` call may take before the clients this repo ships give up.
 
-`over_http` builds `StreamableHttpTransport` and `Client(transport)` with no timeout, and
-fastmcp preserves MCP's 30-second default for regular operations. This is the threshold ADR
-0655's decision is tested against.
+`LiveStackClient.over_http` (`src/kdive/mcp/dev_harness.py:203-208`) and the CLI transport both
+build `Client(transport)` with no timeout override, which leaves `read_timeout_seconds` as
+`None`. Two consequences follow, and the second is the binding one:
+
+- `StreamableHttpTransport.connect_session` builds an `httpx.Timeout` only when
+  `read_timeout_seconds` is set; with `None` it falls through to the MCP SDK's
+  `create_mcp_http_client`, whose default is
+  `Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)`.
+- `BaseSession.send_request` with both timeouts `None` calls `anyio.fail_after(None)`, so there
+  is no session-level request timeout at all.
+
+The bound on a long finalization is therefore the **read** timeout, 300 s. The 30 s figure that
+an earlier draft of this constant carried is the *connect* default, which a request this long
+has already cleared. It is checked by `test_supported_budget_matches_the_shipped_client`, which
+reads the effective value off a client rather than comparing the constant to itself.
 
 A module constant rather than an environment variable on purpose: the spec and the ADR both
 rest on this being a property of the shipped client, so a knob would let whichever environment
 runs the proof move the threshold the accepted decision rests on. The timeout the driver
-*itself* runs under is separate and tunable (`KDIVE_MEASUREMENT_TIMEOUT_S`), because a driver
-bounded by 30 s could not measure a multi-gigabyte bundle at all.
+*itself* runs under is separate and tunable (`KDIVE_MEASUREMENT_TIMEOUT_S`), because it must
+outlast the budget to record a finalization that would breach it rather than truncating there.
 """
 
 PPC64LE_BUNDLE_ENV = "KDIVE_PPC64LE_BUNDLE"
@@ -61,6 +73,7 @@ class MeasurementRow:
     total_ms: float
     store_requests: int
     store_bytes: int
+    store_wait_ms: float
     chunked: bool
     outcome: str
 
@@ -111,6 +124,7 @@ def read_measurement_record(log_path: Path, run_id: str) -> MeasurementRow | Non
                 total_ms=float(payload["total_ms"]),
                 store_requests=int(payload["store_requests"]),
                 store_bytes=int(payload["store_bytes"]),
+                store_wait_ms=float(payload["store_wait_ms"]),
                 chunked=bool(payload["chunked"]),
                 outcome=str(payload["outcome"]),
             )

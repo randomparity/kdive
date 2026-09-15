@@ -373,27 +373,42 @@ class _VersionPinnedStore:
 
 @dataclass(slots=True)
 class _CountingStore:
-    """Count the object-store requests and bytes one validation pass issues (#2318).
+    """Count the object-store requests, bytes, and wait time one validation pass issues (#2318).
 
     Wraps the version-pinned store rather than replacing it: pinning decides *which* bytes are
     read and this decides nothing, so composing them keeps each to one job. A ``head`` is one
     request carrying no body; a ``get_range`` is one request carrying what it returned, so the
     byte total is what the store actually transferred for validation.
+
+    ``wait_s`` is the summed wall time spent inside the wrapped store — the term that separates
+    a loopback deployment from a network-attached one. Without it the scan's elapsed time cannot
+    be split into work and round trips, and ``store_requests x RTT`` stays unevaluable on the
+    only rows that exist. It is measured at this boundary rather than around the whole scan
+    because that is the only place the two are separable.
     """
 
     store: ValidatorStore
     requests: int = 0
     bytes_read: int = 0
+    wait_s: float = 0.0
 
     def head(self, key: str) -> HeadResult | None:
         self.requests += 1
-        return self.store.head(key)
+        started = time.monotonic()
+        try:
+            return self.store.head(key)
+        finally:
+            self.wait_s += time.monotonic() - started
 
     def get_range(
         self, key: str, *, start: int, length: int, version_id: str | None = None
     ) -> bytes:
-        data = self.store.get_range(key, start=start, length=length, version_id=version_id)
         self.requests += 1
+        started = time.monotonic()
+        try:
+            data = self.store.get_range(key, start=start, length=length, version_id=version_id)
+        finally:
+            self.wait_s += time.monotonic() - started
         self.bytes_read += len(data)
         return data
 
@@ -428,6 +443,7 @@ def _log_measurement(
         "total_ms": timer.total_ms(),
         "store_requests": sum(counter.requests for counter in counts),
         "store_bytes": sum(counter.bytes_read for counter in counts),
+        "store_wait_ms": round(sum(counter.wait_s for counter in counts) * 1000.0, 3),
         "chunked": chunked,
         "outcome": outcome,
     }
