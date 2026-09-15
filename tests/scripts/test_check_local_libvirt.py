@@ -318,7 +318,8 @@ def test_unreadable_host_kernel_fails_with_chmod_hint(tmp_path: Path) -> None:
     assert "just prepare-local-libvirt-host" in result.stderr
     assert f"chgrp kvm {boot}/vmlinu?-*" in result.stderr
     assert f"chmod 0640 {boot}/vmlinu?-*" in result.stderr
-    assert "0644" not in result.stderr
+    assert f"chmod 0644 {boot}" not in result.stderr
+    assert "dpkg-statoverride" not in result.stderr
 
 
 def test_readable_host_kernel_passes(tmp_path: Path) -> None:
@@ -464,3 +465,21 @@ def test_unsupported_host_arch_reports_unsupported_and_skips_native_qemu(tmp_pat
     assert "host arch aarch64 is not a supported kdive provisioning arch" in out
     assert "qemu-system-x86_64 not found" not in result.stderr
     assert "qemu-system-ppc64 not found" not in result.stderr
+
+
+def test_unlistable_boot_dir_fails_the_kernel_probe(tmp_path: Path) -> None:
+    """An unlistable /boot must fail, not skip: the glob finds nothing, and the `found=0`
+    skip would otherwise report OK on the exact host state the probe exists to catch (#2479).
+    check-setup-deps.sh's probe_boot_kernels carries the same guard."""
+    bindir, py = _healthy_bin(tmp_path)
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-6.8.0-124-generic").write_text("")
+    boot.chmod(0o000)
+    try:
+        result = _run(_healthy_env(tmp_path, bindir, py, boot))
+    finally:
+        boot.chmod(0o755)  # restore so pytest can clean the tmp tree up
+
+    assert result.returncode == 1, result.stdout
+    assert "is not readable by this user" in result.stderr, result.stderr

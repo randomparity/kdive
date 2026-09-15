@@ -419,7 +419,7 @@ probe_boot_kernels() {
   # to catch. Check the directory before trusting an empty match.
   if [[ -d "${BOOT_DIR}" ]] && { [[ ! -r "${BOOT_DIR}" ]] || [[ ! -x "${BOOT_DIR}" ]]; }; then
     note_manual future "host kernel readability" \
-      "${BOOT_DIR} is not listable by this user (this probe reads as the invoking user), so libguestfs cannot reach a host kernel and no guest image can be built — ${remedy}"
+      "${BOOT_DIR} is not listable by this user (this probe reads as the invoking user), so libguestfs cannot reach a host kernel and no guest image can be built — run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode; a one-off glob cannot help here because your shell cannot expand it inside an unlistable directory"
     return
   fi
   for k in "${BOOT_DIR}"/vmlinuz-* "${BOOT_DIR}"/vmlinux-*; do
@@ -676,7 +676,7 @@ if ((${#required_commands[@]} > 0)); then
 fi
 
 if ((${#recommended_commands[@]} + ${#future_commands[@]} > 0)); then
-  printf "\nRequired dependencies are present. The items above are not needed for the core dev loop; the live_vm and guest-image tiers do need them.\n"
+  printf "\nRequired dependencies are present. The tiers above are not needed for the core dev loop: Recommended is what \`just ci\` runs, and Future is what the live_vm and guest-image tiers need.\n"
 else
   printf "Setup dependencies are present.\n"
 fi

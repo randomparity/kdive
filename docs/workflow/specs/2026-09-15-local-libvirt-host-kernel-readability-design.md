@@ -68,8 +68,9 @@ satisfies.
   tier reclassification and no exit-code change: ADR-0393's warn-only `future` tier is
   unchanged.
 - `scripts/operations/check-local-libvirt.sh`'s host-kernel remedy moves from `chmod 0644` to
-  the same recipe-first, `chgrp kvm` + `chmod 0640` guidance, so the repository states one mode
-  for one failure.
+  the same recipe-first, `chgrp kvm` + `chmod 0640` guidance, and its kernel probe gains the
+  same unlistable-`/boot` guard, so both preflight scripts state one mode for one failure and
+  agree on that host state. The runtime diagnostic still says `chmod 0644` — see below.
 - Docs: `local-libvirt.md` and `install.md` name the recipe that performs the relabel. The
   runbook's closing sentence is disambiguated to say it forbids copying a binding between
   *differing* Python versions — which is what `maybe_link_guestfs` already refuses — so the
@@ -93,6 +94,13 @@ Out of scope, with owners:
 - The `§4b` citations in accepted ADR-0214 and ADR-0393. Both sit in a `## Context` section,
   and `.github/scripts/profiles/adr.sh` makes every non-Status section of a merged record
   append-only, so correcting them takes a superseding record. Owner: those records.
+- `_KERNEL_REMEDIATION` in `src/kdive/images/planes/_build_common.py`, which still tells an
+  operator `sudo chmod 0644 /boot/vmlinuz-*` when build-fs fails. That wording comes from
+  ADR-0222's Decision, so correcting it takes a superseding record, and `src/kdive/` is
+  outside this change. No verified owner: reported as a follow-up candidate.
+- Two `§4b` pointers into the stub runbook in
+  `tests/providers/local_libvirt/test_retrieve_kdump.py`, outside this change's surface. No
+  verified owner: reported as a follow-up candidate.
 - The four other `install-host.sh` attributions in `local-libvirt.md` (CRB, the Docker remedy,
   SELinux labelling, the python3.14 install) and the matching ADR-0640 reference. No verified
   owner: reported as a follow-up candidate rather than claimed as owned elsewhere.

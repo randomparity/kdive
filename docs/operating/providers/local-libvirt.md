@@ -70,7 +70,8 @@ These are the points where the two families genuinely diverge, not just in packa
   repository, or `podman` with `podman-docker` and the podman socket API.
 - **Host kernel permissions.** Debian/Ubuntu ship `/boot/vmlinuz-*` as `root:root 0600`, which the
   libguestfs appliance cannot read as a non-root user, so `just prepare-local-libvirt-host`
-  relabels them `root:kvm 0640` and then verifies that each worker account can read them
+  relabels them `root:kvm 0640` and asserts that every fixed worker account is in `kvm`,
+  which is what that mode grants read through
   ([ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md)). Fedora ships them
   world-readable and is left alone. A Debian/Ubuntu kernel upgrade installs a fresh `0600` file
   under a new name: re-run the recipe afterwards. `just check-deps` and `just check-local-libvirt`

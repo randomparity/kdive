@@ -141,6 +141,10 @@ _default_net_active() {
 _venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
 _host_kernels_readable() {
   local k found=0
+  # A BOOT_DIR this user cannot list hides every kernel from the globs below, which would
+  # otherwise reach the `found=0` skip and report OK — the state this probe exists to catch.
+  # check-setup-deps.sh's probe_boot_kernels carries the same guard.
+  [[ -d "${BOOT_DIR}" ]] && { [[ ! -r "${BOOT_DIR}" ]] || [[ ! -x "${BOOT_DIR}" ]]; } && return 1
   # vmlinuz-* on x86_64, vmlinux-* on ppc64le (#1156) — probe both so neither arch is missed.
   for k in "${BOOT_DIR}"/vmlinuz-* "${BOOT_DIR}"/vmlinux-*; do
     [[ -e "$k" ]] || continue # no-match glob stays literal under no-nullglob; skip it

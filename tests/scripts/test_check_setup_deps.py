@@ -1004,3 +1004,29 @@ def test_absent_boot_dir_reports_nothing(tmp_path: Path) -> None:
     )
 
     assert "host kernel readability" not in result.stderr, result.stderr
+
+
+@skip_if_root
+def test_unlistable_boot_dir_reports_the_provisioning_remedy(tmp_path: Path) -> None:
+    """A /boot the invoking user cannot list hides every kernel from the glob, so a probe that
+    only globbed would read it as "no kernels present" and stay silent — the state it exists
+    to catch. The one-off glob cannot help here, so this branch must not offer one."""
+    d = tmp_path / "boot"
+    d.mkdir()
+    (d / "vmlinuz-6.8.0-124-generic").write_text("")
+    d.chmod(0o000)
+    try:
+        result = _run(
+            "debian",
+            str(_bin(tmp_path)),
+            tmp_path,
+            extra_env={"KDIVE_BOOT_DIR": str(d)},
+        )
+    finally:
+        d.chmod(0o755)  # restore so pytest can clean the tmp tree up
+
+    assert "host kernel readability" in result.stderr, result.stderr
+    assert "is not listable by this user" in result.stderr, result.stderr
+    assert "just prepare-local-libvirt-host" in result.stderr, result.stderr
+    assert "sudo chgrp kvm" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stdout

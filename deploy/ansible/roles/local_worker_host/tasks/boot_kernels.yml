@@ -29,10 +29,23 @@
         label: "{{ item.path }}"
 
     - name: Read the kvm group the relabel grants read through
+      # fail_key: false so a missing group reaches the assertion below with an actionable
+      # message instead of getent's "One or more supplied key could not be found"; the same
+      # form this role's preflight.yml uses for its operator lookup.
       ansible.builtin.getent:
         database: group
         key: kvm
+        fail_key: false
       register: local_worker_host_kvm_group
+
+    - name: Require the kvm group the relabel grants read through
+      ansible.builtin.assert:
+        that:
+          - local_worker_host_kvm_group.ansible_facts.getent_group.get('kvm') is not none
+        fail_msg: >-
+          the kvm group does not exist on this host, so the relabel cannot grant the fixed
+          worker accounts read access; apply libvirt_stack (the qemu/libvirt packages create
+          it) before local_worker_host.
 
     - name: Verify every worker account is in the kvm group
       # The mode above grants read through the group, so an account outside kvm still cannot
