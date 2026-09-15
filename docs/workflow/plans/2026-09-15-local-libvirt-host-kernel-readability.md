@@ -251,7 +251,9 @@ the readonly `BOOT_DIR` and `probe_boot_kernels()`, taking no arguments, called 
        string says the probe reads as the invoking user.
        """
        result = _run(
-           "debian", str(_bin(tmp_path)), tmp_path,
+           "debian",
+           str(_bin(tmp_path)),
+           tmp_path,
            extra_env={"KDIVE_BOOT_DIR": str(_boot(tmp_path, readable=False))},
        )
 
@@ -265,7 +267,9 @@ the readonly `BOOT_DIR` and `probe_boot_kernels()`, taking no arguments, called 
    def test_readable_boot_kernel_reports_nothing(tmp_path: Path) -> None:
        """A readable kernel is the Fedora default and the post-provisioning Debian state."""
        result = _run(
-           "debian", str(_bin(tmp_path)), tmp_path,
+           "debian",
+           str(_bin(tmp_path)),
+           tmp_path,
            extra_env={"KDIVE_BOOT_DIR": str(_boot(tmp_path, readable=True))},
        )
 
@@ -275,7 +279,9 @@ the readonly `BOOT_DIR` and `probe_boot_kernels()`, taking no arguments, called 
    def test_absent_boot_dir_reports_nothing(tmp_path: Path) -> None:
        """An unusual /boot layout must skip the probe, not fail on the literal glob."""
        result = _run(
-           "debian", str(_bin(tmp_path)), tmp_path,
+           "debian",
+           str(_bin(tmp_path)),
+           tmp_path,
            extra_env={"KDIVE_BOOT_DIR": str(tmp_path / "no-such-boot")},
        )
 
