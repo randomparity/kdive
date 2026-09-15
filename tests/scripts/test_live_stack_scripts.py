@@ -2675,6 +2675,19 @@ def _run_stack_services(
         encoding="utf-8",
     )
     stub.chmod(0o755)
+    # The script is REAL, so every binary it reaches that is not stubbed here resolves to the
+    # host's /usr/bin. Its libvirt block runs `sudo systemctl enable --now virtqemud.socket` on a
+    # host where libvirt is unreachable, and `sudo install -d /var/lib/kdive/rootfs` where the
+    # provision dirs are absent — a unit test enabling sockets and creating root directories on
+    # the operator's machine, silently, because the assertions are about earlier phases. Record
+    # and refuse instead of executing, so no stage a caller drives can escape to the host.
+    for name in ("sudo", "virsh", "systemctl"):
+        refused = bin_dir / name
+        refused.write_text(
+            f'#!/usr/bin/env bash\nprintf \'REFUSED {name} %s\\n\' "$*" >> "{log}"\nexit 0\n',
+            encoding="utf-8",
+        )
+        refused.chmod(0o755)
     script = _stub_live_stack_scripts(tmp_path, oidc_image=None)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
     env.update(env_extra or {})
@@ -2758,5 +2771,10 @@ def test_services_stage_reconciles_the_app_tier(tmp_path: Path) -> None:
     symptom is a 401 that reads as an auth bug. The run fails later on the fake checkout's absent
     worker-lifecycle.sh; what is asserted is what reached `docker` before that.
     """
-    _, log = _run_stack_services(tmp_path, "--stage", "services")
-    assert "rm -sf migrate server worker reconciler" in log.read_text()
+    _, log = _run_stack_services(tmp_path, "--stage", "services", "--skip-libvirt")
+    recorded = log.read_text()
+    assert "rm -sf migrate server worker reconciler" in recorded
+    # The reconcile is the contract; this is the guard on the harness itself. --skip-libvirt is
+    # legal under --stage services (only --stage backends rejects it), so the stage gate is still
+    # exercised while the privileged block stays unreached.
+    assert "REFUSED" not in recorded, f"bring-up attempted a privileged call: {recorded}"

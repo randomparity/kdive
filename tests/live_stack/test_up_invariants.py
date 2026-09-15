@@ -72,7 +72,15 @@ def test_wait_set_excludes_the_one_shot() -> None:
     """
     text = _LIB.read_text()
     assert "KDIVE_BACKEND_LONG_RUNNING=(postgres seaweedfs oidc)" in text
+    # The full set has one consumer left (stack-status.sh), so nothing else would notice a
+    # "dead variable" cleanup. Under `set -u` an unset array expands to zero words rather than
+    # erroring, so the status report would silently stop listing the backends and still exit 0.
+    assert "KDIVE_BACKEND_SERVICES=(postgres seaweedfs seaweedfs-init oidc)" in text
     wait_lines = [ln for ln in _compose_up_lines(text) if "--wait" in ln]
     assert len(wait_lines) == 1, wait_lines
+    # Pins the identifier, not the three names: the contract is that the declared long-running
+    # array is what reaches `--wait`. Membership is pinned by the assertion above, and
+    # test_backends_stage_waits_only_on_the_long_running_backends covers the same contract
+    # through recorded argv, without the name coupling.
     assert "KDIVE_BACKEND_LONG_RUNNING[@]" in wait_lines[0], wait_lines[0]
     assert "KDIVE_BACKEND_SERVICES" not in wait_lines[0], wait_lines[0]
