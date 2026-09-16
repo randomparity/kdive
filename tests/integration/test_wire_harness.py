@@ -18,8 +18,6 @@ import asyncio
 
 import jwt  # PyJWT: decode a token's claims without verifying the signature
 import pytest
-from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 
 import kdive.config as config
@@ -27,9 +25,7 @@ from kdive.config.cli_settings import CLI_CLIENT_ID
 from kdive.mcp.dev_harness import (
     AUDIENCE,
     LiveStackClient,
-    LiveStackToolError,
     _build_claims,
-    _tool_error_text,
     make_keypair,
     mint,
     mint_token,
@@ -164,37 +160,6 @@ def test_oidc_issuer_tier_mints_and_verifies_claim_shapes() -> None:
     asyncio.run(_run())
 
 
-async def _invoke_through_gateway(
-    base_url: str, token: str, tool: str, subject: str
-) -> ToolResponse:
-    """Call ``tool`` through ``tools.invoke`` over HTTP and parse the inner envelope.
-
-    Not routed through :meth:`LiveStackClient.call_tool`: its ``name`` parameter is not
-    positional-only, so the gateway's own ``name`` argument cannot be passed through it.
-    ``tools.invoke`` returns the inner tool's structured content verbatim, so the payload
-    parsed here is ``resources.list``'s own ``ToolResponse`` dump.
-
-    The transport construction below mirrors ``LiveStackClient.over_http`` and has to be kept
-    in step with it — this is the second place in the live tier that attaches a bearer to a
-    transport, and the only one outside the harness.
-
-    ``raise_on_error=False`` for the same reason ``LiveStackClient.call_tool`` passes it:
-    ``tools.invoke`` re-raises anything that is not a ``CategorizedError``, so a degraded
-    dependency inside the inner tool would otherwise surface as a bare fastmcp ``ToolError``
-    with neither the tool name nor the role under test attached.
-    """
-    transport = StreamableHttpTransport(url=base_url, headers={"Authorization": f"Bearer {token}"})
-    async with Client(transport) as client:
-        result = await client.call_tool(
-            "tools.invoke", {"name": tool, "arguments": {}}, raise_on_error=False
-        )
-    if getattr(result, "is_error", False):
-        raise LiveStackToolError(tool, f"as {subject}: {_tool_error_text(result)}")
-    payload = result.structured_content
-    assert payload is not None, f"{tool} through tools.invoke returned no structured content"
-    return ToolResponse.model_validate(payload)
-
-
 @pytest.mark.live_stack
 def test_live_stack_tier_agent_catalog_is_gateway_clipped_over_http() -> None:
     """Over HTTP against a host-run server: the agent-profile catalog per role, and a tool
@@ -222,10 +187,17 @@ def test_live_stack_tier_agent_catalog_is_gateway_clipped_over_http() -> None:
             )
             async with LiveStackClient.over_http(base_url, token) as client:
                 names = set(await client.list_tools())
+                # tools.invoke returns the inner tool's structured content verbatim, so the
+                # envelope parsed here is resources.list's own ToolResponse dump.
+                envelope = await client.call_tool(
+                    "tools.invoke", name=_UNADVERTISED_TOOL, arguments={}
+                )
             # The catalog is the gateway clip, so _UNADVERTISED_TOOL's absence follows from
             # this equality; the sibling in-memory test pins it out of CORE_TOOLS.
             assert names == _expected_agent_catalog(roles, platform_roles), subject
-            envelope = await _invoke_through_gateway(base_url, token, _UNADVERTISED_TOOL, subject)
+            assert isinstance(envelope, ToolResponse), (
+                f"{_UNADVERTISED_TOOL} through tools.invoke returned a list, expected one envelope"
+            )
             assert envelope.error_category is None, (
                 f"{_UNADVERTISED_TOOL} through tools.invoke failed for {subject}: "
                 f"{envelope.error_category} {envelope.detail}"
