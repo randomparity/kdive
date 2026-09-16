@@ -10,7 +10,7 @@
     # lxml, so community.libvirt fails in libvirt_pool_net. This play manages the host's own
     # libvirt stack through its distro-packaged bindings, so it pins the system interpreter here
     # rather than in inventory/hosts.yml: that file is shared with pki.yml and the localhost plays
-    # under tests/, which resolve their own dependencies against the launching env (#2498).
+    # under tests/, which must keep resolving against the launching environment (#2498).
     ansible_python_interpreter: /usr/bin/python3
     local_libvirt_host_source: "{{ playbook_dir }}/../../.."
     local_libvirt_host_operator_user: ""

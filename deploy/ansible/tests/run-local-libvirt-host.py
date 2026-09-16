@@ -184,7 +184,15 @@ def ansible(*argv: str) -> str:
     env = {name: os.environ[name] for name in passthrough if name in os.environ}
     env["ANSIBLE_CONFIG"] = str(ANSIBLE / "ansible.cfg")
     env["ANSIBLE_STDOUT_CALLBACK"] = "default"
-    done = subprocess.run(argv, cwd=ANSIBLE, env=env, capture_output=True, text=True, check=False)
+    try:
+        done = subprocess.run(
+            argv, cwd=ANSIBLE, env=env, capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        raise SystemExit(
+            f"local-libvirt-host regression: {argv[0]} is not on PATH; run this gate through "
+            "`just test-ansible`, which supplies ansible-core"
+        ) from None
     require(done.returncode == 0, f"{argv[0]} exited {done.returncode}: {done.stderr.strip()}")
     return done.stdout
 
@@ -221,18 +229,28 @@ def resolved_interpreter(play_vars: dict) -> str:
 
 
 # The pin is a play var, not an inventory host var. hosts.yml is shared with pki.yml and the
-# localhost plays under deploy/ansible/tests/, which resolve their own dependencies; a host var
-# there would retarget all of them, and declaring localhost at all would swap their deterministic
-# launcher interpreter for a PATH-dependent discovery.
+# localhost plays under deploy/ansible/tests/, which resolve their dependencies against the
+# launching environment; a host var there would retarget all of them, and declaring localhost at
+# all replaces their explicit launcher interpreter with a PATH-dependent discovery.
 require(
     "ansible_python_interpreter" in play["vars"],
     "the play must carry its own interpreter pin rather than relying on the inventory",
 )
+
+
+def declared_hosts(group: dict) -> set[str]:
+    """Every host named anywhere in the inventory, not just at the top level."""
+    named = set(group.get("hosts") or {})
+    for child in (group.get("children") or {}).values():
+        named |= declared_hosts(child or {})
+    return named
+
+
 inventory = yaml.safe_load(INVENTORY.read_text())
 require(
-    "localhost" not in (inventory["all"].get("hosts") or {}),
-    "hosts.yml must not declare localhost; every localhost play would inherit group_vars/all and "
-    "lose its deterministic interpreter to PATH discovery",
+    "localhost" not in declared_hosts(inventory["all"]),
+    "hosts.yml must not declare localhost anywhere; every localhost play would lose its explicit "
+    "launcher interpreter to PATH discovery",
 )
 
 play_interpreter = resolved_interpreter(play["vars"])

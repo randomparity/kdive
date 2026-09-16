@@ -14,9 +14,9 @@ Pin `ansible_python_interpreter: /usr/bin/python3` in the `vars:` block of
 `/usr/bin/python3`, because a play var outranks the implicit host var.
 
 Leave `deploy/ansible/inventory/hosts.yml` alone. Declaring `localhost` there is neither necessary
-nor safe: it is shared with `pki.yml` and eight localhost plays under `deploy/ansible/tests/`, and
-a declared host hands them all of `group_vars/all` and swaps their explicit launcher interpreter
-for `PATH` discovery — measured as a `community.crypto` import failure under a restricted `PATH`.
+nor safe: it is shared with `pki.yml` and the localhost plays under `deploy/ansible/tests/`, and a
+declared host swaps their explicit launcher interpreter for `PATH` discovery — measured as a
+`community.crypto` import failure under a restricted `PATH`.
 
 Extend `deploy/ansible/tests/run-local-libvirt-host.py`, which `just test-ansible` runs inside
 `just ci`, to assert resolution rather than key presence. `install.md` gains the become-password
@@ -33,8 +33,8 @@ triage). No ownership transition: each play already owns its execution vars.
 - Invariants: root executes the pinned interpreter; module execution and the guestfs ABI check
   agree on which Python is the system Python; no other play's interpreter changes.
 - Accepted: a `/usr/bin/python3` that is absent, or older than ansible-core's 3.9 target floor,
-  fails closed on Ansible's own error at fact gathering; the recipe carries no pre-check, and
-  neither case is reachable in the `install.md` support table.
+  fails closed on Ansible's own error at fact gathering, with no pre-check. Each supported family's
+  `/usr/bin/python3` is the interpreter `libvirt_stack` installs its libvirt/lxml bindings for.
 - Covered elsewhere: collection prerequisites (#2499); check-mode smoke testing (out of batch).
 
 ### Threat model
