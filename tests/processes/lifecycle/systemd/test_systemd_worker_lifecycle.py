@@ -42,7 +42,11 @@ from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     UnmanagedWorker,
     load_slot_redaction_values,
 )
-from kdive.processes.lifecycle.systemd.systemd_worker_state import SlotState, SlotStore
+from kdive.processes.lifecycle.systemd.systemd_worker_state import (
+    SlotState,
+    SlotStore,
+    StateConflict,
+)
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.local_libvirt.composition import build_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -50,6 +54,7 @@ from kdive.services.external_boot.routing import (
     AuthorityReservationGeometry,
     authority_reservation_geometry,
 )
+from kdive.worker_lifecycle.authority_store import IncarnationConflict
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
@@ -95,6 +100,7 @@ class FakeStore:
         self.preparations = 0
         self.load_calls = 0
         self.load_failure: Exception | None = None
+        self.persist_failure: Exception | None = None
 
     def prepare(self, settings: WorkerSettings | None) -> SlotState:
         assert settings is not None
@@ -122,6 +128,8 @@ class FakeStore:
         return self.state
 
     def persist(self, state: SlotState) -> None:
+        if self.persist_failure is not None:
+            raise self.persist_failure
         assert self.state is not None
         assert state.generation == self.state.generation
         self.state = state
@@ -275,6 +283,8 @@ class FakeAuthority:
         self.register_label = "database:register"
         self.terminate_label = "database:terminate"
         self.fail_register = False
+        self.fail_register_with_fence_conflict = False
+        self.fail_terminate_with_fence_conflict = False
         self.reject_termination = False
         self.terminations: list[tuple[str, TerminationOutcome]] = []
         # The incarnation carries only unit and generation, so `terminations` alone cannot tell
@@ -285,12 +295,18 @@ class FakeAuthority:
     async def register(self, state: SlotState, credential_hash: bytes) -> None:
         assert credential_hash == bytes.fromhex(state.credential_hash)
         self.events.append(self.register_label)
+        if self.fail_register_with_fence_conflict:
+            raise IncarnationConflict(
+                "worker incarnation registration conflicts with durable state"
+            )
         if self.fail_register:
             raise RuntimeError("database unavailable")
         self.registered.add(state.incarnation)
 
     async def terminate(self, state: SlotState, outcome: TerminationOutcome) -> None:
         self.events.append(self.terminate_label)
+        if self.fail_terminate_with_fence_conflict:
+            raise IncarnationConflict("worker incarnation termination conflicts with durable state")
         if self.reject_termination:
             raise EvidenceRejected("database rejected exact evidence")
         assert state.incarnation in self.registered
@@ -531,6 +547,7 @@ def test_start_refuses_unmanaged_worker_without_mutating_slots() -> None:
     )
 
     assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert response.message == "retained lifecycle facts conflict with the observed unit"
     assert all(store.state is None for store in stores)
     assert events == []
 
@@ -545,6 +562,7 @@ def test_start_refuses_populated_fixed_unit_without_retained_state() -> None:
     )
 
     assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert response.message == "systemd observation conflicts with the retained lifecycle contract"
     assert stores[0].preparations == 0
     assert stores[0].state is None
     assert authority.registered == set() and authority.terminations == []
@@ -840,6 +858,52 @@ def test_stop_adopts_active_prepared_gate_without_starting_another_invocation() 
     assert runtime.start_counts == {}
     assert prepared.incarnation in authority.registered
     assert authority.terminations == [(prepared.incarnation, "succeeded")]
+
+
+def test_state_conflict_reports_its_own_distinct_message() -> None:
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: prepared})
+    runtime.current[prepared.unit] = _observation(1, "populated")
+    stores[0].persist_failure = StateConflict("slot state is malformed")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert response.message == "retained slot state conflicts with lifecycle rules"
+    assert authority.registered == set() and authority.terminations == []
+
+
+def test_fence_refused_registration_reports_a_fence_conflict_not_a_database_outage() -> None:
+    # #2481: a still-active fence refusing this registration was misreported as a database
+    # outage, because IncarnationConflict fell through _register's generic exception wrapper.
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: prepared})
+    runtime.current[prepared.unit] = _observation(1, "populated")
+    authority.fail_register_with_fence_conflict = True
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert response.message == "worker incarnation conflicts with an active fence"
+    assert authority.registered == set() and authority.terminations == []
+
+
+def test_fence_refused_termination_reports_a_fence_conflict_not_a_database_outage() -> None:
+    # No current backend's `terminate()` raises IncarnationConflict — only `register`'s
+    # unique-violation path does today (`authority_store.py`). This pins `_terminate`'s
+    # symmetric handling for the recovery-termination path issue #2488 adds, not a
+    # currently reachable production misattribution.
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: prepared})
+    runtime.current[prepared.unit] = _observation(1, "populated")
+    authority.fail_terminate_with_fence_conflict = True
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert response.message == "worker incarnation conflicts with an active fence"
+    assert prepared.incarnation in authority.registered
+    assert authority.terminations == []
 
 
 def test_stop_retains_prepared_generation_when_invocation_facts_are_uncertain() -> None:
