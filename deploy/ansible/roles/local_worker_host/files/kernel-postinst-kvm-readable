@@ -1,0 +1,46 @@
+#!/bin/sh
+# Re-apply the /boot relabel that local_worker_host makes, to a kernel installed after the role
+# last ran (#2567, ADR-0668). Debian and Ubuntu run every executable in /etc/kernel/postinst.d/
+# after installing a kernel; the role installs this one from its Debian-family block only.
+#
+# The two arguments dpkg passes (version, image path) are deliberately unused. This re-asserts the
+# role's own rule over the whole of /boot instead, which covers vmlinuz-* on x86_64 and vmlinux-*
+# on ppc64le (ADR-0356) through one code path, and re-converges a kernel an earlier install missed.
+#
+# 0640 root:kvm exactly, never 0644: Fedora already ships these world-readable, and widening a
+# Debian host to match is the regression the role's Debian-family guard exists to prevent
+# (boot_kernels.yml:2-11). libguestfs' supermin appliance copies a host kernel as the invoking
+# worker account (ADR-0222, #2479), which is what the group read is for.
+#
+# Exits 0 even when it cannot act. A non-zero exit here fails the kernel package's postinst and
+# leaves dpkg half-configured, which is worse than the unreadable kernel it would be reporting --
+# and that kernel is already detected, by check-local-libvirt.sh's FAIL probe.
+set -eu
+
+# dpkg runs hooks with root's PATH, which begins /usr/local/sbin:/usr/local/bin — group-writable
+# on Debian (2775 root:staff). Pin the system directories so a staff member cannot shadow getent,
+# chgrp or chmod for a root-executed script.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+if ! getent group kvm >/dev/null 2>&1; then
+  echo "kdive-kvm-readable: no kvm group on this host; /boot left unchanged" >&2
+  exit 0
+fi
+
+for image in /boot/vmlinuz-* /boot/vmlinux-*; do
+  # An unmatched glob stays literal under `set -f`-less sh, so test before acting.
+  [ -f "$image" ] || continue
+  # chgrp and chmod both dereference, so a symlink here would relabel its target. The role's own
+  # find uses file_type: file with follow: no; match that rather than being the wider of the two.
+  [ ! -L "$image" ] || continue
+  if ! chgrp kvm "$image" 2>/dev/null; then
+    echo "kdive-kvm-readable: cannot chgrp $image to kvm" >&2
+    continue
+  fi
+  if ! chmod 0640 "$image" 2>/dev/null; then
+    echo "kdive-kvm-readable: cannot chmod $image to 0640" >&2
+  fi
+done
+
+exit 0

@@ -59,10 +59,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 319, f"runner listed {len(actual_tasks)} baseline tasks, expected 319")
+require(len(actual_tasks) == 320, f"runner listed {len(actual_tasks)} baseline tasks, expected 320")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 319 ordered task names and tags match the updated baseline")
+print("ok runner: 320 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -406,16 +406,19 @@ def boot_kernel_guard(distribution: str, family: str) -> None:
         "local_worker_host_operator_user": operator,
     }
     result = playbook(probe, "--check", "--tags", "boot_kernels", "-e", json.dumps(facts))
-    heading = (
-        "TASK [local_worker_host : Find the host kernels under /boot "
-        "(vmlinuz-* x86_64, vmlinux-* ppc64le)]"
-    )
-    require(heading in result.stdout, f"{distribution} omitted the host-kernel find task")
-    section = result.stdout.split(heading, 1)[1].split("\nTASK [", 1)[0]
-    require(
-        "skipping: [localhost]" in section,
-        f"{distribution} entered the Debian-only host-kernel relabel",
-    )
+    for heading in (
+        (
+            "TASK [local_worker_host : Find the host kernels under /boot "
+            "(vmlinuz-* x86_64, vmlinux-* ppc64le)]"
+        ),
+        "TASK [local_worker_host : Install the kernel-upgrade hook that re-applies the relabel]",
+    ):
+        require(heading in result.stdout, f"{distribution} omitted {heading}")
+        section = result.stdout.split(heading, 1)[1].split("\nTASK [", 1)[0]
+        require(
+            "skipping: [localhost]" in section,
+            f"{distribution} entered the Debian-only host-kernel relabel",
+        )
 
 
 for distribution, family in (
@@ -425,7 +428,92 @@ for distribution, family in (
     ("SLES", "Suse"),
 ):
     boot_kernel_guard(distribution, family)
-print("ok boot kernels: the /boot relabel skips every non-Debian family")
+print("ok boot kernels: the /boot relabel and its upgrade hook skip every non-Debian family")
+
+
+# The hook re-applies the relabel from outside Ansible, so its constants are the ones that must
+# hold and no play asserts them. 0644 is the specific value boot_kernels.yml:2-11 forbids: Fedora
+# ships /boot world-readable, and widening a Debian host to match is the regression the
+# Debian-family guard exists to prevent. Proving the hook relabels a real upgraded kernel needs a
+# Debian-family host and a privileged package install, which no repository gate can stage (#2567).
+BOOT_HOOK = ANSIBLE / "roles/local_worker_host/files/kernel-postinst-kvm-readable"
+# Comments are stripped first: the hook's own comment explains why 0644 is forbidden, and a
+# check that reads it cannot tell that sentence from a chmod reaching the value.
+hook_code = "\n".join(
+    line for line in BOOT_HOOK.read_text().splitlines() if not line.lstrip().startswith("#")
+)
+# Every mode the hook applies is matched, not just the presence of one good literal: a check that
+# only looked for "chmod 0640" stays green beside an added `chmod o+r`, which is exactly the
+# widening boot_kernels.yml:11 forbids. Double-quoted strings are dropped first so the hook's own
+# diagnostic messages, which name both commands, cannot register as calls.
+hook_calls = re.sub(r'"[^"]*"', "", hook_code)
+require(
+    re.findall(r"\bchmod\s+(\S+)", hook_calls) == ["0640"],
+    "the kernel-upgrade hook applies a mode other than exactly 0640",
+)
+require(
+    re.findall(r"\bchgrp\s+(\S+)", hook_calls) == ["kvm"],
+    "the kernel-upgrade hook applies a group other than exactly kvm",
+)
+for pattern in ("/boot/vmlinuz-*", "/boot/vmlinux-*"):
+    require(
+        pattern in hook_code,
+        f"the kernel-upgrade hook stopped covering {pattern}",
+    )
+# One shared hook, imported by both roles, never a second copy: a duplicated relabel is how this
+# defect came to exist at two sites (local_worker_host and live_vm_host), and a duplicated hook
+# would repeat that. Assert the install task is defined exactly once across the whole role tree.
+HOOK_TASK = "Install the kernel-upgrade hook that re-applies the relabel"
+definitions = sorted(
+    path.relative_to(ANSIBLE).as_posix()
+    for path in (ANSIBLE / "roles").rglob("tasks/*.yml")
+    if f"name: {HOOK_TASK}" in path.read_text()
+)
+require(
+    definitions == ["roles/local_worker_host/tasks/boot_kernel_hook.yml"],
+    f"the kernel-upgrade hook install must be defined exactly once, found {definitions}",
+)
+copies = sorted(
+    path.relative_to(ANSIBLE).as_posix()
+    for path in (ANSIBLE / "roles").rglob("files/*")
+    if path.name == BOOT_HOOK.name
+)
+require(
+    copies == [f"roles/local_worker_host/files/{BOOT_HOOK.name}"],
+    f"the kernel-upgrade hook file must be shipped exactly once, found {copies}",
+)
+# Both call sites reach that one definition, so the runner host is covered too (#2567).
+require(
+    "tasks_from: boot_kernel_hook.yml"
+    in (ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text(),
+    "live_vm_host no longer imports the shared kernel-upgrade hook, so the runner is uncovered",
+)
+hook_task = yaml.safe_load(
+    (ANSIBLE / "roles/local_worker_host/tasks/boot_kernel_hook.yml").read_text()
+)[0]
+# Its own guard, not the caller's: boot_kernels.yml's block still skips non-Debian without this,
+# so only the live_vm_host import — which has no surrounding guard — depends on the task carrying
+# one. Removing it therefore leaves every other arm of this harness green.
+require(
+    hook_task.get("when") == "ansible_facts['os_family'] == 'Debian'",
+    "the shared kernel-upgrade hook lost its own Debian-family guard",
+)
+hook_install = hook_task.get("ansible.builtin.copy", {})
+# src is asserted too: the non-Debian probes all skip this task, so a src naming a file that does
+# not exist would never be resolved by any check-mode run and every other assertion stays green.
+require(
+    hook_install.get("src") == BOOT_HOOK.name,
+    "the kernel-upgrade hook task no longer copies the shipped hook file",
+)
+require(
+    hook_install.get("dest") == "/etc/kernel/postinst.d/kdive-kvm-readable",
+    "the kernel-upgrade hook is no longer installed into /etc/kernel/postinst.d",
+)
+require(
+    hook_install.get("mode") == "0755",
+    "the kernel-upgrade hook is no longer installed executable",
+)
+print("ok boot kernels: the upgrade hook applies 0640 root:kvm to both kernel patterns")
 
 
 CONTAINER_TASKS = "roles/local_worker_host/tasks/container_runtime.yml"

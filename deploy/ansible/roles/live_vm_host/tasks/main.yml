@@ -86,7 +86,8 @@
 - name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
   # Ubuntu ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
   # build (ADR-0222, #694/#1156) — probed by check-local-libvirt.sh as a FAIL — needs them
-  # readable by the non-root runner user. Re-apply after a kernel upgrade (see runbook).
+  # readable by the non-root runner user. This converges the kernels present now; the shared hook
+  # imported below keeps every kernel a LATER upgrade installs converged (#2567, ADR-0668).
   ansible.builtin.find:
     paths: /boot
     patterns: ["vmlinuz-*", "vmlinux-*"]
@@ -102,6 +103,14 @@
   loop: "{{ live_vm_host_boot_kernels.files }}"
   loop_control:
     label: "{{ item.path }}"
+
+- name: Import the shared kernel-upgrade relabel hook
+  # The find above is point-in-time, so a kernel installed by a later upgrade keeps 0600 and the
+  # runner silently loses guest-image builds after the next reboot (#2567). The same file
+  # local_worker_host installs, imported rather than copied: one hook, one set of constants.
+  ansible.builtin.import_role:
+    name: local_worker_host
+    tasks_from: boot_kernel_hook.yml
 
 - name: Enable linger so /run/user/<uid> exists with no login session
   ansible.builtin.command: "loginctl enable-linger {{ github_runner_user }}"

@@ -61,8 +61,10 @@
     - name: Make the host kernels kvm-group-readable for the worker accounts
       # 0640 root:kvm, not 0644: live_vm_host made the same choice for the same file so the
       # relaxation stays group-scoped. The fixed worker accounts (worker_accounts.yml) and the
-      # operator login account (libvirt_stack) are both already in kvm. A kernel UPGRADE
-      # installs a fresh 0600 file under a new name: re-run the recipe afterwards.
+      # operator login account (libvirt_stack) are both already in kvm. This converges the
+      # kernels present right now, including the running one; the hook below keeps every kernel
+      # a LATER package upgrade installs converged (ADR-0668). Neither arm covers the other's
+      # set, so both stay.
       ansible.builtin.file:
         path: "{{ item.path }}"
         group: kvm
@@ -70,3 +72,8 @@
       loop: "{{ local_worker_host_boot_kernels.files }}"
       loop_control:
         label: "{{ item.path }}"
+
+    # The install-time half lives in its own file: live_vm_host carries a duplicate of the
+    # point-in-time relabel above and imports the same file, so one hook serves both roles.
+    - name: Install the kernel-upgrade hook beside the point-in-time relabel
+      ansible.builtin.import_tasks: boot_kernel_hook.yml
