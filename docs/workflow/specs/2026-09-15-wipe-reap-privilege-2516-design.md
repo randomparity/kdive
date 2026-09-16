@@ -59,8 +59,21 @@ the lifecycle contract — session endpoint, operator in `kdive-live-libvirt`; (
   of the privilege decision: moving the gate below the confirmation, and printing the warning
   ahead of the gate while leaving the confirmation where it is (which separates the warning from
   the confirmation it qualifies and warns about irreversibility on runs the gate then refuses).
-- A URI whose scope is not in its path is misclassified. Accepted: not reachable — both
-  published URIs and the bare-host default carry it there.
+- A URI whose scope is not in its path is misclassified. Accepted, but **not** because it is
+  unreachable — an earlier draft of this entry said so and was wrong. The two published URIs and
+  the bare-host default all carry the scope in the path, but they are only three of the four
+  producers: `resolve_libvirt_uri`'s else branch adopts a caller-supplied `KDIVE_LIBVIRT_URI`
+  verbatim (ADR-0659, reported since ADR-0661), and this change's own `_wipe_reap(uri=)` test
+  helper drives exactly that route. What makes the class acceptable is the *direction*: the
+  `case` anchors `*/session` at end-of-string, so every value that does not end in a `/session`
+  path component falls to the escalating branch, which is today's behaviour. A misclassification
+  can cost an unnecessary `sudo`; it cannot silently drop privilege.
+- The overlay `rm` is always local, while the endpoint it takes its privilege from need not be:
+  `qemu+ssh://operator@remote/session` classifies as session and de-escalates a purely local
+  unlink. Accepted: the operator owns the mode-`2770` overlay directory, so the unlink normally
+  succeeds anyway, and where it does not the `[[ ! -e "$overlay" ]]` re-read routes the shortfall
+  into `unreaped` and exits 1. Loud, never silent. A remote endpoint is outside what the
+  lifecycle contract publishes in any case.
 
 **Covered elsewhere.** Wrong-daemon endpoints — #2559 and the operator-owned probe-identity
 question. Endpoint validation and the degraded state — ADR-0659, `libvirt-uri.sh`.
@@ -77,9 +90,16 @@ command word.
 untrusted party: the reap is a local operator tool with no remote input.
 
 **Control per boundary.** The classifier tests `${KDIVE_LIBVIRT_URI%%\?*}` against a literal
-`*/session` pattern; a non-match falls to the escalating branch, so the failure direction is
-today's behaviour, not a silent loss of privilege. The endpoint stays quoted at every `virsh -c`
-use. Nothing new is logged — the reap banner already prints the endpoint.
+`*/session` pattern anchored at end-of-string; a non-match falls to the escalating branch, so the
+failure direction is today's behaviour, not a silent loss of privilege. The endpoint stays quoted
+at every `virsh -c` use and is never a command word — `reap_run` forwards `sudo "$@"` or `"$@"`,
+so the URI is always argv. Nothing new is logged — the reap banner already prints the endpoint.
+
+The four governed commands do not all cross the same boundary: the three `virsh` calls go to
+whatever daemon the endpoint names, local or remote, while the overlay `rm` is unconditionally
+local. One privilege governs both because the reap is one operation, but a remote session
+endpoint therefore de-escalates a local unlink — recorded as an accepted failure class above
+rather than left implicit here.
 
 **Explicitly out of scope.** A caller who can set `KDIVE_LIBVIRT_URI` already chooses the daemon
 the reap talks to by design (ADR-0659), so choosing its privilege class adds no capability that
