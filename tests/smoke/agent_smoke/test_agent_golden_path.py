@@ -22,9 +22,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair
+from kdive.mcp.exposure import CORE_TOOLS, visible_tool_names
+from kdive.security.authz.context import context_from_claims
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.smoke.agent_smoke.surface import AppSurface
-from tests.smoke.agent_smoke.walker import walk
+from tests.smoke.agent_smoke.surface import AppSurface, agent_claims
+from tests.smoke.agent_smoke.walker import GATEWAY_TOOLS, walk
 
 pytestmark = pytest.mark.agent_smoke
 
@@ -34,6 +36,32 @@ def _built_app():
     keypair = make_keypair()
     verifier = JWTVerifier(public_key=keypair.public_key, issuer=ISSUER, audience=AUDIENCE)
     return build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+
+
+def _expected_agent_catalog() -> set[str]:
+    """The names an agent-profile connection holding the walk's grants sees from ``tools/list``.
+
+    Derived from the server's own classification rather than pinned to a literal list: the
+    gateway clips a non-``kdivectl`` caller to ``rbac_visible & CORE_TOOLS``
+    (``mcp/middleware/exposure.py``), so a change to either ``CORE_TOOLS`` membership or a core
+    tool's required scope moves this expectation with it (same derivation as the wire harness's
+    live gateway assertions, PR #2491).
+    """
+    return visible_tool_names(context_from_claims(agent_claims()), CORE_TOOLS)
+
+
+def test_walked_surface_is_the_clipped_agent_catalog() -> None:
+    """The tier walks the catalog an agent receives, not the unfiltered registry (#2523).
+
+    The golden-path walk below passes against *either* catalog, so without this assertion a
+    regression to the pre-``62fb4fa4d`` flat surface — the defect #2521's survey recorded as
+    entry A1 — is invisible: the tier would keep reporting green while exercising a surface no
+    agent is served.
+    """
+    names = asyncio.run(AppSurface(_built_app()).tool_names())
+
+    assert set(names) == _expected_agent_catalog()
+    assert set(GATEWAY_TOOLS) <= names  # the clip keeps the always-available gateway
 
 
 def test_golden_path_walks_the_served_surface_without_stalling() -> None:
