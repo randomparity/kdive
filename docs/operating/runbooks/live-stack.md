@@ -343,6 +343,73 @@ The default MCP URL is `http://127.0.0.1:8000/mcp`. Override the bind address wi
 > [`scripts/live-stack/stack-services.sh`](../../../scripts/live-stack/stack-services.sh) — the path at the top of this
 > section, and the one both `live.yml` gates use.
 
+### Recovering a wedged worker slot
+
+`stack-services.sh` fails, or a lifecycle request comes back with
+`retry_action=operator_recovery`. The usual cause is `code=conflict` after a
+`kdive-live-worker@N.service` unit was restarted outside the lifecycle contract — a
+`needrestart` sweep, an unattended upgrade, a manual `systemctl restart`. The unit comes back
+with a new `InvocationID` while the retained slot state still names the previous one, the gate
+exits, and the unit is left `failed` holding that identity, so the next `start` is refused.
+`retry_action` is what tells you a retry will not clear it; the values are defined in
+[the systemd unit reference](../../../deploy/systemd/README.md#lifecycle-retry-actions).
+
+**Read the cause first.** The client prints one JSON line, so pipe it:
+
+```bash
+scripts/live-stack/worker-lifecycle.sh diagnostics | python3 -m json.tool
+```
+
+The command exits 4 when a slot was withheld; the pipe is what keeps the output readable under
+`set -e`. A withheld slot carries `"code": "diagnostics_withheld"` and
+`"message": "withheld: <reason>"`, with its `"phase"` beside them:
+
+| Reason | What it means | What to do |
+|---|---|---|
+| `state_unreadable` | the slot's retained state could not be read at all | check ownership and mode under `/var/lib/kdive/live-workers` |
+| `slot_unusable` | the slot holds no usable diagnostic state: no exact invocation, or redaction sources rejected as unsafe | run `recover` below; if it persists, check the count, per-value size, ownership, and mode of the slot's redaction sources under the same directory — more than 32 values, or any value over 4096 bytes, is rejected. Do not print their contents: those files hold the worker's database URL and object-store keys |
+| `acquisition_failed` | systemd, the journal, or the request deadline did not answer in time, or acquisition failed unexpectedly | check `systemctl status` and `journalctl` for the unit, then re-run `diagnostics` once; if the same reason returns, read the unit's journal on the host and check the witness log for the exception type |
+| `redaction_refused` | the report held a value the redactor may not emit, or no safe substitute could render it, so the whole report was dropped | read the unit's journal on the host directly; re-running `diagnostics` will not clear it |
+| `peer_redaction_refused` | the report held a value another slot registered, so it was dropped for the same reason | read the unit's journal on the host directly |
+| `internal_error` | the slot's redaction-source file could not be read, or a failure in the slot's diagnostic preconditions that is none of the above | check ownership and mode under `/var/lib/kdive/live-workers`; the witness log names the exception type |
+
+A slot that carries no reason is a different thing. Read it off the slot result rather than off
+the emitted text: a slot whose `"code"` is `"ok"` but which contributes no `=== slot N ===` block
+to the diagnostics was never captured, because the run had already spent the acquisition or
+emission budgets above. That is truncation, not withholding, and the response stays `ok` for it.
+Do not look for `[aggregate diagnostics truncated]` as the cue — the marker is itself suppressed
+when it collides with one of the host's redaction sources, and on some paths it is never emitted
+at all. Read those units' journals on the host directly. The reason text is accounted inside
+those same budgets, so the numbers given above are unchanged.
+
+**Recover.** Unlike `diagnostics`, this operation first requires the installed lifecycle
+environment to match your checkout. If it prints
+`installed lifecycle protocol does not match this checkout; reprovision the runner` or
+`installed lifecycle protocol is unavailable; reprovision the runner`, reprovision the host per
+the Prerequisites above before retrying. A third string,
+`checkout lifecycle compatibility probe failed`, points the other way — at this checkout's own
+environment rather than at the installed runner, so run `uv sync` here first.
+
+```bash
+scripts/live-stack/worker-lifecycle.sh recover
+```
+
+For each slot it observes the unit. A slot whose cgroup still holds live processes is refused:
+the response is `code=conflict` with `retry_action=operator_recovery` and a per-slot
+`recovery_refused`. Stop the work that unit is doing rather than forcing past it. For a slot
+proven dead it publishes terminal evidence derived from that same observation, clears the on-disk
+slot facts, releases the `worker_incarnations` fence, and runs `reset-failed` on a unit systemd
+still accounts for. It never fabricates a termination outcome — see
+[ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md).
+
+**Then bring the stack back up.** Re-run `scripts/live-stack/stack-services.sh`; it is
+idempotent.
+
+**What `recover` does not reach.** A slot with an absent or malformed `state.json`, a drifted
+binding, rejected evidence, or an unreadable boot ID stays wedged after a `recover` pass. That
+gap is issue #2533; do not hand-edit the slot files or the `worker_incarnations` row to work
+around it.
+
 ### The app tier does not hot-reload — re-run `stack-services.sh` after editing source
 
 The three host processes are plain Python; they load your source once, at start. Editing a file
