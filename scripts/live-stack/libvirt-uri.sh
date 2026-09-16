@@ -26,6 +26,17 @@
 # bypasses the allowlist anyway": that holds for resolve_libvirt_uri only, and
 # worker-lifecycle.sh calls load_published_libvirt_uri directly, where no such bypass exists.
 : "${LIBVIRT_ENV:=/etc/kdive/live-worker-libvirt.env}"
+# Why the two names below carry no KDIVE_ prefix either (ADR-0658): check_env_documented.py sweeps
+# scripts/ for KDIVE_[A-Z0-9_]+ and requires every hit to be a registry setting or a catalogued
+# entry in kdive.config.external_env, which renders into the generated config reference. A
+# prefixed name would have to be published there as an operator knob, which is exactly what an
+# entry point's declaration about itself is not.
+#
+# LIBVIRT_OPTIONAL is read, never assigned, here: an entry point that can do useful work without
+# libvirt exports it before sourcing lib.sh or env.sh. LIBVIRT_UNRESOLVED is this file's record of
+# the resulting degraded state, and is `:=` for the same reason LIBVIRT_ENV is -- the file is
+# sourced more than once per shell, and a plain assignment would wipe it on the second source.
+: "${LIBVIRT_UNRESOLVED:=}"
 LIBVIRT_SOCKET_URIS=(
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock'
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock'
@@ -79,9 +90,17 @@ load_published_libvirt_uri() {
 # Every caller sources lib.sh or env.sh before doing any of its own work, so the abort takes the
 # whole invocation with it — including ones that need no libvirt at all (`stack-services.sh
 # --skip-libvirt`, apply-migrations.sh, onboard.sh) and the two that are most wanted when a host
-# is broken, stack-down.sh and stack-status.sh. Whether a libvirt-free entry point should survive
-# a broken contract is a scope question this change does not settle; the override below is the
-# way past it either way, which is why the message names it rather than only the cause.
+# is broken, stack-down.sh and stack-status.sh. ADR-0658 settles that: the abort stays the
+# default, and an entry point that can do useful work without libvirt exports LIBVIRT_OPTIONAL=1
+# before sourcing, which downgrades the abort to the degraded state below. The override the
+# message names is the way past it for everyone else, which is why it names it rather than only
+# the cause.
+#
+# The degraded state leaves KDIVE_LIBVIRT_URI UNSET rather than empty. `virsh -c ''` connects to
+# libvirt's probed default and exits 0, so an empty value would be the silent downgrade this
+# whole file exists to prevent; unset makes every consumer that reads it without a `:-` default
+# die with `unbound variable` under `set -u` instead. require_libvirt_uri below is how an
+# opted-out entry point refuses the operations that do need the endpoint.
 #
 # Two things the override does not fix, recorded here because the abort's own reasoning invites
 # the assumption that it does. A value naming the wrong daemon makes kdive_domains() query one
@@ -91,6 +110,10 @@ load_published_libvirt_uri() {
 # three fail silently and teardown prints `done` having reaped nothing. Both belong to
 # stack-down.sh.
 resolve_libvirt_uri() {
+  # Sticky: stack-status.sh sources lib.sh and env.sh, and each calls this. Without the guard the
+  # second call would re-enter (the endpoint is unset, so the -z test passes), repeat the whole
+  # diagnosis, and resolve again against a contract that has not changed.
+  [[ -z "$LIBVIRT_UNRESOLVED" ]] || return 0
   if [[ -z "${KDIVE_LIBVIRT_URI:-}" ]]; then
     if [[ -e "$LIBVIRT_ENV" || -L "$LIBVIRT_ENV" ]]; then
       KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)" || {
@@ -98,11 +121,30 @@ resolve_libvirt_uri() {
           "${LIBVIRT_ENV} is allowed to publish, or qemu:///system on a host with no" \
           "lifecycle contract; a value naming a daemon the kdive domains do not live on" \
           "leaves them defined while 'stack-down.sh --wipe' still removes their overlays" >&2
-        return 1
+        [[ "${LIBVIRT_OPTIONAL:-0}" == "1" ]] || return 1
+        # The failed command substitution left the endpoint set-but-empty; unset is the sentinel.
+        unset KDIVE_LIBVIRT_URI
+        LIBVIRT_UNRESOLVED="${LIBVIRT_ENV} failed validation"
+        echo "continuing without a libvirt endpoint: ${LIBVIRT_UNRESOLVED}" >&2
+        return 0
       }
     else
       KDIVE_LIBVIRT_URI=qemu:///system
     fi
   fi
   export KDIVE_LIBVIRT_URI
+}
+
+# Refuse <operation> while the endpoint is in the degraded state above, naming which operation was
+# refused. Only a LIBVIRT_OPTIONAL entry point can reach that state, so this is where such an
+# entry point's libvirt-dependent operations fail closed — at the point of use rather than at
+# source time (ADR-0658). Returns 0 unchanged everywhere else, so a caller may gate on it
+# unconditionally.
+require_libvirt_uri() {
+  [[ -z "$LIBVIRT_UNRESOLVED" ]] || {
+    echo "cannot $1: ${LIBVIRT_UNRESOLVED}" >&2
+    echo "repair ${LIBVIRT_ENV}, or export KDIVE_LIBVIRT_URI with one of the values it is" \
+      "allowed to publish, and retry" >&2
+    return 1
+  }
 }

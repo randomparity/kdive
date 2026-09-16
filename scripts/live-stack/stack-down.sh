@@ -17,6 +17,14 @@
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Teardown needs libvirt only for --wipe's reap, and this is a tool an operator reaches for
+# precisely when the host is broken — so it declares itself libvirt-free and lets a broken
+# published contract degrade rather than abort at source time (ADR-0658). EXPORTED, because the
+# `worker-lifecycle.sh stop` below is a child process that sources lib.sh and env.sh itself: a
+# shell-local declaration would not reach it, and teardown would exit having stopped nothing.
+# `stop` needs no libvirt; `start` resolves through load_published_libvirt_uri, which ignores this
+# declaration and still fails closed.
+export LIBVIRT_OPTIONAL=1
 # shellcheck source=scripts/live-stack/lib.sh
 source "${here}/lib.sh"
 cd "$repo_root"
@@ -35,6 +43,14 @@ for arg in "$@"; do
     ;;
   esac
 done
+
+# --wipe is the one operation here that needs the endpoint, so it is refused up front rather than
+# after the teardown has begun. Half a wipe is worse than none: the header above pairs the volume
+# drop with the domain reap because the domains and overlays live outside compose, so dropping the
+# volumes while unable to reach libvirt orphans exactly what the pairing exists to prevent.
+if [[ "$wipe" == "1" ]]; then
+  require_libvirt_uri "reap kdive domains for --wipe" || exit 1
+fi
 
 if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
   echo "WARNING: --wipe drops the compose data volumes (database, artifacts bucket," >&2
