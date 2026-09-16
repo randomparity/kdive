@@ -81,8 +81,12 @@ def test_native_block_preflights_debug_stepping_with_both_native_families() -> N
 
 def _native_guest_image() -> str:
     prefix = "export KDIVE_GUEST_IMAGE="
-    line = next(ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix))
-    return line[len(prefix) :].strip('"')
+    found = [ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix)]
+    assert len(found) == 1, (
+        f"expected exactly one `{prefix}` line in the native spine, found {len(found)}; "
+        "without it the console-part proof fails at its guest-image gate (#2518)"
+    )
+    return found[0][len(prefix) :].split(" #")[0].strip().strip("\"'")
 
 
 def test_native_guest_image_names_the_rootfs_mint_system_stages() -> None:
@@ -97,17 +101,23 @@ def test_native_guest_image_names_the_rootfs_mint_system_stages() -> None:
     from kdive.providers.local_libvirt.lifecycle import storage
 
     mint = (_ROOT / "scripts" / "live-vm" / "mint-system.sh").read_text(encoding="utf-8")
-    staged = next(ln for ln in mint.splitlines() if ln.strip().startswith("staged_rootfs="))
-    basename = staged.strip().rstrip('"').rsplit("/", 1)[-1]
+    staged = [ln.strip() for ln in mint.splitlines() if ln.strip().startswith("staged_rootfs=")]
+    assert len(staged) == 1, (
+        f"expected exactly one `staged_rootfs=` line in mint-system.sh, found {len(staged)}"
+    )
+    basename = staged[0].split(" #")[0].strip().strip("\"'").rsplit("/", 1)[-1]
 
     exported = _native_guest_image()
     assert exported.endswith(f"/{basename}"), (
-        f"live.yml exports KDIVE_GUEST_IMAGE={exported}, but mint-system.sh stages {basename!r}; "
-        "renaming one and not the other fails the native live_vm job at its guest-image gate"
+        f"live.yml exports KDIVE_GUEST_IMAGE={exported}, but mint-system.sh stages {basename!r}. "
+        "Renaming one side, or factoring either literal into a variable, fails the native "
+        "live_vm job at its guest-image gate — keep both literals in step."
     )
-    assert storage.ROOTFS_DIR in exported, (
+    # startswith on the whole expansion, not a substring: `in` would also accept a sibling root
+    # such as `${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs-scratch}` or a `..` escape out of it.
+    assert exported.startswith(f"${{KDIVE_ROOTFS_DIR:-{storage.ROOTFS_DIR}}}/"), (
         f"KDIVE_GUEST_IMAGE={exported} must resolve under the provider's allowed root "
-        f"{storage.ROOTFS_DIR}, or provision rejects the rootfs it names"
+        f"{storage.ROOTFS_DIR} with mint-system.sh's own default, or provision rejects it"
     )
 
 

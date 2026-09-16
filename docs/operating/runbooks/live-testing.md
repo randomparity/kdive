@@ -143,9 +143,11 @@ only**: there `KDIVE_GUEST_IMAGE` fails loud when unset, not just when wrong
 *normal* state on a correctly provisioned host, and that tier has no `<N> passed`
 summary gate of the kind the hosted tcg spine carries
 (`.github/workflows/live.yml`). A skip there was therefore indistinguishable from
-a proof that ran — the silent green #2497 exists to close. Set it from
-`python -m kdive build-fs`'s printed `export` line, or source
-`examples/local-libvirt/env.sh`.
+a proof that ran — the silent green #2497 exists to close. The gate is
+`_preflight` in `tests/integration/test_console_parts_live.py`, and it reverses
+ADR-0035 §4's "a missing fixture is a clear, actionable skip" for this one
+prerequisite. Set it from `python -m kdive build-fs`'s printed `export` line, or
+source `examples/local-libvirt/env.sh`.
 
 The `live_stack` tier still **skips** on the same variable
 (`tests/integration/test_live_stack.py`); #2497 tracks the tier-by-tier state.

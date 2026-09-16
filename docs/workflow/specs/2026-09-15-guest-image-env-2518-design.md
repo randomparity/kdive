@@ -35,8 +35,8 @@ Invariants at stake:
 Accepted failure classes:
 - the other 34 `live_vm` proofs, and `_preflight`'s two later branches, keep their skip gates
 - in CI this changes nothing observable yet: that job fails at `require_compatible_lifecycle`
-  before pytest, never runs on `pull_request`, and still lacks the bare `KDIVE_DATABASE_URL` the
-  proof reads — so there the export moves the skip from the image gate to the database gate
+  before pytest, never runs on `pull_request`, and lacks the bare `KDIVE_DATABASE_URL` the proof
+  reads — so there the export moves the skip from the image gate to the database gate
 - the runner's staged image is unverified here; a later failure there is the guard, not a bug
 
 Covered elsewhere:
@@ -53,8 +53,8 @@ Covered elsewhere:
 - **Preflight fails loud (1).** Mode: focused-test — `_preflight` raises, not skips. Red: before
   the change that run exits 0 with `1 skipped`. Green: both fault arms exit non-zero naming
   `KDIVE_GUEST_IMAGE` under `pytest tests/integration/test_console_parts_live.py`.
-- **Native job export (2).** Mode: task-test-not-applicable — CI cannot exercise the line (see
-  failure model) and `tests/scripts/test_live_workflow_shape.py` is outside this surface, leaving
-  the staged-rootfs literal it shares with `mint-system.sh` unpinned — a stated follow-up.
+- **Native job export (2).** Mode: focused-test — the export names the rootfs `mint-system.sh`
+  stages, inside the provider's allowed root. Red: rename that basename in either file alone.
+  Green: `pytest tests/scripts/test_live_workflow_shape.py -k guest_image`. CI cannot run it.
 - **`env.sh` comments (3).** Mode: task-test-not-applicable — comment-only edits changing no shell
   behavior. Nothing asserts the variable's ABSENCE from `env.sh`; that gap is stated, not closed.

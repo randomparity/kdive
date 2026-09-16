@@ -90,6 +90,9 @@ def _preflight() -> tuple[OidcIssuer, str, str]:
         # Fail, never skip (#2518, #2497). scripts/live-stack/env.sh deliberately exports no
         # KDIVE_GUEST_IMAGE, and the non-tcg live_vm tier carries no `<N> passed` summary gate
         # like the tcg one does, so a skip here is indistinguishable from a proof that ran.
+        # This deliberately reverses ADR-0035 §4's "a missing fixture is a clear, actionable
+        # skip" idiom for THIS prerequisite only; #2497 is the epic revising that idiom, since
+        # the tier-level guard §4 implicitly relied on does not exist for the native tier.
         pytest.fail(
             f"{_GUEST_IMAGE_ENV} unset or points at a missing file; "
             "build the local-libvirt rootfs with `python -m kdive build-fs` and set the env var"
