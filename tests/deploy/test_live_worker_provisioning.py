@@ -2181,7 +2181,10 @@ def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> N
     tasks = _text(MAIN_TASKS)
     unit_start = tasks.index("Install the boot-persistent session libvirtd user unit")
     unit = tasks[unit_start : unit_start + 1400]
-    assert "Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt" in unit
+    # The pragma marks a runtime path, not a credential: detect-secrets reads the long
+    # slash-separated literal below as a base64 high-entropy string.
+    xdg = "Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt"  # pragma: allowlist secret
+    assert xdg in unit
     assert "PIDFile=/run/kdive/live-libvirt/libvirt/libvirtd.pid" in unit
     # If either of these ever appears, the unit gained its own directory management and this
     # pairing should be revisited rather than left as two mechanisms for one invariant.
