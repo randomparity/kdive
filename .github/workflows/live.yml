@@ -808,7 +808,7 @@ jobs:
           "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q | tee "$native_summary" \
             || rc=$?
           if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$native_summary"; then
-            echo "native live_vm spine: ran ZERO native live_vm proofs (no '<N> passed' summary); a skipped tier must never read green" >&2
+            echo "native live_vm spine: ran ZERO native live_vm proofs (no '<N> passed' summary, pytest rc=$rc); a skipped tier must never read green" >&2
             exit 1
           fi
           exit "$rc"

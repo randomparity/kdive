@@ -267,9 +267,10 @@ test-changed:
 # infra-free (built app over a closed pool + dummy KDIVE_S3_* test env), so it needs no stack.
 # --strict-markers fails a mis-marked test. Exit 5 ("no tests collected") is a FAILURE here, not
 # a clean skip (#2540): the tier has carried marked tests since ADR-0411, so the tolerance's
-# original "marked suite absent" justification no longer holds, while the branch remained the one
-# thing standing between an import error in the tier and a green report — the same silent green
-# ADR-0389 kills for the live tiers, in a sibling recipe.
+# original "marked suite absent" justification no longer holds, and what it now covers is a run
+# that silently stopped selecting them — the same silent green ADR-0389 kills for the live tiers,
+# in a sibling recipe. (An import failure is a collection ERROR, exit 2, which never reached this
+# branch; markers dropped or a carrier moved out of rootdir is what actually yields 5.)
 test-agent-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -277,8 +278,9 @@ test-agent-smoke:
     uv run python -m pytest -m agent_smoke --strict-markers -q || rc=$?
     if [[ "$rc" -eq 5 ]]; then
       echo "just test-agent-smoke: pytest collected no agent_smoke test, so this run proved" >&2
-      echo "nothing and is not a pass. Either the tier's markers were dropped, or a carrier" >&2
-      echo "failed to import and pytest deselected it — read the collection errors above." >&2
+      echo "nothing and is not a pass. Either the tier's markers were dropped, or its carrier" >&2
+      echo "moved out of pytest's rootdir. A carrier that fails to IMPORT is a collection" >&2
+      echo "error (exit 2), not this — exit 5 means pytest found nothing to deselect from." >&2
       exit 1
     fi
     exit "$rc"

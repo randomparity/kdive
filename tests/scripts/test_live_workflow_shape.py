@@ -974,24 +974,39 @@ def test_native_spine_fails_loud_on_a_zero_proof_tier() -> None:
 
     `pytest -m "live_vm and not live_vm_tcg"` exits 0 when every proof skips and 5 when none is
     collected, so neither code separates "the tier passed" from "the tier never ran". ADR-0389
-    exists to kill exactly that green: the native family is its decision point 2. Pin the summary
-    gate here so the guard cannot be dropped as silently as its absence went unnoticed.
+    exists to kill exactly that green: the native family is its decision point 2.
+
+    Pin the *whole* guard, not just fragments of it. A deleted guard is the obvious regression;
+    the likelier one is a guard still present but defanged — `if !` dropped to `if`, or `exit 1`
+    softened to `exit 0` — either of which leaves every individual substring in place while
+    inverting what the gate does. Matching the block as one string catches both.
     """
-    spine = _native_spine()
-    assert "[1-9][0-9]* passed" in spine
-    assert "ran ZERO native live_vm proofs" in spine
+    spine = " ".join(_native_spine().split())
+    guard = (
+        "if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' \"$native_summary\"; then "
+        'echo "native live_vm spine: ran ZERO native live_vm proofs '
+        "(no '<N> passed' summary, pytest rc=$rc); "
+        'a skipped tier must never read green" >&2 '
+        "exit 1 "
+        "fi"
+    )
+    assert guard in spine, "the native spine's zero-proof gate is missing, inverted, or defanged"
 
 
 def test_native_spine_captures_the_summary_it_greps_under_pipefail() -> None:
     """The gate reads a `tee`-captured summary, and the capture must not eat pytest's status.
 
-    Without `pipefail` the pipeline reports `tee`'s exit code, so a genuinely failing proof run
-    would satisfy the `<N> passed` gate on its partial summary and then exit 0 — trading one
-    silent green for another. The spine file is already executed under `-o pipefail`; assert the
-    capture-and-propagate shape that relies on it.
+    Without `pipefail` the pipeline would report `tee`'s exit code, so a genuinely failing proof
+    run would satisfy the `<N> passed` gate on its partial summary and then exit 0 — trading one
+    silent green for another. `pipefail` itself is pinned by
+    `test_native_spine_is_executed_from_a_materialized_file`, which asserts the
+    `bin/bash -e -u -o pipefail` exec line; what this pins is the capture-and-propagate shape
+    that depends on it, including the `|| rc=$?` that keeps pytest's status alive under `-e`.
     """
-    spine = " ".join(_native_spine().split())
-    assert '-m "live_vm and not live_vm_tcg" -q | tee "$native_summary"' in spine
+    # Join the shell line continuation before normalizing, or the trailing `\` survives as its
+    # own token and the pipeline reads as `... "$native_summary" \ || rc=$?`.
+    spine = " ".join(_native_spine().replace("\\\n", " ").split())
+    assert '-m "live_vm and not live_vm_tcg" -q | tee "$native_summary" || rc=$?' in spine
     assert 'exit "$rc"' in spine
 
 
