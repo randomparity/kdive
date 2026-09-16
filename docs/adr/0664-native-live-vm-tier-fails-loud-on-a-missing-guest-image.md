@@ -26,7 +26,7 @@ the kind `.github/workflows/live.yml`'s tcg spine has, so a skip there is indist
 a proof that never ran — run 35053412070 showed exactly this, `13 passed, 22 skipped` with the
 untried proof buried in the skip count. It is disclosed in-code
 (`test_console_parts_live.py:94-96` cites ADR-0035 §4 and #2497 by name) and in
-`docs/operating/runbooks/live-testing.md:127-149`, which already documents the resulting
+`docs/operating/runbooks/live-testing.md:127-159`, which already documents the resulting
 tri-state (unset → skip; set but wrong → fail loud; valid → proceed) and the native tier's
 carve-out from it for this one variable. What was missing is the decision record: #2518 took no
 ADR number, by the parallel-run convention that reserves numbering to the orchestrator, so an ADR
