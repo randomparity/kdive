@@ -379,10 +379,7 @@ def build_profile(arch: str = "x86_64") -> dict[str, object]:
     target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
     below, not a server ``kernel_source_ref``/``config`` build.
 
-    Provider-agnostic, which is why it lives here rather than in a spine module: a build profile
-    names no provider, unlike the ``_provision_profile`` factories each suite keeps (ADR-0665).
-    ``tests/integration/live_stack/test_build.py`` guards the returned shape against the real
-    validator.
+    ``test_build.py`` guards the returned shape against the real validator.
 
     Args:
         arch: Target CPU architecture, one of ``SUPPORTED_ARCHES``. Defaults to ``x86_64``.
