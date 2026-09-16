@@ -81,6 +81,25 @@ def test_concurrency_group_still_deduplicates_same_trigger_runs() -> None:
     )
 
 
+def test_group_template_has_no_expression_beyond_the_two_known_substitutions() -> None:
+    # _render only ever substitutes `github.event_name` and the PR/issue-number `||` expression;
+    # anything else is passed through as identical literal text, which would make the previous
+    # test pass even if the group grew a per-run-unique field (`github.run_id`,
+    # `github.run_attempt`, ...) that GitHub itself would vary between two "same trigger type"
+    # runs and that would silently stop them from ever landing in the same group — the opposite
+    # of what that test claims to guard. Asserting no `${{` marker survives both substitutions
+    # catches that class of regression directly, independent of the leftover expression itself.
+    template = _group_template()
+    rendered = _render(template, event_name="pull_request", number=2507)
+    assert "${{" not in rendered, (
+        "the concurrency group template contains a GitHub Actions expression beyond the two this "
+        "test renders (github.event_name and the pull_request/issue number). A leftover expression "
+        "here is untested by the dedup assertion above and, if it varies per run (github.run_id, "
+        "github.run_attempt), would silently defeat same-trigger-type deduplication. "
+        f"rendered group: {rendered!r}"
+    )
+
+
 def test_cancel_in_progress_is_unchanged() -> None:
     workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
     assert workflow["concurrency"]["cancel-in-progress"] is True
