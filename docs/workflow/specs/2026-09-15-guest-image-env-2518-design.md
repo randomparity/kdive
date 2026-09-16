@@ -20,7 +20,7 @@ callers are non-`live_vm` (`stack-services.sh`, `onboard.sh`, `stack-status.sh`,
 `just stack-migrate` (`justfile:314`).
 
 Rejected — default it there. verified: `/var/lib/kdive/rootfs/local/` holds 11 kdive-ready qcow2
-across 5 distro families including `-ppc64le`, so no arch-neutral default resolves.
+across 4 distro families including `-ppc64le`, so no arch-neutral default resolves.
 
 ### Failure model
 
@@ -29,7 +29,7 @@ Actors and deployments:
 - the native `live.yml` job, which reaches this proof only once its runner is repaired
 
 Invariants at stake:
-- a `live_vm` proof that cannot run must not exit 0 (#2497)
+- this proof must not exit 0 when it cannot run (#2497)
 - non-`live_vm` consumers of `scripts/live-stack/env.sh` keep working
 
 Accepted failure classes:
@@ -54,7 +54,7 @@ Covered elsewhere:
   the change that run exits 0 with `1 skipped`. Green: both fault arms exit non-zero naming
   `KDIVE_GUEST_IMAGE` under `pytest tests/integration/test_console_parts_live.py`.
 - **Native job export (2).** Mode: task-test-not-applicable — `live.yml`'s shape-test home is
-  outside this run's surface and CI cannot exercise the line (see failure model); verified by
-  reading the parsed job environment.
+  outside this surface and CI cannot exercise the line (see failure model). Checked by hand: the
+  path is the one `mint-system.sh` stages inside the provider's allowed root, before pytest.
 - **`env.sh` comments (3).** Mode: task-test-not-applicable — comment-only edits changing no shell
-  behavior; `tests/scripts/test_live_stack_scripts.py` already pins the file's export set.
+  behavior. Nothing asserts the variable's ABSENCE from `env.sh`; that gap is stated, not closed.

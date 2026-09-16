@@ -2,9 +2,9 @@
 
 ``live_vm``-gated: needs the full live stack (KDIVE_STACK_BASE_URL, KDIVE_OIDC_ISSUER,
 KDIVE_DATABASE_URL) plus a local KVM host with the kdump guest image (KDIVE_GUEST_IMAGE) and
-the kernel tree (KDIVE_KERNEL_SRC). Skips cleanly without the kernel tree or the database; an
-unresolvable KDIVE_GUEST_IMAGE fails loud instead, so a tier that proved nothing cannot read
-green (#2518).
+the kernel tree (KDIVE_KERNEL_SRC). Skips cleanly without the kernel tree, the database, the
+issuer or the stack; an unresolvable KDIVE_GUEST_IMAGE fails loud instead, so a tier that proved
+nothing cannot read green (#2518).
 
 Proves the #892 gap is closed: a System whose Run has already reached ``succeeded`` continues
 to accumulate ``console-part-<gen>-<index>`` artifacts via the reconciler's ``console_rotate``
