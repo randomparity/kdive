@@ -1124,43 +1124,144 @@ def test_the_declaration_reaches_a_child_that_sources_lib_sh(tmp_path: Path) -> 
     assert result.stdout == "unset"
 
 
+def _isolated_stack_down(tmp_path: Path, events: Path) -> Path:
+    """Copy stack-down.sh beside stubs that record each teardown step instead of performing it.
+
+    The gate under test stays real: the stub lib.sh sources the shipped libvirt-uri.sh, so the
+    declaration, `resolve_libvirt_uri` and `require_libvirt_uri` are the ones being exercised.
+    What the stubs replace is the destruction, and that is the point -- the regression these
+    tests exist to catch (a --wipe gate removed or moved below the teardown) is precisely the
+    one that would otherwise have the suite run `docker compose --profile obs down -v` against
+    whatever host is running it.
+    """
+    script_dir = tmp_path / "scripts" / "live-stack"
+    script_dir.mkdir(parents=True)
+    shutil.copy(ROOT / "scripts/live-stack/stack-down.sh", script_dir / "stack-down.sh")
+    lifecycle = script_dir / "worker-lifecycle.sh"
+    lifecycle.write_text(f'#!/bin/sh\necho "lifecycle $1" >>"{events}"\n', encoding="utf-8")
+    lifecycle.chmod(0o755)
+    (script_dir / "lib.sh").write_text(
+        f'source "{ROOT}/scripts/live-stack/libvirt-uri.sh"\n'
+        "resolve_libvirt_uri\n"
+        f'repo_root="{tmp_path}"\n'
+        f'KDIVE_ROOTFS_DIR="{tmp_path}/rootfs"\n'
+        f'stop_daemons() {{ echo graceful >>"{events}"; }}\n'
+        f'force_stop_daemons() {{ echo force >>"{events}"; }}\n'
+        f'docker() {{ echo docker >>"{events}"; }}\n'
+        f'kdive_domains() {{ echo domains >>"{events}"; }}\n'
+        f'sudo() {{ echo "sudo $1" >>"{events}"; }}\n',
+        encoding="utf-8",
+    )
+    return script_dir / "stack-down.sh"
+
+
 def test_stack_down_refuses_wipe_before_reaching_any_teardown(tmp_path: Path) -> None:
     """--wipe is the one stack-down.sh operation that needs libvirt, so it is refused up front.
 
     Refusing after the teardown had begun would leave the compose volumes dropped and the domains
-    they outlive orphaned -- the pairing stack-down.sh's own header exists to keep.
+    they outlive orphaned -- the pairing stack-down.sh's own header exists to keep. The empty
+    event log is the assertion that carries that: not a banner absent from stdout, but no
+    teardown step having run at all.
     """
     _, staged = _broken_contract(tmp_path)
+    events = tmp_path / "events"
     result = subprocess.run(
-        [str(ROOT / "scripts/live-stack/stack-down.sh"), "--wipe", "--yes"],
+        ["bash", str(_isolated_stack_down(tmp_path, events)), "--wipe", "--yes"],
         capture_output=True,
         text=True,
         check=False,
         env=staged,
     )
     assert result.returncode != 0
+    assert not events.exists(), events.read_text(encoding="utf-8")
     assert "=== stopping host processes ===" not in result.stdout
-    assert "cannot" in result.stderr
+    assert "cannot reap kdive domains for --wipe" in result.stderr
 
 
-def test_stack_down_declares_itself_before_sourcing_lib(tmp_path: Path) -> None:
-    """Order is the contract: lib.sh resolves at source time, so a declaration made after the
-    source would arrive too late to be read."""
-    text = (ROOT / "scripts/live-stack/stack-down.sh").read_text(encoding="utf-8")
-    assert text.index("export LIBVIRT_OPTIONAL=1") < text.index('source "${here}/lib.sh"')
+def test_stack_down_completes_plain_teardown_on_a_broken_contract(tmp_path: Path) -> None:
+    """The other half of the same criterion: the recovery tool has to finish, not merely start.
+
+    Plain teardown reads no libvirt, so the degraded endpoint must carry it through the lifecycle
+    stop, the daemon stop and the compose down. The spawned `worker-lifecycle.sh stop` proves the
+    declaration crossed the process boundary: a shell-local one would abort that child, and the
+    event log would stop at its first line.
+    """
+    _, staged = _broken_contract(tmp_path)
+    events = tmp_path / "events"
+    result = subprocess.run(
+        ["bash", str(_isolated_stack_down(tmp_path, events))],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    assert result.returncode == 0, result.stderr
+    steps = events.read_text(encoding="utf-8").splitlines()
+    assert steps == ["lifecycle stop", "graceful", "docker"], steps
+    assert result.stdout.rstrip().endswith("done")
+
+
+def _stack_status_libvirt_slice(tmp_path: Path) -> Path:
+    """stack-status.sh's setup plus its libvirt section, runnable on its own.
+
+    The idiom test_status_database_probe_scrubs_unrelated_role_dsns already uses: the shipped
+    lib.sh, env.sh and libvirt-uri.sh sit beside the extract, so the declaration, the resolver,
+    the guard and `provision_prereqs_ok` are all the real ones. The compose, host-daemon,
+    lifecycle, app-health and database sections are cut -- none of them is what this contract is
+    about, and each would drag in a backend this test does not need.
+    """
+    source = (ROOT / "scripts/live-stack/stack-status.sh").read_text(encoding="utf-8")
+    setup = source[: source.index('echo "=== compose')]
+    libvirt = source[source.index('if [[ -n "${LIBVIRT_UNRESOLVED}" ]]') :]
+    status = tmp_path / "stack-status.sh"
+    status.write_text(setup + libvirt, encoding="utf-8")
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
+        (tmp_path / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    return status
 
 
 def test_stack_status_reports_an_unresolved_endpoint_without_probing_it(tmp_path: Path) -> None:
     """The banner and the `libvirt_ok` probe both read the endpoint, so both sit inside the
     resolved branch; `provision_prereqs_ok` reads no libvirt and stays outside it, because the
-    overlay-and-staging report is the part a broken host still needs."""
-    text = (ROOT / "scripts/live-stack/stack-status.sh").read_text(encoding="utf-8")
-    assert text.index("export LIBVIRT_OPTIONAL=1") < text.index('source "${here}/lib.sh"')
-    guard = text.index('if [[ -n "${LIBVIRT_UNRESOLVED}" ]]')
-    # The call sites, not the words: both names also appear in the comment above the guard.
-    prereqs = text.index("if provision_prereqs_ok; then")
-    assert guard < text.index("if libvirt_ok; then") < prereqs
-    assert text.index("=== libvirt (${KDIVE_LIBVIRT_URI}) ===") > guard
+    overlay-and-staging report is the part a broken host still needs.
+
+    Run, not read. Asserting the source text's ordering instead passes against a script whose two
+    branch bodies are swapped -- which still carries every literal in the asserted order, and
+    still dies with `unbound variable` on exactly the broken-contract host this names.
+    """
+    contract, staged = _broken_contract(tmp_path)
+    result = subprocess.run(
+        ["bash", str(_stack_status_libvirt_slice(tmp_path))],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "=== libvirt (endpoint unresolved) ===" in result.stdout
+    assert str(contract) in result.stdout
+    assert "daemon: reachable" not in result.stdout
+    assert "daemon: UNREACHABLE" not in result.stdout
+    assert "provision prereqs:" in result.stdout
+
+
+def test_stack_status_still_probes_a_resolved_endpoint(tmp_path: Path) -> None:
+    """The degraded report is the exception, not the new default: a host whose published contract
+    validates keeps the endpoint banner and the probe it guards."""
+    contract, staged = _published_contract(tmp_path)
+    assert contract.exists()
+    result = subprocess.run(
+        ["bash", str(_stack_status_libvirt_slice(tmp_path))],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"=== libvirt ({_PUBLISHED_URI}) ===" in result.stdout
+    assert "endpoint unresolved" not in result.stdout
 
 
 def test_server_and_worker_receive_the_same_libvirt_endpoint(tmp_path: Path) -> None:
