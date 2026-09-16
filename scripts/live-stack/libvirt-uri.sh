@@ -118,10 +118,18 @@ load_published_libvirt_uri() {
 # three fail silently and teardown prints `done` having reaped nothing. Both belong to
 # stack-down.sh.
 resolve_libvirt_uri() {
-  # Sticky: stack-status.sh sources lib.sh and env.sh, and each calls this. Without the guard the
-  # second call would re-enter (the endpoint is unset, so the -z test passes), repeat the whole
-  # diagnosis, and resolve again against a contract that has not changed.
-  [[ -z "$LIBVIRT_UNRESOLVED" ]] || return 0
+  # Re-entry: stack-status.sh sources lib.sh and env.sh, and each calls this. Without the guard
+  # the second call would re-enter (the endpoint is unset, so the -z test passes), repeat the
+  # whole diagnosis, and resolve again against a contract that has not changed.
+  #
+  # It keys on the endpoint as well as the record, so what it short-circuits is "nothing has
+  # changed since the degrade", not "this shell degraded once". A caller that supplies an
+  # endpoint afterwards still reaches the export below -- which matters because ADR-0658 sends
+  # #2509's next guard into the preset branch of this same function, and a write-once record
+  # would have left require_libvirt_uri refusing an operation the shell can by then perform.
+  if [[ -n "$LIBVIRT_UNRESOLVED" && -z "${KDIVE_LIBVIRT_URI:-}" ]]; then
+    return 0
+  fi
   if [[ -z "${KDIVE_LIBVIRT_URI:-}" ]]; then
     if [[ -e "$LIBVIRT_ENV" || -L "$LIBVIRT_ENV" ]]; then
       KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)" || {
@@ -140,6 +148,10 @@ resolve_libvirt_uri() {
       KDIVE_LIBVIRT_URI=qemu:///system
     fi
   fi
+  # Reached only with an endpoint in hand, so the record is stale by definition: clearing it here
+  # is what stops require_libvirt_uri refusing after a repair. The degraded branch above returns
+  # before this line, so it does not undo its own record.
+  LIBVIRT_UNRESOLVED=''
   export KDIVE_LIBVIRT_URI
 }
 
