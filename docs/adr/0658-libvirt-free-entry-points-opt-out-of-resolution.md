@@ -17,9 +17,9 @@ Under the callers' `set -euo pipefail` a broken contract therefore aborts the wh
 including entry points that touch no libvirt at all (`stack-services.sh --skip-libvirt`,
 `apply-migrations.sh`, `onboard.sh`) and the two an operator reaches for *because* the host is
 broken: `stack-down.sh` and `stack-status.sh`. `stack-down.sh` reads `$KDIVE_LIBVIRT_URI` only at
-`:83-84`, inside `if [[ "$wipe" == "1" ]]`; plain teardown needs no libvirt whatever.
+`:105-106`, inside `if [[ "$wipe" == "1" ]]`; plain teardown needs no libvirt whatever.
 
-The abort also crosses a process boundary. `stack-down.sh:57` spawns `worker-lifecycle.sh stop`
+The abort also crosses a process boundary. `stack-down.sh:79` spawns `worker-lifecycle.sh stop`
 before it stops anything, and that script has its own `set -euo pipefail` and sources both
 `lib.sh:7` and `env.sh:9` — so the child aborts too, and teardown exits 1 having stopped nothing.
 
@@ -58,9 +58,9 @@ entry point that will touch libvirt sets it.
 ## Consequences
 
 `stack-status.sh` reports on a broken host instead of aborting: it skips the endpoint banner and
-probe at `:55-60` — `libvirt_ok` reads `$KDIVE_LIBVIRT_URI` unguarded at `lib.sh:380`, and `set -u`
+probe at `:64-75` — `libvirt_ok` reads `$KDIVE_LIBVIRT_URI` unguarded at `lib.sh:380`, and `set -u`
 is not suppressed inside an `if` condition — printing the endpoint as unresolved instead. The
-`provision_prereqs_ok` report at `:61-65` reads no libvirt and keeps running, which is the part a
+`provision_prereqs_ok` report at `:76-80` reads no libvirt and keeps running, which is the part a
 broken host still needs. `stack-down.sh` performs plain teardown, including its compose `down`.
 
 `--wipe` still refuses, and now refuses **before** stopping anything. Refusing it wholesale rather
@@ -88,8 +88,9 @@ would have forced it to be replicated per consumer.
 
 ## Considered & rejected
 
-- **Resolve lazily at first libvirt use (#2504 direction 1).** verified: `rg -n
-  'KDIVE_LIBVIRT_URI' scripts/ examples/` returns 37 lines, of which eleven are top-level reads
+- **Resolve lazily at first libvirt use (#2504 direction 1).** verified against the pre-change
+  tree, whose line numbers this bullet alone keeps: `rg -n 'KDIVE_LIBVIRT_URI' scripts/
+  examples/` returns 37 lines, of which eleven are top-level reads
   outside any function — `stack-services.sh:176,184,189,214,221`, `stack-status.sh:55`,
   `stack-down.sh:83,84`, `examples/local-libvirt/demo-up.sh:42,46,123` — each needing its own
   guard, and `lib.sh:300,304` forks the server and reconciler with the inherited environment, so
@@ -97,14 +98,14 @@ would have forced it to be replicated per consumer.
   every consumer, not the resolver.
 - **Move `resolve_libvirt_uri` out of `lib.sh:68` and `env.sh:15` into each entry point's first
   statement, with no flag at all.** verified: `worker-lifecycle.sh:188` needs the endpoint for
-  `start`, so it would resolve in its own first statement and `stack-down.sh:57` would still spawn
+  `start`, so it would resolve in its own first statement and `stack-down.sh:79` would still spawn
   a child that aborts — the process boundary in *Context* survives this variant, which would then
   need per-subcommand laziness inside `worker-lifecycle.sh` as well.
 - **Degrade to `KDIVE_LIBVIRT_URI=''` instead of leaving it unset.** verified: `virsh -c '' list`
   exits 0 against the probed default connection (virsh 12.0.0, Fedora 44 host) — the empty value
   reads as "no URI given" to libvirt, so a wrong-daemon query would succeed silently.
 - **Degrade to `qemu:///system`.** verified: this is the exact fallback #2480 removed; the
-  resolver's own comment at `libvirt-uri.sh:72-92` records that it puts the server on a daemon
+  resolver's own comment at `libvirt-uri.sh:81-119` records that it puts the server on a daemon
   holding no kdive domains while the worker uses the published session URI.
 - **Do nothing and let operators export `KDIVE_LIBVIRT_URI` by hand.** judgment: the override
   already exists and the abort message already names it, yet the recovery tools stay unusable

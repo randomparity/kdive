@@ -4,7 +4,7 @@
 
 `lib.sh:66-68` and `env.sh:13-15` call the fail-closed `resolve_libvirt_uri` (#2480) at source
 time, so a broken `/etc/kdive/live-worker-libvirt.env` aborts every live-stack entry point under
-`set -euo pipefail` — recovery tools included, and `stack-down.sh:57`'s child spawn dies too.
+`set -euo pipefail` — recovery tools included, and `stack-down.sh:79`'s child spawn dies too.
 
 ## Scope
 
@@ -15,12 +15,12 @@ source-time resolution; an entry point declares itself libvirt-free by exporting
 branch in `resolve_libvirt_uri` that, under the flag, leaves `KDIVE_LIBVIRT_URI` **unset** instead
 of returning 1 and sets `LIBVIRT_UNRESOLVED` to one unexported line naming `$LIBVIRT_ENV`; the
 diagnosis itself stays on stderr. Guarding that branch ahead of the load call keeps the second
-source `stack-status.sh:9,11` performs silent. It adds `require_libvirt_uri <operation>`, refusing
+source `stack-status.sh:14,16` performs silent. It adds `require_libvirt_uri <operation>`, refusing
 an operation while unresolved. Neither new name takes a `KDIVE_` prefix; ADR-0658 records why.
 
 `stack-down.sh` sets the flag and gates `--wipe` on that guard right after argument parsing,
 before any teardown. `stack-status.sh` sets the flag and skips only its banner and probe at
-`:55-60`; `provision_prereqs_ok` at `:61-65` reads no libvirt and keeps running. `lib.sh`, `env.sh`
+`:64-75`; `provision_prereqs_ok` at `:76-80` reads no libvirt and keeps running. `lib.sh`, `env.sh`
 and `worker-lifecycle.sh` are unedited — the last one's `stop` and `status` stop aborting under the
 inherited flag, while `start` still fails closed through the flag-blind
 `load_published_libvirt_uri`. The touched script and new tests cite ADR-0658.
@@ -53,6 +53,8 @@ against a staged broken `LIBVIRT_ENV`, via `just test-verbose <that path>`.
 - Fail-closed default, flag absent: non-zero exit, no fallback value.
 - `LIBVIRT_UNRESOLVED` is an output, not an input: one inherited from the environment does not
   suppress resolution on a host whose contract validates, flag or no flag.
+- It is also the current state, not the first one: after a degrade, a caller that supplies an
+  allowlisted `KDIVE_LIBVIRT_URI` gets it exported and `require_libvirt_uri` stops refusing.
 - `require_libvirt_uri`: non-zero exit, names the refused operation on stderr.
 - `stack-down.sh`: plain run exits 0, child inherits the flag; `--wipe --yes` exits non-zero
   reaching no teardown.
