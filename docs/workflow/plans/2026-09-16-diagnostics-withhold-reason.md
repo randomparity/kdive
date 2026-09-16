@@ -18,9 +18,17 @@ recovery procedure.
 
 Design: [`docs/workflow/specs/2026-09-16-diagnostics-withhold-reason-design.md`](../specs/2026-09-16-diagnostics-withhold-reason-design.md).
 
-Expected implementation size: 230–300 changed lines (M) — from the file map below: about 45 lines
+Expected implementation size: 230–330 changed lines (M) — from the file map below: about 45 lines
 in the diagnostics module, about 130 in its tests (four new cases, seven existing cases updated),
 about 45 in `deploy/systemd/README.md`, about 65 in the runbook. Task 4 changes no file.
+
+The built diff came in at the top of that range — 330 changed lines across the four
+implementation files, against an original top estimate of 300 — and the range above was widened
+to the measured figure rather than the code cut to fit it. The overrun is in the diagnostics
+module and its tests: the `withhold` funnel and the `StateConflict` arm are more code than "about
+45 lines" allowed, and the seven updated cases each gained a reason assertion. Every line traces
+to a completion criterion and the reviewed design; no unrequested work is present. The frozen
+`M` denominator of 250 is unchanged — the estimate is informational and never replaces it.
 
 ## Global Constraints
 
