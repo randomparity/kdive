@@ -5,7 +5,7 @@
 `scripts/live-stack/env.sh` never exports `KDIVE_GUEST_IMAGE`, so `test_console_parts_live.py`
 skips and `pytest -m live_vm` exits 0 having proved nothing (#2497 Instance 2). The issue's
 non-goal assumed `.github/workflows/live.yml` was already wired; it is not: its native job runs
-the non-tcg tier bare (`:786`) and sources that same `env.sh` (`:775`), which assigns nothing.
+the non-tcg tier bare (`:794`) and sources that same `env.sh`, which assigns none.
 
 ## Scope
 
