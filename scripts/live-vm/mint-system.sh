@@ -33,8 +33,13 @@ fi
 #    a preflight stop would surface as the "did not mint a token" die below — a cause that never
 #    happened. A bare assignment's status IS the substitution's, so this one propagates. Same shape
 #    .github/workflows/live.yml:549 already uses on this script, for the same reason.
+#
+#    The die names no cause: `||` fires on ANY non-zero, and onboard.sh's own hard gates (migrate,
+#    verify-project) need the database and no libvirt, so asserting "the preflight" here would
+#    misattribute a database failure — the same wrong-diagnosis defect #2568 is about. onboard.sh
+#    already attributes its own preflight stop, so this only has to stop and point at that output.
 onboard_wiring="$(ONBOARD_PREFLIGHT=required "${here}/../live-stack/onboard.sh")" ||
-  die "onboard.sh failed its local-libvirt preflight (see the FAIL entries above); not provisioning"
+  die "onboard.sh exited non-zero; its output above states the reason; not provisioning"
 #    onboard.sh prints banners + a token-contract heredoc to stdout alongside its one
 #    `export KDIVE_TOKEN=...` line, so eval ONLY that line (eval-ing the whole capture hits
 #    `(required)` unbalanced parens under set -e and aborts before the token).
