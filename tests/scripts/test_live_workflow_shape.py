@@ -79,6 +79,66 @@ def test_native_block_preflights_debug_stepping_with_both_native_families() -> N
     assert "preflight-env.sh throwaway provisioned debug-stepping" in run
 
 
+def _native_guest_image() -> str:
+    prefix = "export KDIVE_GUEST_IMAGE="
+    found = [ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix)]
+    assert len(found) == 1, (
+        f"expected exactly one `{prefix}` line in the native spine, found {len(found)}; "
+        "without it the console-part proof fails at its guest-image gate (#2518)"
+    )
+    return found[0][len(prefix) :].split(" #")[0].strip().strip("\"'")
+
+
+def test_native_guest_image_names_the_rootfs_mint_system_stages() -> None:
+    """The native spine's KDIVE_GUEST_IMAGE must name the file mint-system.sh actually stages.
+
+    mint-system.sh hardlinks the warm-store rootfs into the provider's allowed root under a fixed
+    basename, and live.yml repeats that basename to point the console-part proof at it (#2518).
+    Nothing else ties the two. Since #2518 an unresolvable KDIVE_GUEST_IMAGE *fails* that proof
+    instead of skipping it, so a rename in the script alone turns the native job red rather than
+    green — parse the basename from the script rather than repeating the literal a third time.
+    """
+    mint = (_ROOT / "scripts" / "live-vm" / "mint-system.sh").read_text(encoding="utf-8")
+
+    def _one(prefix: str, text: str, where: str) -> str:
+        # Tolerate a `readonly`/`declare`/`local` qualifier: adding one is a benign edit that
+        # must not read as a rename.
+        stripped = (
+            re.sub(r"^(readonly|declare|local)\s+", "", ln.strip()) for ln in text.splitlines()
+        )
+        found = [ln for ln in stripped if ln.startswith(prefix)]
+        assert len(found) == 1, f"expected exactly one `{prefix}` line in {where}, got {len(found)}"
+        return found[0][len(prefix) :].split(" #")[0].strip().strip("\"'")
+
+    # Compare the two shell sources to EACH OTHER, never to a resolved constant: ROOTFS_DIR is
+    # `config.require(LIBVIRT_ROOTFS_ROOT)`, so asserting against it would make this test's verdict
+    # depend on the runner's own environment and go red on an untouched workflow.
+    rootfs_dir = _one("rootfs_dir=", mint, "mint-system.sh")
+    staged = _one("staged_rootfs=", mint, "mint-system.sh")
+    assert staged.startswith("${rootfs_dir}/"), (
+        f"mint-system.sh stages {staged}, no longer under its own ${{rootfs_dir}}; the workflow "
+        "export below cannot mirror a path this test can no longer derive"
+    )
+    expected = staged.replace("${rootfs_dir}", rootfs_dir, 1)
+
+    exported = _native_guest_image()
+    assert exported == expected, (
+        f"live.yml exports KDIVE_GUEST_IMAGE={exported}, but mint-system.sh stages {expected}. "
+        "Renaming one side, or factoring either literal into a variable, fails the native "
+        "live_vm job at its guest-image gate — keep the two in step."
+    )
+
+
+def test_native_spine_aliases_the_bare_database_url_for_the_proof_suite() -> None:
+    """The proofs read bare KDIVE_DATABASE_URL, which env.sh deliberately does not export.
+
+    One DSN per authority since #1929, so the alias belongs in the spine, not in env.sh and not in
+    preflight-env.sh. The tcg spine has carried it since #2046; the native spine did not, so the
+    console-part proof skipped on the database gate even once its guest image was wired (#2518).
+    """
+    assert 'export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"' in _native_spine()
+
+
 def _tcg_stage_dir() -> str:
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())

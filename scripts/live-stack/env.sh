@@ -93,6 +93,14 @@ export KDIVE_FIXTURE_CATALOG_PATH="${KDIVE_FIXTURE_CATALOG_PATH:-${default_worke
 # a default-only fleet never claims them and the spine starves its own provision jobs (#2058).
 export KDIVE_ACCEPTED_LANES="${KDIVE_ACCEPTED_LANES:-default,state-fenced}"
 export KDIVE_LOG_LEVEL="${KDIVE_LOG_LEVEL:-INFO}"
+# KDIVE_GUEST_IMAGE is deliberately NOT exported here (#2518), unlike its sibling prerequisite
+# below: it names a built artifact with no distro- or arch-neutral default, since
+# /var/lib/kdive/rootfs/local carries one qcow2 per family and architecture and any default this
+# file picked would be wrong on most hosts. Its owners are `python -m kdive build-fs` (which
+# prints the exact export line), examples/local-libvirt/env.sh for the local demo, and live.yml's
+# native job for CI. A live_vm proof that cannot resolve it now fails instead of skipping, so an
+# absent value can no longer read as a passing tier.
+#
 # KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
 # verbatim. The convenience default ${HOME}/src/linux is HOME-relative, so a privileged restart
 # ($HOME -> /root) would silently re-point it to a nonexistent /root/src/linux and every build would

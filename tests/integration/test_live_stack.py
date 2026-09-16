@@ -379,114 +379,125 @@ def test_spine_over_the_wire() -> None:
         op = LiveStackClient.over_http(base_url, operator_token)
         admin = LiveStackClient.over_http(base_url, admin_token)
         system_id = allocation_id = run_id = ""
+        released = False
         async with op, admin:
             # out-of-band: meter the project (admission is fail-closed, ADR-0046 §0), then capture
             # the report window start from the DB clock (shares ledger.ts's clock).
             await seed_metering(db_url, _PROJECT)
             window_start = await db_now(db_url)
-            async with phase("allocate"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "allocations.request",
+            try:
+                async with phase("allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            **{
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_provision_profile(),
+                        ),
+                        "provision",
+                    )
+                    system_id = data_str(env, "system_id")  # in data, NOT object_id (the job id)
+                    await await_system_state(op, "provision", system_id, "ready")
+                async with phase("open-investigation"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            **{"project": _PROJECT, "title": "spine"},
+                        ),
+                        "open-investigation",
+                    )
+                    investigation_id = env.object_id
+                async with phase("create-run"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            investigation_id=investigation_id,
+                            system_id=system_id,
+                            build_profile=_build_profile(),
+                        ),
+                        "create-run",
+                    )
+                    run_id = env.object_id
+                async with phase("upload-build"):
+                    await build_and_upload_kernel(op, run_id=run_id)
+                for step in ("install", "boot"):
+                    async with phase(step):
+                        env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
+                        await drain_job(op, step, env.object_id)
+                async with phase("attach"):
+                    env = ok(
+                        await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"),
+                        "attach",
+                    )
+                    session_id = env.object_id
+                    ok(
+                        await scalar(
+                            op, "debug.read_registers", session_id=session_id, registers=["rip"]
+                        ),
+                        "attach",
+                    )
+                async with phase("crash-rbac-negative"):
+                    denied = await scalar(op, "control.force_crash", system_id=system_id)
+                    if denied.status != "error" or denied.error_category != "authorization_denied":
+                        raise SpinePhaseError("crash-rbac-negative", "operator was not denied")
+                async with phase("crash"):
+                    ok(await scalar(admin, "control.force_crash", system_id=system_id), "crash")
+                    await await_system_state(admin, "crash", system_id, "crashed")
+                async with phase("capture"):
+                    env = ok(await scalar(op, "vmcore.fetch", run_id=run_id), "capture")
+                    drained = await drain_job(op, "capture", env.object_id)
+                    refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
+                    assert refs, "capture published no vmcore reference (#1)"
+                    # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
+                    leaked = raw_vmcore_refs(refs)
+                    assert not leaked, f"raw vmcore leaked (#1) — {leaked!r}"
+                async with phase("introspect"):
+                    env = ok(
+                        await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect"
+                    )
+                    report = json.dumps(data_mapping(env, "report"), sort_keys=True)
+                    assert "hunter2" not in report and "password=" not in report, (
+                        "secret leaked (#3)"
+                    )
+                async with phase("release"):
+                    ok(
+                        await scalar(op, "allocations.release", allocation_id=allocation_id),
+                        "release",
+                    )
+                    released = True
+                async with phase("teardown"):  # reconciler-driven (≥30s) → torn_down
+                    await await_system_state(op, "teardown", system_id, "torn_down")
+                async with phase("report"):  # all-projects rollup under platform_auditor
+                    await assert_report(
+                        base_url,
+                        auditor_token,
+                        db_url,
+                        window_start,
                         project=_PROJECT,
-                        **{
-                            "vcpus": 2,
-                            "memory_gb": 2,
-                            "disk_gb": LOCAL_ALLOCATION_DISK_GB,
-                            "resource": {"mode": "kind"},
-                        },
-                    ),
-                    "allocate",
-                )
-                allocation_id = env.object_id
-            async with phase("provision"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "systems.provision",
-                        allocation_id=allocation_id,
-                        profile=_provision_profile(),
-                    ),
-                    "provision",
-                )
-                system_id = data_str(env, "system_id")  # in data, NOT object_id (the job id)
-                await await_system_state(op, "provision", system_id, "ready")
-            async with phase("open-investigation"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "investigations.open",
-                        **{"project": _PROJECT, "title": "spine"},
-                    ),
-                    "open-investigation",
-                )
-                investigation_id = env.object_id
-            async with phase("create-run"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "runs.create",
-                        investigation_id=investigation_id,
-                        system_id=system_id,
-                        build_profile=_build_profile(),
-                    ),
-                    "create-run",
-                )
-                run_id = env.object_id
-            async with phase("upload-build"):
-                await build_and_upload_kernel(op, run_id=run_id)
-            for step in ("install", "boot"):
-                async with phase(step):
-                    env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
-                    await drain_job(op, step, env.object_id)
-            async with phase("attach"):
-                env = ok(
-                    await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"),
-                    "attach",
-                )
-                session_id = env.object_id
-                ok(
-                    await scalar(
-                        op, "debug.read_registers", session_id=session_id, registers=["rip"]
-                    ),
-                    "attach",
-                )
-            async with phase("crash-rbac-negative"):
-                denied = await scalar(op, "control.force_crash", system_id=system_id)
-                if denied.status != "error" or denied.error_category != "authorization_denied":
-                    raise SpinePhaseError("crash-rbac-negative", "operator was not denied")
-            async with phase("crash"):
-                ok(await scalar(admin, "control.force_crash", system_id=system_id), "crash")
-                await await_system_state(admin, "crash", system_id, "crashed")
-            async with phase("capture"):
-                env = ok(await scalar(op, "vmcore.fetch", run_id=run_id), "capture")
-                drained = await drain_job(op, "capture", env.object_id)
-                refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
-                assert refs, "capture published no vmcore reference (#1)"
-                # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
-                leaked = raw_vmcore_refs(refs)
-                assert not leaked, f"raw vmcore leaked (#1) — {leaked!r}"
-            async with phase("introspect"):
-                env = ok(await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect")
-                report = json.dumps(data_mapping(env, "report"), sort_keys=True)
-                assert "hunter2" not in report and "password=" not in report, "secret leaked (#3)"
-            async with phase("release"):
-                ok(
-                    await scalar(op, "allocations.release", allocation_id=allocation_id),
-                    "release",
-                )
-            async with phase("teardown"):  # reconciler-driven (≥30s) → torn_down
-                await await_system_state(op, "teardown", system_id, "torn_down")
-            async with phase("report"):  # all-projects rollup under platform_auditor
-                await assert_report(
-                    base_url,
-                    auditor_token,
-                    db_url,
-                    window_start,
-                    project=_PROJECT,
-                    artifact_name=_ARTIFACT_NAME,
-                )
+                        artifact_name=_ARTIFACT_NAME,
+                    )
+            finally:
+                # Failure-path net (#2520) — the "release" phase is the success-path assertion.
+                if allocation_id and not released:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
 
         await assert_audit(
             db_url, project=_PROJECT, allocation_id=allocation_id, system_id=system_id
@@ -511,78 +522,89 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
     async def _run() -> None:
         op = LiveStackClient.over_http(base_url, operator_token)
         allocation_id = ""
+        released = False
         async with op:
-            async with phase("allocate"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "allocations.request",
-                        project=_PROJECT,
-                        **{
-                            "vcpus": 2,
-                            "memory_gb": 2,
-                            "disk_gb": LOCAL_ALLOCATION_DISK_GB,
-                            "resource": {"mode": "kind"},
-                        },
-                    ),
-                    "allocate",
-                )
-                allocation_id = env.object_id
-            async with phase("provision"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "systems.provision",
-                        allocation_id=allocation_id,
-                        profile=_provision_profile(),
-                    ),
-                    "provision",
-                )
-                system_id = data_str(env, "system_id")
-                await await_system_state(op, "provision", system_id, "ready")
-            async with phase("create-run"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "investigations.open",
-                        **{"project": _PROJECT, "title": "sweep"},
-                    ),
-                    "create-run",
-                )
-                investigation_id = env.object_id
-                env = ok(
-                    await scalar(
-                        op,
-                        "runs.create",
-                        investigation_id=investigation_id,
-                        system_id=system_id,
-                        build_profile=_build_profile(),
-                    ),
-                    "create-run",
-                )
-                run_id = env.object_id
-            async with phase("upload-build"):
-                await build_and_upload_kernel(op, run_id=run_id)
-
-            for variant in ("dhash_entries=1", "dhash_entries=2"):
-                async with phase(f"install:{variant}"):
+            try:
+                async with phase("allocate"):
                     env = ok(
-                        await scalar(op, "runs.install", run_id=run_id, cmdline=variant), variant
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            **{
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "allocate",
                     )
-                    await drain_job(op, "install", env.object_id)
-                async with phase(f"boot:{variant}"):
-                    env = ok(await scalar(op, "runs.boot", run_id=run_id), variant)
-                    await drain_job(op, "boot", env.object_id)
-                got = ok(await scalar(op, "runs.get", run_id=run_id), "read-back")
-                assert data_str(got, "installed_cmdline") == variant, (
-                    f"runs.get installed_cmdline must reflect the swept variant {variant}"
-                )
-                # The build step stays succeeded across the sweep (no re-upload).
-                steps = data_mapping(got, "steps")
-                assert steps["build"] == "succeeded"
+                    allocation_id = env.object_id
+                async with phase("provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_provision_profile(),
+                        ),
+                        "provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, "provision", system_id, "ready")
+                async with phase("create-run"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            **{"project": _PROJECT, "title": "sweep"},
+                        ),
+                        "create-run",
+                    )
+                    investigation_id = env.object_id
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            investigation_id=investigation_id,
+                            system_id=system_id,
+                            build_profile=_build_profile(),
+                        ),
+                        "create-run",
+                    )
+                    run_id = env.object_id
+                async with phase("upload-build"):
+                    await build_and_upload_kernel(op, run_id=run_id)
 
-            async with phase("release"):
-                ok(await scalar(op, "allocations.release", allocation_id=allocation_id), "release")
+                for variant in ("dhash_entries=1", "dhash_entries=2"):
+                    async with phase(f"install:{variant}"):
+                        env = ok(
+                            await scalar(op, "runs.install", run_id=run_id, cmdline=variant),
+                            variant,
+                        )
+                        await drain_job(op, "install", env.object_id)
+                    async with phase(f"boot:{variant}"):
+                        env = ok(await scalar(op, "runs.boot", run_id=run_id), variant)
+                        await drain_job(op, "boot", env.object_id)
+                    got = ok(await scalar(op, "runs.get", run_id=run_id), "read-back")
+                    assert data_str(got, "installed_cmdline") == variant, (
+                        f"runs.get installed_cmdline must reflect the swept variant {variant}"
+                    )
+                    # The build step stays succeeded across the sweep (no re-upload).
+                    steps = data_mapping(got, "steps")
+                    assert steps["build"] == "succeeded"
+
+                async with phase("release"):
+                    ok(
+                        await scalar(op, "allocations.release", allocation_id=allocation_id),
+                        "release",
+                    )
+                    released = True
+            finally:
+                # Failure-path net (#2520) — the "release" phase is the success-path assertion.
+                if allocation_id and not released:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
 
     asyncio.run(_run())
 
@@ -602,108 +624,117 @@ def test_spine_live_script_over_the_wire() -> None:
     async def _run() -> None:
         op = LiveStackClient.over_http(base_url, operator_token)
         allocation_id = session_id = ""
+        released = False
         async with op:
             await seed_metering(db_url, _PROJECT)
-            async with phase("allocate"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "allocations.request",
-                        project=_PROJECT,
-                        **{
-                            "vcpus": 2,
-                            "memory_gb": 2,
-                            "disk_gb": LOCAL_ALLOCATION_DISK_GB,
-                            "resource": {"mode": "kind"},
-                        },
-                    ),
-                    "allocate",
-                )
-                allocation_id = env.object_id
-            async with phase("provision"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "systems.provision",
-                        allocation_id=allocation_id,
-                        profile=_live_script_provision_profile(),
-                    ),
-                    "provision",
-                )
-                system_id = data_str(env, "system_id")
-                await await_system_state(op, "provision", system_id, "ready")
-            async with phase("open-investigation"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "investigations.open",
-                        **{"project": _PROJECT, "title": "live-script"},
-                    ),
-                    "open-investigation",
-                )
-                investigation_id = env.object_id
-            async with phase("create-run"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "runs.create",
-                        investigation_id=investigation_id,
-                        system_id=system_id,
-                        build_profile=_build_profile(),
-                    ),
-                    "create-run",
-                )
-                run_id = env.object_id
-            async with phase("upload-build"):
-                await build_and_upload_kernel(op, run_id=run_id)
-            for step in ("install", "boot"):
-                async with phase(step):
-                    env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
-                    await drain_job(op, step, env.object_id)
-            async with phase("attach-drgn-live"):
-                env = ok(
-                    await scalar(op, "debug.start_session", run_id=run_id, transport="drgn-live"),
-                    "attach-drgn-live",
-                )
-                session_id = env.object_id
-            async with phase("introspect-script"):
-                env = ok(
-                    await scalar(
+            try:
+                async with phase("allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            **{
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_live_script_provision_profile(),
+                        ),
+                        "provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, "provision", system_id, "ready")
+                async with phase("open-investigation"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            **{"project": _PROJECT, "title": "live-script"},
+                        ),
+                        "open-investigation",
+                    )
+                    investigation_id = env.object_id
+                async with phase("create-run"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            investigation_id=investigation_id,
+                            system_id=system_id,
+                            build_profile=_build_profile(),
+                        ),
+                        "create-run",
+                    )
+                    run_id = env.object_id
+                async with phase("upload-build"):
+                    await build_and_upload_kernel(op, run_id=run_id)
+                for step in ("install", "boot"):
+                    async with phase(step):
+                        env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
+                        await drain_job(op, step, env.object_id)
+                async with phase("attach-drgn-live"):
+                    env = ok(
+                        await scalar(
+                            op, "debug.start_session", run_id=run_id, transport="drgn-live"
+                        ),
+                        "attach-drgn-live",
+                    )
+                    session_id = env.object_id
+                async with phase("introspect-script"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "introspect.script",
+                            session_id=session_id,
+                            script=_PROOF_SCRIPT,
+                            timeout_sec=30.0,
+                        ),
+                        "introspect-script",
+                    )
+                    output = data_str(env, "output")
+                    assert "DRGN_LIVE_PROOF" in output, f"proof marker missing: {output!r}"
+                    assert "ntasks=" in output and "ntasks=0" not in output, (
+                        f"no live task walk: {output!r}"
+                    )
+                    assert env.data["truncated"] is False, "unexpected truncation under cap"
+                async with phase("oversize-script-rejected"):
+                    denied = await scalar(
                         op,
                         "introspect.script",
                         session_id=session_id,
-                        script=_PROOF_SCRIPT,
+                        script=_OVERSIZE_SCRIPT,
                         timeout_sec=30.0,
-                    ),
-                    "introspect-script",
-                )
-                output = data_str(env, "output")
-                assert "DRGN_LIVE_PROOF" in output, f"proof marker missing: {output!r}"
-                assert "ntasks=" in output and "ntasks=0" not in output, (
-                    f"no live task walk: {output!r}"
-                )
-                assert env.data["truncated"] is False, "unexpected truncation under cap"
-            async with phase("oversize-script-rejected"):
-                denied = await scalar(
-                    op,
-                    "introspect.script",
-                    session_id=session_id,
-                    script=_OVERSIZE_SCRIPT,
-                    timeout_sec=30.0,
-                )
-                if denied.status != "error" or denied.error_category != "configuration_error":
-                    raise SpinePhaseError(
-                        "oversize-script-rejected",
-                        "over-cap script not rejected",
-                        error_category=denied.error_category,
                     )
-            async with phase("end-session"):
-                ok(await scalar(op, "debug.end_session", session_id=session_id), "end-session")
-            async with phase("release"):
-                ok(
-                    await scalar(op, "allocations.release", allocation_id=allocation_id),
-                    "release",
-                )
+                    if denied.status != "error" or denied.error_category != "configuration_error":
+                        raise SpinePhaseError(
+                            "oversize-script-rejected",
+                            "over-cap script not rejected",
+                            error_category=denied.error_category,
+                        )
+                async with phase("end-session"):
+                    ok(await scalar(op, "debug.end_session", session_id=session_id), "end-session")
+                async with phase("release"):
+                    ok(
+                        await scalar(op, "allocations.release", allocation_id=allocation_id),
+                        "release",
+                    )
+                    released = True
+            finally:
+                # Failure-path net (#2520) — the "release" phase is the success-path assertion.
+                if allocation_id and not released:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
 
     asyncio.run(_run())
 

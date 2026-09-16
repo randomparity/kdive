@@ -30,7 +30,9 @@ tier is not a single harness.
 `just test` (the default PR suite) selects `-m "not live_vm and not
 live_stack"`, so none of the tiers below run in the ordinary gate. Each tier
 *gate* **skips cleanly** when its environment is absent — but a tier whose env is
-set *wrong* fails loud rather than skipping (see [Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
+set *wrong* fails loud rather than skipping, and in the native `live_vm` tier
+`KDIVE_GUEST_IMAGE` fails loud even when unset (see
+[Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
 Above the gates, `just test-live-tcg` makes the recipe itself red when no proof
 passed, so an all-skip tcg run cannot read as green (#2517).
 
@@ -62,7 +64,7 @@ gates distinguish them from ordinary throwaway tests; stepping also consumes
 | --- | --- | --- | --- |
 | Throwaway (`live_vm_throwaway`) | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
 | gdbstub debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` + matching `KDIVE_LIVE_VM_VMLINUX`; the stepping proof also needs `KDIVE_LIVE_VM_ROOTFS` | `qemu:///session` | `boot_gdbstub_domain` (`kdive.testing.live_vm`); the caller renders the domain XML (ADR-0392) |
-| Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
+| Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` + `KDIVE_GUEST_IMAGE` (the rootfs `mint-system.sh` stages, #2518) | `qemu:///system` | an externally provisioned System through the live stack |
 | Remote (`live_vm_remote`) | `KDIVE_LIVE_VM_REMOTE_URI`, `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE`, `KDIVE_LIVE_VM_REMOTE_SSH`, `KDIVE_LIVE_VM_REMOTE_KERNEL`, `KDIVE_LIVE_VM_REMOTE_INITRD`, `KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE`, `KDIVE_LIVE_VM_REMOTE_GDB_ADDR`, `KDIVE_S3_ENDPOINT_URL`, `KDIVE_S3_BUCKET`, and `KDIVE_LIVE_VM_REMOTE_RECONCILER` | `qemu+tls://` (operator-named; no default host) | direct provider ops against a genuinely remote libvirt host (ADR-0425) |
 
 The env reads live in `tests/live_vm/__init__.py` (kept out of `src/` so the
@@ -72,6 +74,13 @@ exposes the `require_live_vm_throwaway` / `require_live_vm_bzimage` /
 `require_live_vm_remote` gates — the `live_vm`
 analogue of the `require_issuer` / `require_stack` / `require_guest_arch` gates
 the stack tiers use.
+
+`KDIVE_GUEST_IMAGE` is the exception in that table: it is read by the proof
+itself and asserted by `preflight-env.sh`'s `provisioned` family, not by
+`require_live_vm_provisioned`. Its consumer carries the bare `live_vm` marker,
+so `pytest -m live_vm_provisioned` deselects it — run the whole tier, the way
+`just test-live` and the native CI job do, or that proof silently drops out of
+the selection before its gate can fire (#2518).
 
 The **remote** family is the fourth (#1424, epic #1423): the only `live_vm`
 family that drives a genuinely remote `qemu+tls://` host the worker shares no
@@ -136,6 +145,21 @@ runner cannot masquerade as "no environment":
 - **env set but wrong** (rootfs file missing, staging dir not writable, partial
   `KDIVE_S3_*`) → the gate **fails loud**;
 - **env present and valid** → the gate returns the resolved contract.
+
+One prerequisite sits outside that tri-state, **in the native `live_vm` tier
+only**: there `KDIVE_GUEST_IMAGE` fails loud when unset, not just when wrong
+(#2518). `scripts/live-stack/env.sh` exports no default for it, so "unset" is the
+*normal* state on a correctly provisioned host, and that tier has no `<N> passed`
+summary gate of the kind the hosted tcg spine carries
+(`.github/workflows/live.yml`). A skip there was therefore indistinguishable from
+a proof that ran — the silent green #2497 exists to close. The gate is
+`_preflight` in `tests/integration/test_console_parts_live.py`, and it reverses
+ADR-0035 §4's "a missing fixture is a clear, actionable skip" for this one
+prerequisite. Set it from `python -m kdive build-fs`'s printed `export` line, or
+source `examples/local-libvirt/env.sh`.
+
+The `live_stack` tier still **skips** on the same variable
+(`tests/integration/test_live_stack.py`); #2497 tracks the tier-by-tier state.
 
 ## Running each tier
 
