@@ -22,7 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair
-from kdive.mcp.exposure import CORE_TOOLS, visible_tool_names
+from kdive.mcp.exposure import CORE_TOOLS, gateway_enabled, visible_tool_names
 from kdive.security.authz.context import context_from_claims
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.smoke.agent_smoke.surface import AppSurface, agent_claims
@@ -50,6 +50,10 @@ def _expected_agent_catalog() -> set[str]:
     return visible_tool_names(context_from_claims(agent_claims()), CORE_TOOLS)
 
 
+@pytest.mark.skipif(
+    not gateway_enabled(),
+    reason="KDIVE_MCP_TOOL_GATEWAY is off; the server serves the flat ADR-0148 RBAC catalog",
+)
 def test_walked_surface_is_the_clipped_agent_catalog() -> None:
     """The tier walks the catalog an agent receives, not the unfiltered registry (#2523).
 
@@ -57,6 +61,10 @@ def test_walked_surface_is_the_clipped_agent_catalog() -> None:
     regression to the pre-``62fb4fa4d`` flat surface — the defect #2521's survey recorded as
     entry A1 — is invisible: the tier would keep reporting green while exercising a surface no
     agent is served.
+
+    Skipped rather than adapted when the gateway is switched off, because then the flat catalog
+    is what the server is configured to serve: asserting the clip there would report a
+    supported configuration as this defect, and the 100-line set diff reads identically.
     """
     names = asyncio.run(AppSurface(_built_app()).tool_names())
 

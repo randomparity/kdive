@@ -27,18 +27,23 @@ from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_cont
 from mcp.server.auth.provider import AccessToken
 
 from kdive.mcp.dev_harness import AUDIENCE, _build_claims
+from kdive.mcp.tools.gateway import _NAME_LEN_MAX
 
 #: The project the walked agent holds grants on.
 WALK_PROJECT = "proj-a"
+
+#: The walked agent's token subject.
+WALK_SUBJECT = "agent-smoke-walker"
 
 #: The walk's grants. ``admin`` because the served index advertises admin-scoped tools
 #: (``systems.teardown``) in its wind-down stage: a lesser role would hide them behind RBAC and
 #: the walk could not tell "the surface does not serve this" — the stall class this tier exists
 #: to detect — from "this caller may not see it". Execution-time RBAC is tested elsewhere.
+#:
+#: Project grants only: no platform role is held, so platform-scoped tools are deliberately
+#: outside the walked surface and a golden-path stage that came to name one would stall. That
+#: is a real signal for this tier — today's index names none.
 WALK_ROLE = "admin"
-
-#: ``tools.search``'s own per-call ceiling (``le=50`` on its ``limit`` field).
-_SEARCH_LIMIT = 50
 
 
 def agent_claims() -> dict[str, Any]:
@@ -49,7 +54,7 @@ def agent_claims() -> dict[str, Any]:
     clips to ``CORE_TOOLS``.
     """
     return _build_claims(
-        subject="agent-smoke-walker",
+        subject=WALK_SUBJECT,
         audience=AUDIENCE,
         projects=[WALK_PROJECT],
         roles={WALK_PROJECT: WALK_ROLE},
@@ -60,10 +65,15 @@ def agent_claims() -> dict[str, Any]:
 
 @contextmanager
 def _as_agent() -> Iterator[None]:
-    """Run the block with the walk's agent token in the request context."""
+    """Run the block with the walk's agent token in the request context.
+
+    ``client_id`` here is the SDK's own field and nothing downstream reads it: profile
+    resolution takes the caller's ``azp``/``client_id`` from the *claims*
+    (``security/authz/context.py``), which :func:`agent_claims` deliberately omits.
+    """
     token = AccessToken(
         token="agent-smoke",  # pragma: allowlist secret
-        client_id="agent-smoke-client",
+        client_id=WALK_SUBJECT,
         scopes=[],
         claims=agent_claims(),
     )
@@ -79,29 +89,37 @@ class AppSurface:
 
     def __init__(self, app: FastMCP) -> None:
         self._app = app
+        self._advertised: frozenset[str] | None = None
 
     async def tool_names(self) -> frozenset[str]:
-        with _as_agent():
-            return frozenset(tool.name for tool in await self._app.list_tools())
+        """The advertised catalog, fetched once: a walk asks for it on nearly every token.
+
+        Each ``list_tools`` runs the whole middleware chain — RBAC classification, profile
+        resolution, provider-schema projection over the registry — and the served catalog does
+        not change under a walk, so re-deriving it per token buys nothing.
+        """
+        if self._advertised is None:
+            with _as_agent():
+                self._advertised = frozenset(t.name for t in await self._app.list_tools())
+        return self._advertised
 
     async def reachable(self, name: str) -> bool:
         """Whether an agent can reach ``name`` — advertised, or found through the gateway.
 
         The clip narrows what is *advertised*, not what is *callable*: everything else stays
-        reachable via ``tools.search`` + ``tools.invoke`` (ADR-0268). Discovery requires the
-        search to return ``name`` itself, never merely a related hit, so a backticked token
-        that is not a tool name (a ref, a response field, a param) still resolves to False
-        even when the fuzzy search ranks neighbours for it.
+        reachable via ``tools.search`` + ``tools.invoke`` (ADR-0268). Discovery uses the
+        search's exact ``names`` mode, which is documented for a name the caller was handed by
+        a guide — precisely this caller. It skips ranking, applies the same RBAC filter, and
+        reports a name no visible tool carries in ``data.unknown_names`` rather than by
+        raising, so a backticked token that is not a tool name (a ref, a response field, a
+        param) resolves to False without depending on how a fuzzy query happens to rank.
         """
         if name in await self.tool_names():
             return True
+        if not 0 < len(name) <= _NAME_LEN_MAX:
+            return False  # outside the field's own bounds, so no tool carries it
         with _as_agent():
-            try:
-                result = await self._app.call_tool(
-                    "tools.search", {"query": name, "limit": _SEARCH_LIMIT}
-                )
-            except Exception:  # a raised search is a dead end the walk must record
-                return False
+            result = await self._app.call_tool("tools.search", {"names": [name]})
         data = (getattr(result, "structured_content", None) or {}).get("data") or {}
         return any(match.get("name") == name for match in data.get("matches") or ())
 

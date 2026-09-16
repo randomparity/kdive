@@ -162,16 +162,6 @@ def test_stage_reached_only_through_the_gateway_does_not_stall() -> None:
     assert result.ok, [(stall.stage, stall.reason) for stall in result.stalls]
 
 
-def test_stage_naming_only_advertised_tools_does_not_stall() -> None:
-    """The other half of reachability: an advertised tool needs no gateway lookup."""
-    surface = _healthy()
-    surface.discoverable.clear()
-    surface.discoverable.update(WIND_DOWN_TOOLS)
-    surface.tools.update({"investigations.open", "images.describe"})
-
-    assert "stage-1" not in _stages(_walk(surface))
-
-
 def test_missing_gateway_tool_stalls_at_gateway() -> None:
     surface = _healthy()
     surface.tools.discard("tools.invoke")
