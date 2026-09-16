@@ -179,15 +179,57 @@ def test_redhat_unavailable_tools_use_manual_hints_and_name_crb(
 
     assert result.returncode == 1, result.stderr
     dnf_lines = [line for line in result.stderr.splitlines() if "dnf install" in line]
-    unavailable_packages = ("ShellCheck", "shfmt", "docker")
+    unavailable_packages = ("ShellCheck", "shfmt")
     assert all(package not in line for line in dnf_lines for package in unavailable_packages)
     assert "libvirt-devel" in dnf_lines[0]
     assert "shellcheck: https://github.com/koalaman/shellcheck#installing" in result.stderr
     assert "shfmt: go install mvdan.cc/sh/v3/cmd/shfmt@latest" in result.stderr
-    assert "docker: install Docker from https://docs.docker.com/engine/install/" in result.stderr
     assert (
         "libvirt-devel: sudo dnf config-manager --set-enabled crb (Enterprise Linux only)"
         in result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("distro_id", "manager", "docker_package"),
+    [
+        ("fedora", "dnf install", "moby-engine"),
+        ("debian", "apt install", "docker.io"),
+        ("opensuse", "zypper install", "docker"),
+        ("arch", "pacman -S", "docker"),
+    ],
+)
+def test_docker_hint_names_a_package_the_family_ships(
+    distro_id: str, manager: str, docker_package: str, tmp_path: Path
+) -> None:
+    """The docker hint must name an installable package, not the bare `docker` everywhere (#2505).
+
+    Fedora ships `moby-engine`, not `docker`, so the old mapping printed a package the
+    distribution does not provide.
+    """
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    result = _run(distro_id, str(empty), tmp_path)
+
+    assert result.returncode == 1, result.stderr
+    install_lines = [line for line in result.stderr.splitlines() if manager in line]
+    assert any(docker_package in line for line in install_lines), result.stderr
+    assert "docker: install Docker from" not in result.stderr
+
+
+def test_enterprise_linux_docker_hint_stays_manual(tmp_path: Path) -> None:
+    """EL packages no Docker engine in baseos, appstream, extras or CRB, so naming one would be
+    the same defect in a new place; it keeps the two remedies that exist there instead."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    result = _run("rhel", str(empty), tmp_path)
+
+    assert result.returncode == 1, result.stderr
+    dnf_lines = [line for line in result.stderr.splitlines() if "dnf install" in line]
+    assert all("docker" not in line for line in dnf_lines), result.stderr
+    assert (
+        "docker: install Docker from https://docs.docker.com/engine/install/ "
+        "or use podman with podman-docker" in result.stderr
     )
 
 

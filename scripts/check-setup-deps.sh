@@ -149,7 +149,12 @@ package_for() {
   python3-guestfs:fedora | python3-guestfs:el | python3-guestfs:opensuse) printf "python3-libguestfs" ;;
   python3-guestfs:arch) printf "libguestfs" ;;
   python3-guestfs:*) printf "python3-guestfs" ;;
+  # The Docker engine package name diverges by family: Debian/Ubuntu ship `docker.io`, Fedora
+  # ships `moby-engine` (which requires docker-cli, the owner of /usr/bin/docker), and openSUSE,
+  # Arch and the generic fallback ship `docker`. Enterprise Linux has no row because it packages
+  # no engine at all; the probe routes that family to a manual hint instead.
   docker:debian) printf "docker.io" ;;
+  docker:fedora) printf "moby-engine" ;;
   docker:*) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
   qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
@@ -474,8 +479,16 @@ probe_all() {
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
-  require_tool recommended docker \
-    "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
+  # Docker is a packaged dependency everywhere except Enterprise Linux, so it is probed through
+  # package_for rather than as a manual hint — a hint that names no package cannot be acted on.
+  # EL ships no engine in baseos, appstream, extras or CRB (docs/operating/providers/
+  # local-libvirt.md, "Container engine"), so it keeps the two remedies that do exist there.
+  if [[ "${distro}" == el ]]; then
+    require_tool recommended docker \
+      "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
+  else
+    require_command recommended docker "${distro}"
+  fi
 
   # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
   future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)
