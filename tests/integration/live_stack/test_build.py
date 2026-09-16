@@ -26,25 +26,9 @@ _SENT_ARCHES = ("x86_64", "ppc64le")
 @pytest.mark.parametrize("arch", _SENT_ARCHES)
 def test_the_shared_build_profile_parses_through_the_real_validator(arch: str) -> None:
     """The document the suites send is one ``BuildProfile.parse`` accepts, for each sent arch."""
-    profile = BuildProfile.parse(build_profile(arch))
-
-    assert profile.schema_version == 1
-    assert profile.arch == arch
-
-
-def test_the_shared_build_profile_carries_only_known_required_fields() -> None:
-    """Every key is a ``BuildProfile`` field, and every field the model requires is present.
-
-    Deliberately not key-set equality. A field arriving with a default leaves the existing
-    document valid, so whether the suites should start sending it is a judgment call, not a
-    regression — equality would red on it and direct the wrong fix (ADR-0665).
-    """
-    fields = BuildProfile.model_fields
-    required = {name for name, field in fields.items() if field.is_required()}
-    keys = set(build_profile())
-
-    assert keys <= set(fields), f"not BuildProfile fields: {sorted(keys - set(fields))}"
-    assert required <= keys, f"required fields missing: {sorted(required - keys)}"
+    # No `schema_version` assertion: it is `Literal[1]`, so parse raises before any assert
+    # could observe another value. The factory's literal is pinned below instead.
+    assert BuildProfile.parse(build_profile(arch)).arch == arch
 
 
 def test_the_shared_build_profile_is_the_document_the_suites_sent() -> None:

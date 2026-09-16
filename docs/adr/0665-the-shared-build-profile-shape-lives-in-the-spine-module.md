@@ -43,6 +43,11 @@ maps a changed source file onto `tests/**/test_<stem>.py`, so only the stem `bui
 `src/kdive/profiles/build.py` change select this guard. A more descriptive
 `test_build_profile.py` would silently never run on the drift it exists to catch.
 
+Nothing mechanical stops the duplication re-growing. The guard pins the shared factory, not
+its call sites, so a future inline document at a new `runs.create` leaves all of it green while
+that site sends the old shape — which is how the two restatements above arrived. A source-scanning
+guard was weighed and rejected: its upkeep exceeds the risk it removes. Review is the control.
+
 `_provision_profile` stays duplicated across the suites. That is deliberate and out of scope
 here — those bodies genuinely differ per provider and per test intent. No tracker owns that
 dedup yet, and this record does not claim one does.

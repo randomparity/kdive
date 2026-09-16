@@ -47,10 +47,9 @@ discipline in `test_remote_live_stack.py` is untouched — only the `build_profi
 
 `focused-test` entries in that new module, green via `just test-changed`:
 
-- Success 2 — `test_the_shared_build_profile_parses_through_the_real_validator`, and
-  `test_the_shared_build_profile_carries_only_known_required_fields`: its keys are `BuildProfile`
-  field names covering every required one. Not key-set equality, which would red on a defaulted
-  field and direct the wrong fix.
+- Success 2 — `test_the_shared_build_profile_parses_through_the_real_validator`. `extra="forbid"`
+  and no aliases mean parse alone rejects an unknown key and a missing required field, so a
+  separate key-set test could not discriminate and is deliberately absent.
 - Success 3 — `test_the_shared_build_profile_is_the_document_the_suites_sent` pins both literals
   those sites sent — the independent oracle deriving it from `BuildProfile` would destroy. No
   test parametrises over `SUPPORTED_ARCHES`: `BuildProfile` validates `arch` against that same
