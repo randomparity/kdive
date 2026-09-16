@@ -45,7 +45,7 @@ Neither touches a `fix-needed` entry, so neither blocks #2523.
 Surveyed set = the files the two markers select, **plus** every test and support module under
 the paths #2521 names. Neither source alone reaches both: the markers do not select the
 `tests/integration/live_stack/` support package or `tests/smoke/agent_smoke/`'s walker modules,
-and #2521's file list does not name five marker-selected tier files.
+and #2521's file list does not name six of the nine marker-selected tier files.
 
 `marker` is the tier the file actually collects under; `default` means it is **not** tiered out
 and runs inside `just test` and the PR gate (`justfile:100`).
@@ -226,6 +226,13 @@ Owner for every entry here: **#2523**.
   catalog contains the tools the agent-index names stage by stage. Measured against a
   `CORE_TOOLS`-clipped catalog, **5 of the agent index's 10 stages** name no live tool and stall
   — stages 5, 6, 8, 9 and 10. Clipped, the walk records 6 stalls in total (those 5 plus A2's).
+- **Fix locus — size this before starting.** Two loci are viable and #2523's file scope reaches
+  only one. (a) In-tier: re-aim `_stage_tools` at the gateway contract, so a stage is satisfied
+  by reaching its tools through `tools.invoke` rather than by their presence in `tools/list`.
+  (b) Out-of-tier: change the served golden path itself — the index is
+  `docs/guide/agent-index.md` (`src/kdive/mcp/resources/registrar.py:166`), a doc resource
+  outside #2523's declared `tests/smoke/agent_smoke/*.py` scope. This survey does not choose
+  between them; (b) would need #2523's scope widened or a separate issue.
 - **Owner:** #2523.
 
 ### A4 — `fix-coupled` → A1
