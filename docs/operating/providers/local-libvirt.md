@@ -64,10 +64,18 @@ These are the points where the two families genuinely diverge, not just in packa
   package at all ([ADR-0641](../../adr/0641-redhat-qemu-emulator-package-by-nativeness.md)).
 - **CodeReady Builder.** Enterprise Linux keeps `libvirt-devel` in CRB, disabled by default;
   `install-host.sh` enables it. Fedora has no CRB and needs nothing here.
-- **Container engine.** Debian/Ubuntu package `docker.io` and Fedora packages `moby-engine`, both
-  with a compose v2 binary. Enterprise Linux packages neither in baseos, appstream, extras, or CRB,
-  so `install-host.sh` stops before changing the host and names the two real remedies: Docker's own
-  repository, or `podman` with `podman-docker` and the podman socket API.
+- **Container engine.** The engine and the compose v2 plugin are separate packages on every
+  family: Debian/Ubuntu pair `docker.io` with `docker-compose-v2`, Fedora pairs `moby-engine`
+  with `docker-compose`, and openSUSE Tumbleweed pairs `docker` with `docker-compose`. In each
+  case the compose package is what provides the `docker compose` subcommand; the engine alone
+  does not. Enterprise Linux packages no engine in baseos, appstream, extras, or CRB, and SLES
+  ships Docker only in the Containers Module, so neither family gets a declared runtime and the
+  two real remedies there are Docker's own repository, or `podman` with `podman-docker` and the
+  podman socket API. On Fedora and openSUSE the packages alone are not a working runtime:
+  the RPM leaves `docker.service` disabled and adds no account to the `docker` group, so
+  `sudo systemctl enable --now docker` and adding the operator account to `docker` are manual
+  steps `local_worker_host` does not take. `stack-services.sh` refuses to run as root, so
+  without both it fails on the socket.
 - **Host kernel permissions.** Debian/Ubuntu ship `/boot/vmlinuz-*` as `root:root 0600`, which the
   libguestfs appliance cannot read as a non-root user, so `just prepare-local-libvirt-host`
   relabels them `root:kvm 0640` and asserts that every fixed worker account is in `kvm`,

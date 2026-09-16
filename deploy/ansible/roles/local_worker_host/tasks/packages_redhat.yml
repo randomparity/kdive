@@ -4,3 +4,42 @@
     name: "{{ local_worker_host_packages_redhat }}"
     state: present
   tags: [authority_prerequisites]
+
+- name: Look for an existing container engine before installing one (RedHat)
+  # Must run before anything in this play can create /usr/bin/docker. Installing the compose
+  # plugin first would resolve its `(docker-cli or podman-docker)` dependency by pulling
+  # docker-cli, whose /usr/bin/docker would then suppress the engine install below on every
+  # subsequent run — leaving a host with a docker CLI, a compose plugin and no daemon.
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: local_worker_host_docker_provider_redhat
+  tags: [authority_prerequisites]
+
+- name: Install the Fedora container engine
+  # Fedora-only: Enterprise Linux ships no Docker engine and no compose provider in baseos,
+  # appstream, extras or CRB, so an ungated install would fail dnf on RHEL, Rocky and AlmaLinux,
+  # which preflight.yml also admits. EL operators install a runtime themselves
+  # (docs/operating/providers/local-libvirt.md, "Container engine").
+  #
+  # Skipped when the host already owns /usr/bin/docker. podman-docker declares
+  # `Conflicts: moby-engine` and docker-cli declares `Conflicts: podman-docker`, so installing the
+  # engine over the podman route this project's own setup hint recommends would abort the dnf
+  # transaction rather than converge. A host with an engine already keeps the one it chose.
+  ansible.builtin.dnf:
+    name: "{{ local_worker_host_engine_packages_fedora }}"
+    state: present
+  when:
+    - ansible_facts['distribution'] == 'Fedora'
+    - not local_worker_host_docker_provider_redhat.stat.exists
+  tags: [authority_prerequisites]
+
+- name: Install the Fedora compose plugin for the on-box stack and testcontainers
+  # Unconditional within Fedora, and last: docker-compose requires `(docker-cli or
+  # podman-docker)`, so it resolves over whichever provider the host ended up with and must not
+  # inherit the engine's conflict gate — it is the only source of the `docker compose` subcommand
+  # stack-services.sh invokes.
+  ansible.builtin.dnf:
+    name: "{{ local_worker_host_compose_packages_fedora }}"
+    state: present
+  when: ansible_facts['distribution'] == 'Fedora'
+  tags: [authority_prerequisites]
