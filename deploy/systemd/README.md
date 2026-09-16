@@ -85,8 +85,11 @@ Because the reap unlinks overlays as the operator on that path, the operator mus
 that; a directory that has drifted away from it reports one refused removal per overlay.
 On a host with no lifecycle contract the endpoint resolves to root-owned `qemu:///system` and the
 same reap keeps `sudo`, which is why the privilege is derived from the endpoint rather than fixed.
-This governs the reap specifically; installation still uses `sudo` where it must, and
-`scripts/live-stack/README.md` records that split for bring-up.
+This governs the reap specifically, and creation is a separate question from access: the provider
+data directories are *created* by `sudo install -d -o <operator> -g kdive-live-libvirt -m 2770`,
+so root makes them and hands ownership over. `sudo` is the creation path even though every
+subsequent access is the operator's. `scripts/live-stack/README.md` records the same split for
+bring-up.
 
 ## Lifecycle retry actions
 

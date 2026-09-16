@@ -108,7 +108,7 @@ if [[ "$wipe" == "1" ]]; then
   # installer writes that socket `operator_uid:group_gid:770` and /var/lib/kdive/rootfs
   # `operator:kdive-live-libvirt` 2770, and root owns neither -- while against a plain
   # `qemu:///session` it reaches root's own per-uid daemon, which is a different host's worth of
-  # domains. So: `/session` in the path is reaped as the invoking account, anything else keeps sudo.
+  # domains.
   #
   # The query is stripped because the published URIs carry the socket path there, not the scope.
   # Classification is textual and an unclassifiable value falls to the escalating branch, so the
