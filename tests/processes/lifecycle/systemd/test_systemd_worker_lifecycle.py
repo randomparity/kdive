@@ -2928,3 +2928,36 @@ def test_recover_refuses_the_sweep_while_unmanaged_workers_run() -> None:
     assert authority.probed_units == []
     assert stores[0].discards == 0
     assert runtime.resets == []
+
+
+def test_recover_refuses_a_stale_row_found_after_the_evidenced_path_succeeded() -> None:
+    """The merged path's refusal branch: the retained generation retires, a leftover row does not.
+
+    This is the branch where `_retire_inspected_slot` has already retired the retained generation
+    through the evidenced path and the follow-up sweep then refuses. It reports only the refusal,
+    which is the honest answer: the slot is not clean, and the operator has to look.
+    """
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    stores[0].state_document = "valid"
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    stale = _row(1, generation="c" * 32, host="some-other-host")
+    authority.rows[started.unit] = [
+        _row(1, generation=started.generation, invocation_id=cast(str, started.invocation_id)),
+        stale,
+    ]
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "conflict"
+    assert [(result.slot, result.code) for result in response.slots] == [
+        (1, "recovery_refused_incoherent_row")
+    ]
+    # The retained generation was retired before the leftover was found; that work stands.
+    assert (started.incarnation, "killed") in authority.terminations
+    # The leftover row is untouched, and the unit identity was not reset.
+    assert authority.released == []
+    assert [row.incarnation for row in authority.rows[started.unit]] == [stale.incarnation]
+    assert runtime.resets == []

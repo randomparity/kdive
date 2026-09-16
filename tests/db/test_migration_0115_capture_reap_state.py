@@ -16,7 +16,7 @@ _RECONCILER_CUTOFF_COLUMNS = ("singleton", "complete", "cutoff_at")
 def test_latest_migrations_are_discovered_in_order() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(item.version, item.filename) for item in migrations[-36:]] == [
+    assert [(item.version, item.filename) for item in migrations[-37:]] == [
         ("0116", "0116_capture_claimable_queue_depth.sql"),
         ("0117", "0117_worker_bootstrap_key_insert.sql"),
         ("0118", "0118_worker_audit_log_insert.sql"),
@@ -53,6 +53,7 @@ def test_latest_migrations_are_discovered_in_order() -> None:
         ("0152", "0152_worker_system_mutation_discharge.sql"),
         ("0153", "0153_system_tearing_down_state.sql"),
         ("0154", "0154_worker_image_catalog_insert.sql"),
+        ("0155", "0155_recoverable_worker_incarnation_read.sql"),
     ]
 
 

@@ -429,7 +429,14 @@ See
 [ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md) and
 [ADR-0667](../../adr/0667-recovery-names-the-fence-row-by-the-slot-derived-incarnation.md).
 
-Do not hand-edit the slot files or the `worker_incarnations` row in either case.
+**When `recover` refuses the whole sweep.** If any `kdive worker` process is running outside the
+eight fixed unit cgroups, `recover` refuses before touching any slot and returns `code=conflict`
+with `retry_action=operator_recovery` and an **empty slot list** — no slot was examined, so none is
+reported. Cgroup membership cannot see such a process, and recovery releases fences, so it takes
+the same guard `start` takes rather than the weaker check. The lifecycle journal carries a warning
+naming the count. Stop those processes, then re-run `recover`.
+
+Do not hand-edit the slot files or the `worker_incarnations` row in any of these cases.
 
 ### The app tier does not hot-reload — re-run `stack-services.sh` after editing source
 
