@@ -55,6 +55,7 @@ from tests.integration.live_stack.spine import (
     phase,
     scalar,
     seed_metering,
+    worker_libvirt_uri,
 )
 from tests.mcp.json_data import data_str
 
@@ -393,7 +394,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     private_key = await load_system_bootstrap_private_key(
                         key_conn, UUID(system_id), secret_registry=SecretRegistry()
                     )
-                libvirt_conn = libvirt.open("qemu:///system")
+                libvirt_conn = libvirt.open(worker_libvirt_uri())
                 try:
                     domain = libvirt_conn.lookupByName(domain_name_for(UUID(system_id)))
                     with materialized_private_key(private_key) as key_path:

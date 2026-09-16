@@ -18,11 +18,12 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import worker as job_worker
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.integration.live_stack.spine import (
     SpinePhaseError,
     await_system_state,
     drain_job,
+    ok,
     phase,
 )
 
@@ -349,6 +350,71 @@ def test_phase_passes_through_spine_phase_error() -> None:
         assert excinfo.value.phase == "boot"
 
     asyncio.run(_run())
+
+
+def test_spine_phase_error_renders_detail_and_data() -> None:
+    """The rendered message and attributes carry the envelope's detail and data (#2500)."""
+    error = SpinePhaseError(
+        "allocate",
+        "error envelope",
+        error_category="allocation_denied",
+        detail="host capacity exhausted (cap 1, in use 1)",
+        data={"reason": "at_capacity", "cap": "1", "in_use": "1"},
+    )
+
+    assert error.detail == "host capacity exhausted (cap 1, in use 1)"
+    assert error.data == {"reason": "at_capacity", "cap": "1", "in_use": "1"}
+    message = str(error)
+    assert "host capacity exhausted (cap 1, in use 1)" in message
+    assert "at_capacity" in message
+    assert "cap=1" in message
+
+
+def test_spine_phase_error_stays_readable_without_detail_or_data() -> None:
+    """No detail/data on the envelope reproduces the original bare rendering (#2500)."""
+    error = SpinePhaseError("allocate", "error envelope", error_category="allocation_denied")
+
+    assert error.detail is None
+    assert error.data == {}
+    assert str(error) == "phase 'allocate' failed: error envelope (allocation_denied)"
+
+
+def test_spine_phase_error_caps_a_large_rendered_data_value() -> None:
+    """A nested/oversized ``data`` value renders truncated, not as an unbounded one-liner."""
+    unmet: list[JsonValue] = [
+        {
+            "gate": f"gate-{i}",
+            "current": i,
+            "required": i + 5,
+            "remedy": "accounting.set_quota",
+        }
+        for i in range(6)
+    ]
+    error = SpinePhaseError(
+        "allocate", "error envelope", error_category="allocation_denied", data={"unmet": unmet}
+    )
+
+    message = str(error)
+    assert message.endswith("…]")
+    assert len(message) < 300
+
+
+def test_ok_carries_envelope_detail_and_data_into_the_phase_error() -> None:
+    """``ok()`` surfaces the failing envelope's detail and data, not just status/category."""
+    envelope = ToolResponse(
+        object_id="alloc-1",
+        status="error",
+        error_category="allocation_denied",
+        detail="host capacity exhausted (cap 1, in use 1)",
+        data={"reason": "at_capacity", "cap": "1", "in_use": "1"},
+    )
+
+    with pytest.raises(SpinePhaseError) as excinfo:
+        ok(envelope, "allocate")
+
+    assert excinfo.value.error_category == "allocation_denied"
+    assert excinfo.value.detail == "host capacity exhausted (cap 1, in use 1)"
+    assert excinfo.value.data == {"reason": "at_capacity", "cap": "1", "in_use": "1"}
 
 
 def test_drain_job_waits_until_success(monkeypatch: pytest.MonkeyPatch) -> None:
