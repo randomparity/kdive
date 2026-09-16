@@ -51,6 +51,7 @@ from tests.integration.live_stack.spine import (
     SpinePhaseError,
     await_system_state,
     build_and_upload_kernel,
+    build_profile,
     drain_job,
     mint_role_token,
     ok,
@@ -132,16 +133,6 @@ def _provision_profile() -> dict[str, object]:
             }
         },
     }
-
-
-def _build_profile() -> dict[str, object]:
-    """The Run build profile for the x86_64 spine (upload-only lane, ADR-0048).
-
-    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` + the
-    target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
-    (see ``build_and_upload_kernel``), not a server ``kernel_source_ref``/``config`` build.
-    """
-    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _emit_proof_lines(domain: libvirt.virDomain, key_path: Path, proof_marker: str) -> None:
@@ -367,7 +358,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                         **{
                             "investigation_id": investigation_id,
                             "system_id": system_id,
-                            "build_profile": _build_profile(),
+                            "build_profile": build_profile(),
                         },
                     ),
                     "create-run",

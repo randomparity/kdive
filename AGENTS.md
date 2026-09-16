@@ -29,7 +29,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
 | `just test` | the suite, excluding `live_vm`, `live_stack`, and `agent_smoke` |
 | `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
-| `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
+| `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image); declares the `throwaway`, `provisioned` and `debug-stepping` env families up front, and fails loud naming the tier rather than exiting 0 when no proof actually ran |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, and fails loud naming the tier rather than exiting 0 when no proof actually ran |
 | `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, doc-link guards, all generated-artifact checks, then the suite |
 | `just stack-backends` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated |
@@ -372,7 +372,8 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   proofs, run over the `live_stack` vehicle, selected by `just test-live-tcg`); `live_stack`
   (full HTTP transport). `just test-live` is native-only (`-m "live_vm and not live_vm_tcg"`);
   the TCG tier's proofs skip on a host without the foreign qemu emulator (`require_guest_arch`),
-  and `just test-live-tcg` reports that as a failure rather than a pass (#2517).
+  and `just test-live-tcg` reports that as a failure rather than a pass (#2517). `just test-live`
+  reports a native tier that proved nothing the same way (#2540).
   The self-hosted native-KVM runner host is codified in `deploy/ansible/playbooks/runner.yml`
   (+ the `self-hosted-kvm-runner.md` runbook under `docs/operating/runbooks/`), built to the
   `live_vm` environment contract in `tests/live_vm/__init__.py` (ADR-0387, #1291).

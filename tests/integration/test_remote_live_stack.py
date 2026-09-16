@@ -53,6 +53,7 @@ from tests.integration.live_stack.spine import (
     assert_report,
     await_system_state,
     build_and_upload_kernel,
+    build_profile,
     captured_vmcore_refs,
     crash_to_crashed,
     db_now,
@@ -109,17 +110,6 @@ def _remote_provision_profile() -> dict[str, object]:
             }
         },
     }
-
-
-def _build_profile() -> dict[str, object]:
-    """The Run build profile for the remote x86_64 spine (upload-only lane, ADR-0048).
-
-    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` +
-    the target ``arch`` and forbids extras; the ``kernel_source_ref``/``config`` this used to
-    send were rejected outright as invalid tool arguments. The kernel bytes now arrive via
-    ``build_and_upload_kernel``.
-    """
-    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
@@ -291,139 +281,155 @@ def test_remote_spine_over_the_wire() -> None:
         op = LiveStackClient.over_http(base_url, operator_token)
         admin = LiveStackClient.over_http(base_url, admin_token)
         system_id = allocation_id = run_id = ""
+        released = False
         async with op, admin:
             await seed_metering(db_url, _PROJECT)
             window_start = await db_now(db_url)
-            async with phase("allocate"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "allocations.request",
+            try:
+                async with phase("allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            **{
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": 10,
+                                "resource": {"mode": "kind", "kind": "remote-libvirt"},
+                            },
+                        ),
+                        "allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_remote_provision_profile(),
+                        ),
+                        "provision",
+                    )
+                    system_id = data_str(env, "system_id")  # in data, NOT object_id (the job id)
+                    await await_system_state(op, "provision", system_id, "ready")
+                async with phase("open-investigation"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            **{"project": _PROJECT, "title": "remote-spine"},
+                        ),
+                        "open-investigation",
+                    )
+                    investigation_id = env.object_id
+                async with phase("create-run"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            investigation_id=investigation_id,
+                            system_id=system_id,
+                            build_profile=build_profile(),
+                        ),
+                        "create-run",
+                    )
+                    run_id = env.object_id
+                async with phase("upload-build"):
+                    # The server-build lane (runs.build) was removed with schema 0062; the Run
+                    # reaches a built state through the external-build upload lane instead.
+                    # with_vmlinux: the attach phase's debug.read_registers resolves symbols from
+                    # the vmlinux artifact; without it the gdb-MI tier reports no_debuginfo.
+                    await build_and_upload_kernel(
+                        op, run_id=run_id, phase_name="upload-build", with_vmlinux=True
+                    )
+                for step in ("install", "boot"):
+                    async with phase(step):
+                        env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
+                        await drain_job(op, step, env.object_id)
+                async with phase("attach"):
+                    env = ok(
+                        await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"),
+                        "attach",
+                    )
+                    session_id = env.object_id
+                    ok(
+                        await scalar(
+                            op, "debug.read_registers", session_id=session_id, registers=["rip"]
+                        ),
+                        "attach",
+                    )
+                    # Detach before crashing. A gdb client on the QEMU gdbstub HALTS the guest —
+                    # it is why read_registers can read rip at all — so a session left open means
+                    # force_crash injects an NMI into a halted CPU that never executes it, the
+                    # guest never panics into the kdump capture kernel, and capture times out as
+                    # readiness_failure. The capstone already ends its session before crash-B;
+                    # this arm did not, which only became reachable once the gdbstub attach
+                    # worked.
+                    ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
+                async with phase("crash-rbac-negative"):
+                    denied = await scalar(op, "control.force_crash", system_id=system_id)
+                    if denied.status != "error" or denied.error_category != "authorization_denied":
+                        raise SpinePhaseError("crash-rbac-negative", "operator was not denied")
+                async with phase("crash"):
+                    ok(await scalar(admin, "control.force_crash", system_id=system_id), "crash")
+                    await await_system_state(admin, "crash", system_id, "crashed")
+                async with phase("capture"):
+                    # Remote is KDUMP-only (ADR-0084); pin the method (fetch defaults to
+                    # host_dump). Run-addressed since ADR-0244 — a System-addressed fetch is
+                    # rejected outright.
+                    env = ok(
+                        await scalar(op, "vmcore.fetch", run_id=run_id, method="kdump"),
+                        "capture",
+                    )
+                    drained = await drain_job(
+                        op, "capture", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
+                    )
+                    refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
+                    # `captured_vmcore_refs` raises on a missing job ref and returns
+                    # `[job_ref, *artifact_refs]`, so a bare `assert refs` could never fail. What
+                    # is worth asserting is that `artifacts.get` contributed refs of its own.
+                    assert len(refs) > 1, f"artifacts.get published no object ref (#1): {refs}"
+                    # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
+                    assert not raw_vmcore_refs(refs), (
+                        f"raw vmcore leaked (#1): {raw_vmcore_refs(refs)}"
+                    )
+                async with phase("introspect"):
+                    env = ok(
+                        await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect"
+                    )
+                    report_body = data_mapping(env, "report")
+                    # Assert on the mapping, NOT on its JSON text: `json.dumps({})` is `"{}"` and
+                    # `json.dumps(None)` is `"null"`, both truthy, so a truthiness check on the
+                    # serialized form passes on exactly the empty report it claims to catch.
+                    assert report_body, (
+                        "empty postmortem report (introspect did not route to remote)"
+                    )
+                    report = json.dumps(report_body, sort_keys=True)
+                    assert_no_live_secrets(report, "postmortem report (#3)")
+                async with phase("release"):
+                    ok(
+                        await scalar(op, "allocations.release", allocation_id=allocation_id),
+                        "release",
+                    )
+                    released = True
+                async with phase("teardown"):  # reconciler-driven (≥30s) → torn_down
+                    await await_system_state(op, "teardown", system_id, "torn_down")
+                async with phase("report"):  # all-projects rollup; writes the evidence artifact
+                    await assert_report(
+                        base_url,
+                        auditor_token,
+                        db_url,
+                        window_start,
                         project=_PROJECT,
-                        **{
-                            "vcpus": 2,
-                            "memory_gb": 2,
-                            "disk_gb": 10,
-                            "resource": {"mode": "kind", "kind": "remote-libvirt"},
-                        },
-                    ),
-                    "allocate",
-                )
-                allocation_id = env.object_id
-            async with phase("provision"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "systems.provision",
-                        allocation_id=allocation_id,
-                        profile=_remote_provision_profile(),
-                    ),
-                    "provision",
-                )
-                system_id = data_str(env, "system_id")  # in data, NOT object_id (the job id)
-                await await_system_state(op, "provision", system_id, "ready")
-            async with phase("open-investigation"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "investigations.open",
-                        **{"project": _PROJECT, "title": "remote-spine"},
-                    ),
-                    "open-investigation",
-                )
-                investigation_id = env.object_id
-            async with phase("create-run"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "runs.create",
-                        investigation_id=investigation_id,
-                        system_id=system_id,
-                        build_profile=_build_profile(),
-                    ),
-                    "create-run",
-                )
-                run_id = env.object_id
-            async with phase("upload-build"):
-                # The server-build lane (runs.build) was removed with schema 0062; the Run
-                # reaches a built state through the external-build upload lane instead.
-                # with_vmlinux: the attach phase's debug.read_registers resolves symbols from the
-                # vmlinux artifact; without it the gdb-MI tier reports no_debuginfo.
-                await build_and_upload_kernel(
-                    op, run_id=run_id, phase_name="upload-build", with_vmlinux=True
-                )
-            for step in ("install", "boot"):
-                async with phase(step):
-                    env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
-                    await drain_job(op, step, env.object_id)
-            async with phase("attach"):
-                env = ok(
-                    await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"),
-                    "attach",
-                )
-                session_id = env.object_id
-                ok(
-                    await scalar(
-                        op, "debug.read_registers", session_id=session_id, registers=["rip"]
-                    ),
-                    "attach",
-                )
-                # Detach before crashing. A gdb client on the QEMU gdbstub HALTS the guest — it
-                # is why read_registers can read rip at all — so a session left open means
-                # force_crash injects an NMI into a halted CPU that never executes it, the guest
-                # never panics into the kdump capture kernel, and capture times out as
-                # readiness_failure. The capstone already ends its session before crash-B; this
-                # arm did not, which only became reachable once the gdbstub attach worked.
-                ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
-            async with phase("crash-rbac-negative"):
-                denied = await scalar(op, "control.force_crash", system_id=system_id)
-                if denied.status != "error" or denied.error_category != "authorization_denied":
-                    raise SpinePhaseError("crash-rbac-negative", "operator was not denied")
-            async with phase("crash"):
-                ok(await scalar(admin, "control.force_crash", system_id=system_id), "crash")
-                await await_system_state(admin, "crash", system_id, "crashed")
-            async with phase("capture"):
-                # Remote is KDUMP-only (ADR-0084); pin the method (fetch defaults to host_dump).
-                # Run-addressed since ADR-0244 — a System-addressed fetch is rejected outright.
-                env = ok(
-                    await scalar(op, "vmcore.fetch", run_id=run_id, method="kdump"),
-                    "capture",
-                )
-                drained = await drain_job(
-                    op, "capture", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
-                )
-                refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
-                # `captured_vmcore_refs` raises on a missing job ref and returns
-                # `[job_ref, *artifact_refs]`, so a bare `assert refs` could never fail. What is
-                # worth asserting is that `artifacts.get` contributed refs of its own.
-                assert len(refs) > 1, f"artifacts.get published no object ref (#1): {refs}"
-                # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
-                assert not raw_vmcore_refs(refs), f"raw vmcore leaked (#1): {raw_vmcore_refs(refs)}"
-            async with phase("introspect"):
-                env = ok(await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect")
-                report_body = data_mapping(env, "report")
-                # Assert on the mapping, NOT on its JSON text: `json.dumps({})` is `"{}"` and
-                # `json.dumps(None)` is `"null"`, both truthy, so a truthiness check on the
-                # serialized form passes on exactly the empty report it claims to catch.
-                assert report_body, "empty postmortem report (introspect did not route to remote)"
-                report = json.dumps(report_body, sort_keys=True)
-                assert_no_live_secrets(report, "postmortem report (#3)")
-            async with phase("release"):
-                ok(
-                    await scalar(op, "allocations.release", allocation_id=allocation_id),
-                    "release",
-                )
-            async with phase("teardown"):  # reconciler-driven (≥30s) → torn_down
-                await await_system_state(op, "teardown", system_id, "torn_down")
-            async with phase("report"):  # all-projects rollup; writes the evidence artifact
-                await assert_report(
-                    base_url,
-                    auditor_token,
-                    db_url,
-                    window_start,
-                    project=_PROJECT,
-                    artifact_name=_ARTIFACT_NAME,
-                )
+                        artifact_name=_ARTIFACT_NAME,
+                    )
+            finally:
+                # Failure-path net (#2551, mirrors #2520) — the "release" phase is the
+                # success-path release; guard on `released` so this does not double-release.
+                if allocation_id and not released:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
 
     asyncio.run(_run())
 
@@ -498,166 +504,183 @@ def test_remote_four_method_capture_over_the_wire() -> None:
     async def _run() -> None:
         op = LiveStackClient.over_http(base_url, operator_token)
         admin = LiveStackClient.over_http(base_url, admin_token)
+        alloc_a = alloc_b = ""
+        released_a = released_b = False
         async with op, admin:
             await seed_metering(db_url, _FOUR_METHOD_PROJECT)
 
-            # --- System A: host_dump (host-side core-dump; no in-guest kdump kernel needed) ---
-            async with phase("alloc-A"):
-                alloc_a = await allocate_remote(
-                    op, project=_FOUR_METHOD_PROJECT, phase_name="alloc-A"
-                )
-            async with phase("provision-A"):
-                system_a = await provision_to_ready(
-                    op,
-                    allocation_id=alloc_a,
-                    profile=_remote_provision_profile(),
-                    phase_name="provision-A",
-                )
-            async with phase("open-investigation-A"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "investigations.open",
-                        **{"project": _FOUR_METHOD_PROJECT, "title": "capstone-A"},
-                    ),
-                    "open-investigation-A",
-                )
-                investigation_a = env.object_id
-            async with phase("create-run-A"):
-                # Capture is Run-addressed (ADR-0244): the core is owned by the Run bound to the
-                # crashing System. System A never boots a built kernel — host_dump is host-side —
-                # so the Run is created bound and left unbuilt; that is all capture requires.
-                env = ok(
-                    await scalar(
-                        op,
-                        "runs.create",
-                        investigation_id=investigation_a,
-                        system_id=system_a,
-                        build_profile=_build_profile(),
-                    ),
-                    "create-run-A",
-                )
-                run_a = env.object_id
-            async with phase("crash-A"):
-                await crash_to_crashed(admin, system_id=system_a, phase_name="crash-A")
-            async with phase("host_dump"):
-                env = ok(
-                    await scalar(op, "vmcore.fetch", run_id=run_a, method="host_dump"),
-                    "host_dump",
-                )
-                drained = await drain_job(
-                    op, "host_dump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
-                )
-                await _assert_vmcore_captured(op, drained, run_id=run_a, method="host_dump")
-            async with phase("host_dump-same-system-rejected"):
-                # ensure_method_match (#118/ADR-0050, Run-scoped since ADR-0244) is enforced
-                # inside the capture *job* (jobs/handlers/artifacts/vmcore.py:precheck_run), not
-                # at vmcore.fetch admission — so fetch admits a kdump job (distinct dedup key)
-                # and the job *fails* with configuration_error. Assert that category.
-                env = ok(
-                    await scalar(op, "vmcore.fetch", run_id=run_a, method="kdump"),
-                    "host_dump-same-system-rejected",
-                )
-                try:
-                    await drain_job(
-                        op,
-                        "host_dump-same-system-rejected",
-                        env.object_id,
-                        deadline_s=_CAPTURE_DEADLINE_S,
+            try:
+                # --- System A: host_dump (host-side core-dump; no in-guest kdump kernel needed)
+                async with phase("alloc-A"):
+                    alloc_a = await allocate_remote(
+                        op, project=_FOUR_METHOD_PROJECT, phase_name="alloc-A"
                     )
-                except SpinePhaseError as failed:
-                    if failed.error_category != "configuration_error":
+                async with phase("provision-A"):
+                    system_a = await provision_to_ready(
+                        op,
+                        allocation_id=alloc_a,
+                        profile=_remote_provision_profile(),
+                        phase_name="provision-A",
+                    )
+                async with phase("open-investigation-A"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            **{"project": _FOUR_METHOD_PROJECT, "title": "capstone-A"},
+                        ),
+                        "open-investigation-A",
+                    )
+                    investigation_a = env.object_id
+                async with phase("create-run-A"):
+                    # Capture is Run-addressed (ADR-0244): the core is owned by the Run bound to
+                    # the crashing System. System A never boots a built kernel — host_dump is
+                    # host-side — so the Run is created bound and left unbuilt; that is all
+                    # capture requires.
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            investigation_id=investigation_a,
+                            system_id=system_a,
+                            build_profile=build_profile(),
+                        ),
+                        "create-run-A",
+                    )
+                    run_a = env.object_id
+                async with phase("crash-A"):
+                    await crash_to_crashed(admin, system_id=system_a, phase_name="crash-A")
+                async with phase("host_dump"):
+                    env = ok(
+                        await scalar(op, "vmcore.fetch", run_id=run_a, method="host_dump"),
+                        "host_dump",
+                    )
+                    drained = await drain_job(
+                        op, "host_dump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
+                    )
+                    await _assert_vmcore_captured(op, drained, run_id=run_a, method="host_dump")
+                async with phase("host_dump-same-system-rejected"):
+                    # ensure_method_match (#118/ADR-0050, Run-scoped since ADR-0244) is enforced
+                    # inside the capture *job* (jobs/handlers/artifacts/vmcore.py:precheck_run),
+                    # not at vmcore.fetch admission — so fetch admits a kdump job (distinct dedup
+                    # key) and the job *fails* with configuration_error. Assert that category.
+                    env = ok(
+                        await scalar(op, "vmcore.fetch", run_id=run_a, method="kdump"),
+                        "host_dump-same-system-rejected",
+                    )
+                    try:
+                        await drain_job(
+                            op,
+                            "host_dump-same-system-rejected",
+                            env.object_id,
+                            deadline_s=_CAPTURE_DEADLINE_S,
+                        )
+                    except SpinePhaseError as failed:
+                        if failed.error_category != "configuration_error":
+                            raise SpinePhaseError(
+                                "host_dump-same-system-rejected",
+                                f"kdump job failed with {failed.error_category}, "
+                                "expected configuration_error",
+                            ) from failed
+                    else:
                         raise SpinePhaseError(
                             "host_dump-same-system-rejected",
-                            f"kdump job failed with {failed.error_category}, "
-                            "expected configuration_error",
-                        ) from failed
-                else:
-                    raise SpinePhaseError(
-                        "host_dump-same-system-rejected",
-                        "a second vmcore method on System A was not rejected",
+                            "a second vmcore method on System A was not rejected",
+                        )
+
+                # --- System B: full boot → gdbstub attach → console + kdump across the crash --
+                async with phase("alloc-B"):
+                    alloc_b = await allocate_remote(
+                        op, project=_FOUR_METHOD_PROJECT, phase_name="alloc-B"
                     )
-
-            # --- System B: full boot → gdbstub attach → console + kdump across the crash -----
-            async with phase("alloc-B"):
-                alloc_b = await allocate_remote(
-                    op, project=_FOUR_METHOD_PROJECT, phase_name="alloc-B"
-                )
-            async with phase("provision-B"):
-                system_b = await provision_to_ready(
-                    op,
-                    allocation_id=alloc_b,
-                    profile=_remote_provision_profile(),
-                    phase_name="provision-B",
-                )
-            async with phase("open-investigation-B"):
-                env = ok(
-                    await scalar(
+                async with phase("provision-B"):
+                    system_b = await provision_to_ready(
                         op,
-                        "investigations.open",
-                        **{"project": _FOUR_METHOD_PROJECT, "title": "capstone-B"},
-                    ),
-                    "open-investigation-B",
-                )
-                investigation_b = env.object_id
-            async with phase("create-run-B"):
-                env = ok(
-                    await scalar(
-                        op,
-                        "runs.create",
-                        investigation_id=investigation_b,
-                        system_id=system_b,
-                        build_profile=_build_profile(),
-                    ),
-                    "create-run-B",
-                )
-                run_b = env.object_id
-            async with phase("upload-build-B"):
-                await build_and_upload_kernel(
-                    op, run_id=run_b, phase_name="upload-build-B", with_vmlinux=True
-                )
-            for step in ("install", "boot"):
-                async with phase(f"{step}-B"):
-                    env = ok(await scalar(op, f"runs.{step}", run_id=run_b), f"{step}-B")
-                    await drain_job(op, f"{step}-B", env.object_id)
-            async with phase("gdbstub"):
-                env = ok(
-                    await scalar(op, "debug.start_session", run_id=run_b, transport="gdbstub"),
-                    "gdbstub",
-                )
-                session_b = env.object_id
-                ok(
-                    await scalar(
-                        op, "debug.read_registers", session_id=session_b, registers=["rip"]
-                    ),
-                    "gdbstub",
-                )
-                ok(await scalar(op, "debug.end_session", session_id=session_b), "gdbstub")
-            async with phase("crash-B"):
-                await crash_to_crashed(admin, system_id=system_b, phase_name="crash-B")
-            async with phase("kdump"):
-                env = ok(
-                    await scalar(op, "vmcore.fetch", run_id=run_b, method="kdump"),
-                    "kdump",
-                )
-                drained = await drain_job(
-                    op, "kdump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
-                )
-                await _assert_vmcore_captured(op, drained, run_id=run_b, method="kdump")
+                        allocation_id=alloc_b,
+                        profile=_remote_provision_profile(),
+                        phase_name="provision-B",
+                    )
+                async with phase("open-investigation-B"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            **{"project": _FOUR_METHOD_PROJECT, "title": "capstone-B"},
+                        ),
+                        "open-investigation-B",
+                    )
+                    investigation_b = env.object_id
+                async with phase("create-run-B"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            investigation_id=investigation_b,
+                            system_id=system_b,
+                            build_profile=build_profile(),
+                        ),
+                        "create-run-B",
+                    )
+                    run_b = env.object_id
+                async with phase("upload-build-B"):
+                    await build_and_upload_kernel(
+                        op, run_id=run_b, phase_name="upload-build-B", with_vmlinux=True
+                    )
+                for step in ("install", "boot"):
+                    async with phase(f"{step}-B"):
+                        env = ok(await scalar(op, f"runs.{step}", run_id=run_b), f"{step}-B")
+                        await drain_job(op, f"{step}-B", env.object_id)
+                async with phase("gdbstub"):
+                    env = ok(
+                        await scalar(op, "debug.start_session", run_id=run_b, transport="gdbstub"),
+                        "gdbstub",
+                    )
+                    session_b = env.object_id
+                    ok(
+                        await scalar(
+                            op, "debug.read_registers", session_id=session_b, registers=["rip"]
+                        ),
+                        "gdbstub",
+                    )
+                    ok(await scalar(op, "debug.end_session", session_id=session_b), "gdbstub")
+                async with phase("crash-B"):
+                    await crash_to_crashed(admin, system_id=system_b, phase_name="crash-B")
+                async with phase("kdump"):
+                    env = ok(
+                        await scalar(op, "vmcore.fetch", run_id=run_b, method="kdump"),
+                        "kdump",
+                    )
+                    drained = await drain_job(
+                        op, "kdump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
+                    )
+                    await _assert_vmcore_captured(op, drained, run_id=run_b, method="kdump")
 
-            # --- release both allocations; reconciler tears the Systems down ----------------
-            for label, alloc in (("release-A", alloc_a), ("release-B", alloc_b)):
-                async with phase(label):
-                    ok(await scalar(op, "allocations.release", allocation_id=alloc), label)
-            for label, system in (("teardown-A", system_a), ("teardown-B", system_b)):
-                async with phase(label):
-                    await await_system_state(op, label, system, "torn_down")
+                # --- release both allocations; reconciler tears the Systems down ------------
+                async with phase("release-A"):
+                    ok(await scalar(op, "allocations.release", allocation_id=alloc_a), "release-A")
+                    released_a = True
+                async with phase("release-B"):
+                    ok(await scalar(op, "allocations.release", allocation_id=alloc_b), "release-B")
+                    released_b = True
+                for label, system in (("teardown-A", system_a), ("teardown-B", system_b)):
+                    async with phase(label):
+                        await await_system_state(op, label, system, "torn_down")
 
-            # The reconciler-hosted console collector streams System B's boot→crash lifetime and
-            # assembles the single artifact on teardown-finalize (ADR-0095). Assert it only after
-            # System B is torn_down, when the finalize has persisted the artifact row.
-            async with phase("console"):
-                await _await_console_artifact(op, system_id=system_b, run_id=run_b)
+                # The reconciler-hosted console collector streams System B's boot→crash lifetime
+                # and assembles the single artifact on teardown-finalize (ADR-0095). Assert it
+                # only after System B is torn_down, when the finalize has persisted the artifact
+                # row.
+                async with phase("console"):
+                    await _await_console_artifact(op, system_id=system_b, run_id=run_b)
+            finally:
+                # Failure-path net (#2551, mirrors #2520) — both allocations are held
+                # concurrently across the capstone, so each gets its own independent guard flag;
+                # a bare `finally: if alloc_a:` would double-release after the success-path
+                # release-A/release-B phases above.
+                if alloc_a and not released_a:
+                    await scalar(op, "allocations.release", allocation_id=alloc_a)
+                if alloc_b and not released_b:
+                    await scalar(op, "allocations.release", allocation_id=alloc_b)
 
     asyncio.run(_run())
 

@@ -32,3 +32,6 @@
 
 - name: Prepare shared provider data paths
   ansible.builtin.import_tasks: shared_directories.yml
+
+- name: Enable the container engine and grant the operator its socket
+  ansible.builtin.import_tasks: container_runtime.yml

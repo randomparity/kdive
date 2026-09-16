@@ -45,12 +45,12 @@ for arg in "$@"; do
 done
 
 # kdive domain names on stdout, one per line, with virsh's status preserved -- and, on failure,
-# virsh's diagnostic printed instead of the names. lib.sh's kdive_domains() discards stderr and
-# ends in `|| true`, so an endpoint that RESOLVES but does not answer enumerates byte-identically
-# to a host holding no kdive domains, and `require_libvirt_uri` below proves only that the contract
-# resolved, never that anything answers it. The `^kdive-` predicate is lib.sh:467's, duplicated
-# here because keeping virsh's status means not routing through the function that discards it;
-# the two must stay in step.
+# virsh's diagnostic printed instead of the names. This is the tree's one definition of the
+# `^kdive-` domain predicate: lib.sh's `kdive_domains()` discarded virsh's stderr and status and
+# ended in `|| true`, making an endpoint that RESOLVES but does not answer enumerate
+# byte-identically to a host holding no kdive domains, so it was removed as dead code (#2559)
+# rather than kept in step with this one. `require_libvirt_uri` below proves only that the
+# contract resolved, never that anything answers it.
 #
 # What this distinguishes is an endpoint that answers from one that does not, and NOTHING MORE. It
 # does not cover the wrong-daemon URI of libvirt-uri.sh:119-122: a daemon that is running but holds
