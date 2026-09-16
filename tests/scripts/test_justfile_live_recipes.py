@@ -115,7 +115,7 @@ def test_failing_remote_run_propagates_its_exit_code(tmp_path: Path) -> None:
 
 def test_absent_preflight_env_fails_the_tcg_recipe(tmp_path: Path) -> None:
     """Missing tcg prerequisites must fail loud, not skip through pytest to a green exit."""
-    result = _run_recipe("test-live-tcg", tmp_path, uv_exit_code=0, uv_stdout="4 skipped\n")
+    result = _run_recipe("test-live-tcg", tmp_path, uv_exit_code=0)
     assert result.returncode != 0, (
         "the tcg recipe ran with none of the live-stack env its preflight requires, so it proved "
         f"nothing — it must not exit 0 (got {result.returncode}); {result.stdout}"
