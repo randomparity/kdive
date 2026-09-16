@@ -2091,15 +2091,17 @@ def test_ensure_session_libvirtd_fails_loud_naming_the_exact_paths(tmp_path: Pat
     assert "sudo" not in result.stderr
 
 
-def test_up_session_recovery_path_never_sudos_and_keeps_the_bare_host_fallback() -> None:
-    """#2032: the dedicated-session branch recovers unprivileged; sudo stays bare-host-only."""
+def test_up_session_recovery_path_starts_the_daemon_without_sudo() -> None:
+    """#2032: starting the operator-owned session daemon stays unprivileged -- the runner
+    service account has no sudo. #2503 adds a separate, best-effort virtnodedevd remediation
+    later in this same branch that may invoke sudo; this test scopes to daemon startup only."""
     text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
     gate = text.index('*"live-libvirt"*')
-    bare_host_branch = text.index("# Bare dev host")
-    recovery = text[gate:bare_host_branch]
-    assert "ensure_session_libvirtd" in recovery
-    executed = [line for line in recovery.splitlines() if not line.lstrip().startswith("#")]
-    assert "sudo" not in "\n".join(executed), "the runner service account has no sudo (#2032)"
+    start_call = text.index("ensure_session_libvirtd", gate)
+    end_call = text.index("\n      }\n", start_call)
+    daemon_start = text[gate:end_call]
+    executed = [line for line in daemon_start.splitlines() if not line.lstrip().startswith("#")]
+    assert "sudo" not in "\n".join(executed), "starting the session daemon must stay unprivileged"
     assert "sudo systemctl enable --now virtqemud.socket" in text
 
 
@@ -2110,6 +2112,58 @@ def test_up_bare_host_branch_enables_virtnodedevd_alongside_virtqemud() -> None:
     libvirt_ok_gate = text.index("libvirt_ok || {", bare_host_branch)
     branch = text[bare_host_branch:libvirt_ok_gate]
     assert "sudo systemctl enable --now virtqemud.socket virtnodedevd.socket" in branch
+
+
+def _session_recovery_snippet() -> str:
+    """The exact session-daemon recovery `if ... fi` block, standalone-executable."""
+    text = (ROOT / "scripts/live-stack/stack-services.sh").read_text()
+    start = text.index('if [[ "$KDIVE_LIBVIRT_URI" == *"live-libvirt"* ]]; then')
+    end = text.index("\n    fi\n", start) + len("\n    fi")
+    return text[start:end]
+
+
+def _run_session_recovery_snippet(tmp_path: Path, *, libvirt_uri: str) -> list[str]:
+    """Execute the session-daemon recovery branch standalone: stub `ensure_session_libvirtd` to
+    succeed and record every `sudo` invocation, then return the recorded argv lines."""
+    calls = tmp_path / "sudo.calls"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sudo_stub = bin_dir / "sudo"
+    sudo_stub.write_text(
+        f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>'{calls}'\n", encoding="utf-8"
+    )
+    sudo_stub.chmod(0o755)
+    script = f"ensure_session_libvirtd() {{ return 0; }}\n{_session_recovery_snippet()}\n"
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["KDIVE_LIBVIRT_URI"] = libvirt_uri
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False, env=env
+    )
+    assert result.returncode == 0, result.stderr
+    return calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+
+
+def test_session_recovery_enables_virtnodedevd_for_the_modular_family(tmp_path: Path) -> None:
+    """#2503: the modular virtqemud session daemon (Red Hat/SUSE family) proxies node-device
+    queries to the system virtnodedevd socket, which the session recovery branch never enabled --
+    docs/design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md:284-286 records
+    the resulting connection failure. Mirror the bare-host branch's remediation here too."""
+    calls = _run_session_recovery_snippet(
+        tmp_path,
+        libvirt_uri="qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock",
+    )
+    assert any("systemctl enable --now virtnodedevd.socket" in call for call in calls), calls
+
+
+def test_session_recovery_leaves_the_monolithic_family_alone(tmp_path: Path) -> None:
+    """The Debian-family session daemon is the monolithic libvirtd, which answers node-device
+    queries itself (lib.sh's nodedev_ok comment) -- it needs no virtnodedevd unit (#2503)."""
+    calls = _run_session_recovery_snippet(
+        tmp_path,
+        libvirt_uri="qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+    )
+    assert not any("virtnodedevd" in call for call in calls), calls
 
 
 def test_up_checks_virtnodedevd_reachability_and_names_the_unit_on_failure() -> None:
