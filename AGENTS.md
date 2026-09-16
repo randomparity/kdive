@@ -30,7 +30,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just test` | the suite, excluding `live_vm`, `live_stack`, and `agent_smoke` |
 | `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
-| `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
+| `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, and fails loud naming the tier rather than exiting 0 when no proof actually ran |
 | `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, doc-link guards, all generated-artifact checks, then the suite |
 | `just stack-backends` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated |
 | `just compose-up` | the **containerized** tier — backends *plus* `server`/`reconciler`, then the `worker` created and started through the lifecycle witness (`--profile managed-worker`) |
@@ -371,7 +371,8 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   pre-provisioned System); `live_vm_tcg` (the emulated foreign-arch spine — the four ppc64le
   proofs, run over the `live_stack` vehicle, selected by `just test-live-tcg`); `live_stack`
   (full HTTP transport). `just test-live` is native-only (`-m "live_vm and not live_vm_tcg"`);
-  the TCG tier skips cleanly on a host without the foreign qemu emulator (`require_guest_arch`).
+  the TCG tier's proofs skip on a host without the foreign qemu emulator (`require_guest_arch`),
+  and `just test-live-tcg` reports that as a failure rather than a pass (#2517).
   The self-hosted native-KVM runner host is codified in `deploy/ansible/playbooks/runner.yml`
   (+ the `self-hosted-kvm-runner.md` runbook under `docs/operating/runbooks/`), built to the
   `live_vm` environment contract in `tests/live_vm/__init__.py` (ADR-0387, #1291).

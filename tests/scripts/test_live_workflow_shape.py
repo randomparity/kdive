@@ -948,8 +948,9 @@ def test_hosted_spine_aliases_the_bare_database_url_for_the_proof_suite() -> Non
 
 
 def test_hosted_spine_runs_the_tcg_tier_directly_not_just_test_live_tcg() -> None:
-    """`just test-live-tcg` tolerates exit 5 ("no tests collected") as a clean skip — exactly
-    the silent-green hole: run pytest directly so the summary is inspectable in the spine."""
+    """The spine runs pytest directly so it owns the summary it inspects. The recipe now carries
+    an equivalent zero-proof gate (#2517), but the spine's own env wiring, `tee` capture and
+    error text live here and must stay readable in the job log, not one `just` level away."""
     assert "just test-live-tcg" not in _tcg_spine()
     assert "-m live_vm_tcg --strict-markers -q" in " ".join(_tcg_spine().split())
 
