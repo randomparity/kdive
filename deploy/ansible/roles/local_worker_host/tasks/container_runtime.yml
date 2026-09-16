@@ -9,19 +9,37 @@
   register: local_worker_host_engine_unit
   tags: [container_runtime]
 
+- name: Look up the container-engine socket grant's target account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ local_worker_host_operator_user }}"
+    fail_key: false
+  when:
+    - local_worker_host_engine_unit.stat.exists
+    - local_worker_host_operator_user | length > 0
+  register: local_worker_host_engine_operator_getent
+  tags: [container_runtime]
+
 - name: Require the container-engine socket grant to name a non-worker account
   # Socket-group membership is root-equivalent and ADR-0575 keeps the fixed worker slot accounts
   # out of Docker groups. Its runtime verifier (live_vm_host/tasks/verify.yml) covers the runner
   # path only, and a caller reaching this file with `tasks_from` skips preflight.yml and its
   # operator asserts entirely — so the check lives here, the one point every path passes through.
+  # The existence clause is not redundant with preflight: the grant below is ansible.builtin.user,
+  # whose default state is `present`, so a non-empty, non-worker name that does not exist would be
+  # created and handed the socket group as an ordinary `changed` line.
   ansible.builtin.assert:
     that:
       - local_worker_host_operator_user | length > 0
       - local_worker_host_operator_user not in live_vm_host_worker_accounts
+      - >-
+        (local_worker_host_engine_operator_getent.ansible_facts | default({}, true))
+        .get('getent_passwd', {}).get(local_worker_host_operator_user) is not none
     fail_msg: >-
-      local_worker_host_operator_user={{ local_worker_host_operator_user }} must be a named
-      operator account outside live_vm_host_worker_accounts. ADR-0575 excludes the fixed worker
-      slot accounts from Docker groups, and socket-group membership is root-equivalent.
+      local_worker_host_operator_user={{ local_worker_host_operator_user }} must be an existing
+      host account outside live_vm_host_worker_accounts. ADR-0575 excludes the fixed worker slot
+      accounts from Docker groups, socket-group membership is root-equivalent, and the grant below
+      would otherwise create an account that does not exist and hand it that authority.
   when: local_worker_host_engine_unit.stat.exists
   tags: [container_runtime]
 

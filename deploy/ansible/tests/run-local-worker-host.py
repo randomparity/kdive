@@ -59,10 +59,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 317, f"runner listed {len(actual_tasks)} baseline tasks, expected 317")
+require(len(actual_tasks) == 318, f"runner listed {len(actual_tasks)} baseline tasks, expected 318")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 317 ordered task names and tags match the updated baseline")
+print("ok runner: 318 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -431,6 +431,7 @@ print("ok boot kernels: the /boot relabel skips every non-Debian family")
 CONTAINER_TASKS = "roles/local_worker_host/tasks/container_runtime.yml"
 DAEMON_PROBE = "Look for a packaged container-engine service unit"
 DAEMON_ENABLE = "Enable and start the container-engine daemon"
+DAEMON_LOOKUP = "Look up the container-engine socket grant's target account"
 DAEMON_EXCLUDE = "Require the container-engine socket grant to name a non-worker account"
 DAEMON_GRANT = "Add the named operator account to the container-engine socket group"
 
@@ -487,6 +488,48 @@ for engine_unit_exists in (False, True):
 print("ok container daemon: the packaged-unit probe gates both the enable and the grant")
 
 
+def container_daemon_guard(*, operator_user: str, refused: bool) -> None:
+    """The guard runs, and refuses before the enable — not merely appears above it in the listing.
+
+    The structural assertions in container_daemon_grant_target prove the clauses are written. They
+    cannot prove the guard fires: an ignore_errors, a failed_when: false, a block/rescue wrapper or
+    a call site shadowing live_vm_host_worker_accounts with an empty list would all keep the text
+    and lose the refusal. Starting at the guard is what executes it (#2557, ADR-0575).
+    """
+    facts = container_daemon_facts(unit_exists=True)
+    facts["local_worker_host_operator_user"] = operator_user
+    result = playbook(
+        probe,
+        "--check",
+        "--tags",
+        "container_runtime",
+        "--start-at-task",
+        DAEMON_LOOKUP,
+        "-e",
+        json.dumps(facts),
+    )
+    state = f"operator {operator_user!r}"
+    require(
+        (result.returncode != 0) == refused,
+        f"{state} got the wrong guard outcome: rc={result.returncode}",
+    )
+    if refused:
+        require(
+            f"TASK [local_worker_host : {DAEMON_ENABLE}]" not in result.stdout,
+            f"{state} reached the daemon enable after the guard should have stopped the play",
+        )
+
+
+for guard_user, guard_refused in (
+    ("kdive-worker-1", True),
+    ("", True),
+    ("kdive-nonexistent-2557", True),
+    (operator, False),
+):
+    container_daemon_guard(operator_user=guard_user, refused=guard_refused)
+print("ok container daemon: the guard refuses worker, empty and absent accounts before the enable")
+
+
 def container_daemon_grant_target() -> None:
     """The socket group goes to the operator variable, in the file and at the runner call site.
 
@@ -498,7 +541,7 @@ def container_daemon_grant_target() -> None:
     """
     source = (ANSIBLE / CONTAINER_TASKS).read_text()
     by_name = {task["name"]: task for task in yaml.safe_load(source)}
-    for name in (DAEMON_PROBE, DAEMON_ENABLE, DAEMON_EXCLUDE, DAEMON_GRANT):
+    for name in (DAEMON_PROBE, DAEMON_LOOKUP, DAEMON_EXCLUDE, DAEMON_ENABLE, DAEMON_GRANT):
         require(name in by_name, f"container_runtime.yml has no task named {name!r}")
     grant = by_name[DAEMON_GRANT].get("ansible.builtin.user", {})
     require(
@@ -520,9 +563,13 @@ def container_daemon_grant_target() -> None:
         any("local_worker_host_operator_user | length > 0" in str(c) for c in exclusion),
         "the socket grant does not refuse an empty operator account",
     )
+    require(
+        any("getent_passwd" in str(c) for c in exclusion),
+        "the socket grant does not refuse an account the host does not have",
+    )
     register = by_name[DAEMON_PROBE].get("register")
     require(bool(register), "the container-engine probe registers no result to gate on")
-    for name in (DAEMON_ENABLE, DAEMON_EXCLUDE, DAEMON_GRANT):
+    for name in (DAEMON_ENABLE, DAEMON_GRANT):
         require(
             by_name[name].get("when") == f"{register}.stat.exists",
             f"{name!r} is not gated on the packaged-unit probe's own register {register!r}",
@@ -554,6 +601,7 @@ def container_daemon_order() -> None:
     ordered = (
         "Install the Tumbleweed compose plugin for the on-box stack and testcontainers",
         DAEMON_PROBE,
+        DAEMON_LOOKUP,
         DAEMON_EXCLUDE,
         DAEMON_ENABLE,
         DAEMON_GRANT,
@@ -564,7 +612,7 @@ def container_daemon_order() -> None:
         positions.append(listed.stdout.index(name))
     require(
         positions == sorted(positions),
-        "container daemon tasks are out of order: packages, probe, guard, enable, then grant",
+        "container daemon tasks are out of order: probe, lookup, guard, enable, then grant",
     )
 
 

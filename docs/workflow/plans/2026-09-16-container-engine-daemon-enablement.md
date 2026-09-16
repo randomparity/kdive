@@ -59,9 +59,12 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
 - `local_worker_host_engine_socket_group: docker`
 - registered variable `local_worker_host_engine_unit` (an `ansible.builtin.stat` result)
 - task names, exactly: `Look for a packaged container-engine service unit`,
+  `Look up the container-engine socket grant's target account`,
+  `Require the container-engine socket grant to name a non-worker account`,
   `Enable and start the container-engine daemon`,
   `Add the named operator account to the container-engine socket group`
-- tag `container_runtime` on all three.
+- registered variable `local_worker_host_engine_operator_getent`
+- tag `container_runtime` on all five.
 
 **Verification.**
 - Contract: the three tasks parse, carry the tag, and gate on the probe. Mode: `focused-test` —
@@ -104,6 +107,36 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
      register: local_worker_host_engine_unit
      tags: [container_runtime]
 
+   - name: Look up the container-engine socket grant's target account
+     ansible.builtin.getent:
+       database: passwd
+       key: "{{ local_worker_host_operator_user }}"
+       fail_key: false
+     when:
+       - local_worker_host_engine_unit.stat.exists
+       - local_worker_host_operator_user | length > 0
+     register: local_worker_host_engine_operator_getent
+     tags: [container_runtime]
+
+   - name: Require the container-engine socket grant to name a non-worker account
+     # Socket-group membership is root-equivalent and ADR-0575 keeps the fixed worker slot accounts
+     # out of Docker groups. Its runtime verifier covers the runner path only, and a caller using
+     # `tasks_from` skips preflight.yml entirely — so the check lives here. The existence clause is
+     # load-bearing: the grant is ansible.builtin.user, whose default state is `present`, so an
+     # absent name would otherwise be created and handed the socket group.
+     ansible.builtin.assert:
+       that:
+         - local_worker_host_operator_user | length > 0
+         - local_worker_host_operator_user not in live_vm_host_worker_accounts
+         - >-
+           (local_worker_host_engine_operator_getent.ansible_facts | default({}, true))
+           .get('getent_passwd', {}).get(local_worker_host_operator_user) is not none
+       fail_msg: >-
+         local_worker_host_operator_user={{ local_worker_host_operator_user }} must be an existing
+         host account outside live_vm_host_worker_accounts.
+     when: local_worker_host_engine_unit.stat.exists
+     tags: [container_runtime]
+
    - name: Enable and start the container-engine daemon
      # The service, not the socket: docker.service carries Requires=docker.socket and
      # ExecStart=/usr/bin/dockerd -H fd://, so enabling the service pulls the socket in and the play
@@ -132,8 +165,9 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
      tags: [container_runtime]
    ```
 
-3. In `local_worker_host/tasks/main.yml`, insert between the Tumbleweed package import and
-   `Prepare fixed worker groups`:
+3. Append to the end of `local_worker_host/tasks/main.yml`, after `Prepare shared provider data
+   paths` — the fixed-worker contract does not depend on the engine, so an engine that cannot start
+   must not cost the operator all worker provisioning:
 
    ```yaml
    - name: Enable the container engine and grant the operator its socket
@@ -176,7 +210,7 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
 
 6. Run `just lint-ansible` and `just docs-links`. Expect both to exit 0.
 
-**Acceptance.** The three task names appear, in order, in
+**Acceptance.** The five task names appear, in order, in
 `ansible-playbook deploy/ansible/tests/local_worker_host.yml -i localhost, --list-tasks` after
 `Install the Tumbleweed compose plugin for the on-box stack and testcontainers`.
 `rg -n 'manual step|operator step|remain operator steps' deploy/ docs/operating/ scripts/` returns
@@ -194,15 +228,15 @@ Where it fits: closes #2557's "the Debian path should stop depending on dpkg pol
 the duplicated grant policy.
 
 **Interfaces.** Consumes the task file and defaults from Task 1, and `github_runner_user`
-(existing, `live_vm_host/defaults/main.yml`). Produces a runner `--list-tasks` output three entries
-longer and one entry shorter than the current baseline — net +2 — and updates
+(existing, `live_vm_host/defaults/main.yml`). Produces a runner `--list-tasks` output five entries
+longer and one entry shorter than the current baseline — net +4 — and updates
 `run-local-worker-host.py`'s baseline literal to match, so the count contract stays green at the end
 of this task rather than at the end of Task 3.
 
 **Verification.**
-- Contract: the runner play lists the three new tasks in order and its exact-order baseline matches.
+- Contract: the runner play lists the four new tasks in order and its exact-order baseline matches.
   Mode: `focused-test` — `run-local-worker-host.py:61` and its fixture. Red: after step 1 and before
-  step 2, the run fails with `runner listed 316 baseline tasks, expected 314`. Green:
+  step 2, the run fails with `runner listed 318 baseline tasks, expected 314`. Green:
   `just test-ansible`.
 
 **Steps.**
@@ -260,7 +294,7 @@ of this task rather than at the end of Task 3.
    PY
    ```
 
-   Expect `316` on the current base. Whatever it prints is the count — if #2567 has landed it will
+   Expect `318` on the current base. Whatever it prints is the count — if #2567 has landed it will
    differ, and the literal below follows the regeneration rather than the reverse.
 
 3. Set the two `314` literals at `run-local-worker-host.py:61` and the `print` at `:64` to the count
@@ -268,7 +302,7 @@ of this task rather than at the end of Task 3.
 
 4. Run `just test-ansible`. Expect exit 0.
 
-**Acceptance.** `wc -l` on the fixture equals the count in `run-local-worker-host.py:61`; the three
+**Acceptance.** `wc -l` on the fixture equals the count in `run-local-worker-host.py:61`; the four
 new task names appear consecutively where the removed grant task was; no other fixture line changed.
 `just test-ansible` exits 0.
 
@@ -332,9 +366,10 @@ saying what the arm proves and why the injection is needed, `require` for every 
 
 4. `container_daemon_grant_target()` — read `(ANSIBLE / CONTAINER_TASKS).read_text()` and `require`:
 
-   - `"live_vm_host_worker_accounts" not in source` — socket-group membership is root-equivalent and
-     ADR-0575 keeps the fixed worker slot accounts out of it, so a grant naming them would dissolve
-     that boundary silently;
+   - the guard task's `that:` list carries all three clauses — the non-empty check, the
+     `not in live_vm_host_worker_accounts` exclusion, and the `getent_passwd` existence check.
+     The task file names the worker-account list precisely in order to exclude it, so assert that
+     clause is PRESENT; asserting its absence would require deleting the guard;
    - on the `yaml.safe_load`ed task whose `name` is `DAEMON_GRANT`, that
      `["ansible.builtin.user"]["name"] == "{{ local_worker_host_operator_user }}"` and
      `["append"] is True`;
@@ -383,13 +418,20 @@ committed file.
    docker`.
 2. **Idempotence.** Re-run the play unchanged. Expect the enable and grant tasks `ok`, not
    `changed`.
-3. **Ubuntu — the no-op path, through the runner play.** Run `deploy/ansible/playbooks/runner.yml`
-   against a host where `docker.service` is already preset-enabled and running. This is the arm that
-   exercises the call-site rebinding and the replaced grant, so record `id -nG <runner account>`
-   containing `docker` and `systemctl is-active docker.service` `active`. Expect the enable task
-   `ok` on the first run.
+3. **Ubuntu — the no-op path, through the runner play.** Run
+   `deploy/ansible/playbooks/runner.yml --tags container_runtime` (non-check) against a host where
+   `docker.service` is already preset-enabled and running. This is the arm that exercises the
+   call-site rebinding and the replaced grant, so record `id -nG <runner account>` containing
+   `docker` and `systemctl is-active docker.service` `active`. Expect every task `ok` and
+   `changed=0`. A full non-check `runner.yml` run reprovisions the whole runner and is not
+   performed here; say so rather than claiming it.
+
+5. **The guard's refusals.** On the Fedora host, re-run the standalone task file with
+   `local_worker_host_operator_user` set to a fixed worker slot account, to an empty string, and to
+   a name the host does not have. Each must fail at the guard before the enable task is reached,
+   and the absent name must not be created — check `id <name>` afterwards.
 4. **Rocky — the skip arm.** Run the standalone role against a host with no engine package. Expect
    both mutating tasks to report `skipping` and the play to succeed.
-5. **Tumbleweed.** No host exists in the project's test-host set. Its three literals were verified
+6. **Tumbleweed.** No host exists in the project's test-host set. Its three literals were verified
    from the `docker-29.7.2_ce-41.1` package in an `opensuse/tumbleweed` container image; the play
    itself ships unrun there. Report that as the residual rather than claiming the arm.

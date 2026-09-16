@@ -15,10 +15,14 @@ host that cannot bring the stack up. The role documents its own gap at
 ## Scope
 
 One reusable task file, `deploy/ansible/roles/local_worker_host/tasks/container_runtime.yml`,
-owning three tasks: a registered `stat` of the packaged unit path, an enable-and-start of
-`docker.service`, and an append of the socket group to `local_worker_host_operator_user`. Both
-mutating tasks are gated on the `stat`. `local_worker_host/tasks/main.yml` imports the file after
-the family package files.
+owning five tasks: a registered `stat` of the packaged unit path, a `getent` of the operator
+account, a guard asserting that account is non-empty, existing, and outside
+`live_vm_host_worker_accounts`, an enable-and-start of `docker.service`, and an append of the
+socket group to `local_worker_host_operator_user`. All four tasks after the probe are gated on the
+`stat`, and the guard precedes the enable so a bad operator name stops the play before any
+mutation. `local_worker_host/tasks/main.yml` imports the file after
+the family package files and last in the role, since the fixed-worker contract does not depend on
+the engine and should not be lost to a host whose engine cannot start.
 
 Unit presence is the whole predicate. A host without the unit gets neither task and the play
 succeeds — `podman-docker`, and Enterprise Linux or SLES with no engine installed. A host with it
@@ -96,17 +100,17 @@ operator-owned connection, and the role already requires root.
   than the risk, and unmasking is the operator's call.
 - The runner's socket-group grant, unconditional before this change, now skips silently if the
   packaged unit is ever absent rather than failing. Accepted: `live_vm_host`'s apt install of
-  `docker.io` is unconditional and that package ships the unit. What was actually run is a check-mode
-  `runner.yml --check --tags container_runtime` through the `live_vm_host` call site on a real
-  Debian-family host, where all three tasks entered rather than skipped, plus a real
-  non-check grant and enable on that same host through the standalone task file. A full
-  non-check `runner.yml` run was not performed. The play itself does not check this, and an
-  in-play assert was cut because, keyed to distribution, it fails the `podman-docker` host
-  criterion 1 requires to skip cleanly.
-- CI proves gating, ordering, grant target and call-site binding in check mode only; it cannot
-  prove a daemon starts, nor that the probe finds a real unit on a real host. Accepted: covered by
-  the plan's real-host runs, which include a full `runner.yml` run recording that the runner account
-  ends up in the socket group. An in-play assert keyed to "this role installed an engine here" was
+  `docker.io` is unconditional and that package ships the unit, and a real non-check
+  `runner.yml --tags container_runtime` run through the `live_vm_host` call site on a Debian-family
+  host entered all five tasks with `changed=0`, leaving the runner account in the socket group and
+  `docker.service` enabled and active. The play itself does not check this, and an in-play assert
+  keyed to distribution was cut because it fails the `podman-docker` host criterion 1 requires to
+  skip cleanly.
+- CI proves gating, the guard's refusals, ordering, grant target and call-site binding in check
+  mode only; it cannot prove a daemon starts, nor that the probe finds a real unit on a real host.
+  Accepted: covered by the plan's real-host runs. Those include a non-check
+  `runner.yml --tags container_runtime` through the real call site, not a full non-check
+  `runner.yml` run, which remains outstanding and is the stated residual for the runner path. An in-play assert keyed to "this role installed an engine here" was
   considered and cut: `packages_redhat.yml:31-33` skips the engine install when `/usr/bin/docker`
   already exists, so such an assert fails the play on the `podman-docker` host the criteria require
   to skip cleanly.
@@ -139,8 +143,14 @@ choice of `local_worker_host_operator_user`, which `tasks/preflight.yml:17-38` a
 and present in passwd before any mutation on the `main.yml` path.
 
 **Control per boundary.** The grant names exactly one account, from one variable, with
-`append: true` so no unrelated membership is removed, and an assert in the task file refuses an
-empty account or any member of `live_vm_host_worker_accounts` before the daemon is touched. That
+`append: true` so no unrelated membership is removed, and a guard in the task file refuses an
+empty account, an account the host does not have, or any member of `live_vm_host_worker_accounts`,
+before the daemon is touched. The existence clause is load-bearing rather than redundant: the grant
+is `ansible.builtin.user`, whose default `state` is `present`, so a non-empty, non-worker name that
+does not exist would otherwise be created and handed the socket group as an ordinary `changed`
+line. A structural test asserts all three clauses are present, and a separate arm executes the
+guard and requires it to refuse a worker account, an empty name and an absent name without ever
+reaching the enable. That
 assert is in `container_runtime.yml` rather than `preflight.yml` deliberately: `import_role` with
 `tasks_from` does not run preflight, so the runner path would otherwise reach the grant unchecked,
 and `live_vm_host/tasks/verify.yml:109` covers only that path after the fact.
@@ -151,8 +161,9 @@ enabled and which group is granted. That is inside the trust this design already
 caller, who supplies the operator account, runs the play as root, and is the same party that could
 make the change by hand. No assert pins them: one that permitted only the default would remove the
 variables' only purpose, which is to let the tasks and the harness share one literal. Nothing in the change reads
-`live_vm_host_worker_accounts`, and a structural test asserts both that the task file never does
-and that the runner call site rebinds the operator variable to `github_runner_user`. ADR-0575's
+`live_vm_host_worker_accounts` except the guard, which reads it in order to exclude it, and a
+structural test asserts that exclusion clause is present and that the runner call site rebinds the
+operator variable to `github_runner_user`. ADR-0575's
 verifier at `live_vm_host/tasks/verify.yml:109` remains the runtime control that fails a worker
 which gained a forbidden group.
 
