@@ -406,16 +406,19 @@ def boot_kernel_guard(distribution: str, family: str) -> None:
         "local_worker_host_operator_user": operator,
     }
     result = playbook(probe, "--check", "--tags", "boot_kernels", "-e", json.dumps(facts))
-    heading = (
-        "TASK [local_worker_host : Find the host kernels under /boot "
-        "(vmlinuz-* x86_64, vmlinux-* ppc64le)]"
-    )
-    require(heading in result.stdout, f"{distribution} omitted the host-kernel find task")
-    section = result.stdout.split(heading, 1)[1].split("\nTASK [", 1)[0]
-    require(
-        "skipping: [localhost]" in section,
-        f"{distribution} entered the Debian-only host-kernel relabel",
-    )
+    for heading in (
+        (
+            "TASK [local_worker_host : Find the host kernels under /boot "
+            "(vmlinuz-* x86_64, vmlinux-* ppc64le)]"
+        ),
+        "TASK [local_worker_host : Install the kernel-upgrade hook that re-applies the relabel]",
+    ):
+        require(heading in result.stdout, f"{distribution} omitted {heading}")
+        section = result.stdout.split(heading, 1)[1].split("\nTASK [", 1)[0]
+        require(
+            "skipping: [localhost]" in section,
+            f"{distribution} entered the Debian-only host-kernel relabel",
+        )
 
 
 for distribution, family in (
@@ -425,7 +428,46 @@ for distribution, family in (
     ("SLES", "Suse"),
 ):
     boot_kernel_guard(distribution, family)
-print("ok boot kernels: the /boot relabel skips every non-Debian family")
+print("ok boot kernels: the /boot relabel and its upgrade hook skip every non-Debian family")
+
+
+# The hook re-applies the relabel from outside Ansible, so its constants are the ones that must
+# hold and no play asserts them. 0644 is the specific value boot_kernels.yml:2-11 forbids: Fedora
+# ships /boot world-readable, and widening a Debian host to match is the regression the
+# Debian-family guard exists to prevent. Proving the hook relabels a real upgraded kernel needs a
+# Debian-family host and a privileged package install, which no repository gate can stage (#2567).
+BOOT_HOOK = ANSIBLE / "roles/local_worker_host/files/kernel-postinst-kvm-readable"
+# Comments are stripped first: the hook's own comment explains why 0644 is forbidden, and a
+# check that reads it cannot tell that sentence from a chmod reaching the value.
+hook_code = "\n".join(
+    line for line in BOOT_HOOK.read_text().splitlines() if not line.lstrip().startswith("#")
+)
+require(
+    "chmod 0640 " in hook_code,
+    "the kernel-upgrade hook no longer applies mode 0640",
+)
+require(
+    "chgrp kvm " in hook_code,
+    "the kernel-upgrade hook no longer applies group kvm",
+)
+require("0644" not in hook_code, "the kernel-upgrade hook reaches the forbidden 0644")
+for pattern in ("/boot/vmlinuz-*", "/boot/vmlinux-*"):
+    require(
+        pattern in hook_code,
+        f"the kernel-upgrade hook stopped covering {pattern}",
+    )
+hook_install = yaml.safe_load(
+    (ANSIBLE / "roles/local_worker_host/tasks/boot_kernels.yml").read_text()
+)[0]["block"][-1]
+require(
+    hook_install["ansible.builtin.copy"]["dest"] == "/etc/kernel/postinst.d/kdive-kvm-readable",
+    "the kernel-upgrade hook is no longer installed into /etc/kernel/postinst.d",
+)
+require(
+    hook_install["ansible.builtin.copy"]["mode"] == "0755",
+    "the kernel-upgrade hook is no longer installed executable",
+)
+print("ok boot kernels: the upgrade hook applies 0640 root:kvm to both kernel patterns")
 
 
 CONTAINER_TASKS = "roles/local_worker_host/tasks/container_runtime.yml"
