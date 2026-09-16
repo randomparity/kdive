@@ -726,16 +726,22 @@ jobs:
           KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
           export KDIVE_LIBVIRT_URI
 
-          # This tier holds TWO allocations against the local host at once: mint-system.sh's,
-          # held for the whole job, and the one live_vm proof that requests an allocation of its
-          # own (the suite is serial — the spine passes no `-n`). LocalLibvirtDiscovery.from_env
-          # defaults the cap to 1, so the mint took the only slot and every later
-          # allocations.request was denied `at_capacity` mid-suite (#2560). Set it beside the URI,
-          # before mint-system.sh: the cap is read by whichever process registers the resource,
-          # and that is onboard.sh's seed-project, which mint-system.sh runs. Well under both
-          # ceilings — the host advertises 8 vcpus / ~31 GB against a 2 vcpu / 2 GB request, and
-          # onboard.sh funds KDIVE_MAX_ALLOC (4) concurrent allocations. test_live_workflow_shape
-          # pins the value to those two terms, so a third allocating proof raises it deliberately.
+          # This tier holds TWO allocations against the local host at once: mint-system.sh's
+          # (2 vcpu / 4 GB), held for the whole job, and the one live_vm proof that requests an
+          # allocation of its own (2 vcpu / 2 GB; the suite is serial — the spine passes no `-n`).
+          # LocalLibvirtDiscovery.from_env defaults the cap to 1, so the mint took the only slot
+          # and every later allocations.request was denied `at_capacity` mid-suite (#2560). The
+          # 4 vcpu / 6 GB that admits sits well inside the 8 vcpu / ~31 GB this host advertises.
+          #
+          # Placement is load-bearing, and NOT because of mint-system.sh. Per ADR-0384 the cap is
+          # operator-owned: discovery honors this variable when it INSERTS the resources row and
+          # preserves the stored value on every later refresh. The first process to insert here is
+          # the reconciler that stack-services.sh starts, several steps ahead of mint-system.sh —
+          # so the export must precede stack-services.sh, and an export placed anywhere after it
+          # silently no-ops. What makes the insert branch the one taken at all is the pre-job
+          # reaper's `docker compose down -v` below, which drops the tracking volume; a run that
+          # somehow kept a stale resources row would hold cap 1 and reproduce #2560 with this
+          # export still in place. test_live_workflow_shape pins both the value and that ordering.
           export KDIVE_LIBVIRT_ALLOCATION_CAP=2
 
           # Pre-job reaper: a run cancelled mid-boot (cancel-in-progress is false, but a crash or

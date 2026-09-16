@@ -156,11 +156,11 @@ def test_native_spine_raises_the_allocation_cap_above_the_long_lived_mint() -> N
     proof hit once #2518 let it execute on this tier for the first time.
 
     The value is the tier's actual concurrency, not the smallest number that unblocks one test:
-    the long-lived mint plus the single `live_vm` proof that allocates for itself, run serially
-    (the spine passes no `-n`). Two ceilings sit above it and neither binds at this value — the
-    host advertised 8 vcpus / ~31 GB against a 2 vcpu / 2 GB request, and onboard.sh funds the
-    project for `KDIVE_MAX_ALLOC` concurrent allocations, asserted against below because a host
-    cap above the project quota would advertise slots no request could ever use.
+    the long-lived mint (2 vcpu / 4 GB) plus the single `live_vm` proof that allocates for itself
+    (2 vcpu / 2 GB), run serially because the spine passes no `-n`. The 4 vcpu / 6 GB that admits
+    sits well inside the 8 vcpus / ~31 GB the host advertised. No per-project quota bounds it:
+    the cap is counted per resource across projects, and these two allocations are funded in
+    different projects (`demo` for the mint, `console-parts-proof` for the proof).
     """
     lines = [
         ln.strip()
@@ -180,23 +180,16 @@ def test_native_spine_raises_the_allocation_cap_above_the_long_lived_mint() -> N
         "`at_capacity` mid-suite"
     )
 
-    # Set it before the mint: onboard.sh's seed-project registers the local-libvirt resource with
-    # the cap discovery read from ITS environment, and mint-system.sh is what runs onboard.sh.
+    # Anchor on stack-services.sh, NOT mint-system.sh. Per ADR-0384 the cap is operator-owned:
+    # discovery honors this variable when it INSERTS the resources row and preserves the stored
+    # value on every refresh. The reconciler stack-services.sh starts registers discovery at
+    # startup, so it inserts first — an export placed after stack-services.sh but before the mint
+    # reads as correct and silently no-ops, which is how #2560 would come back.
     spine = _native_spine()
-    assert spine.index(_ALLOCATION_CAP_EXPORT) < spine.index("scripts/live-vm/mint-system.sh"), (
-        "KDIVE_LIBVIRT_ALLOCATION_CAP is exported after mint-system.sh; discovery has already "
-        "registered the resource at the old cap by then"
-    )
-
-    # Compare against onboard.sh's own default rather than a repeated literal, for the reason
-    # test_native_guest_image_names_the_rootfs_mint_system_stages gives: pin the two sources to
-    # each other, never to a constant this test would have to be edited to keep true.
-    onboard = (_ROOT / "scripts" / "live-stack" / "onboard.sh").read_text(encoding="utf-8")
-    quota = re.search(r'^MAX_ALLOC="\$\{KDIVE_MAX_ALLOC:-(\d+)\}"$', onboard, flags=re.MULTILINE)
-    assert quota is not None, "onboard.sh no longer defaults MAX_ALLOC; the ceiling is underivable"
-    assert cap <= int(quota.group(1)), (
-        f"host cap {cap} exceeds the project quota onboard.sh funds ({quota.group(1)}); the "
-        "surplus host slots would advertise capacity no allocations.request could obtain"
+    assert spine.index(_ALLOCATION_CAP_EXPORT) < spine.index("live-stack/stack-services.sh"), (
+        "KDIVE_LIBVIRT_ALLOCATION_CAP is exported after stack-services.sh; the reconciler it "
+        "starts has already inserted the resource at the old cap, and ADR-0384 keeps that stored "
+        "value through every later refresh"
     )
 
 
