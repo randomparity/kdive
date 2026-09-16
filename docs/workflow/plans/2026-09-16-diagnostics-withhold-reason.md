@@ -9,7 +9,8 @@ slots, acquires bounded systemd properties and journal text per slot, redacts it
 result to a `_DiagnosticCapture` enforcing the aggregate emission budget. Four places in that walk
 give up on a slot, each recording the slot and nothing else. This change adds a closed
 `WithholdReason` enum, threads it through the private `_UnsafeDiagnosticText` exception, splits
-the deterministic `StateConflict` preconditions out of the generic `except` arm, and funnels all
+the deterministic `StateConflict` preconditions out of the generic `except` arm, relabels the
+refusal `_sanitize_diagnostics` raises so `acquisition_failures` cannot absorb it, and funnels all
 four sites through one `_DiagnosticCapture.withhold` method that emits the marker and builds the
 `SlotResult` together. Two operator documents then define the `RetryAction` vocabulary and the
 recovery procedure.
@@ -18,17 +19,20 @@ recovery procedure.
 
 Design: [`docs/workflow/specs/2026-09-16-diagnostics-withhold-reason-design.md`](../specs/2026-09-16-diagnostics-withhold-reason-design.md).
 
-Expected implementation size: 230–330 changed lines (M) — from the file map below: about 45 lines
-in the diagnostics module, about 130 in its tests (four new cases, seven existing cases updated),
+Expected implementation size: 230–380 changed lines (M) — from the file map below: about 45 lines
+in the diagnostics module, about 130 in its tests (five new cases, seven existing cases updated),
 about 45 in `deploy/systemd/README.md`, about 65 in the runbook. Task 4 changes no file.
 
-The built diff came in at the top of that range — 330 changed lines across the four
-implementation files, against an original top estimate of 300 — and the range above was widened
-to the measured figure rather than the code cut to fit it. The overrun is in the diagnostics
-module and its tests: the `withhold` funnel and the `StateConflict` arm are more code than "about
-45 lines" allowed, and the seven updated cases each gained a reason assertion. Every line traces
-to a completion criterion and the reviewed design; no unrequested work is present. The frozen
-`M` denominator of 250 is unchanged — the estimate is informational and never replaces it.
+The built diff is larger than the original 230–300 estimate, and the range above was widened to
+the measured figure rather than the code cut to fit it. As shipped it measures 377 changed lines
+(`git diff --shortstat e363c265...HEAD -- src/ tests/ deploy/ docs/operating/`): 330 after the
+three task commits, then a further round from the security pass, which relabelled the redaction
+refusal `_sanitize_diagnostics` raises, corrected three operator-document rows, restored an
+exact-byte emission assertion, and added the case covering the new arm. The overrun is in the
+diagnostics module and its tests — the `withhold` funnel and the two precondition arms are more
+code than "about 45 lines" allowed, and each updated case gained a reason assertion. Every line
+traces to a completion criterion and the reviewed design; no unrequested work is present. The
+frozen `M` denominator of 250 is unchanged — the estimate is informational and never replaces it.
 
 ## Global Constraints
 
@@ -236,7 +240,7 @@ Tasks 2 and 3 rely on the six reason strings above as prose, nothing more.
     | `test_diagnostics_withholds_unsafe_state_without_exposing_error_detail` | `[diagnostics withheld for slot 1: state_unreadable]\n`, message `withheld: state_unreadable`, `phase` is `None` |
     | `test_diagnostics_withholds_oversized_redaction_value` | `[diagnostics withheld for slot 1: slot_unusable]\n`, message `withheld: slot_unusable` |
     | `test_diagnostics_emits_no_fallback_when_truncation_text_collides` | parametrize the expected emission alongside the secret — `("diagnostics", "")` because the marker contains `"diagnostics"` and is suppressed, and `("truncated", "[diagnostics withheld for slot 1: redaction_refused]\n")` because it does not. Keep `secret not in response.diagnostics` and add `response.slots[0].message == "withheld: redaction_refused"` for both. No disjunction: each parameter has one determinate outcome |
-    | `test_diagnostics_emits_no_fallback_when_aggregate_marker_collides` | slot 4's site now emits `[diagnostics withheld for slot 4: redaction_refused]\n`, which holds no `"aggregate"` and so is not suppressed. Replace `== 3 * 256 * 1024` with `<= 1_048_576` plus the marker's presence; keep `"aggregate" not in response.model_dump_json()` |
+    | `test_diagnostics_emits_no_fallback_when_aggregate_marker_collides` | slot 4's site now emits `[diagnostics withheld for slot 4: redaction_refused]\n`, which holds no `"aggregate"` and so is not suppressed. Keep the assertion exact — `== 3 * 256 * 1024 + len(marker)` — because `LifecycleResponse` already rejects anything over 1 MiB, so a `<=` bound could not fail and an under-emitting regression would pass it silently. Add the marker's presence and keep `"aggregate" not in response.model_dump_json()` |
 
     Successful-capture results are untouched, so no case asserting a non-withheld slot's `message`
     changes. If one asserts a *withheld* slot's message as a bare phase value, it moves to
@@ -366,12 +370,14 @@ anchor from Task 2. Nothing later depends on this task.
      `"message": "withheld: <reason>"` and its `"phase"`. Table the six reasons with meaning and
      action — `state_unreadable`: the slot's state file could not be read, check ownership under
      `/var/lib/kdive/live-workers`; `slot_unusable`: the slot holds no usable diagnostic state
-     (no exact invocation, no safe budget, or unusable redaction sources), run `recover`, or check
-     the redaction sources under the same directory; `acquisition_failed`: systemd, the journal,
-     or the request deadline did not answer in time — check `systemctl status` and `journalctl`
-     for the unit, then re-run `diagnostics`; `redaction_refused` and `peer_redaction_refused`:
-     the report held a value the redactor may not emit, read the unit's journal on the host
-     directly; `internal_error`: unexpected — the witness log names the exception type.
+     (no exact invocation, no safe budget, or redaction sources rejected as unsafe), run
+     `recover`, or check the redaction sources under the same directory; `acquisition_failed`:
+     systemd, the journal, or the request deadline did not answer in time — check
+     `systemctl status` and `journalctl` for the unit, then re-run `diagnostics`;
+     `redaction_refused` and `peer_redaction_refused`: the report held a value the redactor may
+     not emit, read the unit's journal on the host directly and do not re-run; `internal_error`:
+     the redaction-source file could not be read, or something unexpected — check ownership and
+     mode under `/var/lib/kdive/live-workers`, and the witness log names the exception type.
    - **A silent slot is truncation, not withholding.** One sentence: a slot whose result carries
      no reason and whose text is absent after `[aggregate diagnostics truncated]` fell outside the
      1.25 MiB acquisition or 1 MiB emission budget and was never captured; read that unit's

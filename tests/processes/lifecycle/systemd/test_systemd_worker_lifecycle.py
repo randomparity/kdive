@@ -1408,10 +1408,10 @@ def test_diagnostics_withholds_unsafe_source_without_reading_its_journal(
 
     assert not response.ok
     assert response.code == "diagnostics_withheld"
-    # A PermissionError reading the slot's redaction sources is an unusable precondition an
-    # operator can repair, not an unexpected failure.
-    assert response.diagnostics == "[diagnostics withheld for slot 1: slot_unusable]\n"
-    assert response.slots[0].message == "withheld: slot_unusable"
+    # The shipped loader funnels every failure into PermissionError, so this is the one producer
+    # of internal_error: it is what keeps the generic arm, and that vocabulary member, reachable.
+    assert response.diagnostics == "[diagnostics withheld for slot 1: internal_error]\n"
+    assert response.slots[0].message == "withheld: internal_error"
     assert response.slots[0].phase is SlotPhase.STARTED
     assert "sensitive" not in response.model_dump_json()
     assert runtime.public_property_calls == []

@@ -23,26 +23,29 @@ captured value, or any part of the withheld report:
 | Reason | Cause | Site |
 |---|---|---|
 | `state_unreadable` | the slot's retained state could not be loaded | `:328-338` |
-| `slot_unusable` | preconditions unmet: no exact invocation, no safe budget, or redaction sources that are unreadable or rejected as unsafe | `StateConflict`/`OSError` → `:389-398` |
+| `slot_unusable` | preconditions unmet: no exact invocation, no safe budget, or redaction sources rejected as unsafe | `StateConflict` → `:389-398` |
 | `acquisition_failed` | systemd, the journal, or the request deadline did not answer | `_diagnose_slot` → `:381-388` |
 | `redaction_refused` | a forbidden value survived this slot's own redaction, or no safe sentinel could render it | `_diagnose_trusted_slot` and `_sanitize_diagnostics` → `:381-388` |
 | `peer_redaction_refused` | the report holds a forbidden value learned from another slot | `:401-403` |
-| `internal_error` | anything else escaping the capture loop | `:389-398` |
+| `internal_error` | the redaction-source file could not be read, or anything else escaping the capture loop | `:389-398` |
 
 Two of these split a site rather than adding one. The two `_UnsafeDiagnosticText` causes share one
 site today and are two of the three the issue says an operator cannot tell apart, so the private
 exception carries the reason its raiser knows. And the bare `except Exception` arm is reached by
-everything the three calls before `_diagnose_slot`'s own `try` can raise — the deterministic
-`StateConflict`s from `_require_diagnostic_budget` and `_validated_redaction_values`, and the
-`OSError` from loading the slot's redaction sources. Those are operator-fixable preconditions, not
-unexpected failures, so a `(StateConflict, OSError)` arm ahead of the generic one gives them
-`slot_unusable`.
+everything the three calls before `_diagnose_slot`'s own `try` can raise: the deterministic
+`StateConflict`s from `_require_diagnostic_budget` and `_validated_redaction_values`, which are
+operator-fixable preconditions and take a `StateConflict` arm ahead of the generic one as
+`slot_unusable`; and the `PermissionError` that `load_slot_redaction_values` funnels every failure
+into, which stays with the generic arm. That split is deliberate: widening the precondition arm to
+`OSError` would read better as a category, but it would leave `internal_error` with no producer,
+because the shipped loader raises nothing else.
 
 One relabelling is needed inside `_diagnose_slot` for the vocabulary to be true. `acquisition_failures`
 lists `StateConflict`, so the refusal `_sanitize_diagnostics` raises when no safe visible sentinel
 survives would be reported as `acquisition_failed` — sending the operator to `systemctl status` and
 a re-run that deterministically fails the same way. A `StateConflict` arm ahead of
-`self._acquisition_failures` gives that refusal `redaction_refused`, which is what it is.
+`self._acquisition_failures` gives that refusal `redaction_refused`, which is what it is, and
+shadows the tuple's `StateConflict` entry, which is retained only as a backstop.
 
 **Where the reason rides.** On the existing free-form `SlotResult.message`
 (`StringConstraints(max_length=1024)`) as `withheld: <reason>`. A withheld slot's phase rides the

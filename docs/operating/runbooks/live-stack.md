@@ -367,11 +367,11 @@ The command exits 4 when a slot was withheld; the pipe is what keeps the output 
 | Reason | What it means | What to do |
 |---|---|---|
 | `state_unreadable` | the slot's retained state could not be read at all | check ownership and mode under `/var/lib/kdive/live-workers` |
-| `slot_unusable` | the slot holds no usable diagnostic state: no exact invocation, or redaction sources that could not be read or were rejected as unsafe | run `recover` below; if it persists, check ownership, mode, and size of the slot's redaction sources under the same directory |
+| `slot_unusable` | the slot holds no usable diagnostic state: no exact invocation, or redaction sources rejected as unsafe | run `recover` below; if it persists, check the size and contents of the slot's redaction sources under the same directory |
 | `acquisition_failed` | systemd, the journal, or the request deadline did not answer in time | check `systemctl status` and `journalctl` for the unit, then re-run `diagnostics` |
 | `redaction_refused` | the report held a value the redactor may not emit, or no safe substitute could render it, so the whole report was dropped | read the unit's journal on the host directly; re-running `diagnostics` will not clear it |
 | `peer_redaction_refused` | the report held a value another slot registered, so it was dropped for the same reason | read the unit's journal on the host directly |
-| `internal_error` | an unexpected failure inside the capture | the witness log names the exception type |
+| `internal_error` | the slot's redaction-source file could not be read, or an unexpected failure occurred inside the capture | check ownership and mode under `/var/lib/kdive/live-workers`; the witness log names the exception type |
 
 A slot that carries no reason is a different thing. Read it off the slot result rather than off
 the emitted text: a slot whose `"code"` is `"ok"` but which contributes no `=== slot N ===` block

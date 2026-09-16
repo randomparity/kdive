@@ -415,12 +415,14 @@ class SystemdDiagnostics:
             capture.forbidden_values.update(exc.forbidden)
             capture.aggregate_truncated = exc.aggregate_truncated
             return capture.withhold(store.slot, store.unit, exc.reason, phase=state.phase)
-        except (StateConflict, OSError) as exc:
-            # Reached only by the three calls `_diagnose_slot` makes before its own try:
-            # `_require_diagnostic_budget` and `_validated_redaction_values` raise StateConflict,
-            # and loading the slot's redaction sources raises OSError. Anything of either type
-            # raised inside that try is converted to `_UnsafeDiagnosticText` first. All three are
-            # deterministic, operator-fixable preconditions rather than unexpected failures.
+        except StateConflict as exc:
+            # Reached only by `_require_diagnostic_budget` and `_validated_redaction_values`, which
+            # run before `_diagnose_slot`'s own try and reject a slot whose diagnostic
+            # preconditions do not hold. A StateConflict raised inside that try is relabelled
+            # `redaction_refused` there, so it never arrives here. Loading the slot's redaction
+            # sources raises `PermissionError` instead, which stays with the generic arm below:
+            # widening this one to `OSError` would leave `INTERNAL_ERROR` with no producer at all,
+            # because the shipped loader funnels every failure into that one type.
             _log.warning(
                 "systemd diagnostic slot is unusable slot=%s cause=%s",
                 store.slot,
@@ -498,10 +500,11 @@ class SystemdDiagnostics:
             raise
         except StateConflict as exc:
             # `_sanitize_diagnostics` raises this when no safe visible sentinel survives, which is
-            # a redaction refusal rather than an acquisition failure. `acquisition_failures` lists
-            # StateConflict, so without this arm the refusal would be reported as
-            # `acquisition_failed` and the runbook would send the operator to re-run a request
-            # that deterministically fails the same way.
+            # a redaction refusal rather than an acquisition failure. This arm shadows the
+            # `StateConflict` entry in `acquisition_failures`, which would otherwise report the
+            # refusal as `acquisition_failed` and send the operator to re-run a request that
+            # deterministically fails the same way; that entry is retained only as a backstop, so
+            # a future `StateConflict` raiser inside this try lands here rather than there.
             _log.warning(
                 "systemd diagnostic rendering refused slot=%s cause=%s",
                 state.slot,
