@@ -18,8 +18,8 @@ WORKTREE_PYTHONPATH := justfile_directory() + "/src" + "${PYTHONPATH:+:$PYTHONPA
 default:
     @just --list
 
-# One-command first-time setup: check host deps, sync the venv, install hooks.
-setup: check-deps sync build-capture-bootstrap-manifest install-hooks
+# One-command first-time setup: check host deps, sync the venv, install collections and hooks.
+setup: check-deps sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
     @echo "Development environment is ready."
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
@@ -70,6 +70,18 @@ setup-remote-libvirt host user="root" uri="":
 # Create the venv and install pinned dependencies from the lockfile.
 sync:
     uv sync --locked
+
+# Install the pinned Ansible collections from the source lock. `just setup` and CI both call
+# this recipe, so the developer path and CI resolve the same pinned commits from one definition
+# rather than two command strings that can drift (#2499). Reaches GitHub for four immutable
+# commits; CI additionally points ANSIBLE_GALAXY_SERVER at a dead port, making the "sources
+# only, never Galaxy" boundary executable there. CI verifies the result separately, against a
+# collections directory it owns outright -- that check rejects any collection outside the
+# pinned four, which a developer's shared ~/.ansible/collections is free to hold.
+install-ansible-collections:
+    uv run --with 'ansible-core==2.21.1' ansible-galaxy collection install \
+        --requirements-file deploy/ansible/requirements-ci.lock.yml \
+        --collections-path ~/.ansible/collections --no-deps --no-cache
 
 # Install the git pre-commit hooks and run them across the tree once.
 install-hooks:
