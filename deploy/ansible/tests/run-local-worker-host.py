@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -58,10 +59,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 314, f"runner listed {len(actual_tasks)} baseline tasks, expected 314")
+require(len(actual_tasks) == 316, f"runner listed {len(actual_tasks)} baseline tasks, expected 316")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 314 ordered task names and tags match the updated baseline")
+print("ok runner: 316 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -425,3 +426,131 @@ for distribution, family in (
 ):
     boot_kernel_guard(distribution, family)
 print("ok boot kernels: the /boot relabel skips every non-Debian family")
+
+
+CONTAINER_TASKS = "roles/local_worker_host/tasks/container_runtime.yml"
+DAEMON_PROBE = "Look for a packaged container-engine service unit"
+DAEMON_ENABLE = "Enable and start the container-engine daemon"
+DAEMON_GRANT = "Add the named operator account to the container-engine socket group"
+
+
+def container_daemon_facts(*, unit_exists: bool) -> dict[str, object]:
+    return {
+        "ansible_facts": {
+            "distribution": "Fedora",
+            "distribution_version": "probe",
+            "os_family": "RedHat",
+        },
+        "local_worker_host_operator_user": operator,
+        "local_worker_host_engine_unit": {"stat": {"exists": unit_exists}},
+    }
+
+
+def container_daemon_gate(*, unit_exists: bool) -> None:
+    """Both mutating tasks follow the packaged-unit probe, never the runner's own state.
+
+    The register is injected as an extra-var, which outranks it, so the skip arm proves the gate
+    even on a runner that has docker installed. The skip arm is also the podman-docker case: on a
+    Fedora host where podman-docker already owns /usr/bin/docker, packages_redhat.yml skips the
+    engine install and no docker.service exists, and that must stay a clean skip rather than a
+    failure (#2557, ADR-0663).
+
+    Each task is read from its own invocation started at that task. In the entered arm the modules
+    themselves run — check mode, non-root, against whatever systemd and group state the runner has
+    — so an enable that failed there would otherwise stop the play before the grant is reached. The
+    engine-install gate above starts at its probe for the same reason.
+    """
+    facts = container_daemon_facts(unit_exists=unit_exists)
+    state = f"unit present: {unit_exists}"
+    for name in (DAEMON_ENABLE, DAEMON_GRANT):
+        result = playbook(
+            probe,
+            "--check",
+            "--tags",
+            "container_runtime",
+            "--start-at-task",
+            name,
+            "-e",
+            json.dumps(facts),
+        )
+        section = container_section(result.stdout, name, state)
+        skipped = "skipping: [localhost]" in section
+        require(
+            skipped != unit_exists,
+            f"{state} got the wrong arm of {name!r}: skipped={skipped}",
+        )
+
+
+for engine_unit_exists in (False, True):
+    container_daemon_gate(unit_exists=engine_unit_exists)
+print("ok container daemon: the packaged-unit probe gates both the enable and the grant")
+
+
+def container_daemon_grant_target() -> None:
+    """The socket group goes to the operator variable, in the file and at the runner call site.
+
+    Socket-group membership is root-equivalent and ADR-0575 keeps the fixed worker slot accounts
+    out of it, so a grant naming live_vm_host_worker_accounts would dissolve that boundary
+    silently. The runner call site is the one place the operator variable is rebound, and a lost
+    vars key there would fall back to the role default of "" rather than to a refusal, because
+    import_role with tasks_from does not run preflight.yml.
+    """
+    source = (ANSIBLE / CONTAINER_TASKS).read_text()
+    require(
+        "live_vm_host_worker_accounts" not in source,
+        "the container-engine socket grant reaches the fixed worker accounts (ADR-0575)",
+    )
+    by_name = {task["name"]: task for task in yaml.safe_load(source)}
+    grant = by_name[DAEMON_GRANT]["ansible.builtin.user"]
+    require(
+        grant["name"] == "{{ local_worker_host_operator_user }}",
+        "the container-engine socket grant does not target the operator variable",
+    )
+    require(grant["append"] is True, "the container-engine socket grant replaces memberships")
+    enable = by_name[DAEMON_ENABLE]["ansible.builtin.systemd_service"]
+    require(
+        enable["enabled"] is True and enable["state"] == "started",
+        "the container-engine daemon task does not both enable and start the service",
+    )
+    known = set(defaults) | {"local_worker_host_engine_unit"}
+    used = set(re.findall(r"\{\{\s*(local_worker_host_[a-z_]+)", source))
+    require(
+        used <= known,
+        f"container_runtime.yml uses undeclared role variables: {sorted(used - known)}",
+    )
+    runner_tasks = yaml.safe_load((ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text())
+    call = next(
+        task
+        for task in runner_tasks
+        if task.get("ansible.builtin.import_role", {}).get("tasks_from") == "container_runtime.yml"
+    )
+    require(
+        call["vars"]["local_worker_host_operator_user"] == "{{ github_runner_user }}",
+        "the runner call site does not rebind the operator variable to the runner account",
+    )
+
+
+container_daemon_grant_target()
+print("ok container daemon: the socket grant targets only the named operator, at both sites")
+
+
+def container_daemon_order() -> None:
+    """Probe, enable, grant — all after the compose plugin that resolves the engine."""
+    ordered = (
+        "Install the Tumbleweed compose plugin for the on-box stack and testcontainers",
+        DAEMON_PROBE,
+        DAEMON_ENABLE,
+        DAEMON_GRANT,
+    )
+    positions = []
+    for name in ordered:
+        require(name in listed.stdout, f"container daemon task missing from listing: {name}")
+        positions.append(listed.stdout.index(name))
+    require(
+        positions == sorted(positions),
+        "container daemon tasks are out of order: packages, probe, enable, then grant",
+    )
+
+
+container_daemon_order()
+print("ok container daemon: the enable and grant follow the engine install")

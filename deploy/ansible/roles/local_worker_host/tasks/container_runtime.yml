@@ -1,0 +1,37 @@
+---
+# Declaring the engine packages is not a working runtime (ADR-0663, #2557). Fedora's preset enables
+# docker.socket and leaves docker.service disabled; the sysusers entry creates the docker group
+# empty. Debian reaches the working end state only through dpkg install-time policy, which is
+# packaging behaviour this repository does not control.
+- name: Look for a packaged container-engine service unit
+  ansible.builtin.stat:
+    path: "{{ local_worker_host_engine_unit_path }}"
+  register: local_worker_host_engine_unit
+  tags: [container_runtime]
+
+- name: Enable and start the container-engine daemon
+  # The service, not the socket: docker.service carries Requires=docker.socket and
+  # ExecStart=/usr/bin/dockerd -H fd://, so enabling the service pulls the socket in and the play
+  # witnesses the daemon's first start. Tumbleweed's own docker.socket says the same with
+  # BindsTo=docker.service. A host with the unit but no engine from this role — Enterprise Linux or
+  # SLES on the Docker-repository remedy the operator guide recommends — is enabled too. A host
+  # without it is skipped, not failed: podman-docker owns /usr/bin/docker and ships no unit, and
+  # packages_redhat.yml deliberately leaves such a host the provider it chose.
+  ansible.builtin.systemd_service:
+    name: "{{ local_worker_host_engine_service }}"
+    enabled: true
+    state: started
+  when: local_worker_host_engine_unit.stat.exists
+  tags: [container_runtime]
+
+- name: Add the named operator account to the container-engine socket group
+  # ADR-0575 keeps the fixed worker slot accounts out of Docker groups; this grant is for the
+  # caller's single operator account, a different principal. append: true so no existing membership
+  # is removed. The task names the variable, not a role, because live_vm_host rebinds it to the
+  # runner account.
+  ansible.builtin.user:
+    name: "{{ local_worker_host_operator_user }}"
+    groups: "{{ local_worker_host_engine_socket_group }}"
+    append: true
+  when: local_worker_host_engine_unit.stat.exists
+  tags: [container_runtime]

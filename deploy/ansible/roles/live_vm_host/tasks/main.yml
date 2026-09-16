@@ -58,11 +58,16 @@
     state: present
     update_cache: true
 
-- name: Add the runner service account to the docker group
-  ansible.builtin.user:
-    name: "{{ github_runner_user }}"
-    groups: docker
-    append: true
+- name: Enable the container engine and grant the runner account its socket
+  # One owner for this policy (ADR-0663). The runner previously took the group grant here and
+  # relied on dpkg to start the daemon; the reusable file does both, so a future packaging change
+  # fails loudly instead of silently. The apt install above is unconditional and Debian's docker.io
+  # ships the unit, so the probe holds here; the runner real-host arm proves it.
+  ansible.builtin.import_role:
+    name: local_worker_host
+    tasks_from: container_runtime.yml
+  vars:
+    local_worker_host_operator_user: "{{ github_runner_user }}"
 
 - name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
   # Ubuntu ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
