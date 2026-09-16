@@ -31,12 +31,23 @@ observation and mutation always carry the same identity.
 - On a bare host the up-front `--wipe` gate now enumerates under `sudo`, so an operator who
   cannot escalate is refused before anything is stopped rather than mid-wipe. That moves the
   run's first escalation ahead of the irreversibility warning and the `Type 'wipe'` confirmation,
-  so a host configured to prompt asks for the password before the operator has confirmed. Kept
-  deliberately: the gate exists to refuse before anything is stopped, and reordering it behind
-  the prompt would restore the mid-wipe failure it replaced.
+  so a host configured to prompt asks for the password before the operator has confirmed, and the
+  refreshed sudo timestamp outlives an abort at the confirmation. Kept deliberately: the gate
+  exists to refuse before anything is stopped, and reordering it behind the prompt would restore
+  the mid-wipe failure it replaced. Printing the irreversibility warning *ahead* of the gate, with
+  the `Type 'wipe'` prompt left where it is, was considered as a third option and declined here:
+  it splits the warning from the confirmation it qualifies, and it prints an irreversibility
+  warning on runs the gate then refuses without stopping anything. It remains available as a
+  confirmation-UX change independent of this decision.
 - Classification is textual: an endpoint whose scope is not in its path would be misclassified.
   Both published URIs and the bare-host default carry it there.
-- Which *daemon* answers is untouched; this decides only which account connects.
+- The overlay `rm` becomes the invoking account's on the session branch, so the overlay directory
+  must now be **writable**, not merely listable. `stack-down.sh` refuses a session reap by name
+  when it is not, because every `rm` would be denied identically; the escalating branch is not
+  tested for write, where a root-owned `0755` directory is the normal bare-host shape.
+- Which *daemon* answers is unchanged for the published `?socket=` endpoints, where the socket
+  path selects it; for a plain `qemu:///session` it changes from root's per-uid daemon to the
+  invoking account's, which is the point.
 
 ## Considered & rejected
 

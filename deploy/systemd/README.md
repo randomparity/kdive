@@ -76,8 +76,13 @@ the installed socket.
 operator's own credentials, not under `sudo`, whenever the resolved endpoint is a session URI
 (ADR-0662). The operator owns both paths it touches — the socket is `operator:kdive-live-libvirt`
 mode `0770` and `/var/lib/kdive/rootfs` is `operator:kdive-live-libvirt` mode `2770` — so root
-satisfies neither ACL; it bypasses both. A per-uid session daemon is not reachable by changing uid
-at all, so escalating there reaches a different daemon rather than the same one with more rights.
+satisfies neither ACL; it bypasses both. The published endpoints name their socket path explicitly,
+so `sudo` there reaches the *same* daemon with root's rights rather than a different one; against a
+plain `qemu:///session`, whose socket is per-uid, it reaches root's own daemon instead and so a
+different account's domains. Either way escalation is the wrong credential for the endpoint.
+Because the operator owns `/var/lib/kdive/rootfs`, they must still be able to **write** it for the
+reap to remove overlays; a run that finds it unwritable is refused by name rather than attempting
+removals that would all be denied.
 On a host with no lifecycle contract the endpoint resolves to root-owned `qemu:///system` and the
 same reap keeps `sudo`, which is why the privilege is derived from the endpoint rather than fixed.
 This governs the reap specifically; installation still uses `sudo` where it must, and
