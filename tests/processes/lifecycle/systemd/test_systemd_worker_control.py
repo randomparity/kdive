@@ -279,11 +279,17 @@ class BlockingLifecycleContext:
         self.lifecycle = lifecycle
         self.block = block
         self.cancel_secret = "async-context-cancel-secret"  # pragma: allowlist secret
+        self.entered = threading.Event()
         self.entry_cancelled = threading.Event()
         self.exit_cancelled = threading.Event()
 
     async def __aenter__(self) -> FakeLifecycle:
         if self.block == "entry":
+            # Recorded before the first await: the request budget is bounded by
+            # asyncio.wait_for on the event loop's own clock, so a caller can be
+            # cancelled before this coroutine is ever scheduled (#2558). `entered`
+            # separates that scheduling race from an actual cancellation-handler miss.
+            self.entered.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -333,7 +339,11 @@ def test_deadline_wraps_blocked_async_context_entry(tmp_path: Path) -> None:
         "deadline_exceeded",
         "retry_same_operation",
     )
-    assert context.entry_cancelled.is_set()
+    # `entry_cancelled` only follows from `entered`: the request budget can expire
+    # before this coroutine is ever scheduled, in which case __aenter__ never ran
+    # and there is no cancellation handler to have missed (#2558).
+    if context.entered.is_set():
+        assert context.entry_cancelled.is_set()
     assert lifecycle.operations == []
     assert b"deadline_exceeded" in fake_socket.sent
     assert context.cancel_secret.encode() not in fake_socket.sent
