@@ -5,32 +5,33 @@
     state: present
   tags: [authority_prerequisites]
 
-- name: Install the Tumbleweed compose plugin for the on-box stack and testcontainers
-  # Tumbleweed-only: preflight.yml also admits SLES, which ships Docker in the Containers Module
-  # rather than the base product, so an ungated install would fail to resolve there.
-  #
-  # Unconditional within Tumbleweed for the same reason as the Fedora plugin: docker-compose
-  # requires `(docker or podman)`, so it resolves over either provider and is the only source of
-  # the `docker compose` subcommand stack-services.sh invokes.
-  community.general.zypper:
-    name: "{{ local_worker_host_compose_packages_tumbleweed }}"
-    state: present
-  when: ansible_facts['distribution'] == 'openSUSE Tumbleweed'
-  tags: [authority_prerequisites]
-
 - name: Look for an existing container engine before installing one (Suse)
+  # Same ordering invariant as the RedHat path: the probe must read the host's pre-existing state,
+  # never state this play created by resolving the compose plugin's engine dependency.
   ansible.builtin.stat:
     path: /usr/bin/docker
   register: local_worker_host_docker_provider_suse
   tags: [authority_prerequisites]
 
 - name: Install the Tumbleweed container engine
-  # The same existing-provider skip the RedHat path takes: a host that already owns /usr/bin/docker
-  # keeps the provider it chose rather than having a second engine resolved over it.
+  # Tumbleweed-only: preflight.yml also admits SLES, which ships Docker in the Containers Module
+  # rather than the base product, so an ungated install would fail to resolve there. The
+  # existing-provider skip is the same guard the RedHat path takes.
   community.general.zypper:
     name: "{{ local_worker_host_engine_packages_tumbleweed }}"
     state: present
   when:
     - ansible_facts['distribution'] == 'openSUSE Tumbleweed'
     - not local_worker_host_docker_provider_suse.stat.exists
+  tags: [authority_prerequisites]
+
+- name: Install the Tumbleweed compose plugin for the on-box stack and testcontainers
+  # Unconditional within Tumbleweed, and last, for the same reason as the Fedora plugin:
+  # docker-compose requires `(docker or podman)`, so it resolves over whichever provider the host
+  # ended up with and is the only source of the `docker compose` subcommand stack-services.sh
+  # invokes.
+  community.general.zypper:
+    name: "{{ local_worker_host_compose_packages_tumbleweed }}"
+    state: present
+  when: ansible_facts['distribution'] == 'openSUSE Tumbleweed'
   tags: [authority_prerequisites]

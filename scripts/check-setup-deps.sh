@@ -165,11 +165,12 @@ package_for() {
   python3-guestfs:*) printf "python3-guestfs" ;;
   # The Docker engine package name diverges by family: Debian/Ubuntu ship `docker.io`, Fedora
   # ships `moby-engine` (which requires docker-cli, the owner of /usr/bin/docker), and openSUSE
-  # Tumbleweed ships `docker`. Only the exact distributions listed at the probe reach these rows;
-  # every other distro is routed to a manual hint before package_for is called.
+  # Tumbleweed and Arch ship `docker`. These rows are exhaustive over the probe's allowlist; every
+  # other distro is routed to a manual hint before package_for is called.
   docker:debian) printf "docker.io" ;;
   docker:fedora) printf "moby-engine" ;;
   docker:opensuse) printf "docker" ;;
+  docker:arch) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
   qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
   # The RedHat family answers by NATIVENESS, not by architecture (ADR-0641). `qemu-kvm` is a

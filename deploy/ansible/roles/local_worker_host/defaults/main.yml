@@ -89,7 +89,9 @@ local_worker_host_packages_redhat:
 #
 # The compose plugin is what provides the `docker compose` subcommand stack-services.sh invokes;
 # the engine does not carry it. Fedora's docker-compose requires `(docker-cli or podman-docker)`,
-# so it installs over either provider and needs no engine gate.
+# so it installs over whichever provider the host has and needs no engine gate — but on a host
+# with neither, dnf satisfies that dependency by pulling docker-cli, which owns /usr/bin/docker.
+# That is why the task file probes and installs the engine BEFORE the plugin.
 #
 # Declaring the packages is not the whole runtime. Fedora's RPM leaves docker.service disabled and
 # adds no account to the docker group, so `systemctl enable --now docker` and group membership

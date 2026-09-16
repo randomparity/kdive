@@ -1554,7 +1554,10 @@ def _assert_runtime_tasks(
     ]
     assert len(probes) == 1, task_file
     assert probes[0]["register"] == register
-    assert tasks.index(probes[0]) < tasks.index(_one(engine[0]))
+    # Probe, then engine, then plugin. Installing the plugin first would resolve its engine
+    # dependency by pulling the CLI package that owns /usr/bin/docker, and the probe would then
+    # suppress the engine install on this and every later run.
+    assert tasks.index(probes[0]) < tasks.index(_one(engine[0])) < tasks.index(_one(compose[0]))
     for task in tasks:
         assert task["tags"] == ["authority_prerequisites"], task["name"]
 
