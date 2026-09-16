@@ -47,6 +47,7 @@ _REQUEST_SECONDS = 120.0
 _STOP_SECONDS = 45.0
 _DIAGNOSTIC_SECONDS = 30.0
 _POLL_SECONDS = 0.1
+_RECOVERY_REFUSED = "recovery_refused"
 _log = logging.getLogger(__name__)
 
 
@@ -56,6 +57,10 @@ class EvidenceRejected(RuntimeError):
 
 class LifecycleConflict(RuntimeError):
     """Retained and observed lifecycle facts cannot be reconciled safely."""
+
+
+class LiveWorkerRefused(RuntimeError):
+    """Recovery refused a fixed worker unit that still carries live processes."""
 
 
 class LifecycleDeadlineExceeded(RuntimeError):
@@ -119,6 +124,8 @@ class SystemdControl(Protocol):
     def signal_terminate(self, unit: str, deadline: Deadline) -> None: ...
 
     def stop_retained(self, unit: str, deadline: Deadline) -> None: ...
+
+    def reset_failed(self, unit: str, deadline: Deadline) -> None: ...
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]: ...
 
@@ -256,6 +263,92 @@ class SystemdWorkerLifecycle:
         operation_deadline = _BudgetDeadline(deadline, _REQUEST_SECONDS)
         diagnostic_deadline = _BudgetDeadline(operation_deadline, _DIAGNOSTIC_SECONDS)
         return self._diagnostics.capture(diagnostic_deadline)
+
+    async def recover(self, deadline: Deadline) -> LifecycleResponse:
+        """Retire every slot proven dead and release the identity its failed unit retains.
+
+        ADR-0657 permits clearing the on-disk slot facts and releasing the fence for a slot
+        proven dead, and forbids fabricating a ``TerminationOutcome``. Every outcome published
+        here is derived by ``_terminal_observation`` from a current systemd observation, exactly
+        as ``stop`` derives it; nothing is synthesized for a slot systemd cannot account for.
+        What ``stop`` cannot reach is the unit itself: it is left ``failed`` holding the
+        ``InvocationID`` that ``require_inactive`` refuses, and only ``reset-failed`` clears it.
+        """
+        operation_deadline = _BudgetDeadline(deadline, _REQUEST_SECONDS)
+        results: list[SlotResult] = []
+        try:
+            for store in self._stores:
+                result = await self._recover_slot(store, operation_deadline)
+                if result is not None:
+                    results.append(result)
+        except Exception as exc:
+            return self._failure_response(exc, operation_deadline)
+        if any(result.code == _RECOVERY_REFUSED for result in results):
+            return LifecycleResponse(
+                ok=False,
+                code="conflict",
+                message="recovery refused a fixed worker unit with live processes",
+                retry_action="operator_recovery",
+                slots=tuple(results),
+            )
+        return _ok_response("worker slots recovered", tuple(results))
+
+    async def _recover_slot(self, store: SlotStorage, deadline: Deadline) -> SlotResult | None:
+        observation = self._systemd_call(deadline, self._runtime.observe, store.unit, deadline)
+        if observation.unit != store.unit:
+            raise LifecycleConflict("systemd returned a foreign unit observation")
+        retained_identity = isinstance(observation, UnitObservation)
+        if retained_identity:
+            if observation.membership == "unknown":
+                raise SystemdUnavailable("worker cgroup membership is unavailable")
+            if observation.membership == "populated":
+                return SlotResult(
+                    slot=store.slot,
+                    unit=store.unit,
+                    code=_RECOVERY_REFUSED,
+                    message="fixed worker unit still has live processes",
+                )
+        state = self._store_call(deadline, store.load)
+        retired = (
+            None if state is None else await self._retire_slot(store, state, observation, deadline)
+        )
+        if retained_identity:
+            # Only a unit systemd still accounts for can be holding an identity to release; a
+            # BootObservation is already the inactive, empty-identity state `require_inactive`
+            # wants, so resetting it would be a no-op that hides which slots this call touched.
+            self._systemd_call(deadline, self._runtime.reset_failed, store.unit, deadline)
+        if retired is not None:
+            return _result(retired)
+        if retained_identity:
+            return SlotResult(
+                slot=store.slot, unit=store.unit, message="cleared the retained unit identity"
+            )
+        return None
+
+    async def _retire_slot(
+        self,
+        store: SlotStorage,
+        state: SlotState,
+        observation: UnitObservation | BootObservation,
+        deadline: Deadline,
+    ) -> SlotState:
+        if state.phase is SlotPhase.PREPARED:
+            # Registration happens at the gated-to-registered step, so a prepared generation
+            # holds no fence and has no published evidence to reconcile: its files are discarded
+            # rather than retired, which is what `stop` does for the same phase.
+            self._store_call(deadline, store.discard_prepared, state)
+            return state
+        if state.phase is not SlotPhase.TERMINATED:
+            outcome = _terminal_observation(state, observation)
+            if outcome is None:
+                # `_recover_slot` refuses a populated cgroup over this same observation before
+                # reaching here, and that is the only condition under which the observation
+                # declines to yield an outcome. Kept so a reordering fails closed instead of
+                # retiring a live worker's binding.
+                raise LiveWorkerRefused("fixed worker unit still has live processes")
+            state = await self._terminate_for_stop(store, state, outcome, deadline)
+        self._post_evidence_cleanup(store, state, deadline)
+        return state
 
     async def _replace_current_fleet(self, deadline: Deadline) -> None:
         bound: list[tuple[SlotStorage, SlotState]] = []
@@ -739,6 +832,14 @@ def _map_failure(error: Exception, *, diagnostic: bool) -> tuple[ResponseCode, R
             "conflict",
             "operator_recovery",
             "worker incarnation conflicts with an active fence",
+        )
+    if isinstance(error, LiveWorkerRefused):
+        # Distinct from every other conflict: nothing about the retained facts is wrong, the
+        # unit is simply still running and recovery will not clear a fence beneath it.
+        return (
+            "conflict",
+            "operator_recovery",
+            "recovery refused a fixed worker unit with live processes",
         )
     if isinstance(error, _AuthorityUnavailable):
         return "dependency_unavailable", "restore_database", "database authority is unavailable"

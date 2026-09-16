@@ -268,3 +268,23 @@ def test_result_and_response_strings_use_utf8_byte_limits() -> None:
             message="é" * 2049,
             retry_action="retry_same_operation",
         )
+
+
+def test_recover_is_a_configuration_free_operation() -> None:
+    """`recover` carries no `worker_count` or `settings`, exactly as `stop` and `status` do."""
+    assert LifecycleRequest(operation="recover").operation == "recover"
+
+    with pytest.raises(ValidationError, match="only start requires worker_count and settings"):
+        LifecycleRequest(operation="recover", worker_count=1)
+
+
+def test_adding_the_recover_operation_moved_the_protocol_identity() -> None:
+    """`require_compatible_lifecycle` compares this identity, so the grammar change is visible.
+
+    Held against the identity the four-operation grammar produced: a host whose installed venv
+    predates `recover` must fail closed rather than accept a request it cannot dispatch.
+    """
+    four_operation_identity = "1:c82a1e3b1d4d53ffada17d5e867639c8fa878f0c2e97d0c6cfccd84e9cab6803"
+
+    assert lifecycle_protocol_identity() != four_operation_identity
+    assert lifecycle_protocol_identity().startswith(f"{LIFECYCLE_PROTOCOL_VERSION}:")
