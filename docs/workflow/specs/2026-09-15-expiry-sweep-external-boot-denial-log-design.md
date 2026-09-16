@@ -24,14 +24,28 @@ behavioural test.
 
 `src/kdive/services/allocation/release.py` is in the permitted surface and is **not** changed.
 Issue #2519's second half asks whether refusing release is ADR-0596's intent once the lease has
-elapsed. It is: ADR-0596 admits `allocation_release` only when no activation restricts a System
-the Allocation owns, because the authority is held only while its Allocation is live, and
-terminating the Allocation first strands the release, cleanup and teardown path that would
-clear the activation. `expired` is as terminal as `released`, so the guard is correct here. The
-hold is not permanent either: `repair_external_boot_lane` (same reconcile pass) enqueues those
-successors for a stranded activation, and `get_restricting_for_system`
-(`src/kdive/db/external_boot_activations.py`) stops matching once `cleanup_complete` is set, so
-the next sweep expires the allocation. No ADR is written and no guard code changes.
+elapsed. `guard_external_boot_release` delegates to `check_external_boot_admission`, so two
+denial arms reach this branch and the answer differs by arm:
+
+- **A restricting activation** (`reason=external_boot_restricted`). Refusal is ADR-0596's
+  intent: the authority is held only while its Allocation is live, and terminating the
+  Allocation first strands the release, cleanup and teardown path that would clear the
+  activation. `expired` is as terminal as `released`, so the guard is correct. Convergence is
+  partial, not automatic — `repair_external_boot_lane` enqueues successors only for the states
+  its `_CANDIDATE_SQL` lanes select, and `get_restricting_for_system`
+  (`src/kdive/db/external_boot_activations.py`) stops matching only once the activation is
+  `recovered`, `abandoned` or `torn_down` **and** `cleanup_complete`. An activation parked in
+  `active` matches no lane, so its exit is an operator `systems.teardown`, which
+  `_ALWAYS_ADMITTED` keeps open in every restricting state.
+- **The ADR-0623 authority-ownership fence**
+  (`reason=authority_system_preactivation_mutation_fenced`), raised whenever
+  `ordinary_mutation_is_fenced` holds — every `authority_system_ownership` state except
+  `activated`. Whether refusal is still intended for `torn-down`, where preactivation teardown
+  has already proved absence while the slot stays held, is a different record's question. It is
+  not settled here and is reported as a follow-up candidate.
+
+No ADR is written and no guard code changes: the charter permits a guard change only where the
+review finds refusal unintended, and the fence arm's verdict needs its own design.
 
 Out of scope, with owners: live-stack test fixtures releasing without `try/finally` (#2520);
 redesigning the reap architecture (none — the four records above stand); metrics or alerting
@@ -49,7 +63,8 @@ database call is added or moved.
 
 1. A sweep pass over an allocation whose System carries a restricting external-boot activation
    emits exactly one `WARNING` from `kdive.reconciler.repairs.allocations` naming the
-   allocation id and the denial, and the allocation stays non-terminal with `reclaimed` at 0.
+   allocation id and the denial's own `reason`, and the allocation stays non-terminal with
+   `reclaimed` at 0. The message states no cause of its own, so it is true for both arms above.
 2. No other outcome emits that record: the two no-op returns above the branch are unedited, and
    a clean reclaim keeps only its existing `INFO` line.
 3. The `PROJECT → ALLOCATION` acquisition order and the scope over which both are held are
@@ -59,10 +74,11 @@ database call is added or moved.
 
 ## Failure model
 
-**Actors and deployments.** The reconciler process only: `_expire_one` is module-private with
-one caller, `sweep_expired_allocations`, wired into `reconcile_once`
-(`src/kdive/reconciler/loop.py`); no agent, MCP tool, or untrusted caller reaches it. Designed
-for every deployment running the reconciler, on the root handler its other lines already use.
+**Actors and deployments.** The reconciler process only: `_expire_one` has one production
+caller, `sweep_expired_allocations`, wired into `reconcile_once`, plus the
+`kdive.reconciler.loop` re-export (`loop.py:136`) that
+`tests/adversarial/test_lease_expiry_renew_race.py` drives directly. No agent, MCP tool, or
+untrusted caller reaches it. Designed for every deployment running the reconciler.
 
 **Invariants and assets at stake.**
 
@@ -77,13 +93,19 @@ for every deployment running the reconciler, on the root handler its other lines
 - One record per refused candidate per pass, so a permanently stuck allocation logs once every
   `DEFAULT_INTERVAL` (30s). Accepted: the rate the sibling `except Exception` handler and
   `repair_external_boot_lane` already log at, for a condition that needs an operator.
-- The record is emitted while both advisory locks are held. Accepted and bounded: a synchronous
-  format-and-write to the process's stream handler (`src/kdive/log.py`) with no database access
-  and no `await`, alongside several database round trips already inside the same lock window;
-  the OTLP arm of the bridge is a `BatchLogRecordProcessor`, so it queues rather than blocking.
+- The record is emitted while both advisory locks are held. Accepted and bounded: the
+  reconciler's live emit path is the OTel `LoggingHandler` bridge — `RedactingLogProcessor`
+  then `SimpleLogRecordProcessor(StdoutJsonLogExporter())` in-band, with the OTLP
+  `BatchLogRecordProcessor` queueing behind `otlp_enabled()`, `src/kdive/log.py`'s stream
+  handler being detached by `remove_stdlib_floor()`. That is a synchronous stdout write with no
+  database access and no `await`, alongside several database round trips already inside the
+  same lock window.
 - `logging` raising into the locked region. Not reachable: the format string and its arguments
   are fixed at the call site, `UUID` and the denial's bounded-scalar `details` cannot raise on
-  conversion, and the stdlib routes handler errors through `handleError`, not the caller.
+  conversion, the stdlib routes handler `emit` errors through `handleError`, and the two
+  handler filters that run outside that guard cannot raise here either —
+  `SecretRedactionFilter.filter` wraps `record.getMessage()` in its own `try`/`except` and
+  `ContextFilter` only reads contextvars.
 
 **Covered elsewhere.** Whether a stranded activation converges — ADR-0596 and
 `repair_external_boot_lane`. Live-stack fixture releases — #2520. A richer signal — out of batch.
@@ -92,10 +114,11 @@ for every deployment running the reconciler, on the root handler its other lines
 
 - **A refused expiry is logged** — `Mode: focused-test`, extending
   `tests/services/external_boot/test_allocation_release.py::test_expiry_retains_an_allocation_needed_for_external_boot_cleanup`.
-  Red: no `WARNING` from the repair module. Green: one record carrying the allocation id.
-- **A clean reclaim is not logged as a refusal** — `Mode: focused-test`, new case in the same
-  file seeding a cleaned activation so the guard admits. Red if the call sits outside the
-  `except` branch.
+  Red: no `WARNING` from the repair module. Green: one record carrying the allocation id and
+  `DENIAL_REASON`.
+- **A clean reclaim keeps its `INFO` line and logs no refusal** — `Mode: focused-test`, new
+  case in the same file seeding a cleaned activation so the guard admits. Red if the call sits
+  outside the `except` branch.
 - **Lock ordering and hold scope are unchanged** — `Mode: task-test-not-applicable`. The two
   `advisory_xact_lock` calls and their `async with` header are not edited, so the revisions are
   byte-identical there and no observation distinguishes them;
