@@ -68,16 +68,23 @@ host that was going to fail still fails.
 The hosted `live_vm_tcg` spine provisions too, and stays advisory. `live.yml:549` already has the
 capture shape, so it would honour `required`, but `live.yml` is outside #2568's surface and its
 guard at `:550-553` catches only a missing token — so a preflight `FAIL` that still permits the
-mint keeps the #2568 shape on that tier until it declares `required`. That is a residual this
-record leaves open, not one it closes.
+mint keeps the #2568 shape on that tier until it declares `required`. That residual is recorded in
+`docs/debt/0016-live-vm-tcg-spine-discards-a-preflight-fail.md`; this record leaves it open.
 
 The two severities are not a classification of `FAIL` entries, so a caller declaring `required`
 gets **all nine** of `check-local-libvirt.sh`'s blocking checks as gates, including ones its next
 step does not use. `KDIVE_PREFLIGHT_KDUMP=optional` downgrades exactly one of the nine, so it is
 not the bound; the bound is that the only caller declaring `required` provisions a real domain
-through the local-libvirt provider and needs every one of them. #2568's quoted native-runner
-preflight output carries a single `FAIL`, which is evidence the other eight pass on that host
-today.
+through the local-libvirt provider and needs every one of them.
+
+Three of those nine probe `qemu:///system` (`_in_libvirt_group`, `_virsh_connects`,
+`_default_net_active`) while the native tier provisions through the published *session* endpoint
+(`live.yml:726-727`), so they are the ones that could take a passing job red for a daemon it does
+not use. They do not, because the role stack that stands up that host provisions all three:
+`libvirt_stack` enables and starts the libvirt sockets, `libvirt_pool_net` holds the `default`
+network `active` and `autostart`, and `live_vm_host/tasks/verify.yml:40-45` fails its own verify
+unless the service account is in `kvm` and `libvirt`. The session endpoint is an additional daemon
+for the worker's domains, not a replacement for the system one.
 
 A fifth caller added later inherits `advisory` silently. That is the same default this record
 preserves, and it fails the way `onboard.sh` fails today rather than in a new way. In the other

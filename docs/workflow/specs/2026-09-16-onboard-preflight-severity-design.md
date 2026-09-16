@@ -29,13 +29,13 @@ hosts; the `postinst.d` relabel hook (#2567); `just ci` recipe coverage (#2582).
   hosted `live_vm_tcg` and self-hosted native `live_vm` CI jobs.
 - **Invariants at stake** — the advisory default for callers that only fund a project; a demo with
   no provisionable libvirt still onboarding. The stop precedes `migrate`, stranding no rows.
-- **Accepted classes** — `required` gates all nine blocking checks, not only those the caller's next
-  step uses (that caller provisions and needs every one; #2568's quoted runner output carries one
-  `FAIL`, so the other eight pass there). The `live_vm_tcg` spine provisions too and stays advisory
-  (`live.yml` is out of scope). Exporting `ONBOARD_PREFLIGHT=required` globally reaches
-  `demo-up.sh:66` (known cost of the category — `scripts/live-stack/README.md:54`). No trust
-  boundary moves, so no threat model.
-- **Covered elsewhere** — surviving a kernel upgrade: #2567.
+- **Accepted classes** — `required` gates all nine blocking checks, not only those the next step
+  uses. The three probing `qemu:///system` pass on the native host: `libvirt_stack` starts the
+  system sockets, `libvirt_pool_net` activates `default`, `live_vm_host`'s `verify.yml:40-45`
+  gates on `libvirt` group. Exporting it globally reaches `demo-up.sh:66` (category cost, warned
+  in `onboard.sh`'s header). No trust boundary moves, so no threat model is warranted.
+- **Covered elsewhere** — kernel upgrades: #2567. The advisory `live_vm_tcg` spine (`live.yml` out
+  of scope): `docs/debt/0016-live-vm-tcg-spine-discards-a-preflight-fail.md`.
 
 ## Success
 
