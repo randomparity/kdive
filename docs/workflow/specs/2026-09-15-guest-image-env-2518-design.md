@@ -17,8 +17,8 @@ and it stages the very file. The native spine exports that staged path (not the 
 and aliases the bare `KDIVE_DATABASE_URL` the proof reads, as the tcg spine does. Both `env.sh`
 files gain a comment naming the omission, and `live-testing.md` records the tri-state exception.
 
-Rejected — hard-require it in `scripts/live-stack/env.sh`. verified: six non-`live_vm` scripts
-source that file, so it would break `just stack-migrate` (the PR body lists them).
+Rejected — hard-require it in `scripts/live-stack/env.sh`. verified: six scripts under
+`scripts/` source it and none of them boots a guest, so it would break `just stack-migrate`.
 
 Rejected — default it there. verified: `/var/lib/kdive/rootfs/local/` holds 11 kdive-ready qcow2
 across 4 distro families including `-ppc64le`, so no arch-neutral default resolves.
@@ -54,7 +54,7 @@ Covered elsewhere:
   the change that run exits 0 with `1 skipped`. Green: both fault arms exit non-zero naming it.
 - **Provisioned family (2).** Mode: focused-test — `tests/scripts/test_live_vm_preflight.py`
   covers unset, a path that never landed, and a staged image.
-- **Native spine wiring (3).** Mode: focused-test for the guest image —
-  `test_live_workflow_shape.py` pins it to `mint-system.sh`'s basename inside the allowed root.
+- **Native spine wiring (3).** Mode: focused-test — `test_live_workflow_shape.py` pins the
+  guest-image export to `mint-system.sh`'s staged path, and pins the DSN alias to the native job.
 - **`env.sh` comments (4).** Mode: task-test-not-applicable — comment-only edits changing no
   shell behavior. Nothing asserts the variable's ABSENCE from `env.sh`; stated, not closed.

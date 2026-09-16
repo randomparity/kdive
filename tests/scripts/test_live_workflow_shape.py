@@ -101,7 +101,12 @@ def test_native_guest_image_names_the_rootfs_mint_system_stages() -> None:
     mint = (_ROOT / "scripts" / "live-vm" / "mint-system.sh").read_text(encoding="utf-8")
 
     def _one(prefix: str, text: str, where: str) -> str:
-        found = [ln.strip() for ln in text.splitlines() if ln.strip().startswith(prefix)]
+        # Tolerate a `readonly`/`declare`/`local` qualifier: adding one is a benign edit that
+        # must not read as a rename.
+        stripped = (
+            re.sub(r"^(readonly|declare|local)\s+", "", ln.strip()) for ln in text.splitlines()
+        )
+        found = [ln for ln in stripped if ln.startswith(prefix)]
         assert len(found) == 1, f"expected exactly one `{prefix}` line in {where}, got {len(found)}"
         return found[0][len(prefix) :].split(" #")[0].strip().strip("\"'")
 

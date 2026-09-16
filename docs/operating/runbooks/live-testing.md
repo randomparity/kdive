@@ -73,6 +73,13 @@ exposes the `require_live_vm_throwaway` / `require_live_vm_bzimage` /
 analogue of the `require_issuer` / `require_stack` / `require_guest_arch` gates
 the stack tiers use.
 
+`KDIVE_GUEST_IMAGE` is the exception in that table: it is read by the proof
+itself and asserted by `preflight-env.sh`'s `provisioned` family, not by
+`require_live_vm_provisioned`. Its consumer carries the bare `live_vm` marker,
+so `pytest -m live_vm_provisioned` deselects it — run the whole tier, the way
+`just test-live` and the native CI job do, or that proof silently drops out of
+the selection before its gate can fire (#2518).
+
 The **remote** family is the fourth (#1424, epic #1423): the only `live_vm`
 family that drives a genuinely remote `qemu+tls://` host the worker shares no
 filesystem with, so remote-provider capabilities get a direct provider-op proof
