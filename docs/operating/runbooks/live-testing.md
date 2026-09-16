@@ -29,8 +29,10 @@ tier is not a single harness.
 
 `just test` (the default PR suite) selects `-m "not live_vm and not
 live_stack"`, so none of the tiers below run in the ordinary gate. Each tier
-**skips cleanly** when its environment is absent — but a tier whose env is set
-*wrong* fails loud rather than skipping (see [Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
+*gate* **skips cleanly** when its environment is absent — but a tier whose env is
+set *wrong* fails loud rather than skipping (see [Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
+Above the gates, `just test-live-tcg` makes the recipe itself red when no proof
+passed, so an all-skip tcg run cannot read as green (#2517).
 
 The `live_vm` tier spans four families (below); `just test-live` runs all of them
 (each gated), and one — the remote-libvirt family, which drives a remote
@@ -398,12 +400,15 @@ overlay, kernel volume, or initrd volume from the invocation remains.
 
 ```
 just stack-backends          # the tier runs over the live-stack vehicle
-just test-live-tcg     # -m live_vm_tcg; skips cleanly without the foreign emulator
+just test-live-tcg     # -m live_vm_tcg; fails loud unless a proof actually passed
 ```
 
 This runs the four ppc64le provision→boot→crash→retrieve proofs under TCG. It
 needs the foreign qemu emulator (e.g. `qemu-system-ppc64`) **and** a running
-stack; it skips cleanly (pytest exit 5 tolerated) without either. Because TCG
+stack. Without either, the recipe exits non-zero and names the tier: it runs
+`scripts/live-vm/preflight-env.sh tcg` first, then requires a real `<N> passed`
+summary, so a run where every proof skipped or none was collected is red rather
+than a green exit 0 that proved nothing (#2517). Because TCG
 needs no `/dev/kvm`, this is the tier that runs on a hosted `ubuntu-latest`
 runner. The ppc64le prerequisites and container images are in the
 [cross-platform guide](../../development/cross-platform.md).

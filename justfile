@@ -267,19 +267,33 @@ test-agent-smoke:
 test-live:
     uv run python -m pytest -m "live_vm and not live_vm_tcg" -q
 
-# --strict-markers fails a mis-marked test; pytest exit 5 ("no tests collected") is tolerated as a
-# clean skip, other codes propagate. Needs the foreign qemu emulator (e.g. qemu-system-ppc64) AND a
-# running stack (`just stack-backends` + fixtures); the tests skip cleanly without either.
+# --strict-markers fails a mis-marked test. Needs the foreign qemu emulator (e.g.
+# qemu-system-ppc64) AND a running stack (`just stack-backends` + fixtures + `just onboard`).
+# preflight-env.sh covers the tcg ENV CONTRACT only; a prerequisite outside it — the proofs' own
+# KDIVE_DATABASE_URL gate, say — still skips at run time, which the summary gate below turns red.
+#
+# A run that proved nothing is RED here, never green (#2517): pytest exits 0 when every proof
+# skips and 5 when none is collected, so neither code distinguishes "the tier passed" from "the
+# tier never ran". Gate on the same '<N> passed' summary the hosted spine greps, which closed
+# this hole for CI in #2048 while this developer-facing recipe kept it.
 #
 # Run the emulated foreign-arch (TCG) tier: the four ppc64le provision→boot→crash→retrieve proofs.
 test-live-tcg:
     #!/usr/bin/env bash
     set -euo pipefail
+    ./scripts/live-vm/preflight-env.sh tcg
+    summary="$(mktemp)"
+    trap 'rm -f "$summary"' EXIT
     rc=0
-    uv run python -m pytest -m live_vm_tcg --strict-markers -q || rc=$?
-    if [[ "$rc" -eq 5 ]]; then
-      echo "no live_vm_tcg tests collected — skipping cleanly (marked suite absent)"
-      exit 0
+    # `pipefail` above is load-bearing: without it `| tee` would report tee's status and turn a
+    # genuinely failing proof run into a second silent green.
+    uv run python -m pytest -m live_vm_tcg --strict-markers -q | tee "$summary" || rc=$?
+    if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$summary"; then
+      echo "just test-live-tcg: no '<N> passed' summary from the live_vm_tcg tier (pytest rc=$rc)." >&2
+      echo "A skipped, empty, or wholly failed tier proved nothing and must never read green." >&2
+      echo "Read the SKIPPED reasons above: a proof-level gate outside the tcg preflight contract" >&2
+      echo "(KDIVE_DATABASE_URL, say) skips every proof while preflight itself reports success." >&2
+      exit 1
     fi
     exit "$rc"
 
