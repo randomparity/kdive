@@ -667,6 +667,11 @@ def test_resolve_ssh_endpoint_absent_domain_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         resolver(_SYSTEM)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # The reason tag is what keeps this apart from "no recorded forward" downstream (#2502).
+    assert exc.value.details["reason"] == "system_domain_not_found"
+    # The message names the check #2480 needed: a server on a different libvirt endpoint than
+    # the worker finds no domain for a healthy System.
+    assert "libvirt endpoint" in str(exc.value)
     assert conn.closed == 1
 
 
@@ -677,6 +682,7 @@ def test_resolve_ssh_endpoint_without_a_recorded_port_is_configuration_error() -
     with pytest.raises(CategorizedError) as exc:
         resolver(_SYSTEM)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["reason"] == "ssh_not_provisioned"
     assert "SSH forward" in str(exc.value)
     assert "reprovision" in str(exc.value)
 
@@ -745,10 +751,46 @@ def test_recorded_ssh_endpoint_returns_host_port() -> None:
 
 def test_recorded_ssh_endpoint_none_when_not_provisioned() -> None:
     def _raise(_s):
-        raise CategorizedError("no ssh", category=ErrorCategory.CONFIGURATION_ERROR)
+        raise CategorizedError(
+            "no ssh",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "ssh_not_provisioned"},
+        )
 
     connector = _recorded_endpoint_connector(_raise)
     assert connector.recorded_ssh_endpoint(SystemHandle("sys-1")) is None
+
+
+def test_recorded_ssh_endpoint_reraises_absent_domain() -> None:
+    """A missing domain is a different fault from a missing forward, so it must not become None.
+
+    Collapsing it is what let #2480 surface an endpoint-resolution defect as an SSH provisioning
+    gap (#2502, ADR-0658).
+    """
+
+    def _raise(_s):
+        raise CategorizedError(
+            "System 'sys-1' has no libvirt domain on this connection",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "system_domain_not_found"},
+        )
+
+    connector = _recorded_endpoint_connector(_raise)
+    with pytest.raises(CategorizedError) as excinfo:
+        connector.recorded_ssh_endpoint(SystemHandle("sys-1"))
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "system_domain_not_found"
+
+
+def test_recorded_ssh_endpoint_reraises_untagged_configuration_error() -> None:
+    """Only the no-forward reason maps to None; anything else propagates rather than lying."""
+
+    def _raise(_s):
+        raise CategorizedError("something else", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    connector = _recorded_endpoint_connector(_raise)
+    with pytest.raises(CategorizedError):
+        connector.recorded_ssh_endpoint(SystemHandle("sys-1"))
 
 
 def test_recorded_ssh_endpoint_reraises_infrastructure_failure() -> None:

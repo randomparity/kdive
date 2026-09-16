@@ -239,8 +239,15 @@ class Connector(Protocol):
         ``None`` means the System was not provisioned with an SSH forward, so no agent SSH is
         available. Providers without a local SSH endpoint to disclose return ``None``.
 
+        ``None`` is not a catch-all for "could not resolve an endpoint" (ADR-0658): an
+        implementation that can tell a different configuration fault apart — a System with no
+        domain on the provider's connection, say — raises it with a discriminating
+        ``details["reason"]`` instead of collapsing it here, so a caller can report which
+        condition occurred.
+
         Raises:
-            CategorizedError: ``INFRASTRUCTURE_FAILURE`` on an unexpected provider read error.
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` on an unexpected provider read error;
+                ``CONFIGURATION_ERROR`` for a configuration fault that is not an absent forward.
         """
         ...
 
