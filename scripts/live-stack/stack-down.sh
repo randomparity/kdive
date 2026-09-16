@@ -99,12 +99,20 @@ fi
 
 # kdive domain names on stdout, one per line, with virsh's status preserved -- and, on failure,
 # virsh's diagnostic printed instead of the names. lib.sh's kdive_domains() discards stderr and
-# ends in `|| true`, so an endpoint that RESOLVES but does not answer (a daemon that is down, or
-# the wrong-daemon URI libvirt-uri.sh:119-121 warns about) enumerates byte-identically to a host
-# holding no kdive domains -- and `require_libvirt_uri` above proved only that the contract
+# ends in `|| true`, so an endpoint that RESOLVES but does not answer enumerates byte-identically
+# to a host holding no kdive domains, and `require_libvirt_uri` above proved only that the contract
 # resolved, never that anything answers it. The probe supplies the status that `|| true` swallows;
 # kdive_domains still supplies the names, so what counts as a kdive domain stays defined once.
-# Bare virsh, matching kdive_domains: which privilege the reap should hold is #2516's question.
+#
+# What this distinguishes is an endpoint that answers from one that does not, and NOTHING MORE. It
+# does not cover the wrong-daemon URI of libvirt-uri.sh:119-122: a daemon that is running but holds
+# no kdive domains answers with exit 0 and no output, which is why every zero-domain report below
+# names the endpoint it consulted rather than calling the host clean.
+#
+# Bare virsh, matching kdive_domains, while destroy and undefine below run under sudo -- so for an
+# explicit per-identity endpoint (`qemu:///session`, `qemu+ssh://`) the list that GRADES the reap
+# can come from a different daemon than the one the removal MUTATED. Which privilege each reap call
+# should hold is #2516's question and is not settled here; the reporting consequence is.
 enumerate_kdive_domains() {
   local probe_err
   probe_err="$(virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1 >/dev/null)" || {
@@ -115,7 +123,7 @@ enumerate_kdive_domains() {
 }
 
 if [[ "$wipe" == "1" ]]; then
-  echo "=== reaping kdive-* libvirt domains + overlays ==="
+  echo "=== reaping kdive-* libvirt domains + overlays at ${KDIVE_LIBVIRT_URI} ==="
   # Every call here used to end in `|| true` and the block printed one `destroying <domain>` line
   # per name it INTENDED to reach, then `done` regardless -- so a reap that removed nothing still
   # reported success (#2515) and the next run started from a state nobody expects. Every line below
@@ -126,7 +134,12 @@ if [[ "$wipe" == "1" ]]; then
   declare -A undefine_err=()
   if ! listing="$(enumerate_kdive_domains)"; then
     unreaped+=("kdive domains: cannot enumerate at ${KDIVE_LIBVIRT_URI}, so an empty list is not evidence of an empty host -- ${listing}")
-  elif [[ -n "$listing" ]]; then
+  elif [[ -z "$listing" ]]; then
+    # Named, never bare: an endpoint that answers with nothing is either a clean host or the
+    # wrong daemon of the two libvirt-uri.sh publishes, and nothing here can tell those apart.
+    # Saying which daemon produced the zero is the whole of what this script can honestly offer.
+    echo "  no kdive domains at ${KDIVE_LIBVIRT_URI}"
+  else
     mapfile -t domains <<<"$listing"
     for dom in "${domains[@]}"; do
       # `destroy` keeps its suppression: a domain already shut off answers non-zero and that is not
@@ -185,10 +198,15 @@ if [[ "$wipe" == "1" ]]; then
   if ((${#reaped[@]})); then
     printf '  removed %s\n' "${reaped[@]}"
   fi
-  echo "reaped ${#reaped[@]} item(s)"
+  echo "reaped ${#reaped[@]} item(s) at ${KDIVE_LIBVIRT_URI}"
   if ((${#unreaped[@]})); then
     echo "ERROR: --wipe did not reap the host; ${#unreaped[@]} item(s) remain:" >&2
     printf '  %s\n' "${unreaped[@]}" >&2
+    # The volume drop is irreversible and it already ran, thirty lines above: every failure this
+    # block can report is discovered after it. An operator reading only the list would infer the
+    # database survived, so the state the run has already reached is stated rather than implied.
+    echo "the compose data volumes were already dropped before this reap ran; the stack brings up" >&2
+    echo "on an empty database once the items above are dealt with, or re-run without --wipe" >&2
     exit 1
   fi
 fi

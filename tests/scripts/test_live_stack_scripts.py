@@ -1318,17 +1318,23 @@ def test_wipe_names_every_domain_and_overlay_it_removed(tmp_path: Path) -> None:
     assert result.stdout.rstrip().endswith("done")
 
 
-def test_wipe_reports_an_empty_host_as_removing_nothing(tmp_path: Path) -> None:
-    """The honest end of the same criterion: nothing to reap reports nothing reaped.
+def test_wipe_names_the_endpoint_a_zero_domain_report_came_from(tmp_path: Path) -> None:
+    """A host with no kdive domains and no overlays is a legitimate success, so it must not be
+    reported as a failure -- but it must not be reported as a clean host either.
 
-    A host with no kdive domains and no overlays is a legitimate success, so it must not be
-    reported as a failure -- but it must also not be reported in the same words as a host that
-    was actually wiped, which is how the silent no-op passed for success in the first place.
+    An endpoint that answers with an empty list is either a clean host or the wrong daemon of
+    the two `libvirt-uri.sh` publishes, holding no kdive domains while the real ones survive on
+    the other. The liveness probe cannot tell those apart -- it grades connectivity, not identity
+    -- and neither can anything else available locally. Naming the endpoint every zero came from
+    is the whole of what this script can honestly offer, so `reaped 0 item(s)` is never readable
+    on its own as "this host is clean".
     """
     result = _wipe_reap(tmp_path, domains=())
     assert result.returncode == 0, result.stderr
     assert "removed domain" not in result.stdout
     assert "reaped 0 item(s)" in result.stdout
+    assert f"no kdive domains at {_PUBLISHED_URI}" in result.stdout
+    assert f"reaped 0 item(s) at {_PUBLISHED_URI}" in result.stdout
 
 
 def test_wipe_exits_non_zero_and_names_a_domain_it_could_not_undefine(tmp_path: Path) -> None:
@@ -1398,6 +1404,9 @@ def test_wipe_refuses_an_empty_domain_list_from_an_endpoint_that_does_not_answer
     assert not result.stdout.rstrip().endswith("done")
     # Half a wipe is worse than none: the surviving domains keep their backing disks.
     assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+    # The volume drop is irreversible and already ran, so a failure list that does not mention it
+    # leaves the operator to infer the database survived.
+    assert "compose data volumes were already dropped" in result.stderr
 
 
 def test_wipe_exits_non_zero_and_names_an_overlay_it_could_not_remove(tmp_path: Path) -> None:
