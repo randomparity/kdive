@@ -86,7 +86,8 @@ load_published_libvirt_uri() {
 
 # Export the one host-local libvirt endpoint every consumer a live-stack entry point starts must
 # share — server, reconciler, lifecycle worker, the `virsh` gates, teardown (#2480). An explicit
-# caller value wins; otherwise the published session URI when the lifecycle contract is installed;
+# caller value wins — reported, since #2509, where it contradicts a valid published contract;
+# otherwise the published session URI when the lifecycle contract is installed;
 # otherwise the bare-host default. lib.sh and env.sh both call it, so the endpoint no longer
 # depends on which entry point brought the stack up.
 #
@@ -152,6 +153,28 @@ resolve_libvirt_uri() {
       }
     else
       KDIVE_LIBVIRT_URI=qemu:///system
+    fi
+  else
+    # #2509, ADR-0661: an explicit override is deliberate and stays supported, but on a host that
+    # publishes a contract one that disagrees puts this shell and the worker processes on
+    # different daemons — the #2480 split, reached through the one path still allowed to be
+    # silent. Report it and honour it; refusing would break the escape hatch the abort message
+    # above, stack-status.sh and the live-testing runbook all send an operator to.
+    #
+    # Both halves of a loader failure are caught here, because this is the path that exists to
+    # get past a broken contract. Its stderr is discarded: it writes its refusal BEFORE returning
+    # 1, so an untrusted or allowlist-refused /etc entry would otherwise report itself on the one
+    # path that must stay quiet. And the assignment is split from the declaration, because
+    # `local v="$(f)"` takes `local`'s exit status, not f's — but a split assignment carries f's,
+    # which under the callers' `set -e` aborts the sourcing shell, so the `||` is load-bearing
+    # rather than decorative. Both were caught in review; neither is inferable from the result.
+    local published
+    published="$(load_published_libvirt_uri 2>/dev/null)" || published=''
+    if [[ -n "$published" && "$KDIVE_LIBVIRT_URI" != "$published" ]]; then
+      echo "KDIVE_LIBVIRT_URI is set to ${KDIVE_LIBVIRT_URI}, but ${LIBVIRT_ENV} publishes" \
+        "${published}; honouring the override" >&2
+      echo "every process this stack starts will use the override; unset KDIVE_LIBVIRT_URI to" \
+        "use the published endpoint instead" >&2
     fi
   fi
   # Reached only with an endpoint in hand, so the record is stale by definition: clearing it here

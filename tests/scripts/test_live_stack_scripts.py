@@ -924,17 +924,18 @@ def test_live_stack_libvirt_uri_reaches_child_processes(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("preset", "published", "expected"),
+    ("preset", "published", "expected", "reports"),
     [
-        ("", False, "qemu:///system"),
-        ("", True, _PUBLISHED_URI),
-        # An explicit caller value wins over both, published contract or not.
-        ("qemu:///system", True, "qemu:///system"),
-        ("qemu+ssh://elsewhere/system", False, "qemu+ssh://elsewhere/system"),
+        ("", False, "qemu:///system", False),
+        ("", True, _PUBLISHED_URI, False),
+        # An explicit caller value still wins over both, published contract or not -- but since
+        # #2509 one that contradicts a *valid* contract says so on stderr on its way through.
+        ("qemu:///system", True, "qemu:///system", True),
+        ("qemu+ssh://elsewhere/system", False, "qemu+ssh://elsewhere/system", False),
     ],
 )
 def test_live_stack_env_resolves_one_libvirt_endpoint(
-    tmp_path: Path, preset: str, published: bool, expected: str
+    tmp_path: Path, preset: str, published: bool, expected: str, reports: bool
 ) -> None:
     """env.sh set no libvirt endpoint at all before #2480, so the bare runbook invocation of
     stack-services.sh left the daemons on a different endpoint from the worker's. Reading the
@@ -951,6 +952,82 @@ def test_live_stack_env_resolves_one_libvirt_endpoint(
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == expected
+    # Which value the resolver settles on is unchanged by the report; only stderr moves.
+    assert (result.stderr != "") is reports, result.stderr
+
+
+def test_a_preset_contradicting_the_contract_is_reported(tmp_path: Path) -> None:
+    """#2509: the preset branch short-circuited without ever reading the published contract, so a
+    preset that disagreed with it put the operator's shell and the worker processes on different
+    daemons with no message -- the #2480 split, reached through the one path still allowed to be
+    silent. ADR-0661: report it, do not refuse it.
+
+    The report has to name both values and the way back. A bare "these disagree" leaves the
+    operator with the fact that made the contract unreadable in the first place.
+    """
+    _, staged = _published_contract(tmp_path)
+    staged["KDIVE_LIBVIRT_URI"] = "qemu:///system"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        staged,
+    )
+    # Honoured, not refused: the exported value a child sees is still the operator's.
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "qemu:///system"
+    assert "qemu:///system" in result.stderr
+    assert _PUBLISHED_URI in result.stderr
+    assert "KDIVE_LIBVIRT_URI" in result.stderr
+
+
+def test_a_preset_matching_the_contract_is_not_reported(tmp_path: Path) -> None:
+    """The guard keys on the *value*, not on the preset's presence.
+
+    `.github/workflows/live.yml` and the self-hosted runner runbook both preset the endpoint to
+    `$(load_published_libvirt_uri)` -- agreeing presets, on every live CI run. A presence-keyed
+    guard would report all of them.
+    """
+    _, staged = _published_contract(tmp_path)
+    staged["KDIVE_LIBVIRT_URI"] = _PUBLISHED_URI
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == _PUBLISHED_URI
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("leg", ("absent", "untrusted-metadata", "allowlist-refused"))
+def test_a_preset_is_honoured_silently_without_a_valid_contract(tmp_path: Path, leg: str) -> None:
+    """All three loader-failure legs, on the path that exists to get past exactly that state.
+
+    An explicit override is how an operator works on a host whose contract is broken or absent,
+    so the comparison must not turn the escape hatch into the thing it escapes. Two ways it
+    could: `load_published_libvirt_uri` writes its refusal to stderr *before* returning 1, and
+    under the callers' `set -euo pipefail` a bare assignment from a failing command substitution
+    aborts the sourcing shell. Both halves are asserted here -- empty stderr and exit 0 -- and
+    each leg reaches a different one of the loader's three refusals.
+    """
+    contract, staged = _published_contract(tmp_path)
+    if leg == "absent":
+        contract.unlink()
+    elif leg == "untrusted-metadata":
+        (tmp_path / "bin" / "stat").write_text(
+            "#!/bin/sh\nprintf '1000:1000:644\\n'\n", encoding="utf-8"
+        )
+    else:
+        contract.write_text("KDIVE_LIBVIRT_URI=qemu:///wrong\n", encoding="utf-8")
+    staged["KDIVE_LIBVIRT_URI"] = "qemu+ssh://elsewhere/system"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "qemu+ssh://elsewhere/system"
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize("metadata", ("1000:1000:644", "0:0:664", "0:1000:644"))
