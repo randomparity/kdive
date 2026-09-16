@@ -28,9 +28,10 @@ tier is not a single harness.
 | `live_vm_tcg` | `just test-live-tcg` | live-stack spine (ADR-0353) | the ppc64le provision→boot→crash→retrieve proofs, emulated | TCG | hosted `ubuntu-latest` (compose + S3, no `/dev/kvm`) |
 
 `just test` (the default PR suite) selects `-m "not live_vm and not
-live_stack"`, so none of the tiers below run in the ordinary gate. Each tier
+live_stack"`, so none of the tiers below run in the ordinary gate. A tier mostly
 **skips cleanly** when its environment is absent — but a tier whose env is set
-*wrong* fails loud rather than skipping (see [Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
+*wrong* fails loud rather than skipping, and `KDIVE_GUEST_IMAGE` now fails loud
+even when unset (see [Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
 
 The `live_vm` tier spans four families (below); `just test-live` runs all of them
 (each gated), and one — the remote-libvirt family, which drives a remote
@@ -134,6 +135,15 @@ runner cannot masquerade as "no environment":
 - **env set but wrong** (rootfs file missing, staging dir not writable, partial
   `KDIVE_S3_*`) → the gate **fails loud**;
 - **env present and valid** → the gate returns the resolved contract.
+
+One prerequisite is deliberately outside that tri-state. `KDIVE_GUEST_IMAGE`
+**fails loud when unset**, not just when wrong (#2518): `scripts/live-stack/env.sh`
+exports no default for it, so "unset" is the *normal* state on a correctly
+provisioned host, and the native `live_vm` tier has no `<N> passed` summary gate
+of the kind `just test-live-tcg` gained in #2517. A skip there was therefore
+indistinguishable from a proof that ran — the silent green #2497 exists to close.
+Set it from `python -m kdive build-fs`'s printed `export` line, or source
+`examples/local-libvirt/env.sh`.
 
 ## Running each tier
 

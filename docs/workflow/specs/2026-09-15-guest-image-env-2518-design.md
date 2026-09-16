@@ -11,8 +11,9 @@ the non-tcg tier bare (`:786`) and sources that same `env.sh` (`:775`), which as
 
 The guest-image preflight fails loud instead of skipping: `-m live_vm` asks for the proof, and the
 non-tcg tier carries no `<N> passed` guard, so a skip there reads as a pass. The native `live.yml`
-job gains one line exporting `KDIVE_GUEST_IMAGE`, mirroring the tcg job's `:538` mapping. Both
-`env.sh` files gain a comment naming the omission and its owner. No `src/` change.
+job gains one line exporting `KDIVE_GUEST_IMAGE` — pointed, unlike the tcg job's `:538` line, at
+the rootfs `mint-system.sh` stages inside the provider's allowed root. Both `env.sh` files gain a
+comment naming the omission, and `live-testing.md`'s skip/fail tri-state records the exception.
 
 Rejected — hard-require it in `scripts/live-stack/env.sh`. verified: six of that file's nine
 callers are non-`live_vm` (stack-services, onboard, stack-status, apply-migrations,
@@ -40,7 +41,6 @@ Accepted failure classes:
 
 Covered elsewhere:
 - that tier's `<N> passed` guard, stale runner, and bare `KDIVE_DATABASE_URL` alias — orchestrator
-- `test_console_parts_live.py:55` and `:394` — #2496 / PR #2529
 
 ## Success
 
