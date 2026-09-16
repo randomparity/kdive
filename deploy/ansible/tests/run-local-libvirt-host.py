@@ -189,8 +189,9 @@ def declared_hosts(group: dict) -> set[str]:
 inventory = yaml.safe_load(INVENTORY.read_text())
 require(
     "localhost" not in declared_hosts(inventory["all"]),
-    "hosts.yml must not declare localhost anywhere; every localhost play would lose its explicit "
-    "launcher interpreter to PATH discovery",
+    "hosts.yml must not declare localhost anywhere; the localhost plays that do not pin their own "
+    "interpreter (playbooks/pki.yml, most of deploy/ansible/tests/) would fall back to "
+    "ansible-core interpreter discovery instead of the launching environment",
 )
 
 print(
