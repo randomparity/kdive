@@ -72,6 +72,17 @@ Adding the operator to `kdive-live-control` does not refresh an already-running 
 group list. Interactive operators must start a new login session after installation before using
 the installed socket.
 
+`scripts/live-stack/stack-down.sh --wipe` reaps the kdive domains and their overlays with the
+operator's own credentials, not under `sudo`, whenever the resolved endpoint is a session URI
+(ADR-0662). The operator owns both paths it touches — the socket is `operator:kdive-live-libvirt`
+mode `0770` and `/var/lib/kdive/rootfs` is `operator:kdive-live-libvirt` mode `2770` — so root
+satisfies neither ACL; it bypasses both. A per-uid session daemon is not reachable by changing uid
+at all, so escalating there reaches a different daemon rather than the same one with more rights.
+On a host with no lifecycle contract the endpoint resolves to root-owned `qemu:///system` and the
+same reap keeps `sudo`, which is why the privilege is derived from the endpoint rather than fixed.
+This governs the reap specifically; installation still uses `sudo` where it must, and
+`scripts/live-stack/README.md` records that split for bring-up.
+
 ## Lifecycle retry actions
 
 Every response from `scripts/live-stack/worker-lifecycle.sh` carries a `retry_action` field

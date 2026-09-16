@@ -1371,6 +1371,20 @@ def _counting_virsh(fail_list_from: int) -> str:
     )
 
 
+def _recording_sudo(log: Path) -> str:
+    """A `sudo` that records the command line it was handed and then runs it.
+
+    Appended *after* `_REAP_STUBS`, so it replaces that module's pass-through rather than
+    sitting beside it. It still runs the command, which is what keeps the reap's exit code an
+    assertion instead of collateral: an arm that recorded escalations by refusing them would
+    prove which calls asked for root and nothing at all about whether the reap still works.
+
+    `echo` writes to `log` through its own redirection, so the record survives the
+    `>/dev/null 2>&1` and `2>&1 >/dev/null` the reap wraps three of its four calls in.
+    """
+    return f'sudo() {{ echo "$*" >>"{log}"; "$@"; }}\n'
+
+
 def _wipe_reap(
     tmp_path: Path,
     lib_extra: str = "",
@@ -1378,6 +1392,7 @@ def _wipe_reap(
     domains: tuple[str, ...] = ("kdive-alpha", "kdive-beta"),
     overlays: tuple[str, ...] = (),
     rootfs_mode: int | None = None,
+    uri: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `stack-down.sh --wipe --yes` past the libvirt gate with a staged host.
 
@@ -1386,8 +1401,17 @@ def _wipe_reap(
     whether its removals are permitted to succeed. `rootfs_mode` stages the overlay directory's
     permissions for the run and is restored afterwards, so a failing assertion cannot leave
     `tmp_path` unremovable.
+
+    `uri` overrides the endpoint the run resolves. It is set in the environment rather than in
+    the contract file because that is the only way to reach a *non-session* endpoint at all:
+    `load_published_libvirt_uri`'s allowlist admits the two session URIs and nothing else, while
+    `resolve_libvirt_uri` honours a caller-supplied value by design (ADR-0659). On a host that
+    publishes a contract, an override that disagrees with it is reported and honoured
+    (ADR-0661) -- stderr, never a refusal, so the run still reaches the reap.
     """
     _, staged = _published_contract(tmp_path)
+    if uri is not None:
+        staged["KDIVE_LIBVIRT_URI"] = uri
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
     for name in overlays:
@@ -1632,6 +1656,57 @@ def test_wipe_refuses_to_read_an_unlistable_overlay_directory_as_empty(tmp_path:
     # A refusal that names no way forward is a worse operator experience than the no-op was.
     assert "re-run as the account that owns it" in result.stderr
     assert not result.stdout.rstrip().endswith("done")
+
+
+def test_wipe_reaps_a_session_endpoint_without_sudo(tmp_path: Path) -> None:
+    """#2516 acceptance 1, ADR-0662: on a session endpoint the reap escalates nowhere.
+
+    The published endpoint is an operator-owned session socket, and the installer writes it
+    `operator_uid:group_gid:770` beside `/var/lib/kdive/rootfs` at `operator:kdive-live-libvirt`
+    `2770`. Root owns neither, so `sudo` there bypasses the ownership gate instead of satisfying
+    it -- and on a plain `qemu:///session` it reaches root's own per-uid daemon, which is a
+    different host altogether from the one the operator was looking at.
+
+    The assertion is over the *whole run*, not over the removals: the `--wipe` gate's
+    enumeration, the reap's enumeration, the end-state re-read, `destroy`, `undefine` and the
+    overlay `rm` all have to come in under one identity, so an escalation anywhere in the run is
+    the defect. A log file that does not exist is what says none of them asked for root.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(tmp_path, _recording_sudo(log), overlays=("alpha-overlay.qcow2",))
+    assert result.returncode == 0, result.stderr
+    assert not log.exists(), log.read_text(encoding="utf-8")
+    # The reap still has to have happened: an arm asserting only the absence of `sudo` would
+    # pass just as well against a reap that was skipped entirely.
+    assert "removed domain kdive-alpha" in result.stdout
+    assert list((tmp_path / "rootfs").iterdir()) == []
+
+
+def test_wipe_reaps_a_system_endpoint_under_sudo(tmp_path: Path) -> None:
+    """The other direction, and the reason the fix is not an unconditional `sudo` removal.
+
+    `resolve_libvirt_uri` still resolves root-owned `qemu:///system` on a host with no lifecycle
+    contract, so dropping escalation everywhere would break the reap on exactly the bare dev host
+    it works on today. Every one of the four reap commands keeps `sudo` there.
+
+    The `list` assertion is the half #2515 left open and named #2516 for: the enumeration used to
+    run bare while the mutations escalated, so the list that *graded* a reap could come from a
+    different daemon than the one the removal *mutated*. Asserting it here is what holds the two
+    together.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _recording_sudo(log),
+        overlays=("alpha-overlay.qcow2",),
+        uri="qemu:///system",
+    )
+    assert result.returncode == 0, result.stderr
+    escalated = log.read_text(encoding="utf-8")
+    assert "virsh -c qemu:///system list --all --name" in escalated, escalated
+    assert "virsh -c qemu:///system destroy kdive-alpha" in escalated, escalated
+    assert "virsh -c qemu:///system undefine kdive-alpha" in escalated, escalated
+    assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
 
 
 def _stack_status_libvirt_slice(tmp_path: Path) -> Path:

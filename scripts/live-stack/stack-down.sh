@@ -53,25 +53,39 @@ done
 # contract resolved, never that anything answers it.
 #
 # What this distinguishes is an endpoint that answers from one that does not, and NOTHING MORE. It
-# does not cover the wrong-daemon URI of libvirt-uri.sh:119-122: a daemon that is running but holds
-# no kdive domains answers with exit 0 and no output, which is why every zero-domain report below
-# names the endpoint it consulted rather than calling the host clean.
+# does not cover the wrong-daemon URI libvirt-uri.sh's resolve_libvirt_uri comment records: a
+# daemon that is running but holds no kdive domains answers with exit 0 and no output, which is why
+# every zero-domain report below names the endpoint it consulted rather than calling the host clean.
+# Cited by name, not by line: that passage has already moved once.
 #
 # ONE virsh call, not a status probe plus a separate name read: a daemon lost between two calls
 # would return an empty list with exit 0, which is the silent no-op this function exists to refuse,
 # reached through the gap between the probe and the data.
 #
-# Bare virsh, while destroy and undefine below run under sudo -- so for an explicit per-identity
-# endpoint (`qemu:///session`, `qemu+ssh://`) the list that GRADES the reap can come from a
-# different daemon than the one the removal MUTATED. Which privilege each reap call should hold is
-# #2516's question and is not settled here; the reporting consequence is.
+# Routed through reap_run, not bare. This used to enumerate as the invoking account while destroy
+# and undefine escalated, so for an explicit per-identity endpoint (`qemu:///session`,
+# `qemu+ssh://`) the list that GRADES the reap could come from a different daemon than the one the
+# removal MUTATED -- #2515 recorded the reporting consequence and left the privilege to #2516.
+# ADR-0662 settles it: ONE privilege, derived from the endpoint, for observation and mutation
+# alike, so the two can no longer disagree.
 enumerate_kdive_domains() {
   local out
-  out="$(virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
+  out="$(reap_run virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
     printf '%s' "${out:-virsh list failed and said nothing}"
     return 1
   }
   grep -E '^kdive-' <<<"$out" || true
+}
+
+# ADR-0662: the --wipe reap's privilege follows the endpoint it was published. reap_as_root is set
+# in the --wipe branch below and DELIBERATELY nowhere else -- under `set -u` a call from outside
+# that branch dies with `reap_as_root: unbound variable` rather than silently picking a privilege.
+reap_run() {
+  if ((reap_as_root)); then
+    sudo "$@"
+  else
+    "$@"
+  fi
 }
 
 # --wipe is the one operation here that needs the endpoint, so it is refused up front rather than
@@ -86,6 +100,27 @@ if [[ "$wipe" == "1" ]]; then
     echo "to stop the stack without reaping, re-run without --wipe" >&2
     exit 1
   }
+  # ADR-0662. resolve_libvirt_uri publishes two daemon scopes to one variable: the lifecycle
+  # contract's operator-owned session endpoint, and the qemu:///system fallback on a host without
+  # that contract, which is root's. One fixed privilege cannot be right for both.
+  #
+  # `sudo` against the session socket BYPASSES the ownership gate rather than satisfying it -- the
+  # installer writes that socket `operator_uid:group_gid:770` and /var/lib/kdive/rootfs
+  # `operator:kdive-live-libvirt` 2770, and root owns neither -- while against a plain
+  # `qemu:///session` it reaches root's own per-uid daemon, which is a different host's worth of
+  # domains. So: `/session` in the path is reaped as the invoking account, anything else keeps sudo.
+  #
+  # The query is stripped because the published URIs carry the socket path there, not the scope.
+  # Classification is textual and an unclassifiable value falls to the escalating branch, so the
+  # failure direction is today's behaviour rather than a silent loss of privilege.
+  #
+  # HERE, not at the top of the file: KDIVE_LIBVIRT_URI may be unset in the LIBVIRT_OPTIONAL
+  # degraded state, and a top-level `case` would kill a plain teardown on a broken contract under
+  # `set -u`. This point is past require_libvirt_uri, so the endpoint is in hand.
+  case "${KDIVE_LIBVIRT_URI%%\?*}" in
+  */session) reap_as_root=0 ;;
+  *) reap_as_root=1 ;;
+  esac
   # Liveness, and it belongs HERE rather than at the reap. require_libvirt_uri proves the contract
   # resolved; a daemon that is stopped behind a perfectly valid contract passes it. Discovering
   # that at the reap means `docker compose --profile obs down -v` has already run, so the volumes
@@ -166,8 +201,8 @@ if [[ "$wipe" == "1" ]]; then
       # a reap failure. `2>&1 >/dev/null` in that order captures stderr only -- fd2 to the
       # substitution, then fd1 to /dev/null -- and it is kept verbatim, because which refusal this
       # was decides the operator's next move.
-      sudo virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" >/dev/null 2>&1 || true
-      undefine_err["$dom"]="$(sudo virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>&1 >/dev/null || true)"
+      reap_run virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" >/dev/null 2>&1 || true
+      undefine_err["$dom"]="$(reap_run virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>&1 >/dev/null || true)"
     done
     # Neither call's status is the verdict. `virsh undefine` on a RUNNING domain succeeds by
     # converting it to a transient one WITHOUT stopping it, so an undefine that returned 0 after a
@@ -196,10 +231,13 @@ if [[ "$wipe" == "1" ]]; then
   elif [[ ! -d "$KDIVE_ROOTFS_DIR" ]]; then
     echo "  no overlay directory at ${KDIVE_ROOTFS_DIR}"
   elif [[ ! -r "$KDIVE_ROOTFS_DIR" || ! -x "$KDIVE_ROOTFS_DIR" ]]; then
-    # The overlay glob is the CALLING SHELL's, expanded with the caller's own privilege, while the
-    # removal below runs under sudo. On an account outside the directory's owner and group it
-    # expands to nothing, so a host full of overlays is byte-identical to a clean one -- the one
-    # place a removal failure cannot surface the no-op, because no removal is ever attempted.
+    # The overlay glob is the CALLING SHELL's, expanded with the caller's own privilege, and on the
+    # escalating branch the removal below does not share it. On an account outside the directory's
+    # owner and group the glob expands to nothing, so a host full of overlays is byte-identical to
+    # a clean one -- the one place a removal failure cannot surface the no-op, because no removal
+    # is ever attempted. Hence this refusal rather than an empty sweep. On the session branch the
+    # asymmetry is gone (ADR-0662), but the refusal stays: it is what makes the escalating branch
+    # safe, and an operator who cannot list the directory has the same problem either way.
     unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory \
 and an unreadable one cannot be told apart; re-run as the account that owns it or one in its \
 group (ls -ld names them)")
@@ -209,7 +247,7 @@ group (ls -ld names them)")
     for overlay in "${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2; do
       # Graded on the end state, like the domain half above and for the same reason: `rm`'s exit
       # status is what it attempted, and the line this block prints claims what is gone.
-      rm_err="$(sudo rm -f "$overlay" 2>&1 >/dev/null || true)"
+      rm_err="$(reap_run rm -f "$overlay" 2>&1 >/dev/null || true)"
       if [[ ! -e "$overlay" ]]; then
         reaped+=("overlay ${overlay}")
         overlays_removed=$((overlays_removed + 1))
@@ -222,9 +260,9 @@ group (ls -ld names them)")
     # directory held their backing disks. A host cleaned in a previous pass looks the same, which
     # is why this warns instead of refusing -- sweeping genuinely orphaned overlays is a purpose
     # of --wipe, and refusing them would trade a silent wrong outcome for a loud one. But a
-    # wrong-daemon URI (libvirt-uri.sh:119-122, which its own repair guidance can hand an operator)
-    # lands here too, and there the domains are alive on another daemon and have just lost their
-    # disks. Saying so is what keeps `no kdive domains` from reading as "there was nothing to do".
+    # wrong-daemon URI (libvirt-uri.sh's resolve_libvirt_uri comment, which its own repair guidance
+    # can hand an operator) lands here too, and there the domains are alive on another daemon and
+    # have just lost their disks. Saying so keeps `no kdive domains` from reading as "nothing to do".
     if ((zero_domains && overlays_removed)); then
       echo "WARNING: removed ${overlays_removed} overlay(s) while ${KDIVE_LIBVIRT_URI} reported zero" >&2
       echo "kdive domains. If the domains live on another daemon they are now without their disks." >&2
