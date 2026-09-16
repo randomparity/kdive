@@ -19,6 +19,7 @@ default:
     @just --list
 
 # One-command first-time setup: check host deps, sync the venv, install collections and hooks.
+# Writes outside the checkout: the collections land in ~/.ansible/collections (see below).
 setup: check-deps sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
     @echo "Development environment is ready."
 
@@ -73,11 +74,17 @@ sync:
 
 # Install the pinned Ansible collections from the source lock. `just setup` and CI both call
 # this recipe, so the developer path and CI resolve the same pinned commits from one definition
-# rather than two command strings that can drift (#2499). Reaches GitHub for four immutable
-# commits; CI additionally points ANSIBLE_GALAXY_SERVER at a dead port, making the "sources
-# only, never Galaxy" boundary executable there. CI verifies the result separately, against a
-# collections directory it owns outright -- that check rejects any collection outside the
-# pinned four, which a developer's shared ~/.ansible/collections is free to hold.
+# rather than two command strings that can drift (#2499). CI additionally points
+# ANSIBLE_GALAXY_SERVER at a dead port, making the "sources only, never Galaxy" boundary
+# executable there. CI verifies the result separately, against a collections directory it owns
+# outright -- that check rejects any collection outside the pinned four, which a developer's
+# shared ~/.ansible/collections is free to hold.
+#
+# Not idempotent and not confined to the checkout: every run clones the four repositories from
+# GitHub afresh (--no-cache) and replaces those four collections in the shared
+# ~/.ansible/collections, which is ansible's default user path and may hold collections this
+# repository knows nothing about. It leaves those others alone but claims these four, so a
+# host pinning a different community.general for something else loses that pin here.
 install-ansible-collections:
     uv run --with 'ansible-core==2.21.1' ansible-galaxy collection install \
         --requirements-file deploy/ansible/requirements-ci.lock.yml \
