@@ -16,7 +16,8 @@ document across those three files, so a `BuildProfile` field change
 for has no single place to assert against. Two further restatements sit elsewhere under
 `tests/integration/` — `test_finalization_measurement.py:185` and a divergent `BUILD_PROFILE`
 in `_seed.py:63` that is seeded straight into the database and never meets the validator. Both
-are outside #2511's surface and are carried as follow-ups, not resolved here.
+are outside #2511's surface and are carried as untracked follow-up candidates, not resolved
+here.
 
 `tests/integration/live_stack/spine.py` is already the shared, provider-agnostic scaffolding
 every one of those three suites imports (`mint_role_token`, `drain_job`, `phase`,
@@ -43,8 +44,8 @@ maps a changed source file onto `tests/**/test_<stem>.py`, so only the stem `bui
 `test_build_profile.py` would silently never run on the drift it exists to catch.
 
 `_provision_profile` stays duplicated across the suites. That is deliberate and out of scope
-here — those bodies genuinely differ per provider and per test intent — and it is tracked
-separately.
+here — those bodies genuinely differ per provider and per test intent. No tracker owns that
+dedup yet, and this record does not claim one does.
 
 ## Considered & rejected
 

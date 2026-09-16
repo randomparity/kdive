@@ -29,10 +29,10 @@ discipline in `test_remote_live_stack.py` is untouched — only the `build_profi
 - **Invariants at stake** — the document the suites put on the wire is one `BuildProfile`
   accepts; a `BuildProfile` field change cannot pass while the suites still send the old shape.
 - **Accepted failure classes** — two restatements elsewhere in `tests/integration/` stay as they
-  are, outside this surface and carried as follow-ups: `test_finalization_measurement.py:185`, and
-  `_seed.py:63`, whose divergent document seeds the DB out of band and never meets the validator.
-  A `BuildProfile` field arriving with a default stays green, the old document still being one the
-  model accepts. An unsent `SUPPORTED_ARCHES` arch is proved parseable, not bootable.
+  are, outside this surface and carried as untracked follow-up candidates:
+  `test_finalization_measurement.py:185`, and `_seed.py:63`, whose divergent document seeds the DB
+  out of band and never meets the validator. A `BuildProfile` field arriving with a default stays
+  green, the old document still being one the model accepts.
 - **Covered elsewhere** — `BuildProfile` validation rules: `tests/profiles/`.
 
 ## Success
@@ -40,8 +40,8 @@ discipline in `test_remote_live_stack.py` is untouched — only the `build_profi
 1. One shared definition replaces all six restatements named in Problem; no suite keeps its own.
 2. The guard fails when the shared document stops being one `BuildProfile` accepts — an extra
    key, a required field the model gained, or an arch it rejects.
-3. Every arch in `SUPPORTED_ARCHES` is constructible through the factory and parses.
-4. Behaviour is unchanged: each former call site sends the document it sent before.
+3. Behaviour is unchanged: each former call site sends the document it sent before, `x86_64`
+   and `ppc64le` alike.
 
 ## Validation
 
@@ -51,10 +51,10 @@ discipline in `test_remote_live_stack.py` is untouched — only the `build_profi
   `test_the_shared_build_profile_carries_only_known_required_fields`: its keys are `BuildProfile`
   field names covering every required one. Not key-set equality, which would red on a defaulted
   field and direct the wrong fix.
-- Success 3 — `test_every_supported_arch_is_constructible`, parametrised over `SUPPORTED_ARCHES`;
-  red on an arch the factory renders unparseable.
-- Success 4 — `test_the_shared_build_profile_is_the_document_the_suites_sent` pins the literal
-  those sites sent — the independent oracle deriving it from `BuildProfile` would destroy.
+- Success 3 — `test_the_shared_build_profile_is_the_document_the_suites_sent` pins both literals
+  those sites sent — the independent oracle deriving it from `BuildProfile` would destroy. No
+  test parametrises over `SUPPORTED_ARCHES`: `BuildProfile` validates `arch` against that same
+  frozenset, so a pass-through factory parses every member by construction.
 - Success 1 — `task-test-not-applicable`: no runtime observation separates one shared definition
   from six identical ones, so it is read in review against Problem's six sites. The guard's bite
   is proved before hand-off by a controlled fault: a shape it must reject, red, green on revert.
