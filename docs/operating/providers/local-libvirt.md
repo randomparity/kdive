@@ -106,6 +106,14 @@ These are the points where the two families genuinely diverge, not just in packa
   libvirt daemon. Classic sudo zeroes it, so every RedHat-family host would otherwise reach the
   launch with a zero hard limit and fail every domain start with `cannot limit core file size of
   process N`; Ubuntu 26.04's sudo-rs does not zero it.
+- **Which interpreter the host play runs under.** `playbooks/local-libvirt-host.yml` pins
+  `ansible_python_interpreter: /usr/bin/python3` as a play var. It manages the host's libvirt stack
+  through the distro-packaged `libvirt` and `lxml` bindings, and interpreter discovery would
+  otherwise select whichever Python launched `ansible-playbook` — for `just
+  prepare-local-libvirt-host` that is an ephemeral `uv run` environment with no `lxml`, which fails
+  `community.libvirt` in `libvirt_pool_net`. The pin is a play var rather than an inventory host
+  var on purpose: `inventory/hosts.yml` is shared with `playbooks/pki.yml`, which is also
+  `hosts: localhost` and resolves `community.crypto` against the project environment instead.
 - **The interpreter, and what it costs Enterprise Linux.** The project requires Python 3.14.
   Ubuntu 26.04 and Fedora 44 ship it as `/usr/bin/python3`; EL9 ships 3.9 and EL10 ships 3.12,
   packaging 3.14 separately as `python3.14`, which `install-host.sh` installs and the lifecycle

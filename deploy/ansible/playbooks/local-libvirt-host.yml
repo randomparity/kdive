@@ -5,6 +5,13 @@
   become: true
   gather_facts: true
   vars:
+    # Interpreter discovery on localhost selects whichever Python launched ansible-playbook. The
+    # recipe launches it through `uv run --with ansible-core`, whose ephemeral environment has no
+    # lxml, so community.libvirt fails in libvirt_pool_net. This play manages the host's own
+    # libvirt stack through its distro-packaged bindings, so it owns the system interpreter as a
+    # play var rather than an inventory host var: `hosts.yml` is shared with pki.yml, which
+    # resolves community.crypto against the project environment instead (#2498).
+    ansible_python_interpreter: /usr/bin/python3
     local_libvirt_host_source: "{{ playbook_dir }}/../../.."
     local_libvirt_host_operator_user: ""
     local_libvirt_host_witness_dsn: >-

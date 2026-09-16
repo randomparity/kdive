@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Check the localhost local-libvirt playbook contract without applying it."""
 
+import json
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
-PLAYBOOK = ROOT / "deploy/ansible/playbooks/local-libvirt-host.yml"
+ANSIBLE = ROOT / "deploy/ansible"
+PLAYBOOK = ANSIBLE / "playbooks/local-libvirt-host.yml"
+INVENTORY = ANSIBLE / "inventory/hosts.yml"
+SYSTEM_INTERPRETER = "/usr/bin/python3"
+_PROBE_EXPR = "ansible_python_interpreter | default('auto-discovery')"
 
 
 def require(condition: bool, message: str) -> None:
@@ -163,7 +171,86 @@ require(
     rootfs["owner"] == "{{ local_libvirt_host_operator_user }}",
     "the rootfs publication directory must be owned by the operator",
 )
+
+
+def ansible(*argv: str) -> str:
+    """Run an Ansible command against the repository's own config and inventory."""
+    env = dict(os.environ, ANSIBLE_CONFIG=str(ANSIBLE / "ansible.cfg"))
+    done = subprocess.run(argv, cwd=ANSIBLE, env=env, capture_output=True, text=True, check=False)
+    require(done.returncode == 0, f"{argv[0]} exited {done.returncode}: {done.stderr.strip()}")
+    return done.stdout
+
+
+def resolved_interpreter(play_vars: dict) -> str:
+    """Resolve ansible_python_interpreter the way Ansible would for a play carrying play_vars.
+
+    Asserting the key's presence would stay green if the pin were present but ineffective, which
+    is this issue's own failure mode, so this runs the value through real variable precedence.
+    """
+    probe = [
+        {
+            "name": "Resolve the interpreter this play would execute modules under",
+            "hosts": "localhost",
+            "connection": "local",
+            "gather_facts": False,
+            "vars": play_vars,
+            # default() keeps an unpinned play reporting what it resolved to rather than failing
+            # the probe, so the diagnostic below names the interpreter instead of an exit code.
+            "tasks": [{"ansible.builtin.debug": {"msg": f"RESOLVED={{{{ {_PROBE_EXPR} }}}}"}}],
+        }
+    ]
+    with tempfile.TemporaryDirectory() as scratch:
+        probe_path = Path(scratch) / "probe.yml"
+        probe_path.write_text(yaml.safe_dump(probe))
+        stdout = ansible("ansible-playbook", str(probe_path))
+    marker = "RESOLVED="
+    require(marker in stdout, f"probe play emitted no resolved interpreter:\n{stdout}")
+    return stdout.split(marker, maxsplit=1)[1].split('"', maxsplit=1)[0].strip()
+
+
+inventory = yaml.safe_load(INVENTORY.read_text())
+declared_hosts = inventory["all"].get("hosts") or {}
+require(
+    "localhost" in declared_hosts,
+    "the inventory must declare localhost; the implicit host binds the interpreter to whichever "
+    "Python launched ansible-playbook",
+)
+localhost_vars = declared_hosts["localhost"] or {}
+require(
+    localhost_vars.get("ansible_connection") == "local",
+    "the declared localhost must use the local connection",
+)
+
+# Placement, not just presence. Declared inside either group, the operator's workstation would
+# join the remote-host and runner plays, which select those groups by name.
+for group, body in (inventory["all"].get("children") or {}).items():
+    require(
+        "localhost" not in ((body or {}).get("hosts") or {}),
+        f"localhost must stay ungrouped; it is declared under {group}",
+    )
+
+# The pin belongs to the play, not the inventory: pki.yml is also hosts: localhost and resolves
+# community.crypto against the project environment, so an inventory host var would retarget it.
+inventory_facts = json.loads(ansible("ansible-inventory", "--host", "localhost"))
+require(
+    "ansible_python_interpreter" not in inventory_facts,
+    "the inventory must not pin ansible_python_interpreter; every play reading it would inherit "
+    "the pin, including pki.yml",
+)
+require(
+    inventory_facts.get("ansible_connection") == "local",
+    "the inventory must resolve a local connection for localhost",
+)
+
+play_interpreter = resolved_interpreter(play["vars"])
+require(
+    play_interpreter == SYSTEM_INTERPRETER,
+    f"the play resolves ansible_python_interpreter={play_interpreter}, not {SYSTEM_INTERPRETER}; "
+    "discovery selects whichever Python launched ansible-playbook, and the recipe launches it "
+    "through `uv run --with ansible-core`, whose environment has no lxml for community.libvirt",
+)
+
 print(
     "local-libvirt-host: preflight, localhost role composition, locked live sync, DSN stdin, "
-    "and guestfs ABI handling pass"
+    "guestfs ABI handling, ungrouped localhost, and system-interpreter resolution pass"
 )
