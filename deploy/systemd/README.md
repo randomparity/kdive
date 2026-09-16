@@ -84,7 +84,7 @@ alongside its `code`. It is a closed set, and it — not the code — says what 
 | `retry_same_operation` | a transient condition: the request deadline expired, termination evidence was rejected, or another lifecycle request holds the control lock (`code=busy`) | wait for the named condition to clear, then re-run the same command |
 | `restore_systemd` | systemd could not answer for the retained unit | restore systemd, then re-run |
 | `restore_database` | the database authority is unavailable | restore the database, then re-run |
-| `operator_recovery` | any `conflict` response — retained lifecycle facts disagreeing with the observed unit, a worker incarnation disputed by an active fence, retained slot state that breaks a lifecycle rule, or `recover` refusing a slot whose cgroup still holds live processes — an unmapped internal error, or a `diagnostics` capture that withheld at least one slot | inspect, then recover — see below |
+| `operator_recovery` | any `conflict` response — retained lifecycle facts disagreeing with the observed unit, a worker incarnation disputed by an active fence, retained slot state that breaks a lifecycle rule, a systemd observation disagreeing with the retained lifecycle contract, or `recover` refusing a slot whose cgroup still holds live processes — an unmapped internal error, or a `diagnostics` capture that withheld at least one slot | inspect, then recover — see below |
 
 `operator_recovery` is the one that never clears on its own: no retry of the same request will
 change the outcome, because the retained facts and the observed unit disagree and something has to

@@ -23,8 +23,8 @@ captured value, or any part of the withheld report:
 | Reason | Cause | Site |
 |---|---|---|
 | `state_unreadable` | the slot's retained state could not be loaded | `:328-338` |
-| `slot_unusable` | preconditions unmet: no exact invocation, no safe budget, or redaction sources rejected as unsafe | `StateConflict` → `:389-398` |
-| `acquisition_failed` | systemd, the journal, or the request deadline did not answer | `_diagnose_slot` → `:381-388` |
+| `slot_unusable` | preconditions unmet: no exact invocation, or redaction sources rejected as unsafe | `StateConflict` → `:389-398` |
+| `acquisition_failed` | systemd, the journal, or the request deadline did not answer, or acquisition failed unexpectedly | `_diagnose_slot` → `:381-388` |
 | `redaction_refused` | a forbidden value survived this slot's own redaction, or no safe sentinel could render it | `_diagnose_trusted_slot` and `_sanitize_diagnostics` → `:381-388` |
 | `peer_redaction_refused` | the report holds a forbidden value learned from another slot | `:401-403` |
 | `internal_error` | the redaction-source file could not be read, or anything else escaping the capture loop | `:389-398` |
@@ -122,8 +122,12 @@ ADR-0657); `stack-down.sh --force` and `docs/operating/systemd.md`.
 - The response's structural fields (`code`, `message`, `unit`, `phase`) are not passed through the
   redactor. Accepted: every value written there is a literal from a closed enum or a derived unit
   name, and this is unchanged from base.
-- A reason says a forbidden value was present without saying which. Accepted: that is the
-  withholding's purpose, and the host journal remains the operator's source.
+- A reason says a forbidden value was present without saying which, and
+  `peer_redaction_refused` additionally says *whose* forbidden set matched. Accepted: not naming
+  the value is the withholding's purpose, and the host journal remains the operator's source. The
+  extra bit about whose set matched is bounded — no actor in either named deployment can both
+  write a worker's journal and read the response — and it is what makes the two redaction reasons
+  separately actionable.
 - `acquisition_failed` covers systemd and journal failures, the request deadline
   (`acquisition_failures` includes `LifecycleDeadlineExceeded` and `CommandDeadlineExceeded`), and
   any unexpected failure inside `_diagnose_trusted_slot`. Accepted: the operator's first action is

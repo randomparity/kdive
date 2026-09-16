@@ -224,10 +224,16 @@ Tasks 2 and 3 rely on the six reason strings above as prose, nothing more.
     Otherwise `capture.append(report)` and `return _result(state)`. The trailing `code = ... if
     store.slot in capture.withheld_slots` line goes with it.
 
-12. Name the reason at each raise. Both `except` arms in `_diagnose_slot` pass
-    `reason=WithholdReason.ACQUISITION_FAILED` to `_UnsafeDiagnosticText(secret_values, ...)`; the
-    raise in `_diagnose_trusted_slot` passes `reason=WithholdReason.REDACTION_REFUSED` alongside
-    its existing `used` and `aggregate_truncated` keywords.
+12. Name the reason at each raise, and give `_diagnose_slot` three arms rather than two. Insert
+    `except StateConflict` AHEAD of `except self._acquisition_failures`, raising
+    `_UnsafeDiagnosticText(secret_values, reason=WithholdReason.REDACTION_REFUSED)`: that tuple
+    lists `StateConflict`, so without this arm `_sanitize_diagnostics`'s sentinel refusal would be
+    relabelled `acquisition_failed` and the runbook would send the operator to re-run a request
+    that deterministically fails the same way. The arm shadows the tuple's `StateConflict` entry,
+    which is retained only as a backstop. The remaining two arms keep
+    `reason=WithholdReason.ACQUISITION_FAILED`, and the raise in `_diagnose_trusted_slot` passes
+    `reason=WithholdReason.REDACTION_REFUSED` alongside its existing `used` and
+    `aggregate_truncated` keywords. Cover the new arm with a case that fails without it.
 
 13. Drop the unused `code` keyword from the module-private `_result`, leaving its body as it is,
     and update the seven existing cases in `PYTEST_FILE` the change touches:
