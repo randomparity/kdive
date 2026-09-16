@@ -69,6 +69,12 @@ check_provisioned() {
   require_set KDIVE_LIVE_VM_SYSTEM_ID
   require_set KDIVE_S3_ENDPOINT_URL
   require_set KDIVE_S3_BUCKET
+  # The rootfs mint-system.sh stages for this family (live-vm-provisioned-rootfs.qcow2) is also
+  # what the console-part proof boots, and scripts/live-stack/env.sh exports no default for it
+  # (#2518). Without this the proof skipped mid-run while preflight reported success — the silent
+  # green #2497 exists to close. require_path, not require_set: a staged file that never landed is
+  # the failure worth catching here, minutes before the proof would hit it.
+  require_path KDIVE_GUEST_IMAGE
 }
 
 check_debug_stepping() {

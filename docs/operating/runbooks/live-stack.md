@@ -83,7 +83,9 @@ workers on the host so they can access KVM and libvirt.
   a bring-up entry point starts — server, reconciler, workers, the `virsh` gates, teardown — lands
   on one endpoint rather than splitting by entry point (#2480). A server on a different endpoint
   than the worker finds no domain for a healthy System, and `systems.ssh_info` then reports
-  `ssh_not_provisioned`.
+  `system_domain_not_found` — the reason that names this fault, and whose message points at the
+  endpoint check (#2502, ADR-0658). Before that change the same symptom reported
+  `ssh_not_provisioned`, which is what made #2480 hard to diagnose.
 
   **Leave `KDIVE_LIBVIRT_URI` unset on a provisioned host.** It is honored verbatim and is the one
   thing that still splits the two: `worker-lifecycle.sh` reads the published contract directly and

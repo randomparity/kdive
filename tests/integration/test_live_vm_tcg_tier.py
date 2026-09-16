@@ -1,9 +1,11 @@
 """Non-gated guard: pin exactly the four proofs to both live_stack and live_vm_tcg (#1154).
 
-Runs in ordinary CI (no live marker), like tests/images/test_exit_criteria.py's tier pin. Because
-``just test-live-tcg`` tolerates "no tests collected" as a clean skip, an emptied ``-m
-live_vm_tcg`` selection would read green; this guard fails at the source if a marker is dropped or
-strays.
+Runs in ordinary CI (no live marker), like tests/images/test_exit_criteria.py's tier pin. This
+guard fails at the source if a marker is dropped or strays, which is defense in depth rather than
+the only line: ``just test-live-tcg`` now also rejects a zero-proof run at the tier (#2517), and
+the hosted spine has since #2048. Both of those fire only where the tier is actually run — on a
+host with the emulator and a live stack — whereas an emptied ``-m live_vm_tcg`` selection is a
+source defect this catches in ordinary PR CI, minutes instead of hours earlier.
 
 It reads markers from **both** idioms the repo uses — per-function ``@pytest.mark.NAME`` decorators
 and a module-level ``pytestmark = ...`` assignment (single mark or a list/tuple) — so a future

@@ -95,6 +95,20 @@ resolve_native_emulator() {
   return 1
 }
 
+# The exact ID, never the ID_LIKE-collapsed family. The docker probe needs it: `moby-engine` is a
+# Fedora-proper name its ID_LIKE=fedora derivatives (Amazon Linux, Oracle Linux) do not ship, SLES
+# collapses to `opensuse` but keeps Docker in the Containers Module, and a package name the distro
+# lacks aborts the whole collapsed install transaction, taking git and make down with it.
+load_distro_exact_id() {
+  local id=""
+  if [[ -r "${OS_RELEASE_FILE}" ]]; then
+    # shellcheck disable=SC1090,SC1091
+    source "${OS_RELEASE_FILE}"
+    id="${ID:-}"
+  fi
+  printf "%s" "${id}"
+}
+
 load_distro_id() {
   local id="" id_like=""
   if [[ -r "${OS_RELEASE_FILE}" ]]; then
@@ -149,8 +163,14 @@ package_for() {
   python3-guestfs:fedora | python3-guestfs:el | python3-guestfs:opensuse) printf "python3-libguestfs" ;;
   python3-guestfs:arch) printf "libguestfs" ;;
   python3-guestfs:*) printf "python3-guestfs" ;;
+  # The Docker engine package name diverges by family: Debian/Ubuntu ship `docker.io`, Fedora
+  # ships `moby-engine` (which requires docker-cli, the owner of /usr/bin/docker), and openSUSE
+  # Tumbleweed and Arch ship `docker`. These rows are exhaustive over the probe's allowlist; every
+  # other distro is routed to a manual hint before package_for is called.
   docker:debian) printf "docker.io" ;;
-  docker:*) printf "docker" ;;
+  docker:fedora) printf "moby-engine" ;;
+  docker:opensuse) printf "docker" ;;
+  docker:arch) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
   qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
   # The RedHat family answers by NATIVENESS, not by architecture (ADR-0641). `qemu-kvm` is a
@@ -356,6 +376,7 @@ print_cross_arch_advisory() {
 }
 
 distro="$(load_distro_id)"
+distro_exact="$(load_distro_exact_id)"
 # Guard the substitution so an absent `uname` (restricted-PATH tests) does not trip `set -e`.
 host_arch="$(uname -m 2>/dev/null || true)"
 
@@ -474,8 +495,29 @@ probe_all() {
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
-  require_tool recommended docker \
-    "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
+  # Docker is named as a package only for the exact distributions whose engine package is known,
+  # because a hint that names no package cannot be acted on and a hint that names the wrong one is
+  # worse: the tier installs as one transaction, so a package the distro lacks takes git and make
+  # down with it. The exact ID is what decides, never the ID_LIKE-collapsed family — Enterprise
+  # Linux ships no engine at all (docs/operating/providers/local-libvirt.md, "Container engine"),
+  # Amazon Linux and Oracle Linux collapse to `fedora` without shipping `moby-engine`, and SLES
+  # collapses to `opensuse` but keeps Docker in the Containers Module. Everything else keeps the
+  # remedies that depend on no package name.
+  #
+  # Two consequences of being in the packaged tier rather than the manual one. The autofix now
+  # installs a container engine as root alongside git and make — a system service, where the tier
+  # previously installed only libraries and CLIs, and on Debian/Ubuntu policy starts the daemon at
+  # install time. And the tier covers the testcontainers gate only: it deliberately does not name a
+  # compose provider, which is the provisioning role's concern, not `just setup`'s.
+  case "${distro_exact}" in
+  fedora | debian | ubuntu | arch | opensuse-tumbleweed)
+    require_command recommended docker "${distro}"
+    ;;
+  *)
+    require_tool recommended docker \
+      "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
+    ;;
+  esac
 
   # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
   future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)

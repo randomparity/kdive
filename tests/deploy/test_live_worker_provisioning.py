@@ -1472,6 +1472,104 @@ def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
     assert "kmod" in packages
 
 
+def test_fedora_worker_packages_declare_a_container_runtime_behind_a_fedora_gate() -> None:
+    """Fedora hosts need a runtime for the compose stack and testcontainers (#2505).
+
+    Neither package can join `local_worker_host_packages_redhat`: that list installs on every
+    `os_family == 'RedHat'` host and `preflight.yml` admits RHEL, Rocky and AlmaLinux, none of
+    which package a Docker engine at all. An ungated addition would fail `dnf` there, so the
+    gate is part of the contract, not an implementation detail.
+    """
+    defaults = _yaml(DEFAULTS)
+    _assert_no_docker_provider(defaults, "local_worker_host_packages_redhat")
+    _assert_runtime_tasks(
+        "packages_redhat.yml",
+        module="ansible.builtin.dnf",
+        distribution="Fedora",
+        compose=("local_worker_host_compose_packages_fedora", ["docker-compose"]),
+        engine=("local_worker_host_engine_packages_fedora", ["moby-engine"]),
+        register="local_worker_host_docker_provider_redhat",
+    )
+
+
+def test_tumbleweed_worker_packages_declare_a_container_runtime_behind_a_tumbleweed_gate() -> None:
+    """Tumbleweed hosts need a runtime for the compose stack and testcontainers (#2505).
+
+    `preflight.yml` admits SLES on the same `os_family == 'Suse'` route, and SLES ships Docker
+    in the Containers Module rather than the base product, so these packages carry the same
+    distribution gate the Fedora ones do.
+    """
+    defaults = _yaml(DEFAULTS)
+    _assert_no_docker_provider(defaults, "local_worker_host_packages_suse")
+    _assert_runtime_tasks(
+        "packages_suse.yml",
+        module="community.general.zypper",
+        distribution="openSUSE Tumbleweed",
+        compose=("local_worker_host_compose_packages_tumbleweed", ["docker-compose"]),
+        engine=("local_worker_host_engine_packages_tumbleweed", ["docker"]),
+        register="local_worker_host_docker_provider_suse",
+    )
+
+
+# Every package that would put /usr/bin/docker on the host. None may appear in a family-wide
+# list: those install before the probe task, so one of them there recreates the ordering defect
+# the probe exists to prevent — the probe would see a provider and skip the engine forever.
+DOCKER_PROVIDERS = frozenset(
+    {"docker", "docker-cli", "docker.io", "moby-engine", "podman-docker", "docker-compose"}
+)
+
+
+def _assert_no_docker_provider(defaults: dict[str, object], variable: str) -> None:
+    packages = defaults[variable]
+    assert isinstance(packages, list)
+    assert not DOCKER_PROVIDERS.intersection(packages), variable
+
+
+def _assert_runtime_tasks(
+    task_file: str,
+    *,
+    module: str,
+    distribution: str,
+    compose: tuple[str, list[str]],
+    engine: tuple[str, list[str]],
+    register: str,
+) -> None:
+    """The compose plugin and the engine carry different gates, and the difference is the
+    contract: the plugin is the only source of `docker compose`, so it installs on every host of
+    its distribution, while the engine is skipped where /usr/bin/docker already has a provider it
+    would conflict with. Each family registers the probe under its own name, so a skipped sibling
+    task cannot leave a stale value behind."""
+    defaults = _yaml(DEFAULTS)
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks" / task_file).read_text("utf-8"))
+    distribution_gate = f"ansible_facts['distribution'] == '{distribution}'"
+
+    def _one(variable: str) -> dict[str, object]:
+        declared = "{{ " + variable + " }}"
+        found = [task for task in tasks if task.get(module, {}).get("name") == declared]
+        assert len(found) == 1, f"{task_file}: {variable}"
+        return cast(dict[str, object], found[0])
+
+    for variable, expected in (compose, engine):
+        assert defaults[variable] == expected
+
+    assert _one(compose[0])["when"] == distribution_gate
+    assert _one(engine[0])["when"] == [distribution_gate, f"not {register}.stat.exists"]
+
+    probes = [
+        task
+        for task in tasks
+        if task.get("ansible.builtin.stat", {}).get("path") == "/usr/bin/docker"
+    ]
+    assert len(probes) == 1, task_file
+    assert probes[0]["register"] == register
+    # Probe, then engine, then plugin. Installing the plugin first would resolve its engine
+    # dependency by pulling the CLI package that owns /usr/bin/docker, and the probe would then
+    # suppress the engine install on this and every later run.
+    assert tasks.index(probes[0]) < tasks.index(_one(engine[0])) < tasks.index(_one(compose[0]))
+    for task in tasks:
+        assert task["tags"] == ["authority_prerequisites"], task["name"]
+
+
 def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)
@@ -2198,3 +2296,58 @@ def test_verify_asserts_the_installed_venv_carries_this_checkout_protocol() -> N
     assert "live_vm_host_worker_installed_protocol.stdout" in compared["that"][0]
     assert "live_vm_host_worker_checkout_protocol.stdout" in compared["that"][0]
     assert "refuse every request" in compared["fail_msg"]
+
+
+def test_installer_makes_the_session_libvirt_runtime_root_boot_durable() -> None:
+    """The session libvirt runtime root lives on tmpfs, so it needs a tmpfiles rule.
+
+    `_lock_libvirt_runtime` creates `/run/kdive/live-libvirt` and its `libvirt` child at install
+    time, but `/run` is tmpfs and nothing else recreates them. Without a root-owned rule that runs
+    at boot, `kdive-libvirtd-live.service` restart-loops on `Unable to obtain pidfile` and every
+    entry point resolving the published session URI dies with "dedicated session daemon could not
+    be started". The unit cannot repair this itself: it runs as the operator, and `/run/kdive` is
+    root-owned 0755.
+    """
+    installer = _text(INSTALLER)
+    assert "/etc/tmpfiles.d/kdive-live-libvirt.conf" in installer
+    assert "_install_libvirt_runtime_tmpfiles" in installer
+
+    # The rule must cover the child too — the pid file is written there, not in the root.
+    assert "d /run/kdive/live-libvirt/libvirt 0750" in installer
+    assert "d /run/kdive/live-libvirt 0750" in installer
+    assert "d /run/kdive 0755 root root" in installer
+
+    # Modes must agree with _lock_libvirt_runtime's post-restore state, because tmpfiles
+    # reapplies them on every boot and would otherwise silently overwrite the installer.
+    assert 'chmod 0750 "$runtime_root"' in installer
+    assert 'chmod 0750 "$_libvirt_runtime_child"' in installer
+    assert 'chmod 0755 "$runtime_parent"' in installer
+
+    # Installed after the directories exist, so the immediate --create has something consistent
+    # to reconcile rather than racing the lock/restore pair.
+    assert installer.index("_restore_libvirt_runtime\n_install_libvirt_runtime_tmpfiles") > 0
+
+    # Applied during the run as well as at boot, so an installer run repairs a host whose
+    # runtime root is already gone without waiting for a reboot.
+    assert "systemd-tmpfiles --create" in installer
+
+
+def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> None:
+    """Pin the reason the tmpfiles rule exists, so removing it fails here rather than at boot.
+
+    The user unit names the pid file under `/run/kdive/live-libvirt/libvirt` and sets
+    XDG_RUNTIME_DIR to the root, but declares no RuntimeDirectory and no ExecStartPre — a user
+    unit cannot create either path under root-owned `/run/kdive`.
+    """
+    tasks = _text(MAIN_TASKS)
+    unit_start = tasks.index("Install the boot-persistent session libvirtd user unit")
+    unit = tasks[unit_start : unit_start + 1400]
+    # The pragma marks a runtime path, not a credential: detect-secrets reads the long
+    # slash-separated literal below as a base64 high-entropy string.
+    xdg = "Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt"  # pragma: allowlist secret
+    assert xdg in unit
+    assert "PIDFile=/run/kdive/live-libvirt/libvirt/libvirtd.pid" in unit
+    # If either of these ever appears, the unit gained its own directory management and this
+    # pairing should be revisited rather than left as two mechanisms for one invariant.
+    assert "RuntimeDirectory=" not in unit
+    assert "ExecStartPre=" not in unit

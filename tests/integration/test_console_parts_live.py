@@ -2,7 +2,9 @@
 
 ``live_vm``-gated: needs the full live stack (KDIVE_STACK_BASE_URL, KDIVE_OIDC_ISSUER,
 KDIVE_DATABASE_URL) plus a local KVM host with the kdump guest image (KDIVE_GUEST_IMAGE) and
-the kernel tree (KDIVE_KERNEL_SRC). Skips cleanly on any host where those are absent.
+the kernel tree (KDIVE_KERNEL_SRC). Skips cleanly without the kernel tree, the database, the
+issuer or the stack; an unresolvable KDIVE_GUEST_IMAGE fails loud instead, so that one
+prerequisite can no longer go missing and still read as a passing tier (#2518).
 
 Proves the #892 gap is closed: a System whose Run has already reached ``succeeded`` continues
 to accumulate ``console-part-<gen>-<index>`` artifacts via the reconciler's ``console_rotate``
@@ -55,6 +57,7 @@ from tests.integration.live_stack.spine import (
     phase,
     scalar,
     seed_metering,
+    worker_libvirt_uri,
 )
 from tests.mcp.json_data import data_str
 
@@ -78,14 +81,20 @@ _PARTS_POLL_INTERVAL_S = 5.0
 
 
 def _preflight() -> tuple[OidcIssuer, str, str]:
-    """Resolve live-stack env or skip with a clear, actionable message.
+    """Resolve live-stack env, failing loud on the guest image and skipping on the rest.
 
     Returns:
         A tuple of (OidcIssuer, base_url, db_url) when all prerequisites are present.
     """
     image = os.environ.get(_GUEST_IMAGE_ENV)
     if not image or not Path(image).exists():
-        pytest.skip(
+        # Fail, never skip (#2518, #2497). scripts/live-stack/env.sh deliberately exports no
+        # KDIVE_GUEST_IMAGE, and the non-tcg live_vm tier carries no `<N> passed` summary gate
+        # like the tcg one does, so a skip here is indistinguishable from a proof that ran.
+        # This deliberately reverses ADR-0035 §4's "a missing fixture is a clear, actionable
+        # skip" idiom for THIS prerequisite only; #2497 is the epic revising that idiom, since
+        # the tier-level guard §4 implicitly relied on does not exist for the native tier.
+        pytest.fail(
             f"{_GUEST_IMAGE_ENV} unset or points at a missing file; "
             "build the local-libvirt rootfs with `python -m kdive build-fs` and set the env var"
         )
@@ -393,7 +402,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     private_key = await load_system_bootstrap_private_key(
                         key_conn, UUID(system_id), secret_registry=SecretRegistry()
                     )
-                libvirt_conn = libvirt.open("qemu:///system")
+                libvirt_conn = libvirt.open(worker_libvirt_uri())
                 try:
                     domain = libvirt_conn.lookupByName(domain_name_for(UUID(system_id)))
                     with materialized_private_key(private_key) as key_path:
