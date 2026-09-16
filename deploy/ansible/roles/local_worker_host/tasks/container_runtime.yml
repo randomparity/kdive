@@ -1,0 +1,71 @@
+---
+# Declaring the engine packages is not a working runtime (ADR-0663, #2557). Fedora's preset enables
+# docker.socket and leaves docker.service disabled; the sysusers entry creates the docker group
+# empty. Debian reaches the working end state only through dpkg install-time policy, which is
+# packaging behaviour this repository does not control.
+- name: Look for a packaged container-engine service unit
+  ansible.builtin.stat:
+    path: "{{ local_worker_host_engine_unit_path }}"
+  register: local_worker_host_engine_unit
+  tags: [container_runtime]
+
+- name: Look up the container-engine socket grant's target account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ local_worker_host_operator_user }}"
+    fail_key: false
+  when:
+    - local_worker_host_engine_unit.stat.exists
+    - local_worker_host_operator_user | length > 0
+  register: local_worker_host_engine_operator_getent
+  tags: [container_runtime]
+
+- name: Require the container-engine socket grant to name a non-worker account
+  # Socket-group membership is root-equivalent and ADR-0575 keeps the fixed worker slot accounts
+  # out of Docker groups. Its runtime verifier (live_vm_host/tasks/verify.yml) covers the runner
+  # path only, and a caller reaching this file with `tasks_from` skips preflight.yml and its
+  # operator asserts entirely — so the check lives here, the one point every path passes through.
+  # The existence clause is not redundant with preflight: the grant below is ansible.builtin.user,
+  # whose default state is `present`, so a non-empty, non-worker name that does not exist would be
+  # created and handed the socket group as an ordinary `changed` line.
+  ansible.builtin.assert:
+    that:
+      - local_worker_host_operator_user | length > 0
+      - local_worker_host_operator_user not in live_vm_host_worker_accounts
+      - >-
+        (local_worker_host_engine_operator_getent.ansible_facts | default({}, true))
+        .get('getent_passwd', {}).get(local_worker_host_operator_user) is not none
+    fail_msg: >-
+      local_worker_host_operator_user={{ local_worker_host_operator_user }} must be an existing
+      host account outside live_vm_host_worker_accounts. ADR-0575 excludes the fixed worker slot
+      accounts from Docker groups, socket-group membership is root-equivalent, and the grant below
+      would otherwise create an account that does not exist and hand it that authority.
+  when: local_worker_host_engine_unit.stat.exists
+  tags: [container_runtime]
+
+- name: Enable and start the container-engine daemon
+  # The service, not the socket: docker.service carries Requires=docker.socket and
+  # ExecStart=/usr/bin/dockerd -H fd://, so enabling the service pulls the socket in and the play
+  # witnesses the daemon's first start. Tumbleweed's own docker.socket says the same with
+  # BindsTo=docker.service. A host with the unit but no engine from this role — Enterprise Linux or
+  # SLES on the Docker-repository remedy the operator guide recommends — is enabled too. A host
+  # without it is skipped, not failed: podman-docker owns /usr/bin/docker and ships no unit, and
+  # packages_redhat.yml deliberately leaves such a host the provider it chose.
+  ansible.builtin.systemd_service:
+    name: "{{ local_worker_host_engine_service }}"
+    enabled: true
+    state: started
+  when: local_worker_host_engine_unit.stat.exists
+  tags: [container_runtime]
+
+- name: Add the named operator account to the container-engine socket group
+  # ADR-0575 keeps the fixed worker slot accounts out of Docker groups; this grant is for the
+  # caller's single operator account, a different principal. append: true so no existing membership
+  # is removed. The task names the variable, not a role, because live_vm_host rebinds it to the
+  # runner account.
+  ansible.builtin.user:
+    name: "{{ local_worker_host_operator_user }}"
+    groups: "{{ local_worker_host_engine_socket_group }}"
+    append: true
+  when: local_worker_host_engine_unit.stat.exists
+  tags: [container_runtime]
