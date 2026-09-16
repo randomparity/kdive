@@ -125,13 +125,18 @@ load_published_libvirt_uri() {
 # die with `unbound variable` under `set -u` instead. require_libvirt_uri below is how an
 # opted-out entry point refuses the operations that do need the endpoint.
 #
-# Two things the override does not fix, recorded here because the abort's own reasoning invites
-# the assumption that it does. A value naming the wrong daemon makes kdive_domains() query one
-# holding no kdive domains, so `stack-down.sh --wipe` reaps nothing and still removes the
-# overlays. And even under the right value the reap is not observable: stack-down.sh suffixes
-# its destroy, undefine and rm with `|| true`, so on the sudo-less provisioned service account all
-# three fail silently and teardown prints `done` having reaped nothing. Both belong to
-# stack-down.sh.
+# One thing the override does not fix, recorded here because the abort's own reasoning invites the
+# assumption that it does: a value naming the wrong daemon makes kdive_domains() enumerate one
+# holding no kdive domains, so `stack-down.sh --wipe` reaps nothing and still removes the overlays.
+# Since #2515 that is no longer silent — the zero-domain line names the endpoint it consulted,
+# because an endpoint answering with nothing is either a clean host or the wrong one of the two
+# URIs above and nothing there can tell them apart. Naming it is not detecting it, though: an empty
+# listing leaves nothing unreaped, so the overlay removal still runs.
+#
+# The second defect this comment used to record is gone. #2515 made the reap report what it
+# actually removed and exit 1 before `done` when anything survived, so a wipe that removes nothing
+# no longer reports success. `destroy` still carries `|| true` there, deliberately: a domain that
+# is already shut off answers non-zero, and that is not a reap failure.
 resolve_libvirt_uri() {
   # Re-entry: stack-status.sh sources lib.sh and env.sh, and each calls this. Without the guard
   # the second call would re-enter (the endpoint is unset, so the -z test passes), repeat the
