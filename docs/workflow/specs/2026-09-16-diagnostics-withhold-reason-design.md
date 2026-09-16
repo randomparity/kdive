@@ -38,15 +38,15 @@ preconditions, not unexpected failures, so a `StateConflict` arm ahead of the ge
 them `slot_unusable`.
 
 **Where the reason rides.** On the existing free-form `SlotResult.message`
-(`StringConstraints(max_length=1024)`) as `withheld: <reason>`. The slot phase rides the typed
-`SlotResult.phase` field, which the diagnostics module alone leaves null today while
-`systemd_worker_lifecycle._result` populates it — and which
-`scripts/live-stack/worker-lifecycle.sh` is the one machine reader of. No field is added to
-`LifecycleRequest`, `LifecycleResponse`, or `SlotResult`: those schemas are hashed by
-`lifecycle_protocol_identity()`, and a moved identity fails the client closed until every
-provisioned host is reprovisioned. Populating an existing field does not move that hash. The
-constraint is ADR-0574's and #2532's, not a decision taken here, and the message is operator-facing
-output with no parser — so no ADR is written for it.
+(`StringConstraints(max_length=1024)`) as `withheld: <reason>`. A withheld slot's phase rides the
+typed `SlotResult.phase` field rather than being string-encoded into the message a second time;
+`scripts/live-stack/worker-lifecycle.sh` is the one machine reader of that field. Only withheld
+results change: a successful capture's result keeps the shape it has today, because no completion
+criterion asks for it. No field is added to `LifecycleRequest`, `LifecycleResponse`, or
+`SlotResult`: those schemas are hashed by `lifecycle_protocol_identity()`, and a moved identity
+fails the client closed until every provisioned host is reprovisioned. Populating an existing
+field does not move that hash. The constraint is ADR-0574's and #2532's, not a decision taken
+here, and the message is operator-facing output with no parser — so no ADR is written for it.
 
 **In the emitted text.** `_WITHHELD_TEMPLATE` becomes
 `"[diagnostics withheld for slot {slot}: {reason}]\n"` and all four sites emit it, replacing the
@@ -160,17 +160,20 @@ bound it, unchanged.
 Cases live in `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`.
 
 - **`WithholdReason` members and their mapping to causes.** Mode: `focused-test` — the six causes
-  covered across new and updated cases, asserting the `SlotResult.message`, `SlotResult.phase`,
-  and the emitted marker.
+  covered across new and updated cases, asserting the withheld `SlotResult`'s `message` and
+  `phase` and the emitted marker.
 - **Reason is never report-derived.** Mode: `focused-test` — a case whose withheld report and
   exception both carry a sentinel, asserting the sentinel is absent from the serialized response.
 - **Marker suppression on a forbidden hit.** Mode: `focused-test` — a withholding trigger plus a
   redaction source equal to a marker substring, asserting the emitted text is `""` while the
   `SlotResult` still names the reason.
-- **Protocol identity unchanged.** Mode: `focused-test` — compute `lifecycle_protocol_identity()`
-  at `e363c265` and at HEAD and require equality. The existing contract tests assert determinism
-  and shape, not a frozen hash, and their own docstring says an inequality against a stale hash is
-  not a guard, so this check is computed rather than asserted from a pinned constant.
+- **Protocol identity unchanged.** Mode: `task-test-not-applicable` — the identity is a pure
+  function of `systemd_worker_contract.py`'s two schemas, and the contract being verified is the
+  absence of a change to them. A pinned-hash assertion is the one shape this repository has
+  already rejected: `test_systemd_worker_contract.py`'s own docstring records that an inequality
+  against a frozen hash passes for any schema change at all. The observation that does bite is
+  structural and repeatable — `git diff --exit-code e363c265 -- <that file>` — and the plan runs
+  it as a task step.
 - **The two operator documents.** Mode: `task-test-not-applicable` — prose with no executable
   consumer. `docs-links` resolves a link's file and discards its `#fragment`, so the plan's tasks
   grep each target heading directly; `docs-paths` covers referenced `docs/<path>` strings.

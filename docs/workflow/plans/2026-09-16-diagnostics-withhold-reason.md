@@ -18,9 +18,9 @@ recovery procedure.
 
 Design: [`docs/workflow/specs/2026-09-16-diagnostics-withhold-reason-design.md`](../specs/2026-09-16-diagnostics-withhold-reason-design.md).
 
-Expected implementation size: 250–330 changed lines (M) — from the file map below: about 70 lines
-in the diagnostics module, about 140 in its tests (four new cases, eight existing cases updated),
-about 45 in `deploy/systemd/README.md`, about 65 in the runbook.
+Expected implementation size: 230–300 changed lines (M) — from the file map below: about 45 lines
+in the diagnostics module, about 130 in its tests (four new cases, seven existing cases updated),
+about 45 in `deploy/systemd/README.md`, about 65 in the runbook. Task 4 changes no file.
 
 ## Global Constraints
 
@@ -43,8 +43,8 @@ about 45 in `deploy/systemd/README.md`, about 65 in the runbook.
 
 | Path | Now | After |
 |---|---|---|
-| `src/kdive/processes/lifecycle/systemd/systemd_diagnostics.py` | four anonymous withhold sites; `SlotResult.phase` left null | owns `WithholdReason`, one `withhold` funnel, and a `StateConflict` arm; populates `phase` |
-| `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py` | eight diagnostics cases the change touches | each reason covered, plus the leak and suppression proofs |
+| `src/kdive/processes/lifecycle/systemd/systemd_diagnostics.py` | four anonymous withhold sites | owns `WithholdReason`, one `withhold` funnel, and a `StateConflict` arm; a withheld result carries `phase` |
+| `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py` | seven diagnostics cases the change touches | each reason covered, plus the leak and suppression proofs |
 | `deploy/systemd/README.md` | installs the fixed live-worker contract | also defines the six `RetryAction` values |
 | `docs/operating/runbooks/live-stack.md` | bring-up, budgets, teardown | also the wedged-slot recovery procedure |
 
@@ -84,8 +84,9 @@ _UnsafeDiagnosticText.__init__(
 ) -> None
 
 _result(state: SlotState) -> SlotResult
-    # SlotResult(slot=state.slot, unit=state.unit, phase=state.phase); the `code` keyword and the
-    # `message=state.phase.value` duplicate both go, matching systemd_worker_lifecycle._result
+    # SlotResult(slot=state.slot, unit=state.unit, message=state.phase.value) -- body unchanged.
+    # Only the `code` keyword goes, and only because step 11 leaves every remaining caller on the
+    # default. A successful capture's result is not otherwise reshaped: no criterion asks for it.
 
 _WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}: {reason}]\n"
 ```
@@ -115,16 +116,20 @@ Tasks 2 and 3 rely on the six reason strings above as prose, nothing more.
   `response.slots[0].message == "withheld: acquisition_failed"`. Expected red: today the emitted
   text is `""` but the message is `'started'`, so the message assertion fails. Green:
   `uv run python -m pytest PYTEST_FILE -k withheld_marker_respects -q`.
-- **`lifecycle_protocol_identity()` does not move.** Mode: `focused-test`. Not the existing
-  contract test — it asserts determinism and shape, and its own docstring says an inequality
-  against a stale hash is not a guard. Compute and compare instead (step 15).
+- **`lifecycle_protocol_identity()` does not move.** Mode: `task-test-not-applicable`. The
+  identity is a pure function of `systemd_worker_contract.py`'s two schemas, and the contract is
+  the absence of a change to them. No task-specific test can fail meaningfully: a pinned-hash
+  assertion is the shape this repository already rejected, recorded in
+  `tests/processes/lifecycle/systemd/test_systemd_worker_contract.py`'s own docstring — "an
+  inequality against a frozen hash passes for any schema change at all". The structural
+  observation that does bite is step 15's `git diff --exit-code`, which is exact and repeatable.
 
 ### Steps
 
 1. Read `src/kdive/processes/lifecycle/systemd/systemd_diagnostics.py` end to end. The four
    withhold sites are in `_capture_diagnostics` and `_capture_diagnostic_slot`.
 
-2. Write the three new cases from the verification inventory into `PYTEST_FILE`, beside the
+2. Write the four new cases from the verification inventory into `PYTEST_FILE`, beside the
    existing `test_diagnostics_withholds_*` group, using the module's `_state`, `_fleet`,
    `_coordinator`, `_deadline`, and `_run` helpers. Reach each cause the way the existing cases
    already do:
@@ -212,8 +217,8 @@ Tasks 2 and 3 rely on the six reason strings above as prose, nothing more.
     raise in `_diagnose_trusted_slot` passes `reason=WithholdReason.REDACTION_REFUSED` alongside
     its existing `used` and `aggregate_truncated` keywords.
 
-13. Reshape the module-private `_result` to the Interfaces block's form, and update the eight
-    existing cases in `PYTEST_FILE` the change touches:
+13. Drop the unused `code` keyword from the module-private `_result`, leaving its body as it is,
+    and update the seven existing cases in `PYTEST_FILE` the change touches:
 
     | Case | New expectation |
     |---|---|
@@ -224,7 +229,10 @@ Tasks 2 and 3 rely on the six reason strings above as prose, nothing more.
     | `test_diagnostics_withholds_oversized_redaction_value` | `[diagnostics withheld for slot 1: slot_unusable]\n`, message `withheld: slot_unusable` |
     | `test_diagnostics_emits_no_fallback_when_truncation_text_collides` | parametrize the expected emission alongside the secret — `("diagnostics", "")` because the marker contains `"diagnostics"` and is suppressed, and `("truncated", "[diagnostics withheld for slot 1: redaction_refused]\n")` because it does not. Keep `secret not in response.diagnostics` and add `response.slots[0].message == "withheld: redaction_refused"` for both. No disjunction: each parameter has one determinate outcome |
     | `test_diagnostics_emits_no_fallback_when_aggregate_marker_collides` | slot 4's site now emits `[diagnostics withheld for slot 4: redaction_refused]\n`, which holds no `"aggregate"` and so is not suppressed. Replace `== 3 * 256 * 1024` with `<= 1_048_576` plus the marker's presence; keep `"aggregate" not in response.model_dump_json()` |
-    | any case asserting a diagnostics slot `message` equal to a bare phase | `_result` no longer writes the phase into `message`; assert `slot.phase` instead |
+
+    Successful-capture results are untouched, so no case asserting a non-withheld slot's `message`
+    changes. If one asserts a *withheld* slot's message as a bare phase value, it moves to
+    `withheld: <reason>` with the phase read from `slot.phase`.
 
 14. Run `uv run python -m pytest tests/processes/lifecycle/systemd/ -q`. Expect every case green.
     Then `just lint` and `just type`, expecting exit 0 each.
@@ -389,6 +397,42 @@ anchor from Task 2. Nothing later depends on this task.
 only the shipped contract; every reason maps to an action; `recover`'s compatibility prerequisite
 and its refusal case are named; the residual cases are named as out of reach with their owning
 issue; doc guards green.
+
+## Task 4 — the full gate
+
+Changes no file. It owns completion criterion 7, which no earlier task's checks reach: Tasks 1–3
+run lint, type, one test directory, and three doc guards, while `just ci` additionally runs
+`lock-check`, the shell/workflow/Ansible linters, `adr-status-check`, every generated-artifact
+check, and the whole suite.
+
+### Verification inventory
+
+- **Criterion 7: `just ci` green.** Mode: `focused-test`. The observable is the recipe's own exit
+  status. No expected red: this task runs after Tasks 1–3 are green, and a failure here is a
+  defect in one of them rather than a planned red. Green: the command in step 2, exit 0.
+
+### Steps
+
+1. `git fetch origin main && just records`. Expect exit 0 — no decision record is added or
+   changed by this work, so the gate has nothing to compare.
+
+2. Run the full gate in the foreground, as the last command in its invocation, with a raised
+   timeout:
+
+   ```bash
+   just ci > /tmp/ci-2489.log 2>&1 < /dev/null
+   ```
+
+   Expect exit 0. `< /dev/null` is required: `lint-ansible` aborts on non-blocking stdin. Judge by
+   the exit status, never by grepping the log — `test-ansible` deliberately exercises negative
+   paths, so the log contains `[ERROR]` and `failed:` strings from an intentional
+   checksum-mismatch proof. Never pipe the recipe through `tail` or `head`, and never append
+   `; echo $?`: both replace the recipe's status with the trailing command's.
+
+3. On a failure, read `/tmp/ci-2489.log` for the first failing recipe, fix it in the task that
+   owns the file, and re-run this step rather than the whole plan.
+
+**Acceptance.** `just ci` exits 0, and `just records` exits 0.
 
 ## Deferrals
 
