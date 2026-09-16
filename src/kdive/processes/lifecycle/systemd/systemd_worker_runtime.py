@@ -610,6 +610,17 @@ class SystemdRuntime:
         self._require_unit(unit)
         self._run(("systemctl", "stop", unit), deadline=deadline)
 
+    def reset_failed(self, unit: str, deadline: Deadline) -> None:
+        """Release the identity a failed retained unit holds after its evidence was published.
+
+        ``systemctl stop`` is a no-op on a failed unit, so ``ActiveState`` and ``InvocationID``
+        survive ``stop_retained`` and ``require_inactive`` then refuses the next activation
+        (ADR-0657). Only ``reset-failed`` clears them, and it is a no-op on a unit that is not
+        failed.
+        """
+        self._require_unit(unit)
+        self._run(("systemctl", "reset-failed", unit), deadline=deadline)
+
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
         """List exact worker commands outside the eight fixed unit cgroups."""
         try:

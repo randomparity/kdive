@@ -1225,3 +1225,16 @@ def test_worker_fence_summaries_link_to_the_canonical_staged_runbook() -> None:
         "../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade"
         in _HELM_REFERENCE.read_text()
     )
+
+
+def test_install_states_the_interactive_become_password_the_local_libvirt_recipe_requires() -> None:
+    """`prepare-local-libvirt-host` passes `--ask-become-pass`, so its runbook owes the operator
+    that requirement and its reason. Coupled to the recipe so neither side can drift alone."""
+    justfile = (_ROOT / "justfile").read_text()
+    recipe = justfile.split("\nprepare-local-libvirt-host:\n", maxsplit=1)[1].split("\n\n", 1)[0]
+    assert "--ask-become-pass" in recipe, recipe
+
+    section = _section(_INSTALL, "### Local-libvirt host preparation", "## Run modes")
+    assert "--ask-become-pass" in section
+    assert "interactive" in section
+    assert "unattended" in section

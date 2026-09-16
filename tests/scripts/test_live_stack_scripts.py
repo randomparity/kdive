@@ -107,7 +107,7 @@ def _copied_lifecycle(tmp_path: Path, installed_python: Path) -> Path:
     return lifecycle
 
 
-@pytest.mark.parametrize("operation", ("start 1", "status", "stop"))
+@pytest.mark.parametrize("operation", ("start 1", "status", "stop", "recover"))
 def test_lifecycle_protocol_mismatch_fails_before_mutation(tmp_path: Path, operation: str) -> None:
     installed_python = _installed_protocol_python(tmp_path, "0:incompatible")
     lifecycle = _copied_lifecycle(tmp_path, installed_python)
@@ -924,17 +924,18 @@ def test_live_stack_libvirt_uri_reaches_child_processes(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("preset", "published", "expected"),
+    ("preset", "published", "expected", "reports"),
     [
-        ("", False, "qemu:///system"),
-        ("", True, _PUBLISHED_URI),
-        # An explicit caller value wins over both, published contract or not.
-        ("qemu:///system", True, "qemu:///system"),
-        ("qemu+ssh://elsewhere/system", False, "qemu+ssh://elsewhere/system"),
+        ("", False, "qemu:///system", False),
+        ("", True, _PUBLISHED_URI, False),
+        # An explicit caller value still wins over both, published contract or not -- but since
+        # #2509 one that contradicts a *valid* contract says so on stderr on its way through.
+        ("qemu:///system", True, "qemu:///system", True),
+        ("qemu+ssh://elsewhere/system", False, "qemu+ssh://elsewhere/system", False),
     ],
 )
 def test_live_stack_env_resolves_one_libvirt_endpoint(
-    tmp_path: Path, preset: str, published: bool, expected: str
+    tmp_path: Path, preset: str, published: bool, expected: str, reports: bool
 ) -> None:
     """env.sh set no libvirt endpoint at all before #2480, so the bare runbook invocation of
     stack-services.sh left the daemons on a different endpoint from the worker's. Reading the
@@ -951,6 +952,91 @@ def test_live_stack_env_resolves_one_libvirt_endpoint(
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == expected
+    # Which value the resolver settles on is unchanged by the report; only stderr moves.
+    assert (result.stderr != "") is reports, result.stderr
+
+
+def test_a_preset_contradicting_the_contract_is_reported(tmp_path: Path) -> None:
+    """#2509: the preset branch short-circuited without ever reading the published contract, so a
+    preset that disagreed with it put the operator's shell and the worker processes on different
+    daemons with no message -- the #2480 split, reached through the one path still allowed to be
+    silent. ADR-0661: report it, do not refuse it.
+
+    The report has to name both values and the way back. A bare "these disagree" leaves the
+    operator with the fact that made the contract unreadable in the first place.
+    """
+    _, staged = _published_contract(tmp_path)
+    staged["KDIVE_LIBVIRT_URI"] = "qemu:///system"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        staged,
+    )
+    # Honoured, not refused: the exported value a child sees is still the operator's.
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "qemu:///system"
+    assert "qemu:///system" in result.stderr
+    assert _PUBLISHED_URI in result.stderr
+    assert "KDIVE_LIBVIRT_URI" in result.stderr
+
+
+def test_a_preset_matching_the_contract_is_not_reported(tmp_path: Path) -> None:
+    """The guard keys on the *value*, not on the preset's presence.
+
+    `.github/workflows/live.yml` and the self-hosted runner runbook both preset the endpoint to
+    `$(load_published_libvirt_uri)` -- agreeing presets, on every live CI run. A presence-keyed
+    guard would report all of them.
+    """
+    _, staged = _published_contract(tmp_path)
+    staged["KDIVE_LIBVIRT_URI"] = _PUBLISHED_URI
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == _PUBLISHED_URI
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "leg", ("absent", "untrusted-metadata", "malformed-line-shape", "allowlist-refused")
+)
+def test_a_preset_is_honoured_silently_without_a_valid_contract(tmp_path: Path, leg: str) -> None:
+    """Every loader refusal, on the path that exists to get past exactly that state.
+
+    An explicit override is how an operator works on a host whose contract is broken or absent,
+    so the comparison must not turn the escape hatch into the thing it escapes. Two ways it
+    could: `load_published_libvirt_uri` writes its refusal to stderr *before* returning 1, and
+    under the callers' `set -euo pipefail` a bare assignment from a failing command substitution
+    aborts the sourcing shell. Both halves are asserted here -- empty stderr and exit 0.
+
+    Four inputs across the loader's three refusals, rather than one input each: `absent` and
+    `untrusted-metadata` both land on `require_exact_libvirt_env`, which is one refusal reached
+    two ways, and covering only those two would leave the line-shape refusal unexercised.
+    """
+    contract, staged = _published_contract(tmp_path)
+    if leg == "absent":
+        contract.unlink()
+    elif leg == "untrusted-metadata":
+        (tmp_path / "bin" / "stat").write_text(
+            "#!/bin/sh\nprintf '1000:1000:644\\n'\n", encoding="utf-8"
+        )
+    elif leg == "malformed-line-shape":
+        contract.write_text(
+            f"KDIVE_LIBVIRT_URI={_PUBLISHED_URI}\nHOST=elsewhere\n", encoding="utf-8"
+        )
+    else:
+        contract.write_text("KDIVE_LIBVIRT_URI=qemu:///wrong\n", encoding="utf-8")
+    staged["KDIVE_LIBVIRT_URI"] = "qemu+ssh://elsewhere/system"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        "bash -c 'printf %s \"${KDIVE_LIBVIRT_URI-unset}\"'",
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "qemu+ssh://elsewhere/system"
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize("metadata", ("1000:1000:644", "0:0:664", "0:1000:644"))
@@ -1184,7 +1270,6 @@ def _isolated_stack_down(tmp_path: Path, events: Path, lib_extra: str = "") -> P
         f'stop_daemons() {{ echo graceful >>"{events}"; }}\n'
         f'force_stop_daemons() {{ echo force >>"{events}"; }}\n'
         f'docker() {{ echo docker >>"{events}"; }}\n'
-        f'kdive_domains() {{ echo domains >>"{events}"; }}\n'
         f'sudo() {{ echo "sudo $1" >>"{events}"; }}\n' + lib_extra,
         encoding="utf-8",
     )
@@ -3709,3 +3794,45 @@ def test_services_stage_reconciles_the_app_tier(tmp_path: Path) -> None:
     # legal under --stage services (only --stage backends rejects it), so the stage gate is still
     # exercised while the privileged block stays unreached.
     assert "REFUSED" not in recorded, f"bring-up attempted a privileged call: {recorded}"
+
+
+@pytest.mark.parametrize("operation", ("status", "stop", "diagnostics", "recover"))
+def test_lifecycle_client_dispatches_every_argument_free_operation(operation: str) -> None:
+    """The shell `case` and the usage line must both agree with the wire grammar.
+
+    `worker-lifecycle.sh` is the only client an operator runs, so an operation the contract
+    accepts but the `case` does not name falls through to `*)` and exits 2 on usage before a
+    request is ever built -- indistinguishable from a typo. Asserting the exit status cannot
+    catch that, because a bogus argument produces exactly the same status and the same usage
+    line; only the arm patterns themselves separate the two.
+    """
+    lifecycle = LIFECYCLE.read_text()
+    dispatch = lifecycle.split('case "${1:-}" in', 1)[1]
+    arms: dict[frozenset[str], str] = {}
+    for block in dispatch.split(";;"):
+        header, _, body = block.partition(")")
+        patterns = frozenset(pattern.strip() for pattern in header.strip().split("|"))
+        if patterns:
+            arms[patterns] = body
+    named = {pattern for patterns in arms for pattern in patterns}
+
+    assert operation in named, named
+    assert "*" in named, "the fall-through arm must still reject an unknown argument"
+    assert f"|{operation}" in lifecycle.split("usage()", 1)[1].split("\n}", 1)[0]
+
+    # Naming the operation in an arm is not enough: the arm must build a request rather than
+    # fall back to usage, which would be indistinguishable from the `*)` arm at the exit status.
+    body = next(body for patterns, body in arms.items() if operation in patterns)
+    assert 'request "$1"' in body, body
+
+
+def test_lifecycle_diagnostics_alone_skips_the_compatibility_probe() -> None:
+    """Recovery must fail closed on a skewed host; only `diagnostics` stays reachable.
+
+    A host is reprovisioned *before* `recover` is dispatched against it, so exempting `recover`
+    from the probe would let it run against a venv whose coordinator has no `recover` method —
+    an `internal_error` from an `AttributeError`, not the actionable skew message.
+    """
+    lifecycle = LIFECYCLE.read_text()
+
+    assert '[[ "$operation" != diagnostics ]]' in lifecycle

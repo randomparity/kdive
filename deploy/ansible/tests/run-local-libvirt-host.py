@@ -6,7 +6,10 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
-PLAYBOOK = ROOT / "deploy/ansible/playbooks/local-libvirt-host.yml"
+ANSIBLE = ROOT / "deploy/ansible"
+PLAYBOOK = ANSIBLE / "playbooks/local-libvirt-host.yml"
+INVENTORY = ANSIBLE / "inventory/hosts.yml"
+SYSTEM_INTERPRETER = "/usr/bin/python3"
 
 
 def require(condition: bool, message: str) -> None:
@@ -163,7 +166,35 @@ require(
     rootfs["owner"] == "{{ local_libvirt_host_operator_user }}",
     "the rootfs publication directory must be owned by the operator",
 )
+
+
+# The pin is a play var, not an inventory host var. A play var outranks the implicit-localhost
+# interpreter, which is what binds modules to whichever Python launched ansible-playbook -- under
+# the recipe, a `uv run --with ansible-core` environment with no lxml for community.libvirt.
+require(
+    play["vars"].get("ansible_python_interpreter") == SYSTEM_INTERPRETER,
+    "the play must pin ansible_python_interpreter to "
+    f"{SYSTEM_INTERPRETER} in its own vars, not rely on the inventory or on discovery",
+)
+
+
+def declared_hosts(group: dict) -> set[str]:
+    """Every host named anywhere in the inventory, not just at the top level."""
+    named = set(group.get("hosts") or {})
+    for child in (group.get("children") or {}).values():
+        named |= declared_hosts(child or {})
+    return named
+
+
+inventory = yaml.safe_load(INVENTORY.read_text())
+require(
+    "localhost" not in declared_hosts(inventory["all"]),
+    "hosts.yml must not declare localhost anywhere; the localhost plays that do not pin their own "
+    "interpreter (playbooks/pki.yml, most of deploy/ansible/tests/) would fall back to "
+    "ansible-core interpreter discovery instead of the launching environment",
+)
+
 print(
     "local-libvirt-host: preflight, localhost role composition, locked live sync, DSN stdin, "
-    "and guestfs ABI handling pass"
+    "guestfs ABI handling, and the play-scoped system-interpreter pin pass"
 )

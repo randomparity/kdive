@@ -22,9 +22,17 @@
 # it as "no lifecycle contract installed" and resolves qemu:///system with no message, exactly as
 # it does on a bare dev host, because nothing here can tell the two apart. On a provisioned host
 # that is the server/worker split this file exists to prevent, so the seam is only safe for a
-# caller that stages a real file. Do not restate the bound as "an explicit KDIVE_LIBVIRT_URI
-# bypasses the allowlist anyway": that holds for resolve_libvirt_uri only, and
-# worker-lifecycle.sh calls load_published_libvirt_uri directly, where no such bypass exists.
+# caller that stages a real file.
+#
+# Since #2509 there is a third consequence, because the preset branch reads LIBVIRT_ENV too: a
+# redirect decides not only which value is published but whether the contradiction guard can fire
+# at all. Pointed at an absent or invalid path it leaves the guard silent, so a preset that
+# contradicts the real /etc entry is honoured with no report. What bounds THAT is not the
+# allowlist — it is that the seam belongs to whoever owns the shell's environment, and they set
+# KDIVE_LIBVIRT_URI in the first place. Do not restate the bound as "an explicit
+# KDIVE_LIBVIRT_URI bypasses the allowlist anyway": the preset branch consults the contract but
+# never adopts its value, and worker-lifecycle.sh calls load_published_libvirt_uri directly,
+# where no bypass exists at all.
 : "${LIBVIRT_ENV:=/etc/kdive/live-worker-libvirt.env}"
 # Why the two names below carry no KDIVE_ prefix either (ADR-0659): check_env_documented.py sweeps
 # scripts/ for KDIVE_[A-Z0-9_]+ and requires every hit to be a registry setting or a catalogued
@@ -86,7 +94,8 @@ load_published_libvirt_uri() {
 
 # Export the one host-local libvirt endpoint every consumer a live-stack entry point starts must
 # share — server, reconciler, lifecycle worker, the `virsh` gates, teardown (#2480). An explicit
-# caller value wins; otherwise the published session URI when the lifecycle contract is installed;
+# caller value wins — reported, since #2509, where it contradicts a valid published contract;
+# otherwise the published session URI when the lifecycle contract is installed;
 # otherwise the bare-host default. lib.sh and env.sh both call it, so the endpoint no longer
 # depends on which entry point brought the stack up.
 #
@@ -116,13 +125,19 @@ load_published_libvirt_uri() {
 # die with `unbound variable` under `set -u` instead. require_libvirt_uri below is how an
 # opted-out entry point refuses the operations that do need the endpoint.
 #
-# Two things the override does not fix, recorded here because the abort's own reasoning invites
-# the assumption that it does. A value naming the wrong daemon makes kdive_domains() query one
-# holding no kdive domains, so `stack-down.sh --wipe` reaps nothing and still removes the
-# overlays. And even under the right value the reap is not observable: stack-down.sh suffixes
-# its destroy, undefine and rm with `|| true`, so on the sudo-less provisioned service account all
-# three fail silently and teardown prints `done` having reaped nothing. Both belong to
-# stack-down.sh.
+# One thing the override does not fix, recorded here because the abort's own reasoning invites the
+# assumption that it does: a value naming the wrong daemon makes stack-down.sh's
+# enumerate_kdive_domains() enumerate one holding no kdive domains, so `stack-down.sh --wipe`
+# reaps nothing and still removes the overlays.
+# Since #2515 that is no longer silent — the zero-domain line names the endpoint it consulted,
+# because an endpoint answering with nothing is either a clean host or the wrong one of the two
+# URIs above and nothing there can tell them apart. Naming it is not detecting it, though: an empty
+# listing leaves nothing unreaped, so the overlay removal still runs.
+#
+# The second defect this comment used to record is gone. #2515 made the reap report what it
+# actually removed and exit 1 before `done` when anything survived, so a wipe that removes nothing
+# no longer reports success. `destroy` still carries `|| true` there, deliberately: a domain that
+# is already shut off answers non-zero, and that is not a reap failure.
 resolve_libvirt_uri() {
   # Re-entry: stack-status.sh sources lib.sh and env.sh, and each calls this. Without the guard
   # the second call would re-enter (the endpoint is unset, so the -z test passes), repeat the
@@ -152,6 +167,28 @@ resolve_libvirt_uri() {
       }
     else
       KDIVE_LIBVIRT_URI=qemu:///system
+    fi
+  else
+    # #2509, ADR-0661: an explicit override is deliberate and stays supported, but on a host that
+    # publishes a contract one that disagrees puts this shell and the worker processes on
+    # different daemons — the #2480 split, reached through the one path still allowed to be
+    # silent. Report it and honour it; refusing would break the escape hatch the abort message
+    # above, stack-status.sh and the live-testing runbook all send an operator to.
+    #
+    # Both halves of a loader failure are caught here, because this is the path that exists to
+    # get past a broken contract. Its stderr is discarded: it writes its refusal BEFORE returning
+    # 1, so an untrusted or allowlist-refused /etc entry would otherwise report itself on the one
+    # path that must stay quiet. And the assignment is split from the declaration, because
+    # `local v="$(f)"` takes `local`'s exit status, not f's — but a split assignment carries f's,
+    # which under the callers' `set -e` aborts the sourcing shell, so the `||` is load-bearing
+    # rather than decorative.
+    local published
+    published="$(load_published_libvirt_uri 2>/dev/null)" || published=''
+    if [[ -n "$published" && "$KDIVE_LIBVIRT_URI" != "$published" ]]; then
+      echo "KDIVE_LIBVIRT_URI is set to ${KDIVE_LIBVIRT_URI}, but ${LIBVIRT_ENV} publishes" \
+        "${published}; honouring the override" >&2
+      echo "every process this stack starts will use the override; unset KDIVE_LIBVIRT_URI to" \
+        "use the published endpoint instead" >&2
     fi
   fi
   # Reached only with an endpoint in hand, so the record is stale by definition: clearing it here
