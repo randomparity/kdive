@@ -162,10 +162,9 @@ def test_native_spine_raises_the_allocation_cap_above_the_long_lived_mint() -> N
     the cap is counted per resource across projects, and these two allocations are funded in
     different projects (`demo` for the mint, `console-parts-proof` for the proof).
     """
+    spine = _native_spine()
     lines = [
-        ln.strip()
-        for ln in _native_spine().splitlines()
-        if ln.strip().startswith(_ALLOCATION_CAP_EXPORT)
+        ln.strip() for ln in spine.splitlines() if ln.strip().startswith(_ALLOCATION_CAP_EXPORT)
     ]
     assert len(lines) == 1, (
         f"expected exactly one `{_ALLOCATION_CAP_EXPORT}` line in the native spine, "
@@ -185,7 +184,6 @@ def test_native_spine_raises_the_allocation_cap_above_the_long_lived_mint() -> N
     # value on every refresh. The reconciler stack-services.sh starts registers discovery at
     # startup, so it inserts first — an export placed after stack-services.sh but before the mint
     # reads as correct and silently no-ops, which is how #2560 would come back.
-    spine = _native_spine()
     assert spine.index(_ALLOCATION_CAP_EXPORT) < spine.index("live-stack/stack-services.sh"), (
         "KDIVE_LIBVIRT_ALLOCATION_CAP is exported after stack-services.sh; the reconciler it "
         "starts has already inserted the resource at the old cap, and ADR-0384 keeps that stored "
