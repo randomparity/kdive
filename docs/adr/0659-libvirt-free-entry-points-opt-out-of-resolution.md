@@ -1,4 +1,4 @@
-# 0660 — Libvirt-free entry points opt out of source-time resolution
+# 0659 — Libvirt-free entry points opt out of source-time resolution
 
 ## Status
 
