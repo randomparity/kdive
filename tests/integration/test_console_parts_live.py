@@ -2,7 +2,9 @@
 
 ``live_vm``-gated: needs the full live stack (KDIVE_STACK_BASE_URL, KDIVE_OIDC_ISSUER,
 KDIVE_DATABASE_URL) plus a local KVM host with the kdump guest image (KDIVE_GUEST_IMAGE) and
-the kernel tree (KDIVE_KERNEL_SRC). Skips cleanly on any host where those are absent.
+the kernel tree (KDIVE_KERNEL_SRC). Skips cleanly without the kernel tree or the database; an
+unresolvable KDIVE_GUEST_IMAGE fails loud instead, so a tier that proved nothing cannot read
+green (#2518).
 
 Proves the #892 gap is closed: a System whose Run has already reached ``succeeded`` continues
 to accumulate ``console-part-<gen>-<index>`` artifacts via the reconciler's ``console_rotate``
@@ -78,14 +80,17 @@ _PARTS_POLL_INTERVAL_S = 5.0
 
 
 def _preflight() -> tuple[OidcIssuer, str, str]:
-    """Resolve live-stack env or skip with a clear, actionable message.
+    """Resolve live-stack env, failing loud on the guest image and skipping on the rest.
 
     Returns:
         A tuple of (OidcIssuer, base_url, db_url) when all prerequisites are present.
     """
     image = os.environ.get(_GUEST_IMAGE_ENV)
     if not image or not Path(image).exists():
-        pytest.skip(
+        # Fail, never skip (#2518, #2497). scripts/live-stack/env.sh deliberately exports no
+        # KDIVE_GUEST_IMAGE, and the non-tcg live_vm tier carries no `<N> passed` summary gate
+        # like the tcg one does, so a skip here is indistinguishable from a proof that ran.
+        pytest.fail(
             f"{_GUEST_IMAGE_ENV} unset or points at a missing file; "
             "build the local-libvirt rootfs with `python -m kdive build-fs` and set the env var"
         )
