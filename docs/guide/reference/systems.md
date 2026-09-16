@@ -366,9 +366,8 @@ and remote-libvirt only when the host is configured for SSH parity. Reports
 ``ssh_not_provisioned`` when there is no forward. A **local-libvirt** System with no
 libvirt domain on the libvirt connection this server reads reports
 ``system_domain_not_found`` instead — an endpoint or liveness fault, not a provisioning
-gap. For a remote System the
-endpoint is read live from the host, so an unreachable host surfaces as a transport
-failure rather than a cached value.
+gap. For a remote System the endpoint is read live from the host, so an unreachable host
+surfaces as a transport failure rather than a cached value.
 
 ``host_scope`` is a locality signal for ``host``/``port``. ``worker_loopback`` means the
 coordinates are the worker host's own loopback — reachable only from a caller co-located
