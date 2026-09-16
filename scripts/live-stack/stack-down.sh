@@ -99,13 +99,55 @@ fi
 
 if [[ "$wipe" == "1" ]]; then
   echo "=== reaping kdive-* libvirt domains + overlays ==="
+  # Every call here used to end in `|| true` and the block printed one `destroying <domain>` line
+  # per name it INTENDED to reach, so a reap that removed nothing still reported success (#2515).
+  # An operator told the host was wiped then starts the next run from a state nobody expects.
+  # What survives the rewrite is the suppression on `destroy` alone: a domain that is already shut
+  # off answers non-zero and that is not a reap failure. `undefine` is the removal, so its status
+  # is the verdict, and the lines below are written AFTER a removal rather than before an attempt.
+  reaped=()
+  unreaped=()
   while read -r dom; do
     [[ -n "$dom" ]] || continue
-    echo "  destroying ${dom}"
-    sudo virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" 2>/dev/null || true
-    sudo virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>/dev/null || true
+    sudo virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" >/dev/null 2>&1 || true
+    # `2>&1 >/dev/null` in that order captures stderr only: fd2 goes to the substitution, then fd1
+    # to /dev/null. Verbatim, because which refusal it was decides the operator's next move.
+    if err="$(sudo virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>&1 >/dev/null)"; then
+      reaped+=("domain ${dom}")
+    else
+      unreaped+=("domain ${dom}: ${err:-undefine failed and said nothing}")
+    fi
   done < <(kdive_domains)
-  sudo rm -f "${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2 2>/dev/null || true
+
+  # The overlay glob is the SHELL's, expanded with the caller's own privilege — so on an account
+  # that cannot list the directory it expands to nothing, which is byte-identical to a host that
+  # has no overlays. That is the one place a removal failure cannot surface the no-op, because no
+  # removal is ever attempted; only the listability test below tells the two apart.
+  if [[ ! -d "$KDIVE_ROOTFS_DIR" ]]; then
+    echo "  no overlay directory at ${KDIVE_ROOTFS_DIR}"
+  elif [[ ! -r "$KDIVE_ROOTFS_DIR" || ! -x "$KDIVE_ROOTFS_DIR" ]]; then
+    unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory and an unreadable one cannot be told apart")
+  else
+    shopt -s nullglob
+    for overlay in "${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2; do
+      if err="$(sudo rm -f "$overlay" 2>&1 >/dev/null)"; then
+        reaped+=("overlay ${overlay}")
+      else
+        unreaped+=("overlay ${overlay}: ${err:-rm failed and said nothing}")
+      fi
+    done
+    shopt -u nullglob
+  fi
+
+  for item in "${reaped[@]}"; do
+    echo "  removed ${item}"
+  done
+  echo "reaped ${#reaped[@]} item(s)"
+  if ((${#unreaped[@]})); then
+    echo "ERROR: --wipe did not reap the host; ${#unreaped[@]} item(s) remain:" >&2
+    printf '  %s\n' "${unreaped[@]}" >&2
+    exit 1
+  fi
 fi
 
 echo "done"

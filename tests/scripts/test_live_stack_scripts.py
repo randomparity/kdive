@@ -1146,7 +1146,7 @@ def test_the_declaration_reaches_a_child_that_sources_lib_sh(tmp_path: Path) -> 
     assert result.stdout == "unset"
 
 
-def _isolated_stack_down(tmp_path: Path, events: Path) -> Path:
+def _isolated_stack_down(tmp_path: Path, events: Path, lib_extra: str = "") -> Path:
     """Copy stack-down.sh beside stubs that record each teardown step instead of performing it.
 
     The gate under test stays real: the stub lib.sh sources the shipped libvirt-uri.sh, so the
@@ -1155,6 +1155,10 @@ def _isolated_stack_down(tmp_path: Path, events: Path) -> Path:
     tests exist to catch (a --wipe gate removed or moved below the teardown) is precisely the
     one that would otherwise have the suite run `docker compose --profile obs down -v` against
     whatever host is running it.
+
+    `lib_extra` is appended to the stub lib.sh, so a caller that needs the reap to behave a
+    particular way -- domains present, an `undefine` that is refused, an unreadable overlay
+    directory -- redefines exactly those stubs and inherits the rest.
     """
     script_dir = tmp_path / "scripts" / "live-stack"
     script_dir.mkdir(parents=True)
@@ -1181,7 +1185,7 @@ def _isolated_stack_down(tmp_path: Path, events: Path) -> Path:
         f'force_stop_daemons() {{ echo force >>"{events}"; }}\n'
         f'docker() {{ echo docker >>"{events}"; }}\n'
         f'kdive_domains() {{ echo domains >>"{events}"; }}\n'
-        f'sudo() {{ echo "sudo $1" >>"{events}"; }}\n',
+        f'sudo() {{ echo "sudo $1" >>"{events}"; }}\n' + lib_extra,
         encoding="utf-8",
     )
     return script_dir / "stack-down.sh"
@@ -1234,6 +1238,141 @@ def test_stack_down_completes_plain_teardown_on_a_broken_contract(tmp_path: Path
     steps = events.read_text(encoding="utf-8").splitlines()
     assert steps == ["lifecycle stop", "graceful", "docker"], steps
     assert result.stdout.rstrip().endswith("done")
+
+
+# `sudo` runs the command rather than recording it, so the reap's own `virsh` and `rm` stubs
+# decide each removal -- which is what these arms are about. `virsh` answers 0 for every
+# subcommand unless an arm replaces it; positional args are `-c <uri> <subcommand> <domain>`.
+_REAP_STUBS = (
+    'sudo() { "$@"; }\n'
+    "virsh() { return 0; }\n"
+    'kdive_domains() { printf "kdive-alpha\\nkdive-beta\\n"; }\n'
+)
+
+
+def _wipe_reap(
+    tmp_path: Path,
+    lib_extra: str = "",
+    *,
+    overlays: tuple[str, ...] = (),
+    rootfs_mode: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run `stack-down.sh --wipe --yes` past the libvirt gate with a staged overlay directory.
+
+    The contract is the readable one, so the run reaches the reap instead of being refused at
+    the `--wipe` guard; `lib_extra` then decides what the reap finds and whether its removals
+    are permitted to succeed. `rootfs_mode` stages the overlay directory's permissions for the
+    run and is restored afterwards, so a failing assertion cannot leave `tmp_path` unremovable.
+    """
+    _, staged = _published_contract(tmp_path)
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    for name in overlays:
+        (rootfs / name).write_text("qcow2", encoding="utf-8")
+    script = _isolated_stack_down(tmp_path, tmp_path / "events", _REAP_STUBS + lib_extra)
+    if rootfs_mode is not None:
+        rootfs.chmod(rootfs_mode)
+    try:
+        return subprocess.run(
+            ["bash", str(script), "--wipe", "--yes"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=staged,
+        )
+    finally:
+        rootfs.chmod(0o700)
+
+
+def test_wipe_names_every_domain_and_overlay_it_removed(tmp_path: Path) -> None:
+    """#2515 acceptance 1: `--wipe` reports what it actually removed.
+
+    The reap used to print one `destroying <domain>` line per name it *intended* to reach and
+    then `done`, with every `virsh` and `rm` suffixed `|| true`. That is an intention, not a
+    result: the same output appeared whether the domain went away or the call was refused. The
+    lines asserted here are written after each removal succeeded, and the overlay assertion is
+    made against the filesystem rather than against stdout.
+    """
+    result = _wipe_reap(tmp_path, overlays=("alpha-overlay.qcow2", "beta-overlay.qcow2"))
+    assert result.returncode == 0, result.stderr
+    assert "removed domain kdive-alpha" in result.stdout
+    assert "removed domain kdive-beta" in result.stdout
+    assert "removed overlay" in result.stdout
+    assert list((tmp_path / "rootfs").iterdir()) == []
+    assert result.stdout.rstrip().endswith("done")
+
+
+def test_wipe_reports_an_empty_host_as_removing_nothing(tmp_path: Path) -> None:
+    """The honest end of the same criterion: nothing to reap reports nothing reaped.
+
+    A host with no kdive domains and no overlays is a legitimate success, so it must not be
+    reported as a failure -- but it must also not be reported in the same words as a host that
+    was actually wiped, which is how the silent no-op passed for success in the first place.
+    """
+    result = _wipe_reap(tmp_path, "kdive_domains() { :; }\n")
+    assert result.returncode == 0, result.stderr
+    assert "removed domain" not in result.stdout
+    assert "reaped 0 item(s)" in result.stdout
+
+
+def test_wipe_exits_non_zero_and_names_a_domain_it_could_not_undefine(tmp_path: Path) -> None:
+    """#2515 acceptance 2: a reap that could not remove something exits non-zero.
+
+    `undefine` is the removal, so its status is the verdict. `destroy` keeps its suppression --
+    a domain that is already shut off says so and that is not a reap failure -- which this arm
+    holds by refusing only the `undefine` for one of the two domains.
+    """
+    refuse_beta = (
+        "virsh() {\n"
+        '  if [[ "$3" == undefine && "$4" == kdive-beta ]]; then\n'
+        '    echo "error: Failed to undefine domain kdive-beta: authentication failed" >&2\n'
+        "    return 1\n"
+        "  fi\n"
+        "  return 0\n"
+        "}\n"
+    )
+    result = _wipe_reap(tmp_path, refuse_beta)
+    assert result.returncode != 0
+    assert "removed domain kdive-alpha" in result.stdout
+    assert "kdive-beta" in result.stderr
+    # Verbatim, because the operator's next move depends on which refusal this was.
+    assert "Failed to undefine domain kdive-beta: authentication failed" in result.stderr
+    # `done` is the whole defect: it is what told the operator the host had been wiped.
+    assert not result.stdout.rstrip().endswith("done")
+
+
+def test_wipe_exits_non_zero_and_names_an_overlay_it_could_not_remove(tmp_path: Path) -> None:
+    """The overlay half of acceptance 2. `rm -f` reports a refused unlink and exits non-zero;
+    the `|| true` that used to follow it discarded exactly that."""
+    result = _wipe_reap(
+        tmp_path,
+        'rm() { echo "rm: cannot remove overlay: Permission denied" >&2; return 1; }\n',
+        overlays=("alpha-overlay.qcow2",),
+    )
+    assert result.returncode != 0
+    assert "alpha-overlay.qcow2" in result.stderr
+    assert "rm: cannot remove overlay: Permission denied" in result.stderr
+    assert not result.stdout.rstrip().endswith("done")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0000 directory regardless of mode")
+def test_wipe_refuses_to_read_an_unlistable_overlay_directory_as_empty(tmp_path: Path) -> None:
+    """The overlay glob is the *shell's*, so it is expanded with the caller's own privilege.
+
+    On an account that cannot list the overlay directory it expands to nothing, which is
+    byte-identical to a host that has no overlays -- the silent no-op #2515 is about, in the
+    one place a removal failure cannot surface it because no removal is ever attempted.
+    """
+    result = _wipe_reap(
+        tmp_path,
+        "kdive_domains() { :; }\n",
+        overlays=("alpha-overlay.qcow2",),
+        rootfs_mode=0o000,
+    )
+    assert result.returncode != 0
+    assert str(tmp_path / "rootfs") in result.stderr
+    assert "not listable" in result.stderr
+    assert not result.stdout.rstrip().endswith("done")
 
 
 def _stack_status_libvirt_slice(tmp_path: Path) -> Path:
