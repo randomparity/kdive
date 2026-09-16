@@ -134,7 +134,7 @@ def test_setup_installs_the_collections_before_running_the_hooks() -> None:
         "path does, so a clean host cannot complete it (#2499)"
     )
     assert command.index("ansible-galaxy collection install") < command.index("prek run -a")
-    # It needs the synced venv: both the install and the verifier run under `uv run`.
+    # And after `sync`, because the install runs under `uv run` and needs that venv.
     assert command.index("uv sync --locked") < command.index("ansible-galaxy collection install")
 
 

@@ -76,15 +76,12 @@ sync:
 # this recipe, so the developer path and CI resolve the same pinned commits from one definition
 # rather than two command strings that can drift (#2499). CI additionally points
 # ANSIBLE_GALAXY_SERVER at a dead port, making the "sources only, never Galaxy" boundary
-# executable there. CI verifies the result separately, against a collections directory it owns
-# outright -- that check rejects any collection outside the pinned four, which a developer's
-# shared ~/.ansible/collections is free to hold.
+# executable there, and verifies the result separately -- that check rejects any collection
+# outside the pinned four, which a developer's shared collections directory is free to hold.
 #
-# Not idempotent and not confined to the checkout: every run clones the four repositories from
-# GitHub afresh (--no-cache) and replaces those four collections in the shared
-# ~/.ansible/collections, which is ansible's default user path and may hold collections this
-# repository knows nothing about. It leaves those others alone but claims these four, so a
-# host pinning a different community.general for something else loses that pin here.
+# Not idempotent and not confined to the checkout: --no-cache re-clones all four repositories
+# on every run, and the install claims those four names in ~/.ansible/collections, ansible's
+# default user path, which may hold unrelated collections this repository knows nothing about.
 install-ansible-collections:
     uv run --with 'ansible-core==2.21.1' ansible-galaxy collection install \
         --requirements-file deploy/ansible/requirements-ci.lock.yml \

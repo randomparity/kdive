@@ -112,10 +112,9 @@ jobs:
         run: just install-ansible-collections
 
       - name: Verify pinned Ansible collections
-        # Unconditional, unlike the install: a cache hit skips that step, so this is the only
-        # thing standing between a restored tree and lint. Stays a direct invocation rather
-        # than a recipe: it asserts an exact collection set, which holds for the collections
-        # directory CI owns outright and not for a developer's shared ~/.ansible/collections.
+        # Unconditional, unlike the install: a cache hit skips that step, leaving this the
+        # only thing between a restored tree and lint. Not a shared recipe -- it asserts an
+        # exact collection set, true of the directory CI owns and not of a developer's.
         run: >-
           uv run python scripts/guards/check_ansible_collections.py
           deploy/ansible/requirements.yml ~/.ansible/collections
