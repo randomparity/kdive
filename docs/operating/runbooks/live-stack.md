@@ -421,8 +421,10 @@ A slot reported `recovery_refused_incoherent_row` is a different problem, and a 
 clear it: the database holds an active `worker_incarnations` row over that slot which does not
 describe this slot on this host — its stored binding names a different unit, or a different host.
 Recovery refuses the whole slot rather than releasing that row or clearing the slot's files around
-it, so nothing is lost while you look. Read the row's `authority_binding` and reconcile it with the
-host that actually owns it; the warning in the lifecycle journal names the slot and unit.
+it. A slot that had only a *prepared* generation is the exception: that generation holds no fence,
+and it is discarded before the refusal is decided. Read the row's `authority_binding` and reconcile
+it with the host that actually owns it; the warning in the lifecycle journal names the slot and
+unit, not the foreign host.
 See
 [ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md) and
 [ADR-0667](../../adr/0667-recovery-names-the-fence-row-by-the-slot-derived-incarnation.md).
