@@ -18,7 +18,10 @@
   loop:
     - {path: /usr/local/libexec, mode: "0755"}
     - {path: /etc/kdive, mode: "0755"}
-    # Traverse-only lets each service reach its own private child without listing sibling names.
+    # Traverse-only lets each service reach its own private child without listing sibling
+    # names. Keep this in agreement with the installer's mode for the same path
+    # (deploy/systemd/install-live-worker-lifecycle.sh's `install -d ... /etc/kdive/credentials`)
+    # -- disagreement makes this task report `changed` forever (#2514).
     - {path: /etc/kdive/credentials, mode: "0711"}
     - {path: /var/lib/kdive/secrets, mode: "0711"}
     - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
