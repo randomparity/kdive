@@ -42,7 +42,16 @@ on:
     types: [created, edited]
 
 concurrency:
-  group: pr-body-scan-${{ github.event.pull_request.number || github.event.issue.number }}
+  # Keyed by event type as well as PR/issue number (#2507). The two trigger types used to share
+  # one group, so any `issue_comment` — including a required `WORK:*` annotation, which by
+  # construction cites the pushed head and so lands *after* the body edit it accompanies —
+  # cancelled an in-flight `pull_request`-triggered scan of the same PR, and vice versa. A
+  # cancelled run left this required check with no successful run for the head SHA, and the pull
+  # request sat unmergeable until someone re-ran it by hand. Splitting the group by
+  # `github.event_name` keeps today's dedup-by-cancellation within one trigger type (two rapid
+  # pushes, or two rapid comments, still cancel each other) while stopping it from crossing
+  # between them.
+  group: pr-body-scan-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 permissions: {}
