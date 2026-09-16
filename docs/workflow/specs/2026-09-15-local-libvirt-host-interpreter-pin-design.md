@@ -9,52 +9,52 @@ ansible-core` environment. That environment has no `lxml`, so `community.libvirt
 
 ## Scope
 
-Declare `localhost` in `deploy/ansible/inventory/hosts.yml` with `ansible_connection: local` and
-`ansible_python_interpreter: /usr/bin/python3`. Both keys are load-bearing: explicit `localhost`
-alone leaves `auto` discovery on the launcher's interpreter. The pinned path is the one the play
-already reads its system Python minor from, keeping modules and that ABI check on one interpreter.
+Pin `ansible_python_interpreter: /usr/bin/python3` in the `vars:` block of
+`deploy/ansible/playbooks/local-libvirt-host.yml`, and declare `localhost` in `hosts.yml` with
+`ansible_connection: local` and no interpreter. The pin is load-bearing alone: without it `auto`
+discovery selects the launcher's interpreter, not the path the play reads its Python minor from.
 
-Add the inventory contract to `deploy/ansible/tests/run-local-libvirt-host.py`, which
-`just test-ansible` already runs inside `just ci`. State in `docs/operating/install.md` that the
-recipe needs an interactive become password and why; note the pin in
-`docs/operating/providers/local-libvirt.md` and the `justfile` recipe comment.
+The play owns the pin because `hosts.yml` is shared. `playbooks/pki.yml` is also `hosts: localhost`
+and documented to run with no `-i`, so an inventory host var would retarget its `community.crypto`
+tasks onto a distro `python3-cryptography` nothing installs — this issue's defect, relocated.
+Measured: pki resolution is unchanged here, and forced to `/usr/bin/python3` under the rejection.
 
-Out: the Galaxy-collection developer path (#2499), `--check` smoke-testability of the worktree
-assertion (out of batch), converting the recipe off `--ask-become-pass` (documented, per triage),
-`local-libvirt-host.yml` ~160-181 (#2506). No ownership transition: the inventory already owns
-control-node connection facts. Rejected: the interpreter as a play var — verified: resolves
-correctly, but leaves implicit localhost for every other play reading this inventory. `lxml` added
-to the recipe's `uv run --with` list — judgment: the play mutates the host as root and must use the
-host's own distro-packaged bindings, not a per-invocation copy.
+Extend `deploy/ansible/tests/run-local-libvirt-host.py`, which `just test-ansible` runs inside
+`just ci`, to assert resolution rather than key presence. `install.md` gains the become-password
+requirement and its reason; note the pin in `providers/local-libvirt.md` and the `justfile` comment.
+
+Out: the Galaxy-collection path (#2499); `--check` smoke-testability and `local-libvirt-host.yml`
+~160-181 (#2506, out of batch); converting the recipe off `--ask-become-pass` (documented, per
+triage). No ownership transition: each play already owns its execution vars.
 
 ### Failure model
 
 - Actors: a local operator running the recipe on a supported family, at a terminal, with sudo. No
   CI job applies this play, and no untrusted input reaches it.
-- Invariants: root executes the pinned interpreter; module execution and the guestfs ABI comparison
-  must agree on which Python is the system Python.
+- Invariants: root executes the pinned interpreter; module execution and the guestfs ABI check
+  agree on which Python is the system Python; no other localhost play inherits the pin.
 - Accepted: a host lacking `/usr/bin/python3` fails closed on Ansible's own interpreter error, not
-  reachable in the `install.md` support table. A non-default `-i` bypasses the inventory; every
-  `deploy/ansible/tests/run-*` harness passes `-i localhost,` and is unaffected.
+  reachable in the `install.md` support table. An `-i` override keeps today's behaviour.
 - Covered elsewhere: collection prerequisites (#2499); check-mode smoke testing (out of batch).
 
 ### Threat model
 
-- Boundaries: one existing boundary narrowed, which binary Ansible executes as root on the control
-  node; none added. Actors: the local operator, who already holds sudo, and no untrusted party.
+- Boundaries: one existing boundary narrowed, which binary Ansible executes as root in this play;
+  none added. Actors: the local operator, who already holds sudo, and no untrusted party.
 - Control: a literal root-owned absolute path in a reviewed tracked file, replacing one under
   the invoking user's writable `uv` cache. Out of scope: sudo policy, and the become password.
 
 ## Success
 
-1. The play resolves `/usr/bin/python3` for `localhost` under the repo `ansible.cfg` inventory.
-2. `just test-ansible` fails when either inventory key is removed.
+1. The play resolves `/usr/bin/python3`, and the inventory pins no interpreter for `localhost`.
+2. `just test-ansible` fails when the pin is removed, moved to the inventory, or `localhost` is
+   dropped or grouped.
 3. `docs/operating/install.md` states the interactive become-password requirement and its reason.
 
 ## Validation
 
-- Inventory pins the system interpreter for `localhost`. Mode: `focused-test` —
-  `run-local-libvirt-host.py` asserts both keys; red by deleting either; green via
-  `uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py`.
-- Documentation states the become-password requirement. Mode: `task-test-not-applicable` — prose
-  for a human reader, validated by no executable consumer; a wording snapshot tests nothing.
+- Interpreter resolution and inventory placement. Mode: `focused-test` —
+  `run-local-libvirt-host.py` resolves through a probe play and reads back `ansible-inventory`;
+  red under each fault in Success 2; green via `just test-ansible`.
+- Runbook become-password statement. Mode: `focused-test` — `test_install_topology_contract.py`
+  couples it to the recipe's `--ask-become-pass`; red before the edit, green via `just test`.
