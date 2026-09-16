@@ -22,7 +22,7 @@ already in `/boot` on first run, including the running one. Dropping it would re
 The now-false `:64-65` comment is corrected, and `lint-shell` gains `deploy/ansible/roles`.
 
 Out: Fedora/RHEL/Suse relabel behaviour; retrofitting broken hosts; #2568's `onboard.sh`. Also out,
-reported as a follow-up: `live_vm_host/tasks/main.yml:86-104` keeps a duplicate relabel and never imports
+reported: `live_vm_host/tasks/main.yml:86-104` keeps a duplicate relabel, never imports
 `boot_kernels.yml`, so the runner keeps this defect.
 
 ### Failure model
@@ -34,12 +34,13 @@ Invariants: no path reaches `0644` (`boot_kernels.yml:11`); the relaxation stays
 
 Accepted failure classes:
 
-- `kvm` absent when the hook runs — warn on stderr, exit 0. A non-zero exit fails the kernel package's
-  postinst and half-configures `dpkg`, worse than a kernel `check-local-libvirt.sh` already FAILs on.
+- The hook cannot relabel (no `kvm` group; `chgrp`/`chmod` refused on read-only or `vfat` `/boot`). It
+  warns and exits 0; `check-local-libvirt.sh` FAILs on the result, where a non-zero exit would instead
+  half-configure `dpkg`.
 - The runner keeps the defect (see Scope) — outside the frozen surface, reported.
-- No repository gate can prove a real kernel upgrade — a Debian-family host arm proves it.
+- No repository gate can prove a real kernel upgrade — a host arm proves it.
 
-Covered elsewhere: already-broken hosts — operator runbook, per the issue's non-goals.
+Covered elsewhere: already-broken hosts — operator runbook, per the non-goals.
 
 ## Success
 
@@ -56,5 +57,4 @@ Covered elsewhere: already-broken hosts — operator runbook, per the issue's no
   assertion in that harness reads the shipped hook; red when the mode literal becomes `0644`.
 - A real upgraded kernel lands `0640 root:kvm` (1). task-test-not-applicable: the observable needs a host,
   a privileged package install and `dpkg`'s own invocation; the pull request's real-host arm proves it.
-- First-run relabel retained (4). task-test-not-applicable: this diff leaves the `find` + `file` loop
-  unchanged, so no new observation could fail meaningfully.
+- First-run relabel retained (4). task-test-not-applicable: the `find` + `file` loop is unchanged here.

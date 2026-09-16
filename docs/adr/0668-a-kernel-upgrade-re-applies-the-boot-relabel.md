@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-09-16)
 
 ## Context
 
@@ -46,10 +46,15 @@ upgrade, and `boot_kernels.yml:64-65`'s manual instruction becomes false and is 
 The role gains its first `files/` directory, and `lint-shell` gains `deploy/ansible/roles` so the
 shipped hook is shellchecked like every other script this repository ships.
 
-The hook is host state that no later role run reconciles: an operator who edits or deletes it gets
-no warning until `scripts/operations/check-local-libvirt.sh` FAILs. Choosing exit 0 over a hard
-failure accepts that a host whose `kvm` group has been removed reverts to the old defect quietly,
-with only a stderr line during the upgrade; that trade is argued below.
+`ansible.builtin.copy` defaults to `force: true`, so a later run of the role does restore a hook an
+operator edited or deleted. Nothing schedules that run, though, so between it and the edit the host
+is back to the old behaviour with no signal until
+`scripts/operations/check-local-libvirt.sh` FAILs. Nothing removes the hook either: decommissioning
+a worker host, or deliberately re-tightening `/boot`, means deleting
+`/etc/kernel/postinst.d/kdive-kvm-readable` by hand, or the relaxation re-asserts itself on the next
+kernel install. Choosing exit 0 over a hard failure likewise accepts that a host which cannot
+relabel — no `kvm` group, a read-only or `vfat` `/boot` — reverts quietly, with only a stderr line
+inside the package manager's output; that trade is argued below.
 
 `live_vm_host/tasks/main.yml:86-104` carries its own duplicate point-in-time relabel and never
 imports `boot_kernels.yml`, so this decision does not reach the self-hosted runner. Consolidating
@@ -58,12 +63,15 @@ the two is deferred; it moves the runner task baseline and is a separate change.
 ## Considered & rejected
 
 - **Do nothing; keep the documented operator re-run.** verified: the instruction exists only as a
-  YAML comment at `boot_kernels.yml:64-65`, nothing in the repository prompts for it, and the
-  first failure signal is a failed guest-image build — the defect #2567 reports.
-- **Relabel only the image path the hook contract supplies as `$2`.** judgment: it binds the hook
-  to an argument contract for no gain, and still needs the `vmlinuz`/`vmlinux` distinction that
-  globbing the two patterns gets for free, since the role's `find` already spans both for x86_64
-  and ppc64le (ADR-0356).
+  YAML comment at `boot_kernels.yml:64-65` and nothing prompts for it. Detection is not the gap —
+  `scripts/operations/check-local-libvirt.sh:149,276-277` already FAILs on an unreadable kernel —
+  but it is after the fact and out of band, so the first signal an operator actually meets is a
+  failed guest-image build, which is the defect #2567 reports.
+- **Relabel only the image path the hook contract supplies as `$2`.** judgment: it would cover the
+  newly installed kernel and nothing else, so a kernel installed while the hook was absent or
+  broken stays `0600` until someone re-runs the role. Globbing the two patterns the role's `find`
+  already spans for x86_64 and ppc64le (ADR-0356) re-converges the whole directory each time, at
+  the cost of a `chmod` on a handful of files, and depends on no argument contract.
 - **Drop the `find` + `file` loop and rely on the hook alone.** verified: the hook runs only on a
   subsequent kernel install, so on a freshly provisioned host every kernel already in `/boot`,
   the running one included, keeps `0600 root:root` — precisely the state `boot_kernels.yml:55-72`
@@ -80,5 +88,14 @@ the two is deferred; it moves the runner task baseline and is a separate change.
   deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples deploy/systemd
   .github/scripts`, so a script embedded in YAML is never shellchecked; `shfmt -f
   deploy/ansible/roles` matches nothing today, so adding that one path costs no other file.
-- **Watch `/boot` with a systemd path unit and reconcile.** judgment: a polling reconciler against
-  an event the platform already delivers, with a unit to install, enable and debug.
+- **Watch `/boot` with a systemd path unit and reconcile.** judgment: `.path` units are
+  inotify-driven rather than polling, so the objection is not cost but fit — it is a second,
+  general-purpose watcher on a directory whose relevant event the package manager already delivers
+  to a hook directory built for it, and it adds a unit to install, enable and debug.
+- **Register the mode with `dpkg-statoverride` instead of a hook.** verified: it is Debian's own
+  mechanism for persisting ownership and modes across upgrades, but an override is a literal path,
+  not a pattern — on Ubuntu 26.04.1,
+  `dpkg-statoverride --add root kvm 0640 '/boot/vmlinuz-*'` was accepted and listed back verbatim
+  as `root kvm 640 /boot/vmlinuz-*`, matching only a file of that exact name. Covering a kernel
+  installed under a new name would mean adding an override per version, which needs the very
+  install-time hook this decision installs.

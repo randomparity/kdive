@@ -442,29 +442,45 @@ BOOT_HOOK = ANSIBLE / "roles/local_worker_host/files/kernel-postinst-kvm-readabl
 hook_code = "\n".join(
     line for line in BOOT_HOOK.read_text().splitlines() if not line.lstrip().startswith("#")
 )
+# Every mode the hook applies is matched, not just the presence of one good literal: a check that
+# only looked for "chmod 0640" stays green beside an added `chmod o+r`, which is exactly the
+# widening boot_kernels.yml:11 forbids. Double-quoted strings are dropped first so the hook's own
+# diagnostic messages, which name both commands, cannot register as calls.
+hook_calls = re.sub(r'"[^"]*"', "", hook_code)
 require(
-    "chmod 0640 " in hook_code,
-    "the kernel-upgrade hook no longer applies mode 0640",
+    re.findall(r"\bchmod\s+(\S+)", hook_calls) == ["0640"],
+    "the kernel-upgrade hook applies a mode other than exactly 0640",
 )
 require(
-    "chgrp kvm " in hook_code,
-    "the kernel-upgrade hook no longer applies group kvm",
+    re.findall(r"\bchgrp\s+(\S+)", hook_calls) == ["kvm"],
+    "the kernel-upgrade hook applies a group other than exactly kvm",
 )
-require("0644" not in hook_code, "the kernel-upgrade hook reaches the forbidden 0644")
 for pattern in ("/boot/vmlinuz-*", "/boot/vmlinux-*"):
     require(
         pattern in hook_code,
         f"the kernel-upgrade hook stopped covering {pattern}",
     )
-hook_install = yaml.safe_load(
+# Located by name, not position: appending a task to the block must not silently retarget this.
+boot_kernel_tasks = yaml.safe_load(
     (ANSIBLE / "roles/local_worker_host/tasks/boot_kernels.yml").read_text()
-)[0]["block"][-1]
+)[0]["block"]
+hook_install = next(
+    task["ansible.builtin.copy"]
+    for task in boot_kernel_tasks
+    if task["name"] == "Install the kernel-upgrade hook that re-applies the relabel"
+)
+# src is asserted too: the non-Debian probes all skip this task, so a src naming a file that does
+# not exist would never be resolved by any check-mode run and every other assertion stays green.
 require(
-    hook_install["ansible.builtin.copy"]["dest"] == "/etc/kernel/postinst.d/kdive-kvm-readable",
+    hook_install["src"] == BOOT_HOOK.name,
+    "the kernel-upgrade hook task no longer copies the shipped hook file",
+)
+require(
+    hook_install["dest"] == "/etc/kernel/postinst.d/kdive-kvm-readable",
     "the kernel-upgrade hook is no longer installed into /etc/kernel/postinst.d",
 )
 require(
-    hook_install["ansible.builtin.copy"]["mode"] == "0755",
+    hook_install["mode"] == "0755",
     "the kernel-upgrade hook is no longer installed executable",
 )
 print("ok boot kernels: the upgrade hook applies 0640 root:kvm to both kernel patterns")
