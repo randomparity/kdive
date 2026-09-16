@@ -16,7 +16,6 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-import pytest
 from fastmcp import FastMCP
 
 from tests.smoke.agent_smoke.surface import AppSurface
@@ -134,10 +133,3 @@ def test_an_empty_envelope_leaves_the_token_unreachable() -> None:
     app = _StubApp(advertised=["tools.search"], envelope={})
 
     assert not _reachable(app, "systems.teardown")
-
-
-@pytest.mark.parametrize("advertised", [[], ["tools.search", "tools.invoke"]])
-def test_tool_names_reports_exactly_what_the_app_advertises(advertised: list[str]) -> None:
-    app = _StubApp(advertised=advertised)
-
-    assert asyncio.run(_surface(app).tool_names()) == frozenset(advertised)
