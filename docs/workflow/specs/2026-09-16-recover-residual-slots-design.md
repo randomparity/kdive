@@ -22,8 +22,12 @@ named line in the shipped code:
 4. **`EvidenceRejected` from the authority.** `_terminate` re-raises it unchanged, the terminal
    write never commits, and `_post_evidence_cleanup` is never reached. Facts and fence both
    survive.
-5. **Unreadable invocation identity.** `_terminal_observation` has no rule for it. ADR-0657
-   forbids recovering this case.
+5. **Unreadable invocation identity** — concretely, systemd reporting no invocation for the unit
+   on the *retained* boot, which `_terminal_observation` answers with
+   `SystemdUnavailable("worker invocation is absent on the retained boot")`. ADR-0574 holds that
+   same-boot absence is never termination evidence, so nothing can prove the registered invocation
+   ended. ADR-0657 forbids recovering it. Today that raise also aborts the whole sweep and is
+   indistinguishable from the unrelated `membership == "unknown"` refusal.
 
 ## Scope
 
@@ -47,7 +51,10 @@ validation but needs no parseable `SlotState`.
 **`src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py`.** `recover` gains a
 fence-release path keyed on the row rather than on `state.authority_binding()`. Death is proven
 against the row's stored `boot_id`/`invocation_id` by the rules `_terminal_observation` already
-applies, lifted to take an identity pair. Case 5 is encoded as an explicit per-slot refusal.
+applies, lifted to take an identity pair. Case 5 becomes an explicit per-slot refusal instead of a
+sweep-ending raise, so one unrecoverable slot no longer hides the seven the call could retire. All
+of a slot's rows are classified before any of them is released, so a slot is never left
+half-released; rows whose stored binding names another host are skipped, not released.
 
 **Ownership.** `_terminal_observation` currently owns both "which identity is authoritative" and
 "what does this observation prove about it". The second half moves to a helper taking an identity
@@ -69,6 +76,7 @@ deployment ADR-0574 defines; x86_64 and ppc64le.
   fence was ever held.
 - The `worker_incarnations` table shape and fence protocol are unchanged.
 - The lifecycle protocol identity is unchanged.
+- No host releases another host's fence, and no slot is left with some rows released and some held.
 
 **Accepted failure classes.**
 - A slot whose row is `active` while its unit was never started on this boot is reported `killed`
@@ -81,6 +89,12 @@ deployment ADR-0574 defines; x86_64 and ppc64le.
 - `recover` does not repair a slot whose *directory* is unreadable for reasons other than absence
   (a permission or I/O fault) — accepted: held by the existing slot-permission validation, which
   fails closed.
+- A slot whose registered invocation is absent on the retained boot stays refused until the host
+  reboots — accepted: this is criterion 2's required refusal, not a gap. ADR-0574 makes same-boot
+  absence non-evidence, and a reboot yields a different `boot_id` and therefore real evidence.
+- Two hosts sharing one database could both match a slot's incarnation prefix — accepted as
+  unreachable in the named single-host deployment, and additionally held by the host filter the
+  threat model's control names, so it does not rest on the deployment premise alone.
 
 **Covered elsewhere.** Documenting `operator_recovery` and the operator procedure — #2489. The
 `Operation` value and the fleet reprovision — #2532, closed. Relaxing ADR-0657's case-5
@@ -103,15 +117,17 @@ systemd's `InvocationID`, exactly as ADR-0574 and ADR-0657 already place it.
 checks `pg_has_role(session_user, 'kdive_lifecycle_witness', 'member')` as the sibling fence
 functions do, is granted to that role alone and revoked from `PUBLIC` and the other runtime roles,
 bounds its result set, and takes a unit name it validates against the fixed
-`kdive-live-worker@N.service` shape before building the prefix. It matches with `starts_with`
+`kdive-live-worker@N.service` shape before building the prefix. The caller then drops any row whose
+stored binding names a different `host`, so a shared database cannot let one host release another's
+fence. It matches with `starts_with`
 plus an explicit length and hex-generation check rather than `LIKE`, so no pattern
 metacharacter exists to escape and a widened match is unreachable by construction rather than by
 correct escaping. It returns no `credential_hash` and no `credential_envelope`. On failure it
 raises rather than returning rows.
 
-**Explicitly out of scope.** Authenticating *which* operator ran `recover` — not reachable in this
-deployment, where root on the host already implies full control of the slot files. Protecting the
-fence from a database superuser — covered by the same reasoning, and by the accepted class above.
+**Explicitly out of scope.** Authenticating *which* operator ran `recover`, and protecting the
+fence from a database superuser — both unreachable in this deployment, where root on the host
+already implies full control of the slot files.
 
 ## Success
 
