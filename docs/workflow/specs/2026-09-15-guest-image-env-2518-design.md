@@ -17,8 +17,8 @@ and it stages the very file. The native spine exports that staged path (not the 
 and aliases the bare `KDIVE_DATABASE_URL` the proof reads, as the tcg spine does. Both `env.sh`
 files gain a comment naming the omission, and `live-testing.md` records the tri-state exception.
 
-Rejected — hard-require it in `scripts/live-stack/env.sh`. verified: six of that file's nine
-callers are non-`live_vm`, so it would break `just stack-migrate` (the PR body lists them).
+Rejected — hard-require it in `scripts/live-stack/env.sh`. verified: six non-`live_vm` scripts
+source that file, so it would break `just stack-migrate` (the PR body lists them).
 
 Rejected — default it there. verified: `/var/lib/kdive/rootfs/local/` holds 11 kdive-ready qcow2
 across 4 distro families including `-ppc64le`, so no arch-neutral default resolves.

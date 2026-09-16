@@ -62,7 +62,7 @@ gates distinguish them from ordinary throwaway tests; stepping also consumes
 | --- | --- | --- | --- |
 | Throwaway (`live_vm_throwaway`) | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
 | gdbstub debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` + matching `KDIVE_LIVE_VM_VMLINUX`; the stepping proof also needs `KDIVE_LIVE_VM_ROOTFS` | `qemu:///session` | `boot_gdbstub_domain` (`kdive.testing.live_vm`); the caller renders the domain XML (ADR-0392) |
-| Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
+| Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` + `KDIVE_GUEST_IMAGE` (the rootfs `mint-system.sh` stages, #2518) | `qemu:///system` | an externally provisioned System through the live stack |
 | Remote (`live_vm_remote`) | `KDIVE_LIVE_VM_REMOTE_URI`, `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE`, `KDIVE_LIVE_VM_REMOTE_SSH`, `KDIVE_LIVE_VM_REMOTE_KERNEL`, `KDIVE_LIVE_VM_REMOTE_INITRD`, `KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE`, `KDIVE_LIVE_VM_REMOTE_GDB_ADDR`, `KDIVE_S3_ENDPOINT_URL`, `KDIVE_S3_BUCKET`, and `KDIVE_LIVE_VM_REMOTE_RECONCILER` | `qemu+tls://` (operator-named; no default host) | direct provider ops against a genuinely remote libvirt host (ADR-0425) |
 
 The env reads live in `tests/live_vm/__init__.py` (kept out of `src/` so the

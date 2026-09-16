@@ -98,27 +98,40 @@ def test_native_guest_image_names_the_rootfs_mint_system_stages() -> None:
     instead of skipping it, so a rename in the script alone turns the native job red rather than
     green — parse the basename from the script rather than repeating the literal a third time.
     """
-    from kdive.providers.local_libvirt.lifecycle import storage
-
     mint = (_ROOT / "scripts" / "live-vm" / "mint-system.sh").read_text(encoding="utf-8")
-    staged = [ln.strip() for ln in mint.splitlines() if ln.strip().startswith("staged_rootfs=")]
-    assert len(staged) == 1, (
-        f"expected exactly one `staged_rootfs=` line in mint-system.sh, found {len(staged)}"
+
+    def _one(prefix: str, text: str, where: str) -> str:
+        found = [ln.strip() for ln in text.splitlines() if ln.strip().startswith(prefix)]
+        assert len(found) == 1, f"expected exactly one `{prefix}` line in {where}, got {len(found)}"
+        return found[0][len(prefix) :].split(" #")[0].strip().strip("\"'")
+
+    # Compare the two shell sources to EACH OTHER, never to a resolved constant: ROOTFS_DIR is
+    # `config.require(LIBVIRT_ROOTFS_ROOT)`, so asserting against it would make this test's verdict
+    # depend on the runner's own environment and go red on an untouched workflow.
+    rootfs_dir = _one("rootfs_dir=", mint, "mint-system.sh")
+    staged = _one("staged_rootfs=", mint, "mint-system.sh")
+    assert staged.startswith("${rootfs_dir}/"), (
+        f"mint-system.sh stages {staged}, no longer under its own ${{rootfs_dir}}; the workflow "
+        "export below cannot mirror a path this test can no longer derive"
     )
-    basename = staged[0].split(" #")[0].strip().strip("\"'").rsplit("/", 1)[-1]
+    expected = staged.replace("${rootfs_dir}", rootfs_dir, 1)
 
     exported = _native_guest_image()
-    assert exported.endswith(f"/{basename}"), (
-        f"live.yml exports KDIVE_GUEST_IMAGE={exported}, but mint-system.sh stages {basename!r}. "
+    assert exported == expected, (
+        f"live.yml exports KDIVE_GUEST_IMAGE={exported}, but mint-system.sh stages {expected}. "
         "Renaming one side, or factoring either literal into a variable, fails the native "
-        "live_vm job at its guest-image gate — keep both literals in step."
+        "live_vm job at its guest-image gate — keep the two in step."
     )
-    # startswith on the whole expansion, not a substring: `in` would also accept a sibling root
-    # such as `${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs-scratch}` or a `..` escape out of it.
-    assert exported.startswith(f"${{KDIVE_ROOTFS_DIR:-{storage.ROOTFS_DIR}}}/"), (
-        f"KDIVE_GUEST_IMAGE={exported} must resolve under the provider's allowed root "
-        f"{storage.ROOTFS_DIR} with mint-system.sh's own default, or provision rejects it"
-    )
+
+
+def test_native_spine_aliases_the_bare_database_url_for_the_proof_suite() -> None:
+    """The proofs read bare KDIVE_DATABASE_URL, which env.sh deliberately does not export.
+
+    One DSN per authority since #1929, so the alias belongs in the spine, not in env.sh and not in
+    preflight-env.sh. The tcg spine has carried it since #2046; the native spine did not, so the
+    console-part proof skipped on the database gate even once its guest image was wired (#2518).
+    """
+    assert 'export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"' in _native_spine()
 
 
 def _tcg_stage_dir() -> str:
