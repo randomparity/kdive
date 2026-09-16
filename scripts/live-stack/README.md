@@ -26,6 +26,18 @@ elevates via sudo to socket-activate the system daemon.
 | `stack-down.sh --wipe` | full reset: drop DB/SeaweedFS volumes AND reap `kdive-*` domains + overlays |
 | `stack-status.sh` | read-only health of every layer and retained worker slots |
 
+`stack-down.sh --wipe` **exits non-zero when the reap is incomplete**, naming each domain or
+overlay that is still there and the diagnostic `virsh` or `rm` gave for it. An unreachable libvirt
+endpoint is refused at the gate, before anything is stopped or dropped; every other failure is
+discovered after `docker compose down -v` has run, so the data volumes are already gone when it is
+reported and the error says so. `--wipe` also names the endpoint it consulted on every
+zero-domain report, because a daemon that is running but holds no `kdive-*` domains answers an
+enumeration exactly as a clean host does.
+
+That exit propagates: `stack-services.sh --reset-db` runs `stack-down.sh --wipe --yes` under
+`set -e`, so a failed reap aborts bring-up rather than starting a stack on a host that was not
+actually wiped.
+
 `stack-services.sh --skip-libvirt` skips VM provisioning checks but still requires and uses the installed
 systemd worker contract. There is no direct-worker fallback.
 

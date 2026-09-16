@@ -44,6 +44,36 @@ for arg in "$@"; do
   esac
 done
 
+# kdive domain names on stdout, one per line, with virsh's status preserved -- and, on failure,
+# virsh's diagnostic printed instead of the names. lib.sh's kdive_domains() discards stderr and
+# ends in `|| true`, so an endpoint that RESOLVES but does not answer enumerates byte-identically
+# to a host holding no kdive domains, and `require_libvirt_uri` below proves only that the contract
+# resolved, never that anything answers it. The `^kdive-` predicate is lib.sh:467's, duplicated
+# here because keeping virsh's status means not routing through the function that discards it;
+# the two must stay in step.
+#
+# What this distinguishes is an endpoint that answers from one that does not, and NOTHING MORE. It
+# does not cover the wrong-daemon URI of libvirt-uri.sh:119-122: a daemon that is running but holds
+# no kdive domains answers with exit 0 and no output, which is why every zero-domain report below
+# names the endpoint it consulted rather than calling the host clean.
+#
+# ONE virsh call, not a status probe plus a separate name read: a daemon lost between two calls
+# would return an empty list with exit 0, which is the silent no-op this function exists to refuse,
+# reached through the gap between the probe and the data.
+#
+# Bare virsh, while destroy and undefine below run under sudo -- so for an explicit per-identity
+# endpoint (`qemu:///session`, `qemu+ssh://`) the list that GRADES the reap can come from a
+# different daemon than the one the removal MUTATED. Which privilege each reap call should hold is
+# #2516's question and is not settled here; the reporting consequence is.
+enumerate_kdive_domains() {
+  local out
+  out="$(virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
+    printf '%s' "${out:-virsh list failed and said nothing}"
+    return 1
+  }
+  grep -E '^kdive-' <<<"$out" || true
+}
+
 # --wipe is the one operation here that needs the endpoint, so it is refused up front rather than
 # after the teardown has begun. Half a wipe is worse than none: the header above pairs the volume
 # drop with the domain reap because the domains and overlays live outside compose, so dropping the
@@ -54,6 +84,20 @@ if [[ "$wipe" == "1" ]]; then
     # know which URI their host publishes -- the fact the broken contract just made unreadable.
     # Only this caller knows a useful partial operation exists, so only it can name the third way.
     echo "to stop the stack without reaping, re-run without --wipe" >&2
+    exit 1
+  }
+  # Liveness, and it belongs HERE rather than at the reap. require_libvirt_uri proves the contract
+  # resolved; a daemon that is stopped behind a perfectly valid contract passes it. Discovering
+  # that at the reap means `docker compose --profile obs down -v` has already run, so the volumes
+  # are gone and the domains are not -- the half-wipe this gate's own comment exists to prevent,
+  # and the shape ADR-0659 prescribes refusing wholesale instead. Enumeration is read-only, so it
+  # is safe before anything is stopped. The reap enumerates again regardless: this proves liveness
+  # at gate time, not at reap time, and a daemon lost in between still lands in `unreaped` there.
+  gate_out="$(enumerate_kdive_domains)" || {
+    echo "cannot reach ${KDIVE_LIBVIRT_URI} to reap kdive domains for --wipe:" >&2
+    echo "  ${gate_out}" >&2
+    echo "nothing has been stopped or dropped; restore the endpoint and retry," >&2
+    echo "or stop the stack without reaping by re-running without --wipe" >&2
     exit 1
   }
 fi
@@ -96,31 +140,6 @@ if [[ "$wipe" == "1" ]]; then
 else
   docker compose --profile obs down
 fi
-
-# kdive domain names on stdout, one per line, with virsh's status preserved -- and, on failure,
-# virsh's diagnostic printed instead of the names. lib.sh's kdive_domains() discards stderr and
-# ends in `|| true`, so an endpoint that RESOLVES but does not answer enumerates byte-identically
-# to a host holding no kdive domains, and `require_libvirt_uri` above proved only that the contract
-# resolved, never that anything answers it. The probe supplies the status that `|| true` swallows;
-# kdive_domains still supplies the names, so what counts as a kdive domain stays defined once.
-#
-# What this distinguishes is an endpoint that answers from one that does not, and NOTHING MORE. It
-# does not cover the wrong-daemon URI of libvirt-uri.sh:119-122: a daemon that is running but holds
-# no kdive domains answers with exit 0 and no output, which is why every zero-domain report below
-# names the endpoint it consulted rather than calling the host clean.
-#
-# Bare virsh, matching kdive_domains, while destroy and undefine below run under sudo -- so for an
-# explicit per-identity endpoint (`qemu:///session`, `qemu+ssh://`) the list that GRADES the reap
-# can come from a different daemon than the one the removal MUTATED. Which privilege each reap call
-# should hold is #2516's question and is not settled here; the reporting consequence is.
-enumerate_kdive_domains() {
-  local probe_err
-  probe_err="$(virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1 >/dev/null)" || {
-    printf '%s' "${probe_err:-virsh list failed and said nothing}"
-    return 1
-  }
-  kdive_domains
-}
 
 if [[ "$wipe" == "1" ]]; then
   echo "=== reaping kdive-* libvirt domains + overlays at ${KDIVE_LIBVIRT_URI} ==="

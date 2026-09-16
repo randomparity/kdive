@@ -1241,21 +1241,49 @@ def test_stack_down_completes_plain_teardown_on_a_broken_contract(tmp_path: Path
 
 
 # A directory of files named for the defined domains stands in for the libvirt host, so the reap's
-# end-state re-read observes a removal instead of being told about one: `undefine` unlinks the
-# name and `kdive_domains` lists whatever is left. `sudo` runs its command rather than recording
-# it, so an arm's own `virsh` or `rm` stub decides each removal. `virsh` answers 0 for every other
-# subcommand, including the bare `list` the enumeration probe runs; the positional arguments the
-# stubs read are `-c <uri> <subcommand> [<domain>]`.
+# end-state re-read observes a removal instead of being told about one: `list` reports whatever is
+# still there and `undefine` unlinks the name. `sudo` runs its command rather than recording it, so
+# an arm's own `virsh` or `rm` stub decides each removal. The positional arguments the stubs read
+# are `-c <uri> <subcommand> [<domain>]`.
+#
+# `command rm` in the undefine branch, not bare `rm`: the overlay arm replaces `rm` with a stub
+# that refuses, and a domain teardown is not what that arm is about.
 _REAP_STUBS = (
     'sudo() { "$@"; }\n'
     "virsh() {\n"
     '  case "$3" in\n'
+    '  list) ls "$defined" ;;\n'
     '  undefine) command rm -f "${defined}/$4" ;;\n'
     "  esac\n"
     "  return 0\n"
     "}\n"
-    'kdive_domains() { ls "$defined"; }\n'
 )
+
+
+def _counting_virsh(fail_list_from: int) -> str:
+    """A `virsh` whose `list` succeeds until the `fail_list_from`-th call, then fails.
+
+    `stack-down.sh` enumerates three times on a full `--wipe`: once at the up-front gate, once to
+    find the domains to reap, once to read the end state back. Counting through a file rather than
+    a shell variable is required, not stylistic -- every call is made inside a command
+    substitution, so an incremented variable dies with the subshell.
+    """
+    return (
+        "virsh() {\n"
+        '  case "$3" in\n'
+        "  list)\n"
+        '    echo x >>"${listcalls}"\n'
+        f'    if (($(wc -l <"${{listcalls}}") >= {fail_list_from})); then\n'
+        '      echo "error: failed to connect to the hypervisor" >&2\n'
+        "      return 1\n"
+        "    fi\n"
+        '    ls "$defined"\n'
+        "    ;;\n"
+        '  undefine) command rm -f "${defined}/$4" ;;\n'
+        "  esac\n"
+        "  return 0\n"
+        "}\n"
+    )
 
 
 def _wipe_reap(
@@ -1283,9 +1311,12 @@ def _wipe_reap(
     defined.mkdir()
     for name in domains:
         (defined / name).touch()
-    script = _isolated_stack_down(
-        tmp_path, tmp_path / "events", f'defined="{defined}"\n' + _REAP_STUBS + lib_extra
-    )
+    # Created here, never truncated in the stub: `worker-lifecycle.sh stop` sources the same
+    # lib.sh, so a `: >"$listcalls"` in the preamble would reset the count mid-teardown and every
+    # call ordinal after the gate would be wrong.
+    (tmp_path / "listcalls").touch()
+    preamble = f'defined="{defined}"\nlistcalls="{tmp_path}/listcalls"\n'
+    script = _isolated_stack_down(tmp_path, tmp_path / "events", preamble + _REAP_STUBS + lib_extra)
     if rootfs_mode is not None:
         rootfs.chmod(rootfs_mode)
     try:
@@ -1352,6 +1383,7 @@ def test_wipe_exits_non_zero_and_names_a_domain_it_could_not_undefine(tmp_path: 
         "    return 1\n"
         "  fi\n"
         '  case "$3" in\n'
+        '  list) ls "$defined" ;;\n'
         '  undefine) command rm -f "${defined}/$4" ;;\n'
         "  esac\n"
         "  return 0\n"
@@ -1375,29 +1407,46 @@ def test_wipe_will_not_call_a_still_defined_domain_removed(tmp_path: Path) -> No
     the shape a refused `destroy` followed by an accepted `undefine` produces. Grading on the
     calls alone would report two removals; grading on the re-read end state does not.
     """
-    result = _wipe_reap(tmp_path, "virsh() { return 0; }\n", overlays=("alpha-overlay.qcow2",))
+    still_defined = 'virsh() { case "$3" in list) ls "$defined" ;; esac; return 0; }\n'
+    result = _wipe_reap(tmp_path, still_defined, overlays=("alpha-overlay.qcow2",))
     assert result.returncode != 0
     assert "removed domain" not in result.stdout
     assert "still defined after destroy + undefine" in result.stderr
     assert "kdive-alpha" in result.stderr and "kdive-beta" in result.stderr
 
 
-def test_wipe_refuses_an_empty_domain_list_from_an_endpoint_that_does_not_answer(
+def test_wipe_refuses_a_dead_endpoint_before_stopping_or_dropping_anything(
     tmp_path: Path,
 ) -> None:
-    """`kdive_domains` discards virsh's stderr and status and ends in `|| true`, so a daemon that
-    is down -- or the wrong-daemon URI libvirt-uri.sh warns about -- enumerates byte-identically
-    to a host holding no kdive domains. `require_libvirt_uri` proves only that the contract
-    resolved, never that anything answers it.
+    """`require_libvirt_uri` proves the contract RESOLVED; a daemon stopped behind a perfectly
+    valid contract passes it. Discovering that at the reap is too late -- `docker compose down -v`
+    has already run, so the data volumes are gone and the domains are not.
 
-    Without the probe this is #2515's Effect paragraph reached by a second route, and made worse:
-    every overlay is deleted while every domain survives.
+    That is the half-wipe the up-front `--wipe` gate exists to prevent and the shape ADR-0659
+    prescribes refusing wholesale, so liveness is proved at the gate. The empty event log is the
+    assertion that carries it: not a banner absent from stdout, but no teardown step having run.
     """
-    unreachable = (
-        'virsh() { echo "error: failed to connect to the hypervisor" >&2; return 1; }\n'
-        "kdive_domains() { :; }\n"
-    )
+    unreachable = 'virsh() { echo "error: failed to connect to the hypervisor" >&2; return 1; }\n'
     result = _wipe_reap(tmp_path, unreachable, overlays=("alpha-overlay.qcow2",))
+    assert result.returncode != 0
+    assert not (tmp_path / "events").exists(), (tmp_path / "events").read_text(encoding="utf-8")
+    assert "=== stopping host processes ===" not in result.stdout
+    assert "error: failed to connect to the hypervisor" in result.stderr
+    assert "nothing has been stopped or dropped" in result.stderr
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+
+
+def test_wipe_reports_an_enumeration_that_fails_after_the_gate(tmp_path: Path) -> None:
+    """The gate proves liveness at gate time, not at reap time, so the reap keeps its own check.
+
+    A daemon lost between the two lands here. `kdive_domains` would have discarded virsh's stderr
+    and status and ended in `|| true`, making this byte-identical to a host with no kdive domains
+    -- #2515's Effect paragraph by a second route, and made worse, because every overlay would be
+    deleted while every domain survived.
+    """
+    result = _wipe_reap(
+        tmp_path, _counting_virsh(fail_list_from=2), overlays=("alpha-overlay.qcow2",)
+    )
     assert result.returncode != 0
     assert "cannot enumerate" in result.stderr
     assert "error: failed to connect to the hypervisor" in result.stderr
@@ -1407,6 +1456,25 @@ def test_wipe_refuses_an_empty_domain_list_from_an_endpoint_that_does_not_answer
     # The volume drop is irreversible and already ran, so a failure list that does not mention it
     # leaves the operator to infer the database survived.
     assert "compose data volumes were already dropped" in result.stderr
+
+
+def test_wipe_will_not_report_a_removal_it_could_not_verify(tmp_path: Path) -> None:
+    """The third enumeration is the one that grades the reap, so losing the daemon before it means
+    no removal can be confirmed -- and the conservative fallback treats every enumerated domain as
+    surviving rather than as removed.
+
+    Without that fallback the end-state list would be empty, no domain would match it, and all of
+    them would be graded `removed` -- a false success reached through the failure handling itself.
+    """
+    result = _wipe_reap(
+        tmp_path, _counting_virsh(fail_list_from=3), overlays=("alpha-overlay.qcow2",)
+    )
+    assert result.returncode != 0
+    assert "removed domain" not in result.stdout
+    assert "unverifiable: the end state could not be re-read" in result.stderr
+    assert "error: failed to connect to the hypervisor" in result.stderr
+    assert "kdive-alpha" in result.stderr and "kdive-beta" in result.stderr
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
 
 
 def test_wipe_exits_non_zero_and_names_an_overlay_it_could_not_remove(tmp_path: Path) -> None:
