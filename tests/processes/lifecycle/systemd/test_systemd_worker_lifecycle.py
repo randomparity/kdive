@@ -2266,3 +2266,25 @@ def test_recover_clips_its_systemd_work_to_the_same_ceiling_stop_uses() -> None:
         if operation in {"observe", "stop-retained", "reset-failed"}
     ]
     assert budgets and all(budget <= 45.0 for budget in budgets), budgets
+
+
+def test_recover_keeps_a_refusal_visible_when_a_later_slot_fails() -> None:
+    """A refusal's slot is deliberately left loadable, so the reload must not overwrite it.
+
+    "this unit has live processes" is the one fact that changes what the operator does next;
+    replacing it with whatever code the sweep later failed on would send them after the wrong
+    problem.
+    """
+    live = _state(1, SlotPhase.STARTED)
+    later = _state(2, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: live, 2: later})
+    runtime.observe_failures[later.unit] = SystemdUnavailable("systemctl show is unavailable")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "dependency_unavailable"
+    assert [(result.slot, result.code) for result in response.slots] == [
+        (1, "recovery_refused"),
+        (2, "dependency_unavailable"),
+    ]
+    assert stores[0].state == live and authority.terminations == []

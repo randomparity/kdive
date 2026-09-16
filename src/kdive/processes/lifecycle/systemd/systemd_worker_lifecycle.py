@@ -341,8 +341,9 @@ class SystemdWorkerLifecycle:
         if state.phase is SlotPhase.PREPARED:
             # A prepared generation is registered only at the gated-to-registered step, so it
             # holds no fence and has no evidence to reconcile; its files are simply discarded.
-            # `stop` instead adopts such a generation as GATED and closes it for the audit
-            # record, which recovery has no reason to do when nothing is fenced.
+            # `stop` discards it too where the unit is already inactive and empty, and adopts it
+            # as GATED for the audit record only where `require_inactive` still refuses the unit;
+            # recovery has no reason to re-open a generation nothing is fenced against.
             self._store_call(stop_deadline, store.discard_prepared, state)
             return state
         if state.phase is not SlotPhase.TERMINATED:
@@ -817,10 +818,18 @@ def _with_completed_slots(
     already retired -- its ``state.json`` gone -- disappears from the report. Recovery is the
     operator escape hatch and the whole point of it is knowing which fences were released, so a
     sweep that aborts at slot 5 must still say that slots 1 to 4 were retired. A reloaded result
-    is the more current fact and wins where both describe one slot.
+    is the more current fact and wins where both describe one slot -- except for a refusal, whose
+    slot is deliberately left loadable, so the reload would overwrite "this unit has live
+    processes" with the unrelated code the sweep later failed on.
     """
     merged = {result.slot: result for result in completed}
-    merged.update({result.slot: result for result in response.slots})
+    merged.update(
+        {
+            result.slot: result
+            for result in response.slots
+            if merged.get(result.slot) is None or merged[result.slot].code != _RECOVERY_REFUSED
+        }
+    )
     return LifecycleResponse(
         ok=response.ok,
         code=response.code,
