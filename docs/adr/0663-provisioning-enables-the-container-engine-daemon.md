@@ -44,8 +44,12 @@ file exists, and grant the engine's socket group to the role's single operator a
 rely on socket activation.**
 
 Enabling the service is a superset of enabling the socket: `Requires=docker.socket` pulls the socket
-unit in, so this decision can never leave a host with the daemon enabled and its socket absent. The
-converse is not true, and that asymmetry is most of the argument. The rest is observability. Socket
+unit in whenever the service starts, so this decision can never leave a host with the daemon enabled
+and its socket absent. The converse is not true, and that asymmetry is most of the argument. The
+socket unit is *started* by that dependency rather than separately *enabled*, so
+`systemctl is-enabled docker.socket` can still read `disabled` on a host where everything works;
+what matters is that `systemctl start docker.service` alone brings `/run/docker.sock` up as
+`root:docker 0660`, which it does. The rest is observability. Socket
 activation defers the daemon's first start to the first client connection, so the play cannot
 witness that start; a daemon that will fail to come up is indistinguishable at provisioning time
 from one that will, and the failure surfaces later as a socket error inside `stack-services.sh`.
