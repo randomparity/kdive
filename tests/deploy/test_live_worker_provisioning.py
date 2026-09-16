@@ -1383,6 +1383,29 @@ def test_installer_and_ansible_pin_equivalent_authority_modes() -> None:
         assert f'"{mode}"' in tasks
 
 
+def test_installer_and_ansible_agree_on_credentials_directory_mode() -> None:
+    """Two writers set /etc/kdive/credentials's mode: the installer's `install -d` and the
+    imported `worker_install_dirs.yml` task. A mismatch makes each run undo the other's write,
+    so the task reports `changed` forever instead of converging (#2514)."""
+    installer = _text(INSTALLER)
+    tasks = _text(MAIN_TASKS)
+
+    installer_match = re.search(
+        r"^install -d -o root -g root -m (\d+) /etc/kdive/credentials$",
+        installer,
+        re.MULTILINE,
+    )
+    assert installer_match, "installer no longer creates /etc/kdive/credentials as pinned"
+
+    tasks_match = re.search(r'\{path: /etc/kdive/credentials, mode: "(\d+)"\}', tasks)
+    assert tasks_match, "ansible task no longer creates /etc/kdive/credentials as pinned"
+
+    assert installer_match.group(1) == tasks_match.group(1), (
+        "the installer and the Ansible task disagree on /etc/kdive/credentials's mode "
+        f"({installer_match.group(1)!r} vs {tasks_match.group(1)!r})"
+    )
+
+
 def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
     for name in ("libvirtd-live.conf", "virtqemud-live.conf"):
         config = _text(SYSTEMD / name)

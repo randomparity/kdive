@@ -229,7 +229,7 @@ class LiveStackClient:
             raise RuntimeError(f"resource {uri!r} did not return text content")
         return text
 
-    async def call_tool(self, name: str, **args: object) -> ToolResponse | list[ToolResponse]:
+    async def call_tool(self, name: str, /, **args: object) -> ToolResponse | list[ToolResponse]:
         """Call ``name`` and parse the structured output into ``ToolResponse``.
 
         Reads ``CallToolResult.structured_content`` — a clean ``dict`` (fastmcp 3.4.0). A
