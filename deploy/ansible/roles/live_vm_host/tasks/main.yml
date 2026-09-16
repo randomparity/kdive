@@ -60,11 +60,9 @@
 
 - name: Enable the container engine and grant the runner account its socket
   # One owner for this policy (ADR-0663). The runner previously took the group grant here and
-  # relied on dpkg to start the daemon; the reusable file does both. Note what that trades: the
-  # grant was unconditional here and is now gated on the packaged unit, so a Debian that stopped
-  # shipping /usr/lib/systemd/system/docker.service would skip both tasks silently rather than
-  # fail. The apt install above is unconditional and docker.io ships the unit today, so the probe
-  # holds; the real-host runner arm is what checks that, not the play itself.
+  # relied on dpkg to start the daemon; the reusable file does both. That gates the grant on the
+  # file's unit probe, where it used to be unconditional — the assert below is what holds the
+  # difference.
   ansible.builtin.import_role:
     name: local_worker_host
     tasks_from: container_runtime.yml
