@@ -267,6 +267,112 @@ for distribution, family, selected in (
     package_route(distribution, family, selected)
 print("ok packages: check mode routes each supported family to only its package task")
 
+# The container runtime is declared for one distribution per family, not for the family.
+CONTAINER_RUNTIME = {"RedHat": "Fedora", "Suse": "Tumbleweed"}
+
+
+def container_section(output: str, name: str, context: str) -> str:
+    heading = f"TASK [local_worker_host : {name}]"
+    require(heading in output, f"{context} never reached: {name}")
+    return output.split(heading, 1)[1].split("\nTASK [", 1)[0]
+
+
+def container_runtime_gate(distribution: str, family: str, *, declared: bool) -> None:
+    """Only Fedora and openSUSE Tumbleweed may enter the container-runtime installs (#2505).
+
+    `preflight.yml` admits RHEL, Rocky and AlmaLinux beside Fedora and SLES beside Tumbleweed,
+    and none of those four package the engine or the compose plugin their sibling does. The
+    distribution gate, not the family route, is what keeps dnf/zypper from being handed a
+    package the host cannot resolve, so it is the gate worth proving.
+
+    `--start-at-task` skips the family toolchain install, which check mode cannot run as a
+    non-root user; every gate under test is evaluated before any module runs.
+    """
+    label = CONTAINER_RUNTIME[family]
+    probe_name = f"Look for an existing container engine before installing one ({family})"
+    facts = {
+        "ansible_facts": {
+            "distribution": distribution,
+            "distribution_version": "probe",
+            "os_family": family,
+        },
+        "local_worker_host_operator_user": operator,
+    }
+    result = playbook(
+        probe,
+        "--check",
+        "--tags",
+        "authority_prerequisites",
+        "--start-at-task",
+        probe_name,
+        "-e",
+        json.dumps(facts),
+    )
+    engine = container_section(result.stdout, f"Install the {label} container engine", distribution)
+    compose_name = f"Install the {label} compose plugin for the on-box stack and testcontainers"
+    if not declared:
+        require(
+            "skipping: [localhost]" in engine,
+            f"{distribution} entered the {label} engine install",
+        )
+        compose = container_section(result.stdout, compose_name, distribution)
+        require(
+            "skipping: [localhost]" in compose,
+            f"{distribution} entered the {label} compose plugin install",
+        )
+        return
+    # The engine carries a second gate on /usr/bin/docker being absent, so on a host that
+    # already has a provider it skips and the compose plugin carries the declaration instead.
+    # Asserting the engine arm directly would make this test read the runner's own /usr/bin.
+    if "skipping: [localhost]" in engine:
+        compose = container_section(result.stdout, compose_name, distribution)
+        require(
+            "skipping: [localhost]" not in compose,
+            f"{distribution} skipped both the {label} engine and its compose plugin",
+        )
+
+
+for distribution, family, declared in (
+    ("Fedora", "RedHat", True),
+    ("Rocky", "RedHat", False),
+    ("RedHat", "RedHat", False),
+    ("AlmaLinux", "RedHat", False),
+    ("openSUSE Tumbleweed", "Suse", True),
+    ("SLES", "Suse", False),
+):
+    container_runtime_gate(distribution, family, declared=declared)
+print("ok container runtime: only Fedora and Tumbleweed enter the engine and compose installs")
+
+
+def container_runtime_order() -> None:
+    """Probe, then engine, then compose plugin, in both families.
+
+    Installing the plugin first would resolve its `(engine or podman)` dependency by pulling
+    the CLI package that owns /usr/bin/docker, and the probe would then suppress the engine
+    install on that run and every later one — leaving a host with a CLI, a plugin and no
+    daemon. The order is the contract; a silent reorder must not survive (#2505).
+    """
+    listing = playbook(probe, "--list-tasks")
+    require(listing.returncode == 0, "container runtime task listing failed")
+    for family, label in CONTAINER_RUNTIME.items():
+        ordered = (
+            f"Look for an existing container engine before installing one ({family})",
+            f"Install the {label} container engine",
+            f"Install the {label} compose plugin for the on-box stack and testcontainers",
+        )
+        positions = []
+        for name in ordered:
+            require(name in listing.stdout, f"{label} container task missing from listing: {name}")
+            positions.append(listing.stdout.index(name))
+        require(
+            positions == sorted(positions),
+            f"{label} container tasks are out of order: probe, engine, then compose plugin",
+        )
+
+
+container_runtime_order()
+print("ok container runtime: the engine installs before the compose plugin in both families")
+
 
 def boot_kernel_guard(distribution: str, family: str) -> None:
     """RedHat and Suse ship /boot kernels world-readable; relabelling there would NARROW
