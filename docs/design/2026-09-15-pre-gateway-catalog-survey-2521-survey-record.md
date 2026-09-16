@@ -31,7 +31,7 @@ belong to #2523.
 
 ## In-flight movers of surveyed files
 
-A change merged after the base commit can invalidate a row. Known at survey time:
+Known at survey time:
 
 - **PR #2530** (open, issue #2500) changes `tests/integration/live_stack/spine.py` — cited by
   entry L2.
@@ -212,8 +212,8 @@ Owner for every entry here: **#2523**.
       stalls.append(Stall("wind-down", f"cannot reach wind-down tools: {missing_wind_down}"))
   ```
 - **Disposition:** `fix-needed`. A fixed tool-name list required to be present in `tools/list`
-  — the exact shape #2513 names. None of the three is in `CORE_TOOLS`, so an agent-profile
-  catalog stalls here unconditionally. Under the clip, all three are reported missing.
+  — the exact shape #2513 names. None of the three is in `CORE_TOOLS`, so under the clip all
+  three are reported missing and an agent-profile walk stalls here unconditionally.
 - **Owner:** #2523.
 
 ### A3 — `fix-needed`
