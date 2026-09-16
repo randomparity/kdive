@@ -188,9 +188,10 @@ if [[ "$skip_libvirt" != "1" ]]; then
       }
       if [[ "$KDIVE_LIBVIRT_URI" == *virtqemud-sock ]]; then
         # #2503: the modular virtqemud session daemon proxies node-device queries to the *system*
-        # virtnodedevd socket (docs/design/2026-09-09-ppc64le-emulated-power-live-proof-2383-
-        # proof-record.md:284-286 records the exact connection failure) -- there is no session
-        # counterpart, so enable that system unit here too, mirroring the bare-host branch below.
+        # virtnodedevd socket -- there is no session counterpart -- and
+        # docs/design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md:284-286
+        # records the exact connection failure. Enable that system unit here too, mirroring the
+        # bare-host branch below.
         # Best-effort: the provisioned CI runner has no sudo (#2032) and must not be blocked by
         # this, so tolerate a failed enable exactly like the bare-host branch's own `|| true`. The
         # Debian-family session daemon is the monolithic libvirtd, which answers node-device
