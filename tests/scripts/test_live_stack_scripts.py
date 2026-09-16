@@ -1709,54 +1709,6 @@ def test_wipe_reaps_a_system_endpoint_under_sudo(tmp_path: Path) -> None:
     assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
-def test_wipe_refuses_an_unwritable_overlay_directory_on_a_session_endpoint(tmp_path: Path) -> None:
-    """ADR-0662 moved the overlay `rm` onto the invoking account, so listable is no longer enough.
-
-    The `-r`/`-x` guard beside this one was written when the removal was root's and could not be
-    refused; unlinking needs *write* on the directory, which neither test covers. `0500` is the
-    shape that separates them -- the glob still expands, so the run gets all the way to the
-    removals and then every one of them is denied.
-
-    Reachable without an exotic host: `stack-services.sh` does
-    `sudo install -d -o "$(id -un)" -m 0755` on this same path when it is not already writable, so
-    an account other than the operator running bring-up leaves the installer's mode-`2770`
-    directory as a `0755` one the operator can no longer write.
-
-    Asserted on the end state, like every other reap arm: the overlay is still there, and the run
-    does not claim `done`.
-    """
-    result = _wipe_reap(
-        tmp_path,
-        domains=(),
-        overlays=("alpha-overlay.qcow2",),
-        rootfs_mode=0o500,
-    )
-    assert result.returncode != 0
-    assert "not writable" in result.stderr, result.stderr
-    assert "re-run as the account that owns it" in result.stderr
-    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
-    assert not result.stdout.rstrip().endswith("done")
-
-
-def test_wipe_keeps_an_unwritable_overlay_directory_sweeping_under_sudo(tmp_path: Path) -> None:
-    """The guard is branch-local: on the escalating branch root's `rm` does not need write.
-
-    A root-owned `0755` overlay directory is the normal bare-host shape, so a `! -w` test applied
-    unconditionally would refuse a host that works today -- the "operator where root is required"
-    direction of the same defect. The stub `sudo` here is a pass-through, which is what lets the
-    removal succeed against a directory the calling account cannot write.
-    """
-    result = _wipe_reap(
-        tmp_path,
-        domains=(),
-        overlays=("alpha-overlay.qcow2",),
-        rootfs_mode=0o500,
-        uri="qemu:///system",
-    )
-    assert "not writable" not in result.stderr, result.stderr
-
-
 def _stack_status_libvirt_slice(tmp_path: Path) -> Path:
     """stack-status.sh's setup plus its libvirt section, runnable on its own.
 

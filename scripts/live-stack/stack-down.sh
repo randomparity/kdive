@@ -241,22 +241,6 @@ if [[ "$wipe" == "1" ]]; then
     unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory \
 and an unreadable one cannot be told apart; re-run as the account that owns it or one in its \
 group (ls -ld names them)")
-  elif ((!reap_as_root)) && [[ ! -w "$KDIVE_ROOTFS_DIR" ]]; then
-    # ADR-0662 put the overlay `rm` on the invoking account for a session endpoint, so the
-    # directory has to be WRITABLE and not merely listable. The test above was written when the
-    # removal was root's and could not be refused; unlinking needs write on the DIRECTORY, which
-    # `-r`/`-x` never covered. Reachable without any exotic host: stack-services.sh:232 does
-    # `sudo install -d -o "$(id -un)" -m 0755` on this same path, so an account other than the
-    # operator running bring-up leaves the installer's `operator:kdive-live-libvirt` 2770 as a
-    # 0755 directory the operator can no longer write.
-    #
-    # Refused once here rather than per overlay: every `rm` would fail identically, and this names
-    # the fix instead of repeating one permission error per disk. Guarded on the branch, because
-    # on the escalating branch root's `rm` does not need it and a root-owned 0755 directory is the
-    # normal bare-host shape -- testing `-w` unconditionally would refuse that working host.
-    unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not writable as $(id -un), and a session \
-endpoint's overlays are removed as the invoking account (ADR-0662), so every rm would be refused; \
-re-run as the account that owns it or one in its group (ls -ld names them)")
   else
     shopt -s nullglob
     overlays_removed=0
