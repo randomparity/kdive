@@ -256,6 +256,49 @@ _lock_libvirt_runtime() {
   _libvirt_runtime_child_locked="true"
 }
 
+# The directories _lock_libvirt_runtime just created live on /run, which is tmpfs: they are gone
+# after the next reboot and nothing else recreates them. kdive-libvirtd-live.service names the
+# pid file under the child directory but cannot create it -- a user unit runs as the operator,
+# and /run/kdive is root-owned 0755 -- so a missing root leaves that unit restart-looping on
+# `libvirtd: error: Unable to obtain pidfile`, and every entry point that resolves the published
+# session URI then fails with "dedicated session daemon could not be started". A tmpfiles rule is
+# the only mechanism that runs as root early enough: systemd-tmpfiles-setup.service is ordered in
+# sysinit.target, well before any lingering user manager starts this unit.
+#
+# Modes and ownership mirror _lock_libvirt_runtime's post-restore state exactly. Keep the two in
+# agreement -- tmpfiles reapplies them on every boot, so a disagreement here silently overwrites
+# what the installer set.
+_install_libvirt_runtime_tmpfiles() {
+  local conf=/etc/tmpfiles.d/kdive-live-libvirt.conf tmpfiles_temp=""
+
+  install -d -o root -g root -m 0755 /etc/tmpfiles.d
+  # Staged then installed, like every other file this script writes, so an interrupted run
+  # cannot leave a half-written rule in place. The template deliberately ends in random
+  # characters rather than `.conf`: systemd-tmpfiles reads only `*.conf`, so a stray temp left
+  # by a signal is inert rather than a parse error on the next boot.
+  tmpfiles_temp="$(mktemp /etc/tmpfiles.d/.kdive-live-libvirt.XXXXXX)"
+  cat >"$tmpfiles_temp" <<TMPFILES
+# Managed by deploy/systemd/install-live-worker-lifecycle.sh -- do not edit by hand.
+# Recreates the dedicated session libvirt runtime root on every boot. /run is tmpfs, so the
+# directories the installer creates do not survive one, and kdive-libvirtd-live.service cannot
+# create them itself.
+d /run/kdive 0755 root root -
+d /run/kdive/live-libvirt 0750 ${operator} ${libvirt_group} -
+d /run/kdive/live-libvirt/libvirt 0750 ${operator} ${libvirt_group} -
+TMPFILES
+  install -o root -g root -m 0644 "$tmpfiles_temp" "$conf"
+  unlink "$tmpfiles_temp"
+
+  # Apply now as well as at boot, so an installer run repairs a host whose runtime root is
+  # already missing without waiting for a reboot.
+  if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    systemd-tmpfiles --create "$conf" || {
+      echo "systemd-tmpfiles could not apply ${conf}; the session libvirt runtime root may be missing" >&2
+      return 1
+    }
+  fi
+}
+
 _inspect_libvirt_pid() {
   local pid_path="$1" operator_uid="$2" socket_path="$3"
   local authority pid_mode
@@ -621,6 +664,7 @@ install -d -o root -g root -m 0711 "$state_root/slots"
 _lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
   "$operator_uid" "$libvirt_group_gid" 0 0
 _restore_libvirt_runtime
+_install_libvirt_runtime_tmpfiles
 install -d -o "$operator" -g "$libvirt_group" -m 2770 \
   /var/lib/kdive/rootfs /var/lib/kdive/console \
   /var/lib/kdive/pcap /var/lib/kdive/build /var/lib/kdive/install

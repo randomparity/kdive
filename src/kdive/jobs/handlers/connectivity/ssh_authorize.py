@@ -205,9 +205,13 @@ async def authorize_ssh_key_handler(
     from the failed job alone (ADR-0306).
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the System has no recorded SSH forward or
-            no bootstrap key; ``TRANSPORT_FAILURE`` when the guest sshd is unreachable (a terminal
-            fast-fail from the pre-flight) or the append itself fails.
+        CategorizedError: ``CONFIGURATION_ERROR`` ``reason="ssh_not_provisioned"`` when the System
+            has no recorded SSH forward, or when it has no bootstrap key; the provider's own
+            ``reason="system_domain_not_found"`` propagates unchanged when the System has no
+            libvirt domain on the worker's connection, which is a different fault with a different
+            fix (ADR-0658). The worker prefixes detail keys, so a client reads these as
+            ``failure_detail_reason``. ``TRANSPORT_FAILURE`` when the guest sshd is unreachable (a
+            terminal fast-fail from the pre-flight) or the append itself fails.
     """
     payload = load_payload(job, AuthorizeSshKeyPayload)
     system_id = UUID(payload.system_id)
