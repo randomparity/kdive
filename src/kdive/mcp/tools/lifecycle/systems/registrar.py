@@ -294,8 +294,9 @@ def _register_systems_ssh_info(
         Available on any ready System whose provider exposes an SSH forward: local-libvirt always,
         and remote-libvirt only when the host is configured for SSH parity. Reports
         ``ssh_not_provisioned`` when there is no forward. A **local-libvirt** System with no
-        libvirt domain on the worker's connection reports ``system_domain_not_found`` instead —
-        an endpoint or liveness fault, not a provisioning gap. For a remote System the
+        libvirt domain on the libvirt connection this server reads reports
+        ``system_domain_not_found`` instead — an endpoint or liveness fault, not a provisioning
+        gap. For a remote System the
         endpoint is read live from the host, so an unreachable host surfaces as a transport
         failure rather than a cached value.
 
@@ -337,7 +338,7 @@ def _register_systems_check_ssh_reachable(
         ``ready`` before sshd binds, so a single ``false`` right after provisioning may become
         ``true`` on a repeat call. Available on any ready System whose provider exposes an SSH
         forward; reports ``ssh_not_provisioned`` otherwise, or ``system_domain_not_found`` when a
-        **local-libvirt** System has no libvirt domain on the worker's connection.
+        **local-libvirt** System has no libvirt domain on the libvirt connection this server reads.
 
         ``reachable`` confirms sshd is answering, not that your key is authorized — the probe
         sends no handshake and attempts no login. Call ``systems.authorize_ssh_key`` if a real
@@ -370,7 +371,8 @@ def _register_systems_authorize_ssh_key(
 
         Reports ``ssh_not_provisioned`` when the System's provider exposes no SSH forward, and
         ``system_domain_not_found`` when a **local-libvirt** System has no libvirt domain on the
-        worker's connection — an endpoint or liveness fault, not a provisioning gap.
+        libvirt connection this server reads — an endpoint or liveness fault, not a provisioning
+        gap.
         """
         return await _authorize_ssh_key(
             pool, current_context(), system_id, public_key, resolver=resolver

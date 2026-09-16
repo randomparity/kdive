@@ -239,15 +239,18 @@ class Connector(Protocol):
         ``None`` means the System was not provisioned with an SSH forward, so no agent SSH is
         available. Providers without a local SSH endpoint to disclose return ``None``.
 
-        ``None`` is not a catch-all for "could not resolve an endpoint" (ADR-0658): an
-        implementation that can tell a different configuration fault apart — a System with no
-        domain on the provider's connection, say — raises it with a discriminating
-        ``details["reason"]`` instead of collapsing it here, so a caller can report which
-        condition occurred.
+        An implementation **may** distinguish a different configuration fault instead of
+        collapsing it here — a System with no domain on the provider's connection, say — by
+        raising a ``CONFIGURATION_ERROR`` carrying a discriminating ``details["reason"]``, so a
+        caller can report which condition occurred (ADR-0658). This is permitted, not required,
+        and implementers differ: local-libvirt distinguishes the absent domain, while
+        remote-libvirt still returns ``None`` for it. A caller must therefore treat ``None`` as
+        "no forward is available to disclose" and read the reason only when one is raised.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` on an unexpected provider read error;
-                ``CONFIGURATION_ERROR`` for a configuration fault that is not an absent forward.
+                ``CONFIGURATION_ERROR`` for a configuration fault an implementation chooses to
+                distinguish from an absent forward.
         """
         ...
 

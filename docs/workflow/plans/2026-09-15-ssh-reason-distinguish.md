@@ -109,7 +109,11 @@ into `data` — and the worker prefixes job detail keys to `failure_detail_reaso
 
 - Contract: each of the three MCP tools returns `data.reason == "system_domain_not_found"` with
   `error_category == CONFIGURATION_ERROR` when the connector raises the no-domain error.
-  focused-test — three cases. Red before Task 1 lands: the reason is absent. Green:
+  focused-test — three cases. These inject a **raising** fake connector, so they pin the MCP
+  layer's own contract — that a `CategorizedError`'s `details` reach the response `data` — and do
+  not depend on Task 1's narrowing: they are red against a tool that drops the reason, green
+  otherwise, and stay green with Task 1 reverted. Task 1's narrowing is proven separately, red to
+  green, by the connector cases above. Green:
   `just test-verbose tests/mcp/lifecycle/test_systems_ssh_access.py`.
 - Contract: both job handlers propagate rather than collapse. focused-test — one case each in
   `test_ssh_authorize.py` and `test_ssh_reachable.py` asserting the raised `CategorizedError`
