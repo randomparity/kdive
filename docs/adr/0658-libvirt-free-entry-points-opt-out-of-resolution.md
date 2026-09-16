@@ -29,7 +29,7 @@ libvirt use, or keep source-time resolution and let libvirt-free entry points op
 ## Decision
 
 **Fail-closed source-time resolution stays the default. An entry point that can do useful work
-without libvirt declares itself by exporting `KDIVE_LIBVIRT_OPTIONAL=1` before sourcing `lib.sh`
+without libvirt declares itself by exporting `LIBVIRT_OPTIONAL=1` before sourcing `lib.sh`
 or `env.sh`; on a broken contract that entry point continues with `KDIVE_LIBVIRT_URI` left
 deliberately *unset*, and each operation that genuinely needs libvirt fails closed at the point of
 use through `require_libvirt_uri`.**
@@ -47,16 +47,21 @@ through `load_published_libvirt_uri` directly, on the `start` path only, and tha
 not consult the flag — so a libvirt-requiring operation still fails closed even when it inherits
 the declaration.
 
-`KDIVE_LIBVIRT_OPTIONAL` is a declaration an entry point makes about itself and its children, not
-an operator knob: it gets no row in the generated config reference, and no entry point that will
-touch libvirt sets it.
+`LIBVIRT_OPTIONAL` is a declaration an entry point makes about itself and its children, not an
+operator knob, and it carries no `KDIVE_` prefix for the reason `LIBVIRT_ENV` does not
+(`libvirt-uri.sh:9-11`): `scripts/guards/check_env_documented.py` sweeps `scripts/` for
+`KDIVE_[A-Z0-9_]+` and requires every hit to be a registry setting or a catalogued entry in
+`src/kdive/config/external_env.py`, which renders into the generated config reference. A prefixed
+name would therefore have to be published there as an operator knob, which is what it is not. No
+entry point that will touch libvirt sets it.
 
 ## Consequences
 
-`stack-status.sh` reports on a broken host instead of aborting: it skips the libvirt probe block
-entirely — `libvirt_ok` reads `$KDIVE_LIBVIRT_URI` unguarded at `lib.sh:380`, and `set -u` is not
-suppressed inside an `if` condition — and prints the endpoint as unresolved instead.
-`stack-down.sh` performs plain teardown, including its compose `down`.
+`stack-status.sh` reports on a broken host instead of aborting: it skips the endpoint banner and
+probe at `:55-60` — `libvirt_ok` reads `$KDIVE_LIBVIRT_URI` unguarded at `lib.sh:380`, and `set -u`
+is not suppressed inside an `if` condition — printing the endpoint as unresolved instead. The
+`provision_prereqs_ok` report at `:61-65` reads no libvirt and keeps running, which is the part a
+broken host still needs. `stack-down.sh` performs plain teardown, including its compose `down`.
 
 `--wipe` still refuses, and now refuses **before** stopping anything. Refusing it wholesale rather
 than dropping the volumes and skipping the reap is what `stack-down.sh:5-8` already prescribes:
@@ -71,6 +76,10 @@ a defect, but a visible one. A `:-` default does **not** discharge the obligatio
 silent-downgrade shape this record rejects, and `lib.sh:422` and
 `scripts/operations/check-local-libvirt.sh:49` are existing instances, neither reachable from an
 opted-out entry point today.
+
+This record settles the question for the two entry points #2504's acceptance names.
+`stack-services.sh --skip-libvirt`, `apply-migrations.sh` and `onboard.sh` are libvirt-free by the
+same argument and are left unconverted, with no owner assigned; each needs only the declaration.
 
 Because resolution stays at source time, issue #2509's guard — reporting a preset
 `KDIVE_LIBVIRT_URI` that contradicts the published contract — belongs in `resolve_libvirt_uri`, in
