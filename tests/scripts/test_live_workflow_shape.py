@@ -139,6 +139,58 @@ def test_native_spine_aliases_the_bare_database_url_for_the_proof_suite() -> Non
     assert 'export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"' in _native_spine()
 
 
+_ALLOCATION_CAP_EXPORT = "export KDIVE_LIBVIRT_ALLOCATION_CAP="
+# What the native tier holds against the local-libvirt host at once (#2560):
+#   1  mint-system.sh's allocation, held for the whole job
+# + 1  the one live_vm proof that requests an allocation of its own
+_MINT_ALLOCATIONS = 1
+_SUITE_ALLOCATIONS = 1
+
+
+def test_native_spine_raises_the_allocation_cap_above_the_long_lived_mint() -> None:
+    """The native tier mints a System that holds an allocation for the whole job (#2560).
+
+    `LocalLibvirtDiscovery.from_env` defaults `KDIVE_LIBVIRT_ALLOCATION_CAP` to 1, so discovery
+    advertised `concurrent_allocation_cap: 1` and the mint took the only slot. Every later
+    `allocations.request` was then denied `at_capacity` mid-suite — which is what the console-part
+    proof hit once #2518 let it execute on this tier for the first time.
+
+    The value is the tier's actual concurrency, not the smallest number that unblocks one test:
+    the long-lived mint (2 vcpu / 4 GB) plus the single `live_vm` proof that allocates for itself
+    (2 vcpu / 2 GB), run serially because the spine passes no `-n`. The 4 vcpu / 6 GB that admits
+    sits well inside the 8 vcpus / ~31 GB the host advertised. No per-project quota bounds it:
+    the cap is counted per resource across projects, and these two allocations are funded in
+    different projects (`demo` for the mint, `console-parts-proof` for the proof).
+    """
+    spine = _native_spine()
+    lines = [
+        ln.strip() for ln in spine.splitlines() if ln.strip().startswith(_ALLOCATION_CAP_EXPORT)
+    ]
+    assert len(lines) == 1, (
+        f"expected exactly one `{_ALLOCATION_CAP_EXPORT}` line in the native spine, "
+        f"found {len(lines)}; without it the tier runs at the fail-closed default of 1 and the "
+        "minted System holds the only slot (#2560)"
+    )
+    cap = int(lines[0][len(_ALLOCATION_CAP_EXPORT) :].split(" #")[0].strip().strip("\"'"))
+    assert cap == _MINT_ALLOCATIONS + _SUITE_ALLOCATIONS, (
+        f"the native spine caps concurrent allocations at {cap}, but the tier holds "
+        f"{_MINT_ALLOCATIONS} (mint) + {_SUITE_ALLOCATIONS} (suite) at once; a new proof that "
+        "allocates for itself raises the second term rather than leaving the tier to fail "
+        "`at_capacity` mid-suite"
+    )
+
+    # Anchor on stack-services.sh, NOT mint-system.sh. Per ADR-0384 the cap is operator-owned:
+    # discovery honors this variable when it INSERTS the resources row and preserves the stored
+    # value on every refresh. The reconciler stack-services.sh starts registers discovery at
+    # startup, so it inserts first — an export placed after stack-services.sh but before the mint
+    # reads as correct and silently no-ops, which is how #2560 would come back.
+    assert spine.index(_ALLOCATION_CAP_EXPORT) < spine.index("live-stack/stack-services.sh"), (
+        "KDIVE_LIBVIRT_ALLOCATION_CAP is exported after stack-services.sh; the reconciler it "
+        "starts has already inserted the resource at the old cap, and ADR-0384 keeps that stored "
+        "value through every later refresh"
+    )
+
+
 def _tcg_stage_dir() -> str:
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())
