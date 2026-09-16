@@ -780,10 +780,9 @@ jobs:
           # console-part proof would skip rather than run, and this tier has no `<N> passed` gate to
           # catch that (#2540). Point it at the rootfs mint-system.sh just staged INSIDE the
           # provider's allowed root; the warm-store path in KDIVE_LIVE_VM_ROOTFS is outside that
-          # root and the provider rejects it with CONFIGURATION_ERROR. Same
-          # name and `:-` default as mint-system.sh, which env.sh does not export. That filename is
-          # duplicated from mint-system.sh with nothing pinning the two together: rename it there
-          # and this export goes stale, which now fails the job rather than skipping it.
+          # root and the provider rejects it with CONFIGURATION_ERROR. Same name and `:-` default
+          # as mint-system.sh, which env.sh does not export; test_live_workflow_shape.py pins the
+          # two together.
           export KDIVE_GUEST_IMAGE="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}/live-vm-provisioned-rootfs.qcow2"
 
           scripts/live-vm/preflight-env.sh throwaway provisioned debug-stepping
