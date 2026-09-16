@@ -133,8 +133,10 @@ local_worker_host_packages_suse:
 # The Tumbleweed counterparts, kept out of the list above for the same reason: that list also
 # installs on SLES, which preflight.yml admits and which ships Docker only in the Containers
 # Module rather than the base product. Tumbleweed's docker-compose is Compose V2, installed as the
-# `docker compose` CLI plugin, and requires `(docker or podman)` so it needs no engine gate. The
-# same daemon-enable and socket-access caveat applies.
+# `docker compose` CLI plugin, and requires `(docker or podman)` so it needs no engine gate — but
+# on a host with neither, zypper satisfies that dependency by pulling the package that owns
+# /usr/bin/docker. That is why the task file probes and installs the engine BEFORE the plugin.
+# The same daemon-enable and socket-access caveat applies.
 local_worker_host_compose_packages_tumbleweed:
   - docker-compose
 

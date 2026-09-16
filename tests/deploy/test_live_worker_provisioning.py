@@ -1481,10 +1481,7 @@ def test_fedora_worker_packages_declare_a_container_runtime_behind_a_fedora_gate
     gate is part of the contract, not an implementation detail.
     """
     defaults = _yaml(DEFAULTS)
-    family = defaults["local_worker_host_packages_redhat"]
-    assert isinstance(family, list)
-    assert "moby-engine" not in family
-    assert "docker-compose" not in family
+    _assert_no_docker_provider(defaults, "local_worker_host_packages_redhat")
     _assert_runtime_tasks(
         "packages_redhat.yml",
         module="ansible.builtin.dnf",
@@ -1503,10 +1500,7 @@ def test_tumbleweed_worker_packages_declare_a_container_runtime_behind_a_tumblew
     distribution gate the Fedora ones do.
     """
     defaults = _yaml(DEFAULTS)
-    family = defaults["local_worker_host_packages_suse"]
-    assert isinstance(family, list)
-    assert "docker" not in family
-    assert "docker-compose" not in family
+    _assert_no_docker_provider(defaults, "local_worker_host_packages_suse")
     _assert_runtime_tasks(
         "packages_suse.yml",
         module="community.general.zypper",
@@ -1515,6 +1509,20 @@ def test_tumbleweed_worker_packages_declare_a_container_runtime_behind_a_tumblew
         engine=("local_worker_host_engine_packages_tumbleweed", ["docker"]),
         register="local_worker_host_docker_provider_suse",
     )
+
+
+# Every package that would put /usr/bin/docker on the host. None may appear in a family-wide
+# list: those install before the probe task, so one of them there recreates the ordering defect
+# the probe exists to prevent — the probe would see a provider and skip the engine forever.
+DOCKER_PROVIDERS = frozenset(
+    {"docker", "docker-cli", "docker.io", "moby-engine", "podman-docker", "docker-compose"}
+)
+
+
+def _assert_no_docker_provider(defaults: dict[str, object], variable: str) -> None:
+    packages = defaults[variable]
+    assert isinstance(packages, list)
+    assert not DOCKER_PROVIDERS.intersection(packages), variable
 
 
 def _assert_runtime_tasks(
