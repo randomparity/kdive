@@ -1475,71 +1475,88 @@ def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
 def test_fedora_worker_packages_declare_a_container_runtime_behind_a_fedora_gate() -> None:
     """Fedora hosts need a runtime for the compose stack and testcontainers (#2505).
 
-    It cannot join `local_worker_host_packages_redhat`: that list installs on every
-    `os_family == 'RedHat'` host and `preflight.yml` admits RHEL, Rocky and AlmaLinux,
-    none of which package a Docker engine at all. An ungated addition would fail `dnf`
-    there, so the gate is part of the contract, not an implementation detail.
+    Neither package can join `local_worker_host_packages_redhat`: that list installs on every
+    `os_family == 'RedHat'` host and `preflight.yml` admits RHEL, Rocky and AlmaLinux, none of
+    which package a Docker engine at all. An ungated addition would fail `dnf` there, so the
+    gate is part of the contract, not an implementation detail.
     """
     defaults = _yaml(DEFAULTS)
-    packages = defaults["local_worker_host_container_packages_fedora"]
-    assert isinstance(packages, list)
-    assert packages == ["moby-engine", "docker-compose"]
     family = defaults["local_worker_host_packages_redhat"]
     assert isinstance(family, list)
     assert "moby-engine" not in family
-    _assert_gated_runtime_task(
+    assert "docker-compose" not in family
+    _assert_runtime_tasks(
         "packages_redhat.yml",
         module="ansible.builtin.dnf",
-        variable="local_worker_host_container_packages_fedora",
         distribution="Fedora",
+        compose=("local_worker_host_compose_packages_fedora", ["docker-compose"]),
+        engine=("local_worker_host_engine_packages_fedora", ["moby-engine"]),
+        register="local_worker_host_docker_provider_redhat",
     )
 
 
 def test_tumbleweed_worker_packages_declare_a_container_runtime_behind_a_tumbleweed_gate() -> None:
     """Tumbleweed hosts need a runtime for the compose stack and testcontainers (#2505).
 
-    `preflight.yml` admits SLES on the same `os_family == 'Suse'` route, and SLES ships
-    Docker in the Containers Module rather than the base product, so this pair carries the
-    same distribution gate the Fedora pair does. Tumbleweed's `docker-compose` is Compose V2
-    and installs as the `docker compose` CLI plugin, matching the Debian `docker.io` +
-    `docker-compose-v2` pairing that `stack-services.sh` needs.
+    `preflight.yml` admits SLES on the same `os_family == 'Suse'` route, and SLES ships Docker
+    in the Containers Module rather than the base product, so these packages carry the same
+    distribution gate the Fedora ones do.
     """
     defaults = _yaml(DEFAULTS)
-    packages = defaults["local_worker_host_container_packages_tumbleweed"]
-    assert isinstance(packages, list)
-    assert packages == ["docker", "docker-compose"]
     family = defaults["local_worker_host_packages_suse"]
     assert isinstance(family, list)
     assert "docker" not in family
-    _assert_gated_runtime_task(
+    assert "docker-compose" not in family
+    _assert_runtime_tasks(
         "packages_suse.yml",
         module="community.general.zypper",
-        variable="local_worker_host_container_packages_tumbleweed",
         distribution="openSUSE Tumbleweed",
+        compose=("local_worker_host_compose_packages_tumbleweed", ["docker-compose"]),
+        engine=("local_worker_host_engine_packages_tumbleweed", ["docker"]),
+        register="local_worker_host_docker_provider_suse",
     )
 
 
-def _assert_gated_runtime_task(
-    task_file: str, *, module: str, variable: str, distribution: str
+def _assert_runtime_tasks(
+    task_file: str,
+    *,
+    module: str,
+    distribution: str,
+    compose: tuple[str, list[str]],
+    engine: tuple[str, list[str]],
+    register: str,
 ) -> None:
-    """The runtime install must carry both gates: the distribution that ships the packages, and
-    the absence of an existing /usr/bin/docker provider it would conflict with."""
+    """The compose plugin and the engine carry different gates, and the difference is the
+    contract: the plugin is the only source of `docker compose`, so it installs on every host of
+    its distribution, while the engine is skipped where /usr/bin/docker already has a provider it
+    would conflict with. Each family registers the probe under its own name, so a skipped sibling
+    task cannot leave a stale value behind."""
+    defaults = _yaml(DEFAULTS)
     tasks = yaml.safe_load((LOCAL_WORKER / "tasks" / task_file).read_text("utf-8"))
-    declared = "{{ " + variable + " }}"
-    runtime = [task for task in tasks if task.get(module, {}).get("name") == declared]
-    assert len(runtime) == 1, task_file
-    assert runtime[0]["when"] == [
-        f"ansible_facts['distribution'] == '{distribution}'",
-        "not local_worker_host_docker_provider.stat.exists",
-    ]
+    distribution_gate = f"ansible_facts['distribution'] == '{distribution}'"
+
+    def _one(variable: str) -> dict[str, object]:
+        declared = "{{ " + variable + " }}"
+        found = [task for task in tasks if task.get(module, {}).get("name") == declared]
+        assert len(found) == 1, f"{task_file}: {variable}"
+        return cast(dict[str, object], found[0])
+
+    for variable, expected in (compose, engine):
+        assert defaults[variable] == expected
+
+    assert _one(compose[0])["when"] == distribution_gate
+    assert _one(engine[0])["when"] == [distribution_gate, f"not {register}.stat.exists"]
+
     probes = [
         task
         for task in tasks
         if task.get("ansible.builtin.stat", {}).get("path") == "/usr/bin/docker"
     ]
     assert len(probes) == 1, task_file
-    assert probes[0]["register"] == "local_worker_host_docker_provider"
-    assert tasks.index(probes[0]) < tasks.index(runtime[0])
+    assert probes[0]["register"] == register
+    assert tasks.index(probes[0]) < tasks.index(_one(engine[0]))
+    for task in tasks:
+        assert task["tags"] == ["authority_prerequisites"], task["name"]
 
 
 def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:

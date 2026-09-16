@@ -5,27 +5,36 @@
     state: present
   tags: [authority_prerequisites]
 
-- name: Look for an existing container runtime before declaring one (RedHat)
-  ansible.builtin.stat:
-    path: /usr/bin/docker
-  register: local_worker_host_docker_provider
-  changed_when: false
-  tags: [authority_prerequisites]
-
-- name: Install the Fedora container runtime for the compose stack and testcontainers
+- name: Install the Fedora compose plugin for the on-box stack and testcontainers
   # Fedora-only: Enterprise Linux ships no Docker engine and no compose provider in baseos,
   # appstream, extras or CRB, so an ungated install would fail dnf on RHEL, Rocky and AlmaLinux,
   # which preflight.yml also admits. EL operators install a runtime themselves
   # (docs/operating/providers/local-libvirt.md, "Container engine").
   #
+  # Unconditional within Fedora: docker-compose requires `(docker-cli or podman-docker)`, so it
+  # resolves over either provider and must not inherit the engine's conflict gate below — it is
+  # the only source of the `docker compose` subcommand stack-services.sh invokes.
+  ansible.builtin.dnf:
+    name: "{{ local_worker_host_compose_packages_fedora }}"
+    state: present
+  when: ansible_facts['distribution'] == 'Fedora'
+  tags: [authority_prerequisites]
+
+- name: Look for an existing container engine before installing one (RedHat)
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: local_worker_host_docker_provider_redhat
+  tags: [authority_prerequisites]
+
+- name: Install the Fedora container engine
   # Skipped when the host already owns /usr/bin/docker. podman-docker declares
   # `Conflicts: moby-engine` and docker-cli declares `Conflicts: podman-docker`, so installing the
   # engine over the podman route this project's own setup hint recommends would abort the dnf
-  # transaction rather than converge. A host with a runtime already keeps the one it chose.
+  # transaction rather than converge. A host with an engine already keeps the one it chose.
   ansible.builtin.dnf:
-    name: "{{ local_worker_host_container_packages_fedora }}"
+    name: "{{ local_worker_host_engine_packages_fedora }}"
     state: present
   when:
     - ansible_facts['distribution'] == 'Fedora'
-    - not local_worker_host_docker_provider.stat.exists
+    - not local_worker_host_docker_provider_redhat.stat.exists
   tags: [authority_prerequisites]

@@ -191,25 +191,27 @@ def test_redhat_unavailable_tools_use_manual_hints_and_name_crb(
 
 
 @pytest.mark.parametrize(
-    ("distro_id", "manager", "docker_package"),
+    ("distro_id", "distro_like", "manager", "docker_package"),
     [
-        ("fedora", "dnf install", "moby-engine"),
-        ("debian", "apt install", "docker.io"),
-        ("opensuse", "zypper install", "docker"),
-        ("arch", "pacman -S", "docker"),
+        ("fedora", "", "dnf install", "moby-engine"),
+        ("debian", "", "apt install", "docker.io"),
+        ("ubuntu", "debian", "apt install", "docker.io"),
+        ("opensuse-tumbleweed", "opensuse suse", "zypper install", "docker"),
+        ("arch", "", "pacman -S", "docker"),
     ],
 )
 def test_docker_hint_names_a_package_the_family_ships(
-    distro_id: str, manager: str, docker_package: str, tmp_path: Path
+    distro_id: str, distro_like: str, manager: str, docker_package: str, tmp_path: Path
 ) -> None:
     """The docker hint must name an installable package, not the bare `docker` everywhere (#2505).
 
     Fedora ships `moby-engine`, not `docker`, so the old mapping printed a package the
-    distribution does not provide.
+    distribution does not provide. These are the exact IDs whose engine package is known;
+    everything else keeps the manual hint.
     """
     empty = tmp_path / "empty-bin"
     empty.mkdir()
-    result = _run(distro_id, str(empty), tmp_path)
+    result = _run(distro_id, str(empty), tmp_path, os_release_like=distro_like)
 
     assert result.returncode == 1, result.stderr
     install_lines = [line for line in result.stderr.splitlines() if manager in line]
@@ -217,16 +219,30 @@ def test_docker_hint_names_a_package_the_family_ships(
     assert "docker: install Docker from" not in result.stderr
 
 
-@pytest.mark.parametrize(("distro_id", "manager"), [("rhel", "dnf install"), ("voidlinux", "")])
+@pytest.mark.parametrize(
+    ("distro_id", "distro_like", "manager"),
+    [
+        # Enterprise Linux packages no engine in baseos, appstream, extras or CRB.
+        ("rhel", "", "dnf install"),
+        # An unrecognized distro has no package name to assert at all.
+        ("voidlinux", "", ""),
+        # ID_LIKE derivatives collapse onto a family whose engine package they do not ship:
+        # Amazon Linux 2023 and Oracle Linux resolve to `fedora` without `moby-engine`, and
+        # SLES resolves to `opensuse` while keeping Docker in the Containers Module.
+        ("amzn", "fedora", "dnf install"),
+        ("ol", "fedora", "dnf install"),
+        ("sles", "suse", "zypper install"),
+    ],
+)
 def test_families_without_a_docker_package_keep_the_manual_hint(
-    distro_id: str, manager: str, tmp_path: Path
+    distro_id: str, distro_like: str, manager: str, tmp_path: Path
 ) -> None:
-    """EL packages no Docker engine in baseos, appstream, extras or CRB, and an unrecognized
-    distro has no package name to assert at all. Naming one for either would be the same defect
-    in a new place, so both keep the remedies that do not depend on a package name."""
+    """Naming a package the distribution does not ship is the defect under repair, and it is worse
+    than naming none: the tier installs as one transaction, so a bad name takes `git` and `make`
+    with it. Only exact IDs whose engine package is known are named."""
     empty = tmp_path / "empty-bin"
     empty.mkdir()
-    result = _run(distro_id, str(empty), tmp_path)
+    result = _run(distro_id, str(empty), tmp_path, os_release_like=distro_like)
 
     assert result.returncode == 1, result.stderr
     install_lines = [

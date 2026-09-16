@@ -71,7 +71,11 @@ These are the points where the two families genuinely diverge, not just in packa
   does not. Enterprise Linux packages no engine in baseos, appstream, extras, or CRB, and SLES
   ships Docker only in the Containers Module, so neither family gets a declared runtime and the
   two real remedies there are Docker's own repository, or `podman` with `podman-docker` and the
-  podman socket API.
+  podman socket API. On Fedora and openSUSE the packages alone are not a working runtime:
+  the RPM leaves `docker.service` disabled and adds no account to the `docker` group, so
+  `sudo systemctl enable --now docker` and adding the operator account to `docker` are manual
+  steps `local_worker_host` does not take. `stack-services.sh` refuses to run as root, so
+  without both it fails on the socket.
 - **Host kernel permissions.** Debian/Ubuntu ship `/boot/vmlinuz-*` as `root:root 0600`, which the
   libguestfs appliance cannot read as a non-root user, so `just prepare-local-libvirt-host`
   relabels them `root:kvm 0640` and asserts that every fixed worker account is in `kvm`,
