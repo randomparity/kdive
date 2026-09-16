@@ -3112,16 +3112,22 @@ def test_lifecycle_client_dispatches_every_argument_free_operation(operation: st
     """
     lifecycle = LIFECYCLE.read_text()
     dispatch = lifecycle.split('case "${1:-}" in', 1)[1]
-    arms = [
-        line.strip().removesuffix(")")
-        for line in dispatch.splitlines()
-        if line.strip().endswith(")") and not line.strip().startswith("#")
-    ]
-    patterns = {pattern.strip() for arm in arms for pattern in arm.split("|")}
+    arms: dict[frozenset[str], str] = {}
+    for block in dispatch.split(";;"):
+        header, _, body = block.partition(")")
+        patterns = frozenset(pattern.strip() for pattern in header.strip().split("|"))
+        if patterns:
+            arms[patterns] = body
+    named = {pattern for patterns in arms for pattern in patterns}
 
-    assert operation in patterns, patterns
-    assert "*" in patterns, "the fall-through arm must still reject an unknown argument"
+    assert operation in named, named
+    assert "*" in named, "the fall-through arm must still reject an unknown argument"
     assert f"|{operation}" in lifecycle.split("usage()", 1)[1].split("\n}", 1)[0]
+
+    # Naming the operation in an arm is not enough: the arm must build a request rather than
+    # fall back to usage, which would be indistinguishable from the `*)` arm at the exit status.
+    body = next(body for patterns, body in arms.items() if operation in patterns)
+    assert 'request "$1"' in body, body
 
 
 def test_lifecycle_diagnostics_alone_skips_the_compatibility_probe() -> None:
