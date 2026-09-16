@@ -996,7 +996,9 @@ def test_installer_never_emits_the_witness_dsn() -> None:
         "[[ -n $witness_dsn ]] || {",
         'printf \'%s\\n\' "$witness_dsn" >"$credential_temp"',
     ]
-    assert "set -x" not in source
+    # Every spelling of xtrace, not one: the traced line would be the `printf` above.
+    for tracing in ("set -x", "set -o xtrace", "BASH_XTRACEFD", "SHELLOPTS"):
+        assert tracing not in source
 
 
 def test_installer_uv_resolution_returns_an_absolute_path(tmp_path: Path) -> None:
