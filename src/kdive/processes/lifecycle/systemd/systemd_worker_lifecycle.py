@@ -37,6 +37,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_state import (
 )
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    IncarnationConflict,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
@@ -538,6 +539,8 @@ class SystemdWorkerLifecycle:
             raise
         except LifecycleDeadlineExceeded:
             raise
+        except IncarnationConflict:
+            raise
         except Exception as exc:
             raise _AuthorityUnavailable("worker registration authority unavailable") from exc
 
@@ -549,6 +552,13 @@ class SystemdWorkerLifecycle:
         except EvidenceRejected:
             raise
         except LifecycleDeadlineExceeded:
+            raise
+        except IncarnationConflict:
+            # No current `IncarnationAuthority.terminate` backend raises this — only
+            # `register`'s unique-violation path does today. Kept for symmetry with
+            # `_register` and as forward defense for the recovery-termination path
+            # issue #2488 adds, so a future fence-checked terminate does not fall
+            # through to `_AuthorityUnavailable` the way registration once did.
             raise
         except Exception as exc:
             raise _AuthorityUnavailable("worker termination authority unavailable") from exc
@@ -722,12 +732,32 @@ def _map_failure(error: Exception, *, diagnostic: bool) -> tuple[ResponseCode, R
         return "deadline_exceeded", "retry_same_operation", "lifecycle deadline exceeded"
     if isinstance(error, EvidenceRejected):
         return "evidence_rejected", "retry_same_operation", "termination evidence was rejected"
+    if isinstance(error, IncarnationConflict):
+        # A unique violation on the fence table, not a database outage: the database answered
+        # and refused the write because a still-active fence disputes it (issue #2487).
+        return (
+            "conflict",
+            "operator_recovery",
+            "worker incarnation conflicts with an active fence",
+        )
     if isinstance(error, _AuthorityUnavailable):
         return "dependency_unavailable", "restore_database", "database authority is unavailable"
     if isinstance(error, SystemdUnavailable):
         return "dependency_unavailable", "restore_systemd", "systemd evidence is unavailable"
-    if isinstance(error, (LifecycleConflict, StateConflict, SystemdConflict)):
-        return "conflict", "operator_recovery", "retained lifecycle facts conflict"
+    if isinstance(error, LifecycleConflict):
+        return (
+            "conflict",
+            "operator_recovery",
+            "retained lifecycle facts conflict with the observed unit",
+        )
+    if isinstance(error, StateConflict):
+        return "conflict", "operator_recovery", "retained slot state conflicts with lifecycle rules"
+    if isinstance(error, SystemdConflict):
+        return (
+            "conflict",
+            "operator_recovery",
+            "systemd observation conflicts with the retained lifecycle contract",
+        )
     if diagnostic:
         return "diagnostics_withheld", "retry_same_operation", "diagnostics could not be acquired"
     return "internal_error", "operator_recovery", "lifecycle operation failed"
