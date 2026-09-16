@@ -2135,3 +2135,55 @@ def test_local_worker_declares_boot_kernel_readability() -> None:
     assert "getent" in tasks
     assert "live_vm_host_worker_accounts" in tasks
     assert "boot_kernels.yml" in _text(LOCAL_WORKER / "tasks" / "main.yml")
+
+
+def test_installer_makes_the_session_libvirt_runtime_root_boot_durable() -> None:
+    """The session libvirt runtime root lives on tmpfs, so it needs a tmpfiles rule.
+
+    `_lock_libvirt_runtime` creates `/run/kdive/live-libvirt` and its `libvirt` child at install
+    time, but `/run` is tmpfs and nothing else recreates them. Without a root-owned rule that runs
+    at boot, `kdive-libvirtd-live.service` restart-loops on `Unable to obtain pidfile` and every
+    entry point resolving the published session URI dies with "dedicated session daemon could not
+    be started". The unit cannot repair this itself: it runs as the operator, and `/run/kdive` is
+    root-owned 0755.
+    """
+    installer = _text(INSTALLER)
+    assert "/etc/tmpfiles.d/kdive-live-libvirt.conf" in installer
+    assert "_install_libvirt_runtime_tmpfiles" in installer
+
+    # The rule must cover the child too — the pid file is written there, not in the root.
+    assert "d /run/kdive/live-libvirt/libvirt 0750" in installer
+    assert "d /run/kdive/live-libvirt 0750" in installer
+    assert "d /run/kdive 0755 root root" in installer
+
+    # Modes must agree with _lock_libvirt_runtime's post-restore state, because tmpfiles
+    # reapplies them on every boot and would otherwise silently overwrite the installer.
+    assert 'chmod 0750 "$runtime_root"' in installer
+    assert 'chmod 0750 "$_libvirt_runtime_child"' in installer
+    assert 'chmod 0755 "$runtime_parent"' in installer
+
+    # Installed after the directories exist, so the immediate --create has something consistent
+    # to reconcile rather than racing the lock/restore pair.
+    assert installer.index("_restore_libvirt_runtime\n_install_libvirt_runtime_tmpfiles") > 0
+
+    # Applied during the run as well as at boot, so an installer run repairs a host whose
+    # runtime root is already gone without waiting for a reboot.
+    assert "systemd-tmpfiles --create" in installer
+
+
+def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> None:
+    """Pin the reason the tmpfiles rule exists, so removing it fails here rather than at boot.
+
+    The user unit names the pid file under `/run/kdive/live-libvirt/libvirt` and sets
+    XDG_RUNTIME_DIR to the root, but declares no RuntimeDirectory and no ExecStartPre — a user
+    unit cannot create either path under root-owned `/run/kdive`.
+    """
+    tasks = _text(MAIN_TASKS)
+    unit_start = tasks.index("Install the boot-persistent session libvirtd user unit")
+    unit = tasks[unit_start : unit_start + 1400]
+    assert "Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt" in unit
+    assert "PIDFile=/run/kdive/live-libvirt/libvirt/libvirtd.pid" in unit
+    # If either of these ever appears, the unit gained its own directory management and this
+    # pairing should be revisited rather than left as two mechanisms for one invariant.
+    assert "RuntimeDirectory=" not in unit
+    assert "ExecStartPre=" not in unit
