@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import shlex
+import socket
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -58,7 +59,11 @@ from kdive.services.external_boot.routing import (
     AuthorityReservationGeometry,
     authority_reservation_geometry,
 )
-from kdive.worker_lifecycle.authority_store import IncarnationConflict
+from kdive.worker_lifecycle.authority_store import (
+    IncarnationConflict,
+    LocalAuthorityBinding,
+    LocalWorkerIncarnation,
+)
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
@@ -105,6 +110,12 @@ class FakeStore:
         self.load_calls = 0
         self.load_failure: Exception | None = None
         self.persist_failure: Exception | None = None
+        # A provisioned host always has the slot directory, so the default residue is never
+        # EMPTY: the installer creates all eight. `state_document` models the raw state.json
+        # independently of `state`, which is how cases 1 and 2 are constructed.
+        self.directory = True
+        self.state_document: str | None = "valid" if state is not None else None
+        self.discards = 0
 
     def prepare(self, settings: WorkerSettings | None) -> SlotState:
         assert settings is not None
@@ -122,6 +133,7 @@ class FakeStore:
         self.environment = True
         self.credential = True
         self.release = False
+        self.state_document = "valid"
         self.events.append("persist:prepared")
         return self.state
 
@@ -129,7 +141,35 @@ class FakeStore:
         self.load_calls += 1
         if self.load_failure is not None:
             raise self.load_failure
+        if self.state_document == "unreadable":
+            raise StateConflict(f"slot {self.slot} state is malformed")
         return self.state
+
+    def inspect(self) -> state_module.SlotInspection:
+        self.load_calls += 1
+        if not self.directory:
+            return state_module.SlotInspection(state_module.SlotResidue.EMPTY, None)
+        if self.state_document is None:
+            return state_module.SlotInspection(state_module.SlotResidue.STATE_ABSENT, None)
+        if self.state_document == "unreadable":
+            return state_module.SlotInspection(state_module.SlotResidue.STATE_UNREADABLE, None)
+        return state_module.SlotInspection(state_module.SlotResidue.STATE_VALID, self.state)
+
+    def discard_unrecoverable(self) -> bool:
+        self.discards += 1
+        if not self.directory:
+            return False
+        removed = any(
+            (self.state_document is not None, self.environment, self.credential, self.release)
+        )
+        self.state = None
+        self.state_document = None
+        self.environment = False
+        self.credential = False
+        self.release = False
+        if removed:
+            self.events.append(f"store:discard-unrecoverable:{self.slot}")
+        return removed
 
     def persist(self, state: SlotState) -> None:
         if self.persist_failure is not None:
@@ -137,6 +177,7 @@ class FakeStore:
         assert self.state is not None
         assert state.generation == self.state.generation
         self.state = state
+        self.state_document = "valid"
         self.events.append(f"persist:{state.phase.value}")
 
     def publish_release(self, state: SlotState) -> None:
@@ -152,6 +193,7 @@ class FakeStore:
         self.environment = False
         self.credential = False
         self.state = None
+        self.state_document = None
         self.events.append("state:discard-prepared")
 
     def cleanup_terminated(self, state: SlotState) -> None:
@@ -161,6 +203,7 @@ class FakeStore:
         self.credential = False
         self.release = False
         self.state = None
+        self.state_document = None
         self.events.append("state:cleanup")
 
 
@@ -299,6 +342,17 @@ class FakeAuthority:
         # evidence published for the retained invocation from evidence published for a successor's.
         # PostgreSQL rejects the wrong binding; this records what was actually offered to it.
         self.terminated_bindings: list[tuple[str, str | None, str | None]] = []
+        # #2533: the rows a slot still holds, keyed by unit, and what was released from them.
+        self.rows: dict[str, list[LocalWorkerIncarnation]] = {}
+        self.released: list[tuple[str, TerminationOutcome]] = []
+        self.recoverable_label = "database:recoverable"
+        self.release_label = "database:release"
+        self.fail_recoverable: Exception | None = None
+        # `reject_termination` models the EVIDENCED path being refused because the retained
+        # binding drifted from the row. `reject_release` is the separate case of the row's own
+        # stored binding being refused -- which, by construction, the database cannot do unless
+        # the row changed underneath us. Sharing one flag would have hidden the fallback.
+        self.reject_release = False
 
     async def register(self, state: SlotState, credential_hash: bytes) -> None:
         assert credential_hash == bytes.fromhex(state.credential_hash)
@@ -320,6 +374,28 @@ class FakeAuthority:
         assert state.incarnation in self.registered
         self.terminations.append((state.incarnation, outcome))
         self.terminated_bindings.append((state.incarnation, state.boot_id, state.invocation_id))
+
+    async def recoverable(self, unit: str) -> tuple[LocalWorkerIncarnation, ...]:
+        self.events.append(self.recoverable_label)
+        if self.fail_recoverable is not None:
+            raise self.fail_recoverable
+        return tuple(self.rows.get(unit, ()))
+
+    async def release(self, record: LocalWorkerIncarnation, outcome: TerminationOutcome) -> None:
+        self.events.append(self.release_label)
+        if self.reject_release:
+            raise EvidenceRejected("database rejected the registered binding")
+        # The design's whole claim is that the row's OWN stored binding satisfies the fence's
+        # exact match. A fake that skipped this would pass while the real adapter failed.
+        unit = record.authority_binding["unit"]
+        held = self.rows.get(unit, ())
+        stored = {row.incarnation: row.authority_binding for row in held}
+        assert record.incarnation in stored, "released a row this slot does not hold"
+        assert record.authority_binding == stored[record.incarnation], (
+            "released a binding that is not the row's own stored binding"
+        )
+        self.rows[unit] = [row for row in held if row.incarnation != record.incarnation]
+        self.released.append((record.incarnation, outcome))
 
 
 def _state(
@@ -462,6 +538,43 @@ def test_worker_settings_allow_absent_geometry_and_reject_mismatched_geometry() 
         ValueError, match="worker authority reservation geometry must match worker capacity"
     ):
         WorkerSettings.model_validate(values)
+
+
+def _mutations(events: list[str]) -> list[str]:
+    """Drop the read-only authority probe `recover` issues for every slot (#2533).
+
+    Recovery must ask the database whether each slot still holds a fence, because a slot whose
+    `state.json` is gone looks empty on disk while its row is still active -- that is #2533's
+    case 1. The read mutates nothing, so assertions about what recovery *did* filter it out.
+    """
+    return [event for event in events if event != "database:recoverable"]
+
+
+def _row(
+    slot: int,
+    *,
+    generation: str | None = None,
+    boot_id: str = _BOOT_ID,
+    invocation_id: str | None = None,
+    host: str | None = None,
+    unit: str | None = None,
+) -> LocalWorkerIncarnation:
+    """One active `worker_incarnations` row as the recovery accessor returns it."""
+    resolved_unit = unit or f"kdive-live-worker@{slot}.service"
+    resolved_generation = generation or f"{slot:x}" * 32
+    binding = LocalAuthorityBinding(
+        unit=resolved_unit,
+        generation=resolved_generation,
+        boot_id=boot_id,
+        invocation_id=invocation_id or f"{slot:x}" * 32,
+        host=host or socket.gethostname(),
+    )
+    return LocalWorkerIncarnation(
+        f"local-systemd:kdive-live-worker@{slot}.service:{resolved_generation}",
+        "local",
+        binding,
+        4,
+    )
 
 
 def _deadline(clock: FakeClock, seconds: float = 1_000.0) -> MonotonicDeadline:
@@ -2201,7 +2314,7 @@ def test_recover_retires_a_restarted_slot_and_clears_its_failed_unit_identity() 
     assert not stores[0].environment and not stores[0].credential and not stores[0].release
     assert runtime.resets == [started.unit]
     assert started.unit not in runtime.current
-    assert events[-3:] == [
+    assert _mutations(events)[-3:] == [
         "systemd:stop:kdive-live-worker@1.service",
         "state:cleanup",
         "systemd:reset-failed:kdive-live-worker@1.service",
@@ -2211,8 +2324,8 @@ def test_recover_retires_a_restarted_slot_and_clears_its_failed_unit_identity() 
     ]
 
 
-def test_recover_clears_a_failed_unit_whose_slot_facts_stop_already_removed() -> None:
-    """The case no shipped operation reaches: `stop` skips a slot with no retained state.json."""
+def test_recover_clears_a_failed_unit_that_holds_no_fence() -> None:
+    """A slot with no state.json AND no active row has nothing to release -- only the unit."""
     stores, runtime, authority, clock, events = _fleet()
     unit = "kdive-live-worker@1.service"
     runtime.current[unit] = _observation(
@@ -2225,8 +2338,8 @@ def test_recover_clears_a_failed_unit_whose_slot_facts_stop_already_removed() ->
     assert response.ok
     assert runtime.resets == [unit]
     assert unit not in runtime.current
-    assert authority.terminations == []
-    assert events == [f"systemd:reset-failed:{unit}"]
+    assert authority.released == [] and authority.terminations == []
+    assert _mutations(events) == [f"systemd:reset-failed:{unit}"]
     assert [(result.slot, result.phase, result.message) for result in response.slots] == [
         (1, None, "cleared the retained unit identity")
     ]
@@ -2240,14 +2353,14 @@ def test_recover_refuses_a_live_slot_without_touching_its_facts_or_fence() -> No
 
     assert not response.ok
     assert response.code == "conflict" and response.retry_action == "operator_recovery"
-    assert response.message == "recovery refused a fixed worker unit with live processes"
+    assert response.message == "recovery refused one or more fixed worker slots"
     assert [(result.slot, result.code, result.message) for result in response.slots] == [
         (1, "recovery_refused", "fixed worker unit still has live processes")
     ]
     assert stores[0].state == started
     assert authority.terminations == []
     assert runtime.resets == [] and runtime.stopped == [] and runtime.signaled == []
-    assert events == []
+    assert _mutations(events) == []
 
 
 def test_recover_retires_dead_slots_while_refusing_the_live_one() -> None:
@@ -2287,7 +2400,7 @@ def test_recover_discards_a_prepared_slot_without_publishing_evidence() -> None:
     assert response.ok
     assert stores[0].state is None
     assert authority.registered == set() and authority.terminations == []
-    assert events == [
+    assert _mutations(events) == [
         "state:discard-prepared",
         "systemd:reset-failed:kdive-live-worker@1.service",
     ]
@@ -2307,7 +2420,7 @@ def test_recover_cleans_a_slot_that_already_carries_terminal_evidence() -> None:
     assert authority.terminations == []
     # No `reset-failed`: systemd already reports the unit inactive with an empty identity, which
     # is exactly what the next `require_inactive` wants.
-    assert events == ["systemd:stop:kdive-live-worker@1.service", "state:cleanup"]
+    assert _mutations(events) == ["systemd:stop:kdive-live-worker@1.service", "state:cleanup"]
     assert runtime.resets == []
 
 
@@ -2317,7 +2430,10 @@ def test_recover_leaves_an_empty_fleet_untouched() -> None:
     response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
 
     assert response.ok and response.slots == ()
-    assert runtime.resets == [] and events == []
+    # The authority probe still runs for each slot; nothing else does, which is what "untouched"
+    # means here -- recovery read the fence table and mutated nothing.
+    assert runtime.resets == [] and _mutations(events) == []
+    assert authority.released == [] and authority.terminations == []
 
 
 def test_recover_refuses_a_slot_whose_cgroup_membership_is_unreadable() -> None:
@@ -2335,7 +2451,13 @@ def test_recover_refuses_a_slot_whose_cgroup_membership_is_unreadable() -> None:
 
 
 def test_recover_refuses_a_slot_whose_invocation_identity_is_unreadable() -> None:
-    """ADR-0657 forbids running for a slot whose invocation identity is unreadable."""
+    """ADR-0657 forbids running for a slot whose invocation identity is unreadable.
+
+    #2533 keeps the refusal and changes only how it is reported. It used to escape as
+    `SystemdUnavailable`, ending the whole sweep with `dependency_unavailable` -- the same code a
+    systemd outage gives, so an operator could not tell the two apart and the other seven slots
+    went unrecovered. It is now a per-slot disposition an operator and a log filter can grep.
+    """
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
     runtime.current[started.unit] = _boot_observation(1)
@@ -2343,23 +2465,46 @@ def test_recover_refuses_a_slot_whose_invocation_identity_is_unreadable() -> Non
     response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
 
     assert not response.ok
-    assert response.code == "dependency_unavailable"
+    assert response.code == "conflict" and response.retry_action == "operator_recovery"
+    assert [(result.slot, result.code, result.message) for result in response.slots] == [
+        (
+            1,
+            "recovery_refused_unreadable_identity",
+            "registered invocation identity is unreadable; ADR-0657 forbids recovering it",
+        )
+    ]
     assert stores[0].state == started
-    assert authority.terminations == [] and runtime.resets == []
+    assert stores[0].discards == 0
+    assert authority.terminations == [] and authority.released == []
+    assert runtime.resets == []
 
 
-def test_recover_reports_a_rejected_binding_without_clearing_the_slot() -> None:
-    """A binding the row no longer matches is #2533's residual; recover must not paper over it."""
+def test_recover_recovers_a_rejected_binding_through_the_registered_row() -> None:
+    """#2533 case 4: the evidenced path is rejected, so the row's own binding is used instead.
+
+    This pinned `evidence_rejected` with the slot untouched while #2533 was open. The retained
+    binding no longer matches the row, so `PostgresAuthority.terminate` is refused; recovery now
+    falls back to the row the accessor names and releases it with the binding it actually stores.
+    """
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
     runtime.current[started.unit] = _observation(1, "empty", invocation_id="f" * 32)
     authority.reject_termination = True
+    # The row's stored binding names the invocation the fence actually claims, which is not the
+    # drifted one the slot retained.
+    row = _row(1, generation=started.generation, invocation_id="1" * 32)
+    authority.rows[started.unit] = [row]
 
     response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
 
-    assert not response.ok and response.code == "evidence_rejected"
-    assert stores[0].state == started
-    assert runtime.resets == []
+    assert response.ok, response.message
+    assert authority.released == [(row.incarnation, "killed")]
+    assert stores[0].state is None and stores[0].discards == 1
+    assert authority.rows[started.unit] == []
+    assert runtime.resets == [started.unit]
+    assert [(result.slot, result.message) for result in response.slots] == [
+        (1, "retired the residual worker slot")
+    ]
 
 
 def test_recover_publishes_the_outcome_the_retained_invocation_itself_reports() -> None:
@@ -2501,3 +2646,192 @@ def test_state_identity_is_none_only_for_an_unbound_phase() -> None:
 
     with pytest.raises(LifecycleConflict, match="bound lifecycle phase has no exact invocation"):
         lifecycle._terminal_observation(prepared, _observation(1, "empty"))
+
+
+def _residual_fleet(*, document: str | None, drifted: bool = False, rejected: bool = False):
+    """Build one slot in a named #2533 residual case, with its fence row still active."""
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: started})
+    stores[0].state_document = document
+    if document is None:
+        stores[0].state = None
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(started.unit)
+    authority.rows[started.unit] = [
+        _row(
+            1,
+            generation=started.generation,
+            invocation_id="9" * 32 if drifted else cast(str, started.invocation_id),
+        )
+    ]
+    authority.reject_termination = rejected
+    return started, stores, runtime, authority, clock, events
+
+
+def _assert_residual_slot_retired(response, stores, authority, started) -> None:
+    assert response.ok, response.message
+    assert authority.released == [(f"local-systemd:{started.unit}:{started.generation}", "killed")]
+    assert authority.rows[started.unit] == []
+    assert stores[0].state is None and stores[0].state_document is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert [(result.slot, result.message) for result in response.slots] == [
+        (1, "retired the residual worker slot")
+    ]
+
+
+def test_recover_retires_a_residual_slot_with_no_state_document() -> None:
+    """#2533 case 1: SlotStorage.load returns None, so nothing ever reached the fence."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    _assert_residual_slot_retired(response, stores, authority, started)
+    assert runtime.resets == [started.unit]
+
+
+def test_recover_retires_a_residual_slot_with_an_unreadable_state_document() -> None:
+    """#2533 case 2: SlotStorage.load raises StateConflict, which wedged the whole sweep."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document="unreadable")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    _assert_residual_slot_retired(response, stores, authority, started)
+    assert runtime.resets == [started.unit]
+
+
+def test_recover_retires_a_residual_slot_whose_retained_binding_drifted() -> None:
+    """#2533 case 3: the row's binding is authoritative, so death is proven against it."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None, drifted=True)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    _assert_residual_slot_retired(response, stores, authority, started)
+
+
+def test_recover_retires_a_residual_slot_whose_evidence_the_authority_rejected() -> None:
+    """#2533 case 4: the evidenced path is refused, so the registered row is used instead."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document="valid", rejected=True)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    _assert_residual_slot_retired(response, stores, authority, started)
+
+
+def test_recover_refuses_a_slot_whose_registered_invocation_is_absent_on_the_retained_boot() -> (
+    None
+):
+    """#2533 case 5, refused per slot -- and the sweep still finishes the slots it can."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
+    runtime.current[started.unit] = _boot_observation(1)
+    second = _state(2, SlotPhase.STARTED)
+    stores[1].state = second
+    stores[1].state_document = "valid"
+    authority.registered.add(second.incarnation)
+    runtime.current[second.unit] = _observation(
+        2, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "conflict"
+    reported = {result.slot: (result.code, result.message) for result in response.slots}
+    assert reported[1] == (
+        "recovery_refused_unreadable_identity",
+        "registered invocation identity is unreadable; ADR-0657 forbids recovering it",
+    )
+    # Refused: nothing on slot 1 was released or removed.
+    assert authority.rows[started.unit] != [] and authority.released == []
+    assert stores[0].discards == 0
+    # The sweep continued: slot 2 was retired in the same call, evidence published and files
+    # cleared. Before #2533 the case-5 raise ended the sweep and slot 2 was never reached.
+    assert reported[2][0] == "ok"
+    assert (second.incarnation, "killed") in authority.terminations
+    assert stores[1].state is None
+
+
+@pytest.mark.parametrize(
+    ("document", "drifted", "rejected"),
+    [
+        pytest.param(None, False, False, id="case-1-no-state-document"),
+        pytest.param("unreadable", False, False, id="case-2-unreadable-document"),
+        pytest.param(None, True, False, id="case-3-drifted-binding"),
+        pytest.param("valid", False, True, id="case-4-rejected-evidence"),
+        pytest.param(None, False, False, id="case-5-unreadable-identity"),
+    ],
+)
+def test_recover_refuses_a_live_unit_in_every_residual_case(
+    document: str | None, drifted: bool, rejected: bool, request: pytest.FixtureRequest
+) -> None:
+    """No fence is ever cleared from under a running worker, in any of the five cases."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(
+        document=document, drifted=drifted, rejected=rejected
+    )
+    runtime.current[started.unit] = _observation(1, "populated")
+
+    # The fault really is constructed: the row is active and the slot still holds its files.
+    assert authority.rows[started.unit] != []
+    assert stores[0].state_document == document
+    assert stores[0].environment and stores[0].credential
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "conflict"
+    assert [(result.slot, result.code) for result in response.slots] == [(1, "recovery_refused")]
+    assert authority.released == [] and authority.terminations == []
+    assert authority.rows[started.unit] != []
+    assert stores[0].discards == 0
+    assert stores[0].state_document == document
+    assert stores[0].environment and stores[0].credential
+    assert runtime.resets == []
+
+
+def test_recover_skips_a_row_registered_by_another_host() -> None:
+    """The incarnation prefix carries no host, so a shared database can surface a foreign row."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
+    stores[0].environment = False
+    stores[0].credential = False
+    stores[0].release = False
+    authority.rows[started.unit] = [_row(1, generation=started.generation, host="some-other-host")]
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok, response.message
+    assert authority.released == []
+    assert authority.rows[started.unit] != []
+    assert [(result.slot, result.message) for result in response.slots] == [
+        (1, "cleared the retained unit identity")
+    ]
+
+
+def test_recover_refuses_a_slot_before_releasing_any_of_its_rows() -> None:
+    """A slot with one unrecoverable row is refused whole, never left half-released."""
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
+    authority.rows[started.unit] = [
+        _row(1, generation=started.generation),
+        # The second row's binding names a different unit, so it cannot be trusted to name an
+        # invocation and the whole slot is refused.
+        _row(1, generation="e" * 32, unit="kdive-live-worker@7.service"),
+    ]
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "conflict"
+    assert [(result.slot, result.code) for result in response.slots] == [
+        (1, "recovery_refused_unreadable_identity")
+    ]
+    assert authority.released == []
+    assert len(authority.rows[started.unit]) == 2
+    assert stores[0].discards == 0
+
+
+def test_recover_residual_support_does_not_move_the_protocol_identity() -> None:
+    """#2533 adds no Operation value and no request or response field, so no reprovision."""
+    from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
+        lifecycle_protocol_identity,
+    )
+
+    assert lifecycle_protocol_identity() == (
+        "1:d5de155830bd087207ab73060df513bba91fe4d57436615b4cf7b6359d594a5b"
+    )

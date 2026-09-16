@@ -405,10 +405,21 @@ still accounts for. It never fabricates a termination outcome — see
 **Then bring the stack back up.** Re-run `scripts/live-stack/stack-services.sh`; it is
 idempotent.
 
-**What `recover` does not reach.** A slot with an absent or malformed `state.json`, a drifted
-binding, rejected evidence, or an unreadable boot ID stays wedged after a `recover` pass. That
-gap is issue #2533; do not hand-edit the slot files or the `worker_incarnations` row to work
-around it.
+**The residual slots `recover` now reaches.** A slot whose `state.json` is absent or malformed,
+whose retained binding drifted from its `worker_incarnations` row, or whose termination evidence
+that row rejected, is retired by a `recover` pass: the row is named by the slot's derived
+incarnation prefix and released with the binding it actually stores, then the on-disk facts are
+cleared. Such a slot reports `retired the residual worker slot`.
+
+**The one slot `recover` still refuses.** If systemd reports no invocation for the unit on the
+*retained* boot, nothing can prove the registered invocation ended — absence within a boot is not
+termination evidence — so recovery refuses that slot rather than clearing it, with the per-slot
+code `recovery_refused_unreadable_identity`. The rest of the sweep still runs. The remedy is a
+reboot, which yields a different boot ID and therefore real evidence. See
+[ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md) and
+[ADR-0667](../../adr/0667-recovery-names-the-fence-row-by-the-slot-derived-incarnation.md).
+
+Do not hand-edit the slot files or the `worker_incarnations` row in either case.
 
 ### The app tier does not hot-reload — re-run `stack-services.sh` after editing source
 
