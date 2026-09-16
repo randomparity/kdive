@@ -9,7 +9,7 @@ import pytest
 
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     authorize_ssh_key,
@@ -28,8 +28,11 @@ _GOOD_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
 
 
 class _FakeConnector:
-    def __init__(self, endpoint: tuple[str, int] | None) -> None:
+    def __init__(
+        self, endpoint: tuple[str, int] | None, *, raises: CategorizedError | None = None
+    ) -> None:
         self._endpoint = endpoint
+        self._raises = raises
         self.seen_handles: list[str] = []
 
     def recorded_ssh_endpoint(self, system: object) -> tuple[str, int] | None:
@@ -37,7 +40,20 @@ class _FakeConnector:
         # must pass the System's `kdive-<id>` domain name, not the bare id (regression for the
         # live-proof bug where the bare id raised VIR_ERR_NO_DOMAIN -> spurious unprovisioned).
         self.seen_handles.append(str(system))
+        if self._raises is not None:
+            raise self._raises
         return self._endpoint
+
+
+def _no_domain_error() -> CategorizedError:
+    """The error local-libvirt now raises when the connection has no domain (#2502, ADR-0658)."""
+    return CategorizedError(
+        "System 'kdive-x' has no libvirt domain on this connection; check that the System is "
+        "running and that this process and the worker that provisioned it read the same "
+        "libvirt endpoint",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"reason": "system_domain_not_found"},
+    )
 
 
 async def _seed_system(
@@ -157,6 +173,50 @@ def test_ssh_info_unprovisioned_is_config_error(migrated_url: str) -> None:
         assert resp.detail is not None
         assert "local-libvirt" in resp.detail
         assert "reprovision" not in resp.detail.lower()
+
+    asyncio.run(_run())
+
+
+def test_ssh_info_absent_domain_is_distinguishable_from_unprovisioned(migrated_url: str) -> None:
+    # #2502: a missing domain and a missing forward are different faults with different fixes.
+    # They must not share one reason, and the detail must name which one occurred.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(None, raises=_no_domain_error()))
+            resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "system_domain_not_found"
+        assert resp.detail is not None
+        assert "libvirt endpoint" in resp.detail
+
+    asyncio.run(_run())
+
+
+def test_authorize_ssh_key_absent_domain_is_distinguishable(migrated_url: str) -> None:
+    # The mutating tool reads the same port and must report the same distinction (#2502).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(None, raises=_no_domain_error()))
+            resp = await authorize_ssh_key(pool, _ctx(), sys_id, _GOOD_KEY, resolver=resolver)
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "system_domain_not_found"
+
+    asyncio.run(_run())
+
+
+def test_check_ssh_reachable_absent_domain_is_distinguishable(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(None, raises=_no_domain_error()))
+            resp = await check_ssh_reachable(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "system_domain_not_found"
 
     asyncio.run(_run())
 

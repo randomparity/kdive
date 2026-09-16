@@ -193,9 +193,11 @@ def _job_for(system_id: UUID) -> Job:
     )
 
 
-def _resolver(endpoint: tuple[str, int] | None) -> MagicMock:
+def _resolver(
+    endpoint: tuple[str, int] | None, *, raises: BaseException | None = None
+) -> MagicMock:
     connector = MagicMock()
-    connector.recorded_ssh_endpoint = MagicMock(return_value=endpoint)
+    connector.recorded_ssh_endpoint = MagicMock(return_value=endpoint, side_effect=raises)
     binding = SimpleNamespace(runtime=SimpleNamespace(connector=connector))
     resolver = MagicMock()
     resolver.binding_for_system = AsyncMock(return_value=binding)
@@ -468,6 +470,52 @@ def test_handler_dead_letters_when_no_forward(
                     "This System's provider exposes no loopback SSH forward; direct SSH to a "
                     "System is a local-libvirt capability"
                 )
+
+    asyncio.run(_run())
+
+
+def test_handler_propagates_absent_domain_distinctly(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """A missing domain reaches the job verdict as its own reason, not as ssh_not_provisioned.
+
+    The handler never catches the provider error, so #2502's distinction survives to the worker,
+    which prefixes detail keys into `failure_detail_reason` for the client.
+    """
+
+    async def probe(_host: str, _port: int) -> ReachResult:
+        raise AssertionError("probe must not run when the domain is absent")
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                job = _job_for(system_id)
+                resolver = _resolver(
+                    None,
+                    raises=CategorizedError(
+                        "System 'kdive-x' has no libvirt domain on this connection",
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        details={"reason": "system_domain_not_found"},
+                    ),
+                )
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
+                with pytest.raises(CategorizedError) as excinfo:
+                    await check_ssh_reachable_handler(
+                        conn,
+                        job,
+                        resolver=resolver,
+                        secret_registry=SecretRegistry(),
+                        probe=probe,
+                    )
+                assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+                assert excinfo.value.details["reason"] == "system_domain_not_found"
                 # The forward is looked up for the System's derived domain via its own binding.
                 resolver.binding_for_system.assert_awaited_once_with(conn, system_id)
                 connector = resolver.binding_for_system.return_value.runtime.connector
