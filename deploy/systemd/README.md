@@ -80,9 +80,9 @@ satisfies neither ACL; it bypasses both. The published endpoints name their sock
 so `sudo` there reaches the *same* daemon with root's rights rather than a different one; against a
 plain `qemu:///session`, whose socket is per-uid, it reaches root's own daemon instead and so a
 different account's domains. Either way escalation is the wrong credential for the endpoint.
-Because the operator owns `/var/lib/kdive/rootfs`, they must still be able to **write** it for the
-reap to remove overlays; a run that finds it unwritable is refused by name rather than attempting
-removals that would all be denied.
+Because the reap unlinks overlays as the operator on that path, the operator must be able to
+**write** `/var/lib/kdive/rootfs`, not merely list it. The installed mode-`2770` directory grants
+that; a directory that has drifted away from it reports one refused removal per overlay.
 On a host with no lifecycle contract the endpoint resolves to root-owned `qemu:///system` and the
 same reap keeps `sudo`, which is why the privilege is derived from the endpoint rather than fixed.
 This governs the reap specifically; installation still uses `sudo` where it must, and

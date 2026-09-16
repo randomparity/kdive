@@ -32,19 +32,23 @@ observation and mutation always carry the same identity.
   cannot escalate is refused before anything is stopped rather than mid-wipe. That moves the
   run's first escalation ahead of the irreversibility warning and the `Type 'wipe'` confirmation,
   so a host configured to prompt asks for the password before the operator has confirmed, and the
-  refreshed sudo timestamp outlives an abort at the confirmation. Kept deliberately: the gate
-  exists to refuse before anything is stopped, and reordering it behind the prompt would restore
-  the mid-wipe failure it replaced. Printing the irreversibility warning *ahead* of the gate, with
-  the `Type 'wipe'` prompt left where it is, was considered as a third option and declined here:
-  it splits the warning from the confirmation it qualifies, and it prints an irreversibility
-  warning on runs the gate then refuses without stopping anything. It remains available as a
-  confirmation-UX change independent of this decision.
+  refreshed sudo timestamp outlives an abort at the confirmation. Kept, but not because the
+  ordering is forced: the confirmation block itself precedes every destructive step, so moving
+  the gate below it would still refuse before anything is stopped. The reason to keep the gate
+  first is narrower — refusing before asking spares the operator a confirmation on a run that
+  cannot proceed, and `--wipe --yes` skips the prompt entirely, so the ordering only ever shows
+  on the interactive bare-host path. Two alternatives were weighed and declined as
+  confirmation-UX changes independent of this decision: moving the gate below the confirmation,
+  and printing the irreversibility warning ahead of the gate while leaving the prompt where it
+  is (which splits the warning from the confirmation it qualifies, and warns about
+  irreversibility on runs the gate then refuses).
 - Classification is textual: an endpoint whose scope is not in its path would be misclassified.
   Both published URIs and the bare-host default carry it there.
-- The overlay `rm` becomes the invoking account's on the session branch, so the overlay directory
-  must now be **writable**, not merely listable. `stack-down.sh` refuses a session reap by name
-  when it is not, because every `rm` would be denied identically; the escalating branch is not
-  tested for write, where a root-owned `0755` directory is the normal bare-host shape.
+- The overlay `rm` becomes the invoking account's on the session branch, so the operator must be
+  able to **write** the overlay directory, not merely list it. The installed `2770` directory
+  grants that; a host whose directory has drifted away from it gets one denied `rm` per overlay,
+  reported by the existing end-state grading. No precondition is added for it here — see the
+  unresolved finding carried out of this change's review round.
 - Which *daemon* answers is unchanged for the published `?socket=` endpoints, where the socket
   path selects it; for a plain `qemu:///session` it changes from root's per-uid daemon to the
   invoking account's, which is the point.

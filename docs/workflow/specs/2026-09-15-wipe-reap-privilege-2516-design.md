@@ -51,12 +51,14 @@ the lifecycle contract — session endpoint, operator in `kdive-live-libvirt`; (
 - On the non-session branch the gate's enumeration is now the run's first `sudo`, so a host
   configured to prompt asks for the password before the irreversibility warning and the
   `Type 'wipe'` confirmation, and the refreshed sudo timestamp outlives an abort at that prompt.
-  Accepted: the gate is deliberately ahead of the prompt so that a refusal costs nothing, and
-  moving it behind would reinstate the mid-wipe failure. The prompt still governs whether anything
-  is destroyed; only the credential request moved. A third option — printing the warning ahead of
-  the gate while leaving the confirmation where it is — was considered and declined: it separates
-  the warning from the confirmation it qualifies and warns about irreversibility on runs the gate
-  then refuses. It is a confirmation-UX change independent of the privilege decision.
+  Accepted: refusing before asking spares the operator a confirmation on a run that cannot
+  proceed, and `--wipe --yes` skips the prompt entirely, so the ordering only shows on the
+  interactive bare-host path. Not because the ordering is forced — the confirmation block itself
+  precedes every destructive step, so moving the gate below it would still refuse before anything
+  is stopped. Two alternatives were weighed and declined as confirmation-UX changes independent
+  of the privilege decision: moving the gate below the confirmation, and printing the warning
+  ahead of the gate while leaving the confirmation where it is (which separates the warning from
+  the confirmation it qualifies and warns about irreversibility on runs the gate then refuses).
 - A URI whose scope is not in its path is misclassified. Accepted: not reachable — both
   published URIs and the bare-host default carry it there.
 
@@ -95,10 +97,12 @@ caller lacks.
    the existing `! -r || ! -x` refusal already turns an unlistable directory into a named failure
    rather than an empty sweep, which is the only outcome the asymmetry could corrupt.
    The session branch inverts which half is weaker: `rm` is now the calling shell's, so unlinking
-   needs **write** on the directory, which `-r`/`-x` never covered. A `! -w` refusal guarded on
-   `((!reap_as_root))` closes that, named once instead of one denied `rm` per disk. It is guarded
-   because a root-owned `0755` overlay directory is the normal bare-host shape, where the
-   escalating `rm` is unaffected by it.
+   needs **write** on the directory, which `-r`/`-x` never covered. No precondition is added for
+   it here. A `! -w` refusal was written and reverted inside this change's review round — keyed on
+   permissions alone it reported a fully successful reap of an empty directory as a failure, which
+   is #2515's defect — and the residue is carried out as an unresolved finding. It is not a
+   regression this change introduces: before it, the same host produced one denied `rm` per
+   overlay, graded on the same end state.
 4. #2515's reporting contract is unchanged: the existing reap arms stay green untouched.
 5. `deploy/systemd/README.md` states the operator-credential expectation for the `--wipe` reap.
 
@@ -109,6 +113,5 @@ caller lacks.
 | Success 1 | `focused-test`: `test_wipe_reaps_a_session_endpoint_without_sudo` — a recording `sudo` stub is never invoked across the whole run |
 | Success 2 | `focused-test`: `test_wipe_reaps_a_system_endpoint_under_sudo` — the stub's log carries the `list`, the `undefine`, and the `rm` |
 | Success 3 | `focused-test`: both arms assert over the whole run, so all three enumerations -- the gate's, the reap's and the end-state re-read -- are inside the assertion on either branch. The non-session branch's overlay residue is asserted as stated, not as absent: `test_wipe_reaps_a_system_endpoint_under_sudo` requires the `rm` in the escalation log while the surrounding tests stay the shell's |
-| Success 3 (session-branch write) | `focused-test`: `test_wipe_refuses_an_unwritable_overlay_directory_on_a_session_endpoint` — an `r-x` but not writable directory is refused by name, with every overlay still present |
 | Success 4 | `focused-test`: the existing `test_wipe_*` arms, run unmodified |
 | Success 5 | `task-test-not-applicable`: operator prose with no executable consumer; a test searching for wording would assert nothing about behaviour |
