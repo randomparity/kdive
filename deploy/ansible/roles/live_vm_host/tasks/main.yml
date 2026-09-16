@@ -1029,14 +1029,19 @@
     creates: /opt/kdive-live-worker-lifecycle/.venv/bin/python
   register: live_vm_host_worker_witness_venv
 
+# Unconditional, because every condition this once tested was a proxy for "the installed package
+# differs from the checkout" and none of them can see a venv left stale any other way -- a run
+# that failed anywhere between the checkout task above and this one advances
+# `live_vm_host_checkout` without installing, and every retry then skips the install because the
+# checkout is no longer changing. Verification now asserts that the installed lifecycle protocol
+# matches the checkout (#2532), so that state is a hard failure the play can no longer repair;
+# reinstalling each run is the cheaper half of the trade. `uv pip install` of a source directory
+# rebuilds on a changed source, so this converges on its own without a reinstall flag.
 - name: Install KDIVE into the lifecycle witness venv
   ansible.builtin.command:
     cmd: >-
       {{ live_vm_host_uv_bin }} pip install --python
       /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
-  when: >-
-    live_vm_host_checkout is changed or live_vm_host_buildinfo is changed
-    or live_vm_host_worker_witness_venv is changed
   changed_when: true
 
 - name: Symlink the libguestfs binding into the lifecycle worker venv

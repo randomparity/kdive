@@ -59,10 +59,6 @@ class LifecycleConflict(RuntimeError):
     """Retained and observed lifecycle facts cannot be reconciled safely."""
 
 
-class LiveWorkerRefused(RuntimeError):
-    """Recovery refused a fixed worker unit that still carries live processes."""
-
-
 class LifecycleDeadlineExceeded(RuntimeError):
     """A lifecycle operation exhausted its shared absolute monotonic deadline."""
 
@@ -275,14 +271,17 @@ class SystemdWorkerLifecycle:
         ``InvocationID`` that ``require_inactive`` refuses, and only ``reset-failed`` clears it.
         """
         operation_deadline = _BudgetDeadline(deadline, _REQUEST_SECONDS)
+        stop_deadline = _BudgetDeadline(operation_deadline, _STOP_SECONDS)
         results: list[SlotResult] = []
         try:
             for store in self._stores:
-                result = await self._recover_slot(store, operation_deadline)
+                result = await self._recover_slot(store, operation_deadline, stop_deadline)
                 if result is not None:
                     results.append(result)
         except Exception as exc:
-            return self._failure_response(exc, operation_deadline)
+            return _with_completed_slots(
+                self._failure_response(exc, operation_deadline), tuple(results)
+            )
         if any(result.code == _RECOVERY_REFUSED for result in results):
             return LifecycleResponse(
                 ok=False,
@@ -293,8 +292,12 @@ class SystemdWorkerLifecycle:
             )
         return _ok_response("worker slots recovered", tuple(results))
 
-    async def _recover_slot(self, store: SlotStorage, deadline: Deadline) -> SlotResult | None:
-        observation = self._systemd_call(deadline, self._runtime.observe, store.unit, deadline)
+    async def _recover_slot(
+        self, store: SlotStorage, deadline: Deadline, stop_deadline: Deadline
+    ) -> SlotResult | None:
+        observation = self._systemd_call(
+            stop_deadline, self._runtime.observe, store.unit, stop_deadline
+        )
         if observation.unit != store.unit:
             raise LifecycleConflict("systemd returned a foreign unit observation")
         retained_identity = isinstance(observation, UnitObservation)
@@ -308,15 +311,17 @@ class SystemdWorkerLifecycle:
                     code=_RECOVERY_REFUSED,
                     message="fixed worker unit still has live processes",
                 )
-        state = self._store_call(deadline, store.load)
+        state = self._store_call(stop_deadline, store.load)
         retired = (
-            None if state is None else await self._retire_slot(store, state, observation, deadline)
+            None
+            if state is None
+            else await self._retire_slot(store, state, observation, deadline, stop_deadline)
         )
         if retained_identity:
             # Only a unit systemd still accounts for can be holding an identity to release; a
             # BootObservation is already the inactive, empty-identity state `require_inactive`
             # wants, so resetting it would be a no-op that hides which slots this call touched.
-            self._systemd_call(deadline, self._runtime.reset_failed, store.unit, deadline)
+            self._systemd_call(stop_deadline, self._runtime.reset_failed, store.unit, stop_deadline)
         if retired is not None:
             return _result(retired)
         if retained_identity:
@@ -331,12 +336,14 @@ class SystemdWorkerLifecycle:
         state: SlotState,
         observation: UnitObservation | BootObservation,
         deadline: Deadline,
+        stop_deadline: Deadline,
     ) -> SlotState:
         if state.phase is SlotPhase.PREPARED:
-            # Registration happens at the gated-to-registered step, so a prepared generation
-            # holds no fence and has no published evidence to reconcile: its files are discarded
-            # rather than retired, which is what `stop` does for the same phase.
-            self._store_call(deadline, store.discard_prepared, state)
+            # A prepared generation is registered only at the gated-to-registered step, so it
+            # holds no fence and has no evidence to reconcile; its files are simply discarded.
+            # `stop` instead adopts such a generation as GATED and closes it for the audit
+            # record, which recovery has no reason to do when nothing is fenced.
+            self._store_call(stop_deadline, store.discard_prepared, state)
             return state
         if state.phase is not SlotPhase.TERMINATED:
             outcome = _terminal_observation(state, observation)
@@ -345,9 +352,9 @@ class SystemdWorkerLifecycle:
                 # reaching here, and that is the only condition under which the observation
                 # declines to yield an outcome. Kept so a reordering fails closed instead of
                 # retiring a live worker's binding.
-                raise LiveWorkerRefused("fixed worker unit still has live processes")
+                raise LifecycleConflict("recovery observed a live worker after proving it dead")
             state = await self._terminate_for_stop(store, state, outcome, deadline)
-        self._post_evidence_cleanup(store, state, deadline)
+        self._post_evidence_cleanup(store, state, stop_deadline)
         return state
 
     async def _replace_current_fleet(self, deadline: Deadline) -> None:
@@ -801,6 +808,29 @@ def _result(state: SlotState, *, code: str = "ok") -> SlotResult:
     return SlotResult(slot=state.slot, unit=state.unit, phase=state.phase, code=code)
 
 
+def _with_completed_slots(
+    response: LifecycleResponse, completed: tuple[SlotResult, ...]
+) -> LifecycleResponse:
+    """Keep slots a failed sweep already finished visible beside the failure.
+
+    ``_retained_results`` rebuilds its list by reloading every store, so a slot this request
+    already retired -- its ``state.json`` gone -- disappears from the report. Recovery is the
+    operator escape hatch and the whole point of it is knowing which fences were released, so a
+    sweep that aborts at slot 5 must still say that slots 1 to 4 were retired. A reloaded result
+    is the more current fact and wins where both describe one slot.
+    """
+    merged = {result.slot: result for result in completed}
+    merged.update({result.slot: result for result in response.slots})
+    return LifecycleResponse(
+        ok=response.ok,
+        code=response.code,
+        message=response.message,
+        retry_action=response.retry_action,
+        slots=tuple(merged[slot] for slot in sorted(merged)),
+        diagnostics=response.diagnostics,
+    )
+
+
 def _ok_response(message: str, slots: tuple[SlotResult, ...]) -> LifecycleResponse:
     return LifecycleResponse(
         ok=True,
@@ -832,14 +862,6 @@ def _map_failure(error: Exception, *, diagnostic: bool) -> tuple[ResponseCode, R
             "conflict",
             "operator_recovery",
             "worker incarnation conflicts with an active fence",
-        )
-    if isinstance(error, LiveWorkerRefused):
-        # Distinct from every other conflict: nothing about the retained facts is wrong, the
-        # unit is simply still running and recovery will not clear a fence beneath it.
-        return (
-            "conflict",
-            "operator_recovery",
-            "recovery refused a fixed worker unit with live processes",
         )
     if isinstance(error, _AuthorityUnavailable):
         return "dependency_unavailable", "restore_database", "database authority is unavailable"

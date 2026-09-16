@@ -279,10 +279,12 @@ def test_recover_is_a_configuration_free_operation() -> None:
 
 
 def test_adding_the_recover_operation_moved_the_protocol_identity() -> None:
-    """`require_compatible_lifecycle` compares this identity, so the grammar change is visible.
+    """Record that the grammar change moved the identity `require_compatible_lifecycle` compares.
 
-    Held against the identity the four-operation grammar produced: a host whose installed venv
-    predates `recover` must fail closed rather than accept a request it cannot dispatch.
+    The constant is the value `28be8397e` computes, so a host whose installed venv predates
+    `recover` fails closed rather than accepting a request it cannot dispatch. This documents the
+    move and the reprovision it forces; it is not a guard, because an inequality against a frozen
+    hash passes for any schema change at all.
     """
     four_operation_identity = "1:c82a1e3b1d4d53ffada17d5e867639c8fa878f0c2e97d0c6cfccd84e9cab6803"
 

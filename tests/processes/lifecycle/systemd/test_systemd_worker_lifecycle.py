@@ -2201,3 +2201,68 @@ def test_recover_reports_a_rejected_binding_without_clearing_the_slot() -> None:
     assert not response.ok and response.code == "evidence_rejected"
     assert stores[0].state == started
     assert runtime.resets == []
+
+
+def test_recover_publishes_the_outcome_the_retained_invocation_itself_reports() -> None:
+    """The ordinary recovery: a worker that crashed in place, not an out-of-band restart.
+
+    Here the retained invocation is the one systemd still reports, so the outcome is derived
+    from its own `Result` and `ExecMainStatus` rather than taking ADR-0657's fixed `killed` for
+    a successor. This is the one branch where recovery attributes observed exit facts to the
+    retained incarnation, and they are its own facts -- which is exactly the line ADR-0657 draws.
+    """
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id=started.invocation_id, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(started.unit)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert authority.terminated_bindings == [
+        (started.incarnation, started.boot_id, started.invocation_id)
+    ]
+    assert stores[0].state is None
+    assert runtime.resets == [started.unit]
+
+
+def test_recover_reports_slots_it_already_retired_when_a_later_slot_fails() -> None:
+    """Recovery is the operator escape hatch, so an abort must not hide the fences it released."""
+    first = _state(1, SlotPhase.STARTED)
+    second = _state(2, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: first, 2: second})
+    runtime.current[first.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(first.unit)
+    runtime.observe_failures[second.unit] = SystemdUnavailable("systemctl show is unavailable")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "dependency_unavailable"
+    _assert_retained_binding_retired(authority, first)
+    assert stores[0].state is None
+    # Slot 1 no longer loads, so only the carried result can report that it was retired.
+    assert [(result.slot, result.phase) for result in response.slots] == [
+        (1, SlotPhase.TERMINATED),
+        (2, SlotPhase.STARTED),
+    ]
+
+
+def test_recover_clips_its_systemd_work_to_the_same_ceiling_stop_uses() -> None:
+    """One slow unit must not consume the whole request and strand the other seven slots."""
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", invocation_id="f" * 32)
+
+    _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock, 1_000.0)))
+
+    budgets = [
+        deadline.remaining()
+        for operation, deadline in runtime.systemd_deadlines
+        if operation in {"observe", "stop-retained", "reset-failed"}
+    ]
+    assert budgets and all(budget <= 45.0 for budget in budgets), budgets

@@ -3101,25 +3101,27 @@ def test_services_stage_reconciles_the_app_tier(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("operation", ("status", "stop", "diagnostics", "recover"))
-def test_lifecycle_client_accepts_every_argument_free_operation(operation: str) -> None:
-    """The shell dispatch and the usage line must agree with the wire grammar.
+def test_lifecycle_client_dispatches_every_argument_free_operation(operation: str) -> None:
+    """The shell `case` and the usage line must both agree with the wire grammar.
 
     `worker-lifecycle.sh` is the only client an operator runs, so an operation the contract
-    accepts but the `case` rejects is unreachable: the script exits 2 on usage before a request
-    is ever built.
+    accepts but the `case` does not name falls through to `*)` and exits 2 on usage before a
+    request is ever built -- indistinguishable from a typo. Asserting the exit status cannot
+    catch that, because a bogus argument produces exactly the same status and the same usage
+    line; only the arm patterns themselves separate the two.
     """
     lifecycle = LIFECYCLE.read_text()
+    dispatch = lifecycle.split('case "${1:-}" in', 1)[1]
+    arms = [
+        line.strip().removesuffix(")")
+        for line in dispatch.splitlines()
+        if line.strip().endswith(")") and not line.strip().startswith("#")
+    ]
+    patterns = {pattern.strip() for arm in arms for pattern in arm.split("|")}
 
+    assert operation in patterns, patterns
+    assert "*" in patterns, "the fall-through arm must still reject an unknown argument"
     assert f"|{operation}" in lifecycle.split("usage()", 1)[1].split("\n}", 1)[0]
-
-    result = subprocess.run(
-        ["bash", str(LIFECYCLE), operation, "extra"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 2, result.stdout
-    assert "start COUNT|status|stop|diagnostics|recover" in result.stderr
 
 
 def test_lifecycle_diagnostics_alone_skips_the_compatibility_probe() -> None:
