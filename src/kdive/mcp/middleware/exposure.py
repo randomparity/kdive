@@ -114,6 +114,7 @@ class ToolExposureMiddleware(Middleware):
             if gateway_enabled() and profile is ToolExposureProfile.AGENT_GATEWAY:
                 visible &= CORE_TOOLS
         except AuthError:
+            _EXPOSURE_FAILOPEN.add(1, {"reason": "no_verified_token"})
             _log.debug("no verified token in on_list_tools; advertising the full catalog")
             return tools
         except Exception:
