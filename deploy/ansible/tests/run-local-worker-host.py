@@ -59,10 +59,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 319, f"runner listed {len(actual_tasks)} baseline tasks, expected 319")
+require(len(actual_tasks) == 320, f"runner listed {len(actual_tasks)} baseline tasks, expected 320")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 319 ordered task names and tags match the updated baseline")
+print("ok runner: 320 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -460,27 +460,57 @@ for pattern in ("/boot/vmlinuz-*", "/boot/vmlinux-*"):
         pattern in hook_code,
         f"the kernel-upgrade hook stopped covering {pattern}",
     )
-# Located by name, not position: appending a task to the block must not silently retarget this.
-boot_kernel_tasks = yaml.safe_load(
-    (ANSIBLE / "roles/local_worker_host/tasks/boot_kernels.yml").read_text()
-)[0]["block"]
-hook_install = next(
-    task["ansible.builtin.copy"]
-    for task in boot_kernel_tasks
-    if task["name"] == "Install the kernel-upgrade hook that re-applies the relabel"
+# One shared hook, imported by both roles, never a second copy: a duplicated relabel is how this
+# defect came to exist at two sites (local_worker_host and live_vm_host), and a duplicated hook
+# would repeat that. Assert the install task is defined exactly once across the whole role tree.
+HOOK_TASK = "Install the kernel-upgrade hook that re-applies the relabel"
+definitions = sorted(
+    path.relative_to(ANSIBLE).as_posix()
+    for path in (ANSIBLE / "roles").rglob("tasks/*.yml")
+    if f"name: {HOOK_TASK}" in path.read_text()
 )
+require(
+    definitions == ["roles/local_worker_host/tasks/boot_kernel_hook.yml"],
+    f"the kernel-upgrade hook install must be defined exactly once, found {definitions}",
+)
+copies = sorted(
+    path.relative_to(ANSIBLE).as_posix()
+    for path in (ANSIBLE / "roles").rglob("files/*")
+    if path.name == BOOT_HOOK.name
+)
+require(
+    copies == [f"roles/local_worker_host/files/{BOOT_HOOK.name}"],
+    f"the kernel-upgrade hook file must be shipped exactly once, found {copies}",
+)
+# Both call sites reach that one definition, so the runner host is covered too (#2567).
+require(
+    "tasks_from: boot_kernel_hook.yml"
+    in (ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text(),
+    "live_vm_host no longer imports the shared kernel-upgrade hook, so the runner is uncovered",
+)
+hook_task = yaml.safe_load(
+    (ANSIBLE / "roles/local_worker_host/tasks/boot_kernel_hook.yml").read_text()
+)[0]
+# Its own guard, not the caller's: boot_kernels.yml's block still skips non-Debian without this,
+# so only the live_vm_host import — which has no surrounding guard — depends on the task carrying
+# one. Removing it therefore leaves every other arm of this harness green.
+require(
+    hook_task.get("when") == "ansible_facts['os_family'] == 'Debian'",
+    "the shared kernel-upgrade hook lost its own Debian-family guard",
+)
+hook_install = hook_task.get("ansible.builtin.copy", {})
 # src is asserted too: the non-Debian probes all skip this task, so a src naming a file that does
 # not exist would never be resolved by any check-mode run and every other assertion stays green.
 require(
-    hook_install["src"] == BOOT_HOOK.name,
+    hook_install.get("src") == BOOT_HOOK.name,
     "the kernel-upgrade hook task no longer copies the shipped hook file",
 )
 require(
-    hook_install["dest"] == "/etc/kernel/postinst.d/kdive-kvm-readable",
+    hook_install.get("dest") == "/etc/kernel/postinst.d/kdive-kvm-readable",
     "the kernel-upgrade hook is no longer installed into /etc/kernel/postinst.d",
 )
 require(
-    hook_install["mode"] == "0755",
+    hook_install.get("mode") == "0755",
     "the kernel-upgrade hook is no longer installed executable",
 )
 print("ok boot kernels: the upgrade hook applies 0640 root:kvm to both kernel patterns")

@@ -393,9 +393,10 @@ refresh cannot swap the artifacts out from under an in-flight domain.
 
 ## Maintenance
 
-- **After a kernel upgrade**, re-run `playbooks/runner.yml` (which re-applies
-  `0640 root:kvm` to `/boot/vmlinuz-*`): a new kernel ships `0600 root:root`,
-  which fails the libguestfs appliance build for the non-root runner user.
+- **After a kernel upgrade**, nothing is needed: `playbooks/runner.yml` installs an
+  `/etc/kernel/postinst.d` hook that re-applies `0640 root:kvm` to `/boot/vmlinuz-*` as each new
+  kernel is installed (ADR-0668). A new kernel ships `0600 root:root`, which would otherwise fail
+  the libguestfs appliance build for the non-root runner user.
 - **Version bump:** update `github_runner_version` and `github_runner_sha256`
   together (the linux-x64 SHA-256 is published in the `actions/runner` release
   notes between the `BEGIN/END SHA linux-x64` markers, not a fetchable sidecar).

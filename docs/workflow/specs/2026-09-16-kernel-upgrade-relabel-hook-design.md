@@ -11,19 +11,19 @@ a reboot the running kernel is unreadable, builds fail, and `:64-65` leaves the 
 
 ## Scope
 
-One static hook, `roles/local_worker_host/files/kernel-postinst-kvm-readable`, installed by one new
-`ansible.builtin.copy` task in `boot_kernels.yml` — inside the existing Debian-family block, so that guard
-and the kvm-group assertions above it govern it unchanged. It re-asserts the role's rule over
-`/boot/vmlinuz-*` and `/boot/vmlinux-*`, the patterns the role's `find` uses for x86_64 and ppc64le
-(ADR-0356), not the one image path the hook contract supplies. It exits 0 when it cannot act.
+One static hook, `roles/local_worker_host/files/kernel-postinst-kvm-readable`, installed by one
+`ansible.builtin.copy` task in a shared `boot_kernel_hook.yml`, self-guarded on the Debian family and
+imported by both `boot_kernels.yml` and `live_vm_host/tasks/main.yml` — the two roles carrying the
+point-in-time relabel. It re-asserts the rule over `/boot/vmlinuz-*` and `/boot/vmlinux-*`, the patterns
+the roles' `find` uses for x86_64 and ppc64le (ADR-0356), not the one image path the hook contract
+supplies. It exits 0 when it cannot act.
 
 The `find` + `file` loop **stays**: the hook covers kernels installed after it exists, the loop those
 already in `/boot` on first run, including the running one. Dropping it would regress first provision.
 The now-false `:64-65` comment is corrected, and `lint-shell` gains `deploy/ansible/roles`.
 
-Out: Fedora/RHEL/Suse relabel behaviour; retrofitting broken hosts; #2568's `onboard.sh`. Also out,
-reported: `live_vm_host/tasks/main.yml:86-104` keeps a duplicate relabel, never imports
-`boot_kernels.yml`, so the runner keeps this defect.
+Both roles keep their own `find` + `file` loop; only the install-time half is shared. Out:
+Fedora/RHEL/Suse behaviour; retrofitting broken hosts; #2568's `onboard.sh`; merging the loops.
 
 ### Failure model
 
@@ -37,7 +37,7 @@ Accepted failure classes:
 - The hook cannot relabel (no `kvm` group; `chgrp`/`chmod` refused on read-only or `vfat` `/boot`). It
   warns and exits 0; `check-local-libvirt.sh` FAILs on the result, where a non-zero exit would instead
   half-configure `dpkg`.
-- The runner keeps the defect (see Scope) — outside the frozen surface, reported.
+- The shared hook's install on the runner path is proven structurally, not on a runner host.
 - No repository gate can prove a real kernel upgrade — a host arm proves it.
 
 Covered elsewhere: already-broken hosts — operator runbook, per the non-goals.

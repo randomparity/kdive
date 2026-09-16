@@ -29,10 +29,17 @@ Reinstalling that kernel package with no hook present left `/boot/vmlinuz-7.0.0-
 
 ## Decision
 
-We will install a static hook at `/etc/kernel/postinst.d/kdive-kvm-readable` from the role's
-Debian-family block, which re-asserts `0640 root:kvm` over `/boot/vmlinuz-*` and `/boot/vmlinux-*`
-on every kernel install, and we will keep the existing `find` + `file` loop alongside it. The hook
-reports on stderr and exits 0 whenever it cannot relabel, rather than failing the package install.
+We will install a static hook at `/etc/kernel/postinst.d/kdive-kvm-readable`, which re-asserts
+`0640 root:kvm` over `/boot/vmlinuz-*` and `/boot/vmlinux-*` on every kernel install, and we will
+keep the existing point-in-time `find` + `file` loops alongside it. The hook reports on stderr and
+exits 0 whenever it cannot relabel, rather than failing the package install.
+
+Both roles that carry the point-in-time relabel install that one hook from one shared task file,
+`local_worker_host/tasks/boot_kernel_hook.yml`, self-guarded on the Debian family and imported by
+`boot_kernels.yml` and by `live_vm_host/tasks/main.yml`. A duplicated relabel is how this gap came
+to exist at two sites; a duplicated hook would repeat that mistake one layer up. `import_role`
+with `tasks_from:` resolves the `copy:` `src:` against the defining role's `files/` directory, so
+one artifact serves both call sites — verified on ansible-core 2.21.1 with a two-role probe.
 
 The two arms cover disjoint sets and neither subsumes the other: the loop converges the kernels
 already on a host when the role first runs, including the running one; the hook keeps every later
@@ -60,9 +67,11 @@ kernel install. Choosing exit 0 over a hard failure likewise accepts that a host
 relabel — no `kvm` group, a read-only or `vfat` `/boot` — reverts quietly, with only a stderr line
 inside the package manager's output; that trade is argued below.
 
-`live_vm_host/tasks/main.yml:86-104` carries its own duplicate point-in-time relabel and never
-imports `boot_kernels.yml`, so this decision does not reach the self-hosted runner. Consolidating
-the two is deferred; it moves the runner task baseline and is a separate change.
+`live_vm_host` keeps its own point-in-time relabel, which serves the runner account rather than
+the fixed worker accounts; only the install-time half is shared. Consolidating the two loops
+themselves stays out of scope. Importing the shared hook adds one task to the runner baseline, so
+`deploy/ansible/tests/fixtures/runner-tasks-2391.txt` moves from 319 to 320 lines, regenerated
+through the harness's own filter.
 
 ## Considered & rejected
 
