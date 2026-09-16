@@ -51,7 +51,9 @@ setup-local-libvirt:
     ./scripts/operations/setup-local-libvirt.sh
 
 # Prepare this host for the local-libvirt provider. Supply the witness DSN through the
-# environment so it is passed to Ansible stdin rather than a process argument.
+# environment so it is passed to Ansible stdin rather than a process argument. Requires an
+# interactive become password (--ask-become-pass): the play installs packages and writes system
+# units as root. The play pins its own interpreter, so uv's ephemeral env is not used for modules.
 prepare-local-libvirt-host:
     test -n "${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-}" || { echo "set KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" >&2; exit 2; }
     ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' ansible-playbook deploy/ansible/playbooks/local-libvirt-host.yml --ask-become-pass -e "local_libvirt_host_operator_user=${USER:?set USER to the operator account}"
