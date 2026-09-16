@@ -19,8 +19,12 @@ declared host swaps their explicit launcher interpreter for `PATH` discovery —
 `community.crypto` import failure under a restricted `PATH`.
 
 Extend `deploy/ansible/tests/run-local-libvirt-host.py`, which `just test-ansible` runs inside
-`just ci`, to assert resolution rather than key presence. `install.md` gains the become-password
-requirement and its reason; note the pin in `providers/local-libvirt.md` and the `justfile` comment.
+`just ci`, to assert the pinned value in the play's own `vars:` rather than the key's presence, and
+to reject a `localhost` declared anywhere in the inventory. The gate stays a file-parsing check: a
+probe play that shells out to `ansible-playbook` would re-measure ansible-core's own documented
+play-var precedence, and cost more lines than the change it guards. `install.md` gains the
+become-password requirement and its reason; note the pin in `providers/local-libvirt.md` and the
+`justfile` comment.
 
 Out: the Galaxy-collection path (#2499); `--check` smoke-testability and `local-libvirt-host.yml`
 ~160-181 (#2506, out of batch); converting the recipe off `--ask-become-pass` (documented, per
@@ -52,9 +56,9 @@ triage). No ownership transition: each play already owns its execution vars.
 
 ## Validation
 
-- Interpreter resolution and pin placement. Mode: `focused-test` — `run-local-libvirt-host.py`
-  resolves the value through a probe play built from the real play's vars; red under each fault in
-  Success 2; green via `just test-ansible`.
+- Interpreter value and pin placement. Mode: `focused-test` — `run-local-libvirt-host.py` reads the
+  real play's `vars:` and the inventory; red under each fault in Success 2; green via
+  `just test-ansible`.
 - The runbook's become-password statement. Mode: `focused-test` —
   `test_install_topology_contract.py` couples it to the recipe's real `--ask-become-pass` flag;
   red before the `install.md` edit; green via `just test`.

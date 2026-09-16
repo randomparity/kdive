@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """Check the localhost local-libvirt playbook contract without applying it."""
 
-import os
-import re
-import subprocess
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -14,7 +10,6 @@ ANSIBLE = ROOT / "deploy/ansible"
 PLAYBOOK = ANSIBLE / "playbooks/local-libvirt-host.yml"
 INVENTORY = ANSIBLE / "inventory/hosts.yml"
 SYSTEM_INTERPRETER = "/usr/bin/python3"
-_PROBE_EXPR = "ansible_python_interpreter | default('auto-discovery')"
 
 
 def require(condition: bool, message: str) -> None:
@@ -173,68 +168,13 @@ require(
 )
 
 
-def ansible(*argv: str) -> str:
-    """Run an Ansible command against the repository's own config.
-
-    The child environment is built from an allowlist rather than inherited: a stray ANSIBLE_*
-    in the caller's shell otherwise changes the answer. ANSIBLE_STDOUT_CALLBACK in particular
-    reroutes the rendering this gate parses, and a plugin the caller selected can abort the run.
-    """
-    passthrough = ("PATH", "HOME", "LANG", "LC_ALL")
-    env = {name: os.environ[name] for name in passthrough if name in os.environ}
-    env["ANSIBLE_CONFIG"] = str(ANSIBLE / "ansible.cfg")
-    env["ANSIBLE_STDOUT_CALLBACK"] = "default"
-    try:
-        done = subprocess.run(
-            argv, cwd=ANSIBLE, env=env, capture_output=True, text=True, check=False
-        )
-    except FileNotFoundError:
-        raise SystemExit(
-            f"local-libvirt-host regression: {argv[0]} is not on PATH; run this gate through "
-            "`just test-ansible`, which supplies ansible-core"
-        ) from None
-    require(done.returncode == 0, f"{argv[0]} exited {done.returncode}: {done.stderr.strip()}")
-    return done.stdout
-
-
-def resolved_interpreter(play_vars: dict) -> str:
-    """Resolve ansible_python_interpreter the way Ansible would for a play carrying play_vars.
-
-    Asserting the key's presence would stay green if the pin were present but ineffective, which
-    is this issue's own failure mode, so this runs the value through real variable precedence.
-    """
-    probe = [
-        {
-            "name": "Resolve the interpreter this play would execute modules under",
-            "hosts": "localhost",
-            "connection": "local",
-            "gather_facts": False,
-            "vars": play_vars,
-            # default() keeps an unpinned play reporting what it resolved to rather than failing
-            # the probe, so the diagnostic below names the interpreter instead of an exit code.
-            # Sentinel-delimited so the readback does not depend on how a callback quotes msg.
-            "tasks": [{"ansible.builtin.debug": {"msg": f"<<{{{{ {_PROBE_EXPR} }}}}>>"}}],
-        }
-    ]
-    with tempfile.TemporaryDirectory() as scratch:
-        probe_path = Path(scratch) / "probe.yml"
-        probe_path.write_text(yaml.safe_dump(probe))
-        stdout = ansible("ansible-playbook", str(probe_path))
-    found = re.search(r"<<(.*?)>>", stdout)
-    if found is None:
-        raise SystemExit(
-            f"local-libvirt-host regression: probe play emitted no resolved interpreter:\n{stdout}"
-        )
-    return found.group(1).strip()
-
-
-# The pin is a play var, not an inventory host var. hosts.yml is shared with pki.yml and the
-# localhost plays under deploy/ansible/tests/, which resolve their dependencies against the
-# launching environment; a host var there would retarget all of them, and declaring localhost at
-# all replaces their explicit launcher interpreter with a PATH-dependent discovery.
+# The pin is a play var, not an inventory host var. A play var outranks the implicit-localhost
+# interpreter, which is what binds modules to whichever Python launched ansible-playbook -- under
+# the recipe, a `uv run --with ansible-core` environment with no lxml for community.libvirt.
 require(
-    "ansible_python_interpreter" in play["vars"],
-    "the play must carry its own interpreter pin rather than relying on the inventory",
+    play["vars"].get("ansible_python_interpreter") == SYSTEM_INTERPRETER,
+    "the play must pin ansible_python_interpreter to "
+    f"{SYSTEM_INTERPRETER} in its own vars, not rely on the inventory or on discovery",
 )
 
 
@@ -253,15 +193,7 @@ require(
     "launcher interpreter to PATH discovery",
 )
 
-play_interpreter = resolved_interpreter(play["vars"])
-require(
-    play_interpreter == SYSTEM_INTERPRETER,
-    f"the play resolves ansible_python_interpreter={play_interpreter}, not {SYSTEM_INTERPRETER}; "
-    "discovery selects whichever Python launched ansible-playbook, and the recipe launches it "
-    "through `uv run --with ansible-core`, whose environment has no lxml for community.libvirt",
-)
-
 print(
     "local-libvirt-host: preflight, localhost role composition, locked live sync, DSN stdin, "
-    "guestfs ABI handling, and play-scoped system-interpreter resolution pass"
+    "guestfs ABI handling, and the play-scoped system-interpreter pin pass"
 )
