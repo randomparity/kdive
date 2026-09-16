@@ -53,6 +53,7 @@ from tests.integration.live_stack.spine import (
     assert_report,
     await_system_state,
     build_and_upload_kernel,
+    build_profile,
     captured_vmcore_refs,
     crash_to_crashed,
     db_now,
@@ -109,17 +110,6 @@ def _remote_provision_profile() -> dict[str, object]:
             }
         },
     }
-
-
-def _build_profile() -> dict[str, object]:
-    """The Run build profile for the remote x86_64 spine (upload-only lane, ADR-0048).
-
-    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` +
-    the target ``arch`` and forbids extras; the ``kernel_source_ref``/``config`` this used to
-    send were rejected outright as invalid tool arguments. The kernel bytes now arrive via
-    ``build_and_upload_kernel``.
-    """
-    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
@@ -341,7 +331,7 @@ def test_remote_spine_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_id,
                             system_id=system_id,
-                            build_profile=_build_profile(),
+                            build_profile=build_profile(),
                         ),
                         "create-run",
                     )
@@ -553,7 +543,7 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_a,
                             system_id=system_a,
-                            build_profile=_build_profile(),
+                            build_profile=build_profile(),
                         ),
                         "create-run-A",
                     )
@@ -627,7 +617,7 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_b,
                             system_id=system_b,
-                            build_profile=_build_profile(),
+                            build_profile=build_profile(),
                         ),
                         "create-run-B",
                     )
