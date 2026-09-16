@@ -83,11 +83,18 @@ def test_auth_error_advertises_full_catalog_and_debug_logs(monkeypatch) -> None:
     monkeypatch.setattr(exposure_mod, "request_context", _raise)
     debugs: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     monkeypatch.setattr(exposure_mod._log, "debug", lambda *a, **k: debugs.append((a, k)))
+    exposure_counter_calls: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        exposure_mod._EXPOSURE_FAILOPEN,
+        "add",
+        lambda amount, attrs: exposure_counter_calls.append((amount, attrs)),
+    )
 
     result, _ctx, _received = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
 
     assert [t.name for t in result] == ["runs.create", "admin.teardown"]
     assert debugs[0][0] == ("no verified token in on_list_tools; advertising the full catalog",)
+    assert exposure_counter_calls == [(1, {"reason": "no_verified_token"})]
 
 
 def test_unexpected_error_advertises_full_catalog_and_warns(monkeypatch) -> None:

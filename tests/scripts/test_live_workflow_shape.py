@@ -153,18 +153,21 @@ def test_tcg_block_stages_inside_the_provider_allowed_root() -> None:
     ``LocalLibvirtProvisioning.from_env`` hardcodes ``allowed_roots=[Path(ROOTFS_DIR)]`` with no
     env override, so a set staged anywhere else is rejected at provision time with "local component
     path is outside provider allowed roots" — minutes into the run, after the whole image build.
-    Read ROOTFS_DIR from src rather than repeating the literal, so moving the constant fails here.
+    Compare against ``LIBVIRT_ROOTFS_ROOT.default``, not the runtime-resolved ``ROOTFS_DIR``:
+    the latter is ``config.require(LIBVIRT_ROOTFS_ROOT)``, so it follows whatever the developer
+    running this test has set, while live.yml's literal is the setting's default (#2549).
     """
-    from kdive.providers.local_libvirt.lifecycle import storage
+    from kdive.providers.local_libvirt.settings import LIBVIRT_ROOTFS_ROOT
 
+    rootfs_dir = LIBVIRT_ROOTFS_ROOT.default
     stage = _tcg_stage_dir()
-    assert stage.startswith(f"{storage.ROOTFS_DIR}/"), (
+    assert stage.startswith(f"{rootfs_dir}/"), (
         f"KDIVE_TCG_STAGE_DIR={stage} is outside the provider's allowed root "
-        f"{storage.ROOTFS_DIR}; provision would reject the staged rootfs"
+        f"{rootfs_dir}; provision would reject the staged rootfs"
     )
     # A SUBDIR, never the root itself: stage-tcg-images.sh rm -rf's + recreates its stage dir, and
     # the provider writes every per-System overlay into the root alongside it.
-    assert stage.rstrip("/") != storage.ROOTFS_DIR, (
+    assert stage.rstrip("/") != rootfs_dir, (
         "stage into a subdirectory: the stager deletes and recreates KDIVE_TCG_STAGE_DIR, "
         "which would take the provider's overlay dir with it"
     )
@@ -177,17 +180,20 @@ def test_tcg_allowed_root_is_backed_by_the_large_scratch_disk() -> None:
     back that path with the scratch disk. validate_local_component_path resolves both the candidate
     and the roots, so a symlinked root still matches; `df` follows it too, which keeps
     stage-tcg-images.sh's pre-stage free-space check measuring the disk the bytes actually land on.
+    Compare against ``LIBVIRT_ROOTFS_ROOT.default``, not the runtime-resolved ``ROOTFS_DIR``: see
+    ``test_tcg_block_stages_inside_the_provider_allowed_root`` above (#2549).
     """
-    from kdive.providers.local_libvirt.lifecycle import storage
+    from kdive.providers.local_libvirt.settings import LIBVIRT_ROOTFS_ROOT
 
+    rootfs_dir = LIBVIRT_ROOTFS_ROOT.default
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     joined = "\n".join(s["run"] for s in steps if "run" in s)
     link = next(
-        (ln.strip() for ln in joined.splitlines() if "ln -" in ln and storage.ROOTFS_DIR in ln),
+        (ln.strip() for ln in joined.splitlines() if "ln -" in ln and rootfs_dir in ln),
         None,
     )
     assert link is not None, (
-        f"{storage.ROOTFS_DIR} must be backed by the /mnt scratch disk, not the root filesystem"
+        f"{rootfs_dir} must be backed by the /mnt scratch disk, not the root filesystem"
     )
     assert "/mnt/" in link, f"the allowed root must point at /mnt; got {link!r}"
 
