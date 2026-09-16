@@ -19,8 +19,10 @@ owning five tasks: a registered `stat` of the packaged unit path, a `getent` of 
 account, a guard asserting that account is non-empty, existing, and outside
 `live_vm_host_worker_accounts`, an enable-and-start of `docker.service`, and an append of the
 socket group to `local_worker_host_operator_user`. All four tasks after the probe are gated on the
-`stat`, and the guard precedes the enable so a bad operator name stops the play before any
-mutation. `local_worker_host/tasks/main.yml` imports the file after
+`stat`, and the guard precedes the enable and the grant, so a bad operator name stops the play
+before this file mutates anything. On the role path the rest of `local_worker_host` has already
+run by then — the import is last precisely so the fixed-worker contract does not depend on the
+engine — and `preflight.yml` is what guards that earlier work. `local_worker_host/tasks/main.yml` imports the file after
 the family package files and last in the role, since the fixed-worker contract does not depend on
 the engine and should not be lost to a host whose engine cannot start.
 
