@@ -15,30 +15,28 @@ host that cannot bring the stack up. The role documents its own gap at
 ## Scope
 
 One reusable task file, `deploy/ansible/roles/local_worker_host/tasks/container_runtime.yml`,
-owning four tasks: a registered `stat` of the packaged unit path; an assert that a *declared* engine
-left that unit behind; an enable-and-start of `docker.service`; and an append of the socket group to
-`local_worker_host_operator_user`. The last two are gated on the `stat`, the assert on
-`local_worker_host_engine_declared`. `local_worker_host/tasks/main.yml` imports the file after the
-family package files.
+owning three tasks: a registered `stat` of the packaged unit path, an enable-and-start of
+`docker.service`, and an append of the socket group to `local_worker_host_operator_user`. Both
+mutating tasks are gated on the `stat`. `local_worker_host/tasks/main.yml` imports the file after
+the family package files.
 
-Those are two deliberately different predicates. `local_worker_host_engine_declared` says this
-repository installed an engine for this host (Fedora, Tumbleweed, and the Debian runner via an
-override); the `stat` says the host has one. Declared-and-absent fails loudly. Undeclared-and-present
-— an Enterprise Linux or SLES host that took the Docker-repository remedy
-`docs/operating/providers/local-libvirt.md` recommends — is enabled and granted like any other,
-because that is a working runtime rather than a documented manual step.
+Unit presence is the whole predicate. A host without the unit gets neither task and the play
+succeeds — `podman-docker`, and Enterprise Linux or SLES with no engine installed. A host with it
+gets both, including one this repository did not install: an Enterprise Linux or SLES host that took
+the Docker-repository remedy `docs/operating/providers/local-libvirt.md` recommends has
+`docker.service` at that path, and enabling it is a working runtime rather than a documented manual
+step. Nothing here installs an engine on those families.
 
 `live_vm_host/tasks/main.yml` replaces its existing standalone group-grant task with an
 `import_role ... tasks_from: container_runtime.yml`, substituting `github_runner_user` for
 `local_worker_host_operator_user` — the substitution that file already makes at `:367-372` and
-`:844-848` for other reusable task files — and setting `local_worker_host_engine_declared: true`,
-since its apt install at `:52-59` is unconditional. That is the ownership move: the grant policy
+`:844-848` for other reusable task files. That is the ownership move: the grant policy
 lives in one place instead of two, and the Debian runner gains the enable it lacks. The role's only
 other consumer is `deploy/ansible/playbooks/local-libvirt-host.yml:150`, which applies the whole
 role and so reaches the new tasks through `main.yml` without being edited.
 
-Four new defaults carry the unit path, the service name, the socket group, and the declared-engine
-predicate, so tasks and tests share the literals.
+Three new defaults carry the unit path, the service name, and the socket group, so tasks and tests
+share the literals.
 
 The stale comments at `defaults/main.yml:96-99` and `:139`, and the "Container engine" bullet in
 `docs/operating/providers/local-libvirt.md`, are corrected in this change: automating a step the
@@ -66,6 +64,8 @@ operator-owned connection, and the role already requires root.
 - The single-operator identity: exactly one account per invocation gains the group, and it is the
   one the caller named. On the runner that name arrives through a `vars:` rebinding at the call
   site, which is the one place it can go wrong.
+- The runner's socket-group grant, unconditional today at `live_vm_host/tasks/main.yml:61-65` and
+  gated on the probe afterwards.
 - The exact-order runner task baseline in `deploy/ansible/tests/fixtures/runner-tasks-2391.txt`,
   which issue #2567 also edits.
 
@@ -86,7 +86,12 @@ operator-owned connection, and the role already requires root.
   three families that package an engine, verified on Fedora 44, Ubuntu 26.04 and a Tumbleweed
   container image.
 - CI proves gating, ordering, grant target and call-site binding in check mode only; it cannot
-  prove a daemon starts. Accepted: covered by the plan's real-host run, not by CI.
+  prove a daemon starts, nor that the probe finds a real unit on a real host. Accepted: covered by
+  the plan's real-host runs, which include a full `runner.yml` run recording that the runner account
+  ends up in the socket group. An in-play assert keyed to "this role installed an engine here" was
+  considered and cut: `packages_redhat.yml:31-33` skips the engine install when `/usr/bin/docker`
+  already exists, so such an assert fails the play on the `podman-docker` host the criteria require
+  to skip cleanly.
 
 **Covered elsewhere.** Engine and plugin package selection — #2505 (closed). Enterprise Linux and
 SLES runtime installation — `docs/operating/providers/local-libvirt.md`, operator-owned. Fixed
@@ -125,11 +130,13 @@ worker boundary. Also out: rootless engine configurations, and any hardening of 
 
 1. On a host with `/usr/lib/systemd/system/docker.service`, the play leaves `docker.service`
    enabled and active, and the named operator in the socket group.
-2. On a host without that unit and with no declared engine, both mutating tasks skip and the play
-   still succeeds. Where an engine *was* declared, the play fails naming the probed path.
-3. The grant names `local_worker_host_operator_user` in `container_runtime.yml`, and its two call
-   sites — `local_worker_host/tasks/main.yml` and `live_vm_host/tasks/main.yml` — bind that
-   variable to the operator and the runner account respectively and to no other account.
+2. On a host without that unit, both mutating tasks skip and the play still succeeds — including a
+   Fedora or Tumbleweed host whose engine install was skipped because `podman-docker` already owned
+   `/usr/bin/docker`.
+3. The grant names `local_worker_host_operator_user` in `container_runtime.yml`. The standalone
+   path leaves that variable at the value the caller supplied; the runner call site in
+   `live_vm_host/tasks/main.yml` rebinds it to `github_runner_user`. No other account is named on
+   either path.
 4. The runner play gains the enable; its listed task order is otherwise unchanged.
 5. A second run of the play reports `changed=0` for the new tasks.
 6. `defaults/main.yml:96-99` and `:139` and the "Container engine" bullet in

@@ -1,22 +1,21 @@
 # Container-engine daemon enablement — implementation plan
 
 Goal: make `local_worker_host` leave a provisioned host with the container-engine daemon enabled and
-running and the named operator account in the engine's socket group, fail loudly where the role
-declared an engine that left no unit, and route the Debian-family runner through the same tasks.
+running and the named operator account in the engine's socket group, and route the Debian-family
+runner through the same tasks.
 
 Architecture: one new reusable Ansible task file in `local_worker_host`, imported from that role's
 `main.yml` and from `live_vm_host/tasks/main.yml` with the runner account substituted for the
-operator variable. Four new role defaults name the unit path, the service, the socket group, and the
-declared-engine predicate. The shared check-mode harness `deploy/ansible/tests/run-local-worker-host.py`
-gains gate, assert, target, binding, resolution and ordering assertions, and its exact-order runner
-fixture is regenerated.
+operator variable. Three new role defaults name the unit path, the service and the socket group. The
+shared check-mode harness `deploy/ansible/tests/run-local-worker-host.py` gains gate, target,
+binding, resolution and ordering assertions, and its exact-order runner fixture is regenerated.
 
 Tech stack: Ansible (`ansible.builtin` modules, `profile: production` ansible-lint), Python 3.14 for
 the harness, `just` recipes for guardrails.
 
-Expected implementation size: 210–280 changed lines (M) — from the file map below: one new ~45-line
-task file, ~16 lines of defaults, ~12 lines across the two `main.yml` files, 4 fixture lines,
-~140 lines of harness tests, ~20 lines of corrected prose. ADR-0663 is excluded: it is already
+Expected implementation size: 160–220 changed lines (M) — from the file map below: one new ~35-line
+task file, ~12 lines of defaults, ~10 lines across the two `main.yml` files, 4 fixture lines,
+~105 lines of harness tests, ~20 lines of corrected prose. ADR-0663 is excluded: it is already
 committed.
 
 Design: [spec](../specs/2026-09-16-container-engine-daemon-enablement-design.md),
@@ -58,19 +57,16 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
 - `local_worker_host_engine_service: docker.service`
 - `local_worker_host_engine_unit_path: /usr/lib/systemd/system/docker.service`
 - `local_worker_host_engine_socket_group: docker`
-- `local_worker_host_engine_declared` — true on Fedora and openSUSE Tumbleweed; `live_vm_host`
-  overrides it to `true`
 - registered variable `local_worker_host_engine_unit` (an `ansible.builtin.stat` result)
 - task names, exactly: `Look for a packaged container-engine service unit`,
-  `Require a declared container engine to have installed its service unit`,
   `Enable and start the container-engine daemon`,
   `Add the named operator account to the container-engine socket group`
-- tag `container_runtime` on all four.
+- tag `container_runtime` on all three.
 
 **Verification.**
-- Contract: the four tasks parse, carry the tag, and gate on the right predicate. Mode:
-  `focused-test` — Task 3's `container_daemon_gate` and `container_daemon_declared`; this task's
-  local green command is `just lint-ansible`, expected exit 0 with no findings.
+- Contract: the three tasks parse, carry the tag, and gate on the probe. Mode: `focused-test` —
+  Task 3's `container_daemon_gate`; this task's local green command is `just lint-ansible`,
+  expected exit 0 with no findings.
 - Contract: every `{{ ... }}` name in the task file resolves in the role defaults. Mode:
   `focused-test` — Task 3's `container_daemon_grant_target`; local green is `just lint-ansible`.
 - Contract: the corrected prose. Mode: `task-test-not-applicable` — prose has no executable
@@ -92,12 +88,6 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
    # The socket unit's SocketGroup on all three: its socket is root:docker 0660, so a non-root
    # operator outside this group cannot reach the daemon and stack-services.sh fails (#2557).
    local_worker_host_engine_socket_group: docker
-   # Whether THIS repository installed an engine for this host, which is a different question from
-   # whether the host has one. Only these two distributions get an engine from packages_redhat.yml
-   # and packages_suse.yml; live_vm_host overrides this to true for the Debian runner, whose apt
-   # install is unconditional.
-   local_worker_host_engine_declared: >-
-     {{ ansible_facts['distribution'] in ['Fedora', 'openSUSE Tumbleweed'] }}
    ```
 
 2. Create `local_worker_host/tasks/container_runtime.yml`:
@@ -114,25 +104,14 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
      register: local_worker_host_engine_unit
      tags: [container_runtime]
 
-   - name: Require a declared container engine to have installed its service unit
-     # Unit presence gates the mutations; this assert covers the one combination that must never be
-     # a silent skip. Where the role installed an engine and no unit appeared, something upstream
-     # failed, and skipping would rebuild the green-play-broken-host defect #2557 reports.
-     ansible.builtin.assert:
-       that:
-         - local_worker_host_engine_unit.stat.exists
-       fail_msg: >-
-         This host was provisioned with a container engine but has no
-         {{ local_worker_host_engine_unit_path }}; the engine install did not complete.
-     when: local_worker_host_engine_declared | bool
-     tags: [container_runtime]
-
    - name: Enable and start the container-engine daemon
      # The service, not the socket: docker.service carries Requires=docker.socket and
      # ExecStart=/usr/bin/dockerd -H fd://, so enabling the service pulls the socket in and the play
      # witnesses the daemon's first start. Tumbleweed's own docker.socket says the same with
-     # BindsTo=docker.service. An undeclared host that has the unit anyway — Enterprise Linux or
-     # SLES on the Docker-repository remedy the operator guide recommends — is enabled too.
+     # BindsTo=docker.service. A host with the unit but no engine from this role — Enterprise Linux
+     # or SLES on the Docker-repository remedy the operator guide recommends — is enabled too. A
+     # host without it (podman-docker owns /usr/bin/docker but ships no unit) is skipped, not
+     # failed: packages_redhat.yml:31-33 deliberately leaves such a host the provider it chose.
      ansible.builtin.systemd_service:
        name: "{{ local_worker_host_engine_service }}"
        enabled: true
@@ -197,7 +176,7 @@ asserted non-empty and present in passwd by `tasks/preflight.yml:17-38`). Define
 
 6. Run `just lint-ansible` and `just docs-links`. Expect both to exit 0.
 
-**Acceptance.** The four task names appear, in order, in
+**Acceptance.** The three task names appear, in order, in
 `ansible-playbook deploy/ansible/tests/local_worker_host.yml -i localhost, --list-tasks` after
 `Install the Tumbleweed compose plugin for the on-box stack and testcontainers`.
 `rg -n 'manual step|operator step|remain operator steps' deploy/ docs/operating/ scripts/` returns
@@ -215,15 +194,15 @@ Where it fits: closes #2557's "the Debian path should stop depending on dpkg pol
 the duplicated grant policy.
 
 **Interfaces.** Consumes the task file and defaults from Task 1, and `github_runner_user`
-(existing, `live_vm_host/defaults/main.yml`). Produces a runner `--list-tasks` output four entries
-longer and one entry shorter than the current baseline — net +3 — and updates
+(existing, `live_vm_host/defaults/main.yml`). Produces a runner `--list-tasks` output three entries
+longer and one entry shorter than the current baseline — net +2 — and updates
 `run-local-worker-host.py`'s baseline literal to match, so the count contract stays green at the end
 of this task rather than at the end of Task 3.
 
 **Verification.**
-- Contract: the runner play lists the four new tasks in order and its exact-order baseline matches.
+- Contract: the runner play lists the three new tasks in order and its exact-order baseline matches.
   Mode: `focused-test` — `run-local-worker-host.py:61` and its fixture. Red: after step 1 and before
-  step 2, the run fails with `runner listed 317 baseline tasks, expected 314`. Green:
+  step 2, the run fails with `runner listed 316 baseline tasks, expected 314`. Green:
   `just test-ansible`.
 
 **Steps.**
@@ -244,14 +223,13 @@ of this task rather than at the end of Task 3.
    - name: Enable the container engine and grant the runner account its socket
      # One owner for this policy (ADR-0663). The runner previously took the group grant here and
      # relied on dpkg to start the daemon; the reusable file does both, so a future packaging change
-     # fails loudly instead of silently. The engine install above is unconditional, so the declared
-     # predicate is true regardless of distribution facts.
+     # fails loudly instead of silently. The apt install above is unconditional and Debian's
+     # docker.io ships the unit, so the probe holds here; the runner real-host arm proves it.
      ansible.builtin.import_role:
        name: local_worker_host
        tasks_from: container_runtime.yml
      vars:
        local_worker_host_operator_user: "{{ github_runner_user }}"
-       local_worker_host_engine_declared: true
    ```
 
 2. Regenerate the fixture with the harness's own filter, so its `\tTAGS:` form, the
@@ -282,7 +260,7 @@ of this task rather than at the end of Task 3.
    PY
    ```
 
-   Expect `317` on the current base. Whatever it prints is the count — if #2567 has landed it will
+   Expect `316` on the current base. Whatever it prints is the count — if #2567 has landed it will
    differ, and the literal below follows the regeneration rather than the reverse.
 
 3. Set the two `314` literals at `run-local-worker-host.py:61` and the `print` at `:64` to the count
@@ -290,11 +268,11 @@ of this task rather than at the end of Task 3.
 
 4. Run `just test-ansible`. Expect exit 0.
 
-**Acceptance.** `wc -l` on the fixture equals the count in `run-local-worker-host.py:61`; the four
+**Acceptance.** `wc -l` on the fixture equals the count in `run-local-worker-host.py:61`; the three
 new task names appear consecutively where the removed grant task was; no other fixture line changed.
 `just test-ansible` exits 0.
 
-## Task 3 — Prove the gate, the assert, the target, the binding and the order
+## Task 3 — Prove the gate, the target, the binding and the order
 
 Modifies `deploy/ansible/tests/run-local-worker-host.py`.
 
@@ -317,50 +295,42 @@ saying what the arm proves and why the injection is needed, `require` for every 
 - Contract: both arms of the unit gate, for both mutating tasks. Mode: `focused-test` —
   `container_daemon_gate`. Red before Task 1: `container_section` raises `SystemExit` because the
   enable heading is absent. Green: `just test-ansible`.
-- Contract: a declared engine with no unit fails the play; no other combination does. Mode:
-  `focused-test` — `container_daemon_declared`. Red before Task 1: the assert heading is absent.
 - Contract: the grant targets the operator variable, references no worker account, resolves every
   name it uses, and is rebound at the runner call site. Mode: `focused-test` —
   `container_daemon_grant_target`. Red before Task 1: `FileNotFoundError` on the task file.
-- Contract: probe, assert, enable, grant, in order, after the compose-plugin install. Mode:
+- Contract: probe, enable, grant, in order, after the compose-plugin install. Mode:
   `focused-test` — `container_daemon_order`. Red before Task 1: names absent from `listed.stdout`.
 
 **Steps.**
 
 1. Add `import re` to the imports, in alphabetical position.
 
-2. Add the four task-name constants and a shared `container_daemon_facts(*, unit_exists: bool,
-   declared: bool) -> dict[str, object]` helper returning the extra-vars payload: `ansible_facts`
-   with `distribution: "Fedora"`, `distribution_version: "probe"`, `os_family: "RedHat"`;
-   `local_worker_host_operator_user: operator`; `local_worker_host_engine_unit: {"stat": {"exists":
-   unit_exists}}`; `local_worker_host_engine_declared: declared`. The last two are injected as
-   extra-vars because extra-vars outrank the register and the role default, so both arms are
-   drivable on a runner whatever its own docker state — the same reason `container_runtime_gate`
-   injects `local_worker_host_docker_provider_redhat`.
+2. Add the three task-name constants and a shared `container_daemon_facts(*, unit_exists: bool) ->
+   dict[str, object]` helper returning the extra-vars payload: `ansible_facts` with
+   `distribution: "Fedora"`, `distribution_version: "probe"`, `os_family: "RedHat"`;
+   `local_worker_host_operator_user: operator`; and `local_worker_host_engine_unit: {"stat":
+   {"exists": unit_exists}}`. The register is injected as an extra-var because extra-vars outrank
+   it, so both arms are drivable on a runner whatever its own docker state — the same reason
+   `container_runtime_gate` injects `local_worker_host_docker_provider_redhat`.
 
    ```python
    CONTAINER_TASKS = "roles/local_worker_host/tasks/container_runtime.yml"
    DAEMON_PROBE = "Look for a packaged container-engine service unit"
-   DAEMON_ASSERT = "Require a declared container engine to have installed its service unit"
    DAEMON_ENABLE = "Enable and start the container-engine daemon"
    DAEMON_GRANT = "Add the named operator account to the container-engine socket group"
    ```
 
 3. `container_daemon_gate(*, unit_exists: bool)` — for each of `DAEMON_ENABLE` and `DAEMON_GRANT`,
    run `playbook(probe, "--check", "--tags", "container_runtime", "--start-at-task", name, "-e",
-   json.dumps(facts))` with `declared=False`, take `container_section(result.stdout, name, state)`,
-   and `require` that `("skipping: [localhost]" in section) != unit_exists`. One invocation per
-   task, each started at that task: in the entered arm the modules themselves run, check mode and
-   non-root, so an enable that failed there would otherwise stop the play before the grant is
-   reached. Call it for `unit_exists` in `(False, True)`.
+   json.dumps(facts))`, take `container_section(result.stdout, name, state)`, and `require` that
+   `("skipping: [localhost]" in section) != unit_exists`. One invocation per task, each started at
+   that task: in the entered arm the modules themselves run, check mode and non-root, so an enable
+   that failed there would otherwise stop the play before the grant is reached. Call it for
+   `unit_exists` in `(False, True)`. The `unit_exists=False` arm is the `podman-docker` case — a
+   Fedora host whose engine install `packages_redhat.yml:31-33` skipped — and it must be a clean
+   skip, never a failure.
 
-4. `container_daemon_declared(*, declared: bool, unit_exists: bool)` — run the same invocation
-   started at `DAEMON_ASSERT`, and `require` that `("fatal: [localhost]" in section) == (declared
-   and not unit_exists)`. In that one combination also `require` that `"the engine install did not
-   complete"` appears in `result.stdout`, so the message stays actionable. Call it over all four
-   combinations.
-
-5. `container_daemon_grant_target()` — read `(ANSIBLE / CONTAINER_TASKS).read_text()` and `require`:
+4. `container_daemon_grant_target()` — read `(ANSIBLE / CONTAINER_TASKS).read_text()` and `require`:
 
    - `"live_vm_host_worker_accounts" not in source` — socket-group membership is root-equivalent and
      ADR-0575 keeps the fixed worker slot accounts out of it, so a grant naming them would dissolve
@@ -375,29 +345,28 @@ saying what the arm proves and why the injection is needed, `require` for every 
      rather than on a host;
    - on `yaml.safe_load` of `ANSIBLE / "roles/live_vm_host/tasks/main.yml"`, that the task whose
      `["ansible.builtin.import_role"]["tasks_from"] == "container_runtime.yml"` carries
-     `vars["local_worker_host_operator_user"] == "{{ github_runner_user }}"` and
-     `vars["local_worker_host_engine_declared"] is True`. That call site is the only place the
+     `vars["local_worker_host_operator_user"] == "{{ github_runner_user }}"`. That call site is the
+     only place the
      operator variable is rebound, and `import_role` with `tasks_from` does not run `preflight.yml`,
      so a lost `vars` key would fall back to the role default of `""` rather than to a refusal.
 
-6. `container_daemon_order()` — mirror the existing `container_runtime_order` exactly: collect
+5. `container_daemon_order()` — mirror the existing `container_runtime_order` exactly: collect
    `listed.stdout.index(name)` for `("Install the Tumbleweed compose plugin for the on-box stack and
-   testcontainers", DAEMON_PROBE, DAEMON_ASSERT, DAEMON_ENABLE, DAEMON_GRANT)`, `require` each name
-   is present, and `require(positions == sorted(positions))`.
+   testcontainers", DAEMON_PROBE, DAEMON_ENABLE, DAEMON_GRANT)`, `require` each name is present, and
+   `require(positions == sorted(positions))`.
 
-7. Run `just lint`, `just type`, then `just test-ansible`. Expect all three to exit 0 and
-   `test-ansible` to print the four new `ok container daemon:` lines. That recipe deliberately
+6. Run `just lint`, `just type`, then `just test-ansible`. Expect all three to exit 0 and
+   `test-ansible` to print the three new `ok container daemon:` lines. That recipe deliberately
    exercises negative paths, so `[ERROR]` and `failed:` strings in its output are expected; judge by
    the exit code.
 
 **Acceptance.** `just test-ansible` exits 0. Removing Task 1's `when:` from the grant task makes
-`container_daemon_gate` fail; removing the assert's `when:` makes `container_daemon_declared` fail;
-restoring each makes them pass.
+`container_daemon_gate` fail; restoring it makes it pass.
 
 ## Final verification — the real-host proof
 
-`just test-ansible` proves gating, the assert, the grant target, the call-site binding and ordering
-in check mode. It cannot prove the daemon starts, the socket is reachable without sudo, or that the
+`just test-ansible` proves gating, the grant target, the call-site binding and ordering in check
+mode. It cannot prove the daemon starts, the socket is reachable without sudo, or that the
 play converges, and AGENTS.md makes that proof the extender's job. Run it after Task 3 is green
 against the operator-supplied hosts, and report which arms ran. Never write a hostname into a
 committed file.
@@ -419,9 +388,8 @@ committed file.
    exercises the call-site rebinding and the replaced grant, so record `id -nG <runner account>`
    containing `docker` and `systemctl is-active docker.service` `active`. Expect the enable task
    `ok` on the first run.
-4. **Rocky — the skip arm.** Run the standalone role against a host with no engine package and
-   `local_worker_host_engine_declared` at its default (false there). Expect the assert to skip, both
-   mutating tasks to report `skipping`, and the play to succeed.
+4. **Rocky — the skip arm.** Run the standalone role against a host with no engine package. Expect
+   both mutating tasks to report `skipping` and the play to succeed.
 5. **Tumbleweed.** No host exists in the project's test-host set. Its three literals were verified
    from the `docker-29.7.2_ce-41.1` package in an `opensuse/tumbleweed` container image; the play
    itself ships unrun there. Report that as the residual rather than claiming the arm.

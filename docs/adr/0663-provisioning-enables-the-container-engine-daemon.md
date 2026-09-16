@@ -40,9 +40,8 @@ and settling it is that issue's stated purpose.
 ## Decision
 
 **We will enable and start `docker.service` from provisioning on any host where the packaged unit
-file exists, grant the engine's socket group to the role's single operator account, and fail the
-play where the role declared an engine for this host but the unit is absent. We will not rely on
-socket activation.**
+file exists, and grant the engine's socket group to the role's single operator account. We will not
+rely on socket activation.**
 
 Enabling the service is a superset of enabling the socket: `Requires=docker.socket` pulls the socket
 unit in, so this decision can never leave a host with the daemon enabled and its socket absent. The
@@ -54,18 +53,15 @@ That is the "provisioning reports success against a host that cannot run the sta
 reports, so a fix preserving it has not fixed the issue. Tumbleweed's packagers reached the same
 conclusion for the same reason, in the `BindsTo` comment quoted above.
 
-**The gate is unit presence, not distribution, and the two are deliberately different predicates.**
-`local_worker_host_engine_declared` — true on Fedora and openSUSE Tumbleweed, and set true by
-`live_vm_host` for the Debian runner — records whether *this repository* installed an engine for
-this host. The `stat` of `/usr/lib/systemd/system/docker.service` records whether the host *has*
-one. Where the role declared an engine and the unit is missing, something upstream of this task
-failed and the play stops with a message naming the probed path; a silent skip there would rebuild
-the defect this record removes. Where the role declared nothing and the unit is present anyway, the
-enable and the grant still run. That case is not hypothetical and it is not an accident:
-`docs/operating/providers/local-libvirt.md` tells Enterprise Linux and SLES operators — whose
-runtime this repository does not package — that one of the two remedies is Docker's own repository,
-and a `docker-ce` install puts its unit at exactly that path. Such a host gets a working runtime
-rather than a documented manual step, which is the outcome #2557 asks for.
+**The gate is unit presence, and nothing else.** The `stat` of
+`/usr/lib/systemd/system/docker.service` asks the only question these two tasks need answered: is
+there a daemon here to enable and a socket to grant. A host without that unit gets neither task and
+the play succeeds — `podman-docker`, Enterprise Linux and SLES with no engine installed. A host
+with it gets both, including one the role did not install: `docs/operating/providers/local-libvirt.md`
+tells Enterprise Linux and SLES operators — whose runtime this repository does not package — that
+one of the two remedies is Docker's own repository, and a `docker-ce` install puts its unit at
+exactly that path. Such a host gets a working runtime rather than a documented manual step, which is
+the outcome #2557 asks for. This repository still installs no engine there.
 
 The grant targets `local_worker_host_operator_user` and only that account. `live_vm_host` reaches
 the same tasks with its runner account substituted for that variable, which is the substitution
@@ -75,9 +71,13 @@ files.
 ## Consequences
 
 Provisioning now fails on a host whose engine cannot start, at the task that starts it, with
-systemd's own message, and on a host where a declared engine left no unit, at the assert, with the
-probed path. This is the intended trade: a longer play that stops at the cause, in place of a
-shorter play that succeeds and defers the symptom.
+systemd's own message. This is the intended trade: a longer play that stops at the cause, in place
+of a shorter play that succeeds and defers the symptom.
+
+The runner's socket-group grant, previously unconditional
+(`live_vm_host/tasks/main.yml:61-65`), becomes conditional on that same probe. Its apt install of
+`docker.io` is unconditional and Debian's package ships the unit, so the condition holds there; the
+proof is a real run of `deploy/ansible/playbooks/runner.yml`, not an in-play assertion.
 
 The Debian path stops depending on dpkg policy for its correctness. The enable is a no-op there
 (`docker.service` is already preset-enabled and running), so it costs one `ok` task per run and
@@ -131,11 +131,15 @@ side of that boundary.
   `docs/operating/providers/local-libvirt.md` directs Enterprise Linux and SLES operators to Docker's
   own repository, and a `docker-ce` install places `docker.service` at the probed path — so a
   distribution gate would leave exactly #2557's defect standing on a host that followed this
-  repository's own advice. The declared-engine assert recovers what the distribution gate was for:
-  it catches a declared engine whose unit never appeared.
-- **Skip silently when a declared engine left no unit.** judgment: it reproduces the failure this
-  record exists to remove — a green play against a host that cannot run the stack — and moves it
-  behind a predicate nothing reports on.
+  repository's own advice.
+- **Assert that a host this role installed an engine for now carries the unit.** verified: keyed to
+  distribution, that assert fails the play on a Fedora or Tumbleweed host running `podman-docker` —
+  `packages_redhat.yml:31-33` and `packages_suse.yml:23-25` skip the engine install when
+  `/usr/bin/docker` already exists, and `dnf repoquery -l podman-docker` (Rocky 10.2) lists
+  `/usr/bin/docker` and man pages with no systemd unit. That is the podman route
+  `defaults/main.yml:103-105` calls "the podman route this project's own setup hint recommends", so
+  the assert would break the configuration the repository advises. Keyed to the install register
+  instead, it guards a state the `dnf`/`zypper` task would already have failed on.
 - **Refuse with an actionable message instead of performing the steps.** verified: #2557's
   "Expected" admits this branch, but `AGENTS.md` ("Provisioning parity is the extender's job")
   requires the role to own a host dependency it introduced, and the engine packages were added to
