@@ -75,8 +75,12 @@ esac
 banner "preflight (${PREFLIGHT})"
 if ! "${repo_root}/scripts/operations/check-local-libvirt.sh"; then
   if [[ "$PREFLIGHT" == "required" ]]; then
-    echo "ERROR: the local-libvirt preflight FAILED and ONBOARD_PREFLIGHT=required, so this run" >&2
-    echo "       stops here, before migrate. The FAIL entries above are the reason — fix those." >&2
+    # "its output above", not "the FAIL entries above": check-local-libvirt.sh also exits 2 on a
+    # mistyped KDIVE_PREFLIGHT_KDUMP, and the shell returns 126/127 when it is missing or not
+    # executable — none of which print a FAIL entry. Naming a cause this branch cannot know is
+    # the same defect #2568 is about.
+    echo "ERROR: the local-libvirt preflight did not pass and ONBOARD_PREFLIGHT=required, so this" >&2
+    echo "       run stops here, before migrate. Its output above is the reason — fix that." >&2
     echo "       To fund the project without a provisionable provider, re-run with" >&2
     echo "       ONBOARD_PREFLIGHT=advisory (the default)." >&2
     exit 1
