@@ -51,7 +51,8 @@ The second half is not decoration. `mint-system.sh:30` reads
 substitution in an argument list does not fire errexit — so a `required` stop would reach
 `mint-system.sh:31` and terminate with `die "onboard.sh did not mint a token"`, naming a cause that
 never occurred. The caller therefore captures `onboard.sh` into a variable first, the shape
-`.github/workflows/live.yml:549` already uses on this same script, and dies naming the preflight.
+`.github/workflows/live.yml:549` already uses on this same script, re-emits that capture, and dies
+pointing at it rather than naming a cause `||` cannot tell apart from a `migrate` failure.
 
 ## Consequences
 

@@ -13,8 +13,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT = _ROOT / "scripts" / "live-vm" / "mint-system.sh"
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "live-vm" / "mint-system.sh"
 
 
 def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -63,7 +62,7 @@ def _mint_tree(tmp_path: Path) -> tuple[Path, Path]:
     live_vm.mkdir(parents=True)
     (tmp_path / "scripts" / "live-stack").mkdir()
     for name in ("mint-system.sh", "lib.sh"):
-        (live_vm / name).write_text((_ROOT / "scripts" / "live-vm" / name).read_text())
+        (live_vm / name).write_text((_SCRIPT.parent / name).read_text())
     # Staging would SUCCEED if the gate were skipped, so reaching it is observable rather than
     # masked by a later failure — without this a test passes on the staging die instead.
     provider_root = tmp_path / "provider-root"
