@@ -72,8 +72,18 @@ class _Conn(Protocol):
 type _Connect = Callable[[], _Conn]
 
 
-def _config_error(message: str) -> CategorizedError:
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR)
+# The two conditions `recorded_ssh_endpoint` must keep apart (#2502, ADR-0658). Only
+# _REASON_NO_FORWARD is an absent forward; a missing domain is a different fault with a different
+# fix, so it propagates instead of collapsing to None. Both values are client-facing: the
+# no-forward one reaches a caller through the drgn-live `debug.attach` path, which never swallowed
+# these raise sites.
+_REASON_NO_DOMAIN = "system_domain_not_found"
+_REASON_NO_FORWARD = "ssh_not_provisioned"
+
+
+def _config_error(message: str, *, reason: str | None = None) -> CategorizedError:
+    details = {"reason": reason} if reason is not None else {}
+    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=details)
 
 
 def _is_loopback_literal(host: str) -> bool:
@@ -186,16 +196,25 @@ class LocalLibvirtConnect:
     def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
         """Return the recorded loopback SSH ``(host, port)``, or ``None`` if there is no forward.
 
-        Reuses the drgn-live SSH endpoint resolver; a `CONFIGURATION_ERROR` (no domain, or no
-        recorded SSH forward) maps to ``None``. Local-libvirt now renders the forward on every
-        domain (ADR-0281), so a ready local System resolves an endpoint; ``None`` means the
-        provider exposes no loopback SSH forward (a domain defined before that change). Any other
-        libvirt/parse fault (`INFRASTRUCTURE_FAILURE`) propagates (ADR-0271).
+        ``None`` means exactly one thing: the domain was read and records no loopback SSH forward
+        (ADR-0298, narrowed by ADR-0658). Local-libvirt renders the forward on every domain
+        (ADR-0281), so ``None`` means a domain defined before that change.
+
+        A System with no libvirt domain on this connection is a different fault with a different
+        fix, so its `CONFIGURATION_ERROR` propagates carrying ``reason=system_domain_not_found``
+        rather than collapsing here — that collapse is what misdiagnosed #2480. Any other fault
+        propagates too (ADR-0271).
         """
         try:
             return self._resolve_ssh_endpoint(system)
         except CategorizedError as exc:
-            if exc.category is ErrorCategory.CONFIGURATION_ERROR:
+            # Both conjuncts are load-bearing. Dropping the category would report any fault
+            # carrying this reason string as an absent SSH forward — wider than ADR-0658 and
+            # the port docstring state.
+            if (
+                exc.category is ErrorCategory.CONFIGURATION_ERROR
+                and exc.details.get("reason") == _REASON_NO_FORWARD
+            ):
                 return None
             raise
 
@@ -293,8 +312,10 @@ def _resolve_ssh_endpoint_via(connect: _Connect) -> _ResolveEndpoint:
         except libvirt.libvirtError as exc:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
                 raise _config_error(
-                    f"System {domain_name!r} has no running libvirt domain to open a drgn-live "
-                    "SSH transport to"
+                    f"System {domain_name!r} has no libvirt domain on this connection; check "
+                    "that the System is running and that this process and the worker that "
+                    "provisioned it read the same libvirt endpoint",
+                    reason=_REASON_NO_DOMAIN,
                 ) from exc
             raise CategorizedError(
                 "libvirt error reading the drgn-live SSH domain XML",
@@ -327,7 +348,8 @@ def _resolved_ssh_port(xml: str, domain_name: str) -> int:
     if port is None:
         raise _config_error(
             f"System {domain_name!r} has no recorded loopback SSH forward for drgn-live; "
-            "reprovision to render one (the forward is rendered on every domain, ADR-0281)"
+            "reprovision to render one (the forward is rendered on every domain, ADR-0281)",
+            reason=_REASON_NO_FORWARD,
         )
     return port
 

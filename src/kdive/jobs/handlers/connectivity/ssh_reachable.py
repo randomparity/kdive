@@ -204,6 +204,10 @@ async def check_ssh_reachable_handler(
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when the System is
             no longer ready, or ``reason="ssh_not_provisioned"`` when it has no loopback forward.
+            The provider's own ``reason="system_domain_not_found"`` propagates unchanged when the
+            System has no libvirt domain on the worker's connection — a different fault with a
+            different fix (ADR-0658). The worker prefixes detail keys, so a client reads these as
+            ``failure_detail_reason``.
     """
     payload = load_payload(job, CheckSshReachablePayload)
     system_id = UUID(payload.system_id)

@@ -81,6 +81,32 @@ local_worker_host_packages_redhat:
   - elfutils-devel
   - libkdumpfile-devel
 
+# Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
+# testcontainers gate, split into engine and compose halves because they carry different gates.
+# Both stay out of the family list above: that list installs on every RedHat-family host, and
+# Enterprise Linux packages no engine in baseos, appstream, extras or CRB, so naming one there
+# would fail dnf — the defect these declarations exist to avoid, not repeat.
+#
+# The compose plugin is what provides the `docker compose` subcommand stack-services.sh invokes;
+# the engine does not carry it. Fedora's docker-compose requires `(docker-cli or podman-docker)`,
+# so it installs over whichever provider the host has and needs no engine gate — but on a host
+# with neither, dnf satisfies that dependency by pulling docker-cli, which owns /usr/bin/docker.
+# That is why the task file probes and installs the engine BEFORE the plugin.
+#
+# Declaring the packages is not the whole runtime. Fedora's RPM leaves docker.service disabled and
+# adds no account to the docker group, so `systemctl enable --now docker` and group membership
+# remain operator steps this role does not take. (live_vm_host adds the group for the self-hosted
+# runner and relies on Debian's install-time daemon start, which the RPM families do not have.)
+local_worker_host_compose_packages_fedora:
+  - docker-compose
+
+# Engine for a host that has no /usr/bin/docker provider yet. podman-docker declares
+# `Conflicts: moby-engine` and docker-cli declares `Conflicts: podman-docker`, so installing the
+# engine over the podman route this project's own setup hint recommends would abort the dnf
+# transaction rather than converge. A host with a provider already keeps the one it chose.
+local_worker_host_engine_packages_fedora:
+  - moby-engine
+
 # openSUSE Tumbleweed worker debug/build packages.
 local_worker_host_packages_suse:
   - bubblewrap
@@ -103,3 +129,16 @@ local_worker_host_packages_suse:
   - libelf-devel
   - libdw-devel
   - libkdumpfile-devel
+
+# The Tumbleweed counterparts, kept out of the list above for the same reason: that list also
+# installs on SLES, which preflight.yml admits and which ships Docker only in the Containers
+# Module rather than the base product. Tumbleweed's docker-compose is Compose V2, installed as the
+# `docker compose` CLI plugin, and requires `(docker or podman)` so it needs no engine gate — but
+# on a host with neither, zypper satisfies that dependency by pulling the package that owns
+# /usr/bin/docker. That is why the task file probes and installs the engine BEFORE the plugin.
+# The same daemon-enable and socket-access caveat applies.
+local_worker_host_compose_packages_tumbleweed:
+  - docker-compose
+
+local_worker_host_engine_packages_tumbleweed:
+  - docker
