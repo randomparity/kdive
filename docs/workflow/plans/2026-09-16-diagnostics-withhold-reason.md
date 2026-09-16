@@ -8,24 +8,26 @@ make `operator_recovery` and the wedged-slot recovery procedure resolve in shipp
 slots, acquires bounded systemd properties and journal text per slot, redacts it, and appends the
 result to a `_DiagnosticCapture` enforcing the aggregate emission budget. Four places in that walk
 give up on a slot, each recording the slot and nothing else. This change adds a closed
-`WithholdReason` enum, threads it through the private `_UnsafeDiagnosticText` exception, and
-funnels all four sites through one `_DiagnosticCapture.withhold` method that emits the marker and
-builds the `SlotResult` together. Two operator documents then define the `RetryAction` vocabulary
-and the recovery procedure.
+`WithholdReason` enum, threads it through the private `_UnsafeDiagnosticText` exception, splits
+the deterministic `StateConflict` preconditions out of the generic `except` arm, and funnels all
+four sites through one `_DiagnosticCapture.withhold` method that emits the marker and builds the
+`SlotResult` together. Two operator documents then define the `RetryAction` vocabulary and the
+recovery procedure.
 
 **Tech stack.** Python 3.14, `uv`, pydantic v2, pytest. Markdown under `docs/` and `deploy/`.
 
 Design: [`docs/workflow/specs/2026-09-16-diagnostics-withhold-reason-design.md`](../specs/2026-09-16-diagnostics-withhold-reason-design.md).
 
-Expected implementation size: 240–320 changed lines (M) — from the file map below: about 60 lines
-in the diagnostics module, about 150 in its tests (five new cases, six existing assertions
-updated), about 40 in `deploy/systemd/README.md`, about 60 in the runbook.
+Expected implementation size: 250–330 changed lines (M) — from the file map below: about 70 lines
+in the diagnostics module, about 140 in its tests (four new cases, eight existing cases updated),
+about 45 in `deploy/systemd/README.md`, about 65 in the runbook.
 
 ## Global Constraints
 
 - **No schema change.** `Operation`, `LifecycleRequest`, `LifecycleResponse`, and `SlotResult` are
   untouched; `lifecycle_protocol_identity()` stays byte-identical to its value at base `e363c265`,
-  or `scripts/live-stack/worker-lifecycle.sh` fails closed on every provisioned host.
+  or `scripts/live-stack/worker-lifecycle.sh` fails closed on every provisioned host. Populating
+  the existing `SlotResult.phase` field is not a schema change.
 - **Closed vocabulary.** Every reason value is a literal member of `WithholdReason`; none is
   derived from an exception string, a captured value, or any part of the withheld report.
 - **Bounds do not move.** 320 KiB per-slot and 1.25 MiB aggregate acquisition; 256 KiB per-slot
@@ -41,27 +43,29 @@ updated), about 40 in `deploy/systemd/README.md`, about 60 in the runbook.
 
 | Path | Now | After |
 |---|---|---|
-| `src/kdive/processes/lifecycle/systemd/systemd_diagnostics.py` | four anonymous withhold sites | owns `WithholdReason` and one `withhold` funnel |
-| `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py` | three withhold cases asserting a slot-only marker | one case per reason plus the leak and suppression proofs |
+| `src/kdive/processes/lifecycle/systemd/systemd_diagnostics.py` | four anonymous withhold sites; `SlotResult.phase` left null | owns `WithholdReason`, one `withhold` funnel, and a `StateConflict` arm; populates `phase` |
+| `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py` | eight diagnostics cases the change touches | each reason covered, plus the leak and suppression proofs |
 | `deploy/systemd/README.md` | installs the fixed live-worker contract | also defines the six `RetryAction` values |
 | `docs/operating/runbooks/live-stack.md` | bring-up, budgets, teardown | also the wedged-slot recovery procedure |
 
 No caller migration and no obsolete path: `WithholdReason` is new surface inside the module that
 already owns withholding, and the only removal is the now-unreachable `code` keyword on the
-module-private `_result`. `systemd_worker_contract.py`, `systemd_worker_lifecycle.py`, and
-`scripts/live-stack/worker-lifecycle.sh` are read, not changed.
+module-private `_result`. `systemd_worker_contract.py`, `systemd_worker_lifecycle.py`,
+`systemd_worker_control.py`, and `scripts/live-stack/worker-lifecycle.sh` are read, not changed.
 
 ## Task 1 — the reason vocabulary and the four withhold sites
 
 Modifies `src/kdive/processes/lifecycle/systemd/systemd_diagnostics.py`; tests in
-`tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`.
+`tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py` (`PYTEST_FILE` below).
 
 **Interfaces.** Consumes `SlotPhase` and `SlotResult` from
-`kdive.processes.lifecycle.systemd.systemd_worker_contract`. Provides:
+`kdive.processes.lifecycle.systemd.systemd_worker_contract`, and `StateConflict`, already
+imported from `...systemd_worker_state`. Provides:
 
 ```text
 class WithholdReason(StrEnum)
     STATE_UNREADABLE = "state_unreadable"
+    SLOT_UNUSABLE = "slot_unusable"
     ACQUISITION_FAILED = "acquisition_failed"
     REDACTION_REFUSED = "redaction_refused"
     PEER_REDACTION_REFUSED = "peer_redaction_refused"
@@ -70,58 +74,64 @@ class WithholdReason(StrEnum)
 _DiagnosticCapture.withhold(
     self, slot: int, unit: str, reason: WithholdReason, *, phase: SlotPhase | None = None
 ) -> SlotResult
+    # adds slot to withheld_slots; appends the marker, or "" when the marker contains a value
+    # in self.forbidden_values; returns SlotResult(slot, unit, phase=phase,
+    # code="diagnostics_withheld", message=f"withheld: {reason.value}")
 
 _UnsafeDiagnosticText.__init__(
     self, forbidden: tuple[str, ...], *, reason: WithholdReason,
     used: int | None = None, aggregate_truncated: bool = False
 ) -> None
 
-_result(state: SlotState) -> SlotResult   # the `code` keyword is removed
+_result(state: SlotState) -> SlotResult
+    # SlotResult(slot=state.slot, unit=state.unit, phase=state.phase); the `code` keyword and the
+    # `message=state.phase.value` duplicate both go, matching systemd_worker_lifecycle._result
+
+_WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}: {reason}]\n"
 ```
 
-Tasks 2 and 3 rely on the five reason strings above as prose, nothing more.
+Tasks 2 and 3 rely on the six reason strings above as prose, nothing more.
 
 ### Verification inventory
 
-All focused commands below run in the worktree root. `PYTEST_FILE` stands for
-`tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`.
-
-- **Each withhold cause yields its own reason on the `SlotResult` message and in the emitted
-  marker.** Mode: `focused-test`. Observable: `response.slots[i].message` and
-  `response.diagnostics` after `SystemdWorkerLifecycle.diagnostics`. Cases
-  `test_diagnostics_names_state_unreadable_reason`,
-  `test_diagnostics_names_acquisition_failed_reason`,
-  `test_diagnostics_names_redaction_refused_reason`,
-  `test_diagnostics_names_peer_redaction_refused_reason`, and
-  `test_diagnostics_names_internal_error_reason` in `PYTEST_FILE`. Expected red: `AssertionError`
-  comparing `'withheld'` or a bare phase value against `'withheld: <reason>; phase=started'`.
-  Green: `uv run python -m pytest PYTEST_FILE -k "names_ and reason" -q`.
-- **No reason carries report-derived text.** Mode: `focused-test`. Case
-  `test_diagnostics_reason_carries_no_withheld_material` in `PYTEST_FILE`: a redaction source and
-  a journal body both holding the sentinel `LEAK-SENTINEL`, asserting it is absent from
+- **Each withhold cause yields its own reason on the `SlotResult` and in the emitted marker.**
+  Mode: `focused-test`. Observable: `response.slots[i].message`, `response.slots[i].phase`, and
+  `response.diagnostics` after `SystemdWorkerLifecycle.diagnostics`. New cases
+  `test_diagnostics_names_acquisition_failed_reason` and
+  `test_diagnostics_names_peer_redaction_refused_reason`; the other four causes are asserted in
+  the existing cases step 13 updates. Expected red: `AssertionError` comparing `'withheld'` or a
+  bare phase value against `'withheld: <reason>'`. Green:
+  `uv run python -m pytest PYTEST_FILE -k "diagnostics and reason" -q`.
+- **No reason carries report-derived text.** Mode: `focused-test`. New case
+  `test_diagnostics_reason_carries_no_withheld_material`: a redaction source and a journal body
+  both holding the sentinel `LEAK-SENTINEL`, asserting it is absent from
   `response.model_dump_json()`. Expected red: the case does not exist yet. Green:
   `uv run python -m pytest PYTEST_FILE -k reason_carries_no_withheld_material -q`.
 - **The marker is suppressed when it collides with a known forbidden value.** Mode:
-  `focused-test`. Case `test_diagnostics_withheld_marker_respects_known_forbidden_values` in
-  `PYTEST_FILE`: redaction source `"withheld"`, asserting `response.diagnostics == ""` while
-  `response.slots[0].message` still names the reason. Expected red: `AssertionError` on the
-  message, which is `'started'` today. Green:
+  `focused-test`. New case `test_diagnostics_withheld_marker_respects_known_forbidden_values`:
+  a single-slot fleet with `runtime.journal_failure = SystemdUnavailable("journal unavailable")`
+  and `redaction_sources={1: ("withheld",)}`, so the `acquisition_failed` marker collides.
+  Asserts `response.diagnostics == ""` and
+  `response.slots[0].message == "withheld: acquisition_failed"`. Expected red: today the emitted
+  text is `""` but the message is `'started'`, so the message assertion fails. Green:
   `uv run python -m pytest PYTEST_FILE -k withheld_marker_respects -q`.
-- **`lifecycle_protocol_identity()` does not move.** Mode: `focused-test`. The existing pin in
-  `tests/processes/lifecycle/systemd/test_systemd_worker_contract.py` must stay green:
-  `uv run python -m pytest tests/processes/lifecycle/systemd/test_systemd_worker_contract.py -q`.
+- **`lifecycle_protocol_identity()` does not move.** Mode: `focused-test`. Not the existing
+  contract test — it asserts determinism and shape, and its own docstring says an inequality
+  against a stale hash is not a guard. Compute and compare instead (step 15).
 
 ### Steps
 
 1. Read `src/kdive/processes/lifecycle/systemd/systemd_diagnostics.py` end to end. The four
    withhold sites are in `_capture_diagnostics` and `_capture_diagnostic_slot`.
 
-2. Write the seven cases from the verification inventory into
-   `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`, beside the existing
-   `test_diagnostics_withholds_*` group, using the module's `_state`, `_fleet`, `_coordinator`,
-   `_deadline`, and `_run` helpers. Reach each cause the way the existing cases already do:
+2. Write the three new cases from the verification inventory into `PYTEST_FILE`, beside the
+   existing `test_diagnostics_withholds_*` group, using the module's `_state`, `_fleet`,
+   `_coordinator`, `_deadline`, and `_run` helpers. Reach each cause the way the existing cases
+   already do:
 
    - `state_unreadable`: `stores[0].load_failure = ValueError("state path and credential detail")`.
+   - `slot_unusable`: `redaction_sources={1: ("s" * 4097,)}`, so `_validated_redaction_values`
+     raises `StateConflict` before `_diagnose_slot`'s own `try`.
    - `acquisition_failed`: `runtime.journal_failure = SystemdUnavailable("journal unavailable")`
      on a single-slot fleet.
    - `redaction_refused`: a journal body of `"x" * (320 * 1024)` with
@@ -130,41 +140,24 @@ All focused commands below run in the worktree root. `PYTEST_FILE` stands for
    - `peer_redaction_refused`: a two-slot fleet where slot 1 registers a value that also appears
      in slot 2's journal body, so slot 2's report is clean against its own forbidden set and
      refused against the accumulated one.
-   - `internal_error`: a `load_redaction_values` callable raising `PermissionError`, which escapes
-     `_diagnose_slot` outside its own `try`.
+   - `internal_error`: a `load_redaction_values` callable raising `PermissionError`, which is not
+     a `StateConflict` and so falls through to the generic arm.
 
-3. Run `uv run python -m pytest tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py -k "names_ and reason" -q`.
-   Expect failures: the messages are still `'withheld'` or a bare phase value.
+3. Run `uv run python -m pytest PYTEST_FILE -k "diagnostics and reason" -q`. Expect failures: the
+   messages are still `'withheld'` or a bare phase value.
 
 4. Add `from enum import StrEnum` to the imports and `SlotPhase` to the existing
-   `systemd_worker_contract` import, then add the enum after the module constants:
+   `systemd_worker_contract` import. Add `WithholdReason` after the module constants with exactly
+   the six members in the Interfaces block, and a class docstring stating that every member is a
+   literal — no value is derived from an exception, a captured value, or the withheld report,
+   because two of these causes fire precisely because that material held a forbidden value.
 
-   ```python
-   class WithholdReason(StrEnum):
-       """The closed vocabulary naming why one slot's diagnostics were withheld.
+5. Change `_WITHHELD_TEMPLATE` to the value in the Interfaces block, and give
+   `_UnsafeDiagnosticText` the required keyword `reason: WithholdReason` after `*`, stored as
+   `self.reason` beside the existing three attributes.
 
-       Every member is a literal: no value is derived from an exception, a captured value, or
-       the withheld report, because two of these causes fire precisely because that material
-       held a redaction-forbidden value.
-       """
-
-       STATE_UNREADABLE = "state_unreadable"
-       ACQUISITION_FAILED = "acquisition_failed"
-       REDACTION_REFUSED = "redaction_refused"
-       PEER_REDACTION_REFUSED = "peer_redaction_refused"
-       INTERNAL_ERROR = "internal_error"
-   ```
-
-5. Change the template to carry the reason:
-
-   ```python
-   _WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}: {reason}]\n"
-   ```
-
-6. Give `_UnsafeDiagnosticText` a required keyword `reason: WithholdReason` in its signature after
-   `*`, and store it as `self.reason = reason` beside the existing three attributes.
-
-7. Add the funnel to `_DiagnosticCapture`, after `append`:
+6. Add `withhold` to `_DiagnosticCapture`, directly after `append`, with the signature and
+   behaviour in the Interfaces block:
 
    ```python
    def withhold(
@@ -174,180 +167,205 @@ All focused commands below run in the worktree root. `PYTEST_FILE` stands for
        self.withheld_slots.add(slot)
        marker = _WITHHELD_TEMPLATE.format(slot=slot, reason=reason.value)
        self.append("" if _contains_forbidden(marker, tuple(self.forbidden_values)) else marker)
-       detail = "" if phase is None else f"; phase={phase.value}"
        return SlotResult(
            slot=slot,
            unit=unit,
+           phase=phase,
            code="diagnostics_withheld",
-           message=f"withheld: {reason.value}{detail}",
+           message=f"withheld: {reason.value}",
        )
    ```
 
-8. Replace the unsafe-state branch in `_capture_diagnostics` with one call:
+7. In `_capture_diagnostics`, replace the unsafe-state branch's three statements
+   (`withheld_slots.add`, `append(...)`, `results.append(SlotResult(...))`) with
+   `capture.results.append(capture.withhold(store.slot, store.unit,
+   WithholdReason.STATE_UNREADABLE))`. That site has no loaded state, so it passes no `phase`.
 
-   ```python
-   if unsafe_state:
-       capture.results.append(
-           capture.withhold(store.slot, store.unit, WithholdReason.STATE_UNREADABLE)
-       )
-   ```
+8. In `_capture_diagnostic_slot`, rewrite the `except _UnsafeDiagnosticText` arm to keep its
+   `used` refund and `forbidden_values` update, then set `capture.aggregate_truncated =
+   exc.aggregate_truncated` **before** returning `capture.withhold(store.slot, store.unit,
+   exc.reason, phase=state.phase)`. Moving the assignment ahead of the emission is
+   behaviour-preserving: `append` reads only `emitted`.
 
-9. Replace the two `except` blocks in `_capture_diagnostic_slot`. Moving `aggregate_truncated`
-   ahead of the emission is behaviour-preserving, because `append` reads only `emitted`:
+9. Insert a new `except StateConflict as exc:` arm between it and the generic one. It is reached
+   only by `_require_diagnostic_budget` and `_validated_redaction_values`, which run before
+   `_diagnose_slot`'s own `try`; a `StateConflict` raised inside that `try` is converted to
+   `_UnsafeDiagnosticText` by `self._acquisition_failures`, which lists it. Log at `warning` with
+   the existing `slot=%s cause=%s` shape and `type(exc).__name__`, refund the full reservation
+   with `capture.acquired -= reservation` as the generic arm does, and return
+   `capture.withhold(store.slot, store.unit, WithholdReason.SLOT_UNUSABLE, phase=state.phase)`.
 
-   ```python
-   except _UnsafeDiagnosticText as exc:
-       if exc.used is not None:
-           capture.acquired -= reservation - exc.used
-       capture.forbidden_values.update(exc.forbidden)
-       capture.aggregate_truncated = exc.aggregate_truncated
-       return capture.withhold(store.slot, store.unit, exc.reason, phase=state.phase)
-   except Exception as exc:
-       _log.error(
-           "unexpected systemd diagnostic capture failure slot=%s cause=%s",
-           store.slot,
-           type(exc).__name__,
-       )
-       capture.acquired -= reservation
-       return capture.withhold(
-           store.slot, store.unit, WithholdReason.INTERNAL_ERROR, phase=state.phase
-       )
-   ```
+10. Leave the generic `except Exception` arm's log and full refund as they are, and replace its
+    two-statement withhold with
+    `capture.withhold(store.slot, store.unit, WithholdReason.INTERNAL_ERROR, phase=state.phase)`.
 
-10. Replace the tail of `_capture_diagnostic_slot`:
+11. Rewrite the tail of `_capture_diagnostic_slot`: keep the `acquired` refund and
+    `forbidden_values.update(forbidden)`, hoist `capture.aggregate_truncated =
+    aggregate_truncated` above the forbidden check, and where `_contains_forbidden(report,
+    tuple(capture.forbidden_values))` holds, return `capture.withhold(store.slot, store.unit,
+    WithholdReason.PEER_REDACTION_REFUSED, phase=state.phase)` instead of blanking `report`.
+    Otherwise `capture.append(report)` and `return _result(state)`. The trailing `code = ... if
+    store.slot in capture.withheld_slots` line goes with it.
 
-    ```python
-    capture.acquired -= reservation - used
-    capture.forbidden_values.update(forbidden)
-    capture.aggregate_truncated = aggregate_truncated
-    if _contains_forbidden(report, tuple(capture.forbidden_values)):
-        return capture.withhold(
-            store.slot, store.unit, WithholdReason.PEER_REDACTION_REFUSED, phase=state.phase
-        )
-    capture.append(report)
-    return _result(state)
-    ```
-
-11. Name the reason at each raise. Both `except` arms in `_diagnose_slot` pass
+12. Name the reason at each raise. Both `except` arms in `_diagnose_slot` pass
     `reason=WithholdReason.ACQUISITION_FAILED` to `_UnsafeDiagnosticText(secret_values, ...)`; the
     raise in `_diagnose_trusted_slot` passes `reason=WithholdReason.REDACTION_REFUSED` alongside
     its existing `used` and `aggregate_truncated` keywords.
 
-12. Drop the now-unreachable keyword from the module-private helper:
-
-    ```python
-    def _result(state: SlotState) -> SlotResult:
-        return SlotResult(slot=state.slot, unit=state.unit, message=state.phase.value)
-    ```
-
-13. Update the six existing assertions the new markers change, in `PYTEST_FILE`:
+13. Reshape the module-private `_result` to the Interfaces block's form, and update the eight
+    existing cases in `PYTEST_FILE` the change touches:
 
     | Case | New expectation |
     |---|---|
     | `test_diagnostics_reserves_aggregate_acquisition_for_failed_journals` | the four reached slots each emit `[diagnostics withheld for slot N: acquisition_failed]\n` ahead of `[aggregate diagnostics truncated]\n` |
     | `test_failed_journal_aggregate_marker_respects_known_forbidden_values` | the four withheld markers are emitted; only the aggregate marker is suppressed by the forbidden value `"aggregate"` |
-    | `test_diagnostics_withholds_unsafe_source_without_reading_its_journal` | `[diagnostics withheld for slot 1: internal_error]\n` |
-    | `test_diagnostics_withholds_unsafe_state_without_exposing_error_detail` | `[diagnostics withheld for slot 1: state_unreadable]\n` |
-    | `test_diagnostics_withholds_oversized_redaction_value` | `[diagnostics withheld for slot 1: internal_error]\n` |
-    | `test_diagnostics_emits_no_fallback_when_truncation_text_collides` | the contract is that no acquired material is emitted, not that nothing is: the emitted text is `""` or exactly `[diagnostics withheld for slot 1: redaction_refused]\n`, the secret is absent from it, and `response.slots[0].message` names `redaction_refused` |
+    | `test_diagnostics_withholds_unsafe_source_without_reading_its_journal` | `[diagnostics withheld for slot 1: internal_error]\n`, message `withheld: internal_error`, `phase` is `SlotPhase.STARTED` |
+    | `test_diagnostics_withholds_unsafe_state_without_exposing_error_detail` | `[diagnostics withheld for slot 1: state_unreadable]\n`, message `withheld: state_unreadable`, `phase` is `None` |
+    | `test_diagnostics_withholds_oversized_redaction_value` | `[diagnostics withheld for slot 1: slot_unusable]\n`, message `withheld: slot_unusable` |
+    | `test_diagnostics_emits_no_fallback_when_truncation_text_collides` | parametrize the expected emission alongside the secret — `("diagnostics", "")` because the marker contains `"diagnostics"` and is suppressed, and `("truncated", "[diagnostics withheld for slot 1: redaction_refused]\n")` because it does not. Keep `secret not in response.diagnostics` and add `response.slots[0].message == "withheld: redaction_refused"` for both. No disjunction: each parameter has one determinate outcome |
+    | `test_diagnostics_emits_no_fallback_when_aggregate_marker_collides` | slot 4's site now emits `[diagnostics withheld for slot 4: redaction_refused]\n`, which holds no `"aggregate"` and so is not suppressed. Replace `== 3 * 256 * 1024` with `<= 1_048_576` plus the marker's presence; keep `"aggregate" not in response.model_dump_json()` |
+    | any case asserting a diagnostics slot `message` equal to a bare phase | `_result` no longer writes the phase into `message`; assert `slot.phase` instead |
 
-14. Run `uv run python -m pytest tests/processes/lifecycle/systemd/ -q`. Expect every case green,
-    the protocol-identity pin included. Then `just lint` and `just type`, expecting exit 0 each.
+14. Run `uv run python -m pytest tests/processes/lifecycle/systemd/ -q`. Expect every case green.
+    Then `just lint` and `just type`, expecting exit 0 each.
 
-15. Confirm the identity is unmoved. The contract module is not in this task's file map, so prove
-    that directly rather than by re-running the hash:
-    `git diff --stat origin/main...HEAD -- src/kdive/processes/lifecycle/systemd/systemd_worker_contract.py`.
-    Expect no output; the pinned case in step 14 is the second half of the proof.
+15. Prove the protocol identity did not move — a computed comparison, because no frozen-hash pin
+    exists and the repository deliberately rejected that shape:
+
+    ```bash
+    probe='from kdive.processes.lifecycle.systemd.systemd_worker_contract import lifecycle_protocol_identity as i; print(i())'
+    git -C . show e363c265:src/kdive/processes/lifecycle/systemd/systemd_worker_contract.py > /tmp/base_contract.py
+    diff /tmp/base_contract.py src/kdive/processes/lifecycle/systemd/systemd_worker_contract.py
+    uv run python -c "$probe"
+    ```
+
+    Expect `diff` to print nothing and exit 0, which makes the two computed identities equal by
+    construction; record the printed identity in the commit body.
 
 16. Stage, run `prek run`, re-add exactly the recorded staged paths, and commit
     `fix(lifecycle): name the cause of every diagnostics withholding`.
 
-**Acceptance.** Five distinct reasons, one per cause; every reason a literal enum member; the
-marker suppressed on a forbidden collision; `lifecycle_protocol_identity()` unchanged; lint, type,
-and the module's tests green.
+**Acceptance.** Six distinct reasons, one per cause; every reason a literal enum member; the
+marker suppressed on a forbidden collision; `SlotResult.phase` populated; the computed identity
+unchanged; lint, type, and the module's tests green.
 
 ## Task 2 — define the `RetryAction` vocabulary
 
 Modifies `deploy/systemd/README.md`.
 
-**Interfaces.** Consumes the five reason strings from Task 1 and the `RetryAction` literals in
+**Interfaces.** Consumes the six reason strings from Task 1 and the `RetryAction` literals in
 `src/kdive/processes/lifecycle/systemd/systemd_worker_contract.py`. Task 3 links to the
 `## Lifecycle retry actions` section this task adds.
 
 ### Verification inventory
 
 - **`deploy/systemd/README.md` defines all six `RetryAction` values.** Mode:
-  `task-test-not-applicable`. The changed surface is operator-readable prose with no executable
-  consumer; its machine-checkable properties are link targets and referenced repository paths,
-  which `docs-links`, `docs-paths`, `served-doc-links`, and `docs-check` already validate in
-  `just ci`. A test over the prose would pin wording, not behaviour.
+  `task-test-not-applicable`. Prose with no executable consumer. `docs-links` resolves a link's
+  file and discards its `#fragment` (`scripts/check-doc-links.sh`, `target="${target%%#*}"`), so
+  step 4 greps the heading that produces the anchor instead; `docs-paths` covers referenced
+  `docs/<path>` strings. `docs-check` is the tool-reference generator diff and `served-doc-links`
+  applies only to served docs, so neither touches this file. A test over the prose would pin
+  wording, not behaviour.
 
 ### Steps
 
-1. Read `deploy/systemd/README.md` and `_map_failure` in
-   `src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py`, which chooses five of the
-   six values. The sixth, `none`, comes from `_ok_response` and from a successful `diagnostics`
-   capture.
+1. Read `deploy/systemd/README.md`, `_map_failure` and `_invalid_start_response` in
+   `src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py`, and
+   `src/kdive/processes/lifecycle/systemd/systemd_worker_control.py`, which is the socket server
+   every `worker-lifecycle.sh` invocation goes through. `_map_failure` returns four of the six
+   values — `retry_same_operation`, `operator_recovery`, `restore_database`, `restore_systemd`.
+   `correct_request` comes from `_invalid_start_response` and from the control module's malformed
+   request response; `none` comes from `_ok_response` and from a successful `diagnostics` capture.
 
 2. Append a `## Lifecycle retry actions` section after `## Fixed live-worker lifecycle contract`.
    Introduce it as the `retry_action` field of every `scripts/live-stack/worker-lifecycle.sh`
    response, then give one table row per value with what it means and the action it asks for, each
-   grounded in the condition that produces it: `none` from a successful response;
-   `correct_request` from an invalid start request; `retry_same_operation` from a deadline or
-   rejected termination evidence; `restore_systemd` from `SystemdUnavailable`; `restore_database`
-   from an unavailable database authority; `operator_recovery` from every `conflict`, from an
-   unmapped internal error, and from a `diagnostics` capture that withheld a slot.
+   grounded in the condition that produces it:
+
+   - `none` — a successful response.
+   - `correct_request` — a start request missing `worker_count`/`settings`, or a request frame the
+     control module rejects as malformed.
+   - `retry_same_operation` — a deadline, rejected termination evidence, a `busy` refusal while
+     another lifecycle request holds the control lock, or a `diagnostics` operation that failed
+     before any slot was captured.
+   - `restore_systemd` — `SystemdUnavailable`: systemd could not answer for the retained unit.
+   - `restore_database` — the database authority is unavailable.
+   - `operator_recovery` — every `conflict` response, an unmapped internal error, and a
+     `diagnostics` capture that withheld at least one slot.
 
 3. Under the table, state that `operator_recovery` means no retry of the same request will clear
    the condition: the operator inspects `status` and `diagnostics`, then runs
-   `scripts/live-stack/worker-lifecycle.sh recover`. Link the procedure Task 3 adds at
+   `scripts/live-stack/worker-lifecycle.sh recover`. Add one clause noting that
+   `code=diagnostics_withheld` carries `operator_recovery` for a per-slot withholding but
+   `retry_same_operation` when the whole capture failed, so the retry action rather than the code
+   selects the response. Link the procedure Task 3 adds at
    `../../docs/operating/runbooks/live-stack.md#recovering-a-wedged-worker-slot`.
 
-4. Run `just docs-links` and `just docs-paths`, expecting exit 0 each. Stage, run `prek run`,
-   re-add exactly the recorded staged paths, and commit
+4. Run `just docs-links` and `just docs-paths`, expecting exit 0 each, and require a hit from
+   `rg -n '^## Lifecycle retry actions' deploy/systemd/README.md`. Stage, run `prek run`, re-add
+   exactly the recorded staged paths, and commit
    `docs(systemd): define the lifecycle retry actions`.
 
-**Acceptance.** All six values defined against the condition that emits them; `operator_recovery`
-resolves to a definition and to the recovery procedure; doc guards green.
+**Acceptance.** All six values defined against the condition that emits them, across both modules
+that emit them; `operator_recovery` resolves to a definition and to the recovery procedure; the
+anchor the runbook links exists; doc guards green.
 
 ## Task 3 — the wedged-slot recovery procedure
 
 Modifies `docs/operating/runbooks/live-stack.md`.
 
-**Interfaces.** Consumes the five reason strings from Task 1 and the `#lifecycle-retry-actions`
+**Interfaces.** Consumes the six reason strings from Task 1 and the `#lifecycle-retry-actions`
 anchor from Task 2. Nothing later depends on this task.
 
 ### Verification inventory
 
 - **The runbook carries a wedged-slot procedure matching the shipped `recover`.** Mode:
-  `task-test-not-applicable`. Same reason as Task 2: operator prose with no executable consumer,
-  whose links and referenced paths are covered by the four doc guards in `just ci`.
+  `task-test-not-applicable`. Same reasoning as Task 2: prose with no executable consumer, whose
+  file-level links `docs-links` resolves and whose anchor step 4 greps directly. This file is not
+  under `src/kdive/mcp/resources/_content/`, so it is not a served doc and needs no
+  `resources-docs-check` snapshot.
 
 ### Steps
 
 1. Read section 4 of `docs/operating/runbooks/live-stack.md`, `recover` and `_recover_slot` in
-   `src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py`, and the `recover`
-   paragraphs of `docs/adr/0657-a-successor-invocation-is-terminal-evidence.md`. Describe what the
-   code does now, not what it could do.
+   `src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py`, the `request` function in
+   `scripts/live-stack/worker-lifecycle.sh`, and the `recover` paragraphs of
+   `docs/adr/0657-a-successor-invocation-is-terminal-evidence.md`. Describe what the code does
+   now, not what it could do.
 
-2. Add a `### Recovering a wedged worker slot` subsection to section 4, after the paragraph
-   stating the request deadlines and diagnostic budgets, covering in order:
+2. Add a `### Recovering a wedged worker slot` subsection immediately **before** the existing
+   `### The app tier does not hot-reload — re-run `stack-services.sh` after editing source`
+   subsection, so the new heading opens at a heading boundary and section 4's flowing prose stays
+   in section 4. Cover, in order:
 
    - **The symptom.** `stack-services.sh` fails, or a lifecycle request returns
      `retry_action=operator_recovery` — most often `code=conflict` after a worker unit was
      restarted outside the lifecycle contract, leaving it `failed` with its `InvocationID`
-     retained so the next `start` is refused.
-   - **Read the cause first.** `scripts/live-stack/worker-lifecycle.sh diagnostics`, then the
-     per-slot `message`: a withheld slot reads `withheld: <reason>; phase=<phase>`, or
-     `withheld: state_unreadable` when no state could be loaded. Table the five reasons with
-     meaning and action — `state_unreadable`: slot files unreadable or malformed, check ownership
-     under `/var/lib/kdive/live-workers`; `acquisition_failed`: systemd or the journal did not
-     answer, check `systemctl status` and `journalctl` for the unit; `redaction_refused` and
-     `peer_redaction_refused`: the report held a value the redactor may not emit, read the unit's
-     journal on the host directly; `internal_error`: unexpected, the witness log names the
-     exception type.
-   - **Recover.** `scripts/live-stack/worker-lifecycle.sh recover`. Per slot it observes the unit
-     and refuses one whose cgroup still holds live processes, returning `code=conflict`,
+     retained so the next `start` is refused. Link the retry-action table at
+     `../../../deploy/systemd/README.md#lifecycle-retry-actions`.
+   - **Read the cause first.** The client prints one JSON line, so give a command rather than a
+     noun: `scripts/live-stack/worker-lifecycle.sh diagnostics | python3 -m json.tool`, noting
+     that the command exits 4 when a slot was withheld, so the pipe is what keeps the output
+     readable in a `set -e` shell. A withheld slot reads `"code": "diagnostics_withheld"` with
+     `"message": "withheld: <reason>"` and its `"phase"`. Table the six reasons with meaning and
+     action — `state_unreadable`: the slot's state file could not be read, check ownership under
+     `/var/lib/kdive/live-workers`; `slot_unusable`: the slot holds no usable diagnostic state
+     (no exact invocation, no safe budget, or unusable redaction sources), run `recover`, or check
+     the redaction sources under the same directory; `acquisition_failed`: systemd, the journal,
+     or the request deadline did not answer in time — check `systemctl status` and `journalctl`
+     for the unit, then re-run `diagnostics`; `redaction_refused` and `peer_redaction_refused`:
+     the report held a value the redactor may not emit, read the unit's journal on the host
+     directly; `internal_error`: unexpected — the witness log names the exception type.
+   - **A silent slot is truncation, not withholding.** One sentence: a slot whose result carries
+     no reason and whose text is absent after `[aggregate diagnostics truncated]` fell outside the
+     1.25 MiB acquisition or 1 MiB emission budget and was never captured; read that unit's
+     journal on the host directly.
+   - **Recover.** `scripts/live-stack/worker-lifecycle.sh recover`. Unlike `diagnostics`, this
+     operation first requires the installed lifecycle venv to match the checkout; if it prints
+     `installed lifecycle protocol does not match this checkout; reprovision the runner` or
+     `installed lifecycle protocol is unavailable; reprovision the runner`, reprovision the host
+     per this runbook's Prerequisites before retrying. Per slot it then observes the unit and
+     refuses one whose cgroup still holds live processes, returning `code=conflict`,
      `retry_action=operator_recovery`, and a per-slot `recovery_refused` — stop that work rather
      than forcing past it. For a slot proven dead it publishes terminal evidence derived from that
      observation, clears the on-disk slot facts, releases the `worker_incarnations` fence, and
@@ -361,16 +379,16 @@ anchor from Task 2. Nothing later depends on this task.
    State that the reason bytes are accounted inside the emission budgets given above, so those
    numbers are unchanged.
 
-3. Link the new subsection to the retry-action table at
-   `../../../deploy/systemd/README.md#lifecycle-retry-actions`.
-
-4. Run `just docs-links`, `just docs-paths`, and `just served-doc-links`, expecting exit 0 each.
-   Stage, run `prek run`, re-add exactly the recorded staged paths, and commit
+3. Run `just docs-links`, `just docs-paths`, and `just served-doc-links`, expecting exit 0 each,
+   and require a hit from
+   `rg -n '^### Recovering a wedged worker slot' docs/operating/runbooks/live-stack.md`. Stage,
+   run `prek run`, re-add exactly the recorded staged paths, and commit
    `docs(runbook): add the wedged worker slot recovery procedure`.
 
 **Acceptance.** An operator can go from an `operator_recovery` response to a running stack with
-only the shipped contract; every reason maps to an action; the residual cases are named as out of
-reach with their owning issue; doc guards green.
+only the shipped contract; every reason maps to an action; `recover`'s compatibility prerequisite
+and its refusal case are named; the residual cases are named as out of reach with their owning
+issue; doc guards green.
 
 ## Deferrals
 
