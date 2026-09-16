@@ -40,12 +40,14 @@ denial arms reach this branch and the answer differs by arm:
 - **The ADR-0623 authority-ownership fence**
   (`reason=authority_system_preactivation_mutation_fenced`), raised whenever
   `ordinary_mutation_is_fenced` holds — every `authority_system_ownership` state except
-  `activated`. Whether refusal is still intended for `torn-down`, where preactivation teardown
-  has already proved absence while the slot stays held, is a different record's question. It is
-  not settled here and is reported as a follow-up candidate.
+  `activated`. ADR-0623, not ADR-0596, governs it, so criterion 2 does not reach it and this
+  change does not review it. The new log line reports it the same way it reports the other arm.
 
-No ADR is written and no guard code changes: the charter permits a guard change only where the
-review finds refusal unintended, and the fence arm's verdict needs its own design.
+The guard reaching `_expire_one` at all is deliberate — commit `024000d44`, "close recovery
+review gaps", added it there, and the silent `return False` this change fixes was born in the
+same commit — even though ADR-0596's Decision text names only the project-facing release and
+`reclaim_under_lock`. No ADR is written and no guard code changes: the charter permits a guard
+change only where the review finds refusal unintended.
 
 Out of scope, with owners: live-stack test fixtures releasing without `try/finally` (#2520);
 redesigning the reap architecture (none — the four records above stand); metrics or alerting
@@ -106,6 +108,11 @@ untrusted caller reaches it. Designed for every deployment running the reconcile
   handler filters that run outside that guard cannot raise here either —
   `SecretRedactionFilter.filter` wraps `record.getMessage()` in its own `try`/`except` and
   `ContextFilter` only reads contextvars.
+
+- Neither arm's underlying hold is fixed here, only reported. Accepted: criterion 1 asks for
+  visibility and criterion 2 authorizes a guard change only on a finding that refusal is
+  unintended, which this review does not make for the arm ADR-0596 governs and does not reach
+  for the arm ADR-0623 governs.
 
 **Covered elsewhere.** Whether a stranded activation converges — ADR-0596 and
 `repair_external_boot_lane`. Live-stack fixture releases — #2520. A richer signal — out of batch.
