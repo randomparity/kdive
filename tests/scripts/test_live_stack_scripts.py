@@ -1005,6 +1005,299 @@ def test_a_symlink_at_the_contract_path_is_refused_not_downgraded(
     assert contract.exists()
 
 
+def _broken_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """Stage a contract whose metadata passes but whose content the allowlist refuses.
+
+    The ownership probe is answered by the same `stat` shim `_published_contract` installs, so
+    what fails here is the parser's two-URI allowlist -- the failure an operator actually meets
+    when /etc/kdive/live-worker-libvirt.env has drifted, rather than the tampered-metadata case
+    the tests above cover.
+    """
+    contract, staged = _published_contract(tmp_path)
+    contract.write_text("KDIVE_LIBVIRT_URI=qemu:///wrong\n", encoding="utf-8")
+    return contract, staged
+
+
+def test_a_libvirt_free_entry_point_survives_a_broken_contract(tmp_path: Path) -> None:
+    """ADR-0659: LIBVIRT_OPTIONAL downgrades the source-time abort to a recorded degraded state.
+
+    The endpoint is left UNSET rather than empty, because `virsh -c ''` connects to libvirt's
+    probed default and exits 0 -- the silent downgrade #2480 exists to prevent. Unset makes every
+    unguarded reader die under `set -u` instead.
+    """
+    contract, staged = _broken_contract(tmp_path)
+    staged["LIBVIRT_OPTIONAL"] = "1"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        'printf "%s|%s" "${KDIVE_LIBVIRT_URI-unset}" "${LIBVIRT_UNRESOLVED}"',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    endpoint, reason = result.stdout.split("|", 1)
+    assert endpoint == "unset"
+    assert str(contract) in reason
+
+
+def test_the_degraded_state_survives_a_second_source(tmp_path: Path) -> None:
+    """stack-status.sh sources lib.sh and env.sh, each calling resolve_libvirt_uri, so the second
+    call must neither clear the recorded reason nor repeat the diagnosis."""
+    _, staged = _broken_contract(tmp_path)
+    staged["LIBVIRT_OPTIONAL"] = "1"
+    result = _sourced(
+        ROOT / "scripts/live-stack/lib.sh",
+        f'set -euo pipefail\nsource "{ROOT}/scripts/live-stack/env.sh"\n'
+        'printf %s "${LIBVIRT_UNRESOLVED}"',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout, "the second source cleared the degraded reason"
+    assert result.stderr.count("failed validation") == 1, result.stderr
+
+
+def test_a_broken_contract_still_aborts_without_the_declaration(tmp_path: Path) -> None:
+    """The opt-out is off by default: an entry point that has not declared itself libvirt-free
+    keeps the #2480 fail-closed abort, endpoint and all."""
+    _, staged = _broken_contract(tmp_path)
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        'printf %s "${KDIVE_LIBVIRT_URI-unset}"',
+        staged,
+    )
+    assert result.returncode != 0
+    assert result.stdout != "qemu:///system"
+
+
+def test_an_inherited_degraded_record_does_not_suppress_resolution(tmp_path: Path) -> None:
+    """LIBVIRT_UNRESOLVED is the resolver's output, never its input.
+
+    `resolve_libvirt_uri`'s first statement short-circuits on it, so a value arriving from the
+    environment would leave KDIVE_LIBVIRT_URI unset on a host whose published contract is fine --
+    with no opt-out declared by anyone, and with stack-status.sh reporting that healthy host as
+    unresolved with a caller-chosen reason string.
+    """
+    _, staged = _published_contract(tmp_path)
+    staged["LIBVIRT_UNRESOLVED"] = "inherited reason"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        'printf "%s|%s" "${KDIVE_LIBVIRT_URI-unset}" "${LIBVIRT_UNRESOLVED}"',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{_PUBLISHED_URI}|"
+
+
+def test_repairing_the_endpoint_clears_the_degraded_record(tmp_path: Path) -> None:
+    """The record is the current state, not the first one.
+
+    ADR-0659 sends #2509's next guard into resolve_libvirt_uri's preset-endpoint branch, so a
+    caller supplying an endpoint after a degrade is the shape this function is about to grow. A
+    write-once record would leave require_libvirt_uri refusing an operation the shell can by then
+    perform, and the re-entry guard would skip the #2480 export that supplied value needs.
+    """
+    _, staged = _broken_contract(tmp_path)
+    staged["LIBVIRT_OPTIONAL"] = "1"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        f'KDIVE_LIBVIRT_URI="{_PUBLISHED_URI}"\n'
+        "resolve_libvirt_uri\n"
+        'require_libvirt_uri "reap kdive domains"\n'
+        'bash -c \'printf "%s|%s" "${KDIVE_LIBVIRT_URI-unset}" "${LIBVIRT_UNRESOLVED-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    # The endpoint reached a child because resolve_libvirt_uri exported it; the record did not,
+    # because it is this file's own state and never leaves the shell that computed it.
+    assert result.stdout == f"{_PUBLISHED_URI}|unset"
+
+
+def test_require_libvirt_uri_refuses_while_the_endpoint_is_unresolved(tmp_path: Path) -> None:
+    """A libvirt-free entry point still fails closed for the operations that need libvirt --
+    at the point of use rather than at source time, and naming which operation was refused."""
+    _, staged = _broken_contract(tmp_path)
+    staged["LIBVIRT_OPTIONAL"] = "1"
+    refused = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        'require_libvirt_uri "reap kdive domains"',
+        staged,
+    )
+    assert refused.returncode != 0
+    assert "reap kdive domains" in refused.stderr
+    _, resolved = _published_contract(tmp_path)
+    resolved["LIBVIRT_OPTIONAL"] = "1"
+    allowed = _sourced(
+        ROOT / "scripts/live-stack/env.sh", 'require_libvirt_uri "reap kdive domains"', resolved
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+
+def test_the_declaration_reaches_a_child_that_sources_lib_sh(tmp_path: Path) -> None:
+    """stack-down.sh spawns `worker-lifecycle.sh stop` before it stops anything, and that child
+    sources lib.sh and env.sh itself. A shell-local declaration would never reach it, so the
+    child would abort and teardown would exit having stopped nothing."""
+    _, staged = _broken_contract(tmp_path)
+    staged["LIBVIRT_OPTIONAL"] = "1"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        f'bash -euo pipefail -c \'source "{ROOT}/scripts/live-stack/lib.sh"; printf %s'
+        ' "${KDIVE_LIBVIRT_URI-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "unset"
+
+
+def _isolated_stack_down(tmp_path: Path, events: Path) -> Path:
+    """Copy stack-down.sh beside stubs that record each teardown step instead of performing it.
+
+    The gate under test stays real: the stub lib.sh sources the shipped libvirt-uri.sh, so the
+    declaration, `resolve_libvirt_uri` and `require_libvirt_uri` are the ones being exercised.
+    What the stubs replace is the destruction, and that is the point -- the regression these
+    tests exist to catch (a --wipe gate removed or moved below the teardown) is precisely the
+    one that would otherwise have the suite run `docker compose --profile obs down -v` against
+    whatever host is running it.
+    """
+    script_dir = tmp_path / "scripts" / "live-stack"
+    script_dir.mkdir(parents=True)
+    shutil.copy(ROOT / "scripts/live-stack/stack-down.sh", script_dir / "stack-down.sh")
+    # The child sources lib.sh under its own `set -euo pipefail`, exactly as the real
+    # worker-lifecycle.sh does, because that is the only thing the `export` on the declaration
+    # buys: a stub that merely echoes cannot abort, so it records the same event list whether or
+    # not the keyword is there, and the arm below would assert nothing about it.
+    lifecycle = script_dir / "worker-lifecycle.sh"
+    lifecycle.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'source "${here}/lib.sh"\n'
+        f'echo "lifecycle $1" >>"{events}"\n',
+        encoding="utf-8",
+    )
+    lifecycle.chmod(0o755)
+    (script_dir / "lib.sh").write_text(
+        f'source "{ROOT}/scripts/live-stack/libvirt-uri.sh"\n'
+        "resolve_libvirt_uri\n"
+        f'repo_root="{tmp_path}"\n'
+        f'KDIVE_ROOTFS_DIR="{tmp_path}/rootfs"\n'
+        f'stop_daemons() {{ echo graceful >>"{events}"; }}\n'
+        f'force_stop_daemons() {{ echo force >>"{events}"; }}\n'
+        f'docker() {{ echo docker >>"{events}"; }}\n'
+        f'kdive_domains() {{ echo domains >>"{events}"; }}\n'
+        f'sudo() {{ echo "sudo $1" >>"{events}"; }}\n',
+        encoding="utf-8",
+    )
+    return script_dir / "stack-down.sh"
+
+
+def test_stack_down_refuses_wipe_before_reaching_any_teardown(tmp_path: Path) -> None:
+    """--wipe is the one stack-down.sh operation that needs libvirt, so it is refused up front.
+
+    Refusing after the teardown had begun would leave the compose volumes dropped and the domains
+    they outlive orphaned -- the pairing stack-down.sh's own header exists to keep. The empty
+    event log is the assertion that carries that: not a banner absent from stdout, but no
+    teardown step having run at all.
+    """
+    _, staged = _broken_contract(tmp_path)
+    events = tmp_path / "events"
+    result = subprocess.run(
+        ["bash", str(_isolated_stack_down(tmp_path, events)), "--wipe", "--yes"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    assert result.returncode != 0
+    assert not events.exists(), events.read_text(encoding="utf-8")
+    assert "=== stopping host processes ===" not in result.stdout
+    assert "cannot reap kdive domains for --wipe" in result.stderr
+    # The shared message's two routes both need the URI the broken contract just made
+    # unreadable; the operator whose goal is "get this stack down" needs the third one named.
+    assert "re-run without --wipe" in result.stderr
+
+
+def test_stack_down_completes_plain_teardown_on_a_broken_contract(tmp_path: Path) -> None:
+    """The other half of the same criterion: the recovery tool has to finish, not merely start.
+
+    Plain teardown reads no libvirt, so the degraded endpoint must carry it through the lifecycle
+    stop, the daemon stop and the compose down. The spawned `worker-lifecycle.sh stop` proves the
+    declaration crossed the process boundary: a shell-local one would abort that child, and the
+    event log would stop at its first line.
+    """
+    _, staged = _broken_contract(tmp_path)
+    events = tmp_path / "events"
+    result = subprocess.run(
+        ["bash", str(_isolated_stack_down(tmp_path, events))],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    assert result.returncode == 0, result.stderr
+    steps = events.read_text(encoding="utf-8").splitlines()
+    assert steps == ["lifecycle stop", "graceful", "docker"], steps
+    assert result.stdout.rstrip().endswith("done")
+
+
+def _stack_status_libvirt_slice(tmp_path: Path) -> Path:
+    """stack-status.sh's setup plus its libvirt section, runnable on its own.
+
+    The idiom test_status_database_probe_scrubs_unrelated_role_dsns already uses: the shipped
+    lib.sh, env.sh and libvirt-uri.sh sit beside the extract, so the declaration, the resolver,
+    the guard and `provision_prereqs_ok` are all the real ones. The compose, host-daemon,
+    lifecycle, app-health and database sections are cut -- none of them is what this contract is
+    about, and each would drag in a backend this test does not need.
+    """
+    source = (ROOT / "scripts/live-stack/stack-status.sh").read_text(encoding="utf-8")
+    setup = source[: source.index('echo "=== compose')]
+    libvirt = source[source.index('if [[ -n "${LIBVIRT_UNRESOLVED}" ]]') :]
+    status = tmp_path / "stack-status.sh"
+    status.write_text(setup + libvirt, encoding="utf-8")
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
+        (tmp_path / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    return status
+
+
+def test_stack_status_reports_an_unresolved_endpoint_without_probing_it(tmp_path: Path) -> None:
+    """The banner and the `libvirt_ok` probe both read the endpoint, so both sit inside the
+    resolved branch; `provision_prereqs_ok` reads no libvirt and stays outside it, because the
+    overlay-and-staging report is the part a broken host still needs.
+
+    Run, not read. Asserting the source text's ordering instead passes against a script whose two
+    branch bodies are swapped -- which still carries every literal in the asserted order, and
+    still dies with `unbound variable` on exactly the broken-contract host this names.
+    """
+    contract, staged = _broken_contract(tmp_path)
+    result = subprocess.run(
+        ["bash", str(_stack_status_libvirt_slice(tmp_path))],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "=== libvirt (endpoint unresolved) ===" in result.stdout
+    assert str(contract) in result.stdout
+    assert "daemon: reachable" not in result.stdout
+    assert "daemon: UNREACHABLE" not in result.stdout
+    assert "provision prereqs:" in result.stdout
+
+
+def test_stack_status_still_probes_a_resolved_endpoint(tmp_path: Path) -> None:
+    """The degraded report is the exception, not the new default: a host whose published contract
+    validates keeps the endpoint banner and the probe it guards."""
+    _, staged = _published_contract(tmp_path)
+    result = subprocess.run(
+        ["bash", str(_stack_status_libvirt_slice(tmp_path))],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"=== libvirt ({_PUBLISHED_URI}) ===" in result.stdout
+    assert "endpoint unresolved" not in result.stdout
+
+
 def test_server_and_worker_receive_the_same_libvirt_endpoint(tmp_path: Path) -> None:
     """The endpoint agreement #2480 asks for, asserted as agreement rather than as a substring
     of either script: the server-side value is read out of the environment
@@ -2473,7 +2766,12 @@ def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> Non
     status = tmp_path / "stack-status.sh"
     source = (ROOT / "scripts/live-stack/stack-status.sh").read_text()
     setup = source[: source.index('echo "=== compose')]
-    database = source[source.index('echo "=== database') : source.index('echo "=== libvirt')]
+    # The libvirt section opens with its unresolved-endpoint guard, not with its banner: since
+    # ADR-0659 the banner is inside that `if`, so slicing to the banner would cut the block in
+    # half and leave the extract syntactically unclosed.
+    database = source[
+        source.index('echo "=== database') : source.index('if [[ -n "${LIBVIRT_UNRESOLVED}" ]]')
+    ]
     status.write_text(setup + database + "exit 0\n", encoding="utf-8")
     for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
         (tmp_path / name).write_text(
