@@ -22,10 +22,18 @@ observation and mutation always carry the same identity.
 
 ## Consequences
 
-- On a provisioned host the reap needs no root. It reaches the mode-`0770` socket through
-  `kdive-live-libvirt` membership, which is the access path the contract publishes.
+- On a provisioned host the reap needs no root. The operator reaches the mode-`0770` socket and
+  the mode-`2770` overlay directory as their **owner**: `install-live-worker-lifecycle.sh`
+  installs the socket `operator_uid:group_gid:770` and `/var/lib/kdive/rootfs`
+  `operator:kdive-live-libvirt` mode `2770`. `kdive-live-libvirt` membership is how the *worker*
+  accounts reach the same two paths; both are access paths the contract publishes, and neither
+  is root's.
 - On a bare host the up-front `--wipe` gate now enumerates under `sudo`, so an operator who
-  cannot escalate is refused before anything is stopped rather than mid-wipe.
+  cannot escalate is refused before anything is stopped rather than mid-wipe. That moves the
+  run's first escalation ahead of the irreversibility warning and the `Type 'wipe'` confirmation,
+  so a host configured to prompt asks for the password before the operator has confirmed. Kept
+  deliberately: the gate exists to refuse before anything is stopped, and reordering it behind
+  the prompt would restore the mid-wipe failure it replaced.
 - Classification is textual: an endpoint whose scope is not in its path would be misclassified.
   Both published URIs and the bare-host default carry it there.
 - Which *daemon* answers is untouched; this decides only which account connects.
@@ -35,7 +43,7 @@ observation and mutation always carry the same identity.
 - **Keep `sudo` on every call.** verified: `_reconcile_libvirt_tuple` in
   `deploy/systemd/install-live-worker-lifecycle.sh` adopts an endpoint only when the live pid's
   uid equals `$operator_uid`, and the same installer creates `/var/lib/kdive/rootfs` as
-  `operator:kdive-live-libvirt` mode `2770`. Root owns neither, so escalation bypasses the group
+  `operator:kdive-live-libvirt` mode `2770`. Root owns neither, so escalation bypasses the ownership
   gate rather than satisfying it.
 - **Drop `sudo` from every call.** verified: `resolve_libvirt_uri` in
   `scripts/live-stack/libvirt-uri.sh` resolves `qemu:///system` when the contract file is absent,

@@ -15,8 +15,11 @@ still resolves root-owned `qemu:///system` on a host with no lifecycle contract.
 
 In: `scripts/live-stack/stack-down.sh` gains one privilege decision derived from
 `KDIVE_LIBVIRT_URI` (ADR-0662), applied to the enumeration, `destroy`, `undefine`, and the
-overlay `rm`. `deploy/systemd/README.md` states that tooling reaches the published endpoint and
-the provider data directories with the operator's own credentials.
+overlay `rm`. `deploy/systemd/README.md` states that the `--wipe` reap reaches the published
+session endpoint and the overlay directory with the operator's own credentials. Scoped to the
+reap, not to tooling generally: `stack-services.sh` legitimately uses `sudo` against the same
+tree — `install -d` to create the provider data directories and `systemctl enable` on a bare
+host — so a blanket "sudo is not the access path" would be contradicted in-tree.
 `tests/scripts/test_live_stack_scripts.py` gains one arm per branch.
 
 Out: the reap's exit-code and reporting behaviour (#2515, merged — preserved unchanged); the
@@ -45,6 +48,11 @@ the lifecycle contract — session endpoint, operator in `kdive-live-libvirt`; (
   tells them to start a new login session.
 - An operator on a bare host without `sudo` is refused at the gate instead of mid-wipe.
   Accepted: strictly earlier than the existing failure, and bounded to a refusal.
+- On the non-session branch the gate's enumeration is now the run's first `sudo`, so a host
+  configured to prompt asks for the password before the irreversibility warning and the
+  `Type 'wipe'` confirmation. Accepted: the gate is deliberately ahead of the prompt so that a
+  refusal costs nothing, and moving it behind would reinstate the mid-wipe failure. The prompt
+  still governs whether anything is destroyed; only the credential request moved.
 - A URI whose scope is not in its path is misclassified. Accepted: not reachable — both
   published URIs and the bare-host default carry it there.
 
@@ -76,9 +84,14 @@ caller lacks.
 1. On a session endpoint none of the four reap commands — enumeration, `destroy`, `undefine`,
    overlay `rm` — runs under `sudo`.
 2. On a non-session endpoint all four keep `sudo`.
-3. The enumeration carries the same privilege as the mutations on both branches.
+3. The libvirt enumeration that grades the domain reap carries the same privilege as the domain
+   mutations, on both branches. The overlay half is symmetric only on the session branch: on the
+   non-session branch the `-d`/`-r`/`-x` tests, the glob and the `[[ ! -e ]]` re-read stay in the
+   calling shell while `rm` escalates. That residue is not closed here and does not need to be —
+   the existing `! -r || ! -x` refusal already turns an unlistable directory into a named failure
+   rather than an empty sweep, which is the only outcome the asymmetry could corrupt.
 4. #2515's reporting contract is unchanged: the existing reap arms stay green untouched.
-5. `deploy/systemd/README.md` states the operator-credential expectation for tooling.
+5. `deploy/systemd/README.md` states the operator-credential expectation for the `--wipe` reap.
 
 ## Validation
 
@@ -86,6 +99,6 @@ caller lacks.
 | --- | --- |
 | Success 1 | `focused-test`: `test_wipe_reaps_a_session_endpoint_without_sudo` — a recording `sudo` stub is never invoked across the whole run |
 | Success 2 | `focused-test`: `test_wipe_reaps_a_system_endpoint_under_sudo` — the stub's log carries the `list`, the `undefine`, and the `rm` |
-| Success 3 | `focused-test`: both arms assert over the whole run, so the gate's and the reap's enumerations are inside the assertion on either branch |
+| Success 3 | `focused-test`: both arms assert over the whole run, so all three enumerations -- the gate's, the reap's and the end-state re-read -- are inside the assertion on either branch. The non-session branch's overlay residue is asserted as stated, not as absent: `test_wipe_reaps_a_system_endpoint_under_sudo` requires the `rm` in the escalation log while the surrounding tests stay the shell's |
 | Success 4 | `focused-test`: the existing `test_wipe_*` arms, run unmodified |
 | Success 5 | `task-test-not-applicable`: operator prose with no executable consumer; a test searching for wording would assert nothing about behaviour |

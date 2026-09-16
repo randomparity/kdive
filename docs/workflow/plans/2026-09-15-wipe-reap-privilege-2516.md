@@ -38,7 +38,7 @@ paragraph.
 | --- | --- | --- |
 | `scripts/live-stack/stack-down.sh` | reap escalates unconditionally, enumeration bare | one URI-derived privilege for the whole reap |
 | `tests/scripts/test_live_stack_scripts.py` | reap arms cover reporting only | one arm per branch; `_wipe_reap` takes a `uri` override |
-| `deploy/systemd/README.md` | socket ownership and modes | plus the operator-credential expectation for tooling |
+| `deploy/systemd/README.md` | socket ownership and modes | plus the operator-credential expectation for the `--wipe` reap |
 
 No caller migration and no obsolete path: `stack-down.sh` already owns the reap and keeps it.
 
@@ -70,7 +70,10 @@ and the exported `KDIVE_LIBVIRT_URI`. Both confirmed present in that file at thi
 ### Steps
 
 1. In `enumerate_kdive_domains()`, route the enumeration through the wrapper, and rewrite the
-   header paragraph naming #2516 to record that the split is now closed rather than open:
+   header paragraph naming #2516 to record that the split is now closed rather than open. While
+   rewriting that block, replace its `libvirt-uri.sh:119-122` citation — and the identical one in
+   the overlay-warning comment — with a citation by name rather than by line: the base merge
+   already moved that passage, so a line number there is stale the next time the file is touched:
 
    ```bash
    out="$(reap_run virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
@@ -122,10 +125,19 @@ and the exported `KDIVE_LIBVIRT_URI`. Both confirmed present in that file at thi
    the reap runs to completion and the exit code stays an assertion.
 
 7. In `deploy/systemd/README.md`, after the paragraph ending "start a new login session after
-   installation before using the installed socket.", add a paragraph: tooling reaching the
-   published endpoint or the provider data directories uses the operator's own credentials;
-   `sudo` is not the access path, because root bypasses the `0770`/`2770` group gate rather than
-   satisfying it and a per-uid session daemon is not reachable by changing uid. Cite ADR-0662.
+   installation before using the installed socket." and before the `## Lifecycle retry actions`
+   heading, add a paragraph scoped to the reap: `stack-down.sh --wipe` reaches the published
+   session endpoint and the overlay directory as the operator, which owns both (socket
+   `operator_uid:group_gid:770`, `/var/lib/kdive/rootfs` `operator:kdive-live-libvirt` `2770`);
+   worker accounts reach the same paths through `kdive-live-libvirt`. `sudo` is not that access
+   path, because root satisfies neither ACL — it bypasses both — and a per-uid session daemon is
+   not reachable by changing uid at all. Cite ADR-0662.
+
+   Scoped to the reap deliberately, and NOT widened to tooling in general: `stack-services.sh`
+   uses `sudo install -d` to create the provider data directories and `sudo systemctl enable` to
+   socket-activate the system daemon on a bare host, so a blanket "`sudo` is not the access path"
+   would be false in-tree. `scripts/live-stack/README.md` already scopes the same distinction
+   correctly and is the wording to match.
 
 8. Prove the arms bite: `git stash push -- scripts/live-stack/stack-down.sh`, run both new arms,
    record the two failures, `git stash pop`, re-run. Expected: red without the change, green
@@ -140,7 +152,8 @@ and the exported `KDIVE_LIBVIRT_URI`. Both confirmed present in that file at thi
   through `reap_run`; no bare `sudo` remains inside the `--wipe` path.
 - Both new arms pass, and each was observed failing with the script change absent.
 - Every pre-existing `test_wipe_*` arm passes unmodified.
-- `deploy/systemd/README.md` states the operator-credential expectation and cites ADR-0662.
+- `deploy/systemd/README.md` states the reap's operator-credential expectation, does not widen
+  it to tooling generally, and cites ADR-0662.
 - `just ci` exits 0.
 
 ### Rollback
