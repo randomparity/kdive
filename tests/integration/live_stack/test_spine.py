@@ -18,7 +18,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import worker as job_worker
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.integration.live_stack.spine import (
     SpinePhaseError,
     await_system_state,
@@ -377,6 +377,26 @@ def test_spine_phase_error_stays_readable_without_detail_or_data() -> None:
     assert error.detail is None
     assert error.data == {}
     assert str(error) == "phase 'allocate' failed: error envelope (allocation_denied)"
+
+
+def test_spine_phase_error_caps_a_large_rendered_data_value() -> None:
+    """A nested/oversized ``data`` value renders truncated, not as an unbounded one-liner."""
+    unmet: list[JsonValue] = [
+        {
+            "gate": f"gate-{i}",
+            "current": i,
+            "required": i + 5,
+            "remedy": "accounting.set_quota",
+        }
+        for i in range(6)
+    ]
+    error = SpinePhaseError(
+        "allocate", "error envelope", error_category="allocation_denied", data={"unmet": unmet}
+    )
+
+    message = str(error)
+    assert message.endswith("…]")
+    assert len(message) < 300
 
 
 def test_ok_carries_envelope_detail_and_data_into_the_phase_error() -> None:

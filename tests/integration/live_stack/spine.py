@@ -127,6 +127,9 @@ def record_provision_evidence_target(target: Path, job_id: str, system_id: str) 
 # --- phase-failure naming contract (ADR-0042 §4, ADR-0045 §2) -------------------------------
 
 
+_MAX_RENDERED_DATA_CHARS = 200  # a nested unmet/failure_context value must not run the line away
+
+
 class SpinePhaseError(AssertionError):
     """A spine phase failed; carries the phase name so a failure says which step died.
 
@@ -135,7 +138,9 @@ class SpinePhaseError(AssertionError):
     reads only "error envelope (allocation_denied)", which names the category but not the fault
     — a category alone cannot distinguish "quota exhausted" from "capacity held by a stale row",
     and those have entirely different fixes; every diagnosis then costs a re-run with an ad-hoc
-    probe to recover what the envelope already had in hand.
+    probe to recover what the envelope already had in hand. ``data`` renders capped at
+    ``_MAX_RENDERED_DATA_CHARS`` — some producers (e.g. a funding denial's ``unmet`` remedy list)
+    nest lists/dicts, and an uncapped repr would grow the message without bound.
     """
 
     def __init__(
@@ -157,6 +162,8 @@ class SpinePhaseError(AssertionError):
             summary = f"{summary}: {self.detail}"
         if self.data:
             rendered = ", ".join(f"{key}={value}" for key, value in self.data.items())
+            if len(rendered) > _MAX_RENDERED_DATA_CHARS:
+                rendered = f"{rendered[:_MAX_RENDERED_DATA_CHARS]}…"
             summary = f"{summary} [{rendered}]"
         super().__init__(f"phase {phase!r} failed: {summary}")
 
