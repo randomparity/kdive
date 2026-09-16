@@ -71,6 +71,14 @@ flag's own documentation exists to avoid. The refusal bounds the unresolved-endp
 behind a *valid* contract a wrong-daemon or unreachable-daemon reap still orphans, which is #2515
 and #2516, not this record.
 
+The unset sentinel bounds SHELL readers. It does not cross a process boundary into Python:
+`kdive.config`'s own `LIBVIRT_URI` setting defaults to `qemu:///system`
+(`src/kdive/providers/local_libvirt/settings.py:52-56`), so a forked daemon that inherits no
+endpoint reads that default rather than failing. No entry point this record converts forks a
+daemon. `stack-services.sh --skip-libvirt` does, and it skips every shell read that would
+otherwise abort — so if it is ever converted, or if it inherits the declaration from an ambient
+shell, it must `unset LIBVIRT_OPTIONAL` first.
+
 The obligation this creates is transitive: an entry point that opts out owns every
 `$KDIVE_LIBVIRT_URI` read it can reach, including reads inside `lib.sh` functions it calls. A
 reachable read added later without `require_libvirt_uri` aborts that entry point under `set -u` —

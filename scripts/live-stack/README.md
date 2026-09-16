@@ -29,6 +29,13 @@ elevates via sudo to socket-activate the system daemon.
 `stack-services.sh --skip-libvirt` skips VM provisioning checks but still requires and uses the installed
 systemd worker contract. There is no direct-worker fallback.
 
+`stack-down.sh` and `stack-status.sh` declare themselves libvirt-free with `LIBVIRT_OPTIONAL=1`
+(ADR-0658), so a `/etc/kdive/live-worker-libvirt.env` that fails validation leaves them working
+with `KDIVE_LIBVIRT_URI` unset instead of aborting them at source time: status reports the endpoint
+unresolved, and `--wipe` is refused before any teardown. Every other entry point still fails
+closed. Do not export `LIBVIRT_OPTIONAL` in an operator shell — it is a declaration a script makes
+about itself, and entry points that need libvirt do not check it.
+
 Run only one live-stack flow per host from `up` through `down`. The lifecycle request lock
 serializes individual requests, not whole flows; a later `start` replaces the current fleet.
 `worker-lifecycle.sh diagnostics` is bounded to 30 seconds of acquisition, 320 KiB read and

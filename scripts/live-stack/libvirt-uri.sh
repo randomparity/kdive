@@ -44,6 +44,12 @@
 # stack-status.sh performs (lib.sh then env.sh, one shell), and the resolver this file is about
 # to define is the one thing that tells a re-source from a fresh shell -- so the clear is
 # conditional on that rather than on a second variable. Keep this line ABOVE that definition.
+#
+# The bound is an ordinary exported VARIABLE, which is the reachable case. It is not absolute: an
+# ancestor that also `export -f resolve_libvirt_uri` makes the probe below see the function on the
+# first source and keep an ambient record. That actor already owns the shell's function table --
+# they could shadow `virsh` or `stat` instead -- so it buys them nothing, but do not read this
+# line as proof against one.
 declare -F resolve_libvirt_uri >/dev/null || LIBVIRT_UNRESOLVED=''
 LIBVIRT_SOCKET_URIS=(
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock'
