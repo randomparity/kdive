@@ -570,7 +570,7 @@ _cleanup_source_link() {
 # already been mutated (#2506). Resolve it to an absolute path up front instead, and refuse with
 # the remedy. `command -v` also reports functions and builtins, so the result must be a path.
 _resolve_uv_bin() {
-  local resolved=""
+  local resolved
   resolved="$(command -v uv 2>/dev/null)" || resolved=""
   if [[ $resolved != /* ]]; then
     echo "uv is not resolvable from PATH=$PATH; this installer runs as root, and sudo's" \
