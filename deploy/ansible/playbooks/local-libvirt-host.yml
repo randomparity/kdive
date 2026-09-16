@@ -185,10 +185,27 @@
           - "{{ local_libvirt_host_source }}"
         stdin: "{{ local_libvirt_host_witness_dsn }}"
         stdin_add_newline: true
+      # The DSN reaches the installer on stdin, so the module arguments carry a live credential
+      # and this result must stay censored. Censoring the failure with it left an installer exit
+      # 127 reported without its reason (#2506), so the failure is deferred to the uncensored
+      # task below: the installer writes the DSN to a file and never echoes it, so its return
+      # code and stderr carry the diagnosis without the credential.
       no_log: true
+      register: local_libvirt_host_lifecycle_install
+      failed_when: false
       # The installer converges its own files and units but has no change receipt; keeping this
       # task read-only to Ansible makes reruns accurately report role-managed changes only.
       changed_when: false
+
+    - name: Report a failed live-worker lifecycle installation
+      ansible.builtin.fail:
+        msg: >-
+          install-live-worker-lifecycle.sh failed with rc
+          {{ local_libvirt_host_lifecycle_install.rc | default('none') }}:
+          {{ (local_libvirt_host_lifecycle_install.stderr
+              | default(local_libvirt_host_lifecycle_install.msg | default('no output captured'),
+                        true)) | trim }}
+      when: local_libvirt_host_lifecycle_install.rc | default(1) != 0
 
     - name: Create the local rootfs publication directory
       ansible.builtin.file:

@@ -901,7 +901,7 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert source.startswith("#!/bin/bash\nset -euo pipefail\n")
     assert "IFS= read -r witness_dsn" in source
     assert "--witness-dsn" not in source
-    sync = "uv sync --locked --no-editable --no-dev --group live"
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
     prepare = "_prepare_attested_runtime_root /opt/kdive-live-worker-lifecycle root root"
     assert source.index(prepare) < source.index(sync)
     assert "UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv" in source
@@ -938,6 +938,68 @@ def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
     assert "--project /opt/kdive --python-preference only-system" in source
 
 
+def test_installer_resolves_uv_before_it_mutates_the_host() -> None:
+    """A bare ``uv`` exits 127 under ``sudo``, whose ``secure_path`` hides a user-local one.
+
+    The installer runs as root from the provisioning play, so the binary it will need at the
+    end must be resolved -- and refused, with the remedy -- before the first host mutation
+    (#2506).
+    """
+    source = _text(INSTALLER)
+    resolve = 'uv_bin="$(_resolve_uv_bin)"'
+    first_mutation = 'getent group "$control_group" >/dev/null || groupadd'
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
+    assert resolve in source
+    assert sync in source
+    assert source.index(resolve) < source.index(first_mutation)
+    assert source.index(resolve) < source.index(sync)
+
+
+def test_installer_uv_resolution_names_the_remedy_and_refuses(tmp_path: Path) -> None:
+    command = r"""
+source "$1"
+export PATH="$2"
+_resolve_uv_bin
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    # The message has to carry the diagnosis (the PATH that was searched) and the remedy,
+    # because this is the only output the operator gets.
+    assert "uv is not resolvable" in result.stderr
+    assert str(tmp_path) in result.stderr
+    assert "secure_path" in result.stderr
+    assert "/usr/local/bin" in result.stderr
+
+
+def test_installer_uv_resolution_returns_an_absolute_path(tmp_path: Path) -> None:
+    stub = tmp_path / "uv"
+    stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    command = r"""
+source "$1"
+export PATH="$2"
+_resolve_uv_bin
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(stub)
+
+
 def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> None:
     """A reinstall must rebuild the manifest, because the manifest describes what it replaced.
 
@@ -947,7 +1009,7 @@ def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> No
     rather than erroring -- the queue never drains and neither side logs anything.
     """
     source = _text(INSTALLER)
-    sync = "uv sync --locked --no-editable --no-dev --group live"
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
     harden = "_harden_runtime_tree /opt/kdive-live-worker-lifecycle"
     build = '"$manifest_python" "$manifest_builder" build'
     install = '"$manifest_python" "$manifest_builder" install'
@@ -2246,7 +2308,7 @@ def test_installer_forces_a_fresh_project_wheel_into_the_worker_venv() -> None:
     source, sync again, and the second import still returns the first value.
     """
     source = _text(INSTALLER)
-    sync = "uv sync --locked --no-editable --no-dev --group live --reinstall-package kdive"
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live --reinstall-package kdive'
 
     assert sync in source
     # Scoped to the project: third-party wheels stay cached, so a reinstall is not a full rebuild.
