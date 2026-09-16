@@ -1472,6 +1472,21 @@ def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
     assert "kmod" in packages
 
 
+def test_suse_worker_packages_declare_a_container_runtime_and_compose() -> None:
+    """Tumbleweed hosts need a runtime for the compose stack and testcontainers (#2505).
+
+    `scripts/live-stack/stack-services.sh` runs `docker compose`, so the runtime is only
+    useful paired with a compose provider — the same pairing the Debian set makes with
+    `docker.io` + `docker-compose-v2`. Tumbleweed's `docker-compose` is Compose V2 and
+    installs as the `docker compose` CLI plugin.
+    """
+    defaults = _yaml(DEFAULTS)
+    packages = defaults["local_worker_host_packages_suse"]
+    assert isinstance(packages, list)
+    assert "docker" in packages
+    assert "docker-compose" in packages
+
+
 def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)

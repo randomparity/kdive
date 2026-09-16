@@ -103,3 +103,9 @@ local_worker_host_packages_suse:
   - libelf-devel
   - libdw-devel
   - libkdumpfile-devel
+  # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
+  # testcontainers gate. Tumbleweed's `docker-compose` is Compose V2, which installs as the
+  # `docker compose` CLI plugin rather than a standalone binary, so this pair is the Tumbleweed
+  # equivalent of the Debian `docker.io` + `docker-compose-v2` pairing.
+  - docker
+  - docker-compose
