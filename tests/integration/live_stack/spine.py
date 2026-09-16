@@ -24,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -130,18 +130,35 @@ def record_provision_evidence_target(target: Path, job_id: str, system_id: str) 
 class SpinePhaseError(AssertionError):
     """A spine phase failed; carries the phase name so a failure says which step died.
 
-    The rendered message includes ``error_category`` when the envelope carried one. Without it
-    a failing phase reads only "error envelope", which names the step but not the fault — every
-    diagnosis then costs a re-run with an ad-hoc probe to recover the category the spine already
-    had in hand.
+    The rendered message includes ``error_category`` when the envelope carried one, plus the
+    envelope's ``detail`` and structured ``data`` when present. Without those a failing phase
+    reads only "error envelope (allocation_denied)", which names the category but not the fault
+    — a category alone cannot distinguish "quota exhausted" from "capacity held by a stale row",
+    and those have entirely different fixes; every diagnosis then costs a re-run with an ad-hoc
+    probe to recover what the envelope already had in hand.
     """
 
-    def __init__(self, phase: str, reason: str, *, error_category: str | None = None) -> None:
+    def __init__(
+        self,
+        phase: str,
+        reason: str,
+        *,
+        error_category: str | None = None,
+        detail: str | None = None,
+        data: Mapping[str, JsonValue] | None = None,
+    ) -> None:
         self.phase = phase
         self.reason = reason
         self.error_category = error_category
-        detail = f"{reason} ({error_category})" if error_category else reason
-        super().__init__(f"phase {phase!r} failed: {detail}")
+        self.detail = detail
+        self.data = dict(data) if data else {}
+        summary = f"{reason} ({error_category})" if error_category else reason
+        if self.detail:
+            summary = f"{summary}: {self.detail}"
+        if self.data:
+            rendered = ", ".join(f"{key}={value}" for key, value in self.data.items())
+            summary = f"{summary} [{rendered}]"
+        super().__init__(f"phase {phase!r} failed: {summary}")
 
 
 @asynccontextmanager
@@ -162,7 +179,11 @@ def ok(envelope: ToolResponse, phase_name: str) -> ToolResponse:
     """Return the envelope if non-failure, else raise a SpinePhaseError naming the phase."""
     if envelope.status in {"error", "failed"}:
         raise SpinePhaseError(
-            phase_name, f"{envelope.status} envelope", error_category=envelope.error_category
+            phase_name,
+            f"{envelope.status} envelope",
+            error_category=envelope.error_category,
+            detail=envelope.detail,
+            data=envelope.data,
         )
     return envelope
 
