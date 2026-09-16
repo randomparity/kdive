@@ -108,6 +108,9 @@ def test_onboard_failure_aborts_at_the_preflight(tmp_path: Path) -> None:
         "#!/bin/sh\n"
         '[ "${ONBOARD_PREFLIGHT:-advisory}" = required ] || '
         "{ echo 'export KDIVE_TOKEN=advisory-token'; exit 0; }\n"
+        # A token already on stdout when the failure happens: this step's stderr is a
+        # world-readable CI log, so the re-emit must not carry it there.
+        "echo 'export KDIVE_TOKEN=leaked-token'\n"
         "echo 'FAIL  a host kernel under /boot is unreadable' >&2\n"
         "exit 1\n"
     )
@@ -120,6 +123,7 @@ def test_onboard_failure_aborts_at_the_preflight(tmp_path: Path) -> None:
     assert _die_line(r.stderr) is not None
     # onboard.sh's own diagnosis survives as the reason the reader sees.
     assert "FAIL  a host kernel under /boot is unreadable" in r.stderr
+    assert "leaked-token" not in r.stderr, "the re-emit carried the minted token into the log"
     # Staging is the first step past the gate; a discarded exit status would have reached it.
     assert not (provider_root / "live-vm-provisioned-rootfs.qcow2").exists()
 

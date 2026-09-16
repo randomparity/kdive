@@ -13,9 +13,8 @@ Per ADR-0666 the preflight's severity is the **caller's** declaration. `onboard.
 `migrate`, non-zero, with the preflight's own `FAIL` text on stderr plus a line attributing it.
 Any other value is refused. Unprefixed, per ADR-0659's category.
 
-`scripts/live-vm/mint-system.sh` gets both halves: it declares `required` **and** captures
-`onboard.sh` before `eval`, the `live.yml:549` shape. Its present `eval "$(onboard.sh | grep ...)"`
-at `:30` discards a non-zero exit, so the stop would arrive as a token-mint failure that never was.
+`mint-system.sh` gets both halves: it declares `required` **and** captures `onboard.sh` before
+`eval` (the `live.yml:549` shape), since `eval "$(cmd)"` discards a non-zero exit.
 
 Changed: `onboard.sh`, `mint-system.sh`, `tests/scripts/test_onboard.py`,
 `tests/scripts/test_mint_system.py`. `check-local-libvirt.sh` is reused unchanged: no owner moves.
@@ -28,12 +27,13 @@ hosts; the `postinst.d` relabel hook (#2567); `just ci` recipe coverage (#2582).
 - **Actors, deployments** — an operator at `just onboard`; the `demo-up.sh` workstation demo; the
   hosted `live_vm_tcg` and self-hosted native `live_vm` CI jobs.
 - **Invariants at stake** — the advisory default for callers that only fund a project; a demo with
-  no provisionable libvirt still onboarding. The stop precedes `migrate`, stranding no rows.
+  no provisionable libvirt still onboarding; the stop precedes `migrate`, stranding no rows. The
+  one boundary the change touches: `mint-system.sh` re-emits its captured stdout into a public CI
+  log on failure, so it filters `export KDIVE_TOKEN=` — the complement of the grep consuming it.
 - **Accepted classes** — `required` gates all nine blocking checks, not only those the next step
-  uses. The three probing `qemu:///system` pass on the native host: `libvirt_stack` starts the
+  uses; the three probing `qemu:///system` pass on the native host (`libvirt_stack` starts the
   system sockets, `libvirt_pool_net` activates `default`, `live_vm_host`'s `verify.yml:40-45`
-  gates on `libvirt` group. Exporting it globally reaches `demo-up.sh:66` (category cost, warned
-  in `onboard.sh`'s header). No trust boundary moves, so no threat model is warranted.
+  gates on `libvirt` group). Exporting it globally reaches `demo-up.sh:66` (category cost).
 - **Covered elsewhere** — kernel upgrades: #2567. The advisory `live_vm_tcg` spine (`live.yml` out
   of scope): `docs/debt/0016-live-vm-tcg-spine-discards-a-preflight-fail.md`.
 

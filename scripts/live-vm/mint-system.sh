@@ -44,8 +44,14 @@ fi
 #    goes to STDOUT (kdive/__main__.py `_handle_verify_project` prints, then raises SystemExit),
 #    so this capture would swallow the one line that says what went wrong. bash assigns the
 #    variable even when the substitution exits non-zero, so the text is already in hand.
+#    Filter the token line out of that re-emit. onboard.sh prints `export KDIVE_TOKEN=<jwt>` on
+#    stdout (a 30-day platform_admin demo token), and this script runs in a GitHub Actions step
+#    whose stderr is a world-readable log, so an onboard.sh that printed the token and THEN exited
+#    non-zero would leak it. This grep is the exact complement of the one below, so the two
+#    partition the capture and nothing on that stream reaches the log by default. `|| true`
+#    because grep exits 1 when it filters every line, which errexit would read as our own failure.
 onboard_wiring="$(ONBOARD_PREFLIGHT=required "${here}/../live-stack/onboard.sh")" || {
-  printf '%s\n' "$onboard_wiring" >&2
+  grep -v '^export KDIVE_TOKEN=' <<<"$onboard_wiring" >&2 || true
   die "onboard.sh exited non-zero; its output above states the reason; not provisioning"
 }
 #    onboard.sh prints banners + a token-contract heredoc to stdout alongside its one
