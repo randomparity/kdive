@@ -23,19 +23,26 @@ captured value, or any part of the withheld report:
 | Reason | Cause | Site |
 |---|---|---|
 | `state_unreadable` | the slot's retained state could not be loaded | `:328-338` |
-| `slot_unusable` | preconditions unmet: no exact invocation, no safe budget, or unusable redaction sources | `StateConflict` → `:389-398` |
+| `slot_unusable` | preconditions unmet: no exact invocation, no safe budget, or redaction sources that are unreadable or rejected as unsafe | `StateConflict`/`OSError` → `:389-398` |
 | `acquisition_failed` | systemd, the journal, or the request deadline did not answer | `_diagnose_slot` → `:381-388` |
-| `redaction_refused` | a forbidden value survived this slot's own redaction | `_diagnose_trusted_slot` → `:381-388` |
+| `redaction_refused` | a forbidden value survived this slot's own redaction, or no safe sentinel could render it | `_diagnose_trusted_slot` and `_sanitize_diagnostics` → `:381-388` |
 | `peer_redaction_refused` | the report holds a forbidden value learned from another slot | `:401-403` |
 | `internal_error` | anything else escaping the capture loop | `:389-398` |
 
 Two of these split a site rather than adding one. The two `_UnsafeDiagnosticText` causes share one
 site today and are two of the three the issue says an operator cannot tell apart, so the private
 exception carries the reason its raiser knows. And the bare `except Exception` arm is reached by
-the deterministic `StateConflict`s that `_require_diagnostic_budget` and
-`_validated_redaction_values` raise before `_diagnose_slot`'s own `try`; those are operator-fixable
-preconditions, not unexpected failures, so a `StateConflict` arm ahead of the generic one gives
-them `slot_unusable`.
+everything the three calls before `_diagnose_slot`'s own `try` can raise — the deterministic
+`StateConflict`s from `_require_diagnostic_budget` and `_validated_redaction_values`, and the
+`OSError` from loading the slot's redaction sources. Those are operator-fixable preconditions, not
+unexpected failures, so a `(StateConflict, OSError)` arm ahead of the generic one gives them
+`slot_unusable`.
+
+One relabelling is needed inside `_diagnose_slot` for the vocabulary to be true. `acquisition_failures`
+lists `StateConflict`, so the refusal `_sanitize_diagnostics` raises when no safe visible sentinel
+survives would be reported as `acquisition_failed` — sending the operator to `systemctl status` and
+a re-run that deterministically fails the same way. A `StateConflict` arm ahead of
+`self._acquisition_failures` gives that refusal `redaction_refused`, which is what it is.
 
 **Where the reason rides.** On the existing free-form `SlotResult.message`
 (`StringConstraints(max_length=1024)`) as `withheld: <reason>`. A withheld slot's phase rides the
@@ -118,7 +125,9 @@ ADR-0657); `stack-down.sh --force` and `docs/operating/systemd.md`.
   (`acquisition_failures` includes `LifecycleDeadlineExceeded` and `CommandDeadlineExceeded`), and
   any unexpected failure inside `_diagnose_trusted_slot`. Accepted: the operator's first action is
   the same for all of them — read the unit's systemd and journal state — and the runbook row adds
-  the deadline's extra step, re-running `diagnostics`.
+  the deadline's extra step, re-running `diagnostics`. The one cause this entry does *not* accept
+  is the deterministic redaction refusal, because re-running never clears it; that is why
+  `_diagnose_slot` gives it `redaction_refused` instead of letting `acquisition_failures` absorb it.
 
 **Covered elsewhere.**
 
@@ -140,8 +149,12 @@ redaction sources are trusted as inputs to the redactor, never as output.
 **Control per boundary.**
 
 - Emitted marker: the reason is a literal from `WithholdReason`, so no acquired byte can reach it;
-  the whole marker is checked against the capture's known forbidden set and suppressed to `""` on
-  a hit — fail closed, no partial emission.
+  the whole marker is checked against the forbidden set the capture knows **at the moment it is
+  appended** and suppressed to `""` on a hit — fail closed, no partial emission. The check is not
+  retroactive: `capture.reports` is append-only and is never re-scanned, so a value a later slot
+  contributes does not retire an earlier marker. That bound is the same one the aggregate
+  truncation marker has always had, and it is stated here rather than implied, because the marker
+  text is fixed-form and carries no acquired material either way.
 - Emitted marker in a CI log: the live.yml steps wrap the output in a `::stop-commands::` fence
   because they treat it as untrusted. The marker's fixed form carries no `::`, so it cannot escape
   that fence; the closed vocabulary is what guarantees this rather than an escaping pass.

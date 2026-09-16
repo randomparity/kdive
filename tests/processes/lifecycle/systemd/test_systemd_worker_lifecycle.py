@@ -1408,8 +1408,10 @@ def test_diagnostics_withholds_unsafe_source_without_reading_its_journal(
 
     assert not response.ok
     assert response.code == "diagnostics_withheld"
-    assert response.diagnostics == "[diagnostics withheld for slot 1: internal_error]\n"
-    assert response.slots[0].message == "withheld: internal_error"
+    # A PermissionError reading the slot's redaction sources is an unusable precondition an
+    # operator can repair, not an unexpected failure.
+    assert response.diagnostics == "[diagnostics withheld for slot 1: slot_unusable]\n"
+    assert response.slots[0].message == "withheld: slot_unusable"
     assert response.slots[0].phase is SlotPhase.STARTED
     assert "sensitive" not in response.model_dump_json()
     assert runtime.public_property_calls == []
@@ -1512,6 +1514,30 @@ def test_diagnostics_names_peer_redaction_refused_reason() -> None:
         "[diagnostics withheld for slot 2: peer_redaction_refused]\n"
     )
     assert "ALPHACREDENTIAL" not in response.model_dump_json()
+    assert events == []
+
+
+def test_diagnostics_names_redaction_refused_when_no_sentinel_survives() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    # Escaping the NUL reintroduces the literal "x00" the redactor just masked, so no sentinel
+    # choice renders the text safely and `_sanitize_diagnostics` refuses. That refusal is a
+    # StateConflict raised inside `_diagnose_slot`'s try, where `acquisition_failures` would
+    # otherwise relabel it as an acquisition failure the operator is told to retry.
+    runtime.journal_chunks[state.invocation_id or ""] = ("saw \x00 here",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("x00",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: redaction_refused]\n"
+    assert response.slots[0].message == "withheld: redaction_refused"
     assert events == []
 
 
@@ -1918,9 +1944,12 @@ def test_diagnostics_emits_no_fallback_when_aggregate_marker_collides() -> None:
     assert "aggregate" not in response.model_dump_json()
     # Slot 4's marker names redaction_refused and holds no "aggregate", so it is emitted where
     # the aggregate-truncation marker it replaces was suppressed.
-    assert response.diagnostics.endswith("[diagnostics withheld for slot 4: redaction_refused]\n")
+    marker = b"[diagnostics withheld for slot 4: redaction_refused]\n"
+    assert response.diagnostics.endswith(marker.decode())
     assert response.slots[3].message == "withheld: redaction_refused"
-    assert len(response.diagnostics.encode()) <= 1_048_576
+    # Exact, not a bound: LifecycleResponse already rejects anything over 1 MiB, so a <= assertion
+    # here could not fail, and an under-emitting regression would pass it silently.
+    assert len(response.diagnostics.encode()) == 3 * 256 * 1024 + len(marker)
 
 
 class _DiagnosticPropertyRunner:
