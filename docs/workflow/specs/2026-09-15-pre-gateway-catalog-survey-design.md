@@ -16,19 +16,17 @@ once the `fix-needed` entry it names changes), or `keep` with a reason.
 
 Surveyed set = the files `pytest -m live_stack|agent_smoke --collect-only` selects, **plus**
 every test and support module under the paths #2521 names — neither source alone reaches both.
-The record lists every union file with its marker, so a membership change is a diff. An
-issue-named file a marker does not select is surveyed anyway, under its real marker.
-`tests/integration/test_wire_harness.py` reads `excluded (2)`, never `0`, so an excluded file
-never reads as an examined-clean one.
+The record lists every union file with its marker. An issue-named file a marker does not
+select is surveyed anyway, under its real marker. `tests/integration/test_wire_harness.py`
+reads `excluded (2)`, never `0`.
 
 Each disposition follows one rule: evaluate the assertion's expected catalog against
-`CORE_TOOLS` and the agent-profile clip at the base commit. No source or test file changes —
-the fixes belong to #2522 and #2523.
+`CORE_TOOLS` and the agent-profile clip at the base commit. No source or test file changes.
 
 ### Failure model
 
 - **Actors** — a reader sizing #2522/#2523; `just lint` (ruff over Python fences); no runtime
-  actor and, per Validation, no guardrail over this record's citations.
+  actor and, per Validation, no guardrail over its citations.
 - **Invariants** — citations and counts must hold at the named commit; a wrong disposition
   mis-sizes a fix issue.
 - **Accepted failure classes** — the record goes stale as `main` moves, bounded by the named base
@@ -42,8 +40,10 @@ the fixes belong to #2522 and #2523.
 
 1. Every file in the surveyed set is listed with its hit count — `0` and `excluded` included.
 2. Every entry carries file:line, the assertion, and exactly one disposition.
-3. Entries split by tier, each half opening with headline counts.
-4. The record names its base commit and the exact commands reproducing its counts.
+3. Entries split by tier, each half opening with headline counts; each names its owning fix
+   issue, or `unrouted` with the reason when neither #2522 nor #2523 covers its tier.
+4. The record names its base commit, the in-flight movers of surveyed files (#2530, #2511),
+   and the exact commands reproducing its counts.
 5. `git diff --name-only <base>...HEAD` lists only this spec and the record.
 
 ## Validation
@@ -56,4 +56,4 @@ the fixes belong to #2522 and #2523.
   the record's named command, both reported in the completion report.
 - **Contract: each entry's disposition.** Mode: `task-test-not-applicable`. A disposition judges
   that same evidence; the record states the rule above and the completion report gives
-  per-disposition counts, so a single entry is re-derivable without re-running the survey.
+  per-disposition counts, so a single entry is re-derivable without re-running it.
