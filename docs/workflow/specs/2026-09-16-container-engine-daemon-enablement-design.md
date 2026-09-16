@@ -85,6 +85,16 @@ operator-owned connection, and the role already requires root.
   not detected. Accepted: the packaged unit is at `/usr/lib/systemd/system/docker.service` on all
   three families that package an engine, verified on Fedora 44, Ubuntu 26.04 and a Tumbleweed
   container image.
+- A deliberately masked `docker.service` satisfies the probe and fails the play at the enable.
+  Accepted: masking writes an `/etc/systemd/system` symlink and leaves the packaged unit in place,
+  so the probe cannot distinguish it; systemd's own `Unit /etc/systemd/system/docker.service is
+  masked` names the cause, verified on a Fedora 44 host. An opt-out variable would be more surface
+  than the risk, and unmasking is the operator's call.
+- The runner's socket-group grant, unconditional before this change, now skips silently if the
+  packaged unit is ever absent rather than failing. Accepted: `live_vm_host`'s apt install of
+  `docker.io` is unconditional and that package ships the unit, and the real-host `runner.yml` arm
+  is what checks it. The play itself does not, and an in-play assert was cut because keyed to
+  distribution it fails the `podman-docker` host criterion 1 requires to skip cleanly.
 - CI proves gating, ordering, grant target and call-site binding in check mode only; it cannot
   prove a daemon starts, nor that the probe finds a real unit on a real host. Accepted: covered by
   the plan's real-host runs, which include a full `runner.yml` run recording that the runner account

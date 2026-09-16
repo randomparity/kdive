@@ -8,8 +8,9 @@ Accepted (2026-09-16)
 
 `local_worker_host` declares a container engine and a compose plugin on Fedora and openSUSE
 Tumbleweed (ADR-0642, #2505), and `live_vm_host` declares them on the Debian-family runner. No task
-anywhere in `deploy/` or `scripts/` enables, starts, or grants access to that engine, and the role's
-own defaults say so at `deploy/ansible/roles/local_worker_host/defaults/main.yml:96-99`. The
+anywhere in `deploy/` or `scripts/` enabled, started, or granted access to that engine, and before
+this change the role's own defaults said so, in the comment above
+`local_worker_host_compose_packages_fedora`. The
 consumer is `scripts/live-stack/stack-services.sh`, which refuses UID 0 at `:69-72` and then runs
 `docker compose`, so a provisioned host whose daemon is down or whose operator is outside the socket
 group fails at bring-up after provisioning has reported success (#2557).
@@ -68,9 +69,9 @@ exactly that path. Such a host gets a working runtime rather than a documented m
 the outcome #2557 asks for. This repository still installs no engine there.
 
 The grant targets `local_worker_host_operator_user` and only that account. `live_vm_host` reaches
-the same tasks with its runner account substituted for that variable, which is the substitution
-`deploy/ansible/roles/live_vm_host/tasks/main.yml:367-372` already makes for other reusable task
-files.
+the same tasks with its runner account substituted for that variable — the substitution its
+`Import reusable worker installation paths` and `Import reusable shared provider directories` tasks
+already make for other reusable task files.
 
 ## Consequences
 
@@ -78,10 +79,17 @@ Provisioning now fails on a host whose engine cannot start, at the task that sta
 systemd's own message. This is the intended trade: a longer play that stops at the cause, in place
 of a shorter play that succeeds and defers the symptom.
 
-The runner's socket-group grant, previously unconditional
-(`live_vm_host/tasks/main.yml:61-65`), becomes conditional on that same probe. Its apt install of
-`docker.io` is unconditional and Debian's package ships the unit, so the condition holds there; the
-proof is a real run of `deploy/ansible/playbooks/runner.yml`, not an in-play assertion.
+Two consequences run the other way, and neither is hypothetical. The runner's socket-group grant,
+previously unconditional (the `Add the runner service account to the docker group` task this change
+replaces), becomes conditional on the same probe: a Debian that stopped shipping the packaged unit
+would skip both tasks silently rather than fail. Its apt install of `docker.io` is unconditional and
+the package ships the unit today, so the condition holds — but what checks that is a real run of
+`deploy/ansible/playbooks/runner.yml`, not the play itself. And a deliberately masked
+`docker.service` still satisfies the probe, because masking writes a `/etc/systemd/system` symlink
+and leaves the packaged unit in place: the play then fails at the enable with systemd's own
+`Unit /etc/systemd/system/docker.service is masked`, verified on a Fedora 44 host. Unmasking, or
+removing the engine, is the operator's call; an opt-out variable would be more surface than the
+risk, and the charter's outcome is that a host carrying an engine ends up able to run the stack.
 
 The Debian path stops depending on dpkg policy for its correctness. The enable is a no-op there
 (`docker.service` is already preset-enabled and running), so it costs one `ok` task per run and
@@ -105,8 +113,8 @@ session that already exists; the operator guide says to start a fresh one.
 Socket-group membership is root-equivalent: a member can start a container that mounts the host
 filesystem. On the standalone path this is the operator account's **first** root-equivalent group
 from provisioning — `local_worker_host` creates `kdive-live-control` (`worker_groups.yml:16`) but
-adds nobody to it, and the only membership grant for that group in the tree is
-`live_vm_host/tasks/main.yml:254-260`, on the runner. So this record does not widen a list the
+adds nobody to it, and the only membership grant for that group in the tree is `live_vm_host`'s
+`Add the runner to the live-worker control and libvirt groups`, on the runner. So this record does not widen a list the
 standalone operator was already on; it adds one, to the account `preflight.yml:17-38` already
 requires the caller to name and `stack-services.sh:69-72` already requires to be non-root.
 
