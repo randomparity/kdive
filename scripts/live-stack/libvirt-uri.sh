@@ -26,7 +26,7 @@
 # bypasses the allowlist anyway": that holds for resolve_libvirt_uri only, and
 # worker-lifecycle.sh calls load_published_libvirt_uri directly, where no such bypass exists.
 : "${LIBVIRT_ENV:=/etc/kdive/live-worker-libvirt.env}"
-# Why the two names below carry no KDIVE_ prefix either (ADR-0658): check_env_documented.py sweeps
+# Why the two names below carry no KDIVE_ prefix either (ADR-0660): check_env_documented.py sweeps
 # scripts/ for KDIVE_[A-Z0-9_]+ and requires every hit to be a registry setting or a catalogued
 # entry in kdive.config.external_env, which renders into the generated config reference. A
 # prefixed name would have to be published there as an operator knob, which is exactly what an
@@ -104,7 +104,7 @@ load_published_libvirt_uri() {
 # Every caller sources lib.sh or env.sh before doing any of its own work, so the abort takes the
 # whole invocation with it — including ones that need no libvirt at all (`stack-services.sh
 # --skip-libvirt`, apply-migrations.sh, onboard.sh) and the two that are most wanted when a host
-# is broken, stack-down.sh and stack-status.sh. ADR-0658 settles that: the abort stays the
+# is broken, stack-down.sh and stack-status.sh. ADR-0660 settles that: the abort stays the
 # default, and an entry point that can do useful work without libvirt exports LIBVIRT_OPTIONAL=1
 # before sourcing, which downgrades the abort to the degraded state below. The override the
 # message names is the way past it for everyone else, which is why it names it rather than only
@@ -130,7 +130,7 @@ resolve_libvirt_uri() {
   #
   # It keys on the endpoint as well as the record, so what it short-circuits is "nothing has
   # changed since the degrade", not "this shell degraded once". A caller that supplies an
-  # endpoint afterwards still reaches the export below -- which matters because ADR-0658 sends
+  # endpoint afterwards still reaches the export below -- which matters because ADR-0660 sends
   # #2509's next guard into the preset branch of this same function, and a write-once record
   # would have left require_libvirt_uri refusing an operation the shell can by then perform.
   if [[ -n "$LIBVIRT_UNRESOLVED" && -z "${KDIVE_LIBVIRT_URI:-}" ]]; then
@@ -164,7 +164,7 @@ resolve_libvirt_uri() {
 # Refuse <operation> while the endpoint is in the degraded state above, naming which operation was
 # refused. Only a LIBVIRT_OPTIONAL entry point can reach that state, so this is where such an
 # entry point's libvirt-dependent operations fail closed — at the point of use rather than at
-# source time (ADR-0658). Returns 0 unchanged everywhere else, so a caller may gate on it
+# source time (ADR-0660). Returns 0 unchanged everywhere else, so a caller may gate on it
 # unconditionally.
 require_libvirt_uri() {
   [[ -z "$LIBVIRT_UNRESOLVED" ]] || {

@@ -8,7 +8,7 @@ recovery tools included, and `stack-down.sh:79`'s child spawn dies too.
 
 ## Scope
 
-[ADR-0658](../../adr/0658-libvirt-free-entry-points-opt-out-of-resolution.md) keeps fail-closed
+[ADR-0660](../../adr/0660-libvirt-free-entry-points-opt-out-of-resolution.md) keeps fail-closed
 source-time resolution; an entry point declares itself libvirt-free by exporting
 `LIBVIRT_OPTIONAL=1` before sourcing, which also reaches its children.
 `scripts/live-stack/libvirt-uri.sh`, the resolution owner, gains a degraded branch in
@@ -57,4 +57,4 @@ All but the last two are Mode: `focused-test` in `tests/scripts/test_live_stack_
 - `stack-status.sh`: exits 0, prints the unresolved banner, reaches no libvirt probe.
 - Criterion 2's live proof — manual arm: on a Red Hat-family and a Debian-family host, break
   `$LIBVIRT_ENV`, run both scripts before and after, restore it.
-- ADR-0658 prose — Mode: `task-test-not-applicable`; no contract beyond the records gate.
+- ADR-0660 prose — Mode: `task-test-not-applicable`; no contract beyond the records gate.

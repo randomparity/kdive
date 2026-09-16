@@ -19,7 +19,7 @@ set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Teardown needs libvirt only for --wipe's reap, and this is a tool an operator reaches for
 # precisely when the host is broken — so it declares itself libvirt-free and lets a broken
-# published contract degrade rather than abort at source time (ADR-0658). EXPORTED, because the
+# published contract degrade rather than abort at source time (ADR-0660). EXPORTED, because the
 # `worker-lifecycle.sh stop` below is a child process that sources lib.sh and env.sh itself: a
 # shell-local declaration would not reach it, and teardown would exit having stopped nothing.
 # `stop` needs no libvirt; `start` resolves through load_published_libvirt_uri, which ignores this

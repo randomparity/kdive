@@ -1019,7 +1019,7 @@ def _broken_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 
 
 def test_a_libvirt_free_entry_point_survives_a_broken_contract(tmp_path: Path) -> None:
-    """ADR-0658: LIBVIRT_OPTIONAL downgrades the source-time abort to a recorded degraded state.
+    """ADR-0660: LIBVIRT_OPTIONAL downgrades the source-time abort to a recorded degraded state.
 
     The endpoint is left UNSET rather than empty, because `virsh -c ''` connects to libvirt's
     probed default and exits 0 -- the silent downgrade #2480 exists to prevent. Unset makes every
@@ -1089,7 +1089,7 @@ def test_an_inherited_degraded_record_does_not_suppress_resolution(tmp_path: Pat
 def test_repairing_the_endpoint_clears_the_degraded_record(tmp_path: Path) -> None:
     """The record is the current state, not the first one.
 
-    ADR-0658 sends #2509's next guard into resolve_libvirt_uri's preset-endpoint branch, so a
+    ADR-0660 sends #2509's next guard into resolve_libvirt_uri's preset-endpoint branch, so a
     caller supplying an endpoint after a degrade is the shape this function is about to grow. A
     write-once record would leave require_libvirt_uri refusing an operation the shell can by then
     perform, and the re-entry guard would skip the #2480 export that supplied value needs.
@@ -2767,7 +2767,7 @@ def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> Non
     source = (ROOT / "scripts/live-stack/stack-status.sh").read_text()
     setup = source[: source.index('echo "=== compose')]
     # The libvirt section opens with its unresolved-endpoint guard, not with its banner: since
-    # ADR-0658 the banner is inside that `if`, so slicing to the banner would cut the block in
+    # ADR-0660 the banner is inside that `if`, so slicing to the banner would cut the block in
     # half and leave the extract syntactically unclosed.
     database = source[
         source.index('echo "=== database') : source.index('if [[ -n "${LIBVIRT_UNRESOLVED}" ]]')
