@@ -15,7 +15,7 @@ authenticate with it, until the job completes. Once the job succeeds, use
 
 Reports ``ssh_not_provisioned`` when the System's provider exposes no SSH forward, and
 ``system_domain_not_found`` when a **local-libvirt** System has no libvirt domain on the
-worker's connection — an endpoint or liveness fault, not a provisioning gap (ADR-0658).
+worker's connection — an endpoint or liveness fault, not a provisioning gap.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -40,7 +40,7 @@ re-poll rather than reuse an old result. The probe tolerates the brief window af
 ``ready`` before sshd binds, so a single ``false`` right after provisioning may become
 ``true`` on a repeat call. Available on any ready System whose provider exposes an SSH
 forward; reports ``ssh_not_provisioned`` otherwise, or ``system_domain_not_found`` when a
-**local-libvirt** System has no libvirt domain on the worker's connection (ADR-0658).
+**local-libvirt** System has no libvirt domain on the worker's connection.
 
 ``reachable`` confirms sshd is answering, not that your key is authorized — the probe
 sends no handshake and attempts no login. Call ``systems.authorize_ssh_key`` if a real
@@ -364,7 +364,7 @@ Available on any ready System whose provider exposes an SSH forward: local-libvi
 and remote-libvirt only when the host is configured for SSH parity. Reports
 ``ssh_not_provisioned`` when there is no forward. A **local-libvirt** System with no
 libvirt domain on the worker's connection reports ``system_domain_not_found`` instead —
-an endpoint or liveness fault, not a provisioning gap (ADR-0658). For a remote System the
+an endpoint or liveness fault, not a provisioning gap. For a remote System the
 endpoint is read live from the host, so an unreachable host surfaces as a transport
 failure rather than a cached value.
 
