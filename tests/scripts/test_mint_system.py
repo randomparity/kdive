@@ -101,8 +101,15 @@ def test_onboard_failure_aborts_at_the_preflight(tmp_path: Path) -> None:
     """
     live_vm, provider_root = _mint_tree(tmp_path)
     onboard = tmp_path / "scripts" / "live-stack" / "onboard.sh"
+    # The stub only FAILs when the caller declared `required`, so this covers BOTH halves of
+    # ADR-0666's decision: drop the declaration from mint-system.sh and the stub mints a token,
+    # staging is reached, and the assertions below go red.
     onboard.write_text(
-        "#!/bin/sh\necho 'FAIL  a host kernel under /boot is unreadable' >&2\nexit 1\n"
+        "#!/bin/sh\n"
+        '[ "${ONBOARD_PREFLIGHT:-advisory}" = required ] || '
+        "{ echo 'export KDIVE_TOKEN=advisory-token'; exit 0; }\n"
+        "echo 'FAIL  a host kernel under /boot is unreadable' >&2\n"
+        "exit 1\n"
     )
     onboard.chmod(onboard.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -125,11 +132,14 @@ def test_onboard_database_failure_is_not_blamed_on_the_preflight(tmp_path: Path)
     """
     live_vm, provider_root = _mint_tree(tmp_path)
     onboard = tmp_path / "scripts" / "live-stack" / "onboard.sh"
+    # verify-project prints its diagnosis to STDOUT (kdive/__main__.py `_handle_verify_project`),
+    # which mint-system.sh captures — so the stub uses stdout too, and the assertion below proves
+    # the capture is re-emitted rather than swallowed.
     onboard.write_text(
         "#!/bin/sh\n"
         "echo '=== local-libvirt preflight ===' >&2\n"
         "echo '=== local-libvirt host is ready ===' >&2\n"
-        "echo 'psycopg.OperationalError: connection to server at 127.0.0.1 failed' >&2\n"
+        "echo \"project 'demo' is NOT funded: no budget row; no quota row\"\n"
         "exit 1\n"
     )
     onboard.chmod(onboard.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -140,4 +150,6 @@ def test_onboard_database_failure_is_not_blamed_on_the_preflight(tmp_path: Path)
     die = _die_line(r.stderr)
     assert die is not None
     assert "preflight" not in die, f"the stop asserted a cause it cannot know: {die}"
+    # The die claims "its output above states the reason" — so the captured stdout must be there.
+    assert "is NOT funded" in r.stderr
     assert not (provider_root / "live-vm-provisioned-rootfs.qcow2").exists()

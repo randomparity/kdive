@@ -38,8 +38,16 @@ fi
 #    verify-project) need the database and no libvirt, so asserting "the preflight" here would
 #    misattribute a database failure — the same wrong-diagnosis defect #2568 is about. onboard.sh
 #    already attributes its own preflight stop, so this only has to stop and point at that output.
-onboard_wiring="$(ONBOARD_PREFLIGHT=required "${here}/../live-stack/onboard.sh")" ||
+#
+#    Re-emit the capture first, or the claim is false for half the failures: the preflight writes
+#    its FAIL entries to stderr and reaches the reader directly, but verify-project's diagnosis
+#    goes to STDOUT (kdive/__main__.py `_handle_verify_project` prints, then raises SystemExit),
+#    so this capture would swallow the one line that says what went wrong. bash assigns the
+#    variable even when the substitution exits non-zero, so the text is already in hand.
+onboard_wiring="$(ONBOARD_PREFLIGHT=required "${here}/../live-stack/onboard.sh")" || {
+  printf '%s\n' "$onboard_wiring" >&2
   die "onboard.sh exited non-zero; its output above states the reason; not provisioning"
+}
 #    onboard.sh prints banners + a token-contract heredoc to stdout alongside its one
 #    `export KDIVE_TOKEN=...` line, so eval ONLY that line (eval-ing the whole capture hits
 #    `(required)` unbalanced parens under set -e and aborts before the token).
