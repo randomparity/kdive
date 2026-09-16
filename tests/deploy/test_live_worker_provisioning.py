@@ -1472,6 +1472,104 @@ def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
     assert "kmod" in packages
 
 
+def test_fedora_worker_packages_declare_a_container_runtime_behind_a_fedora_gate() -> None:
+    """Fedora hosts need a runtime for the compose stack and testcontainers (#2505).
+
+    Neither package can join `local_worker_host_packages_redhat`: that list installs on every
+    `os_family == 'RedHat'` host and `preflight.yml` admits RHEL, Rocky and AlmaLinux, none of
+    which package a Docker engine at all. An ungated addition would fail `dnf` there, so the
+    gate is part of the contract, not an implementation detail.
+    """
+    defaults = _yaml(DEFAULTS)
+    _assert_no_docker_provider(defaults, "local_worker_host_packages_redhat")
+    _assert_runtime_tasks(
+        "packages_redhat.yml",
+        module="ansible.builtin.dnf",
+        distribution="Fedora",
+        compose=("local_worker_host_compose_packages_fedora", ["docker-compose"]),
+        engine=("local_worker_host_engine_packages_fedora", ["moby-engine"]),
+        register="local_worker_host_docker_provider_redhat",
+    )
+
+
+def test_tumbleweed_worker_packages_declare_a_container_runtime_behind_a_tumbleweed_gate() -> None:
+    """Tumbleweed hosts need a runtime for the compose stack and testcontainers (#2505).
+
+    `preflight.yml` admits SLES on the same `os_family == 'Suse'` route, and SLES ships Docker
+    in the Containers Module rather than the base product, so these packages carry the same
+    distribution gate the Fedora ones do.
+    """
+    defaults = _yaml(DEFAULTS)
+    _assert_no_docker_provider(defaults, "local_worker_host_packages_suse")
+    _assert_runtime_tasks(
+        "packages_suse.yml",
+        module="community.general.zypper",
+        distribution="openSUSE Tumbleweed",
+        compose=("local_worker_host_compose_packages_tumbleweed", ["docker-compose"]),
+        engine=("local_worker_host_engine_packages_tumbleweed", ["docker"]),
+        register="local_worker_host_docker_provider_suse",
+    )
+
+
+# Every package that would put /usr/bin/docker on the host. None may appear in a family-wide
+# list: those install before the probe task, so one of them there recreates the ordering defect
+# the probe exists to prevent — the probe would see a provider and skip the engine forever.
+DOCKER_PROVIDERS = frozenset(
+    {"docker", "docker-cli", "docker.io", "moby-engine", "podman-docker", "docker-compose"}
+)
+
+
+def _assert_no_docker_provider(defaults: dict[str, object], variable: str) -> None:
+    packages = defaults[variable]
+    assert isinstance(packages, list)
+    assert not DOCKER_PROVIDERS.intersection(packages), variable
+
+
+def _assert_runtime_tasks(
+    task_file: str,
+    *,
+    module: str,
+    distribution: str,
+    compose: tuple[str, list[str]],
+    engine: tuple[str, list[str]],
+    register: str,
+) -> None:
+    """The compose plugin and the engine carry different gates, and the difference is the
+    contract: the plugin is the only source of `docker compose`, so it installs on every host of
+    its distribution, while the engine is skipped where /usr/bin/docker already has a provider it
+    would conflict with. Each family registers the probe under its own name, so a skipped sibling
+    task cannot leave a stale value behind."""
+    defaults = _yaml(DEFAULTS)
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks" / task_file).read_text("utf-8"))
+    distribution_gate = f"ansible_facts['distribution'] == '{distribution}'"
+
+    def _one(variable: str) -> dict[str, object]:
+        declared = "{{ " + variable + " }}"
+        found = [task for task in tasks if task.get(module, {}).get("name") == declared]
+        assert len(found) == 1, f"{task_file}: {variable}"
+        return cast(dict[str, object], found[0])
+
+    for variable, expected in (compose, engine):
+        assert defaults[variable] == expected
+
+    assert _one(compose[0])["when"] == distribution_gate
+    assert _one(engine[0])["when"] == [distribution_gate, f"not {register}.stat.exists"]
+
+    probes = [
+        task
+        for task in tasks
+        if task.get("ansible.builtin.stat", {}).get("path") == "/usr/bin/docker"
+    ]
+    assert len(probes) == 1, task_file
+    assert probes[0]["register"] == register
+    # Probe, then engine, then plugin. Installing the plugin first would resolve its engine
+    # dependency by pulling the CLI package that owns /usr/bin/docker, and the probe would then
+    # suppress the engine install on this and every later run.
+    assert tasks.index(probes[0]) < tasks.index(_one(engine[0])) < tasks.index(_one(compose[0]))
+    for task in tasks:
+        assert task["tags"] == ["authority_prerequisites"], task["name"]
+
+
 def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)

@@ -267,6 +267,127 @@ for distribution, family, selected in (
     package_route(distribution, family, selected)
 print("ok packages: check mode routes each supported family to only its package task")
 
+# The container runtime is declared for one distribution per family, not for the family.
+CONTAINER_RUNTIME = {"RedHat": "Fedora", "Suse": "Tumbleweed"}
+
+
+def container_section(output: str, name: str, context: str) -> str:
+    heading = f"TASK [local_worker_host : {name}]"
+    require(heading in output, f"{context} never reached: {name}")
+    return output.split(heading, 1)[1].split("\nTASK [", 1)[0]
+
+
+def container_runtime_gate(distribution: str, family: str, *, declared: bool) -> None:
+    """Only Fedora and openSUSE Tumbleweed may enter the container-runtime installs (#2505).
+
+    `preflight.yml` admits RHEL, Rocky and AlmaLinux beside Fedora and SLES beside Tumbleweed,
+    and none of those four package the engine or the compose plugin their sibling does. The
+    distribution gate, not the family route, is what keeps dnf/zypper from being handed a
+    package the host cannot resolve, so it is the gate worth proving.
+
+    `--start-at-task` skips the family toolchain install, which check mode cannot run as a
+    non-root user. The engine and compose modules themselves DO run: whichever one the gates
+    admit ends in a module failure here (dnf without root, zypper absent entirely), which is
+    why only skip-versus-entered is asserted and the playbook return code is not.
+
+    The engine's second gate reads a registered stat of /usr/bin/docker, so both of its arms
+    are driven by injecting that result as an extra-var, which outranks the register. Reading
+    the runner's real /usr/bin instead would leave the no-provider arm — the state #2505 is
+    about — asserting nothing on any runner that happens to have docker installed.
+    """
+    label = CONTAINER_RUNTIME[family]
+    probe_name = f"Look for an existing container engine before installing one ({family})"
+    engine_name = f"Install the {label} container engine"
+    compose_name = f"Install the {label} compose plugin for the on-box stack and testcontainers"
+    for provider_exists in (False, True):
+        facts = {
+            "ansible_facts": {
+                "distribution": distribution,
+                "distribution_version": "probe",
+                "os_family": family,
+            },
+            "local_worker_host_operator_user": operator,
+            f"local_worker_host_docker_provider_{family.lower()}": {
+                "stat": {"exists": provider_exists}
+            },
+        }
+        result = playbook(
+            probe,
+            "--check",
+            "--tags",
+            "authority_prerequisites",
+            "--start-at-task",
+            probe_name,
+            "-e",
+            json.dumps(facts),
+        )
+        state = f"{distribution} (provider present: {provider_exists})"
+        engine = container_section(result.stdout, engine_name, state)
+        engine_skipped = "skipping: [localhost]" in engine
+        if not declared:
+            # With no provider injected, the distribution gate is the only thing that can skip
+            # these, so a pass here cannot be an accident of the runner's own /usr/bin.
+            require(engine_skipped, f"{state} entered the {label} engine install")
+            compose = container_section(result.stdout, compose_name, state)
+            require(
+                "skipping: [localhost]" in compose,
+                f"{state} entered the {label} compose plugin install",
+            )
+            continue
+        require(
+            engine_skipped == provider_exists,
+            f"{state} got the wrong {label} engine arm: skipped={engine_skipped}",
+        )
+        if not provider_exists:
+            continue  # the engine entered and failed the module, so the play stops here
+        # A host that already has a provider keeps it, and the compose plugin — the only source
+        # of the `docker compose` subcommand stack-services.sh runs — must still be installed.
+        compose = container_section(result.stdout, compose_name, state)
+        require(
+            "skipping: [localhost]" not in compose,
+            f"{state} skipped the {label} compose plugin",
+        )
+
+
+for distribution, family, declared in (
+    ("Fedora", "RedHat", True),
+    ("Rocky", "RedHat", False),
+    ("RedHat", "RedHat", False),
+    ("AlmaLinux", "RedHat", False),
+    ("openSUSE Tumbleweed", "Suse", True),
+    ("SLES", "Suse", False),
+):
+    container_runtime_gate(distribution, family, declared=declared)
+print("ok container runtime: only Fedora and Tumbleweed enter the engine and compose installs")
+
+
+def container_runtime_order() -> None:
+    """Probe, then engine, then compose plugin, in both families.
+
+    Installing the plugin first would resolve its `(engine or podman)` dependency by pulling
+    the CLI package that owns /usr/bin/docker, and the probe would then suppress the engine
+    install on that run and every later one — leaving a host with a CLI, a plugin and no
+    daemon. The order is the contract; a silent reorder must not survive (#2505).
+    """
+    for family, label in CONTAINER_RUNTIME.items():
+        ordered = (
+            f"Look for an existing container engine before installing one ({family})",
+            f"Install the {label} container engine",
+            f"Install the {label} compose plugin for the on-box stack and testcontainers",
+        )
+        positions = []
+        for name in ordered:
+            require(name in listed.stdout, f"{label} container task missing from listing: {name}")
+            positions.append(listed.stdout.index(name))
+        require(
+            positions == sorted(positions),
+            f"{label} container tasks are out of order: probe, engine, then compose plugin",
+        )
+
+
+container_runtime_order()
+print("ok container runtime: the engine installs before the compose plugin in both families")
+
 
 def boot_kernel_guard(distribution: str, family: str) -> None:
     """RedHat and Suse ship /boot kernels world-readable; relabelling there would NARROW
