@@ -501,17 +501,24 @@ def container_daemon_grant_target() -> None:
         "the container-engine socket grant reaches the fixed worker accounts (ADR-0575)",
     )
     by_name = {task["name"]: task for task in yaml.safe_load(source)}
-    grant = by_name[DAEMON_GRANT]["ansible.builtin.user"]
+    for name in (DAEMON_PROBE, DAEMON_ENABLE, DAEMON_GRANT):
+        require(name in by_name, f"container_runtime.yml has no task named {name!r}")
+    grant = by_name[DAEMON_GRANT].get("ansible.builtin.user", {})
     require(
-        grant["name"] == "{{ local_worker_host_operator_user }}",
+        grant.get("name") == "{{ local_worker_host_operator_user }}",
         "the container-engine socket grant does not target the operator variable",
     )
-    require(grant["append"] is True, "the container-engine socket grant replaces memberships")
-    enable = by_name[DAEMON_ENABLE]["ansible.builtin.systemd_service"]
+    require(grant.get("append") is True, "the container-engine socket grant replaces memberships")
+    enable = by_name[DAEMON_ENABLE].get("ansible.builtin.systemd_service", {})
     require(
-        enable["enabled"] is True and enable["state"] == "started",
+        enable.get("enabled") is True and enable.get("state") == "started",
         "the container-engine daemon task does not both enable and start the service",
     )
+    for name in (DAEMON_ENABLE, DAEMON_GRANT):
+        require(
+            by_name[name].get("when") == "local_worker_host_engine_unit.stat.exists",
+            f"{name!r} is not gated on the packaged-unit probe",
+        )
     known = set(defaults) | {"local_worker_host_engine_unit"}
     used = set(re.findall(r"\{\{\s*(local_worker_host_[a-z_]+)", source))
     require(
@@ -525,7 +532,7 @@ def container_daemon_grant_target() -> None:
         if task.get("ansible.builtin.import_role", {}).get("tasks_from") == "container_runtime.yml"
     )
     require(
-        call["vars"]["local_worker_host_operator_user"] == "{{ github_runner_user }}",
+        call.get("vars", {}).get("local_worker_host_operator_user") == "{{ github_runner_user }}",
         "the runner call site does not rebind the operator variable to the runner account",
     )
 
