@@ -784,6 +784,12 @@ jobs:
           # as mint-system.sh, which env.sh does not export; test_live_workflow_shape.py pins the
           # two together.
           export KDIVE_GUEST_IMAGE="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}/live-vm-provisioned-rootfs.qcow2"
+          # _preflight reads bare KDIVE_DATABASE_URL, which env.sh deliberately does not export —
+          # one DSN per authority since #1929. Alias the server role here, in the spine, exactly as
+          # the tcg job does at :560; this is a test-side alias, never a fourth authority DSN, so it
+          # belongs here and not in preflight-env.sh. Without it the proof skips on the database
+          # gate instead of the image gate and the tier still reports green (#2518).
+          export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"
 
           scripts/live-vm/preflight-env.sh throwaway provisioned debug-stepping
           # Run pytest directly under the /opt/kdive interpreter — NOT `just test-live`, whose
