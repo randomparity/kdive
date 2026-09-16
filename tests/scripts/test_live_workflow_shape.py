@@ -79,6 +79,38 @@ def test_native_block_preflights_debug_stepping_with_both_native_families() -> N
     assert "preflight-env.sh throwaway provisioned debug-stepping" in run
 
 
+def _native_guest_image() -> str:
+    prefix = "export KDIVE_GUEST_IMAGE="
+    line = next(ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix))
+    return line[len(prefix) :].strip('"')
+
+
+def test_native_guest_image_names_the_rootfs_mint_system_stages() -> None:
+    """The native spine's KDIVE_GUEST_IMAGE must name the file mint-system.sh actually stages.
+
+    mint-system.sh hardlinks the warm-store rootfs into the provider's allowed root under a fixed
+    basename, and live.yml repeats that basename to point the console-part proof at it (#2518).
+    Nothing else ties the two. Since #2518 an unresolvable KDIVE_GUEST_IMAGE *fails* that proof
+    instead of skipping it, so a rename in the script alone turns the native job red rather than
+    green — parse the basename from the script rather than repeating the literal a third time.
+    """
+    from kdive.providers.local_libvirt.lifecycle import storage
+
+    mint = (_ROOT / "scripts" / "live-vm" / "mint-system.sh").read_text(encoding="utf-8")
+    staged = next(ln for ln in mint.splitlines() if ln.strip().startswith("staged_rootfs="))
+    basename = staged.strip().rstrip('"').rsplit("/", 1)[-1]
+
+    exported = _native_guest_image()
+    assert exported.endswith(f"/{basename}"), (
+        f"live.yml exports KDIVE_GUEST_IMAGE={exported}, but mint-system.sh stages {basename!r}; "
+        "renaming one and not the other fails the native live_vm job at its guest-image gate"
+    )
+    assert storage.ROOTFS_DIR in exported, (
+        f"KDIVE_GUEST_IMAGE={exported} must resolve under the provider's allowed root "
+        f"{storage.ROOTFS_DIR}, or provision rejects the rootfs it names"
+    )
+
+
 def _tcg_stage_dir() -> str:
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())
