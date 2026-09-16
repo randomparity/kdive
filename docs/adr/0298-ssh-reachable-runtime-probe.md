@@ -4,6 +4,11 @@
 - **Date:** 2026-07-02
 - **Deciders:** KDIVE maintainers
 
+> **Partially superseded by [0658](0658-missing-domain-is-not-a-missing-ssh-forward.md)**
+> (2026-09-15): a `None` endpoint now means only that the domain was read and records no loopback
+> SSH forward. A System with no libvirt domain on the connection raises
+> `reason="system_domain_not_found"` instead of collapsing to the same `ssh_not_provisioned`.
+
 ## Context
 
 Issue #972 (split from #956, deferred by ADR-0294 §5) asks for an `ssh_reachable` signal
