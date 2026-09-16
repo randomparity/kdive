@@ -1472,6 +1472,29 @@ def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
     assert "kmod" in packages
 
 
+def test_fedora_worker_packages_declare_a_container_runtime_behind_a_fedora_gate() -> None:
+    """Fedora hosts need a runtime for the compose stack and testcontainers (#2505).
+
+    It cannot join `local_worker_host_packages_redhat`: that list installs on every
+    `os_family == 'RedHat'` host and `preflight.yml` admits RHEL, Rocky and AlmaLinux,
+    none of which package a Docker engine at all. An ungated addition would fail `dnf`
+    there, so the gate is part of the contract, not an implementation detail.
+    """
+    defaults = _yaml(DEFAULTS)
+    packages = defaults["local_worker_host_container_packages_fedora"]
+    assert isinstance(packages, list)
+    assert packages == ["moby-engine", "docker-compose"]
+    family = defaults["local_worker_host_packages_redhat"]
+    assert isinstance(family, list)
+    assert "moby-engine" not in family
+
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks" / "packages_redhat.yml").read_text("utf-8"))
+    gated = "{{ local_worker_host_container_packages_fedora }}"
+    runtime = [task for task in tasks if task["ansible.builtin.dnf"]["name"] == gated]
+    assert len(runtime) == 1
+    assert runtime[0]["when"] == "ansible_facts['distribution'] == 'Fedora'"
+
+
 def test_suse_worker_packages_declare_a_container_runtime_and_compose() -> None:
     """Tumbleweed hosts need a runtime for the compose stack and testcontainers (#2505).
 

@@ -81,6 +81,16 @@ local_worker_host_packages_redhat:
   - elfutils-devel
   - libkdumpfile-devel
 
+# Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
+# testcontainers gate, kept out of the list above because that list installs on every RedHat-family
+# host: Enterprise Linux packages no engine in baseos, appstream, extras or CRB, so naming one
+# there would fail dnf. moby-engine requires docker-cli, the owner of /usr/bin/docker, and Fedora's
+# docker-compose is Compose V2 installed as the `docker compose` CLI plugin — the Fedora equivalent
+# of the Debian docker.io + docker-compose-v2 pairing.
+local_worker_host_container_packages_fedora:
+  - moby-engine
+  - docker-compose
+
 # openSUSE Tumbleweed worker debug/build packages.
 local_worker_host_packages_suse:
   - bubblewrap

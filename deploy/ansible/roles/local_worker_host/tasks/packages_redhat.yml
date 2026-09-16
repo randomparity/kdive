@@ -4,3 +4,14 @@
     name: "{{ local_worker_host_packages_redhat }}"
     state: present
   tags: [authority_prerequisites]
+
+- name: Install the Fedora container runtime for the compose stack and testcontainers
+  # Fedora-only: Enterprise Linux ships no Docker engine and no compose provider in baseos,
+  # appstream, extras or CRB, so an ungated install would fail dnf on RHEL, Rocky and AlmaLinux,
+  # which preflight.yml also admits. EL operators install a runtime themselves
+  # (docs/operating/providers/local-libvirt.md, "Container engine").
+  ansible.builtin.dnf:
+    name: "{{ local_worker_host_container_packages_fedora }}"
+    state: present
+  when: ansible_facts['distribution'] == 'Fedora'
+  tags: [authority_prerequisites]
