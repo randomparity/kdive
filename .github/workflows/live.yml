@@ -797,7 +797,21 @@ jobs:
           # never-uv-sync-in-workspace invariant), and omit the `live` group that carries drgn (a
           # native live_vm test imports drgn in-process). /opt/kdive already has drgn + guestfs, so
           # this also needs no `just` on the self-hosted runner.
-          "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q
+          # A run that proved nothing is RED here, never green (#2540). pytest exits 0 when every
+          # proof skips and 5 when none is collected, so neither code separates "the tier passed"
+          # from "the tier never ran" — the silent green ADR-0389 exists to kill, closed for the
+          # tcg spine at :569 and left open here. The spine file runs under `-o pipefail`, which
+          # is load-bearing: without it `| tee` would report tee's status and a genuinely failing
+          # proof run would trade one silent green for another.
+          rc=0
+          native_summary="$(mktemp)"
+          "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q | tee "$native_summary" \
+            || rc=$?
+          if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$native_summary"; then
+            echo "native live_vm spine: ran ZERO native live_vm proofs (no '<N> passed' summary, pytest rc=$rc); a skipped tier must never read green" >&2
+            exit 1
+          fi
+          exit "$rc"
           KDIVE_NATIVE_SPINE
           exec /bin/bash -e -u -o pipefail "$RUNNER_TEMP/spine-native.sh"
 

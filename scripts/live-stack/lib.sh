@@ -461,8 +461,3 @@ provision_prereqs_ok() {
   }
   return "$rc"
 }
-
-# Names of kdive-provisioned libvirt domains (kdive-<id>), one per line.
-kdive_domains() {
-  virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>/dev/null | grep -E '^kdive-' || true
-}

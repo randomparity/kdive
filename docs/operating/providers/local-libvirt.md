@@ -113,6 +113,23 @@ These are the points where the two families genuinely diverge, not just in packa
   libvirt daemon. Classic sudo zeroes it, so every RedHat-family host would otherwise reach the
   launch with a zero hard limit and fail every domain start with `cannot limit core file size of
   process N`; Ubuntu 26.04's sudo-rs does not zero it.
+- **Which interpreter the host play runs under.** `playbooks/local-libvirt-host.yml` pins
+  `ansible_python_interpreter: /usr/bin/python3` as a play var. It manages the host's libvirt stack
+  through the distro-packaged `libvirt` and `lxml` bindings, and interpreter discovery would
+  otherwise select whichever Python launched `ansible-playbook` — for `just
+  prepare-local-libvirt-host` that is an ephemeral `uv run` environment with no `lxml`, which fails
+  `community.libvirt` in `libvirt_pool_net`. The pin is a play var, and `inventory/hosts.yml`
+  deliberately declares no `localhost`: that file is shared with `playbooks/pki.yml` and with the
+  localhost plays under `deploy/ansible/tests/` that do not pin an interpreter of their own, all of
+  which resolve their dependencies against the launching environment. Declaring the host there
+  would swap their explicit launcher interpreter for ansible-core's own interpreter discovery, so
+  the pin binds only this play. It also fixes the family bound: on Debian/Ubuntu, Fedora and the EL
+  family, `/usr/bin/python3` is the interpreter `libvirt_stack` installs `python3-libvirt` and
+  `python3-lxml` for; its Suse branch installs `python3-libvirt-python`, which zypper resolves
+  against the distro's default Python ABI — the same interpreter. A `/usr/bin/python3` predating
+  ansible-core's 3.9 target floor fails closed on Ansible's own error at fact gathering, and the
+  recipe carries no pre-check. EL9's 3.9 sits exactly on that floor, so the first bump of the
+  `ansible-core` pin in `just prepare-local-libvirt-host` that raises the floor retires EL9 here.
 - **The interpreter, and what it costs Enterprise Linux.** The project requires Python 3.14.
   Ubuntu 26.04 and Fedora 44 ship it as `/usr/bin/python3`; EL9 ships 3.9 and EL10 ships 3.12,
   packaging 3.14 separately as `python3.14`, which `install-host.sh` installs and the lifecycle

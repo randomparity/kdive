@@ -5,6 +5,13 @@
   become: true
   gather_facts: true
   vars:
+    # Implicit localhost binds the interpreter to whichever Python launched ansible-playbook. The
+    # recipe launches it through `uv run --with ansible-core`, whose ephemeral environment has no
+    # lxml, so community.libvirt fails in libvirt_pool_net. This play manages the host's own
+    # libvirt stack through its distro-packaged bindings, so it pins the system interpreter here
+    # rather than in inventory/hosts.yml: that file is shared with pki.yml and the localhost plays
+    # under tests/, which must keep resolving against the launching environment (#2498).
+    ansible_python_interpreter: /usr/bin/python3
     local_libvirt_host_source: "{{ playbook_dir }}/../../.."
     local_libvirt_host_operator_user: ""
     local_libvirt_host_witness_dsn: >-
@@ -178,10 +185,32 @@
           - "{{ local_libvirt_host_source }}"
         stdin: "{{ local_libvirt_host_witness_dsn }}"
         stdin_add_newline: true
+      # The DSN reaches the installer on stdin, so the module arguments carry a live credential
+      # and this result must stay censored. Censoring the failure with it left an installer exit
+      # 127 reported without its reason (#2506), so the failure is deferred to the uncensored
+      # task below. Two things make that safe to publish, and both are worth re-checking before
+      # anything else is relayed through it: the installer writes the DSN to a file and never
+      # echoes it, which tests/deploy/test_live_worker_provisioning.py pins -- though the
+      # relayed stderr is the whole process tree's, so uv and systemd output this repository
+      # does not author rides along with it -- and Ansible keeps a censored task's registered rc
+      # and stderr readable by a later task, verified against the ansible-core 2.21.1 every
+      # recipe pins.
       no_log: true
+      register: local_libvirt_host_lifecycle_install
+      failed_when: false
       # The installer converges its own files and units but has no change receipt; keeping this
       # task read-only to Ansible makes reruns accurately report role-managed changes only.
       changed_when: false
+
+    - name: Report a failed live-worker lifecycle installation
+      ansible.builtin.fail:
+        msg: >-
+          install-live-worker-lifecycle.sh failed with rc
+          {{ local_libvirt_host_lifecycle_install.rc | default('none') }}:
+          {{ (local_libvirt_host_lifecycle_install.stderr
+              | default(local_libvirt_host_lifecycle_install.msg | default('no output captured'),
+                        true)) | trim }}
+      when: local_libvirt_host_lifecycle_install.rc | default(1) != 0
 
     - name: Create the local rootfs publication directory
       ansible.builtin.file:
