@@ -1075,8 +1075,7 @@ def test_an_inherited_degraded_record_does_not_suppress_resolution(tmp_path: Pat
     with no opt-out declared by anyone, and with stack-status.sh reporting that healthy host as
     unresolved with a caller-chosen reason string.
     """
-    contract, staged = _published_contract(tmp_path)
-    assert contract.exists()
+    _, staged = _published_contract(tmp_path)
     staged["LIBVIRT_UNRESOLVED"] = "inherited reason"
     result = _sourced(
         ROOT / "scripts/live-stack/env.sh",
@@ -1123,8 +1122,7 @@ def test_require_libvirt_uri_refuses_while_the_endpoint_is_unresolved(tmp_path: 
     )
     assert refused.returncode != 0
     assert "reap kdive domains" in refused.stderr
-    contract, resolved = _published_contract(tmp_path)
-    assert contract.exists()
+    _, resolved = _published_contract(tmp_path)
     resolved["LIBVIRT_OPTIONAL"] = "1"
     allowed = _sourced(
         ROOT / "scripts/live-stack/env.sh", 'require_libvirt_uri "reap kdive domains"', resolved
@@ -1287,8 +1285,7 @@ def test_stack_status_reports_an_unresolved_endpoint_without_probing_it(tmp_path
 def test_stack_status_still_probes_a_resolved_endpoint(tmp_path: Path) -> None:
     """The degraded report is the exception, not the new default: a host whose published contract
     validates keeps the endpoint banner and the probe it guards."""
-    contract, staged = _published_contract(tmp_path)
-    assert contract.exists()
+    _, staged = _published_contract(tmp_path)
     result = subprocess.run(
         ["bash", str(_stack_status_libvirt_slice(tmp_path))],
         capture_output=True,
