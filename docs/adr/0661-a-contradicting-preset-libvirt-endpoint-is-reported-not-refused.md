@@ -56,6 +56,13 @@ A per-shell record was considered and cut: it buys one duplicate advisory line a
 second shell global on a file whose existing one needed a dedicated regression test to establish
 that it is an output and never an input.
 
+Reading the contract on the preset branch also gives `LIBVIRT_ENV` — the test-staging seam — a
+third consequence, beside the two `libvirt-uri.sh:13-27` already enumerates: a redirect now decides
+whether this guard can fire at all, since an absent or invalid target leaves it silent. The
+allowlist does not bound that one. What does is that the seam and `KDIVE_LIBVIRT_URI` arrive from
+the same environment, so anyone who can redirect it could set the endpoint directly; the guard is
+an operator advisory, not a control against a hostile party.
+
 This record does not touch behaviour behind a *valid* contract on a wrong or unreachable daemon —
 the wrong-daemon reap and the unobservable teardown are #2515 and #2516, as ADR-0659 already
 records.

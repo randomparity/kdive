@@ -51,9 +51,9 @@ the override is the documented escape hatch (`docs/operating/runbooks/live-testi
 - Success 1 — `test_a_preset_contradicting_the_contract_is_reported`; red today, because the branch
   never loads the contract and stderr is empty.
 - Success 2 — `test_a_preset_matching_the_contract_is_not_reported`; red on a presence-keyed guard.
-- Success 3 — `test_a_preset_is_honoured_silently_without_a_valid_contract`, parametrized over all
-  three loader-failure legs (absent, untrusted metadata, allowlist-refused), asserting exit 0 and
-  empty stderr; red without either half of the loader-failure handling.
+- Success 3 — `test_a_preset_is_honoured_silently_without_a_valid_contract`, four inputs across the
+  loader's three refusals (two reach `require_exact_libvirt_env`), asserting exit 0 and empty
+  stderr; red without either half of the loader-failure handling.
 - Existing preset expectations, now meeting the guard — the `("qemu:///system", True, …)` case of
   `test_live_stack_env_resolves_one_libvirt_endpoint`, which now asserts the report, and
   `test_lifecycle_uri_is_parsed_as_literal_data`.

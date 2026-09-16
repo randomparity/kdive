@@ -999,16 +999,21 @@ def test_a_preset_matching_the_contract_is_not_reported(tmp_path: Path) -> None:
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("leg", ("absent", "untrusted-metadata", "allowlist-refused"))
+@pytest.mark.parametrize(
+    "leg", ("absent", "untrusted-metadata", "malformed-line-shape", "allowlist-refused")
+)
 def test_a_preset_is_honoured_silently_without_a_valid_contract(tmp_path: Path, leg: str) -> None:
-    """All three loader-failure legs, on the path that exists to get past exactly that state.
+    """Every loader refusal, on the path that exists to get past exactly that state.
 
     An explicit override is how an operator works on a host whose contract is broken or absent,
     so the comparison must not turn the escape hatch into the thing it escapes. Two ways it
     could: `load_published_libvirt_uri` writes its refusal to stderr *before* returning 1, and
     under the callers' `set -euo pipefail` a bare assignment from a failing command substitution
-    aborts the sourcing shell. Both halves are asserted here -- empty stderr and exit 0 -- and
-    each leg reaches a different one of the loader's three refusals.
+    aborts the sourcing shell. Both halves are asserted here -- empty stderr and exit 0.
+
+    Four inputs across the loader's three refusals, rather than one input each: `absent` and
+    `untrusted-metadata` both land on `require_exact_libvirt_env`, which is one refusal reached
+    two ways, and covering only those two would leave the line-shape refusal unexercised.
     """
     contract, staged = _published_contract(tmp_path)
     if leg == "absent":
@@ -1016,6 +1021,10 @@ def test_a_preset_is_honoured_silently_without_a_valid_contract(tmp_path: Path, 
     elif leg == "untrusted-metadata":
         (tmp_path / "bin" / "stat").write_text(
             "#!/bin/sh\nprintf '1000:1000:644\\n'\n", encoding="utf-8"
+        )
+    elif leg == "malformed-line-shape":
+        contract.write_text(
+            f"KDIVE_LIBVIRT_URI={_PUBLISHED_URI}\nHOST=elsewhere\n", encoding="utf-8"
         )
     else:
         contract.write_text("KDIVE_LIBVIRT_URI=qemu:///wrong\n", encoding="utf-8")

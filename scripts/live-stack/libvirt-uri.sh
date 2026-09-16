@@ -22,9 +22,17 @@
 # it as "no lifecycle contract installed" and resolves qemu:///system with no message, exactly as
 # it does on a bare dev host, because nothing here can tell the two apart. On a provisioned host
 # that is the server/worker split this file exists to prevent, so the seam is only safe for a
-# caller that stages a real file. Do not restate the bound as "an explicit KDIVE_LIBVIRT_URI
-# bypasses the allowlist anyway": that holds for resolve_libvirt_uri only, and
-# worker-lifecycle.sh calls load_published_libvirt_uri directly, where no such bypass exists.
+# caller that stages a real file.
+#
+# Since #2509 there is a third consequence, because the preset branch reads LIBVIRT_ENV too: a
+# redirect decides not only which value is published but whether the contradiction guard can fire
+# at all. Pointed at an absent or invalid path it leaves the guard silent, so a preset that
+# contradicts the real /etc entry is honoured with no report. What bounds THAT is not the
+# allowlist — it is that the seam belongs to whoever owns the shell's environment, and they set
+# KDIVE_LIBVIRT_URI in the first place. Do not restate the bound as "an explicit
+# KDIVE_LIBVIRT_URI bypasses the allowlist anyway": the preset branch consults the contract but
+# never adopts its value, and worker-lifecycle.sh calls load_published_libvirt_uri directly,
+# where no bypass exists at all.
 : "${LIBVIRT_ENV:=/etc/kdive/live-worker-libvirt.env}"
 # Why the two names below carry no KDIVE_ prefix either (ADR-0659): check_env_documented.py sweeps
 # scripts/ for KDIVE_[A-Z0-9_]+ and requires every hit to be a registry setting or a catalogued
