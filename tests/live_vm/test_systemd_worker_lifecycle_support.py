@@ -15,7 +15,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 _HOSTED_PROOF = "tests/live_vm/test_systemd_worker_lifecycle.py"
 
 
-def test_hosted_systemd_proof_collects_exactly_three_cases() -> None:
+def test_hosted_systemd_proof_collects_exactly_six_cases() -> None:
+    """The gated suite never runs in CI, so this list is the only thing that notices a change.
+
+    A proof silently added, renamed, or lost there would be invisible until someone ran the live
+    tier by hand, which is exactly when nobody is checking the roster.
+    """
     result = subprocess.run(
         (sys.executable, "-m", "pytest", _HOSTED_PROOF, "--collect-only", "-q"),
         cwd=_ROOT,
@@ -32,6 +37,9 @@ def test_hosted_systemd_proof_collects_exactly_three_cases() -> None:
         f"{_HOSTED_PROOF}::test_real_systemd_workers_register_heartbeat_and_terminate[1]",
         f"{_HOSTED_PROOF}::test_real_systemd_workers_register_heartbeat_and_terminate[3]",
         f"{_HOSTED_PROOF}::test_database_outage_retains_exact_invocation_until_stop_retry",
+        f"{_HOSTED_PROOF}::test_recover_clears_the_failed_identity_that_blocks_the_next_start",
+        f"{_HOSTED_PROOF}::test_recover_retires_a_restarted_slot_and_releases_its_fence_in_one_call",
+        f"{_HOSTED_PROOF}::test_recover_refuses_a_live_slot_without_releasing_its_fence",
     )
 
 

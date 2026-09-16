@@ -441,10 +441,10 @@ test-compose-lifecycle:
 test-compose-volumes:
     KDIVE_RUN_COMPOSE_VOLUME_PROOF=1 KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/compose/test_compose_volume_persistence_live.py -m live_stack --strict-markers -q
 
-# Lint and format-check the shell scripts (recursively under scripts/).
+# Lint and format-check the shell scripts across the repo's listed directories.
 lint-shell:
-    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples | xargs shellcheck
-    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples
+    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples deploy/systemd .github/scripts | xargs shellcheck
+    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples deploy/systemd .github/scripts
 
 # Lint and syntax-check the Ansible automation (deploy/ansible).
 lint-ansible:

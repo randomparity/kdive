@@ -375,3 +375,139 @@ def test_database_outage_retains_exact_invocation_until_stop_retry(
         raise failure.with_traceback(failure.__traceback__)
     current = support.docker_inspect("container", container_id)
     support.assert_current_postgres_identity(container_id, current)
+
+
+def _lifecycle_result(operation: str, count: int | None = None) -> tuple[int, LifecycleResponse]:
+    """Run one lifecycle operation that is expected to fail, and decode its response frame.
+
+    ``support.run`` uses ``check=True``, but a refused or conflicting operation exits non-zero
+    *after* printing the same bounded response frame a successful one prints. Reading it is the
+    only way to assert the disposition rather than just the exit status.
+    """
+    argv = [str(_LIFECYCLE), operation]
+    if count is not None:
+        argv.append(str(count))
+    result = subprocess.run(
+        argv, cwd=support.ROOT, check=False, capture_output=True, text=True, timeout=130
+    )
+    return result.returncode, LifecycleResponse.model_validate_json(result.stdout.strip())
+
+
+def _restart_out_of_band(unit: str, retained_invocation: str) -> str:
+    """Restart one worker unit outside the lifecycle contract, as a sweep or an operator does.
+
+    Under ADR-0657's strict gate binding the successor invocation exits non-zero, so `systemctl
+    restart` itself fails; that failure is the wedge being created, not an error. This is the one
+    precondition unit tests cannot build -- nothing in-process assigns a new `INVOCATION_ID`.
+    """
+    subprocess.run(
+        ("sudo", "systemctl", "restart", unit),
+        cwd=support.ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    properties = _properties(unit)
+    successor = properties["InvocationID"]
+    assert properties["ActiveState"] == "failed", properties
+    assert len(successor) == 32 and successor != retained_invocation, properties
+    return successor
+
+
+def _reset_fleet() -> None:
+    """Return every fixed unit to the inactive, empty-identity state the next test needs."""
+    _lifecycle("stop")
+    _lifecycle("recover")
+
+
+def test_recover_clears_the_failed_identity_that_blocks_the_next_start(
+    proof_context: ProofContext,
+) -> None:
+    """The residual ADR-0657 discloses and nothing shipped could reach.
+
+    `stop` retires the restarted slot's binding and removes its files, but `systemctl stop` is a
+    no-op on the `failed` unit it leaves, so the retained `InvocationID` survives and
+    `require_inactive` refuses the next `start`. With `state.json` gone, every later `stop` skips
+    the slot entirely, so before `recover` there was no operation that could clear it.
+    """
+    rows = _assert_started(proof_context, 1)
+    try:
+        before = _unit_evidence(1)
+        _restart_out_of_band(before.unit, before.invocation_id)
+
+        assert _lifecycle("stop").ok
+        retired = _incarnation(proof_context.admin_dsn, rows[0].incarnation)
+        assert retired.state == "terminated" and retired.outcome == "killed"
+        assert not _slot_artifacts_exist(1)
+
+        # The wedge: the unit still holds an identity, and that alone refuses activation.
+        wedged = _properties(before.unit)
+        assert wedged["ActiveState"] == "failed" and wedged["InvocationID"] != ""
+        status, refused = _lifecycle_result("start", 1)
+        assert status == 4 and not refused.ok
+        assert refused.code == "conflict" and refused.retry_action == "operator_recovery"
+
+        recovered = _lifecycle("recover")
+        assert recovered.ok, recovered.model_dump_json()
+        assert [(slot.slot, slot.message) for slot in recovered.slots] == [
+            (1, "cleared the retained unit identity")
+        ]
+        cleared = _properties(before.unit)
+        assert cleared["ActiveState"] == "inactive"
+        assert cleared["SubState"] == "dead"
+        assert cleared["InvocationID"] == ""
+
+        # The point of clearing it: the slot is startable again with no hand-run reset-failed.
+        restarted = _assert_started(proof_context, 1)
+        assert restarted[0].binding["invocation_id"] != before.invocation_id
+    finally:
+        _reset_fleet()
+
+
+def test_recover_retires_a_restarted_slot_and_releases_its_fence_in_one_call(
+    proof_context: ProofContext,
+) -> None:
+    """The other branch: retained facts still present, so one call clears facts, fence and unit."""
+    rows = _assert_started(proof_context, 1)
+    try:
+        before = _unit_evidence(1)
+        successor = _restart_out_of_band(before.unit, before.invocation_id)
+
+        response = _lifecycle("recover")
+        assert response.ok, response.model_dump_json()
+        assert [(slot.slot, slot.phase) for slot in response.slots] == [(1, SlotPhase.TERMINATED)]
+
+        retired = _incarnation(proof_context.admin_dsn, rows[0].incarnation)
+        assert retired.state == "terminated" and retired.outcome == "killed"
+        # ADR-0657: evidence is published for the retained binding, never the successor's.
+        assert retired.binding["invocation_id"] == before.invocation_id != successor
+        assert not _slot_artifacts_exist(1)
+        cleared = _properties(before.unit)
+        assert cleared["ActiveState"] == "inactive" and cleared["InvocationID"] == ""
+    finally:
+        _reset_fleet()
+
+
+def test_recover_refuses_a_live_slot_without_releasing_its_fence(
+    proof_context: ProofContext,
+) -> None:
+    """The guard that matters most: recovery must never retire a worker that is still running."""
+    rows = _assert_started(proof_context, 1)
+    try:
+        before = _unit_evidence(1)
+        assert before.populated
+
+        status, response = _lifecycle_result("recover")
+        assert status == 4 and not response.ok
+        assert response.code == "conflict" and response.retry_action == "operator_recovery"
+        assert [(slot.slot, slot.code) for slot in response.slots] == [(1, "recovery_refused")]
+
+        untouched = _incarnation(proof_context.admin_dsn, rows[0].incarnation)
+        assert untouched.state == "active" and untouched.outcome is None
+        assert _slot_artifacts_exist(1)
+        after = _unit_evidence(1)
+        assert after.invocation_id == before.invocation_id and after.populated
+        _wait_for_heartbeat(1)
+    finally:
+        _reset_fleet()

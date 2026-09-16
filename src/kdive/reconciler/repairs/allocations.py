@@ -229,7 +229,19 @@ async def _expire_one(conn: AsyncConnection, allocation_id: UUID, project: str) 
             await allocation_release.guard_external_boot_release(
                 conn, allocation_id, project=project
             )
-        except allocation_release.ExternalBootDenied:
+        except allocation_release.ExternalBootDenied as denied:
+            # A bare `return False` here is indistinguishable from the two no-op returns
+            # above, and `reclaimed` does not move either way, so the skip is invisible
+            # (#2519). The cause comes from the denial rather than this message: the guard
+            # raises for a restricting activation (ADR-0596) and for the ADR-0623
+            # authority-ownership fence, and only `details` tells the two apart.
+            _log.warning(
+                "reconciler: allocation %s not expired — the external-boot admission guard "
+                "refused the release; retried next pass: %s %s",
+                allocation_id,
+                denied,
+                denied.details,
+            )
             return False
         alloc = await accounting.stamp_active_ended(conn, alloc, datetime.now(UTC))
         await ALLOCATIONS.update_state(conn, allocation_id, _EXPIRED_ALLOCATION_STATE)

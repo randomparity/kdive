@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-Operation = Literal["start", "status", "stop", "diagnostics"]
+Operation = Literal["start", "status", "stop", "diagnostics", "recover"]
 LIFECYCLE_PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_RESPONSE_BYTES = 1_114_112

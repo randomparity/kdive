@@ -97,6 +97,8 @@ class Lifecycle(Protocol):
 
     async def diagnostics(self, deadline: Deadline) -> LifecycleResponse: ...
 
+    async def recover(self, deadline: Deadline) -> LifecycleResponse: ...
+
 
 type LifecycleContext = AbstractAsyncContextManager[Lifecycle]
 type LifecycleFactory = Callable[[Deadline], object]
@@ -429,7 +431,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve", help="serve one socket-activated request")
     request = subparsers.add_parser("request", help="send one lifecycle request")
-    request.add_argument("operation", choices=("start", "status", "stop", "diagnostics"))
+    request.add_argument("operation", choices=("start", "status", "stop", "diagnostics", "recover"))
     return parser
 
 

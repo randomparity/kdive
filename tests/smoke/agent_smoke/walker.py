@@ -6,6 +6,12 @@ using **only** what the surface serves — the tools ``list_tools`` advertises, 
 path deterministically (no LLM) and records every **stall**: a step whose next action is a
 dead end because the surface does not actually serve what the doc advertises.
 
+"Serves" means what the gateway contract means by it (ADR-0268): ``tools/list`` advertises the
+``CORE_TOOLS`` core set, and every other registered tool stays reachable through
+``tools.search`` + ``tools.invoke``. A stage or a wind-down step is therefore a dead end only
+when its tools are unreachable *both* ways — asserting bare presence in ``tools/list`` would
+stall the walk on the gateway's own design (#2521 survey entries A2 and A3, fixed by #2523).
+
 The walk is *surface-driven*. It parses the served index at runtime and follows what the doc
 itself says, so it holds no hand-copied tool table — that is #1366's job. #1366 (ADR-0407,
 ``test_next_actions_graph.py``) is the **PR-gate static graph guard** over a reviewed
@@ -21,6 +27,7 @@ surface), so the real app and a synthetic fixture drive the same code.
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -28,13 +35,16 @@ AGENT_INDEX_URI = "resource://kdive/docs/guide/agent-index.md"
 
 # The gateway the index promises is "always available" — a lazy-loading host that materializes
 # only some tools reaches everything else through it, so its absence strands such a client.
+# These two are asserted against ``tools/list`` itself, not against reachability: they are the
+# means of reaching everything else, so nothing can discover them on the agent's behalf.
 GATEWAY_TOOLS: tuple[str, ...] = ("tools.search", "tools.invoke")
 
 # The lifecycle prompts the index footer tells prompt-listing clients they can use.
 NAMED_PROMPTS: tuple[str, ...] = ("start_investigation", "build_boot_debug", "triage_panic")
 
 # The wind-down the index's final stage names: an agent that cannot reach these leaks the
-# capacity it acquired, which is itself a stall.
+# capacity it acquired, which is itself a stall. None of them is in ``CORE_TOOLS``, so the
+# check asks whether the agent can *reach* them, not whether ``tools/list`` advertises them.
 WIND_DOWN_TOOLS: tuple[str, ...] = (
     "systems.teardown",
     "allocations.release",
@@ -51,6 +61,7 @@ class Surface(Protocol):
     """A normalized, string-only view of the served MCP surface an agent reaches."""
 
     async def tool_names(self) -> frozenset[str]: ...
+    async def reachable(self, name: str) -> bool: ...
     async def resource_uris(self) -> frozenset[str]: ...
     async def read(self, uri: str) -> str: ...
     async def prompt_names(self) -> frozenset[str]: ...
@@ -87,18 +98,38 @@ def _session_section(doc: str) -> str:
     return rest[: next_heading.start()] if next_heading else rest
 
 
-def _stage_tools(section: str, tools: frozenset[str]) -> list[tuple[int, list[str]]]:
-    """Map each numbered stage to the live tools it names, in first-mention order.
+async def _stage_tools(
+    section: str, reachable: Callable[[str], Awaitable[bool]]
+) -> list[tuple[int, list[str]]]:
+    """Map each numbered stage to the tools it names that the agent can reach, in mention order.
 
-    Backticked tokens that are not live tool names — refs (``refs.latest_console``), response
-    fields (``data.supports_snapshots``), provider paths, params — are dropped, so a stage's
-    surviving list is exactly the actions the served surface can honor.
+    Backticked tokens that are not reachable tool names — refs (``refs.latest_console``),
+    response fields (``data.supports_snapshots``), provider paths, params — are dropped, so a
+    stage's surviving list is exactly the actions the served surface can honor. Reachability,
+    not advertisement: a stage naming only non-core tools is still actionable, because the
+    agent reaches them through the gateway.
     """
     stages: list[tuple[int, list[str]]] = []
     for number, body in _STEP.findall(section):
-        named = [t for t in dict.fromkeys(_BACKTICKED.findall(body)) if t in tools]
+        named = [t for t in dict.fromkeys(_BACKTICKED.findall(body)) if await reachable(t)]
         stages.append((int(number), named))
     return stages
+
+
+def _memoized(surface: Surface) -> Callable[[str], Awaitable[bool]]:
+    """``surface.reachable`` with per-walk caching.
+
+    The served index names the same tool across several stages and again in the wind-down, and
+    a miss costs a real ``tools.search`` round trip, so each distinct token is resolved once.
+    """
+    cache: dict[str, bool] = {}
+
+    async def reachable(name: str) -> bool:
+        if name not in cache:
+            cache[name] = await surface.reachable(name)
+        return cache[name]
+
+    return reachable
 
 
 def _advertised_links(doc: str) -> list[str]:
@@ -119,6 +150,7 @@ async def walk(surface: Surface) -> WalkResult:
     visited: list[str] = ["orient"]
     stalls: list[Stall] = []
 
+    reachable = _memoized(surface)
     tools = await surface.tool_names()
     resources = await surface.resource_uris()
     prompts = await surface.prompt_names()
@@ -130,16 +162,16 @@ async def walk(surface: Surface) -> WalkResult:
         return WalkResult(tuple(visited), tuple(stalls))
 
     section = _session_section(index)
-    stages = _stage_tools(section, tools)
+    stages = await _stage_tools(section, reachable)
     if not stages:
         stalls.append(Stall("typical-session", "no numbered golden-path stages found"))
     for number, named in stages:
         visited.append(f"stage-{number}")
         if not named:
-            stalls.append(Stall(f"stage-{number}", "names no live tool — no next action"))
+            stalls.append(Stall(f"stage-{number}", "names no reachable tool — no next action"))
 
     visited.append("wind-down")
-    missing_wind_down = [t for t in WIND_DOWN_TOOLS if t not in tools]
+    missing_wind_down = [t for t in WIND_DOWN_TOOLS if not await reachable(t)]
     if missing_wind_down:
         stalls.append(Stall("wind-down", f"cannot reach wind-down tools: {missing_wind_down}"))
 

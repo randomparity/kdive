@@ -15,7 +15,8 @@ readonly WORKER_PYTHON=/opt/kdive-live-worker-lifecycle/.venv/bin/python
 readonly WORKER_EXECUTABLE="${here}/worker-from-checkout"
 
 usage() {
-  echo "usage: scripts/live-stack/worker-lifecycle.sh start COUNT|status|stop|diagnostics" >&2
+  echo "usage: scripts/live-stack/worker-lifecycle.sh" \
+    "start COUNT|status|stop|diagnostics|recover" >&2
 }
 
 require_exact_file() {
@@ -321,7 +322,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     }
     request "$1"
     ;;
-  stop | diagnostics)
+  stop | diagnostics | recover)
     [[ $# == 1 ]] || {
       usage
       exit 2

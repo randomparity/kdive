@@ -218,7 +218,9 @@ class FakeRuntime:
         assert deadline.remaining() >= 0
         if failure := self.observe_failures.get(unit):
             raise failure
-        observation = self.current[unit]
+        # An untracked unit is the inactive, empty-identity case the real runtime answers with a
+        # BootObservation, which is what every never-started fixed slot reports.
+        observation = self.current.get(unit) or _boot_observation(_slot_from_unit(unit))
         if (
             unit in self.signaled
             and isinstance(observation, UnitObservation)
@@ -252,11 +254,13 @@ class FakeRuntime:
         if unit not in self.unstoppable:
             self.current.pop(unit, None)
 
-    def reset(self, unit: str, deadline: Deadline) -> None:
-        self.systemd_deadlines.append(("reset", deadline))
+    def reset_failed(self, unit: str, deadline: Deadline) -> None:
+        self.systemd_deadlines.append(("reset-failed", deadline))
         assert deadline.remaining() >= 0
         self.resets.append(unit)
-        self.events.append(f"systemd:reset:{unit}")
+        self.events.append(f"systemd:reset-failed:{unit}")
+        # `systemctl reset-failed` drops a failed unit's ActiveState and InvocationID, leaving
+        # the inactive, empty-identity unit `observe` reports as a BootObservation.
         self.current.pop(unit, None)
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
@@ -2014,3 +2018,273 @@ def test_diagnostic_source_loader_rejects_unsafe_metadata(tmp_path: Path, unsafe
         load_slot_redaction_values(root, 1, expected_uid=expected_uid, expected_gid=os.getgid())
 
     assert str(error.value) == "slot diagnostic redaction source is unsafe"
+
+
+def test_recover_retires_a_restarted_slot_and_clears_its_failed_unit_identity() -> None:
+    """The residual ADR-0657 discloses: the fence clears but `require_inactive` still refuses.
+
+    `stop` already retires the retained binding of an out-of-band-restarted slot (#2485), and
+    leaves the unit `failed` holding the successor's InvocationID because `systemctl stop` is a
+    no-op on it. `recover` is the call that finishes the job in one request.
+    """
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(started.unit)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok and response.code == "ok"
+    _assert_retained_binding_retired(authority, started)
+    assert stores[0].state is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert runtime.resets == [started.unit]
+    assert started.unit not in runtime.current
+    assert events[-3:] == [
+        "systemd:stop:kdive-live-worker@1.service",
+        "state:cleanup",
+        "systemd:reset-failed:kdive-live-worker@1.service",
+    ]
+    assert [(result.slot, result.phase, result.code) for result in response.slots] == [
+        (1, SlotPhase.TERMINATED, "ok")
+    ]
+
+
+def test_recover_clears_a_failed_unit_whose_slot_facts_stop_already_removed() -> None:
+    """The case no shipped operation reaches: `stop` skips a slot with no retained state.json."""
+    stores, runtime, authority, clock, events = _fleet()
+    unit = "kdive-live-worker@1.service"
+    runtime.current[unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(unit)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert runtime.resets == [unit]
+    assert unit not in runtime.current
+    assert authority.terminations == []
+    assert events == [f"systemd:reset-failed:{unit}"]
+    assert [(result.slot, result.phase, result.message) for result in response.slots] == [
+        (1, None, "cleared the retained unit identity")
+    ]
+
+
+def test_recover_refuses_a_live_slot_without_touching_its_facts_or_fence() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: started})
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == "conflict" and response.retry_action == "operator_recovery"
+    assert response.message == "recovery refused a fixed worker unit with live processes"
+    assert [(result.slot, result.code, result.message) for result in response.slots] == [
+        (1, "recovery_refused", "fixed worker unit still has live processes")
+    ]
+    assert stores[0].state == started
+    assert authority.terminations == []
+    assert runtime.resets == [] and runtime.stopped == [] and runtime.signaled == []
+    assert events == []
+
+
+def test_recover_retires_dead_slots_while_refusing_the_live_one() -> None:
+    """A refusal is per slot: one running worker must not strand every wedged slot."""
+    live = _state(1, SlotPhase.STARTED)
+    wedged = _state(2, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: live, 2: wedged})
+    runtime.current[wedged.unit] = _observation(
+        2, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(wedged.unit)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "conflict"
+    assert [(result.slot, result.code) for result in response.slots] == [
+        (1, "recovery_refused"),
+        (2, "ok"),
+    ]
+    assert stores[0].state == live
+    assert stores[1].state is None
+    _assert_retained_binding_retired(authority, wedged)
+    assert runtime.resets == [wedged.unit]
+
+
+def test_recover_discards_a_prepared_slot_without_publishing_evidence() -> None:
+    """A prepared generation is registered only at gated->registered, so it holds no fence."""
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, events = _fleet(states={1: prepared})
+    runtime.current[prepared.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(prepared.unit)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert stores[0].state is None
+    assert authority.registered == set() and authority.terminations == []
+    assert events == [
+        "state:discard-prepared",
+        "systemd:reset-failed:kdive-live-worker@1.service",
+    ]
+    assert [(result.slot, result.phase) for result in response.slots] == [(1, SlotPhase.PREPARED)]
+
+
+def test_recover_cleans_a_slot_that_already_carries_terminal_evidence() -> None:
+    """Evidence was published before the crash; recovery republishes none of it."""
+    terminated = _state(1, SlotPhase.TERMINATED, outcome="killed")
+    stores, runtime, authority, clock, events = _fleet(states={1: terminated})
+    runtime.current.pop(terminated.unit, None)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert stores[0].state is None
+    assert authority.terminations == []
+    # No `reset-failed`: systemd already reports the unit inactive with an empty identity, which
+    # is exactly what the next `require_inactive` wants.
+    assert events == ["systemd:stop:kdive-live-worker@1.service", "state:cleanup"]
+    assert runtime.resets == []
+
+
+def test_recover_leaves_an_empty_fleet_untouched() -> None:
+    stores, runtime, authority, clock, events = _fleet()
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok and response.slots == ()
+    assert runtime.resets == [] and events == []
+
+
+def test_recover_refuses_a_slot_whose_cgroup_membership_is_unreadable() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "unknown")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == "dependency_unavailable"
+    assert response.retry_action == "restore_systemd"
+    assert stores[0].state == started
+    assert authority.terminations == [] and runtime.resets == []
+
+
+def test_recover_refuses_a_slot_whose_invocation_identity_is_unreadable() -> None:
+    """ADR-0657 forbids running for a slot whose invocation identity is unreadable."""
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _boot_observation(1)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == "dependency_unavailable"
+    assert stores[0].state == started
+    assert authority.terminations == [] and runtime.resets == []
+
+
+def test_recover_reports_a_rejected_binding_without_clearing_the_slot() -> None:
+    """A binding the row no longer matches is #2533's residual; recover must not paper over it."""
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", invocation_id="f" * 32)
+    authority.reject_termination = True
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "evidence_rejected"
+    assert stores[0].state == started
+    assert runtime.resets == []
+
+
+def test_recover_publishes_the_outcome_the_retained_invocation_itself_reports() -> None:
+    """The ordinary recovery: a worker that crashed in place, not an out-of-band restart.
+
+    Here the retained invocation is the one systemd still reports, so the outcome is derived
+    from its own `Result` and `ExecMainStatus` rather than taking ADR-0657's fixed `killed` for
+    a successor. This is the one branch where recovery attributes observed exit facts to the
+    retained incarnation, and they are its own facts -- which is exactly the line ADR-0657 draws.
+    """
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id=started.invocation_id, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(started.unit)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert authority.terminated_bindings == [
+        (started.incarnation, started.boot_id, started.invocation_id)
+    ]
+    assert stores[0].state is None
+    assert runtime.resets == [started.unit]
+
+
+def test_recover_reports_slots_it_already_retired_when_a_later_slot_fails() -> None:
+    """Recovery is the operator escape hatch, so an abort must not hide the fences it released."""
+    first = _state(1, SlotPhase.STARTED)
+    second = _state(2, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: first, 2: second})
+    runtime.current[first.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    runtime.unstoppable.add(first.unit)
+    runtime.observe_failures[second.unit] = SystemdUnavailable("systemctl show is unavailable")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "dependency_unavailable"
+    _assert_retained_binding_retired(authority, first)
+    assert stores[0].state is None
+    # Slot 1 no longer loads, so only the carried result can report that it was retired.
+    assert [(result.slot, result.phase) for result in response.slots] == [
+        (1, SlotPhase.TERMINATED),
+        (2, SlotPhase.STARTED),
+    ]
+
+
+def test_recover_clips_its_systemd_work_to_the_same_ceiling_stop_uses() -> None:
+    """One slow unit must not consume the whole request and strand the other seven slots."""
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", invocation_id="f" * 32)
+
+    _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock, 1_000.0)))
+
+    budgets = [
+        deadline.remaining()
+        for operation, deadline in runtime.systemd_deadlines
+        if operation in {"observe", "stop-retained", "reset-failed"}
+    ]
+    assert budgets and all(budget <= 45.0 for budget in budgets), budgets
+
+
+def test_recover_keeps_a_refusal_visible_when_a_later_slot_fails() -> None:
+    """A refusal's slot is deliberately left loadable, so the reload must not overwrite it.
+
+    "this unit has live processes" is the one fact that changes what the operator does next;
+    replacing it with whatever code the sweep later failed on would send them after the wrong
+    problem.
+    """
+    live = _state(1, SlotPhase.STARTED)
+    later = _state(2, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: live, 2: later})
+    runtime.observe_failures[later.unit] = SystemdUnavailable("systemctl show is unavailable")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "dependency_unavailable"
+    assert [(result.slot, result.code) for result in response.slots] == [
+        (1, "recovery_refused"),
+        (2, "dependency_unavailable"),
+    ]
+    assert stores[0].state == live and authority.terminations == []
