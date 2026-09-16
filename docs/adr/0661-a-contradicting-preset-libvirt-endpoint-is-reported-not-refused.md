@@ -31,9 +31,11 @@ yields no published value to disagree with, so the preset is honoured silently, 
 that path *is* the documented way past a broken contract, and emitting a validation error on it
 would break the escape hatch at the moment it is needed.
 
-The report is emitted once per shell rather than once per call, recorded the way
-`LIBVIRT_UNRESOLVED` is and cleared on a fresh source by the same `declare -F resolve_libvirt_uri`
-probe.
+That silence has to be arranged, because the loader is loud on failure in both channels: it
+writes `lifecycle prerequisite has untrusted metadata` or an allowlist refusal to stderr *before*
+returning 1 (`libvirt-uri.sh:60-86`). On this branch both halves are caught — the message
+discarded, the status taken explicitly — and the specification carries the exact spelling. Getting
+either half wrong turns the escape hatch into the thing it escapes.
 
 ## Consequences
 
@@ -48,18 +50,25 @@ The report reaches stderr only. A consumer that captures stderr, or an operator 
 it, still gets the split; nothing in this record claims otherwise, and #2509's acceptance asks for
 the disagreement to be *reported*, not prevented.
 
+The report is emitted once per call, not once per shell, so `stack-status.sh` — which sources
+both `lib.sh` and `env.sh`, each calling the resolver (`lib.sh:68`, `env.sh:15`) — prints it twice.
+A per-shell record was considered and cut: it buys one duplicate advisory line at the price of a
+second shell global on a file whose existing one needed a dedicated regression test to establish
+that it is an output and never an input.
+
 This record does not touch behaviour behind a *valid* contract on a wrong or unreachable daemon —
 the wrong-daemon reap and the unobservable teardown are #2515 and #2516, as ADR-0659 already
 records.
 
 ## Considered & rejected
 
-- **Refuse the contradicting preset.** verified: three places in this same tree direct an operator
-  to export the variable as the way out of a broken or unprobeable contract —
-  `docs/operating/runbooks/live-testing.md:93` ("`KDIVE_LIBVIRT_URI` is the operator escape hatch
-  across every family"), `scripts/live-stack/stack-status.sh:67`, and this file's own abort message
-  at `scripts/live-stack/libvirt-uri.sh:142`. Refusing contradicts all three and takes away the
-  second half of #2509's acceptance.
+- **Refuse the contradicting preset.** verified: `docs/operating/runbooks/live-testing.md:93`
+  states the override unconditionally — "`KDIVE_LIBVIRT_URI` is the operator escape hatch across
+  every family" — and that is the citation refusing contradicts. The two other places naming the
+  export, `scripts/live-stack/stack-status.sh:67` and this file's abort message at
+  `scripts/live-stack/libvirt-uri.sh:142`, both sit on the *broken*-contract path, where this guard
+  never fires; they are precedent for the escape hatch, not instances of it. Refusing also takes
+  away the second half of #2509's acceptance.
 - **Refuse, and add an opt-out knob to restore the override.** verified:
   `scripts/guards/check_env_documented.py:36` sweeps `scripts/` for `KDIVE_[A-Z0-9_]+` and requires
   every hit to be a registry setting or a catalogued `external_env` entry rendered into the
@@ -74,9 +83,11 @@ records.
   invalid, `load_published_libvirt_uri` returns 1 after writing `lifecycle prerequisite has
   untrusted metadata` or an allowlist refusal to stderr (`libvirt-uri.sh:60-86`) — on the preset
   path, which exists to get past exactly that state.
-- **Report once per call rather than once per shell.** verified: `stack-status.sh` sources both
-  `lib.sh` and `env.sh` in one shell and each calls the resolver (`lib.sh:68`, `env.sh:15`), so a
-  per-call report prints the same two URIs twice on the entry point most likely to be run against a
-  misconfigured host.
+- **Suppress the second report with a per-shell record.** verified: `stack-status.sh` sources both
+  `lib.sh` and `env.sh` in one shell and each calls the resolver (`lib.sh:68`, `env.sh:15`), so the
+  duplicate is real — but it is one advisory line on one entry point, and the sibling record
+  `LIBVIRT_UNRESOLVED` shows the cost of a shell global here: `libvirt-uri.sh:39-52` spends fourteen
+  lines establishing that it is an output and never an input, backed by its own regression test
+  (`test_live_stack_scripts.py::test_an_inherited_degraded_record_does_not_suppress_resolution`).
 - **Do nothing; leave the override silent.** judgment: cost. The failure surfaces far from its
   cause, which is the bill #2480 already paid once.
