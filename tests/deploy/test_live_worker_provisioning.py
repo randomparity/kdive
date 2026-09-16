@@ -2135,3 +2135,53 @@ def test_local_worker_declares_boot_kernel_readability() -> None:
     assert "getent" in tasks
     assert "live_vm_host_worker_accounts" in tasks
     assert "boot_kernels.yml" in _text(LOCAL_WORKER / "tasks" / "main.yml")
+
+
+def test_installer_forces_a_fresh_project_wheel_into_the_worker_venv() -> None:
+    """`--no-editable` installs a copy, and uv keys that copy on name and version.
+
+    A checkout whose sources changed under an unchanged `version` in pyproject.toml re-syncs to
+    the cached wheel, so the venv keeps the old code while provisioning reports success. That is
+    invisible until a request is sent: `lifecycle_protocol_identity` is derived from the
+    installed code, so `require_compatible_lifecycle` then refuses every operation on a host the
+    role just declared healthy (#2532). Reproduced on uv with a two-line project: sync, edit the
+    source, sync again, and the second import still returns the first value.
+    """
+    source = _text(INSTALLER)
+    sync = "uv sync --locked --no-editable --no-dev --group live --reinstall-package kdive"
+
+    assert sync in source
+    # Scoped to the project: third-party wheels stay cached, so a reinstall is not a full rebuild.
+    assert "--reinstall " not in source
+    assert "--reinstall-package kdive" in source
+
+
+def test_verify_asserts_the_installed_venv_carries_this_checkout_protocol() -> None:
+    """The revision stamp is written by the role, so it records intent, not installed code.
+
+    Only comparing `lifecycle_protocol_identity` between the checkout and the installed venv
+    catches a stale worker venv while provisioning is still running, instead of leaving it for
+    the first `worker-lifecycle.sh` request to discover (#2532).
+    """
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    names = [task["name"] for task in tasks]
+    probe = "Read the checkout lifecycle protocol identity"
+    installed = "Read the installed lifecycle protocol identity"
+    assertion = "Assert the installed lifecycle protocol matches the checkout"
+
+    assert names.index(probe) < names.index(installed) < names.index(assertion)
+    checkout_task = tasks[names.index(probe)]["ansible.builtin.command"]["argv"]
+    # Isolated, and reading the checkout rather than the installed copy for the expected value.
+    assert checkout_task[0] == "/opt/kdive-live-worker-lifecycle/.venv/bin/python"
+    assert "-I" in checkout_task
+    assert checkout_task[-1] == "{{ live_vm_venv }}/src"
+    assert "sys.path.insert(0, sys.argv[1])" in checkout_task[3]
+    assert "lifecycle_protocol_identity" in checkout_task[3]
+
+    installed_task = tasks[names.index(installed)]["ansible.builtin.command"]["argv"]
+    assert "sys.path.insert" not in installed_task[3]
+
+    compared = tasks[names.index(assertion)]["ansible.builtin.assert"]
+    assert "live_vm_host_worker_installed_protocol.stdout" in compared["that"][0]
+    assert "live_vm_host_worker_checkout_protocol.stdout" in compared["that"][0]
+    assert "refuse every request" in compared["fail_msg"]
