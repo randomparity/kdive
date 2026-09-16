@@ -51,6 +51,8 @@ against a staged broken `LIBVIRT_ENV`, via `just test-verbose <that path>`.
 - Degraded branch, flag set: red while absent (sourcing exits non-zero); green when the URI is
   unset, `LIBVIRT_UNRESOLVED` names `$LIBVIRT_ENV`, and a re-source adds nothing.
 - Fail-closed default, flag absent: non-zero exit, no fallback value.
+- `LIBVIRT_UNRESOLVED` is an output, not an input: one inherited from the environment does not
+  suppress resolution on a host whose contract validates, flag or no flag.
 - `require_libvirt_uri`: non-zero exit, names the refused operation on stderr.
 - `stack-down.sh`: plain run exits 0, child inherits the flag; `--wipe --yes` exits non-zero
   reaching no teardown.
