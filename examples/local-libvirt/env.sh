@@ -52,6 +52,10 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # scripts pass this path straight into the provision profile as `rootfs = {kind = "local",
 # path = ...}`; it is a file on disk, not an image_catalog object (the catalog models only
 # s3/build/staged sources, none of which describe a local-disk file).
+#
+# This example owns the DEFAULT; scripts/live-stack/env.sh deliberately sets none (#2518), because
+# a general entry point cannot pick one family and architecture for every host. The value below is
+# this walkthrough's image, so a host that built a different one must override it.
 export KDIVE_GUEST_IMAGE="${KDIVE_GUEST_IMAGE:-/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2}"
 
 # The interpreter that runs `python -m kdive ...` and the three processes. Defaults to the
