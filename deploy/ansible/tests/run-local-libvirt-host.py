@@ -128,6 +128,36 @@ require(
     "the lifecycle installer must run after the project venv sync",
 )
 require(lifecycle["no_log"] is True, "lifecycle DSN task must not log input")
+# The DSN reaches the installer on stdin, so the module arguments carry a live credential and the
+# task result has to stay censored. Censoring the failure with it made an installer exit 127
+# undiagnosable (#2506), so the task registers its result, defers the failure, and a follow-up
+# task outside no_log reports the return code and the installer's own stderr.
+require(
+    lifecycle.get("failed_when") is False,
+    "the censored lifecycle installer must defer its failure to an uncensored task",
+)
+require(
+    lifecycle.get("register") == "local_libvirt_host_lifecycle_install",
+    "the censored lifecycle installer must register its result",
+)
+lifecycle_failure = tasks["Report a failed live-worker lifecycle installation"]
+require(
+    task_names.index(lifecycle["name"]) + 1 == task_names.index(lifecycle_failure["name"]),
+    "the lifecycle installer failure must be reported before any later task runs",
+)
+require(
+    "no_log" not in lifecycle_failure,
+    "the lifecycle installer failure report must not be censored",
+)
+require(
+    "local_libvirt_host_lifecycle_install.rc" in str(lifecycle_failure["when"]),
+    "the lifecycle installer failure must be detected by its return code",
+)
+for required_evidence in ("rc", "stderr"):
+    require(
+        required_evidence in str(lifecycle_failure["ansible.builtin.fail"]["msg"]),
+        f"the lifecycle installer failure report must carry the installer {required_evidence}",
+    )
 command = lifecycle["ansible.builtin.command"]
 require(
     "stdin" in command and "stdin_add_newline" in command,

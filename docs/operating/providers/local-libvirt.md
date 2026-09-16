@@ -71,11 +71,18 @@ These are the points where the two families genuinely diverge, not just in packa
   does not. Enterprise Linux packages no engine in baseos, appstream, extras, or CRB, and SLES
   ships Docker only in the Containers Module, so neither family gets a declared runtime and the
   two real remedies there are Docker's own repository, or `podman` with `podman-docker` and the
-  podman socket API. On Fedora and openSUSE the packages alone are not a working runtime:
-  the RPM leaves `docker.service` disabled and adds no account to the `docker` group, so
-  `sudo systemctl enable --now docker` and adding the operator account to `docker` are manual
-  steps `local_worker_host` does not take. `stack-services.sh` refuses to run as root, so
-  without both it fails on the socket.
+  podman socket API. `stack-services.sh` refuses to run as root, so the operator needs the
+  socket, and the packages alone do not give it: the RPM leaves `docker.service` disabled and
+  creates the `docker` group empty. `just prepare-local-libvirt-host` now enables and starts
+  `docker.service` and adds the operator account to the `docker` group
+  ([ADR-0663](../../adr/0663-provisioning-enables-the-container-engine-daemon.md)). It does that on
+  any host carrying `/usr/lib/systemd/system/docker.service` — which on Debian/Ubuntu means an
+  engine you installed yourself, since the standalone role declares one only on Fedora and openSUSE
+  Tumbleweed — and that includes an Enterprise Linux or SLES host that took the Docker-repository
+  remedy above — this repository still installs no engine
+  there, it only makes one you installed usable. A `podman-docker` host has no such unit, so both
+  steps skip and its socket path stays yours. The new group does not reach a login session that
+  already existed, so start a fresh one before running `stack-services.sh`.
 - **Host kernel permissions.** Debian/Ubuntu ship `/boot/vmlinuz-*` as `root:root 0600`, which the
   libguestfs appliance cannot read as a non-root user, so `just prepare-local-libvirt-host`
   relabels them `root:kvm 0640` and asserts that every fixed worker account is in `kvm`,
