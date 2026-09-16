@@ -278,9 +278,9 @@ test-agent-smoke:
     uv run python -m pytest -m agent_smoke --strict-markers -q || rc=$?
     if [[ "$rc" -eq 5 ]]; then
       echo "just test-agent-smoke: pytest collected no agent_smoke test, so this run proved" >&2
-      echo "nothing and is not a pass. Either the tier's markers were dropped, or its carrier" >&2
-      echo "moved out of pytest's rootdir. A carrier that fails to IMPORT is a collection" >&2
-      echo "error (exit 2), not this — exit 5 means pytest found nothing to deselect from." >&2
+      echo "nothing and is not a pass. Exit 5 means every test was deselected and none was" >&2
+      echo "left to run: either the tier's markers were dropped, or its carrier moved out of" >&2
+      echo "pytest's rootdir. A carrier that fails to IMPORT is a collection error (exit 2)." >&2
       exit 1
     fi
     exit "$rc"
