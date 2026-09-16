@@ -149,14 +149,16 @@ if [[ "$wipe" == "1" ]]; then
   # is written from an OBSERVED end state instead of from an attempt.
   reaped=()
   unreaped=()
+  zero_domains=0
   declare -A undefine_err=()
   if ! listing="$(enumerate_kdive_domains)"; then
     unreaped+=("kdive domains: cannot enumerate at ${KDIVE_LIBVIRT_URI}, so an empty list is not evidence of an empty host -- ${listing}")
   elif [[ -z "$listing" ]]; then
     # Named, never bare: an endpoint that answers with nothing is either a clean host or the
-    # wrong daemon of the two libvirt-uri.sh publishes, and nothing here can tell those apart.
-    # Saying which daemon produced the zero is the whole of what this script can honestly offer.
+    # wrong daemon of the two libvirt-uri.sh publishes. Recorded, because the overlay sweep below
+    # is about to see the other half of the only evidence that separates them.
     echo "  no kdive domains at ${KDIVE_LIBVIRT_URI}"
+    zero_domains=1
   else
     mapfile -t domains <<<"$listing"
     for dom in "${domains[@]}"; do
@@ -203,14 +205,30 @@ and an unreadable one cannot be told apart; re-run as the account that owns it o
 group (ls -ld names them)")
   else
     shopt -s nullglob
+    overlays_removed=0
     for overlay in "${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2; do
-      if rm_err="$(sudo rm -f "$overlay" 2>&1 >/dev/null)"; then
+      # Graded on the end state, like the domain half above and for the same reason: `rm`'s exit
+      # status is what it attempted, and the line this block prints claims what is gone.
+      rm_err="$(sudo rm -f "$overlay" 2>&1 >/dev/null || true)"
+      if [[ ! -e "$overlay" ]]; then
         reaped+=("overlay ${overlay}")
+        overlays_removed=$((overlays_removed + 1))
       else
-        unreaped+=("overlay ${overlay}: ${rm_err:-rm failed and said nothing}")
+        unreaped+=("overlay ${overlay}: still present after rm${rm_err:+ -- ${rm_err}}")
       fi
     done
     shopt -u nullglob
+    # The one local contradiction available: the endpoint reported no kdive domains, and this
+    # directory held their backing disks. A host cleaned in a previous pass looks the same, which
+    # is why this warns instead of refusing -- sweeping genuinely orphaned overlays is a purpose
+    # of --wipe, and refusing them would trade a silent wrong outcome for a loud one. But a
+    # wrong-daemon URI (libvirt-uri.sh:119-122, which its own repair guidance can hand an operator)
+    # lands here too, and there the domains are alive on another daemon and have just lost their
+    # disks. Saying so is what keeps `no kdive domains` from reading as "there was nothing to do".
+    if ((zero_domains && overlays_removed)); then
+      echo "WARNING: removed ${overlays_removed} overlay(s) while ${KDIVE_LIBVIRT_URI} reported zero" >&2
+      echo "kdive domains. If the domains live on another daemon they are now without their disks." >&2
+    fi
   fi
 
   # Guarded, not bare: expanding an empty array under `set -u` is an error before bash 4.4, and

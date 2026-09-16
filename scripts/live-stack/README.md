@@ -26,13 +26,19 @@ elevates via sudo to socket-activate the system daemon.
 | `stack-down.sh --wipe` | full reset: drop DB/SeaweedFS volumes AND reap `kdive-*` domains + overlays |
 | `stack-status.sh` | read-only health of every layer and retained worker slots |
 
-`stack-down.sh --wipe` **exits non-zero when the reap is incomplete**, naming each domain or
-overlay that is still there and the diagnostic `virsh` or `rm` gave for it. An unreachable libvirt
-endpoint is refused at the gate, before anything is stopped or dropped; every other failure is
-discovered after `docker compose down -v` has run, so the data volumes are already gone when it is
-reported and the error says so. `--wipe` also names the endpoint it consulted on every
-zero-domain report, because a daemon that is running but holds no `kdive-*` domains answers an
-enumeration exactly as a clean host does.
+`stack-down.sh --wipe` **exits non-zero when the reap is incomplete**, naming each domain still
+defined and each overlay still present, with the diagnostic `virsh` or `rm` gave for it. Both
+halves are graded by re-reading the end state, not by the exit status of the call that attempted
+the removal. An unreachable libvirt endpoint is refused at the gate, before anything is stopped or
+dropped; every other failure is discovered after `docker compose down -v` has run, so the data
+volumes are already gone when it is reported and the error says so.
+
+`--wipe` names the endpoint it consulted on every zero-domain report, because a daemon that is
+running but holds no `kdive-*` domains answers an enumeration exactly as a clean host does. If it
+removes overlays while the endpoint reported zero domains it warns, since that is the one local
+sign of a wrong-daemon URI — the domains would still be alive on another daemon, now without their
+disks. It warns rather than refusing: sweeping genuinely orphaned overlays is a purpose of
+`--wipe`.
 
 That exit propagates: `stack-services.sh --reset-db` runs `stack-down.sh --wipe --yes` under
 `set -e`, so a failed reap aborts bring-up rather than starting a stack on a host that was not

@@ -1488,7 +1488,43 @@ def test_wipe_exits_non_zero_and_names_an_overlay_it_could_not_remove(tmp_path: 
     assert result.returncode != 0
     assert "alpha-overlay.qcow2" in result.stderr
     assert "rm: cannot remove overlay: Permission denied" in result.stderr
+    assert "still present after rm" in result.stderr
     assert not result.stdout.rstrip().endswith("done")
+
+
+def test_wipe_grades_an_overlay_on_the_end_state_not_on_rm_s_exit_status(tmp_path: Path) -> None:
+    """The domain half re-reads the end state because neither `destroy` nor `undefine` returning 0
+    proves the domain is gone. The overlay half owes the same: a `removed overlay` line claims the
+    file is gone, so it is written from the filesystem rather than from `rm`'s exit status.
+
+    An `rm` that exits 0 without unlinking is not something a real `sudo rm -f` does -- permission
+    denied, EROFS and an immutable attribute all exit non-zero even under `-f`. The arm exists to
+    hold the stated rule, and to keep the README sentence that promises it true.
+    """
+    result = _wipe_reap(tmp_path, "rm() { return 0; }\n", overlays=("alpha-overlay.qcow2",))
+    assert result.returncode != 0
+    assert "removed overlay" not in result.stdout
+    assert "still present after rm" in result.stderr
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+
+
+def test_wipe_warns_when_it_removes_overlays_an_empty_endpoint_disclaims(tmp_path: Path) -> None:
+    """Zero domains plus overlays on disk is the one contradiction available locally, and it is
+    the signature of a wrong-daemon URI -- which `libvirt-uri.sh`'s own repair guidance can hand
+    an operator. There the domains are alive on another daemon and have just lost their disks,
+    while `no kdive domains at <URI>` reads as "there was nothing to remove".
+
+    It warns rather than refusing: a host cleaned in a previous pass looks identical, and sweeping
+    genuinely orphaned overlays is a purpose of `--wipe`, so refusing would trade a silent wrong
+    outcome for a loud one. The exit stays 0 and the sweep still happens.
+    """
+    result = _wipe_reap(tmp_path, domains=(), overlays=("alpha-overlay.qcow2",))
+    assert result.returncode == 0, result.stderr
+    assert "removed overlay" in result.stdout
+    assert not (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+    assert "WARNING: removed 1 overlay(s)" in result.stderr
+    assert "reported zero" in result.stderr
+    assert "without their disks" in result.stderr
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0000 directory regardless of mode")
