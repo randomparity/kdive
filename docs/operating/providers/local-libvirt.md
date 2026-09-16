@@ -120,8 +120,9 @@ These are the points where the two families genuinely diverge, not just in packa
   family, `/usr/bin/python3` is the interpreter `libvirt_stack` installs `python3-libvirt` and
   `python3-lxml` for; its Suse branch installs `python3-libvirt-python`, which zypper resolves
   against the distro's default Python ABI — the same interpreter. A `/usr/bin/python3` predating
-  ansible-core's 3.9 target floor fails closed on Ansible's own error at fact gathering. The recipe
-  carries no pre-check.
+  ansible-core's 3.9 target floor fails closed on Ansible's own error at fact gathering, and the
+  recipe carries no pre-check. EL9's 3.9 sits exactly on that floor, so the first bump of the
+  `ansible-core` pin in `just prepare-local-libvirt-host` that raises the floor retires EL9 here.
 - **The interpreter, and what it costs Enterprise Linux.** The project requires Python 3.14.
   Ubuntu 26.04 and Fedora 44 ship it as `/usr/bin/python3`; EL9 ships 3.9 and EL10 ships 3.12,
   packaging 3.14 separately as `python3.14`, which `install-host.sh` installs and the lifecycle
