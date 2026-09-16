@@ -13,6 +13,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "live-stack" / "onboard.sh"
 BASH = shutil.which("bash")
 
@@ -48,6 +50,11 @@ def _healthy_env(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     _stub(bindir, "id", "echo kvm libvirt")
     _stub(bindir, "qemu-system-x86_64", "exit 0")
     _stub(bindir, "qemu-img", "exit 0")
+    # check-local-libvirt.sh derives the REQUIRED native emulator from `uname -m` — x86_64 wants
+    # qemu-system-x86_64 (stubbed above), ppc64le wants qemu-system-ppc64 (not). Unstubbed, the
+    # fixture's verdict is decided by the machine: on a POWER host the probe fails, and on x86_64
+    # it can still be satisfied by whatever qemu the host happens to have installed.
+    _stub(bindir, "uname", 'case "$*" in -m) echo x86_64 ;; *) echo Linux ;; esac')
     # check-local-libvirt.sh probes `python3 -c "import guestfs, drgn"`; succeed on it.
     _stub(bindir, "python3", 'case "$*" in -c*) exit 0 ;; esac\nexit 0')
     _stub(bindir, "uv", _uv_stub_body(tmp_path / "uv.log"))
@@ -64,6 +71,15 @@ def _healthy_env(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "KDIVE_KVM_NODE": str(kvm),
         "KDIVE_INSTALL_STAGING": str(staging),
         "KDIVE_BOOT_DIR": str(boot),
+        # The RedHat off-PATH emulator fallback, pinned absent so it cannot resolve from the host.
+        "KDIVE_QEMU_LIBEXEC": str(tmp_path / "absent-qemu-kvm"),
+        # check-local-libvirt.sh prefers the REPO .venv over the stubbed python3 when one exists,
+        # and that venv has no guestfs/drgn — so without this the preflight's verdict depends on
+        # whether the checkout has been synced. Downgrade the one probe with a documented soft
+        # case (the same knob demo-up.sh uses) so "healthy" means healthy on any machine. It is
+        # the only one of the nine blocking checks downgraded here, so a `required` case in this
+        # file proves the gate against 8/9 real gates plus this one as a WARN.
+        "KDIVE_PREFLIGHT_KDUMP": "optional",
     }
     return bindir, env
 
@@ -118,6 +134,56 @@ def test_preflight_failure_is_advisory(tmp_path: Path) -> None:
     logged = (tmp_path / "uv.log").read_text()
     assert "seed-project --project demo" in logged  # seed still ran
     assert "WARN" in result.stderr
+
+
+@pytest.mark.parametrize("declared", ["advisory", ""])
+def test_explicit_advisory_matches_the_default(tmp_path: Path, declared: str) -> None:
+    """`advisory` and empty are the documented default, not a second behaviour (ADR-0666)."""
+    _bindir, env = _healthy_env(tmp_path)
+    env["ONBOARD_PREFLIGHT"] = declared
+    env["KDIVE_KVM_NODE"] = str(tmp_path / "absent")  # unreadable -> preflight fails
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "WARN" in result.stderr
+    assert "seed-project --project demo" in (tmp_path / "uv.log").read_text()
+
+
+def test_required_aborts(tmp_path: Path) -> None:
+    """ONBOARD_PREFLIGHT=required stops before migrate, attributing the stop (#2568)."""
+    _bindir, env = _healthy_env(tmp_path)
+    env["ONBOARD_PREFLIGHT"] = "required"
+    env["KDIVE_KVM_NODE"] = str(tmp_path / "absent")  # unreadable -> preflight fails
+    result = _run(env)
+    assert result.returncode != 0
+    # The preflight's own diagnosis survives as the reason, not a generic later failure.
+    assert "KVM unavailable" in result.stderr
+    assert "ONBOARD_PREFLIGHT=required" in result.stderr
+    # Nothing past the gate ran: the log has no migrate, and the funding steps never started.
+    logged = (tmp_path / "uv.log").read_text() if (tmp_path / "uv.log").exists() else ""
+    assert "migrate" not in logged
+    assert "seed-project" not in logged
+
+
+def test_required_proceeds(tmp_path: Path) -> None:
+    """A passing preflight is not blocked: the gate reads the exit status, not its own mode."""
+    _bindir, env = _healthy_env(tmp_path)
+    env["ONBOARD_PREFLIGHT"] = "required"
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    logged = (tmp_path / "uv.log").read_text()
+    assert "run python -m kdive migrate" in logged
+    assert "export KDIVE_TOKEN=FAKETOKEN" in result.stdout
+
+
+def test_invalid_preflight_refused(tmp_path: Path) -> None:
+    """A typo is an error, not a silent fallback to advisory (mirrors KDIVE_PREFLIGHT_KDUMP)."""
+    _bindir, env = _healthy_env(tmp_path)
+    env["ONBOARD_PREFLIGHT"] = "requried"
+    result = _run(env)
+    assert result.returncode != 0
+    assert "ONBOARD_PREFLIGHT=requried is not valid" in result.stderr
+    logged = (tmp_path / "uv.log").read_text() if (tmp_path / "uv.log").exists() else ""
+    assert "migrate" not in logged
 
 
 def test_verify_failure_aborts_and_skips_mint(tmp_path: Path) -> None:

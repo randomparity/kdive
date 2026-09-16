@@ -24,10 +24,40 @@ else
   py=(uv run python)
 fi
 
-# 1. Fund the project + mint a token. onboard.sh prints banners + a token-contract heredoc to stdout
-#    alongside its one `export KDIVE_TOKEN=...` line, so eval ONLY that line (eval-ing the whole
-#    capture hits `(advisory)` unbalanced parens under set -e and aborts before the token).
-eval "$("${here}/../live-stack/onboard.sh" | grep '^export KDIVE_TOKEN=')"
+# 1. Fund the project + mint a token. The local-libvirt preflight is a HARD gate here (ADR-0666):
+#    the next steps provision a real domain, so a preflight FAIL is fatal and its own text is the
+#    reason — not a generic infrastructure_failure from systems.get 30 lines later (#2568).
+#
+#    Capture into a variable rather than `eval "$(onboard.sh | grep ...)"`: a command substitution
+#    in an argument list does not fire errexit, so that shape discards onboard.sh's exit status and
+#    a preflight stop would surface as the "did not mint a token" die below — a cause that never
+#    happened. A bare assignment's status IS the substitution's, so this one propagates. Same shape
+#    .github/workflows/live.yml:549 already uses on this script, for the same reason.
+#
+#    The die names no cause: `||` fires on ANY non-zero, and onboard.sh's own hard gates (migrate,
+#    verify-project) need the database and no libvirt, so asserting "the preflight" here would
+#    misattribute a database failure — the same wrong-diagnosis defect #2568 is about. onboard.sh
+#    already attributes its own preflight stop, so this only has to stop and point at that output.
+#
+#    Re-emit the capture first, or the claim is false for half the failures: the preflight writes
+#    its FAIL entries to stderr and reaches the reader directly, but verify-project's diagnosis
+#    goes to STDOUT (kdive/__main__.py `_handle_verify_project` prints, then raises SystemExit),
+#    so this capture would swallow the one line that says what went wrong. bash assigns the
+#    variable even when the substitution exits non-zero, so the text is already in hand.
+#    Filter the token line out of that re-emit. onboard.sh prints `export KDIVE_TOKEN=<jwt>` on
+#    stdout (a 30-day platform_admin demo token), and this script runs in a GitHub Actions step
+#    whose stderr is a world-readable log, so an onboard.sh that printed the token and THEN exited
+#    non-zero would leak it. This grep is the exact complement of the one below, so the two
+#    partition the capture and nothing on that stream reaches the log by default. `|| true`
+#    because grep exits 1 when it filters every line, which errexit would read as our own failure.
+onboard_wiring="$(ONBOARD_PREFLIGHT=required "${here}/../live-stack/onboard.sh")" || {
+  grep -v '^export KDIVE_TOKEN=' <<<"$onboard_wiring" >&2 || true
+  die "onboard.sh exited non-zero; its output above states the reason; not provisioning"
+}
+#    onboard.sh prints banners + a token-contract heredoc to stdout alongside its one
+#    `export KDIVE_TOKEN=...` line, so eval ONLY that line (eval-ing the whole capture hits
+#    `(required)` unbalanced parens under set -e and aborts before the token).
+eval "$(grep '^export KDIVE_TOKEN=' <<<"$onboard_wiring")"
 [ -n "${KDIVE_TOKEN:-}" ] || die "onboard.sh did not mint a token"
 
 # The local-libvirt provider only accepts a rootfs path under its allowed root (KDIVE_ROOTFS_DIR);
