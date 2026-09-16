@@ -175,7 +175,7 @@ resolve_libvirt_uri() {
     # path that must stay quiet. And the assignment is split from the declaration, because
     # `local v="$(f)"` takes `local`'s exit status, not f's — but a split assignment carries f's,
     # which under the callers' `set -e` aborts the sourcing shell, so the `||` is load-bearing
-    # rather than decorative. Both were caught in review; neither is inferable from the result.
+    # rather than decorative.
     local published
     published="$(load_published_libvirt_uri 2>/dev/null)" || published=''
     if [[ -n "$published" && "$KDIVE_LIBVIRT_URI" != "$published" ]]; then
