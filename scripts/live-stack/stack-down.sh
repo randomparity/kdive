@@ -130,7 +130,6 @@ if [[ "$wipe" == "1" ]]; then
   # is written from an OBSERVED end state instead of from an attempt.
   reaped=()
   unreaped=()
-  domains=()
   declare -A undefine_err=()
   if ! listing="$(enumerate_kdive_domains)"; then
     unreaped+=("kdive domains: cannot enumerate at ${KDIVE_LIBVIRT_URI}, so an empty list is not evidence of an empty host -- ${listing}")
@@ -180,7 +179,9 @@ if [[ "$wipe" == "1" ]]; then
     # removal below runs under sudo. On an account outside the directory's owner and group it
     # expands to nothing, so a host full of overlays is byte-identical to a clean one -- the one
     # place a removal failure cannot surface the no-op, because no removal is ever attempted.
-    unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory and an unreadable one cannot be told apart; re-run as the account that owns it or one in its group (ls -ld names them)")
+    unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory \
+and an unreadable one cannot be told apart; re-run as the account that owns it or one in its \
+group (ls -ld names them)")
   else
     shopt -s nullglob
     for overlay in "${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2; do
