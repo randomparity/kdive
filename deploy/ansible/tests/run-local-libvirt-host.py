@@ -6,7 +6,10 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
-PLAYBOOK = ROOT / "deploy/ansible/playbooks/local-libvirt-host.yml"
+ANSIBLE = ROOT / "deploy/ansible"
+PLAYBOOK = ANSIBLE / "playbooks/local-libvirt-host.yml"
+INVENTORY = ANSIBLE / "inventory/hosts.yml"
+SYSTEM_INTERPRETER = "/usr/bin/python3"
 
 
 def require(condition: bool, message: str) -> None:
@@ -125,6 +128,36 @@ require(
     "the lifecycle installer must run after the project venv sync",
 )
 require(lifecycle["no_log"] is True, "lifecycle DSN task must not log input")
+# The DSN reaches the installer on stdin, so the module arguments carry a live credential and the
+# task result has to stay censored. Censoring the failure with it made an installer exit 127
+# undiagnosable (#2506), so the task registers its result, defers the failure, and a follow-up
+# task outside no_log reports the return code and the installer's own stderr.
+require(
+    lifecycle.get("failed_when") is False,
+    "the censored lifecycle installer must defer its failure to an uncensored task",
+)
+require(
+    lifecycle.get("register") == "local_libvirt_host_lifecycle_install",
+    "the censored lifecycle installer must register its result",
+)
+lifecycle_failure = tasks["Report a failed live-worker lifecycle installation"]
+require(
+    task_names.index(lifecycle["name"]) + 1 == task_names.index(lifecycle_failure["name"]),
+    "the lifecycle installer failure must be reported before any later task runs",
+)
+require(
+    "no_log" not in lifecycle_failure,
+    "the lifecycle installer failure report must not be censored",
+)
+require(
+    "local_libvirt_host_lifecycle_install.rc" in str(lifecycle_failure["when"]),
+    "the lifecycle installer failure must be detected by its return code",
+)
+for required_evidence in ("rc", "stderr"):
+    require(
+        required_evidence in str(lifecycle_failure["ansible.builtin.fail"]["msg"]),
+        f"the lifecycle installer failure report must carry the installer {required_evidence}",
+    )
 command = lifecycle["ansible.builtin.command"]
 require(
     "stdin" in command and "stdin_add_newline" in command,
@@ -163,7 +196,35 @@ require(
     rootfs["owner"] == "{{ local_libvirt_host_operator_user }}",
     "the rootfs publication directory must be owned by the operator",
 )
+
+
+# The pin is a play var, not an inventory host var. A play var outranks the implicit-localhost
+# interpreter, which is what binds modules to whichever Python launched ansible-playbook -- under
+# the recipe, a `uv run --with ansible-core` environment with no lxml for community.libvirt.
+require(
+    play["vars"].get("ansible_python_interpreter") == SYSTEM_INTERPRETER,
+    "the play must pin ansible_python_interpreter to "
+    f"{SYSTEM_INTERPRETER} in its own vars, not rely on the inventory or on discovery",
+)
+
+
+def declared_hosts(group: dict) -> set[str]:
+    """Every host named anywhere in the inventory, not just at the top level."""
+    named = set(group.get("hosts") or {})
+    for child in (group.get("children") or {}).values():
+        named |= declared_hosts(child or {})
+    return named
+
+
+inventory = yaml.safe_load(INVENTORY.read_text())
+require(
+    "localhost" not in declared_hosts(inventory["all"]),
+    "hosts.yml must not declare localhost anywhere; the localhost plays that do not pin their own "
+    "interpreter (playbooks/pki.yml, most of deploy/ansible/tests/) would fall back to "
+    "ansible-core interpreter discovery instead of the launching environment",
+)
+
 print(
     "local-libvirt-host: preflight, localhost role composition, locked live sync, DSN stdin, "
-    "and guestfs ABI handling pass"
+    "guestfs ABI handling, and the play-scoped system-interpreter pin pass"
 )

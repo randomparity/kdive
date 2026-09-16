@@ -1357,7 +1357,10 @@ def test_diagnostics_reserves_aggregate_acquisition_for_failed_journals() -> Non
     assert not response.ok and response.diagnostics is not None
     assert len(runtime.journal_calls) == 4
     assert sum(byte_limit + 4096 for _, byte_limit, _ in runtime.journal_calls) <= 1_310_720
-    assert response.diagnostics == "[aggregate diagnostics truncated]\n"
+    withheld = "".join(
+        f"[diagnostics withheld for slot {slot}: acquisition_failed]\n" for slot in range(1, 5)
+    )
+    assert response.diagnostics == f"{withheld}[aggregate diagnostics truncated]\n"
 
 
 def test_failed_journal_aggregate_marker_respects_known_forbidden_values() -> None:
@@ -1374,7 +1377,13 @@ def test_failed_journal_aggregate_marker_respects_known_forbidden_values() -> No
 
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
-    assert not response.ok and response.diagnostics == ""
+    # Only the aggregate marker carries the forbidden value, so only it is suppressed; each
+    # withheld slot still names its cause.
+    assert not response.ok
+    assert response.diagnostics == "".join(
+        f"[diagnostics withheld for slot {slot}: acquisition_failed]\n" for slot in range(1, 5)
+    )
+    assert "[aggregate diagnostics truncated]" not in (response.diagnostics or "")
     assert len(runtime.journal_calls) == 4
 
 
@@ -1399,7 +1408,11 @@ def test_diagnostics_withholds_unsafe_source_without_reading_its_journal(
 
     assert not response.ok
     assert response.code == "diagnostics_withheld"
-    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    # The shipped loader funnels every failure into PermissionError, so this is the one producer
+    # of internal_error: it is what keeps the generic arm, and that vocabulary member, reachable.
+    assert response.diagnostics == "[diagnostics withheld for slot 1: internal_error]\n"
+    assert response.slots[0].message == "withheld: internal_error"
+    assert response.slots[0].phase is SlotPhase.STARTED
     assert "sensitive" not in response.model_dump_json()
     assert runtime.public_property_calls == []
     assert runtime.journal_calls == []
@@ -1421,7 +1434,10 @@ def test_diagnostics_withholds_unsafe_state_without_exposing_error_detail(
 
     assert not response.ok
     assert response.code == "diagnostics_withheld"
-    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: state_unreadable]\n"
+    assert response.slots[0].message == "withheld: state_unreadable"
+    # No state was loadable, so the site has no phase to report.
+    assert response.slots[0].phase is None
     assert "credential detail" not in response.model_dump_json()
     assert runtime.journal_calls == []
     assert events == []
@@ -1443,8 +1459,128 @@ def test_diagnostics_withholds_oversized_redaction_value() -> None:
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
     assert not response.ok
-    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: slot_unusable]\n"
+    assert response.slots[0].code == "diagnostics_withheld"
+    assert response.slots[0].message == "withheld: slot_unusable"
     assert runtime.journal_calls == []
+    assert events == []
+
+
+def test_diagnostics_names_acquisition_failed_reason() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    runtime.journal_failure = SystemdUnavailable("journal unavailable")
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("retained-credential",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: acquisition_failed]\n"
+    assert response.slots[0].code == "diagnostics_withheld"
+    assert response.slots[0].message == "withheld: acquisition_failed"
+    assert response.slots[0].phase is SlotPhase.STARTED
+    assert events == []
+
+
+def test_diagnostics_names_peer_redaction_refused_reason() -> None:
+    states = {slot: _state(slot, SlotPhase.STARTED) for slot in (1, 2)}
+    stores, runtime, authority, clock, events = _fleet(states=states)
+    runtime.journal_chunks[states[2].invocation_id or ""] = ("saw ALPHACREDENTIAL",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("ALPHACREDENTIAL",), 2: ("BETACREDENTIAL",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    # Slot 2 renders clean against its own forbidden set and is refused only against the set
+    # slot 1 contributed, which is the one condition this reason separates from the rest.
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.slots[0].code == "ok"
+    assert response.slots[1].code == "diagnostics_withheld"
+    assert response.slots[1].message == "withheld: peer_redaction_refused"
+    assert response.slots[1].phase is SlotPhase.STARTED
+    assert response.diagnostics is not None
+    assert response.diagnostics.endswith(
+        "[diagnostics withheld for slot 2: peer_redaction_refused]\n"
+    )
+    assert "ALPHACREDENTIAL" not in response.model_dump_json()
+    assert events == []
+
+
+def test_diagnostics_names_redaction_refused_when_no_sentinel_survives() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    # Escaping the NUL reintroduces the literal "x00" the redactor just masked, so no sentinel
+    # choice renders the text safely and `_sanitize_diagnostics` refuses. That refusal is a
+    # StateConflict raised inside `_diagnose_slot`'s try, where `acquisition_failures` would
+    # otherwise relabel it as an acquisition failure the operator is told to retry.
+    runtime.journal_chunks[state.invocation_id or ""] = ("saw \x00 here",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("x00",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: redaction_refused]\n"
+    assert response.slots[0].message == "withheld: redaction_refused"
+    assert events == []
+
+
+def test_diagnostics_reason_carries_no_withheld_material() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = ("LEAK-SENTINEL" + "x" * (320 * 1024),)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("truncated",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: redaction_refused]\n"
+    assert response.slots[0].message == "withheld: redaction_refused"
+    assert "LEAK-SENTINEL" not in response.model_dump_json()
+    assert events == []
+
+
+def test_diagnostics_withheld_marker_respects_known_forbidden_values() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    runtime.journal_failure = SystemdUnavailable("journal unavailable")
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("withheld",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    # The marker itself carries a forbidden value, so it is suppressed whole; the reason still
+    # reaches the operator on the slot result, which is composed only of closed-enum literals.
+    assert not response.ok and response.diagnostics == ""
+    assert response.slots[0].code == "diagnostics_withheld"
+    assert response.slots[0].message == "withheld: acquisition_failed"
     assert events == []
 
 
@@ -1535,8 +1671,18 @@ def test_diagnostics_sanitizes_framework_headers_with_registered_values() -> Non
     assert "payload" in response.diagnostics
 
 
-@pytest.mark.parametrize("secret", ("diagnostics", "truncated"))
-def test_diagnostics_emits_no_fallback_when_truncation_text_collides(secret: str) -> None:
+@pytest.mark.parametrize(
+    ("secret", "expected"),
+    (
+        # The withhold marker itself holds "diagnostics", so it is suppressed whole; it holds no
+        # "truncated", so that parameter emits it. Each side of the suppression rule, stated.
+        ("diagnostics", ""),
+        ("truncated", "[diagnostics withheld for slot 1: redaction_refused]\n"),
+    ),
+)
+def test_diagnostics_emits_no_fallback_when_truncation_text_collides(
+    secret: str, expected: str
+) -> None:
     state = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: state})
     runtime.journal_chunks[state.invocation_id or ""] = ("x" * (320 * 1024),)
@@ -1551,8 +1697,10 @@ def test_diagnostics_emits_no_fallback_when_truncation_text_collides(secret: str
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
     assert not response.ok and response.diagnostics is not None
-    assert response.diagnostics == ""
+    assert response.diagnostics == expected
     assert secret not in response.diagnostics
+    assert "x" not in response.diagnostics
+    assert response.slots[0].message == "withheld: redaction_refused"
 
 
 def test_diagnostics_mask_cannot_reproduce_an_unknown_structural_secret() -> None:
@@ -1794,7 +1942,14 @@ def test_diagnostics_emits_no_fallback_when_aggregate_marker_collides() -> None:
 
     assert not response.ok and response.diagnostics is not None
     assert "aggregate" not in response.model_dump_json()
-    assert len(response.diagnostics.encode()) == 3 * 256 * 1024
+    # Slot 4's marker names redaction_refused and holds no "aggregate", so it is emitted where
+    # the aggregate-truncation marker it replaces was suppressed.
+    marker = b"[diagnostics withheld for slot 4: redaction_refused]\n"
+    assert response.diagnostics.endswith(marker.decode())
+    assert response.slots[3].message == "withheld: redaction_refused"
+    # Exact, not a bound: LifecycleResponse already rejects anything over 1 MiB, so a <= assertion
+    # here could not fail, and an under-emitting regression would pass it silently.
+    assert len(response.diagnostics.encode()) == 3 * 256 * 1024 + len(marker)
 
 
 class _DiagnosticPropertyRunner:
