@@ -969,6 +969,32 @@ def test_hosted_spine_fails_loud_on_a_zero_proof_tier() -> None:
     assert "ran ZERO live_vm_tcg proofs" in spine
 
 
+def test_native_spine_fails_loud_on_a_zero_proof_tier() -> None:
+    """The same gate on the native tier, which shipped without one (#2540).
+
+    `pytest -m "live_vm and not live_vm_tcg"` exits 0 when every proof skips and 5 when none is
+    collected, so neither code separates "the tier passed" from "the tier never ran". ADR-0389
+    exists to kill exactly that green: the native family is its decision point 2. Pin the summary
+    gate here so the guard cannot be dropped as silently as its absence went unnoticed.
+    """
+    spine = _native_spine()
+    assert "[1-9][0-9]* passed" in spine
+    assert "ran ZERO native live_vm proofs" in spine
+
+
+def test_native_spine_captures_the_summary_it_greps_under_pipefail() -> None:
+    """The gate reads a `tee`-captured summary, and the capture must not eat pytest's status.
+
+    Without `pipefail` the pipeline reports `tee`'s exit code, so a genuinely failing proof run
+    would satisfy the `<N> passed` gate on its partial summary and then exit 0 — trading one
+    silent green for another. The spine file is already executed under `-o pipefail`; assert the
+    capture-and-propagate shape that relies on it.
+    """
+    spine = " ".join(_native_spine().split())
+    assert '-m "live_vm and not live_vm_tcg" -q | tee "$native_summary"' in spine
+    assert 'exit "$rc"' in spine
+
+
 # --- spine stdin hygiene: materialize the script, never share bash's stdin (#2054) -----------
 #
 # A stdin-fed spine (`bash -s` over a heredoc, or GitHub piping the run block to `bash {0}`)

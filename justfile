@@ -265,23 +265,53 @@ test-changed:
 # agent-index.md golden path over the served surface and fails on any stall. Non-PR-gate like
 # the live tiers and NOT in `ci` — the harness for the deferred nightly live-LLM agent. It is
 # infra-free (built app over a closed pool + dummy KDIVE_S3_* test env), so it needs no stack.
-# --strict-markers fails a mis-marked test; exit 5 ("no tests collected") is tolerated as a
-# clean skip, other codes propagate.
+# --strict-markers fails a mis-marked test. Exit 5 ("no tests collected") is a FAILURE here, not
+# a clean skip (#2540): the tier has carried marked tests since ADR-0411, so the tolerance's
+# original "marked suite absent" justification no longer holds, while the branch remained the one
+# thing standing between an import error in the tier and a green report — the same silent green
+# ADR-0389 kills for the live tiers, in a sibling recipe.
 test-agent-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
     rc=0
     uv run python -m pytest -m agent_smoke --strict-markers -q || rc=$?
     if [[ "$rc" -eq 5 ]]; then
-      echo "no agent_smoke tests collected — skipping cleanly (marked suite absent)"
-      exit 0
+      echo "just test-agent-smoke: pytest collected no agent_smoke test, so this run proved" >&2
+      echo "nothing and is not a pass. Either the tier's markers were dropped, or a carrier" >&2
+      echo "failed to import and pytest deselected it — read the collection errors above." >&2
+      exit 1
     fi
     exit "$rc"
 
+# Needs a KVM/libvirt host with a kdump-enabled guest. The marker selects all three native
+# families, so preflight declares all three: an unsatisfied contract is RED here, matching the
+# native spine in `.github/workflows/live.yml` rather than skipping through to a green exit.
+#
+# A run that proved nothing is RED here, never green (#2540). pytest exits 0 when every proof
+# skips and 5 when none is collected, so neither code distinguishes "the tier passed" from "the
+# tier never ran" — the silent green ADR-0389 exists to kill. Gate on the same '<N> passed'
+# summary the hosted spine greps, which #2048 closed for the tcg tier and #2517 for its recipe.
+#
 # The emulated foreign-arch tier is `just test-live-tcg`, excluded here so the native run stays fast.
-# Run the native live_vm suite (needs a KVM/libvirt host with a kdump-enabled guest).
+# Run the native live_vm suite (throwaway + provisioned + debug-stepping families).
 test-live:
-    uv run python -m pytest -m "live_vm and not live_vm_tcg" -q
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/live-vm/preflight-env.sh throwaway provisioned debug-stepping
+    summary="$(mktemp)"
+    trap 'rm -f "$summary"' EXIT
+    rc=0
+    # `pipefail` above is load-bearing: without it `| tee` would report tee's status and turn a
+    # genuinely failing proof run into a second silent green.
+    uv run python -m pytest -m "live_vm and not live_vm_tcg" -q | tee "$summary" || rc=$?
+    if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$summary"; then
+      echo "just test-live: no '<N> passed' summary from the native live_vm tier (pytest rc=$rc)." >&2
+      echo "A skipped, empty, or wholly failed tier proved nothing and must never read green." >&2
+      echo "Read the SKIPPED reasons above: a proof-level gate outside the native preflight" >&2
+      echo "contract (KDIVE_DATABASE_URL, say) skips every proof while preflight reports success." >&2
+      exit 1
+    fi
+    exit "$rc"
 
 # --strict-markers fails a mis-marked test. Needs the foreign qemu emulator (e.g.
 # qemu-system-ppc64) AND a running stack (`just stack-backends` + fixtures + `just onboard`).
