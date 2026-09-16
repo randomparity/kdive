@@ -59,10 +59,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 316, f"runner listed {len(actual_tasks)} baseline tasks, expected 316")
+require(len(actual_tasks) == 317, f"runner listed {len(actual_tasks)} baseline tasks, expected 317")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 316 ordered task names and tags match the updated baseline")
+print("ok runner: 317 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -431,6 +431,7 @@ print("ok boot kernels: the /boot relabel skips every non-Debian family")
 CONTAINER_TASKS = "roles/local_worker_host/tasks/container_runtime.yml"
 DAEMON_PROBE = "Look for a packaged container-engine service unit"
 DAEMON_ENABLE = "Enable and start the container-engine daemon"
+DAEMON_EXCLUDE = "Require the container-engine socket grant to name a non-worker account"
 DAEMON_GRANT = "Add the named operator account to the container-engine socket group"
 
 
@@ -496,12 +497,8 @@ def container_daemon_grant_target() -> None:
     import_role with tasks_from does not run preflight.yml.
     """
     source = (ANSIBLE / CONTAINER_TASKS).read_text()
-    require(
-        "live_vm_host_worker_accounts" not in source,
-        "the container-engine socket grant reaches the fixed worker accounts (ADR-0575)",
-    )
     by_name = {task["name"]: task for task in yaml.safe_load(source)}
-    for name in (DAEMON_PROBE, DAEMON_ENABLE, DAEMON_GRANT):
+    for name in (DAEMON_PROBE, DAEMON_ENABLE, DAEMON_EXCLUDE, DAEMON_GRANT):
         require(name in by_name, f"container_runtime.yml has no task named {name!r}")
     grant = by_name[DAEMON_GRANT].get("ansible.builtin.user", {})
     require(
@@ -514,9 +511,18 @@ def container_daemon_grant_target() -> None:
         enable.get("enabled") is True and enable.get("state") == "started",
         "the container-engine daemon task does not both enable and start the service",
     )
+    exclusion = by_name[DAEMON_EXCLUDE].get("ansible.builtin.assert", {}).get("that", [])
+    require(
+        any("not in live_vm_host_worker_accounts" in str(c) for c in exclusion),
+        "nothing keeps the socket grant off the fixed worker accounts (ADR-0575)",
+    )
+    require(
+        any("local_worker_host_operator_user | length > 0" in str(c) for c in exclusion),
+        "the socket grant does not refuse an empty operator account",
+    )
     register = by_name[DAEMON_PROBE].get("register")
     require(bool(register), "the container-engine probe registers no result to gate on")
-    for name in (DAEMON_ENABLE, DAEMON_GRANT):
+    for name in (DAEMON_ENABLE, DAEMON_EXCLUDE, DAEMON_GRANT):
         require(
             by_name[name].get("when") == f"{register}.stat.exists",
             f"{name!r} is not gated on the packaged-unit probe's own register {register!r}",
@@ -548,6 +554,7 @@ def container_daemon_order() -> None:
     ordered = (
         "Install the Tumbleweed compose plugin for the on-box stack and testcontainers",
         DAEMON_PROBE,
+        DAEMON_EXCLUDE,
         DAEMON_ENABLE,
         DAEMON_GRANT,
     )
@@ -557,7 +564,7 @@ def container_daemon_order() -> None:
         positions.append(listed.stdout.index(name))
     require(
         positions == sorted(positions),
-        "container daemon tasks are out of order: packages, probe, enable, then grant",
+        "container daemon tasks are out of order: packages, probe, guard, enable, then grant",
     )
 
 

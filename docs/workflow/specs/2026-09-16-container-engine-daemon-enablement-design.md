@@ -33,7 +33,11 @@ step. Nothing here installs an engine on those families.
 `:844-848` for other reusable task files. That is the ownership move: the grant policy
 lives in one place instead of two, and the Debian runner gains the enable it lacks. The role's only
 other consumer is `deploy/ansible/playbooks/local-libvirt-host.yml:150`, which applies the whole
-role and so reaches the new tasks through `main.yml` without being edited.
+role and so reaches the new tasks through `main.yml` without being edited, and
+`deploy/ansible/tests/local_worker_host.yml`, the check harness's probe play, which applies the
+role the same way. The probe play stays harmless because every harness invocation is check-mode or
+tag-restricted and the play sets no `become`; a future harness that dropped either would reach
+these tasks for real.
 
 Three new defaults carry the unit path, the service name, and the socket group, so tasks and tests
 share the literals.
@@ -114,8 +118,15 @@ worker account authority — ADR-0575 and `live_vm_host/tasks/verify.yml:109`.
 ## Threat model
 
 **Boundary inventory.** This change adds no entry point, parses no external input, and builds no
-command, path, or URL from a non-literal. It changes one thing: the membership list of the host's
-engine socket group, whose socket is `root:docker 0660`. On the runner path that widens a grant
+command, path, or URL from a non-literal. It changes two things. The first is the membership list
+of the host's engine socket group, whose socket is `root:docker 0660`. The second is a consequence
+of starting the daemon rather than of the grant: a running `dockerd` installs its own packet-filter
+chains and sets `net.ipv4.ip_forward=1`, on a host that is also the libvirt hypervisor. Observed on
+a provisioned Fedora 44 host after this change: `sysctl -n net.ipv4.ip_forward` is `1`, `nft list
+ruleset` carries 182 docker rules, `iptables -t nat -S` carries three `DOCKER` chains, and a
+`docker0` bridge exists. The provider uses user-mode SLIRP networking and manages no libvirt
+network, so nothing here contends with it today; the opt-out is masking the unit, whose behaviour
+is the accepted class above. On the runner path that widens a grant
 `live_vm_host/tasks/main.yml:61-65` already makes. On the standalone path it is a new membership —
 `local_worker_host` grants no Docker group today, and it creates `kdive-live-control`
 (`worker_groups.yml:16`) without adding anyone to it — so it is the operator account's first
@@ -128,7 +139,18 @@ choice of `local_worker_host_operator_user`, which `tasks/preflight.yml:17-38` a
 and present in passwd before any mutation on the `main.yml` path.
 
 **Control per boundary.** The grant names exactly one account, from one variable, with
-`append: true` so no unrelated membership is removed. Nothing in the change reads
+`append: true` so no unrelated membership is removed, and an assert in the task file refuses an
+empty account or any member of `live_vm_host_worker_accounts` before the daemon is touched. That
+assert is in `container_runtime.yml` rather than `preflight.yml` deliberately: `import_role` with
+`tasks_from` does not run preflight, so the runner path would otherwise reach the grant unchecked,
+and `live_vm_host/tasks/verify.yml:109` covers only that path after the fact.
+
+The three new defaults — the unit path, the service name and the socket group — are operator-owned
+inputs like every other role variable, so an inventory or extra-var override redirects what gets
+enabled and which group is granted. That is inside the trust this design already places in the
+caller, who supplies the operator account, runs the play as root, and is the same party that could
+make the change by hand. No assert pins them: one that permitted only the default would remove the
+variables' only purpose, which is to let the tasks and the harness share one literal. Nothing in the change reads
 `live_vm_host_worker_accounts`, and a structural test asserts both that the task file never does
 and that the runner call site rebinds the operator variable to `github_runner_user`. ADR-0575's
 verifier at `live_vm_host/tasks/verify.yml:109` remains the runtime control that fails a worker

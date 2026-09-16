@@ -110,8 +110,18 @@ carrying the unit without the group fails the grant with the `user` module's own
 not exist`, the correct outcome for a half-installed engine. Group membership also does not reach a
 session that already exists; the operator guide says to start a fresh one.
 
+Starting the engine also changes host networking, which enabling it on demand would have deferred:
+a running `dockerd` installs its packet-filter chains and sets `net.ipv4.ip_forward=1` on a machine
+that is also the libvirt hypervisor (observed on a Fedora 44 host: 182 docker `nft` rules, three
+`DOCKER` nat chains, a `docker0` bridge). The local-libvirt provider uses user-mode SLIRP
+networking and manages no libvirt network, so nothing contends with it today; an operator who
+cannot accept it masks the unit, with the consequence recorded above.
+
 Socket-group membership is root-equivalent: a member can start a container that mounts the host
-filesystem. On the standalone path this is the operator account's **first** root-equivalent group
+filesystem. The play refuses to grant it to an empty account or to any member of
+`live_vm_host_worker_accounts`, asserted in the task file itself rather than in `preflight.yml`,
+because `import_role` with `tasks_from` skips preflight and would otherwise reach the grant
+unchecked. On the standalone path this is the operator account's **first** root-equivalent group
 from provisioning — `local_worker_host` creates `kdive-live-control` (`worker_groups.yml:16`) but
 adds nobody to it, and the only membership grant for that group in the tree is `live_vm_host`'s
 `Add the runner to the live-worker control and libvirt groups`, on the runner. So this record does not widen a list the
