@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check the localhost local-libvirt playbook contract without applying it."""
 
-import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -174,8 +174,16 @@ require(
 
 
 def ansible(*argv: str) -> str:
-    """Run an Ansible command against the repository's own config and inventory."""
-    env = dict(os.environ, ANSIBLE_CONFIG=str(ANSIBLE / "ansible.cfg"))
+    """Run an Ansible command against the repository's own config.
+
+    The child environment is built from an allowlist rather than inherited: a stray ANSIBLE_*
+    in the caller's shell otherwise changes the answer. ANSIBLE_STDOUT_CALLBACK in particular
+    reroutes the rendering this gate parses, and a plugin the caller selected can abort the run.
+    """
+    passthrough = ("PATH", "HOME", "LANG", "LC_ALL")
+    env = {name: os.environ[name] for name in passthrough if name in os.environ}
+    env["ANSIBLE_CONFIG"] = str(ANSIBLE / "ansible.cfg")
+    env["ANSIBLE_STDOUT_CALLBACK"] = "default"
     done = subprocess.run(argv, cwd=ANSIBLE, env=env, capture_output=True, text=True, check=False)
     require(done.returncode == 0, f"{argv[0]} exited {done.returncode}: {done.stderr.strip()}")
     return done.stdout
@@ -196,50 +204,35 @@ def resolved_interpreter(play_vars: dict) -> str:
             "vars": play_vars,
             # default() keeps an unpinned play reporting what it resolved to rather than failing
             # the probe, so the diagnostic below names the interpreter instead of an exit code.
-            "tasks": [{"ansible.builtin.debug": {"msg": f"RESOLVED={{{{ {_PROBE_EXPR} }}}}"}}],
+            # Sentinel-delimited so the readback does not depend on how a callback quotes msg.
+            "tasks": [{"ansible.builtin.debug": {"msg": f"<<{{{{ {_PROBE_EXPR} }}}}>>"}}],
         }
     ]
     with tempfile.TemporaryDirectory() as scratch:
         probe_path = Path(scratch) / "probe.yml"
         probe_path.write_text(yaml.safe_dump(probe))
         stdout = ansible("ansible-playbook", str(probe_path))
-    marker = "RESOLVED="
-    require(marker in stdout, f"probe play emitted no resolved interpreter:\n{stdout}")
-    return stdout.split(marker, maxsplit=1)[1].split('"', maxsplit=1)[0].strip()
+    found = re.search(r"<<(.*?)>>", stdout)
+    if found is None:
+        raise SystemExit(
+            f"local-libvirt-host regression: probe play emitted no resolved interpreter:\n{stdout}"
+        )
+    return found.group(1).strip()
 
 
+# The pin is a play var, not an inventory host var. hosts.yml is shared with pki.yml and the
+# localhost plays under deploy/ansible/tests/, which resolve their own dependencies; a host var
+# there would retarget all of them, and declaring localhost at all would swap their deterministic
+# launcher interpreter for a PATH-dependent discovery.
+require(
+    "ansible_python_interpreter" in play["vars"],
+    "the play must carry its own interpreter pin rather than relying on the inventory",
+)
 inventory = yaml.safe_load(INVENTORY.read_text())
-declared_hosts = inventory["all"].get("hosts") or {}
 require(
-    "localhost" in declared_hosts,
-    "the inventory must declare localhost; the implicit host binds the interpreter to whichever "
-    "Python launched ansible-playbook",
-)
-localhost_vars = declared_hosts["localhost"] or {}
-require(
-    localhost_vars.get("ansible_connection") == "local",
-    "the declared localhost must use the local connection",
-)
-
-# Placement, not just presence. Declared inside either group, the operator's workstation would
-# join the remote-host and runner plays, which select those groups by name.
-for group, body in (inventory["all"].get("children") or {}).items():
-    require(
-        "localhost" not in ((body or {}).get("hosts") or {}),
-        f"localhost must stay ungrouped; it is declared under {group}",
-    )
-
-# The pin belongs to the play, not the inventory: pki.yml is also hosts: localhost and resolves
-# community.crypto against the project environment, so an inventory host var would retarget it.
-inventory_facts = json.loads(ansible("ansible-inventory", "--host", "localhost"))
-require(
-    "ansible_python_interpreter" not in inventory_facts,
-    "the inventory must not pin ansible_python_interpreter; every play reading it would inherit "
-    "the pin, including pki.yml",
-)
-require(
-    inventory_facts.get("ansible_connection") == "local",
-    "the inventory must resolve a local connection for localhost",
+    "localhost" not in (inventory["all"].get("hosts") or {}),
+    "hosts.yml must not declare localhost; every localhost play would inherit group_vars/all and "
+    "lose its deterministic interpreter to PATH discovery",
 )
 
 play_interpreter = resolved_interpreter(play["vars"])
@@ -252,5 +245,5 @@ require(
 
 print(
     "local-libvirt-host: preflight, localhost role composition, locked live sync, DSN stdin, "
-    "guestfs ABI handling, ungrouped localhost, and system-interpreter resolution pass"
+    "guestfs ABI handling, and play-scoped system-interpreter resolution pass"
 )

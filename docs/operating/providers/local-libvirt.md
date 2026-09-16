@@ -111,9 +111,13 @@ These are the points where the two families genuinely diverge, not just in packa
   through the distro-packaged `libvirt` and `lxml` bindings, and interpreter discovery would
   otherwise select whichever Python launched `ansible-playbook` — for `just
   prepare-local-libvirt-host` that is an ephemeral `uv run` environment with no `lxml`, which fails
-  `community.libvirt` in `libvirt_pool_net`. The pin is a play var rather than an inventory host
-  var on purpose: `inventory/hosts.yml` is shared with `playbooks/pki.yml`, which is also
-  `hosts: localhost` and resolves `community.crypto` against the project environment instead.
+  `community.libvirt` in `libvirt_pool_net`. The pin is a play var, and `inventory/hosts.yml`
+  deliberately declares no `localhost`: that file is shared with `playbooks/pki.yml` and the
+  localhost plays under `deploy/ansible/tests/`, which resolve their own dependencies against the
+  launching environment. Declaring the host there would hand all of them `group_vars/all` and
+  swap their deterministic interpreter for a `PATH`-dependent discovery. The pin binds only this
+  play. It also fixes the family bound: a `/usr/bin/python3` older than ansible-core's 3.9 target
+  floor fails closed at fact gathering, and the recipe carries no pre-check for it.
 - **The interpreter, and what it costs Enterprise Linux.** The project requires Python 3.14.
   Ubuntu 26.04 and Fedora 44 ship it as `/usr/bin/python3`; EL9 ships 3.9 and EL10 ships 3.12,
   packaging 3.14 separately as `python3.14`, which `install-host.sh` installs and the lifecycle
