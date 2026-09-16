@@ -378,6 +378,12 @@ class FakeAuthority:
         assert state.incarnation in self.registered
         self.terminations.append((state.incarnation, outcome))
         self.terminated_bindings.append((state.incarnation, state.boot_id, state.invocation_id))
+        # Both paths are the same real `terminate_worker_incarnation` call, so a row terminated
+        # here stops being active exactly as one released through `release` does. Leaving it in
+        # `rows` let a slot look swept while a row was still held.
+        self.rows[state.unit] = [
+            row for row in self.rows.get(state.unit, ()) if row.incarnation != state.incarnation
+        ]
 
     async def recoverable(self, unit: str) -> tuple[LocalWorkerIncarnation, ...]:
         self.events.append(self.recoverable_label)
@@ -2872,3 +2878,53 @@ def test_recover_residual_support_does_not_move_the_protocol_identity() -> None:
     assert lifecycle_protocol_identity() == (
         "1:d5de155830bd087207ab73060df513bba91fe4d57436615b4cf7b6359d594a5b"
     )
+
+
+def test_recover_sweeps_a_stale_row_left_beside_the_retained_generation() -> None:
+    """A slot can hold an older active row than the one its state.json names.
+
+    `prepare` mints a fresh generation for a slot whose files were lost out of band and registers
+    it beside the row still held, so the evidenced path retires one and leaves the other. Reporting
+    that slot `ok` would leave it half-released, which the failure model forbids.
+    """
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    stores[0].state_document = "valid"
+    runtime.current[started.unit] = _observation(
+        1, "empty", invocation_id="f" * 32, result="exit-code", status=1
+    )
+    stale = _row(1, generation="c" * 32)
+    authority.rows[started.unit] = [
+        _row(1, generation=started.generation, invocation_id=cast(str, started.invocation_id)),
+        stale,
+    ]
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok, response.message
+    # The retained generation went through the evidenced path...
+    assert (started.incarnation, "killed") in authority.terminations
+    # ...and the stale row was swept in the same call rather than left held.
+    assert (stale.incarnation, "killed") in authority.released
+    assert authority.rows[started.unit] == []
+    assert [(result.slot, result.phase) for result in response.slots] == [(1, SlotPhase.TERMINATED)]
+
+
+def test_recover_refuses_the_sweep_while_unmanaged_workers_run() -> None:
+    """Cgroup membership cannot see a `kdive worker` outside every fixed unit.
+
+    Recovery releases fences, so it takes the same guard `start` takes rather than resting on the
+    weaker of the two liveness checks.
+    """
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
+    runtime.unmanaged = (UnmanagedWorker(pid=4321, uid=1000),)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok and response.code == "conflict"
+    assert response.retry_action == "operator_recovery"
+    assert authority.released == [] and authority.terminations == []
+    assert authority.rows[started.unit] != []
+    assert authority.probed_units == []
+    assert stores[0].discards == 0
+    assert runtime.resets == []

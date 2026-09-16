@@ -417,9 +417,12 @@ termination evidence — so recovery refuses that slot rather than clearing it, 
 code `recovery_refused_unreadable_identity`. The rest of the sweep still runs. The remedy is a
 reboot, which yields a different boot ID and therefore real evidence.
 
-A slot reported `recovery_refused_incoherent_row` is a different problem: a `worker_incarnations`
-row whose stored binding does not name an invocation on that slot's unit, which a reboot will not
-clear. That row was not written by the lifecycle contract and needs an operator to reconcile it.
+A slot reported `recovery_refused_incoherent_row` is a different problem, and a reboot will not
+clear it: the database holds an active `worker_incarnations` row over that slot which does not
+describe this slot on this host — its stored binding names a different unit, or a different host.
+Recovery refuses the whole slot rather than releasing that row or clearing the slot's files around
+it, so nothing is lost while you look. Read the row's `authority_binding` and reconcile it with the
+host that actually owns it; the warning in the lifecycle journal names the slot and unit.
 See
 [ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md) and
 [ADR-0667](../../adr/0667-recovery-names-the-fence-row-by-the-slot-derived-incarnation.md).

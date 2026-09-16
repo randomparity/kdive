@@ -355,6 +355,13 @@ class SystemdWorkerLifecycle:
             # replacing the fleet rather than the weaker of the two liveness checks.
             unmanaged = self._systemd_call(operation_deadline, self._runtime.unmanaged_workers)
             if unmanaged:
+                # `_map_failure` renders `LifecycleConflict` with a canned message, so without
+                # this the operator gets `conflict` and an empty slot list with nothing naming
+                # the cause. Recovery is the escape hatch; it owes a trace of why it refused.
+                _log.warning(
+                    "recovery refused the sweep: unmanaged worker processes are running count=%d",
+                    len(unmanaged),
+                )
                 raise LifecycleConflict("unmanaged worker processes require operator recovery")
             for store in self._stores:
                 result = await self._recover_slot(store, operation_deadline, stop_deadline)
@@ -452,7 +459,17 @@ class SystemdWorkerLifecycle:
                     type(exc).__name__,
                 )
             else:
-                return _Recovery(state=retired)
+                # The evidenced path retired the retained generation, but a slot can hold an
+                # older active row too -- `prepare` mints a fresh generation for a slot whose
+                # files were lost out of band and registers it beside the row still held. Sweep
+                # what is left before calling the slot done, or this reports `ok` with a fence
+                # still held and leaves the slot half-released.
+                residual = await self._retire_residual_slot(
+                    store, inspection, observation, deadline, stop_deadline
+                )
+                if residual.refusal is not None:
+                    return residual
+                return _Recovery(state=retired, cleared=residual.cleared)
         return await self._retire_residual_slot(
             store, inspection, observation, deadline, stop_deadline
         )
