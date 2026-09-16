@@ -81,7 +81,7 @@ alongside its `code`. It is a closed set, and it — not the code — says what 
 |---|---|---|
 | `none` | the operation succeeded | nothing |
 | `correct_request` | the request itself was rejected: a `start` missing its worker count or settings, or a request frame the witness could not parse | fix the invocation; retrying it unchanged fails the same way |
-| `retry_same_operation` | a transient condition: the request deadline expired, termination evidence was rejected, another lifecycle request holds the control lock (`code=busy`), or a `diagnostics` operation failed before any slot was captured | wait for the named condition to clear, then re-run the same command |
+| `retry_same_operation` | a transient condition: the request deadline expired, termination evidence was rejected, or another lifecycle request holds the control lock (`code=busy`) | wait for the named condition to clear, then re-run the same command |
 | `restore_systemd` | systemd could not answer for the retained unit | restore systemd, then re-run |
 | `restore_database` | the database authority is unavailable | restore the database, then re-run |
 | `operator_recovery` | retained lifecycle facts conflict with what was observed, an unmapped internal error occurred, or a `diagnostics` capture withheld at least one slot | inspect, then recover — see below |
@@ -94,6 +94,6 @@ resolve that disagreement. Run `scripts/live-stack/worker-lifecycle.sh status` a
 including how to read a withheld slot's reason, is in
 [the live-stack runbook](../../docs/operating/runbooks/live-stack.md#recovering-a-wedged-worker-slot).
 
-One code carries two actions, so read the action. `code=diagnostics_withheld` arrives with
-`operator_recovery` when the capture ran and withheld individual slots, and with
-`retry_same_operation` when the whole capture failed before any slot was reached.
+`code=diagnostics_withheld` always arrives with `operator_recovery`: `diagnostics` catches every
+per-slot failure inside the capture and reports it as a withheld slot, so there is no path on
+which that code asks for a plain retry.

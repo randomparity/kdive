@@ -367,17 +367,20 @@ The command exits 4 when a slot was withheld; the pipe is what keeps the output 
 | Reason | What it means | What to do |
 |---|---|---|
 | `state_unreadable` | the slot's retained state could not be read at all | check ownership and mode under `/var/lib/kdive/live-workers` |
-| `slot_unusable` | the slot holds no usable diagnostic state: no exact invocation, no safe budget, or unusable redaction sources | run `recover` below; if it persists, check the slot's redaction sources under the same directory |
+| `slot_unusable` | the slot holds no usable diagnostic state: no exact invocation, or unusable redaction sources | run `recover` below; if it persists, check the slot's redaction sources under the same directory |
 | `acquisition_failed` | systemd, the journal, or the request deadline did not answer in time | check `systemctl status` and `journalctl` for the unit, then re-run `diagnostics` |
 | `redaction_refused` | the report held a value the redactor may not emit, so the whole report was dropped | read the unit's journal on the host directly |
 | `peer_redaction_refused` | the report held a value another slot registered, so it was dropped for the same reason | read the unit's journal on the host directly |
 | `internal_error` | an unexpected failure inside the capture | the witness log names the exception type |
 
-A slot that carries no reason and no text is a different thing: everything after
-`[aggregate diagnostics truncated]` fell outside the acquisition or emission budgets above and
-was never captured, which is truncation rather than withholding. Read that unit's journal on the
-host directly. The reason text itself is accounted inside those same budgets, so the numbers
-given above are unchanged.
+A slot that carries no reason is a different thing. Read it off the slot result rather than off
+the emitted text: a slot whose `"code"` is `"ok"` but which contributes no `=== slot N ===` block
+to the diagnostics was never captured, because the run had already spent the acquisition or
+emission budgets above. That is truncation, not withholding, and the response stays `ok` for it.
+Do not look for `[aggregate diagnostics truncated]` as the cue — the marker is itself suppressed
+when it collides with one of the host's redaction sources, and on some paths it is never emitted
+at all. Read those units' journals on the host directly. The reason text is accounted inside
+those same budgets, so the numbers given above are unchanged.
 
 **Recover.** Unlike `diagnostics`, this operation first requires the installed lifecycle
 environment to match your checkout. If it prints
