@@ -57,6 +57,7 @@ from tests.integration.live_stack.spine import (
     assert_report,
     await_system_state,
     build_and_upload_kernel,
+    build_profile,
     captured_vmcore_refs,
     drain_job,
     mint_role_token,
@@ -196,16 +197,6 @@ def _provision_profile() -> dict[str, object]:
             }
         },
     }
-
-
-def _build_profile() -> dict[str, object]:
-    """The Run build profile for the x86_64 spine (upload-only lane, ADR-0048).
-
-    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` + the
-    target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
-    (see ``build_and_upload_kernel``), not a server ``kernel_source_ref``/``config`` build.
-    """
-    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _live_script_provision_profile() -> dict[str, object]:
@@ -431,7 +422,7 @@ def test_spine_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_id,
                             system_id=system_id,
-                            build_profile=_build_profile(),
+                            build_profile=build_profile(),
                         ),
                         "create-run",
                     )
@@ -569,7 +560,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_id,
                             system_id=system_id,
-                            build_profile=_build_profile(),
+                            build_profile=build_profile(),
                         ),
                         "create-run",
                     )
@@ -673,7 +664,7 @@ def test_spine_live_script_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_id,
                             system_id=system_id,
-                            build_profile=_build_profile(),
+                            build_profile=build_profile(),
                         ),
                         "create-run",
                     )
@@ -1149,7 +1140,7 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                             **{
                                 "investigation_id": env.object_id,
                                 "system_id": system_id,
-                                "build_profile": {"schema_version": 1, "arch": "ppc64le"},
+                                "build_profile": build_profile("ppc64le"),
                             },
                         ),
                         "ppc64le-bundle:create-run",
@@ -1383,7 +1374,7 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                             **{
                                 "investigation_id": env.object_id,
                                 "system_id": system_id,
-                                "build_profile": {"schema_version": 1, "arch": "ppc64le"},
+                                "build_profile": build_profile("ppc64le"),
                             },
                         ),
                         "ppc64le-fadump:create-run",
@@ -1577,7 +1568,7 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                             **{
                                 "investigation_id": env.object_id,
                                 "system_id": system_id,
-                                "build_profile": {"schema_version": 1, "arch": "ppc64le"},
+                                "build_profile": build_profile("ppc64le"),
                             },
                         ),
                         "ppc64le-kdump:create-run",

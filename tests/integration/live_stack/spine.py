@@ -8,8 +8,12 @@ in one place: the phase-naming contract (``phase`` / ``SpinePhaseError``), the e
 (``ok`` / ``scalar``), the async-drain helpers (``drain_job`` / ``await_system_state`` — both with
 an overridable deadline so a longer phase can extend its budget), the per-project role-token
 factory (``mint_role_token``), the out-of-band metering/capability seeders, and the audit / ledger
-/ report helpers. Provider-specific pieces (profile factories, the booted-spine bodies, the
-owned-infra teardown check) stay in each spine's own module.
+/ report helpers. Provider-specific pieces (the ``_provision_profile`` factories, the booted-spine
+bodies, the owned-infra teardown check) stay in each spine's own module.
+
+The line between the two runs through the profiles: a *provision* profile names its provider and
+stays per-suite, while the *build* profile names only ``schema_version`` and ``arch``, so
+``build_profile`` is shared here and guarded by ``test_build.py`` (#2511, ADR-0665).
 """
 
 from __future__ import annotations
@@ -366,6 +370,24 @@ async def await_system_state(
 # capture assertions. Shared here so the next lane change lands in one place.
 
 KERNEL_TREE_ENV = "KDIVE_KERNEL_SRC"
+
+
+def build_profile(arch: str = "x86_64") -> dict[str, object]:
+    """The Run build profile every spine sends to ``runs.create`` (upload-only lane, ADR-0048).
+
+    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` + the
+    target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
+    below, not a server ``kernel_source_ref``/``config`` build.
+
+    ``test_build.py`` guards the returned shape against the real validator.
+
+    Args:
+        arch: Target CPU architecture, one of ``SUPPORTED_ARCHES``. Defaults to ``x86_64``.
+
+    Returns:
+        The profile as a dict for the wire.
+    """
+    return {"schema_version": 1, "arch": arch}
 
 
 def sha256_b64(path: Path) -> str:
