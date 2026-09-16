@@ -107,7 +107,7 @@ def _copied_lifecycle(tmp_path: Path, installed_python: Path) -> Path:
     return lifecycle
 
 
-@pytest.mark.parametrize("operation", ("start 1", "status", "stop"))
+@pytest.mark.parametrize("operation", ("start 1", "status", "stop", "recover"))
 def test_lifecycle_protocol_mismatch_fails_before_mutation(tmp_path: Path, operation: str) -> None:
     installed_python = _installed_protocol_python(tmp_path, "0:incompatible")
     lifecycle = _copied_lifecycle(tmp_path, installed_python)
@@ -3795,3 +3795,45 @@ def test_services_stage_reconciles_the_app_tier(tmp_path: Path) -> None:
     # legal under --stage services (only --stage backends rejects it), so the stage gate is still
     # exercised while the privileged block stays unreached.
     assert "REFUSED" not in recorded, f"bring-up attempted a privileged call: {recorded}"
+
+
+@pytest.mark.parametrize("operation", ("status", "stop", "diagnostics", "recover"))
+def test_lifecycle_client_dispatches_every_argument_free_operation(operation: str) -> None:
+    """The shell `case` and the usage line must both agree with the wire grammar.
+
+    `worker-lifecycle.sh` is the only client an operator runs, so an operation the contract
+    accepts but the `case` does not name falls through to `*)` and exits 2 on usage before a
+    request is ever built -- indistinguishable from a typo. Asserting the exit status cannot
+    catch that, because a bogus argument produces exactly the same status and the same usage
+    line; only the arm patterns themselves separate the two.
+    """
+    lifecycle = LIFECYCLE.read_text()
+    dispatch = lifecycle.split('case "${1:-}" in', 1)[1]
+    arms: dict[frozenset[str], str] = {}
+    for block in dispatch.split(";;"):
+        header, _, body = block.partition(")")
+        patterns = frozenset(pattern.strip() for pattern in header.strip().split("|"))
+        if patterns:
+            arms[patterns] = body
+    named = {pattern for patterns in arms for pattern in patterns}
+
+    assert operation in named, named
+    assert "*" in named, "the fall-through arm must still reject an unknown argument"
+    assert f"|{operation}" in lifecycle.split("usage()", 1)[1].split("\n}", 1)[0]
+
+    # Naming the operation in an arm is not enough: the arm must build a request rather than
+    # fall back to usage, which would be indistinguishable from the `*)` arm at the exit status.
+    body = next(body for patterns, body in arms.items() if operation in patterns)
+    assert 'request "$1"' in body, body
+
+
+def test_lifecycle_diagnostics_alone_skips_the_compatibility_probe() -> None:
+    """Recovery must fail closed on a skewed host; only `diagnostics` stays reachable.
+
+    A host is reprovisioned *before* `recover` is dispatched against it, so exempting `recover`
+    from the probe would let it run against a venv whose coordinator has no `recover` method —
+    an `internal_error` from an `AttributeError`, not the actionable skew message.
+    """
+    lifecycle = LIFECYCLE.read_text()
+
+    assert '[[ "$operation" != diagnostics ]]' in lifecycle

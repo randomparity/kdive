@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 
@@ -24,8 +25,10 @@ from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     MAX_RESPONSE_BYTES,
     LifecycleRequest,
     LifecycleResponse,
+    Operation,
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_control import (
+    Lifecycle,
     PeerCredentials,
     PeerRejected,
     ProtocolRejected,
@@ -33,6 +36,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_control import (
     serve_one,
     service_configuration,
 )
+from kdive.processes.lifecycle.systemd.systemd_worker_lifecycle import SystemdWorkerLifecycle
 from kdive.processes.lifecycle.systemd.systemd_worker_runtime import Deadline
 from tests.processes.lifecycle.systemd.systemd_worker_support import start_payload
 
@@ -117,6 +121,11 @@ class FakeLifecycle:
 
     async def diagnostics(self, deadline: Deadline) -> LifecycleResponse:
         self.operations.append("diagnostics")
+        self.deadlines.append(deadline)
+        return _response()
+
+    async def recover(self, deadline: Deadline) -> LifecycleResponse:
+        self.operations.append("recover")
         self.deadlines.append(deadline)
         return _response()
 
@@ -216,6 +225,7 @@ def test_deadline_starts_after_peer_auth_and_is_shared_with_lifecycle(tmp_path: 
         LifecycleRequest(operation="status"),
         LifecycleRequest(operation="stop"),
         LifecycleRequest(operation="diagnostics"),
+        LifecycleRequest(operation="recover"),
     ],
 )
 def test_server_dispatches_each_validated_operation_exactly_once(
@@ -598,3 +608,16 @@ def test_service_configuration_requires_root_only_witness_credential(
 
     with pytest.raises(PermissionError, match="untrusted metadata"):
         service_configuration(environment)
+
+
+def test_every_operation_has_a_protocol_member_and_a_coordinator_method() -> None:
+    """`_call_lifecycle` resolves every non-start operation with `getattr(lifecycle, ...)`.
+
+    An `Operation` literal with no declared `Lifecycle` member and no `SystemdWorkerLifecycle`
+    method is therefore an `AttributeError` raised while serving a validated request — not a
+    type error `just type` reports, and not something a contract-only test would surface. The
+    server maps it to `internal_error`, so the seam fails at its least informative point.
+    """
+    for operation in get_args(Operation):
+        assert callable(getattr(Lifecycle, operation, None)), operation
+        assert callable(getattr(SystemdWorkerLifecycle, operation, None)), operation

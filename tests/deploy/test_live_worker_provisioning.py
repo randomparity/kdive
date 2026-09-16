@@ -850,7 +850,7 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     )
     install = (
         "{{ live_vm_host_uv_bin }} pip install --python "
-        "/opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive"
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive /opt/kdive"
     )
     assert commands.index(create) < commands.index(install)
     assert "path: /opt/kdive-live-worker-lifecycle" in tasks
@@ -2233,6 +2233,69 @@ def test_local_worker_declares_boot_kernel_readability() -> None:
     assert "getent" in tasks
     assert "live_vm_host_worker_accounts" in tasks
     assert "boot_kernels.yml" in _text(LOCAL_WORKER / "tasks" / "main.yml")
+
+
+def test_installer_forces_a_fresh_project_wheel_into_the_worker_venv() -> None:
+    """`--no-editable` installs a copy, and uv keys that copy on name and version.
+
+    A checkout whose sources changed under an unchanged `version` in pyproject.toml re-syncs to
+    the cached wheel, so the venv keeps the old code while provisioning reports success. That is
+    invisible until a request is sent: `lifecycle_protocol_identity` is derived from the
+    installed code, so `require_compatible_lifecycle` then refuses every operation on a host the
+    role just declared healthy (#2532). Reproduced on uv with a two-line project: sync, edit the
+    source, sync again, and the second import still returns the first value.
+    """
+    source = _text(INSTALLER)
+    sync = "uv sync --locked --no-editable --no-dev --group live --reinstall-package kdive"
+
+    assert sync in source
+    # Scoped to the project: third-party wheels stay cached, so a reinstall is not a full rebuild.
+    assert "--reinstall " not in source
+    assert "--reinstall-package kdive" in source
+
+    # The role builds the same venv by a second, independent path; both must force the rebuild,
+    # or a host provisioned through the role alone carries a venv the installer's gate would fail.
+    role = _text(MAIN_TASKS)
+    install = "Install KDIVE into the lifecycle witness venv"
+    install_block = role[role.index(install) :].split("- name:", 2)[0]
+    assert "--reinstall-package kdive" in install_block
+    # Unconditional: its `when:` proxies could not see a venv left stale by a failed earlier run,
+    # and the protocol assertion in verify.yml now makes that state unrecoverable.
+    assert not any(line.strip().startswith("when:") for line in install_block.splitlines())
+
+
+def test_verify_asserts_the_installed_venv_carries_this_checkout_protocol() -> None:
+    """The revision stamp is written by the role, so it records intent, not installed code.
+
+    Only comparing `lifecycle_protocol_identity` between the checkout and the installed venv
+    catches a stale worker venv while provisioning is still running, instead of leaving it for
+    the first `worker-lifecycle.sh` request to discover (#2532).
+    """
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    names = [task["name"] for task in tasks]
+    probe = "Read the checkout lifecycle protocol identity"
+    installed = "Read the installed lifecycle protocol identity"
+    assertion = "Assert the installed lifecycle protocol matches the checkout"
+
+    assert names.index(probe) < names.index(installed) < names.index(assertion)
+    checkout = tasks[names.index(probe)]
+    checkout_argv = checkout["ansible.builtin.command"]["argv"]
+    installed_argv = tasks[names.index(installed)]["ansible.builtin.command"]["argv"]
+
+    # Two interpreters, one expression: the same comparison require_compatible_lifecycle makes.
+    assert checkout_argv[0] == "{{ live_vm_venv }}/.venv/bin/python"
+    assert installed_argv[0] == "/opt/kdive-live-worker-lifecycle/.venv/bin/python"
+    assert checkout_argv[1:] == installed_argv[1:]
+    assert "-I" in checkout_argv
+    assert "lifecycle_protocol_identity()" in checkout_argv[-1]
+    # The checkout is writable by the runner account, so root must not import from it.
+    assert checkout["become_user"] == "{{ github_runner_user }}"
+    assert "become_user" not in tasks[names.index(installed)]
+
+    compared = tasks[names.index(assertion)]["ansible.builtin.assert"]
+    assert "live_vm_host_worker_installed_protocol.stdout" in compared["that"][0]
+    assert "live_vm_host_worker_checkout_protocol.stdout" in compared["that"][0]
+    assert "refuse every request" in compared["fail_msg"]
 
 
 def test_installer_makes_the_session_libvirt_runtime_root_boot_durable() -> None:

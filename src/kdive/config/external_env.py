@@ -662,7 +662,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         None,
         "Internal request-construction handoff derived from the worker-lifecycle.sh command; "
-        "operators use start, status, stop, or diagnostics arguments instead.",
+        "operators use start, status, stop, diagnostics, or recover arguments instead.",
     ),
     ExternalEnvVar(
         "KDIVE_LIFECYCLE_COUNT",

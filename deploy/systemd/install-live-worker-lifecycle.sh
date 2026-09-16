@@ -729,8 +729,15 @@ fi
 # system interpreter keeps `UV_PYTHON_DOWNLOADS=never` hermetic while naming neither a path nor
 # a version here — the requirement stays in pyproject.toml's `requires-python`, which is what
 # uv matches against.
+# `--reinstall-package kdive` because `--no-editable` installs a *copy*: uv keys the built wheel
+# on the project name and version, so a checkout whose sources changed under an unchanged
+# `version` in pyproject.toml re-syncs to the cached wheel and the venv silently keeps the old
+# code. The lifecycle protocol identity is derived from that installed code
+# (`lifecycle_protocol_identity`), so a stale copy makes `require_compatible_lifecycle` reject
+# every request on a host provisioning just reported healthy. Only the project is reinstalled;
+# third-party wheels stay cached (#2532).
 UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv UV_PYTHON_DOWNLOADS=never \
-  uv sync --locked --no-editable --no-dev --group live \
+  uv sync --locked --no-editable --no-dev --group live --reinstall-package kdive \
   --project /opt/kdive --python-preference only-system
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
