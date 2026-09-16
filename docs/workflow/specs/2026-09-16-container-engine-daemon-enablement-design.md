@@ -99,13 +99,14 @@ operator-owned connection, and the role already requires root.
   masked` names the cause, verified on a Fedora 44 host. An opt-out variable would be more surface
   than the risk, and unmasking is the operator's call.
 - The runner's socket-group grant, unconditional before this change, now skips silently if the
-  packaged unit is ever absent rather than failing. Accepted: `live_vm_host`'s apt install of
-  `docker.io` is unconditional and that package ships the unit, and a real non-check
-  `runner.yml --tags container_runtime` run through the `live_vm_host` call site on a Debian-family
-  host entered all five tasks with `changed=0`, leaving the runner account in the socket group and
-  `docker.service` enabled and active. The play itself does not check this, and an in-play assert
-  keyed to distribution was cut because it fails the `podman-docker` host criterion 1 requires to
-  skip cleanly.
+  packaged unit is ever absent rather than failing — on the **standalone** path. Accepted there:
+  the role installs no engine on Debian at all, and criterion 1 requires a `podman-docker` host to
+  skip cleanly, so a role-level assert keyed to distribution is the thing that was cut. The
+  **runner** path does not accept it: `live_vm_host`'s apt install of `docker.io` is unconditional,
+  so the unit is not optional there, and that call site asserts the probe found it. Verified on a
+  Debian-family host: a non-check `runner.yml --tags container_runtime` run entered all six tasks
+  with `changed=0`, leaving the runner account in the socket group and `docker.service` enabled and
+  active, and injecting an absent unit fails at that assert naming the package and the probed path.
 - CI proves gating, the guard's refusals, ordering, grant target and call-site binding in check
   mode only; it cannot prove a daemon starts, nor that the probe finds a real unit on a real host.
   Accepted: covered by the plan's real-host runs. Those include a non-check
@@ -131,7 +132,8 @@ ruleset` carries 182 docker rules, `iptables -t nat -S` carries three `DOCKER` c
 `docker0` bridge exists. The provider uses user-mode SLIRP networking and manages no libvirt
 network, so nothing here contends with it today; the opt-out is masking the unit, whose behaviour
 is the accepted class above. On the runner path that widens a grant
-`live_vm_host/tasks/main.yml:61-65` already makes. On the standalone path it is a new membership —
+`live_vm_host/tasks/main.yml:61-65` already makes, and that call site now asserts the probe found
+the unit its own unconditional apt install provides. On the standalone path it is a new membership —
 `local_worker_host` grants no Docker group today, and it creates `kdive-live-control`
 (`worker_groups.yml:16`) without adding anyone to it — so it is the operator account's first
 root-equivalent group from provisioning.

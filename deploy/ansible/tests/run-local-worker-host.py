@@ -59,10 +59,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 318, f"runner listed {len(actual_tasks)} baseline tasks, expected 318")
+require(len(actual_tasks) == 319, f"runner listed {len(actual_tasks)} baseline tasks, expected 319")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 318 ordered task names and tags match the updated baseline")
+print("ok runner: 319 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -509,15 +509,17 @@ def container_daemon_guard(*, operator_user: str, refused: bool) -> None:
         json.dumps(facts),
     )
     state = f"operator {operator_user!r}"
+    section = container_section(result.stdout, DAEMON_EXCLUDE, state)
+    guard_failed = "fatal: [localhost]" in section
     require(
-        (result.returncode != 0) == refused,
-        f"{state} got the wrong guard outcome: rc={result.returncode}",
+        guard_failed == refused,
+        f"{state} got the wrong guard outcome: refused={guard_failed}",
     )
-    if refused:
-        require(
-            f"TASK [local_worker_host : {DAEMON_ENABLE}]" not in result.stdout,
-            f"{state} reached the daemon enable after the guard should have stopped the play",
-        )
+    reached_enable = f"TASK [local_worker_host : {DAEMON_ENABLE}]" in result.stdout
+    require(
+        reached_enable != refused,
+        f"{state} {'reached' if reached_enable else 'did not reach'} the enable after the guard",
+    )
 
 
 for guard_user, guard_refused in (

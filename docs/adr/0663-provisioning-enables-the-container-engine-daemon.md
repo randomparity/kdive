@@ -93,8 +93,10 @@ risk, and the charter's outcome is that a host carrying an engine ends up able t
 
 The Debian path stops depending on dpkg policy for its correctness. The enable is a no-op there
 (`docker.service` is already preset-enabled and running), so it costs one `ok` task per run and
-converts an accident of packaging into a stated requirement that a future packaging change would
-break loudly.
+converts an accident of packaging into a stated requirement. A packaging change that leaves the
+unit in place but breaks the daemon breaks loudly at the enable; one that removed the unit would be
+the silent skip recorded below, which is why the runner call site asserts the unit separately —
+there the engine install is unconditional, so its absence can only be a regression.
 
 An Enterprise Linux or SLES host that installed Docker from Docker's own repository is enabled and
 granted like any other. This repository still packages no runtime for those families —
