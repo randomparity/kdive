@@ -889,6 +889,10 @@ def test_fence_refused_registration_reports_a_fence_conflict_not_a_database_outa
 
 
 def test_fence_refused_termination_reports_a_fence_conflict_not_a_database_outage() -> None:
+    # No current backend's `terminate()` raises IncarnationConflict — only `register`'s
+    # unique-violation path does today (`authority_store.py`). This pins `_terminate`'s
+    # symmetric handling for the recovery-termination path issue #2488 adds, not a
+    # currently reachable production misattribution.
     prepared = _state(1, SlotPhase.PREPARED)
     stores, runtime, authority, clock, _ = _fleet(states={1: prepared})
     runtime.current[prepared.unit] = _observation(1, "populated")

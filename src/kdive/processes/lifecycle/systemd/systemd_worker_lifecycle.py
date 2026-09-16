@@ -554,6 +554,11 @@ class SystemdWorkerLifecycle:
         except LifecycleDeadlineExceeded:
             raise
         except IncarnationConflict:
+            # No current `IncarnationAuthority.terminate` backend raises this — only
+            # `register`'s unique-violation path does today. Kept for symmetry with
+            # `_register` and as forward defense for the recovery-termination path
+            # issue #2488 adds, so a future fence-checked terminate does not fall
+            # through to `_AuthorityUnavailable` the way registration once did.
             raise
         except Exception as exc:
             raise _AuthorityUnavailable("worker termination authority unavailable") from exc
