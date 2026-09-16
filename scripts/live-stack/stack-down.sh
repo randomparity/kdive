@@ -97,51 +97,94 @@ else
   docker compose --profile obs down
 fi
 
+# kdive domain names on stdout, one per line, with virsh's status preserved -- and, on failure,
+# virsh's diagnostic printed instead of the names. lib.sh's kdive_domains() discards stderr and
+# ends in `|| true`, so an endpoint that RESOLVES but does not answer (a daemon that is down, or
+# the wrong-daemon URI libvirt-uri.sh:119-121 warns about) enumerates byte-identically to a host
+# holding no kdive domains -- and `require_libvirt_uri` above proved only that the contract
+# resolved, never that anything answers it. The probe supplies the status that `|| true` swallows;
+# kdive_domains still supplies the names, so what counts as a kdive domain stays defined once.
+# Bare virsh, matching kdive_domains: which privilege the reap should hold is #2516's question.
+enumerate_kdive_domains() {
+  local probe_err
+  probe_err="$(virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1 >/dev/null)" || {
+    printf '%s' "${probe_err:-virsh list failed and said nothing}"
+    return 1
+  }
+  kdive_domains
+}
+
 if [[ "$wipe" == "1" ]]; then
   echo "=== reaping kdive-* libvirt domains + overlays ==="
   # Every call here used to end in `|| true` and the block printed one `destroying <domain>` line
-  # per name it INTENDED to reach, so a reap that removed nothing still reported success (#2515).
-  # An operator told the host was wiped then starts the next run from a state nobody expects.
-  # What survives the rewrite is the suppression on `destroy` alone: a domain that is already shut
-  # off answers non-zero and that is not a reap failure. `undefine` is the removal, so its status
-  # is the verdict, and the lines below are written AFTER a removal rather than before an attempt.
+  # per name it INTENDED to reach, then `done` regardless -- so a reap that removed nothing still
+  # reported success (#2515) and the next run started from a state nobody expects. Every line below
+  # is written from an OBSERVED end state instead of from an attempt.
   reaped=()
   unreaped=()
-  while read -r dom; do
-    [[ -n "$dom" ]] || continue
-    sudo virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" >/dev/null 2>&1 || true
-    # `2>&1 >/dev/null` in that order captures stderr only: fd2 goes to the substitution, then fd1
-    # to /dev/null. Verbatim, because which refusal it was decides the operator's next move.
-    if err="$(sudo virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>&1 >/dev/null)"; then
-      reaped+=("domain ${dom}")
+  domains=()
+  declare -A undefine_err=()
+  if ! listing="$(enumerate_kdive_domains)"; then
+    unreaped+=("kdive domains: cannot enumerate at ${KDIVE_LIBVIRT_URI}, so an empty list is not evidence of an empty host -- ${listing}")
+  elif [[ -n "$listing" ]]; then
+    mapfile -t domains <<<"$listing"
+    for dom in "${domains[@]}"; do
+      # `destroy` keeps its suppression: a domain already shut off answers non-zero and that is not
+      # a reap failure. `2>&1 >/dev/null` in that order captures stderr only -- fd2 to the
+      # substitution, then fd1 to /dev/null -- and it is kept verbatim, because which refusal this
+      # was decides the operator's next move.
+      sudo virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" >/dev/null 2>&1 || true
+      undefine_err["$dom"]="$(sudo virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>&1 >/dev/null || true)"
+    done
+    # Neither call's status is the verdict. `virsh undefine` on a RUNNING domain succeeds by
+    # converting it to a transient one WITHOUT stopping it, so an undefine that returned 0 after a
+    # destroy the host refused would read as a removal while the guest is still up. Re-reading the
+    # list settles that and every other residue in one call.
+    if ! end_state="$(enumerate_kdive_domains)"; then
+      still_there="unverifiable: the end state could not be re-read -- ${end_state}"
+      end_state="$listing"
     else
-      unreaped+=("domain ${dom}: ${err:-undefine failed and said nothing}")
+      still_there="still defined after destroy + undefine"
     fi
-  done < <(kdive_domains)
+    for dom in "${domains[@]}"; do
+      if [[ $'\n'"${end_state}"$'\n' == *$'\n'"${dom}"$'\n'* ]]; then
+        unreaped+=("domain ${dom}: ${still_there}${undefine_err[$dom]:+ -- ${undefine_err[$dom]}}")
+      else
+        reaped+=("domain ${dom}")
+      fi
+    done
+  fi
 
-  # The overlay glob is the SHELL's, expanded with the caller's own privilege — so on an account
-  # that cannot list the directory it expands to nothing, which is byte-identical to a host that
-  # has no overlays. That is the one place a removal failure cannot surface the no-op, because no
-  # removal is ever attempted; only the listability test below tells the two apart.
-  if [[ ! -d "$KDIVE_ROOTFS_DIR" ]]; then
+  # Half a wipe is worse than none, the same pairing the header and the --wipe gate above keep: a
+  # domain that survived still needs its backing overlay, so an incomplete domain reap stops here
+  # rather than deleting the disks out from under it.
+  if ((${#unreaped[@]})); then
+    echo "  skipping overlays: the domain reap did not complete" >&2
+  elif [[ ! -d "$KDIVE_ROOTFS_DIR" ]]; then
     echo "  no overlay directory at ${KDIVE_ROOTFS_DIR}"
   elif [[ ! -r "$KDIVE_ROOTFS_DIR" || ! -x "$KDIVE_ROOTFS_DIR" ]]; then
-    unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory and an unreadable one cannot be told apart")
+    # The overlay glob is the CALLING SHELL's, expanded with the caller's own privilege, while the
+    # removal below runs under sudo. On an account outside the directory's owner and group it
+    # expands to nothing, so a host full of overlays is byte-identical to a clean one -- the one
+    # place a removal failure cannot surface the no-op, because no removal is ever attempted.
+    unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory and an unreadable one cannot be told apart; re-run as the account that owns it or one in its group (ls -ld names them)")
   else
     shopt -s nullglob
     for overlay in "${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2; do
-      if err="$(sudo rm -f "$overlay" 2>&1 >/dev/null)"; then
+      if rm_err="$(sudo rm -f "$overlay" 2>&1 >/dev/null)"; then
         reaped+=("overlay ${overlay}")
       else
-        unreaped+=("overlay ${overlay}: ${err:-rm failed and said nothing}")
+        unreaped+=("overlay ${overlay}: ${rm_err:-rm failed and said nothing}")
       fi
     done
     shopt -u nullglob
   fi
 
-  for item in "${reaped[@]}"; do
-    echo "  removed ${item}"
-  done
+  # Guarded, not bare: expanding an empty array under `set -u` is an error before bash 4.4, and
+  # nothing in this script otherwise needs a bash newer than the 4.0 `mapfile` above.
+  if ((${#reaped[@]})); then
+    printf '  removed %s\n' "${reaped[@]}"
+  fi
   echo "reaped ${#reaped[@]} item(s)"
   if ((${#unreaped[@]})); then
     echo "ERROR: --wipe did not reap the host; ${#unreaped[@]} item(s) remain:" >&2

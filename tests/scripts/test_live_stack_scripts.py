@@ -1240,13 +1240,21 @@ def test_stack_down_completes_plain_teardown_on_a_broken_contract(tmp_path: Path
     assert result.stdout.rstrip().endswith("done")
 
 
-# `sudo` runs the command rather than recording it, so the reap's own `virsh` and `rm` stubs
-# decide each removal -- which is what these arms are about. `virsh` answers 0 for every
-# subcommand unless an arm replaces it; positional args are `-c <uri> <subcommand> <domain>`.
+# A directory of files named for the defined domains stands in for the libvirt host, so the reap's
+# end-state re-read observes a removal instead of being told about one: `undefine` unlinks the
+# name and `kdive_domains` lists whatever is left. `sudo` runs its command rather than recording
+# it, so an arm's own `virsh` or `rm` stub decides each removal. `virsh` answers 0 for every other
+# subcommand, including the bare `list` the enumeration probe runs; the positional arguments the
+# stubs read are `-c <uri> <subcommand> [<domain>]`.
 _REAP_STUBS = (
     'sudo() { "$@"; }\n'
-    "virsh() { return 0; }\n"
-    'kdive_domains() { printf "kdive-alpha\\nkdive-beta\\n"; }\n'
+    "virsh() {\n"
+    '  case "$3" in\n'
+    '  undefine) command rm -f "${defined}/$4" ;;\n'
+    "  esac\n"
+    "  return 0\n"
+    "}\n"
+    'kdive_domains() { ls "$defined"; }\n'
 )
 
 
@@ -1254,22 +1262,30 @@ def _wipe_reap(
     tmp_path: Path,
     lib_extra: str = "",
     *,
+    domains: tuple[str, ...] = ("kdive-alpha", "kdive-beta"),
     overlays: tuple[str, ...] = (),
     rootfs_mode: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run `stack-down.sh --wipe --yes` past the libvirt gate with a staged overlay directory.
+    """Run `stack-down.sh --wipe --yes` past the libvirt gate with a staged host.
 
     The contract is the readable one, so the run reaches the reap instead of being refused at
-    the `--wipe` guard; `lib_extra` then decides what the reap finds and whether its removals
-    are permitted to succeed. `rootfs_mode` stages the overlay directory's permissions for the
-    run and is restored afterwards, so a failing assertion cannot leave `tmp_path` unremovable.
+    the `--wipe` guard; `domains`, `overlays` and `lib_extra` then decide what the reap finds and
+    whether its removals are permitted to succeed. `rootfs_mode` stages the overlay directory's
+    permissions for the run and is restored afterwards, so a failing assertion cannot leave
+    `tmp_path` unremovable.
     """
     _, staged = _published_contract(tmp_path)
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
     for name in overlays:
         (rootfs / name).write_text("qcow2", encoding="utf-8")
-    script = _isolated_stack_down(tmp_path, tmp_path / "events", _REAP_STUBS + lib_extra)
+    defined = tmp_path / "defined"
+    defined.mkdir()
+    for name in domains:
+        (defined / name).touch()
+    script = _isolated_stack_down(
+        tmp_path, tmp_path / "events", f'defined="{defined}"\n' + _REAP_STUBS + lib_extra
+    )
     if rootfs_mode is not None:
         rootfs.chmod(rootfs_mode)
     try:
@@ -1309,7 +1325,7 @@ def test_wipe_reports_an_empty_host_as_removing_nothing(tmp_path: Path) -> None:
     reported as a failure -- but it must also not be reported in the same words as a host that
     was actually wiped, which is how the silent no-op passed for success in the first place.
     """
-    result = _wipe_reap(tmp_path, "kdive_domains() { :; }\n")
+    result = _wipe_reap(tmp_path, domains=())
     assert result.returncode == 0, result.stderr
     assert "removed domain" not in result.stdout
     assert "reaped 0 item(s)" in result.stdout
@@ -1318,9 +1334,10 @@ def test_wipe_reports_an_empty_host_as_removing_nothing(tmp_path: Path) -> None:
 def test_wipe_exits_non_zero_and_names_a_domain_it_could_not_undefine(tmp_path: Path) -> None:
     """#2515 acceptance 2: a reap that could not remove something exits non-zero.
 
-    `undefine` is the removal, so its status is the verdict. `destroy` keeps its suppression --
-    a domain that is already shut off says so and that is not a reap failure -- which this arm
-    holds by refusing only the `undefine` for one of the two domains.
+    `destroy` keeps its suppression -- a domain that is already shut off says so and that is not
+    a reap failure -- which this arm holds by refusing only the `undefine` for one of the two
+    domains. The refused one stays defined, so the end-state re-read reports it as surviving and
+    carries virsh's own diagnostic with it.
     """
     refuse_beta = (
         "virsh() {\n"
@@ -1328,6 +1345,9 @@ def test_wipe_exits_non_zero_and_names_a_domain_it_could_not_undefine(tmp_path: 
         '    echo "error: Failed to undefine domain kdive-beta: authentication failed" >&2\n'
         "    return 1\n"
         "  fi\n"
+        '  case "$3" in\n'
+        '  undefine) command rm -f "${defined}/$4" ;;\n'
+        "  esac\n"
         "  return 0\n"
         "}\n"
     )
@@ -1339,6 +1359,45 @@ def test_wipe_exits_non_zero_and_names_a_domain_it_could_not_undefine(tmp_path: 
     assert "Failed to undefine domain kdive-beta: authentication failed" in result.stderr
     # `done` is the whole defect: it is what told the operator the host had been wiped.
     assert not result.stdout.rstrip().endswith("done")
+
+
+def test_wipe_will_not_call_a_still_defined_domain_removed(tmp_path: Path) -> None:
+    """`virsh undefine` on a *running* domain succeeds by converting it to a transient one
+    without stopping it, so neither call's exit status proves the domain is gone.
+
+    This arm answers both `destroy` and `undefine` with 0 while leaving the domains defined --
+    the shape a refused `destroy` followed by an accepted `undefine` produces. Grading on the
+    calls alone would report two removals; grading on the re-read end state does not.
+    """
+    result = _wipe_reap(tmp_path, "virsh() { return 0; }\n", overlays=("alpha-overlay.qcow2",))
+    assert result.returncode != 0
+    assert "removed domain" not in result.stdout
+    assert "still defined after destroy + undefine" in result.stderr
+    assert "kdive-alpha" in result.stderr and "kdive-beta" in result.stderr
+
+
+def test_wipe_refuses_an_empty_domain_list_from_an_endpoint_that_does_not_answer(
+    tmp_path: Path,
+) -> None:
+    """`kdive_domains` discards virsh's stderr and status and ends in `|| true`, so a daemon that
+    is down -- or the wrong-daemon URI libvirt-uri.sh warns about -- enumerates byte-identically
+    to a host holding no kdive domains. `require_libvirt_uri` proves only that the contract
+    resolved, never that anything answers it.
+
+    Without the probe this is #2515's Effect paragraph reached by a second route, and made worse:
+    every overlay is deleted while every domain survives.
+    """
+    unreachable = (
+        'virsh() { echo "error: failed to connect to the hypervisor" >&2; return 1; }\n'
+        "kdive_domains() { :; }\n"
+    )
+    result = _wipe_reap(tmp_path, unreachable, overlays=("alpha-overlay.qcow2",))
+    assert result.returncode != 0
+    assert "cannot enumerate" in result.stderr
+    assert "error: failed to connect to the hypervisor" in result.stderr
+    assert not result.stdout.rstrip().endswith("done")
+    # Half a wipe is worse than none: the surviving domains keep their backing disks.
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
 
 
 def test_wipe_exits_non_zero_and_names_an_overlay_it_could_not_remove(tmp_path: Path) -> None:
@@ -1365,13 +1424,15 @@ def test_wipe_refuses_to_read_an_unlistable_overlay_directory_as_empty(tmp_path:
     """
     result = _wipe_reap(
         tmp_path,
-        "kdive_domains() { :; }\n",
+        domains=(),
         overlays=("alpha-overlay.qcow2",),
         rootfs_mode=0o000,
     )
     assert result.returncode != 0
     assert str(tmp_path / "rootfs") in result.stderr
     assert "not listable" in result.stderr
+    # A refusal that names no way forward is a worse operator experience than the no-op was.
+    assert "re-run as the account that owns it" in result.stderr
     assert not result.stdout.rstrip().endswith("done")
 
 
