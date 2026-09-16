@@ -7,11 +7,16 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from itertools import chain
 from pathlib import Path
 from typing import Any, Protocol
 
-from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleResponse, SlotResult
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
+    LifecycleResponse,
+    SlotPhase,
+    SlotResult,
+)
 from kdive.processes.lifecycle.systemd.systemd_worker_runtime import Deadline
 from kdive.processes.lifecycle.systemd.systemd_worker_state import SlotState, StateConflict
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -28,7 +33,7 @@ _MAX_FORBIDDEN_SOURCE_BYTES = (
 )
 _TRUNCATION_MARKER = "[diagnostics truncated]\n"
 _AGGREGATE_TRUNCATION_MARKER = "[aggregate diagnostics truncated]\n"
-_WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}]\n"
+_WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}: {reason}]\n"
 _URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)([^/@\s]+)(@)")
 _SCHEMELESS_USERINFO = re.compile(r"(?<![\w/])([^/:@\s]+:[^/@\s]*)(@)(?=[^/\s]+)")
 _UNTERMINATED_URL_AUTHORITY = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)([^\s/]*)\Z")
@@ -41,6 +46,22 @@ _SECRET_ASSIGNMENT = re.compile(
 )
 
 
+class WithholdReason(StrEnum):
+    """The closed vocabulary naming why one slot's diagnostics were withheld.
+
+    Every member is a literal: no value is derived from an exception, a captured value, or any
+    part of the withheld report, because two of these causes fire precisely because that material
+    held a redaction-forbidden value.
+    """
+
+    STATE_UNREADABLE = "state_unreadable"
+    SLOT_UNUSABLE = "slot_unusable"
+    ACQUISITION_FAILED = "acquisition_failed"
+    REDACTION_REFUSED = "redaction_refused"
+    PEER_REDACTION_REFUSED = "peer_redaction_refused"
+    INTERNAL_ERROR = "internal_error"
+
+
 class _UnsafeDiagnosticText(RuntimeError):
     """Known forbidden text could not be excluded from a post-acquisition rendering."""
 
@@ -48,11 +69,13 @@ class _UnsafeDiagnosticText(RuntimeError):
         self,
         forbidden: tuple[str, ...],
         *,
+        reason: WithholdReason,
         used: int | None = None,
         aggregate_truncated: bool = False,
     ) -> None:
         super().__init__("diagnostic text could not be rendered safely")
         self.forbidden = forbidden
+        self.reason = reason
         self.used = used
         self.aggregate_truncated = aggregate_truncated
 
@@ -72,6 +95,21 @@ class _DiagnosticCapture:
         bounded = _bounded_text(report, available, truncated=False)
         self.reports.append(bounded)
         self.emitted += len(bounded.encode("utf-8"))
+
+    def withhold(
+        self, slot: int, unit: str, reason: WithholdReason, *, phase: SlotPhase | None = None
+    ) -> SlotResult:
+        """Record one withheld slot, emit its marker, and name its fixed-form cause."""
+        self.withheld_slots.add(slot)
+        marker = _WITHHELD_TEMPLATE.format(slot=slot, reason=reason.value)
+        self.append("" if _contains_forbidden(marker, tuple(self.forbidden_values)) else marker)
+        return SlotResult(
+            slot=slot,
+            unit=unit,
+            phase=phase,
+            code="diagnostics_withheld",
+            message=f"withheld: {reason.value}",
+        )
 
 
 def _bounded_chunks(chunks: Sequence[str], limit: int) -> tuple[str, int, bool]:
@@ -326,15 +364,8 @@ class SystemdDiagnostics:
         capture = _DiagnosticCapture()
         for index, (store, state, unsafe_state) in enumerate(entries):
             if unsafe_state:
-                capture.withheld_slots.add(store.slot)
-                capture.append(_WITHHELD_TEMPLATE.format(slot=store.slot))
                 capture.results.append(
-                    SlotResult(
-                        slot=store.slot,
-                        unit=store.unit,
-                        code="diagnostics_withheld",
-                        message="withheld",
-                    )
+                    capture.withhold(store.slot, store.unit, WithholdReason.STATE_UNREADABLE)
                 )
             elif state is not None:
                 has_later = any(
@@ -382,10 +413,22 @@ class SystemdDiagnostics:
             if exc.used is not None:
                 capture.acquired -= reservation - exc.used
             capture.forbidden_values.update(exc.forbidden)
-            capture.withheld_slots.add(store.slot)
-            capture.append("")
             capture.aggregate_truncated = exc.aggregate_truncated
-            return _result(state, code="diagnostics_withheld")
+            return capture.withhold(store.slot, store.unit, exc.reason, phase=state.phase)
+        except StateConflict as exc:
+            # Reached only by `_require_diagnostic_budget` and `_validated_redaction_values`, which
+            # run before `_diagnose_slot`'s own try; a StateConflict raised inside it is converted
+            # to `_UnsafeDiagnosticText` because `acquisition_failures` lists that type. These are
+            # deterministic, operator-fixable preconditions rather than unexpected failures.
+            _log.warning(
+                "systemd diagnostic slot is unusable slot=%s cause=%s",
+                store.slot,
+                type(exc).__name__,
+            )
+            capture.acquired -= reservation
+            return capture.withhold(
+                store.slot, store.unit, WithholdReason.SLOT_UNUSABLE, phase=state.phase
+            )
         except Exception as exc:
             _log.error(
                 "unexpected systemd diagnostic capture failure slot=%s cause=%s",
@@ -393,18 +436,18 @@ class SystemdDiagnostics:
                 type(exc).__name__,
             )
             capture.acquired -= reservation
-            capture.withheld_slots.add(store.slot)
-            capture.append(_WITHHELD_TEMPLATE.format(slot=store.slot))
-            return _result(state, code="diagnostics_withheld")
+            return capture.withhold(
+                store.slot, store.unit, WithholdReason.INTERNAL_ERROR, phase=state.phase
+            )
         capture.acquired -= reservation - used
         capture.forbidden_values.update(forbidden)
-        if _contains_forbidden(report, tuple(capture.forbidden_values)):
-            capture.withheld_slots.add(store.slot)
-            report = ""
         capture.aggregate_truncated = aggregate_truncated
+        if _contains_forbidden(report, tuple(capture.forbidden_values)):
+            return capture.withhold(
+                store.slot, store.unit, WithholdReason.PEER_REDACTION_REFUSED, phase=state.phase
+            )
         capture.append(report)
-        code = "diagnostics_withheld" if store.slot in capture.withheld_slots else "ok"
-        return _result(state, code=code)
+        return _result(state)
 
     def _diagnostic_state(
         self, store: _DiagnosticSlotStorage, deadline: Deadline
@@ -458,14 +501,18 @@ class SystemdDiagnostics:
                 state.slot,
                 type(exc).__name__,
             )
-            raise _UnsafeDiagnosticText(secret_values) from exc
+            raise _UnsafeDiagnosticText(
+                secret_values, reason=WithholdReason.ACQUISITION_FAILED
+            ) from exc
         except Exception as exc:
             _log.error(
                 "unexpected systemd diagnostic acquisition failure slot=%s cause=%s",
                 state.slot,
                 type(exc).__name__,
             )
-            raise _UnsafeDiagnosticText(secret_values) from exc
+            raise _UnsafeDiagnosticText(
+                secret_values, reason=WithholdReason.ACQUISITION_FAILED
+            ) from exc
 
     def _diagnose_trusted_slot(
         self,
@@ -512,6 +559,7 @@ class SystemdDiagnostics:
         if _contains_forbidden(report, forbidden):
             raise _UnsafeDiagnosticText(
                 forbidden,
+                reason=WithholdReason.REDACTION_REFUSED,
                 used=public_bytes + journal_bytes,
                 aggregate_truncated=aggregate_truncated,
             )
@@ -534,5 +582,5 @@ class SystemdDiagnostics:
         return text, used, truncated or used >= byte_limit
 
 
-def _result(state: SlotState, *, code: str = "ok") -> SlotResult:
-    return SlotResult(slot=state.slot, unit=state.unit, code=code, message=state.phase.value)
+def _result(state: SlotState) -> SlotResult:
+    return SlotResult(slot=state.slot, unit=state.unit, message=state.phase.value)
