@@ -100,6 +100,42 @@ def test_provisioned_fails_without_system_id() -> None:
     assert "KDIVE_LIVE_VM_SYSTEM_ID" in r.stderr
 
 
+def _provisioned_env(**overrides: str) -> dict[str, str]:
+    base = {
+        "KDIVE_LIVE_VM_SYSTEM_ID": "sys-1",
+        "KDIVE_S3_ENDPOINT_URL": "http://x",
+        "KDIVE_S3_BUCKET": "b",
+    }
+    return {**base, **overrides}
+
+
+def test_provisioned_fails_without_guest_image() -> None:
+    """The console-part proof boots KDIVE_GUEST_IMAGE and env.sh exports no default (#2518).
+
+    Before this, a provisioned run with every other variable set passed preflight and then skipped
+    the proof mid-run, so the tier reported green having proved nothing (#2497).
+    """
+    r = _run(["provisioned"], _provisioned_env())
+    assert r.returncode != 0
+    assert "KDIVE_GUEST_IMAGE" in r.stderr
+
+
+def test_provisioned_fails_when_guest_image_path_is_absent(tmp_path: Path) -> None:
+    """require_path, not require_set: a staged rootfs that never landed must fail here."""
+    missing = tmp_path / "never-staged.qcow2"
+    r = _run(["provisioned"], _provisioned_env(KDIVE_GUEST_IMAGE=str(missing)))
+    assert r.returncode != 0
+    assert "KDIVE_GUEST_IMAGE" in r.stderr
+    assert "does not exist" in r.stderr
+
+
+def test_provisioned_ok_with_a_staged_guest_image(tmp_path: Path) -> None:
+    image = tmp_path / "live-vm-provisioned-rootfs.qcow2"
+    image.write_bytes(b"x")
+    r = _run(["provisioned"], _provisioned_env(KDIVE_GUEST_IMAGE=str(image)))
+    assert r.returncode == 0, r.stderr
+
+
 # Post-split (#1929), env.sh exports one DSN per authority instead of a shared
 # KDIVE_DATABASE_URL; the tcg family gates on that four-authority set (#2046).
 _ROLE_DSN_VARS = (
