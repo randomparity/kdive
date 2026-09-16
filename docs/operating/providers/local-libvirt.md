@@ -112,13 +112,16 @@ These are the points where the two families genuinely diverge, not just in packa
   otherwise select whichever Python launched `ansible-playbook` — for `just
   prepare-local-libvirt-host` that is an ephemeral `uv run` environment with no `lxml`, which fails
   `community.libvirt` in `libvirt_pool_net`. The pin is a play var, and `inventory/hosts.yml`
-  deliberately declares no `localhost`: that file is shared with `playbooks/pki.yml` and the
-  localhost plays under `deploy/ansible/tests/`, which resolve their dependencies against the
-  launching environment. Declaring the host there would swap their explicit launcher interpreter
-  for a `PATH`-dependent discovery, so the pin binds only this play. It also fixes the family
-  bound: each supported family's `/usr/bin/python3` is the interpreter `libvirt_stack` installs
-  `python3-libvirt` and `python3-lxml` for, and one predating ansible-core's 3.9 target floor
-  fails closed on Ansible's own error at fact gathering. The recipe carries no pre-check.
+  deliberately declares no `localhost`: that file is shared with `playbooks/pki.yml` and with the
+  localhost plays under `deploy/ansible/tests/` that do not pin an interpreter of their own, all of
+  which resolve their dependencies against the launching environment. Declaring the host there
+  would swap their explicit launcher interpreter for ansible-core's own interpreter discovery, so
+  the pin binds only this play. It also fixes the family bound: on Debian/Ubuntu, Fedora and the EL
+  family, `/usr/bin/python3` is the interpreter `libvirt_stack` installs `python3-libvirt` and
+  `python3-lxml` for; its Suse branch installs `python3-libvirt-python`, which zypper resolves
+  against the distro's default Python ABI — the same interpreter. A `/usr/bin/python3` predating
+  ansible-core's 3.9 target floor fails closed on Ansible's own error at fact gathering. The recipe
+  carries no pre-check.
 - **The interpreter, and what it costs Enterprise Linux.** The project requires Python 3.14.
   Ubuntu 26.04 and Fedora 44 ship it as `/usr/bin/python3`; EL9 ships 3.9 and EL10 ships 3.12,
   packaging 3.14 separately as `python3.14`, which `install-host.sh` installs and the lifecycle
