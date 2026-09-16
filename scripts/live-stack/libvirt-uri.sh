@@ -126,8 +126,9 @@ load_published_libvirt_uri() {
 # opted-out entry point refuses the operations that do need the endpoint.
 #
 # One thing the override does not fix, recorded here because the abort's own reasoning invites the
-# assumption that it does: a value naming the wrong daemon makes kdive_domains() enumerate one
-# holding no kdive domains, so `stack-down.sh --wipe` reaps nothing and still removes the overlays.
+# assumption that it does: a value naming the wrong daemon makes stack-down.sh's
+# enumerate_kdive_domains() enumerate one holding no kdive domains, so `stack-down.sh --wipe`
+# reaps nothing and still removes the overlays.
 # Since #2515 that is no longer silent — the zero-domain line names the endpoint it consulted,
 # because an endpoint answering with nothing is either a clean host or the wrong one of the two
 # URIs above and nothing there can tell them apart. Naming it is not detecting it, though: an empty
