@@ -850,7 +850,7 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     )
     install = (
         "{{ live_vm_host_uv_bin }} pip install --python "
-        "/opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive"
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive /opt/kdive"
     )
     assert commands.index(create) < commands.index(install)
     assert "path: /opt/kdive-live-worker-lifecycle" in tasks
@@ -2155,6 +2155,16 @@ def test_installer_forces_a_fresh_project_wheel_into_the_worker_venv() -> None:
     assert "--reinstall " not in source
     assert "--reinstall-package kdive" in source
 
+    # The role builds the same venv by a second, independent path; both must force the rebuild,
+    # or a host provisioned through the role alone carries a venv the installer's gate would fail.
+    role = _text(MAIN_TASKS)
+    install = "Install KDIVE into the lifecycle witness venv"
+    install_block = role[role.index(install) :].split("- name:", 2)[0]
+    assert "--reinstall-package kdive" in install_block
+    # Unconditional: its `when:` proxies could not see a venv left stale by a failed earlier run,
+    # and the protocol assertion in verify.yml now makes that state unrecoverable.
+    assert not any(line.strip().startswith("when:") for line in install_block.splitlines())
+
 
 def test_verify_asserts_the_installed_venv_carries_this_checkout_protocol() -> None:
     """The revision stamp is written by the role, so it records intent, not installed code.
@@ -2170,16 +2180,19 @@ def test_verify_asserts_the_installed_venv_carries_this_checkout_protocol() -> N
     assertion = "Assert the installed lifecycle protocol matches the checkout"
 
     assert names.index(probe) < names.index(installed) < names.index(assertion)
-    checkout_task = tasks[names.index(probe)]["ansible.builtin.command"]["argv"]
-    # Isolated, and reading the checkout rather than the installed copy for the expected value.
-    assert checkout_task[0] == "/opt/kdive-live-worker-lifecycle/.venv/bin/python"
-    assert "-I" in checkout_task
-    assert checkout_task[-1] == "{{ live_vm_venv }}/src"
-    assert "sys.path.insert(0, sys.argv[1])" in checkout_task[3]
-    assert "lifecycle_protocol_identity" in checkout_task[3]
+    checkout = tasks[names.index(probe)]
+    checkout_argv = checkout["ansible.builtin.command"]["argv"]
+    installed_argv = tasks[names.index(installed)]["ansible.builtin.command"]["argv"]
 
-    installed_task = tasks[names.index(installed)]["ansible.builtin.command"]["argv"]
-    assert "sys.path.insert" not in installed_task[3]
+    # Two interpreters, one expression: the same comparison require_compatible_lifecycle makes.
+    assert checkout_argv[0] == "{{ live_vm_venv }}/.venv/bin/python"
+    assert installed_argv[0] == "/opt/kdive-live-worker-lifecycle/.venv/bin/python"
+    assert checkout_argv[1:] == installed_argv[1:]
+    assert "-I" in checkout_argv
+    assert "lifecycle_protocol_identity()" in checkout_argv[-1]
+    # The checkout is writable by the runner account, so root must not import from it.
+    assert checkout["become_user"] == "{{ github_runner_user }}"
+    assert "become_user" not in tasks[names.index(installed)]
 
     compared = tasks[names.index(assertion)]["ansible.builtin.assert"]
     assert "live_vm_host_worker_installed_protocol.stdout" in compared["that"][0]

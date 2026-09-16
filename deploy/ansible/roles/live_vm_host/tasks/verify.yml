@@ -254,20 +254,21 @@
 # role intended to install rather than the code the worker venv actually holds. The lifecycle
 # protocol identity is derived from the installed code, and a venv carrying an older one makes
 # `require_compatible_lifecycle` refuse every request on a host this role just reported healthy
-# (#2532). Reading both identities through the installed interpreter needs no second venv: `-I`
-# keeps it isolated and the checkout `src` inserted at the front of `sys.path` shadows the
-# installed package for the first read only.
+# (#2532). The same expression is evaluated in both environments and the two answers compared,
+# which is exactly the comparison `require_compatible_lifecycle` makes at request time.
+# The checkout half runs as the checkout's owner rather than as root: it reads a tree the runner
+# account can write, and root has no reason to import from it.
 - name: Read the checkout lifecycle protocol identity
   ansible.builtin.command:
     argv:
-      - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+      - "{{ live_vm_venv }}/.venv/bin/python"
       - -I
       - -c
       - >-
-        import sys; sys.path.insert(0, sys.argv[1]); from
-        kdive.processes.lifecycle.systemd.systemd_worker_contract import
+        from kdive.processes.lifecycle.systemd.systemd_worker_contract import
         lifecycle_protocol_identity; print(lifecycle_protocol_identity())
-      - "{{ live_vm_venv }}/src"
+  become: true
+  become_user: "{{ github_runner_user }}"
   changed_when: false
   register: live_vm_host_worker_checkout_protocol
 

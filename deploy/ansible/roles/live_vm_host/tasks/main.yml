@@ -1035,13 +1035,16 @@
 # `live_vm_host_checkout` without installing, and every retry then skips the install because the
 # checkout is no longer changing. Verification now asserts that the installed lifecycle protocol
 # matches the checkout (#2532), so that state is a hard failure the play can no longer repair;
-# reinstalling each run is the cheaper half of the trade. `uv pip install` of a source directory
-# rebuilds on a changed source, so this converges on its own without a reinstall flag.
+# reinstalling each run is the cheaper half of the trade. `--reinstall-package kdive` for the same
+# reason the installer carries it: uv keys a built wheel on project name and version, so a source
+# change under an unchanged `version` can be served from cache. Measured with the project's
+# `uv_build` backend, `uv pip install` of a directory does rebuild where `uv sync --no-editable`
+# does not -- the flag makes both provisioning paths agree rather than rely on that difference.
 - name: Install KDIVE into the lifecycle witness venv
   ansible.builtin.command:
     cmd: >-
       {{ live_vm_host_uv_bin }} pip install --python
-      /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
+      /opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive /opt/kdive
   changed_when: true
 
 - name: Symlink the libguestfs binding into the lifecycle worker venv
