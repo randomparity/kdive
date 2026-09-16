@@ -102,7 +102,9 @@ class _DiagnosticCapture:
         """Record one withheld slot, emit its marker, and name its fixed-form cause."""
         self.withheld_slots.add(slot)
         marker = _WITHHELD_TEMPLATE.format(slot=slot, reason=reason.value)
-        self.append("" if _contains_forbidden(marker, tuple(self.forbidden_values)) else marker)
+        if _contains_forbidden(marker, tuple(self.forbidden_values)):
+            marker = ""
+        self.append(marker)
         return SlotResult(
             slot=slot,
             unit=unit,
@@ -416,13 +418,11 @@ class SystemdDiagnostics:
             capture.aggregate_truncated = exc.aggregate_truncated
             return capture.withhold(store.slot, store.unit, exc.reason, phase=state.phase)
         except StateConflict as exc:
-            # Reached only by `_require_diagnostic_budget` and `_validated_redaction_values`, which
-            # run before `_diagnose_slot`'s own try and reject a slot whose diagnostic
-            # preconditions do not hold. A StateConflict raised inside that try is relabelled
-            # `redaction_refused` there, so it never arrives here. Loading the slot's redaction
-            # sources raises `PermissionError` instead, which stays with the generic arm below:
-            # widening this one to `OSError` would leave `INTERNAL_ERROR` with no producer at all,
-            # because the shipped loader funnels every failure into that one type.
+            # Reached only by `_require_diagnostic_budget` and `_validated_redaction_values`, the
+            # precondition checks that run before `_diagnose_slot`'s own try; one raised inside
+            # that try is relabelled `redaction_refused` there. Do not widen this to `OSError` to
+            # catch the redaction-source load as well: the shipped loader funnels every failure
+            # into `PermissionError`, so that would leave `INTERNAL_ERROR` with no producer.
             _log.warning(
                 "systemd diagnostic slot is unusable slot=%s cause=%s",
                 store.slot,
@@ -499,12 +499,10 @@ class SystemdDiagnostics:
         except _UnsafeDiagnosticText:
             raise
         except StateConflict as exc:
-            # `_sanitize_diagnostics` raises this when no safe visible sentinel survives, which is
-            # a redaction refusal rather than an acquisition failure. This arm shadows the
-            # `StateConflict` entry in `acquisition_failures`, which would otherwise report the
-            # refusal as `acquisition_failed` and send the operator to re-run a request that
-            # deterministically fails the same way; that entry is retained only as a backstop, so
-            # a future `StateConflict` raiser inside this try lands here rather than there.
+            # `_sanitize_diagnostics` raises this when no safe visible sentinel survives: a
+            # redaction refusal, not an acquisition failure. Keep this arm ahead of the next one,
+            # which lists `StateConflict` and would otherwise report the refusal as
+            # `acquisition_failed` — sending the operator to re-run a deterministic failure.
             _log.warning(
                 "systemd diagnostic rendering refused slot=%s cause=%s",
                 state.slot,
