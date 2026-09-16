@@ -67,7 +67,9 @@ broken host still needs. `stack-down.sh` performs plain teardown, including its 
 than dropping the volumes and skipping the reap is what `stack-down.sh:5-8` already prescribes:
 the domains and overlays live outside compose, so "a DB wipe alone would orphan them". The two
 halves are one operation, and half of it on a host that cannot reach libvirt is the orphaning the
-flag's own documentation exists to avoid.
+flag's own documentation exists to avoid. The refusal bounds the unresolved-endpoint case only:
+behind a *valid* contract a wrong-daemon or unreachable-daemon reap still orphans, which is #2515
+and #2516, not this record.
 
 The obligation this creates is transitive: an entry point that opts out owns every
 `$KDIVE_LIBVIRT_URI` read it can reach, including reads inside `lib.sh` functions it calls. A
