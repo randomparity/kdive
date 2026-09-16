@@ -71,3 +71,29 @@ account can neither traverse nor replace a sibling slot.
 Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
 group list. Interactive operators must start a new login session after installation before using
 the installed socket.
+
+## Lifecycle retry actions
+
+Every response from `scripts/live-stack/worker-lifecycle.sh` carries a `retry_action` field
+alongside its `code`. It is a closed set, and it — not the code — says what to do next.
+
+| `retry_action` | What it means | What to do |
+|---|---|---|
+| `none` | the operation succeeded | nothing |
+| `correct_request` | the request itself was rejected: a `start` missing its worker count or settings, or a request frame the witness could not parse | fix the invocation; retrying it unchanged fails the same way |
+| `retry_same_operation` | a transient condition: the request deadline expired, termination evidence was rejected, another lifecycle request holds the control lock (`code=busy`), or a `diagnostics` operation failed before any slot was captured | wait for the named condition to clear, then re-run the same command |
+| `restore_systemd` | systemd could not answer for the retained unit | restore systemd, then re-run |
+| `restore_database` | the database authority is unavailable | restore the database, then re-run |
+| `operator_recovery` | retained lifecycle facts conflict with what was observed, an unmapped internal error occurred, or a `diagnostics` capture withheld at least one slot | inspect, then recover — see below |
+
+`operator_recovery` is the one that never clears on its own: no retry of the same request will
+change the outcome, because the retained facts and the observed unit disagree and something has to
+resolve that disagreement. Run `scripts/live-stack/worker-lifecycle.sh status` and
+`scripts/live-stack/worker-lifecycle.sh diagnostics` to find out which slot and why, then
+`scripts/live-stack/worker-lifecycle.sh recover` to retire the slots proven dead. The procedure,
+including how to read a withheld slot's reason, is in
+[the live-stack runbook](../../docs/operating/runbooks/live-stack.md#recovering-a-wedged-worker-slot).
+
+One code carries two actions, so read the action. `code=diagnostics_withheld` arrives with
+`operator_recovery` when the capture ran and withheld individual slots, and with
+`retry_same_operation` when the whole capture failed before any slot was reached.
