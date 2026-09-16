@@ -4,9 +4,9 @@
 
 `recorded_ssh_endpoint` on local-libvirt catches every `CONFIGURATION_ERROR` from the SSH endpoint
 resolver and returns `None`, so two conditions — no libvirt domain, and a domain recording no
-loopback SSH forward — both surface as `reason="ssh_not_provisioned"` with a message naming
-neither; #2480 was misdiagnosed on this. Decision, alternatives, and the ADR-0298 `None` contract
-this narrows: [ADR-0658](../../adr/0658-missing-domain-is-not-a-missing-ssh-forward.md).
+loopback SSH forward — both surface as `reason="ssh_not_provisioned"` naming neither; #2480 was
+misdiagnosed on this. Decision, alternatives, and the ADR-0298 `None` contract this narrows:
+[ADR-0658](../../adr/0658-missing-domain-is-not-a-missing-ssh-forward.md).
 
 ## Scope
 
@@ -19,7 +19,8 @@ and its detail text are unchanged.
 No port signature change, so remote-libvirt and fault-inject are untouched and the five call sites
 need no edit — each already routes a `CategorizedError` through `failure_from_error`, which merges
 scalar `details` into the response `data`. Changed: the local-libvirt connect module, the port and
-consumer docstrings, the generated tool reference, and the tests. Out of scope: the same pair on
+consumer docstrings, the generated tool reference, the tests, and the two records this invalidates
+— a runbook naming the old reason for this symptom, and ADR-0298's amendment banner. Out of scope: the same pair on
 this module's gdbstub transport (approved exclusion, #2502 charter) and remote-libvirt's own
 collapse of absent-parity, absent-domain, and absent-port to `None` (a follow-up).
 

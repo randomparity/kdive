@@ -2,8 +2,8 @@
 
 **Goal.** `recorded_ssh_endpoint` on the local-libvirt connector maps *every* `CONFIGURATION_ERROR`
 from the SSH endpoint resolver to `None`, though the resolver raises two with distinct messages. Tag
-each raise with a `reason` detail and narrow the `except` to the no-forward reason, so the no-domain
-error propagates through the existing call sites and names its own condition.
+each raise with a `reason` and narrow the `except` to the no-forward one, so the no-domain error
+propagates through the existing call sites and names its own condition.
 
 **Tech stack.** Python (`requires-python = "==3.14.*"`, ruff `target-version = "py314"`), `uv`,
 pytest, ruff, mypy. [ADR-0658](../../adr/0658-missing-domain-is-not-a-missing-ssh-forward.md) ·
@@ -21,8 +21,8 @@ reference, seven new cases across four test modules.
   `tests/jobs/handlers/test_ssh_{authorize,reachable}.py` pass **unedited**.
 - Exactly one existing test changes: `test_recorded_ssh_endpoint_none_when_not_provisioned`
   (`tests/providers/local_libvirt/test_connect.py:746`) raises a **bare** `CONFIGURATION_ERROR` and
-  asserts `None`, pinning the collapse this issue calls a defect. Verified: it is the only bare
-  `CONFIGURATION_ERROR` reaching `recorded_ssh_endpoint` in that module.
+  asserts `None`, pinning the collapse this issue calls a defect. Verified: the only such bare raise
+  reaching `recorded_ssh_endpoint`.
 - Do not touch the gdbstub `_config_error` raise sites in the same module (approved exclusion,
   #2502), or `recorded_ssh_endpoint` in remote-libvirt or fault-inject.
 - `docs/guide/reference/systems.md` is generated — never hand-edit; run `just docs`.
@@ -36,7 +36,7 @@ reference, seven new cases across four test modules.
 |---|---|---|
 | `providers/local_libvirt/lifecycle/connect.py` | `_config_error` (message only); two SSH raise sites; a broad `except` | a `reason` detail on both raises; `except` narrowed to the no-forward reason |
 | `providers/ports/lifecycle.py`, `jobs/handlers/connectivity/ssh_{authorize,reachable}.py`, `mcp/tools/lifecycle/systems/registrar.py` | contract prose naming only `ssh_not_provisioned` | same, plus `system_domain_not_found` |
-| `docs/guide/reference/systems.md` | generated from the registrar docstrings | regenerated |
+| `docs/guide/reference/systems.md`; `docs/operating/runbooks/live-stack.md`; `docs/adr/0298-ssh-reachable-runtime-probe.md` | generated reference; a runbook naming the old reason for this exact symptom; the `None` contract this narrows | regenerated; corrected reason; amendment banner under `## Status` |
 | `tests/providers/local_libvirt/test_connect.py`, `tests/mcp/lifecycle/test_systems_ssh_access.py`, `tests/jobs/handlers/test_ssh_{authorize,reachable}.py` | resolver/connector cases; pinned `ssh_not_provisioned` cases | plus one case per condition, no-domain cases for all three tools, one propagation case per handler |
 
 ## Task 1 — Tag the two SSH raise sites and narrow the swallow
@@ -53,23 +53,20 @@ Modifies `providers/local_libvirt/lifecycle/connect.py` and `providers/ports/lif
 
 - Contract: `recorded_ssh_endpoint` returns `None` only for the no-forward reason. focused-test —
   two cases via the existing helper `_recorded_endpoint_connector(resolve_ssh_endpoint)` (line 732).
-  Red: the no-domain case fails `Failed: DID NOT RAISE <class
-  'kdive.domain.errors.CategorizedError'>`. Green:
+  Red: the no-domain case fails `DID NOT RAISE ... CategorizedError`. Green:
   `just test-verbose tests/providers/local_libvirt/test_connect.py`.
-- Contract: each raise carries its own `reason`. focused-test — same file and command, asserting
-  `details["reason"]` in the existing raise-site tests at lines 664 and 673.
+  The same file and command also pin each raise's own `reason`, via `details["reason"]`
+  assertions added to the existing raise-site tests at lines 664 and 673.
 
 **Steps.**
 
-1. Write the two connector cases with `_recorded_endpoint_connector`: one injecting a function that
-   raises the tagged no-forward error, asserting `is None`; one injecting the tagged no-domain
-   error, asserting `excinfo.value.details["reason"] == "system_domain_not_found"`. Run the green
-   command; expect the red above.
+1. Write the two connector cases with `_recorded_endpoint_connector`: one injecting a function
+   raising the tagged no-forward error, asserting `is None`; one injecting the tagged no-domain
+   error, asserting `excinfo.value.details["reason"] == "system_domain_not_found"`. Expect the red above.
 2. Widen `_config_error` (line 75) to the Interfaces signature: pass `details={"reason": reason}`
-   when `reason` is given, `details={}` otherwise, keeping the category it already sets. The
-   parameter stays optional so the excluded gdbstub call sites, which share this helper, need no
-   edit. Add the two constants beside the module's other module-level constants, with a comment
-   naming #2502 and ADR-0658 as why the two are kept apart.
+   when given, `details={}` otherwise, keeping its category. The parameter stays optional so the
+   excluded gdbstub call sites sharing this helper need no edit. Add the two constants beside the
+   module's other module-level constants, commented with #2502 and ADR-0658.
 3. Tag the no-domain raise in `_resolve_ssh_endpoint_via`'s `resolve` with `reason=_REASON_NO_DOMAIN`,
    replacing its message with `f"System {domain_name!r} has no libvirt domain on this connection;
    check that the System is running and that this process and the worker that provisioned it read
@@ -99,8 +96,7 @@ Modifies the two connectivity job handlers, `registrar.py`, and the generated
 **Interfaces.** Consumes Task 1's propagating `CategorizedError` carrying
 `details["reason"] == "system_domain_not_found"`. Defines nothing; no call site changes, because
 `ToolResponse.failure_from_error(object_id, exc)` already merges `safe_error_details(exc.details)`
-into `data` — and on the job path the worker prefixes detail keys, so a client reads
-`failure_detail_reason`.
+into `data` — and the worker prefixes job detail keys to `failure_detail_reason`.
 
 **Verification.** Each entry below is also this task's acceptance criterion.
 
@@ -130,20 +126,29 @@ into `data` — and on the job path the worker prefixes detail keys, so a client
    Add the three tool cases, asserting
    `resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value` and
    `resp.data["reason"] == "system_domain_not_found"`. `authorize_ssh_key` is mutating and
-   CONTRIBUTOR-gated, so seed its case like the existing `authorize_ssh_key` cases here and pass a
-   valid public key, so the run reaches the connector rather than failing validation first. Do not
-   edit the existing `ssh_not_provisioned` cases. Run the green command.
+   CONTRIBUTOR-gated: seed its case like the existing ones here and pass a valid public key so the
+   run reaches the connector. Do not edit the existing `ssh_not_provisioned` cases.
 3. Add one case each to the two job-handler test modules, modelled on their existing
    `ssh_not_provisioned` case: a connector raising the no-domain error, asserting the handler
    propagates it with `details["reason"] == "system_domain_not_found"`.
 4. In both job handlers, extend the existing `Raises:` entry with one clause naming the propagating
    `system_domain_not_found` beside `ssh_not_provisioned`, and note the `failure_detail_` prefix.
    Change no code.
-5. In `registrar.py`, extend the `ssh_info`, `authorize_ssh_key`, and `check_ssh_reachable`
-   docstrings: after the existing `ssh_not_provisioned` sentence, state that a System with no
-   libvirt domain on the worker's connection reports `system_domain_not_found` — an endpoint or
-   liveness fault, not a provisioning gap.
-6. Run `just docs`, then `just docs-check`; expect exit 0 and a diff confined to the three tool
-   sections edited in step 6.
-7. Run `just lint`, `just type`, `just test-changed`, `just docs-links`; expect exit 0. Commit
+5. In `registrar.py`, add to the `ssh_info` and `check_ssh_reachable` docstrings, after their
+   existing `ssh_not_provisioned` sentence, that a **local-libvirt** System with no libvirt domain
+   on the worker's connection reports `system_domain_not_found` — an endpoint or liveness fault,
+   not a provisioning gap. Qualify it to local-libvirt: remote-libvirt still returns `None` for an
+   absent domain (`remote_libvirt/lifecycle/connect.py:163-166`), so an unqualified sentence would
+   be false there. `authorize_ssh_key`'s docstring (line 361) has **no** `ssh_not_provisioned`
+   sentence to extend — add one short sentence carrying both reasons instead.
+6. Correct the two records this change invalidates. `docs/operating/runbooks/live-stack.md:85-86`
+   says the split-endpoint symptom surfaces as `ssh_not_provisioned`; it now surfaces as
+   `system_domain_not_found` — update that sentence only. Then add an amendment banner under
+   `## Status` in `docs/adr/0298-ssh-reachable-runtime-probe.md`, copying the blockquote form
+   `docs/adr/0574-*.md` uses: bolded "Partially superseded by" plus a relative markdown link whose
+   text is the number 0658 and whose target is this change's ADR filename, then `(2026-09-15):` and
+   one line saying `None` now means a read domain recording no forward. Nothing else there changes.
+7. Run `just docs`, then `just docs-check`; expect exit 0 and a diff confined to the three tool
+   sections edited in step 5.
+8. Run `just lint`, `just type`, `just test-changed`, `just docs-links`; expect exit 0. Commit
    `docs(mcp): name the missing-domain reason in the SSH tool contract`.
