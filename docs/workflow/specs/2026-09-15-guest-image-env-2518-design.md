@@ -15,9 +15,8 @@ job gains one line exporting `KDIVE_GUEST_IMAGE`, mirroring the tcg job's `:538`
 `env.sh` files gain a comment naming the omission and its owner. No `src/` change.
 
 Rejected — hard-require it in `scripts/live-stack/env.sh`. verified: six of that file's nine
-callers are non-`live_vm` (`stack-services.sh`, `onboard.sh`, `stack-status.sh`,
-`apply-migrations.sh`, `worker-lifecycle.sh`, `provision-queue-diagnostics.sh`), so it would break
-`just stack-migrate` (`justfile:314`).
+callers are non-`live_vm` (stack-services, onboard, stack-status, apply-migrations,
+worker-lifecycle, provision-queue-diagnostics), so it would break `just stack-migrate`.
 
 Rejected — default it there. verified: `/var/lib/kdive/rootfs/local/` holds 11 kdive-ready qcow2
 across 4 distro families including `-ppc64le`, so no arch-neutral default resolves.
@@ -26,7 +25,7 @@ across 4 distro families including `-ppc64le`, so no arch-neutral default resolv
 
 Actors and deployments:
 - a local operator running `just test-live` or `pytest -m live_vm` from a checkout
-- the native `live.yml` job, which reaches this proof only once its runner is repaired
+- the native `live.yml` job, which needs its runner and DB alias fixed before it reaches this
 
 Invariants at stake:
 - this proof must not exit 0 when it cannot run (#2497)
@@ -34,8 +33,9 @@ Invariants at stake:
 
 Accepted failure classes:
 - the other 34 `live_vm` proofs, and `_preflight`'s two later branches, keep their skip gates
-- unobservable in CI today: the native job fails at `require_compatible_lifecycle` before pytest,
-  and never runs on `pull_request`
+- in CI this changes nothing observable yet: that job fails at `require_compatible_lifecycle`
+  before pytest, never runs on `pull_request`, and still lacks the bare `KDIVE_DATABASE_URL` the
+  proof reads — so there the export moves the skip from the image gate to the database gate
 - the runner's staged image is unverified here; a later failure there is the guard, not a bug
 
 Covered elsewhere:
@@ -53,8 +53,8 @@ Covered elsewhere:
 - **Preflight fails loud (1).** Mode: focused-test — `_preflight` raises, not skips. Red: before
   the change that run exits 0 with `1 skipped`. Green: both fault arms exit non-zero naming
   `KDIVE_GUEST_IMAGE` under `pytest tests/integration/test_console_parts_live.py`.
-- **Native job export (2).** Mode: task-test-not-applicable — `live.yml`'s shape-test home is
-  outside this surface and CI cannot exercise the line (see failure model). Checked by hand: the
-  path is the one `mint-system.sh` stages inside the provider's allowed root, before pytest.
+- **Native job export (2).** Mode: task-test-not-applicable — CI cannot exercise the line (see
+  failure model) and `tests/scripts/test_live_workflow_shape.py` is outside this surface, leaving
+  the staged-rootfs literal it shares with `mint-system.sh` unpinned — a stated follow-up.
 - **`env.sh` comments (3).** Mode: task-test-not-applicable — comment-only edits changing no shell
   behavior. Nothing asserts the variable's ABSENCE from `env.sh`; that gap is stated, not closed.
