@@ -609,7 +609,12 @@ for slot in {1..8}; do
 done
 
 install -d -o root -g root -m 0755 /usr/local/libexec /etc/kdive
-install -d -o root -g root -m 0700 /etc/kdive/credentials
+# Traverse-only (0711), not 0700: the external-boot authority's non-root
+# service account must reach its own private child (provider-authority,
+# mode 0700) without listing siblings. Keep this in agreement with
+# local_worker_host/tasks/worker_install_dirs.yml's mode for the same path
+# (#2514) -- disagreement here makes the Ansible task flap `changed` forever.
+install -d -o root -g root -m 0711 /etc/kdive/credentials
 install -d -o root -g root -m 0755 "$state_root"
 _prepare_attested_runtime_root /opt/kdive-live-worker-lifecycle root root
 install -d -o root -g root -m 0711 "$state_root/slots"
