@@ -27,9 +27,9 @@ hosts; the `postinst.d` relabel hook (#2567); `just ci` recipe coverage (#2582).
 - **Actors, deployments** — an operator at `just onboard`; the `demo-up.sh` workstation demo; the
   hosted `live_vm_tcg` and self-hosted native `live_vm` CI jobs.
 - **Invariants at stake** — the advisory default for callers that only fund a project; a demo with
-  no provisionable libvirt still onboarding; the stop precedes `migrate`, stranding no rows. The
-  one boundary the change touches: `mint-system.sh` re-emits its captured stdout into a public CI
-  log on failure, so it filters `export KDIVE_TOKEN=` — the complement of the grep consuming it.
+  no provisionable libvirt still onboarding; the stop precedes `migrate`, stranding no rows. Two
+  boundaries: `ONBOARD_PREFLIGHT` entering `onboard.sh`, closed by a two-value allowlist; and the
+  failure re-emit into a public CI log, filtering `export KDIVE_TOKEN=` (the grep's complement).
 - **Accepted classes** — `required` gates all nine blocking checks, not only those the next step
   uses; the three probing `qemu:///system` pass on the native host (`libvirt_stack` starts the
   system sockets, `libvirt_pool_net` activates `default`, `live_vm_host`'s `verify.yml:40-45`

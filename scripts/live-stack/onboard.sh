@@ -144,6 +144,9 @@ print(
 )
 PY
 )"; then
+  # Keep this ONE line. scripts/live-vm/mint-system.sh filters the token out of a public-log
+  # re-emit by the `^export KDIVE_TOKEN=` line prefix, so a token carrying an embedded newline
+  # would put its tail on a line that filter does not match.
   printf 'export KDIVE_TOKEN=%s\n' "$token"
 else
   echo "WARN: token mint failed (is the mock-OIDC issuer up?). Re-mint when it is, e.g.:" >&2
