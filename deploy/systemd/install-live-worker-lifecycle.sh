@@ -574,8 +574,10 @@ _resolve_uv_bin() {
   resolved="$(command -v uv 2>/dev/null)" || resolved=""
   if [[ $resolved != /* ]]; then
     echo "uv is not resolvable from PATH=$PATH; this installer runs as root, and sudo's" \
-      "secure_path hides a user-local uv. Install uv where root resolves it -- pip installs" \
-      "the console script to /usr/local/bin -- and rerun." >&2
+      "secure_path hides a user-local uv. Invoke it through 'sudo env \"PATH=\$PATH\"', as" \
+      ".github/workflows/live.yml and docs/operating/runbooks/live-stack.md do; where root is" \
+      "reached through Ansible's become instead, install uv where root resolves it (pip installs" \
+      "the console script to /usr/local/bin)." >&2
     return 1
   fi
   printf '%s\n' "$resolved"

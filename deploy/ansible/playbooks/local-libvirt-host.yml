@@ -188,8 +188,11 @@
       # The DSN reaches the installer on stdin, so the module arguments carry a live credential
       # and this result must stay censored. Censoring the failure with it left an installer exit
       # 127 reported without its reason (#2506), so the failure is deferred to the uncensored
-      # task below: the installer writes the DSN to a file and never echoes it, so its return
-      # code and stderr carry the diagnosis without the credential.
+      # task below: the installer writes the DSN to a file and never echoes it, which
+      # tests/deploy/test_live_worker_provisioning.py pins, so its return code and stderr carry
+      # the diagnosis without the credential. The deferral also depends on Ansible keeping a
+      # censored task's registered rc and stderr readable by a later task -- verified against the
+      # ansible-core 2.21.1 every recipe pins, and worth re-verifying on a pin bump.
       no_log: true
       register: local_libvirt_host_lifecycle_install
       failed_when: false

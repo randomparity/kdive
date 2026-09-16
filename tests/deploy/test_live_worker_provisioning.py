@@ -979,6 +979,26 @@ _resolve_uv_bin
     assert "/usr/local/bin" in result.stderr
 
 
+def test_installer_never_emits_the_witness_dsn() -> None:
+    """The play reports this installer's stderr from an uncensored task, so stderr is public.
+
+    `no_log: true` still censors the invocation that carries the DSN on stdin, but the failure
+    report outside it prints whatever the installer wrote (#2506). That makes "the installer
+    never echoes the DSN" a load-bearing invariant: pin the lines allowed to name it, so a new
+    diagnostic or a debugging `set -x` fails here instead of shipping a live credential into an
+    Ansible log.
+    """
+    source = _text(INSTALLER)
+    naming_the_dsn = [line.strip() for line in source.splitlines() if "witness_dsn" in line]
+
+    assert naming_the_dsn == [
+        "IFS= read -r witness_dsn || [[ -n $witness_dsn ]]",
+        "[[ -n $witness_dsn ]] || {",
+        'printf \'%s\\n\' "$witness_dsn" >"$credential_temp"',
+    ]
+    assert "set -x" not in source
+
+
 def test_installer_uv_resolution_returns_an_absolute_path(tmp_path: Path) -> None:
     stub = tmp_path / "uv"
     stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
