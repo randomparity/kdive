@@ -9,7 +9,10 @@ propagates through the existing call sites and names its own condition.
 pytest, ruff, mypy. [ADR-0658](../../adr/0658-missing-domain-is-not-a-missing-ssh-forward.md) ·
 [spec](../specs/2026-09-15-ssh-reason-distinguish-design.md). Expected implementation size: 120–180
 changed lines (S) — from the file map: one connector module, five docstring sites, one regenerated
-reference, seven new cases across four test modules.
+reference, seven new cases across four test modules. Measured after the build: 295 changed lines,
+with that task coverage unchanged. The estimate was low because each MCP-tool and job-handler case
+carries async pool/seed/resolver fixture boilerplate (~14 lines, not ~8) and three test helpers
+grew. Band stays S; scope, design, and task list are unchanged.
 
 ## Global Constraints
 
