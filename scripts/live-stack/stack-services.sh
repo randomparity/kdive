@@ -177,7 +177,7 @@ if [[ "$skip_libvirt" != "1" ]]; then
       # Provisioned-runner recovery (#2032): the dedicated session endpoint is down (fresh boot,
       # reprovision lag). Start the OPERATOR-OWNED session daemon as the invoking user — the same
       # daemon shape the live_vm_host role provisions and keeps boot-persistent via its systemd
-      # --user unit. No sudo on this path: the runner service account has none, virtqemud does not
+      # --user unit. No sudo to start it: the runner service account has none, virtqemud does not
       # exist on the Debian-family runner, and degrading to qemu:///system would hit the
       # root-readback wall (ADR-0223) anyway. If the daemon cannot be started non-interactively,
       # die loud naming the missing paths instead of failing later with a confusing URI error.
@@ -186,6 +186,19 @@ if [[ "$skip_libvirt" != "1" ]]; then
         echo "dedicated session daemon could not be started; refusing to fall back to a system daemon" >&2
         exit 1
       }
+      if [[ "$KDIVE_LIBVIRT_URI" == *virtqemud-sock ]]; then
+        # #2503: the modular virtqemud session daemon proxies node-device queries to the *system*
+        # virtnodedevd socket -- there is no session counterpart -- and
+        # docs/design/2026-09-09-ppc64le-emulated-power-live-proof-2383-proof-record.md:284-286
+        # records the exact connection failure. Enable that system unit here too, mirroring the
+        # bare-host branch below.
+        # Best-effort: the provisioned CI runner has no sudo (#2032) and must not be blocked by
+        # this, so tolerate a failed enable exactly like the bare-host branch's own `|| true`. The
+        # Debian-family session daemon is the monolithic libvirtd, which answers node-device
+        # queries itself (lib.sh's nodedev_ok comment), so it never takes this branch.
+        echo "modular session daemon selected; enabling virtnodedevd.socket (sudo, best-effort) ..."
+        sudo systemctl enable --now virtnodedevd.socket || true
+      fi
     else
       # Bare dev host (qemu:///system default): the system daemon is socket-activated, so enable
       # --now plus the re-checks below are enough. Onboarding's resource discovery also needs
