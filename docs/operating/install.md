@@ -208,8 +208,10 @@ See [remote-libvirt](providers/remote-libvirt.md) for remote-provider requiremen
 ### Local-libvirt host preparation
 
 From a complete KDIVE checkout, prepare a local-libvirt host with the canonical Ansible-backed
-recipe. It prompts for privilege escalation and reads the lifecycle-witness database URL from the
-environment, so the URL is not a process argument:
+recipe. It passes `--ask-become-pass`, so it requires an interactive become password and cannot run
+unattended: the play installs distribution packages and writes system units as root, and this
+repository holds no sudo credential to supply on the operator's behalf. It reads the
+lifecycle-witness database URL from the environment, so the URL is not a process argument:
 
 ```bash
 export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL='<witness database URL>'

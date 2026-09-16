@@ -178,3 +178,129 @@ def test_failing_tcg_run_propagates_its_exit_code(tmp_path: Path) -> None:
         "one proof passed, so the '<N> passed' gate is satisfied and pytest's own failure status "
         f"must survive the capture pipeline (got {result.returncode}); {result.stdout}"
     )
+
+
+def _satisfied_native_env(tmp_path: Path) -> dict[str, str]:
+    """The env `preflight-env.sh throwaway provisioned debug-stepping` demands (#2540).
+
+    `test-live` selects `live_vm and not live_vm_tcg`, which spans all three native families, so
+    the recipe declares all three and the test must satisfy all three to get past preflight.
+    Stubs `gdb` and `qemu-img` into the same bin dir `_run_recipe` puts its `uv` stub in, and
+    touches the four paths the families `require_path`.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    for tool in ("gdb", "qemu-img"):
+        stub = stub_dir / tool
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    paths = {}
+    for var, name in (
+        ("KDIVE_LIVE_VM_ROOTFS", "rootfs.qcow2"),
+        ("KDIVE_LIVE_VM_BZIMAGE", "bzImage"),
+        ("KDIVE_LIVE_VM_VMLINUX", "vmlinux"),
+        ("KDIVE_GUEST_IMAGE", "live-vm-provisioned-rootfs.qcow2"),
+    ):
+        target = tmp_path / name
+        target.touch()
+        paths[var] = str(target)
+    return {
+        **paths,
+        "KDIVE_LIBVIRT_URI": "qemu:///session",
+        "KDIVE_LIVE_VM_SYSTEM_ID": "01JQ0000000000000000000000",
+        "KDIVE_S3_ENDPOINT_URL": "http://s3.invalid",
+        "KDIVE_S3_BUCKET": "kdive-artifacts",
+    }
+
+
+def test_absent_preflight_env_fails_the_native_recipe(tmp_path: Path) -> None:
+    """Missing native prerequisites must fail loud, not skip through pytest to a green exit."""
+    result = _run_recipe("test-live", tmp_path, uv_exit_code=0)
+    assert result.returncode != 0, (
+        "the native recipe ran with none of the env its preflight requires, so it proved nothing "
+        f"— it must not exit 0 (got {result.returncode}); {result.stdout}"
+    )
+    assert "KDIVE_LIVE_VM_ROOTFS" in result.stderr, result.stderr
+
+
+def test_all_skipped_native_run_fails_naming_the_tier(tmp_path: Path) -> None:
+    """The reported defect (#2540): `3 skipped, 18584 deselected` is exit 0 and proved nothing."""
+    result = _run_recipe(
+        "test-live",
+        tmp_path,
+        uv_exit_code=0,
+        uv_stdout="3 skipped, 18584 deselected in 9.10s\n",
+        extra_env=_satisfied_native_env(tmp_path),
+    )
+    assert result.returncode != 0, (
+        "every native live_vm proof skipped, so the tier proved nothing — the recipe must not "
+        f"exit 0 (got {result.returncode}); {result.stdout}"
+    )
+    assert "native live_vm tier" in result.stderr, result.stderr
+
+
+def test_no_tests_collected_fails_the_native_recipe(tmp_path: Path) -> None:
+    """Exit 5 is zero-collect: a hard failure here, matching the native spine, not a clean skip."""
+    result = _run_recipe(
+        "test-live",
+        tmp_path,
+        uv_exit_code=5,
+        uv_stdout="no tests ran in 0.31s\n",
+        extra_env=_satisfied_native_env(tmp_path),
+    )
+    assert result.returncode != 0, (
+        f"pytest exit 5 means no native live_vm proof ran (got {result.returncode}); "
+        f"{result.stdout}"
+    )
+    assert "native live_vm tier" in result.stderr, result.stderr
+
+
+def test_passing_native_run_succeeds(tmp_path: Path) -> None:
+    result = _run_recipe(
+        "test-live",
+        tmp_path,
+        uv_exit_code=0,
+        uv_stdout="3 passed in 812.44s\n",
+        extra_env=_satisfied_native_env(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_failing_native_run_propagates_its_exit_code(tmp_path: Path) -> None:
+    """Capturing pytest's output through a pipe must not swallow its status (`pipefail`)."""
+    result = _run_recipe(
+        "test-live",
+        tmp_path,
+        uv_exit_code=1,
+        uv_stdout="2 passed, 1 failed in 804.10s\n",
+        extra_env=_satisfied_native_env(tmp_path),
+    )
+    assert result.returncode == 1, (
+        "one proof passed, so the '<N> passed' gate is satisfied and pytest's own failure status "
+        f"must survive the capture pipeline (got {result.returncode}); {result.stdout}"
+    )
+
+
+def test_no_tests_collected_fails_the_agent_smoke_recipe(tmp_path: Path) -> None:
+    """The `rc -eq 5` tolerance this recipe carried reported a zero-collect run as green (#2540).
+
+    The tier has had marked carriers since ADR-0411, so "marked suite absent" no longer justifies
+    the branch, and what it covered instead was a run that had silently stopped selecting them.
+    """
+    result = _run_recipe("test-agent-smoke", tmp_path, uv_exit_code=5, uv_stdout="no tests ran\n")
+    assert result.returncode != 0, (
+        "pytest collected no agent_smoke test, so the run proved nothing and must not exit 0 "
+        f"(got {result.returncode}); {result.stdout}"
+    )
+    assert "agent_smoke" in result.stderr, result.stderr
+
+
+def test_passing_agent_smoke_run_succeeds(tmp_path: Path) -> None:
+    """Removing the tolerance must not turn a tier that really ran its carriers red."""
+    result = _run_recipe(
+        "test-agent-smoke",
+        tmp_path,
+        uv_exit_code=0,
+        uv_stdout="2 passed, 18655 deselected in 4.02s\n",
+    )
+    assert result.returncode == 0, result.stderr

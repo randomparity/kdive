@@ -1270,7 +1270,6 @@ def _isolated_stack_down(tmp_path: Path, events: Path, lib_extra: str = "") -> P
         f'stop_daemons() {{ echo graceful >>"{events}"; }}\n'
         f'force_stop_daemons() {{ echo force >>"{events}"; }}\n'
         f'docker() {{ echo docker >>"{events}"; }}\n'
-        f'kdive_domains() {{ echo domains >>"{events}"; }}\n'
         f'sudo() {{ echo "sudo $1" >>"{events}"; }}\n' + lib_extra,
         encoding="utf-8",
     )
