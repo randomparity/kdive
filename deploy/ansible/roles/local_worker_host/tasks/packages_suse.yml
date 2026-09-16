@@ -4,3 +4,22 @@
     name: "{{ local_worker_host_packages_suse }}"
     state: present
   tags: [authority_prerequisites]
+
+- name: Look for an existing container runtime before declaring one (Suse)
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: local_worker_host_docker_provider
+  changed_when: false
+  tags: [authority_prerequisites]
+
+- name: Install the Tumbleweed container runtime for the compose stack and testcontainers
+  # Tumbleweed-only: preflight.yml also admits SLES, which ships Docker in the Containers Module
+  # rather than the base product, so an ungated install would fail to resolve there. The
+  # existing-provider skip is the same guard the RedHat path takes.
+  community.general.zypper:
+    name: "{{ local_worker_host_container_packages_tumbleweed }}"
+    state: present
+  when:
+    - ansible_facts['distribution'] == 'openSUSE Tumbleweed'
+    - not local_worker_host_docker_provider.stat.exists
+  tags: [authority_prerequisites]

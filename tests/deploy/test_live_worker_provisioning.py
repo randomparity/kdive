@@ -1487,27 +1487,59 @@ def test_fedora_worker_packages_declare_a_container_runtime_behind_a_fedora_gate
     family = defaults["local_worker_host_packages_redhat"]
     assert isinstance(family, list)
     assert "moby-engine" not in family
+    _assert_gated_runtime_task(
+        "packages_redhat.yml",
+        module="ansible.builtin.dnf",
+        variable="local_worker_host_container_packages_fedora",
+        distribution="Fedora",
+    )
 
-    tasks = yaml.safe_load((LOCAL_WORKER / "tasks" / "packages_redhat.yml").read_text("utf-8"))
-    gated = "{{ local_worker_host_container_packages_fedora }}"
-    runtime = [task for task in tasks if task["ansible.builtin.dnf"]["name"] == gated]
-    assert len(runtime) == 1
-    assert runtime[0]["when"] == "ansible_facts['distribution'] == 'Fedora'"
 
-
-def test_suse_worker_packages_declare_a_container_runtime_and_compose() -> None:
+def test_tumbleweed_worker_packages_declare_a_container_runtime_behind_a_tumbleweed_gate() -> None:
     """Tumbleweed hosts need a runtime for the compose stack and testcontainers (#2505).
 
-    `scripts/live-stack/stack-services.sh` runs `docker compose`, so the runtime is only
-    useful paired with a compose provider — the same pairing the Debian set makes with
-    `docker.io` + `docker-compose-v2`. Tumbleweed's `docker-compose` is Compose V2 and
-    installs as the `docker compose` CLI plugin.
+    `preflight.yml` admits SLES on the same `os_family == 'Suse'` route, and SLES ships
+    Docker in the Containers Module rather than the base product, so this pair carries the
+    same distribution gate the Fedora pair does. Tumbleweed's `docker-compose` is Compose V2
+    and installs as the `docker compose` CLI plugin, matching the Debian `docker.io` +
+    `docker-compose-v2` pairing that `stack-services.sh` needs.
     """
     defaults = _yaml(DEFAULTS)
-    packages = defaults["local_worker_host_packages_suse"]
+    packages = defaults["local_worker_host_container_packages_tumbleweed"]
     assert isinstance(packages, list)
-    assert "docker" in packages
-    assert "docker-compose" in packages
+    assert packages == ["docker", "docker-compose"]
+    family = defaults["local_worker_host_packages_suse"]
+    assert isinstance(family, list)
+    assert "docker" not in family
+    _assert_gated_runtime_task(
+        "packages_suse.yml",
+        module="community.general.zypper",
+        variable="local_worker_host_container_packages_tumbleweed",
+        distribution="openSUSE Tumbleweed",
+    )
+
+
+def _assert_gated_runtime_task(
+    task_file: str, *, module: str, variable: str, distribution: str
+) -> None:
+    """The runtime install must carry both gates: the distribution that ships the packages, and
+    the absence of an existing /usr/bin/docker provider it would conflict with."""
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks" / task_file).read_text("utf-8"))
+    declared = "{{ " + variable + " }}"
+    runtime = [task for task in tasks if task.get(module, {}).get("name") == declared]
+    assert len(runtime) == 1, task_file
+    assert runtime[0]["when"] == [
+        f"ansible_facts['distribution'] == '{distribution}'",
+        "not local_worker_host_docker_provider.stat.exists",
+    ]
+    probes = [
+        task
+        for task in tasks
+        if task.get("ansible.builtin.stat", {}).get("path") == "/usr/bin/docker"
+    ]
+    assert len(probes) == 1, task_file
+    assert probes[0]["register"] == "local_worker_host_docker_provider"
+    assert tasks.index(probes[0]) < tasks.index(runtime[0])
 
 
 def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:

@@ -81,12 +81,16 @@ local_worker_host_packages_redhat:
   - elfutils-devel
   - libkdumpfile-devel
 
-# Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
-# testcontainers gate, kept out of the list above because that list installs on every RedHat-family
-# host: Enterprise Linux packages no engine in baseos, appstream, extras or CRB, so naming one
-# there would fail dnf. moby-engine requires docker-cli, the owner of /usr/bin/docker, and Fedora's
-# docker-compose is Compose V2 installed as the `docker compose` CLI plugin — the Fedora equivalent
-# of the Debian docker.io + docker-compose-v2 pairing.
+# Container runtime packages for the on-box compose stack (scripts/live-stack/stack-services.sh)
+# and the testcontainers gate. These stay out of the family list above because that list installs
+# on every RedHat-family host and Enterprise Linux packages no engine in baseos, appstream, extras
+# or CRB — naming one there would fail dnf, which is the defect this pair exists to avoid.
+# moby-engine requires docker-cli, the owner of /usr/bin/docker, and Fedora's docker-compose is
+# Compose V2 installed as the `docker compose` CLI plugin, so together they are the Fedora
+# equivalent of the Debian docker.io + docker-compose-v2 pairing.
+# Declaring the packages is not the whole runtime: enabling the daemon and granting an account
+# socket access are separate steps this role does not take (live_vm_host does both for the
+# self-hosted runner).
 local_worker_host_container_packages_fedora:
   - moby-engine
   - docker-compose
@@ -113,9 +117,12 @@ local_worker_host_packages_suse:
   - libelf-devel
   - libdw-devel
   - libkdumpfile-devel
-  # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
-  # testcontainers gate. Tumbleweed's `docker-compose` is Compose V2, which installs as the
-  # `docker compose` CLI plugin rather than a standalone binary, so this pair is the Tumbleweed
-  # equivalent of the Debian `docker.io` + `docker-compose-v2` pairing.
+
+# The Tumbleweed counterpart of local_worker_host_container_packages_fedora, kept out of the list
+# above for the same reason: that list also installs on SLES, which preflight.yml admits and which
+# ships Docker only in the Containers Module rather than the base product. Tumbleweed's
+# docker-compose is Compose V2, installed as the `docker compose` CLI plugin rather than a
+# standalone binary. The same daemon-enable and socket-access caveat applies.
+local_worker_host_container_packages_tumbleweed:
   - docker
   - docker-compose

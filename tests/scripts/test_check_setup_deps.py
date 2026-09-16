@@ -217,16 +217,25 @@ def test_docker_hint_names_a_package_the_family_ships(
     assert "docker: install Docker from" not in result.stderr
 
 
-def test_enterprise_linux_docker_hint_stays_manual(tmp_path: Path) -> None:
-    """EL packages no Docker engine in baseos, appstream, extras or CRB, so naming one would be
-    the same defect in a new place; it keeps the two remedies that exist there instead."""
+@pytest.mark.parametrize(("distro_id", "manager"), [("rhel", "dnf install"), ("voidlinux", "")])
+def test_families_without_a_docker_package_keep_the_manual_hint(
+    distro_id: str, manager: str, tmp_path: Path
+) -> None:
+    """EL packages no Docker engine in baseos, appstream, extras or CRB, and an unrecognized
+    distro has no package name to assert at all. Naming one for either would be the same defect
+    in a new place, so both keep the remedies that do not depend on a package name."""
     empty = tmp_path / "empty-bin"
     empty.mkdir()
-    result = _run("rhel", str(empty), tmp_path)
+    result = _run(distro_id, str(empty), tmp_path)
 
     assert result.returncode == 1, result.stderr
-    dnf_lines = [line for line in result.stderr.splitlines() if "dnf install" in line]
-    assert all("docker" not in line for line in dnf_lines), result.stderr
+    install_lines = [
+        line
+        for line in result.stderr.splitlines()
+        if (manager or "your distribution package manager") in line
+    ]
+    assert install_lines, result.stderr
+    assert all("docker" not in line for line in install_lines), result.stderr
     assert (
         "docker: install Docker from https://docs.docker.com/engine/install/ "
         "or use podman with podman-docker" in result.stderr

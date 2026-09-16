@@ -150,9 +150,9 @@ package_for() {
   python3-guestfs:arch) printf "libguestfs" ;;
   python3-guestfs:*) printf "python3-guestfs" ;;
   # The Docker engine package name diverges by family: Debian/Ubuntu ship `docker.io`, Fedora
-  # ships `moby-engine` (which requires docker-cli, the owner of /usr/bin/docker), and openSUSE,
-  # Arch and the generic fallback ship `docker`. Enterprise Linux has no row because it packages
-  # no engine at all; the probe routes that family to a manual hint instead.
+  # ships `moby-engine` (which requires docker-cli, the owner of /usr/bin/docker), and openSUSE
+  # and Arch ship `docker`. Enterprise Linux and an unrecognized distro have no row because
+  # neither has a name to assert; the probe routes both to a manual hint instead.
   docker:debian) printf "docker.io" ;;
   docker:fedora) printf "moby-engine" ;;
   docker:*) printf "docker" ;;
@@ -479,11 +479,18 @@ probe_all() {
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
-  # Docker is a packaged dependency everywhere except Enterprise Linux, so it is probed through
+  # Docker is a packaged dependency on every family this script can name, so it is probed through
   # package_for rather than as a manual hint — a hint that names no package cannot be acted on.
-  # EL ships no engine in baseos, appstream, extras or CRB (docs/operating/providers/
-  # local-libvirt.md, "Container engine"), so it keeps the two remedies that do exist there.
-  if [[ "${distro}" == el ]]; then
+  # Two families keep the manual remedies instead: EL ships no engine in baseos, appstream,
+  # extras or CRB (docs/operating/providers/local-libvirt.md, "Container engine"), and an
+  # unrecognized distro has no package name this script could honestly assert.
+  #
+  # Two consequences of being in the packaged tier rather than the manual one. The autofix now
+  # installs a container engine as root alongside git and make — a system service, where the tier
+  # previously installed only libraries and CLIs, and on Debian/Ubuntu policy starts the daemon at
+  # install time. And the tier covers the testcontainers gate only: it deliberately does not name a
+  # compose provider, which is the provisioning role's concern, not `just setup`'s.
+  if [[ "${distro}" == el || "${distro}" == unknown ]]; then
     require_tool recommended docker \
       "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
   else
