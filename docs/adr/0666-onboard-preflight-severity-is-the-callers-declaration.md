@@ -31,18 +31,27 @@ and `onboard.sh` has four of them: `just onboard` (`justfile:63`),
 ## Decision
 
 **The preflight's severity is declared by the caller, not decided by `onboard.sh` or by the
-preflight. `KDIVE_ONBOARD_PREFLIGHT` takes `advisory` (the default, today's `WARN`) or `required`,
-which stops `onboard.sh` before `migrate` with the preflight's own `FAIL` text already on stderr as
-the stated reason. `scripts/live-vm/mint-system.sh` declares `required`.**
+preflight. `ONBOARD_PREFLIGHT` takes `advisory` (the default, today's `WARN`) or `required`, which
+stops `onboard.sh` before `migrate` with the preflight's own `FAIL` text already on stderr, plus a
+line attributing the stop to it. `scripts/live-vm/mint-system.sh` declares `required` **and** takes
+the call shape that can observe it.**
 
 The default is unchanged behaviour because the header's advisory intent is correct for the callers
-it was written for. `required` is set by the one caller whose next step provisions, which is the
+it was written for. `required` is set by the provisioning caller inside this change's surface, the
 path the observed failure came from.
 
-The knob is `KDIVE_`-prefixed and therefore published in `src/kdive/config/external_env.py` and the
-generated reference: unlike ADR-0659's `LIBVIRT_OPTIONAL`, this **is** an operator knob — an
-operator running `just onboard` on a host they intend to provision from has the same reason to
-insist as CI does. `scripts/guards/check_env_documented.py` enforces the publication.
+The declaration is unprefixed for exactly ADR-0659's reason. It is what that record describes — "a
+declaration an entry point makes about itself and its children, not an operator knob" — and
+`scripts/guards/check_env_documented.py:35-36` sweeps `src tests scripts deploy` for
+`KDIVE_[A-Z0-9_]+`, so a prefixed name would have to be published in
+`src/kdive/config/external_env.py` and the generated reference as the operator knob it is not.
+
+The second half is not decoration. `mint-system.sh:30` reads
+`eval "$("${here}/../live-stack/onboard.sh" | grep '^export KDIVE_TOKEN=')"`, and a command
+substitution in an argument list does not fire errexit — so a `required` stop would reach
+`mint-system.sh:31` and terminate with `die "onboard.sh did not mint a token"`, naming a cause that
+never occurred. The caller therefore captures `onboard.sh` into a variable first, the shape
+`.github/workflows/live.yml:549` already uses on this same script, and dies naming the preflight.
 
 ## Consequences
 
@@ -56,14 +65,25 @@ The native `live_vm` job now stops at the preflight with the actionable diagnosi
 words, instead of reaching `systems.get`. Its failure moves earlier and its message improves; a
 host that was going to fail still fails.
 
+The hosted `live_vm_tcg` spine provisions too, and stays advisory. `live.yml:549` already has the
+capture shape, so it would honour `required`, but `live.yml` is outside #2568's surface and its
+guard at `:550-553` catches only a missing token — so a preflight `FAIL` that still permits the
+mint keeps the #2568 shape on that tier until it declares `required`. That is a residual this
+record leaves open, not one it closes.
+
 The two severities are not a classification of `FAIL` entries, so a caller declaring `required`
-gets **every** required check as a gate, including ones its next step does not use. That is the
-cost of not teaching the preflight about its callers, and it is bounded: `check-local-libvirt.sh`
-already splits blocking from advisory itself (`note_fail` sets `fail=1`; `note_warn` does not), and
-`KDIVE_PREFLIGHT_KDUMP=optional` already downgrades the one check with a documented soft case.
+gets **all nine** of `check-local-libvirt.sh`'s blocking checks as gates, including ones its next
+step does not use. `KDIVE_PREFLIGHT_KDUMP=optional` downgrades exactly one of the nine, so it is
+not the bound; the bound is that the only caller declaring `required` provisions a real domain
+through the local-libvirt provider and needs every one of them. #2568's quoted native-runner
+preflight output carries a single `FAIL`, which is evidence the other eight pass on that host
+today.
 
 A fifth caller added later inherits `advisory` silently. That is the same default this record
-preserves, and it fails the way `onboard.sh` fails today rather than in a new way.
+preserves, and it fails the way `onboard.sh` fails today rather than in a new way. In the other
+direction, an operator who exports `ONBOARD_PREFLIGHT=required` in their shell has it inherited by
+every `onboard.sh` a later script runs, including `demo-up.sh:66` — the cost ADR-0659's category
+carries and `scripts/live-stack/README.md:54` already warns about for `LIBVIRT_OPTIONAL`.
 
 ## Considered & rejected
 
@@ -83,5 +103,17 @@ preserves, and it fails the way `onboard.sh` fails today rather than in a new wa
 - **Drop the knob; hard-gate the preflight in `mint-system.sh` itself.** judgment: it fixes the
   native job and leaves `onboard.sh` still discarding the diagnosis for every other caller, which
   is the defect #2568 names.
+- **Declare `required` at `mint-system.sh:30` and leave its call shape alone.** verified: a stub
+  harness carrying `mint-system.sh`'s exact `:9` (`set -euo pipefail`), `:30` and `:31` shapes,
+  against an `onboard.sh` stub printing a `FAIL` line to stderr and exiting 1, reached the statement
+  after the `eval` with rc 0 and terminated on `die "onboard.sh did not mint a token"` (GNU bash
+  5.3.9, Fedora 44) — a command substitution in an argument list does not fire errexit. The
+  repository documents the same trap 25 lines above its own call site, at `live.yml:751-752`.
+- **Publish the declaration as a `KDIVE_`-prefixed operator knob.** verified:
+  `scripts/guards/check_env_documented.py:35-36` scans `src tests scripts deploy` for
+  `KDIVE_[A-Z0-9_]+`, so the prefix alone would pull `src/kdive/config/external_env.py` and the
+  generated `docs/guide/reference/config.md` into the change. judgment: it buys generated
+  documentation for a need nothing states — no completion criterion names an operator who wants to
+  insist at `just onboard`, and an operator can set an unprefixed name just as easily.
 - **Do nothing; let the reader correlate the two log entries.** judgment: that is the present
   behaviour, and #2568 is the report that it does not work.
