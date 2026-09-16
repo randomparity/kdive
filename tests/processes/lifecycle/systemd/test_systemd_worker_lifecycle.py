@@ -2815,22 +2815,31 @@ def test_residual_retirement_refuses_a_row_whose_invocation_is_still_live() -> N
     assert stores[0].discards == 0
 
 
-def test_recover_skips_a_row_registered_by_another_host() -> None:
-    """The incarnation prefix carries no host, so a shared database can surface a foreign row."""
+def test_recover_refuses_a_slot_whose_row_was_registered_by_another_host() -> None:
+    """A foreign-host fence must not be released -- and must not let this slot's files be cleared.
+
+    The incarnation prefix carries no host, so a shared database can surface another host's row
+    over this slot's unit. Skipping that row and carrying on would delete this slot's files while
+    that fence is still held, inverting the ordering the failure model requires. The slot is
+    refused whole instead, with the code an operator reconciles rather than reboots.
+    """
     started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
-    stores[0].environment = False
-    stores[0].credential = False
-    stores[0].release = False
+    stores[0].environment = True
+    stores[0].credential = True
+    stores[0].release = True
     authority.rows[started.unit] = [_row(1, generation=started.generation, host="some-other-host")]
 
     response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
 
-    assert response.ok, response.message
+    assert not response.ok and response.code == "conflict"
+    assert [(result.slot, result.code) for result in response.slots] == [
+        (1, "recovery_refused_incoherent_row")
+    ]
     assert authority.released == []
     assert authority.rows[started.unit] != []
-    assert [(result.slot, result.message) for result in response.slots] == [
-        (1, "cleared the retained unit identity")
-    ]
+    # The point of the finding: the files are still here.
+    assert stores[0].discards == 0
+    assert stores[0].environment and stores[0].credential and stores[0].release
 
 
 def test_recover_refuses_a_slot_before_releasing_any_of_its_rows() -> None:

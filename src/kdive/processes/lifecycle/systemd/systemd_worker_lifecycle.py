@@ -62,8 +62,9 @@ _RECOVERY_REFUSED = "recovery_refused"
 # a live-process refusal, which is transient. Relaxing this takes an ADR amendment; the operator's
 # remedy is a reboot, which yields a different boot ID and so real evidence.
 _RECOVERY_REFUSED_IDENTITY = "recovery_refused_unreadable_identity"
-# A row whose stored binding does not name an invocation on this slot's own unit. It is not the
-# unreadable-identity case and must not share its code: that one is cleared by a reboot, which
+# A row the accessor returned that does not describe this slot on this host -- a stored `unit`
+# disagreeing with the incarnation prefix it was found by, or a `host` that is not ours. It is not
+# the unreadable-identity case and must not share its code: that one is cleared by a reboot, which
 # yields a fresh boot ID, while this one is a row only an operator can reconcile.
 _RECOVERY_REFUSED_INCOHERENT = "recovery_refused_incoherent_row"
 _REFUSAL_MESSAGES = {
@@ -71,9 +72,7 @@ _REFUSAL_MESSAGES = {
     _RECOVERY_REFUSED_IDENTITY: (
         "registered invocation identity is unreadable; ADR-0657 forbids recovering it"
     ),
-    _RECOVERY_REFUSED_INCOHERENT: (
-        "registered fence row does not name an invocation on this slot's unit"
-    ),
+    _RECOVERY_REFUSED_INCOHERENT: ("registered fence row does not describe this slot on this host"),
 }
 _REFUSALS = frozenset(_REFUSAL_MESSAGES)
 # Only these phases still have to derive an outcome from a current observation. `_retire_slot`
@@ -350,6 +349,13 @@ class SystemdWorkerLifecycle:
         stop_deadline = _BudgetDeadline(operation_deadline, _STOP_SECONDS)
         results: list[SlotResult] = []
         try:
+            # The per-slot refusal below reads cgroup membership, which sees only workers inside
+            # a unit's own cgroup. A `kdive worker` running outside every fixed unit defeats it,
+            # and recovery releases fences, so it takes the same guard `start` takes before
+            # replacing the fleet rather than the weaker of the two liveness checks.
+            unmanaged = self._systemd_call(operation_deadline, self._runtime.unmanaged_workers)
+            if unmanaged:
+                raise LifecycleConflict("unmanaged worker processes require operator recovery")
             for store in self._stores:
                 result = await self._recover_slot(store, operation_deadline, stop_deadline)
                 if result is not None:
@@ -463,11 +469,17 @@ class SystemdWorkerLifecycle:
         for record in await self._authority_records(store, deadline):
             if record.authority_binding["host"] != socket.gethostname():
                 # Another host's fence. The incarnation prefix carries no host, so a shared
-                # database can surface one; it is not this host's to release (ADR-0667).
+                # database can surface one, and it is not this host's to release (ADR-0667).
+                # Refuse the slot rather than skipping the row: falling through would delete this
+                # slot's files while that fence is still held, which is exactly the ordering the
+                # failure model forbids. A host that cannot account for every row over its own
+                # slot cannot safely clear that slot's facts either.
                 _log.warning(
-                    "recovery skipped a foreign-host fence unit=%s slot=%d", store.unit, store.slot
+                    "recovery refused a slot holding a foreign-host fence unit=%s slot=%d",
+                    store.unit,
+                    store.slot,
                 )
-                continue
+                return _Recovery(refusal=_RECOVERY_REFUSED_INCOHERENT)
             identity = _registered_identity(store, record)
             if identity is None:
                 return _Recovery(refusal=_RECOVERY_REFUSED_INCOHERENT)
