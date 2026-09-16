@@ -41,7 +41,11 @@ kernel converged without an operator.
 ## Consequences
 
 A Debian-family worker host stops silently losing its guest-image build capability across a kernel
-upgrade, and `boot_kernels.yml:64-65`'s manual instruction becomes false and is removed.
+upgrade. Three statements of the manual instruction become false and are corrected with it:
+`boot_kernels.yml:64-65`, `docs/operating/install.md`, and
+`docs/operating/providers/local-libvirt.md`. The runner runbook's equivalent
+(`docs/operating/runbooks/self-hosted-kvm-runner.md:396`) stays accurate, because it names
+`playbooks/runner.yml`, which this decision does not reach.
 
 The role gains its first `files/` directory, and `lint-shell` gains `deploy/ansible/roles` so the
 shipped hook is shellchecked like every other script this repository ships.

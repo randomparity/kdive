@@ -89,8 +89,10 @@ These are the points where the two families genuinely diverge, not just in packa
   which is what that mode grants read through
   ([ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md)). Fedora ships them
   world-readable and is left alone. A Debian/Ubuntu kernel upgrade installs a fresh `0600` file
-  under a new name: re-run the recipe afterwards. `just check-deps` and `just check-local-libvirt`
-  both report the unfixed state.
+  under a new name, so the recipe also installs an `/etc/kernel/postinst.d` hook that re-applies
+  the mode at install time
+  ([ADR-0668](../../adr/0668-a-kernel-upgrade-re-applies-the-boot-relabel.md)); no re-run is
+  needed. `just check-deps` and `just check-local-libvirt` both report the unfixed state.
 - **SELinux.** Fedora and Enterprise Linux run SELinux enforcing, so `install-host.sh` and
   `build-image.sh` label the kdive image directories `svirt_image_t` for the confined domain
   (ADR-0640). `install-host.sh` installs `policycoreutils-python-utils` for the `semanage` that
