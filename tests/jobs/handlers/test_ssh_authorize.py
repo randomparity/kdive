@@ -63,9 +63,11 @@ def _job_for(system_id: UUID, *, public_key: str = _KEY) -> Job:
     )
 
 
-def _resolver(endpoint: tuple[str, int] | None) -> MagicMock:
+def _resolver(
+    endpoint: tuple[str, int] | None, *, raises: BaseException | None = None
+) -> MagicMock:
     connector = MagicMock()
-    connector.recorded_ssh_endpoint = MagicMock(return_value=endpoint)
+    connector.recorded_ssh_endpoint = MagicMock(return_value=endpoint, side_effect=raises)
     binding = SimpleNamespace(runtime=SimpleNamespace(connector=connector))
     resolver = MagicMock()
     resolver.binding_for_system = AsyncMock(return_value=binding)
@@ -138,6 +140,35 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
         "System is a local-libvirt capability"
     )
     assert "reprovision" not in str(excinfo.value).lower()
+
+
+def test_handler_propagates_absent_domain_distinctly() -> None:
+    """A missing domain reaches the job verdict as its own reason (#2502, ADR-0658).
+
+    The handler reads the endpoint outside its try/except, so the provider's distinction survives
+    to the worker, which prefixes detail keys into `failure_detail_reason` for the client.
+    """
+    resolver = _resolver(
+        None,
+        raises=CategorizedError(
+            "System 'kdive-x' has no libvirt domain on this connection",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "system_domain_not_found"},
+        ),
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(
+            authorize_ssh_key_handler(
+                MagicMock(),
+                _job(),
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+                ssh_exec=lambda _argv, _key: None,
+            )
+        )
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "system_domain_not_found"
+    assert "libvirt domain" in str(excinfo.value)
 
 
 # --- Fast-fail pre-flight (#1012): an unreachable guest fails in seconds, terminally, not a
