@@ -61,6 +61,7 @@ it is reported as measured, not trimmed, and no task may be dropped to make it a
 | `tests/worker_lifecycle/test_authority_store.py` | — | + 5 accessor cases |
 | `tests/.../test_systemd_worker_state.py` | — | + 6 inspect/discard cases |
 | `tests/.../test_systemd_worker_lifecycle.py` | 14 `recover` cases | + 8 residual cases, 3 amended |
+| `docs/operating/runbooks/live-stack.md` | "What `recover` does not reach" names #2533 as an open gap | that subsection replaced by what `recover` now does reach |
 
 No caller migrates and no compatibility path is retained: `_terminal_observation` keeps its
 signature and every existing call site is untouched.
@@ -367,14 +368,19 @@ tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py -k identity_o
    def _terminal_observation(
        state: SlotState, observation: UnitObservation | BootObservation
    ) -> TerminationOutcome | None:
+       if observation.unit != state.unit:
+           raise LifecycleConflict("systemd returned a foreign unit observation")
        identity = _state_identity(state)
        if identity is None:
            raise LifecycleConflict("bound lifecycle phase has no exact invocation")
        return _identity_outcome(identity, observation)
    ```
 
-   The foreign-unit check moves into `_identity_outcome`, where it still runs first for every
-   existing caller.
+   Keep the foreign-unit check here, ahead of `_state_identity`, even though `_identity_outcome`
+   repeats it. The original checked the unit first, so moving it would swap which
+   `LifecycleConflict` a foreign observation of an unbound state raises -- a behaviour change this
+   task promises not to make, and one the equivalence test structurally cannot catch because
+   `_identity_outcome` cannot represent an unbound state.
 
 3. Add `_identity_outcome` directly beneath, carrying the whole body that used to live in
    `_terminal_observation` — foreign-unit raise, boot-ID branch, `BootObservation` branch,
@@ -439,7 +445,9 @@ in one of the two ways #2533 names, or where there was never a parseable state.
   still present, row still active — not merely that nothing happened, or every arm passes for the
   same uninteresting reason.
 - `::test_recover_skips_a_row_registered_by_another_host` — a row whose binding `host` is not this
-  host's is neither released nor counted, and the slot is not reported as retired.
+  host's is neither released nor counted. Give the slot no files, so `discard_unrecoverable`
+  returns `False` and the slot is reported as not retired; asserting "not retired" while leaving
+  files present would pass for the unrelated reason that the files were cleared.
 - `::test_recover_refuses_a_slot_before_releasing_any_of_its_rows` — two active rows, the second
   unrecoverable; asserts `authority.released == []`, so a slot is never left half-released.
 - `::test_recover_residual_support_does_not_move_the_protocol_identity` — asserts
@@ -455,8 +463,9 @@ in one of the two ways #2533 names, or where there was never a parseable state.
    ```
 
    Paste the printed value in as a literal. Do not compute it at test time from the code under
-   test — that would assert nothing. Cross-check it against the literal
-   `tests/scripts/test_live_stack_scripts.py` already pins; they must agree.
+   test — that would assert nothing. Do not try to cross-check it against
+   `tests/scripts/test_live_stack_scripts.py`: that file pins no literal, it calls
+   `lifecycle_protocol_identity()` at runtime, which is exactly why it needs no update here.
 
 2. Add the refusal disposition, its message map, and the fallback tuple beside `_RECOVERY_REFUSED`:
 
@@ -569,7 +578,19 @@ in one of the two ways #2533 names, or where there was never a parseable state.
        for record, outcome in releasable:
            await self._release(record, outcome, deadline)
        removed = self._store_call(stop_deadline, store.discard_unrecoverable)
-       return _Recovery(cleared=bool(releasable) or removed)
+       cleared = bool(releasable) or removed
+       if cleared:
+           # The residue is why this slot needed the residual path at all, and it is the only
+           # place the absent-versus-malformed distinction reaches an operator. Recovery must not
+           # branch on it; reporting it is what it is for.
+           _log.warning(
+               "recovery retired a residual slot unit=%s slot=%d residue=%s released=%d",
+               store.unit,
+               store.slot,
+               inspection.residue,
+               len(releasable),
+           )
+       return _Recovery(cleared=cleared)
 
 
    async def _authority_records(
@@ -703,7 +724,27 @@ in one of the two ways #2533 names, or where there was never a parseable state.
     tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py` — every case passes. Then
     `just lint`, `just type`, `just test-changed` — exit 0 each.
 
-12. Commit: `feat(lifecycle): recover the residual slots through the registered row`.
+12. Correct the runbook subsection this change falsifies. `docs/operating/runbooks/live-stack.md`
+    carries a subsection headed **What `recover` does not reach** naming "a slot with an absent or
+    malformed `state.json`, a drifted binding, rejected evidence, or an unreadable boot ID" as
+    wedged, citing #2533 as the gap and telling operators not to hand-edit the slot files or the
+    `worker_incarnations` row. Shipping this PR makes every sentence of it false and would route
+    operators back to the manual `UPDATE` that #2481 exists to retire.
+
+    Replace that subsection with what `recover` now reaches: the four residual cases are retired
+    through the registered row, and the one remaining refusal is a slot whose registered
+    invocation is absent on the retained boot, reported per slot as
+    `recovery_refused_unreadable_identity`, whose remedy is a reboot because ADR-0574 makes
+    same-boot absence non-evidence. Keep the standing instruction not to hand-edit the slot files
+    or the row — that advice outlives the gap. Do not expand it into an `operator_recovery`
+    procedure: this is a correction of a statement this PR makes untrue, not new documentation.
+
+    This file is outside the frozen surface and is added deliberately. Its stated owner, #2489,
+    closed COMPLETED on 2026-09-16 after this design was written, so no open issue holds it, and
+    a doc that fails when followed is a defect of the change that exposed it. Run
+    `just docs-paths` afterwards — exit 0.
+
+13. Commit: `feat(lifecycle): recover the residual slots through the registered row`.
 
 ---
 
@@ -714,8 +755,13 @@ in one of the two ways #2533 names, or where there was never a parseable state.
 3. `just lock-check`, `just lint-workflows`, `just container-arch-check` — no workflow runs these
    three (#2582), so run them locally before hand-off. Exit 0 each.
 4. `just ci > <file> 2>&1 < /dev/null` — exit 0. 15–20 minutes.
-5. The spec's live-host criterion needs a provisioned systemd host and `sudo`, denied to this
-   session. Record which proof arms ran and which did not; do not assert the host proof.
+5. **The issue's seventh acceptance criterion is not satisfiable by this session and is owed to
+   the operator.** #2533 requires the change "proven on a provisioned systemd host against the
+   installed contract, with each residual case induced on a real slot — an unlinked `state.json`,
+   a truncated one, a rewritten binding". That needs root on a provisioned host, and `sudo` is
+   denied to dispatched sessions. It is not excluded and has no other owner: state plainly in the
+   hand-off that this arm did not run, so the operator can run it before merging. Record which
+   proof arms did run; never assert the host proof from unit tests.
 
 ## Deferrals and rejected findings from design review
 

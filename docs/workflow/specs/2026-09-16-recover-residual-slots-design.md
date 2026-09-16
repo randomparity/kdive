@@ -56,6 +56,13 @@ sweep-ending raise, so one unrecoverable slot no longer hides the seven the call
 of a slot's rows are classified before any of them is released, so a slot is never left
 half-released; rows whose stored binding names another host are skipped, not released.
 
+**`docs/operating/runbooks/live-stack.md`** (outside the frozen surface, added deliberately). Its
+subsection "What `recover` does not reach" names these five cases as wedged and cites #2533 as the
+open gap. This change closes that gap, so the subsection becomes false on merge and would send
+operators back to the manual `UPDATE` #2481 exists to retire. Its stated owner, #2489, closed
+COMPLETED on 2026-09-16, after this design was written. The correction is confined to that
+subsection; it is not the `operator_recovery` procedure charter exclusion 3 reserves.
+
 **Ownership.** `_terminal_observation` currently owns both "which identity is authoritative" and
 "what does this observation prove about it". The second half moves to a helper taking an identity
 pair; `_terminal_observation` keeps the first half and delegates. Current callers are unchanged
@@ -142,6 +149,11 @@ already implies full control of the slot files.
 5. `lifecycle_protocol_identity()` is byte-identical to its value on the base commit, and
    `tests/scripts/test_live_stack_scripts.py` needs no identity update.
 6. `just ci` is green.
+
+The issue's seventh acceptance criterion — proof on a provisioned systemd host with each residual
+case induced on a real slot — is **not met by this change** and is not excluded. It needs root on a
+provisioned host, which is denied to the session implementing this. It is owed to the operator
+before merge, and the hand-off says so rather than implying unit tests discharge it.
 
 ## Validation
 
