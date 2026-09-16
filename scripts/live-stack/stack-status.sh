@@ -5,6 +5,11 @@
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# A health report is the tool an operator reaches for when the host is broken, so it declares
+# itself libvirt-free and reports an unresolved endpoint instead of aborting on one (ADR-0659).
+# EXPORTED, because the `worker-lifecycle.sh status` call below is a child process that sources
+# lib.sh and env.sh itself; without this its whole section would report the resolver's error.
+export LIBVIRT_OPTIONAL=1
 # shellcheck source=scripts/live-stack/lib.sh
 source "${here}/lib.sh"
 # shellcheck disable=SC1091 # repo-relative env script
@@ -52,11 +57,21 @@ else
 fi
 
 echo
-echo "=== libvirt (${KDIVE_LIBVIRT_URI}) ==="
-if libvirt_ok; then
-  echo "  daemon: reachable"
+# The banner and the probe both read the endpoint — `libvirt_ok` reads it unguarded (lib.sh), and
+# `set -u` is not suppressed inside an `if` condition — so both sit inside the resolved branch.
+# provision_prereqs_ok below reads no libvirt and stays outside it: the qemu-img and overlay-dir
+# report is the part a host with a broken contract still needs.
+if [[ -n "${LIBVIRT_UNRESOLVED}" ]]; then
+  echo "=== libvirt (endpoint unresolved) ==="
+  echo "  ${LIBVIRT_UNRESOLVED}"
+  echo "  daemon: NOT PROBED — repair the contract, or export KDIVE_LIBVIRT_URI, and re-run"
 else
-  echo "  daemon: UNREACHABLE"
+  echo "=== libvirt (${KDIVE_LIBVIRT_URI}) ==="
+  if libvirt_ok; then
+    echo "  daemon: reachable"
+  else
+    echo "  daemon: UNREACHABLE"
+  fi
 fi
 if provision_prereqs_ok; then
   echo "  provision prereqs: qemu-img + ${KDIVE_ROOTFS_DIR} OK"
