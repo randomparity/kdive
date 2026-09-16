@@ -1067,6 +1067,26 @@ def test_a_broken_contract_still_aborts_without_the_declaration(tmp_path: Path) 
     assert result.stdout != "qemu:///system"
 
 
+def test_an_inherited_degraded_record_does_not_suppress_resolution(tmp_path: Path) -> None:
+    """LIBVIRT_UNRESOLVED is the resolver's output, never its input.
+
+    `resolve_libvirt_uri`'s first statement short-circuits on it, so a value arriving from the
+    environment would leave KDIVE_LIBVIRT_URI unset on a host whose published contract is fine --
+    with no opt-out declared by anyone, and with stack-status.sh reporting that healthy host as
+    unresolved with a caller-chosen reason string.
+    """
+    contract, staged = _published_contract(tmp_path)
+    assert contract.exists()
+    staged["LIBVIRT_UNRESOLVED"] = "inherited reason"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        'printf "%s|%s" "${KDIVE_LIBVIRT_URI-unset}" "${LIBVIRT_UNRESOLVED}"',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{_PUBLISHED_URI}|"
+
+
 def test_require_libvirt_uri_refuses_while_the_endpoint_is_unresolved(tmp_path: Path) -> None:
     """A libvirt-free entry point still fails closed for the operations that need libvirt --
     at the point of use rather than at source time, and naming which operation was refused."""

@@ -34,9 +34,17 @@
 #
 # LIBVIRT_OPTIONAL is read, never assigned, here: an entry point that can do useful work without
 # libvirt exports it before sourcing lib.sh or env.sh. LIBVIRT_UNRESOLVED is this file's record of
-# the resulting degraded state, and is `:=` for the same reason LIBVIRT_ENV is -- the file is
-# sourced more than once per shell, and a plain assignment would wipe it on the second source.
-: "${LIBVIRT_UNRESOLVED:=}"
+# the resulting degraded state.
+#
+# Unlike LIBVIRT_ENV it is an OUTPUT, never an input, so it is not `:=`: resolve_libvirt_uri's
+# first statement short-circuits on it, so a value arriving from the environment would disable
+# endpoint resolution for every entry point, opted out or not -- KDIVE_LIBVIRT_URI would be left
+# unset on a host whose contract is fine, and stack-status.sh would report that healthy host as
+# unresolved with a caller-chosen reason string. It still has to survive the second source that
+# stack-status.sh performs (lib.sh then env.sh, one shell), and the resolver this file is about
+# to define is the one thing that tells a re-source from a fresh shell -- so the clear is
+# conditional on that rather than on a second variable. Keep this line ABOVE that definition.
+declare -F resolve_libvirt_uri >/dev/null || LIBVIRT_UNRESOLVED=''
 LIBVIRT_SOCKET_URIS=(
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock'
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock'
