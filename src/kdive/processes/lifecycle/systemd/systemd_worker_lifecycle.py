@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -762,18 +763,47 @@ def _require_prepared_observation(
         raise SystemdUnavailable("worker cgroup membership is unavailable")
 
 
+@dataclass(frozen=True, slots=True)
+class _InvocationIdentity:
+    """One exact systemd invocation, from retained state or from the registered binding."""
+
+    unit: str
+    slot: int
+    boot_id: str
+    invocation_id: str
+
+
+def _state_identity(state: SlotState) -> _InvocationIdentity | None:
+    """Return the retained invocation identity, or ``None`` for an unbound phase."""
+    if state.boot_id is None or state.invocation_id is None:
+        return None
+    return _InvocationIdentity(state.unit, state.slot, state.boot_id, state.invocation_id)
+
+
 def _terminal_observation(
     state: SlotState, observation: UnitObservation | BootObservation
 ) -> TerminationOutcome | None:
+    # The foreign-unit check stays ahead of `_state_identity`, even though `_identity_outcome`
+    # repeats it: the original checked the unit first, so moving it would swap which
+    # `LifecycleConflict` a foreign observation of an unbound state raises.
     if observation.unit != state.unit:
         raise LifecycleConflict("systemd returned a foreign unit observation")
-    if state.boot_id is None or state.invocation_id is None:
+    identity = _state_identity(state)
+    if identity is None:
         raise LifecycleConflict("bound lifecycle phase has no exact invocation")
-    if observation.boot_id != state.boot_id:
+    return _identity_outcome(identity, observation)
+
+
+def _identity_outcome(
+    identity: _InvocationIdentity, observation: UnitObservation | BootObservation
+) -> TerminationOutcome | None:
+    if observation.unit != identity.unit:
+        raise LifecycleConflict("systemd returned a foreign unit observation")
+    if observation.boot_id != identity.boot_id:
         return "killed"
     if isinstance(observation, BootObservation):
         raise SystemdUnavailable("worker invocation is absent on the retained boot")
-    if observation.invocation_id != state.invocation_id:
+    if observation.invocation_id != identity.invocation_id:
         # A unit carries one invocation at a time and is assigned a new INVOCATION_ID only when it
         # leaves an inactive state, so a successor identity on the retained boot proves the
         # retained invocation ended. Its own exit facts went with it, and the observed result and
@@ -785,9 +815,9 @@ def _terminal_observation(
         _log.warning(
             "retained worker invocation was replaced out of band unit=%s slot=%d "
             "retained_invocation=%s observed_invocation=%s",
-            state.unit,
-            state.slot,
-            state.invocation_id,
+            identity.unit,
+            identity.slot,
+            identity.invocation_id,
             observation.invocation_id,
         )
         return "killed"

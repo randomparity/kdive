@@ -5,17 +5,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import shlex
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pydantic import SecretStr
 
 import kdive.config as config_registry
 import kdive.processes.lifecycle.systemd.systemd_diagnostics as diagnostics_module
+import kdive.processes.lifecycle.systemd.systemd_worker_lifecycle as lifecycle
 import kdive.processes.lifecycle.systemd.systemd_worker_runtime as runtime_module
 import kdive.processes.lifecycle.systemd.systemd_worker_state as state_module
 from kdive.domain.catalog.resources import ResourceKind
@@ -27,6 +30,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_lifecycle import (
     EvidenceRejected,
+    LifecycleConflict,
     SystemdWorkerLifecycle,
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
@@ -2443,3 +2447,57 @@ def test_recover_keeps_a_refusal_visible_when_a_later_slot_fails() -> None:
         (2, "dependency_unavailable"),
     ]
     assert stores[0].state == live and authority.terminations == []
+
+
+@pytest.mark.parametrize(
+    "observation_factory",
+    [
+        pytest.param(lambda: _observation(2, "empty"), id="foreign-unit"),
+        pytest.param(lambda: _observation(1, "empty", boot_id="other-boot"), id="boot-mismatch"),
+        pytest.param(lambda: _boot_observation(1), id="absent-on-retained-boot"),
+        pytest.param(lambda: _boot_observation(1, boot_id="other-boot"), id="absent-other-boot"),
+        pytest.param(
+            lambda: _observation(1, "empty", invocation_id="f" * 32), id="successor-invocation"
+        ),
+        pytest.param(lambda: _observation(1, "unknown"), id="unknown-membership"),
+        pytest.param(lambda: _observation(1, "populated"), id="populated-membership"),
+        pytest.param(lambda: _observation(1, "empty", result="success"), id="result-success"),
+        pytest.param(
+            lambda: _observation(1, "empty", result="exit-code", status=1), id="result-exit-code"
+        ),
+        pytest.param(lambda: _observation(1, "empty", result="signal"), id="result-signal"),
+        pytest.param(lambda: _observation(1, "empty", result="oom-kill"), id="result-oom"),
+        pytest.param(lambda: _observation(1, "empty", result="watchdog"), id="result-watchdog"),
+    ],
+)
+def test_identity_outcome_matches_the_state_rules(observation_factory) -> None:
+    """The extraction must preserve every rule `_terminal_observation` applied (#2533 Task 3)."""
+    state = _state(1, SlotPhase.STARTED, invocation_id="1" * 32)
+    identity = lifecycle._InvocationIdentity(
+        state.unit, state.slot, cast(str, state.boot_id), cast(str, state.invocation_id)
+    )
+    observation = observation_factory()
+
+    def _via_state():
+        return lifecycle._terminal_observation(state, observation)
+
+    def _via_identity():
+        return lifecycle._identity_outcome(identity, observation)
+
+    try:
+        expected = _via_state()
+    except Exception as exc:  # noqa: BLE001 - the raised type is the thing under comparison
+        with pytest.raises(type(exc), match=re.escape(str(exc))):
+            _via_identity()
+    else:
+        assert _via_identity() == expected
+
+
+def test_state_identity_is_none_only_for_an_unbound_phase() -> None:
+    """`_terminal_observation` keeps raising its own conflict for a prepared slot."""
+    prepared = _state(1, SlotPhase.PREPARED)
+    assert lifecycle._state_identity(prepared) is None
+    assert lifecycle._state_identity(_state(1, SlotPhase.STARTED)) is not None
+
+    with pytest.raises(LifecycleConflict, match="bound lifecycle phase has no exact invocation"):
+        lifecycle._terminal_observation(prepared, _observation(1, "empty"))
