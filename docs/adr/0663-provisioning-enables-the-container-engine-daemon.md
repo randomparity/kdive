@@ -83,8 +83,8 @@ Two consequences run the other way, and neither is hypothetical. The runner's so
 previously unconditional (the `Add the runner service account to the docker group` task this change
 replaces), becomes conditional on the same probe: a Debian that stopped shipping the packaged unit
 would skip both tasks silently rather than fail. Its apt install of `docker.io` is unconditional and
-the package ships the unit today, so the condition holds — but what checks that is a real run of
-`deploy/ansible/playbooks/runner.yml`, not the play itself. And a deliberately masked
+the package ships the unit today, so the condition holds — but what checks that is a run of
+`deploy/ansible/playbooks/runner.yml` against a real host, not the play itself. And a deliberately masked
 `docker.service` still satisfies the probe, because masking writes a `/etc/systemd/system` symlink
 and leaves the packaged unit in place: the play then fails at the enable with systemd's own
 `Unit /etc/systemd/system/docker.service is masked`, verified on a Fedora 44 host. Unmasking, or

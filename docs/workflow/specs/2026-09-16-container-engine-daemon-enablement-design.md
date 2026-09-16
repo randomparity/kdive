@@ -92,9 +92,13 @@ operator-owned connection, and the role already requires root.
   than the risk, and unmasking is the operator's call.
 - The runner's socket-group grant, unconditional before this change, now skips silently if the
   packaged unit is ever absent rather than failing. Accepted: `live_vm_host`'s apt install of
-  `docker.io` is unconditional and that package ships the unit, and the real-host `runner.yml` arm
-  is what checks it. The play itself does not, and an in-play assert was cut because keyed to
-  distribution it fails the `podman-docker` host criterion 1 requires to skip cleanly.
+  `docker.io` is unconditional and that package ships the unit. What was actually run is a check-mode
+  `runner.yml --check --tags container_runtime` through the `live_vm_host` call site on a real
+  Debian-family host, where all three tasks entered rather than skipped, plus a real
+  non-check grant and enable on that same host through the standalone task file. A full
+  non-check `runner.yml` run was not performed. The play itself does not check this, and an
+  in-play assert was cut because, keyed to distribution, it fails the `podman-docker` host
+  criterion 1 requires to skip cleanly.
 - CI proves gating, ordering, grant target and call-site binding in check mode only; it cannot
   prove a daemon starts, nor that the probe finds a real unit on a real host. Accepted: covered by
   the plan's real-host runs, which include a full `runner.yml` run recording that the runner account

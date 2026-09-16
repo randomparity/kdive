@@ -514,10 +514,12 @@ def container_daemon_grant_target() -> None:
         enable.get("enabled") is True and enable.get("state") == "started",
         "the container-engine daemon task does not both enable and start the service",
     )
+    register = by_name[DAEMON_PROBE].get("register")
+    require(bool(register), "the container-engine probe registers no result to gate on")
     for name in (DAEMON_ENABLE, DAEMON_GRANT):
         require(
-            by_name[name].get("when") == "local_worker_host_engine_unit.stat.exists",
-            f"{name!r} is not gated on the packaged-unit probe",
+            by_name[name].get("when") == f"{register}.stat.exists",
+            f"{name!r} is not gated on the packaged-unit probe's own register {register!r}",
         )
     known = set(defaults) | {"local_worker_host_engine_unit"}
     used = set(re.findall(r"\{\{\s*(local_worker_host_[a-z_]+)", source))

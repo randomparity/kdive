@@ -76,8 +76,10 @@ These are the points where the two families genuinely diverge, not just in packa
   creates the `docker` group empty. `just prepare-local-libvirt-host` now enables and starts
   `docker.service` and adds the operator account to the `docker` group
   ([ADR-0663](../../adr/0663-provisioning-enables-the-container-engine-daemon.md)). It does that on
-  any host carrying `/usr/lib/systemd/system/docker.service`, which includes an Enterprise Linux or
-  SLES host that took the Docker-repository remedy above — this repository still installs no engine
+  any host carrying `/usr/lib/systemd/system/docker.service` — which on Debian/Ubuntu means an
+  engine you installed yourself, since the standalone role declares one only on Fedora and openSUSE
+  Tumbleweed — and that includes an Enterprise Linux or SLES host that took the Docker-repository
+  remedy above — this repository still installs no engine
   there, it only makes one you installed usable. A `podman-docker` host has no such unit, so both
   steps skip and its socket path stays yours. The new group does not reach a login session that
   already existed, so start a fresh one before running `stack-services.sh`.
