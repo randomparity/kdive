@@ -24,10 +24,21 @@ else
   py=(uv run python)
 fi
 
-# 1. Fund the project + mint a token. onboard.sh prints banners + a token-contract heredoc to stdout
-#    alongside its one `export KDIVE_TOKEN=...` line, so eval ONLY that line (eval-ing the whole
-#    capture hits `(advisory)` unbalanced parens under set -e and aborts before the token).
-eval "$("${here}/../live-stack/onboard.sh" | grep '^export KDIVE_TOKEN=')"
+# 1. Fund the project + mint a token. The local-libvirt preflight is a HARD gate here (ADR-0666):
+#    the next steps provision a real domain, so a preflight FAIL is fatal and its own text is the
+#    reason — not a generic infrastructure_failure from systems.get 30 lines later (#2568).
+#
+#    Capture into a variable rather than `eval "$(onboard.sh | grep ...)"`: a command substitution
+#    in an argument list does not fire errexit, so that shape discards onboard.sh's exit status and
+#    a preflight stop would surface as the "did not mint a token" die below — a cause that never
+#    happened. A bare assignment's status IS the substitution's, so this one propagates. Same shape
+#    .github/workflows/live.yml:549 already uses on this script, for the same reason.
+onboard_wiring="$(ONBOARD_PREFLIGHT=required "${here}/../live-stack/onboard.sh")" ||
+  die "onboard.sh failed its local-libvirt preflight (see the FAIL entries above); not provisioning"
+#    onboard.sh prints banners + a token-contract heredoc to stdout alongside its one
+#    `export KDIVE_TOKEN=...` line, so eval ONLY that line (eval-ing the whole capture hits
+#    `(required)` unbalanced parens under set -e and aborts before the token).
+eval "$(grep '^export KDIVE_TOKEN=' <<<"$onboard_wiring")"
 [ -n "${KDIVE_TOKEN:-}" ] || die "onboard.sh did not mint a token"
 
 # The local-libvirt provider only accepts a rootfs path under its allowed root (KDIVE_ROOTFS_DIR);

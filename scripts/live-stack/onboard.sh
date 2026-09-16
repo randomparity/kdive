@@ -6,10 +6,11 @@
 #   just onboard                 # project "demo" (default)
 #   KDIVE_PROJECT=acme just onboard
 #
-# Order: source env.sh -> advisory preflight -> migrate -> seed -> verify -> mint + contract.
+# Order: source env.sh -> preflight -> migrate -> seed -> verify -> mint + contract.
 # Hard gates: migrate and verify-project (the funding rows are present). Advisory (warn,
-# non-fatal): the provider preflight, the seed's resource-discovery side effect, and the token
-# mint. seed-project commits the budget/quota upserts BEFORE it registers discovered resources,
+# non-fatal): the seed's resource-discovery side effect and the token mint. The provider preflight
+# is advisory BY DEFAULT and fatal when the caller declares ONBOARD_PREFLIGHT=required (ADR-0666).
+# seed-project commits the budget/quota upserts BEFORE it registers discovered resources,
 # so a discovery failure (provider unreachable) still leaves a funded project that verify
 # confirms — verify, not the seed exit code, is the funding source of truth.
 #
@@ -24,6 +25,13 @@
 # Env overrides: KDIVE_PROJECT (demo), KDIVE_ROLE (admin), KDIVE_TOKEN_TTL (2592000 = 30d,
 #   default from live-stack/env.sh),
 #   KDIVE_LIMIT_KCU (1000000), KDIVE_MAX_ALLOC (4), KDIVE_MAX_SYS (4).
+#
+# ONBOARD_PREFLIGHT (advisory) — 'advisory' warns and continues on a preflight FAIL; 'required'
+#   stops before migrate with the preflight's own FAIL text as the reason. Unprefixed for
+#   ADR-0659's reason: it is a declaration a CALLER makes about its own next step, not an operator
+#   knob, so it is deliberately absent from kdive.config's registry and the generated reference.
+#   Do NOT export it in an operator shell — every later onboard.sh inherits it, including the one
+#   examples/local-libvirt/demo-up.sh runs, whose first-run workstation case expects 'advisory'.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,8 +57,30 @@ MAX_SYS="${KDIVE_MAX_SYS:-4}"
 
 banner() { printf '\n=== %s ===\n' "$1"; }
 
-banner "preflight (advisory)"
+# The preflight's severity is the CALLER's declaration (ADR-0666), because only the caller knows
+# what it does next. This script's own hard gates are migrate and verify-project, which need the
+# database and no libvirt at all, so no preflight FAIL blocks *its* work — but a caller that goes
+# on to provision needs the FAIL to be fatal, and to read the preflight's own text as the reason
+# rather than a generic infrastructure_failure from a later component (#2568).
+PREFLIGHT="${ONBOARD_PREFLIGHT:-advisory}"
+case "$PREFLIGHT" in
+advisory | required) ;;
+*)
+  printf "ONBOARD_PREFLIGHT=%s is not valid; set 'advisory' (default) or 'required'\n" \
+    "$PREFLIGHT" >&2
+  exit 2
+  ;;
+esac
+
+banner "preflight (${PREFLIGHT})"
 if ! "${repo_root}/scripts/operations/check-local-libvirt.sh"; then
+  if [[ "$PREFLIGHT" == "required" ]]; then
+    echo "ERROR: the local-libvirt preflight FAILED and ONBOARD_PREFLIGHT=required, so this run" >&2
+    echo "       stops here, before migrate. The FAIL entries above are the reason — fix those." >&2
+    echo "       To fund the project without a provisionable provider, re-run with" >&2
+    echo "       ONBOARD_PREFLIGHT=advisory (the default)." >&2
+    exit 1
+  fi
   echo "WARN: local-libvirt preflight reported problems; funding the project anyway." >&2
   echo "      A later 'no schedulable resource' denial is provider readiness, not funding." >&2
 fi
