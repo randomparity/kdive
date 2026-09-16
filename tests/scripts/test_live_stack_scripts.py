@@ -1087,6 +1087,30 @@ def test_an_inherited_degraded_record_does_not_suppress_resolution(tmp_path: Pat
     assert result.stdout == f"{_PUBLISHED_URI}|"
 
 
+def test_repairing_the_endpoint_clears_the_degraded_record(tmp_path: Path) -> None:
+    """The record is the current state, not the first one.
+
+    ADR-0658 sends #2509's next guard into resolve_libvirt_uri's preset-endpoint branch, so a
+    caller supplying an endpoint after a degrade is the shape this function is about to grow. A
+    write-once record would leave require_libvirt_uri refusing an operation the shell can by then
+    perform, and the re-entry guard would skip the #2480 export that supplied value needs.
+    """
+    _, staged = _broken_contract(tmp_path)
+    staged["LIBVIRT_OPTIONAL"] = "1"
+    result = _sourced(
+        ROOT / "scripts/live-stack/env.sh",
+        f'KDIVE_LIBVIRT_URI="{_PUBLISHED_URI}"\n'
+        "resolve_libvirt_uri\n"
+        'require_libvirt_uri "reap kdive domains"\n'
+        'bash -c \'printf "%s|%s" "${KDIVE_LIBVIRT_URI-unset}" "${LIBVIRT_UNRESOLVED-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    # The endpoint reached a child because resolve_libvirt_uri exported it; the record did not,
+    # because it is this file's own state and never leaves the shell that computed it.
+    assert result.stdout == f"{_PUBLISHED_URI}|unset"
+
+
 def test_require_libvirt_uri_refuses_while_the_endpoint_is_unresolved(tmp_path: Path) -> None:
     """A libvirt-free entry point still fails closed for the operations that need libvirt --
     at the point of use rather than at source time, and naming which operation was refused."""
@@ -1137,8 +1161,18 @@ def _isolated_stack_down(tmp_path: Path, events: Path) -> Path:
     script_dir = tmp_path / "scripts" / "live-stack"
     script_dir.mkdir(parents=True)
     shutil.copy(ROOT / "scripts/live-stack/stack-down.sh", script_dir / "stack-down.sh")
+    # The child sources lib.sh under its own `set -euo pipefail`, exactly as the real
+    # worker-lifecycle.sh does, because that is the only thing the `export` on the declaration
+    # buys: a stub that merely echoes cannot abort, so it records the same event list whether or
+    # not the keyword is there, and the arm below would assert nothing about it.
     lifecycle = script_dir / "worker-lifecycle.sh"
-    lifecycle.write_text(f'#!/bin/sh\necho "lifecycle $1" >>"{events}"\n', encoding="utf-8")
+    lifecycle.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'source "${here}/lib.sh"\n'
+        f'echo "lifecycle $1" >>"{events}"\n',
+        encoding="utf-8",
+    )
     lifecycle.chmod(0o755)
     (script_dir / "lib.sh").write_text(
         f'source "{ROOT}/scripts/live-stack/libvirt-uri.sh"\n'
@@ -1176,6 +1210,9 @@ def test_stack_down_refuses_wipe_before_reaching_any_teardown(tmp_path: Path) ->
     assert not events.exists(), events.read_text(encoding="utf-8")
     assert "=== stopping host processes ===" not in result.stdout
     assert "cannot reap kdive domains for --wipe" in result.stderr
+    # The shared message's two routes both need the URI the broken contract just made
+    # unreadable; the operator whose goal is "get this stack down" needs the third one named.
+    assert "re-run without --wipe" in result.stderr
 
 
 def test_stack_down_completes_plain_teardown_on_a_broken_contract(tmp_path: Path) -> None:

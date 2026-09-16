@@ -49,7 +49,13 @@ done
 # drop with the domain reap because the domains and overlays live outside compose, so dropping the
 # volumes while unable to reach libvirt orphans exactly what the pairing exists to prevent.
 if [[ "$wipe" == "1" ]]; then
-  require_libvirt_uri "reap kdive domains for --wipe" || exit 1
+  require_libvirt_uri "reap kdive domains for --wipe" || {
+    # The shared message offers only endpoint repair, and both of its routes need the operator to
+    # know which URI their host publishes -- the fact the broken contract just made unreadable.
+    # Only this caller knows a useful partial operation exists, so only it can name the third way.
+    echo "to stop the stack without reaping, re-run without --wipe" >&2
+    exit 1
+  }
 fi
 
 if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
