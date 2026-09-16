@@ -415,7 +415,12 @@ cleared. Such a slot reports `retired the residual worker slot`.
 *retained* boot, nothing can prove the registered invocation ended — absence within a boot is not
 termination evidence — so recovery refuses that slot rather than clearing it, with the per-slot
 code `recovery_refused_unreadable_identity`. The rest of the sweep still runs. The remedy is a
-reboot, which yields a different boot ID and therefore real evidence. See
+reboot, which yields a different boot ID and therefore real evidence.
+
+A slot reported `recovery_refused_incoherent_row` is a different problem: a `worker_incarnations`
+row whose stored binding does not name an invocation on that slot's unit, which a reboot will not
+clear. That row was not written by the lifecycle contract and needs an operator to reconcile it.
+See
 [ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md) and
 [ADR-0667](../../adr/0667-recovery-names-the-fence-row-by-the-slot-derived-incarnation.md).
 

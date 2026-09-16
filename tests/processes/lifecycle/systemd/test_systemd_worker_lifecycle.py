@@ -344,6 +344,10 @@ class FakeAuthority:
         self.terminated_bindings: list[tuple[str, str | None, str | None]] = []
         # #2533: the rows a slot still holds, keyed by unit, and what was released from them.
         self.rows: dict[str, list[LocalWorkerIncarnation]] = {}
+        # Snapshots taken when a row is handed out, so the release assertion compares values
+        # rather than being satisfied by the record being the very object it was read from.
+        self.row_snapshots: dict[str, dict[str, str]] = {}
+        self.probed_units: list[str] = []
         self.released: list[tuple[str, TerminationOutcome]] = []
         self.recoverable_label = "database:recoverable"
         self.release_label = "database:release"
@@ -377,9 +381,15 @@ class FakeAuthority:
 
     async def recoverable(self, unit: str) -> tuple[LocalWorkerIncarnation, ...]:
         self.events.append(self.recoverable_label)
+        self.probed_units.append(unit)
         if self.fail_recoverable is not None:
             raise self.fail_recoverable
-        return tuple(self.rows.get(unit, ()))
+        held = tuple(self.rows.get(unit, ()))
+        for row in held:
+            self.row_snapshots[row.incarnation] = {
+                key: str(value) for key, value in row.authority_binding.items()
+            }
+        return held
 
     async def release(self, record: LocalWorkerIncarnation, outcome: TerminationOutcome) -> None:
         self.events.append(self.release_label)
@@ -389,9 +399,11 @@ class FakeAuthority:
         # exact match. A fake that skipped this would pass while the real adapter failed.
         unit = record.authority_binding["unit"]
         held = self.rows.get(unit, ())
-        stored = {row.incarnation: row.authority_binding for row in held}
-        assert record.incarnation in stored, "released a row this slot does not hold"
-        assert record.authority_binding == stored[record.incarnation], (
+        assert record.incarnation in {row.incarnation for row in held}, (
+            "released a row this slot does not hold"
+        )
+        offered = {key: str(value) for key, value in record.authority_binding.items()}
+        assert offered == self.row_snapshots[record.incarnation], (
             "released a binding that is not the row's own stored binding"
         )
         self.rows[unit] = [row for row in held if row.incarnation != record.incarnation]
@@ -2751,40 +2763,56 @@ def test_recover_refuses_a_slot_whose_registered_invocation_is_absent_on_the_ret
     assert stores[1].state is None
 
 
-@pytest.mark.parametrize(
-    ("document", "drifted", "rejected"),
-    [
-        pytest.param(None, False, False, id="case-1-no-state-document"),
-        pytest.param("unreadable", False, False, id="case-2-unreadable-document"),
-        pytest.param(None, True, False, id="case-3-drifted-binding"),
-        pytest.param("valid", False, True, id="case-4-rejected-evidence"),
-        pytest.param(None, False, False, id="case-5-unreadable-identity"),
-    ],
-)
-def test_recover_refuses_a_live_unit_in_every_residual_case(
-    document: str | None, drifted: bool, rejected: bool, request: pytest.FixtureRequest
-) -> None:
-    """No fence is ever cleared from under a running worker, in any of the five cases."""
-    started, stores, runtime, authority, clock, _ = _residual_fleet(
-        document=document, drifted=drifted, rejected=rejected
-    )
-    runtime.current[started.unit] = _observation(1, "populated")
+def test_recover_refuses_a_live_unit_before_reading_the_slot_or_the_fence() -> None:
+    """Criterion 3: the populated-cgroup guard is what stops a live worker, and it runs first.
 
-    # The fault really is constructed: the row is active and the slot still holds its files.
-    assert authority.rows[started.unit] != []
-    assert stores[0].state_document == document
-    assert stores[0].environment and stores[0].credential
+    An earlier version of this test parametrized five residual faults against a populated cgroup
+    and asserted nothing happened. Every arm refused at this one guard without reaching the
+    residual path at all, so the parameters were dead and the five arms were one test wearing
+    five names. What actually needs proving is that the guard precedes every read: no slot
+    inspection, and no fence probe.
+    """
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
+    runtime.current[started.unit] = _observation(1, "populated")
+    stores[0].load_calls = 0
 
     response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
 
     assert not response.ok and response.code == "conflict"
     assert [(result.slot, result.code) for result in response.slots] == [(1, "recovery_refused")]
+    # The guard ran before anything read this slot or its fence rows. The other seven slots are
+    # still probed, which is why this asserts on slot 1's unit rather than on the fleet's events.
+    assert stores[0].load_calls == 0
+    assert started.unit not in authority.probed_units
     assert authority.released == [] and authority.terminations == []
     assert authority.rows[started.unit] != []
     assert stores[0].discards == 0
-    assert stores[0].state_document == document
-    assert stores[0].environment and stores[0].credential
     assert runtime.resets == []
+
+
+def test_residual_retirement_refuses_a_row_whose_invocation_is_still_live() -> None:
+    """The residual path's own live-worker backstop, which `recover` never lets it reach.
+
+    `_recover_slot` refuses a populated cgroup before dispatching, so this branch is defence in
+    depth against a future reordering. It is exercised directly rather than left unproven: a
+    reordering that removed the outer guard would otherwise land with nothing failing.
+    """
+    started, stores, runtime, authority, clock, _ = _residual_fleet(document=None)
+    coordinator = _coordinator(stores, runtime, authority, clock)
+    live = _observation(1, "populated", invocation_id=cast(str, started.invocation_id))
+    inspection = stores[0].inspect()
+
+    recovery = asyncio.run(
+        coordinator._retire_residual_slot(
+            stores[0], inspection, live, _deadline(clock), _deadline(clock)
+        )
+    )
+
+    assert recovery.refusal == "recovery_refused"
+    assert not recovery.cleared
+    assert authority.released == []
+    assert authority.rows[started.unit] != []
+    assert stores[0].discards == 0
 
 
 def test_recover_skips_a_row_registered_by_another_host() -> None:
@@ -2819,7 +2847,7 @@ def test_recover_refuses_a_slot_before_releasing_any_of_its_rows() -> None:
 
     assert not response.ok and response.code == "conflict"
     assert [(result.slot, result.code) for result in response.slots] == [
-        (1, "recovery_refused_unreadable_identity")
+        (1, "recovery_refused_incoherent_row")
     ]
     assert authority.released == []
     assert len(authority.rows[started.unit]) == 2

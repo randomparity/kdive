@@ -62,10 +62,17 @@ _RECOVERY_REFUSED = "recovery_refused"
 # a live-process refusal, which is transient. Relaxing this takes an ADR amendment; the operator's
 # remedy is a reboot, which yields a different boot ID and so real evidence.
 _RECOVERY_REFUSED_IDENTITY = "recovery_refused_unreadable_identity"
+# A row whose stored binding does not name an invocation on this slot's own unit. It is not the
+# unreadable-identity case and must not share its code: that one is cleared by a reboot, which
+# yields a fresh boot ID, while this one is a row only an operator can reconcile.
+_RECOVERY_REFUSED_INCOHERENT = "recovery_refused_incoherent_row"
 _REFUSAL_MESSAGES = {
     _RECOVERY_REFUSED: "fixed worker unit still has live processes",
     _RECOVERY_REFUSED_IDENTITY: (
         "registered invocation identity is unreadable; ADR-0657 forbids recovering it"
+    ),
+    _RECOVERY_REFUSED_INCOHERENT: (
+        "registered fence row does not name an invocation on this slot's unit"
     ),
 }
 _REFUSALS = frozenset(_REFUSAL_MESSAGES)
@@ -462,7 +469,9 @@ class SystemdWorkerLifecycle:
                 )
                 continue
             identity = _registered_identity(store, record)
-            if identity is None or _identity_is_unreadable(identity, observation):
+            if identity is None:
+                return _Recovery(refusal=_RECOVERY_REFUSED_INCOHERENT)
+            if _identity_is_unreadable(identity, observation):
                 return _Recovery(refusal=_RECOVERY_REFUSED_IDENTITY)
             outcome = _identity_outcome(identity, observation)
             if outcome is None:
