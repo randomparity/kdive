@@ -773,6 +773,10 @@ jobs:
           # KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
+          # Map the warm-store rootfs onto the spine env the same way the tcg job does for its own
+          # variable: env.sh exports no KDIVE_GUEST_IMAGE (#2518), and without this the console-part
+          # proof skipped here instead of running, which the tier has no `<N> passed` gate to catch.
+          export KDIVE_GUEST_IMAGE="$KDIVE_LIVE_VM_ROOTFS"
           # Keep the published URI exported for mint, preflight and pytest; env.sh honors it.
           KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
           export KDIVE_LIVE_VM_SYSTEM_ID
