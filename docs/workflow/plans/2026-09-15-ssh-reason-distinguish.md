@@ -31,7 +31,9 @@ grew. Band stays S; scope, design, and task list are unchanged.
 - `docs/guide/reference/systems.md` is generated — never hand-edit; run `just docs`.
   `docs/adr/README.md` has no row table; add no index row.
 - Guardrails, all part of `just ci`: `just lint`, `just type`, `just test-changed`,
-  `just docs-check`, `just docs-links`.
+  `just docs-check`, `just docs-links`, `just docs-paths`, `just records`. `docs-paths` resolves
+  every concrete `docs/<path>` reference in changed markdown, so a glob or a truncated path in a
+  plan or spec fails it — write whole filenames.
 
 ## File map
 
@@ -76,9 +78,11 @@ Modifies `providers/local_libvirt/lifecycle/connect.py` and `providers/ports/lif
    the same libvirt endpoint"`. No host path or libvirt URI enters the message.
 4. Tag the no-forward raise in `_resolved_ssh_port` with `reason=_REASON_NO_FORWARD`, leaving its
    message exactly as it is.
-5. Narrow the `except` in `recorded_ssh_endpoint`: replace
-   `if exc.category is ErrorCategory.CONFIGURATION_ERROR` with
-   `if exc.details.get("reason") == _REASON_NO_FORWARD`. Rewrite the docstring to say `None` means
+5. Narrow the `except` in `recorded_ssh_endpoint`: keep the
+   `exc.category is ErrorCategory.CONFIGURATION_ERROR` test and conjoin
+   `exc.details.get("reason") == _REASON_NO_FORWARD`. Both conjuncts are load-bearing — the reason
+   narrows to the absent forward, and the category keeps the predicate no wider than the contract.
+   Rewrite the docstring to say `None` means
    exactly one thing — the domain was read and records no forward (ADR-0298, narrowed by ADR-0658)
    — while a missing domain propagates as `system_domain_not_found`.
 6. Update the test at line 746: add `details={"reason": "ssh_not_provisioned"}` to the
@@ -87,7 +91,7 @@ Modifies `providers/local_libvirt/lifecycle/connect.py` and `providers/ports/lif
 7. Update the `recorded_ssh_endpoint` docstring in `providers/ports/lifecycle.py`: `None` means no
    recorded SSH forward, and an implementation may raise `CONFIGURATION_ERROR` for a condition that
    is not that. Keep the existing `Raises:` entry.
-8. Run `just lint` and `just type`; expect exit 0, no warnings. Commit
+8. Run `just lint`, `just type`, and `just docs-paths`; expect exit 0, no warnings. Commit
    `fix(providers): distinguish a missing domain from a missing SSH forward`.
 
 
@@ -148,7 +152,8 @@ into `data` — and the worker prefixes job detail keys to `failure_detail_reaso
    says the split-endpoint symptom surfaces as `ssh_not_provisioned`; it now surfaces as
    `system_domain_not_found` — update that sentence only. Then add an amendment banner under
    `## Status` in `docs/adr/0298-ssh-reachable-runtime-probe.md`, copying the blockquote form
-   `docs/adr/0574-*.md` uses: bolded "Partially superseded by" plus a relative markdown link whose
+   `docs/adr/0574-systemd-supervises-host-worker-incarnations.md` uses: bolded
+   "Partially superseded by" plus a relative markdown link whose
    text is the number 0658 and whose target is this change's ADR filename, then `(2026-09-15):` and
    one line saying `None` now means a read domain recording no forward. Nothing else there changes.
 7. Run `just docs`, then `just docs-check`; expect exit 0 and a diff confined to the three tool

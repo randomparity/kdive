@@ -208,7 +208,14 @@ class LocalLibvirtConnect:
         try:
             return self._resolve_ssh_endpoint(system)
         except CategorizedError as exc:
-            if exc.details.get("reason") == _REASON_NO_FORWARD:
+            # Both conjuncts are load-bearing: the reason narrows this to the absent forward, and
+            # the category keeps the predicate no wider than the contract ADR-0658 and the port
+            # docstring state. A non-configuration fault carrying the same reason string would
+            # otherwise be reported to the caller as "this System has no SSH forward".
+            if (
+                exc.category is ErrorCategory.CONFIGURATION_ERROR
+                and exc.details.get("reason") == _REASON_NO_FORWARD
+            ):
                 return None
             raise
 

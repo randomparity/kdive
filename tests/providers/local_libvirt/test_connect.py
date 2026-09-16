@@ -793,6 +793,27 @@ def test_recorded_ssh_endpoint_reraises_untagged_configuration_error() -> None:
         connector.recorded_ssh_endpoint(SystemHandle("sys-1"))
 
 
+def test_recorded_ssh_endpoint_reraises_non_configuration_carrying_the_forward_reason() -> None:
+    """The category conjunct is load-bearing, not redundant with the reason.
+
+    `None` is documented as narrowing a CONFIGURATION_ERROR (ADR-0298, ADR-0658). A fault in any
+    other category that happens to carry the same reason string must not be reported to the caller
+    as "this System has no SSH forward".
+    """
+
+    def _raise(_s):
+        raise CategorizedError(
+            "libvirt read fault",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"reason": "ssh_not_provisioned"},
+        )
+
+    connector = _recorded_endpoint_connector(_raise)
+    with pytest.raises(CategorizedError) as excinfo:
+        connector.recorded_ssh_endpoint(SystemHandle("sys-1"))
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 def test_recorded_ssh_endpoint_reraises_infrastructure_failure() -> None:
     def _raise(_s):
         raise CategorizedError("libvirt down", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
