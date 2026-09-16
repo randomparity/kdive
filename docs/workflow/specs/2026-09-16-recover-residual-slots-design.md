@@ -129,46 +129,23 @@ fence from a database superuser — covered by the same reasoning, and by the ac
 
 ## Validation
 
-- **The read accessor returns only active local rows for the exact slot prefix.**
-  `Mode: focused-test` — `tests/worker_lifecycle/test_authority_store.py`, a case registering
-  rows for slots 1 and 2 plus a terminated row for slot 1 and asserting only slot 1's active row
-  returns. Red: `AttributeError` on the absent wrapper. Green:
-  `just test-verbose tests/worker_lifecycle/test_authority_store.py -k recoverable`.
-- **A slot-prefix lookup cannot be widened by a crafted unit name or a crafted incarnation.**
-  `Mode: focused-test` — same file, one case passing a unit name containing `%` and `_` and
-  asserting the wrapper raises rather than matching foreign rows, and one registering a row whose
-  incarnation extends the slot-1 prefix with a longer suffix and asserting it does not match.
-  Red: rows returned. Green: as above.
-- **The fence releases when the row's own stored binding is echoed back.**
-  `Mode: focused-test` — same file, a case terminating via a binding read back from the accessor
-  rather than a caller-built one. Red: `terminate_worker_incarnation` returns false. Green: as
-  above.
-- **`inspect()` distinguishes absent, unparseable, and valid state.** `Mode: focused-test` —
-  `tests/processes/lifecycle/systemd/test_systemd_worker_state.py`, three cases. Red:
-  `AttributeError`. Green:
-  `just test-verbose tests/processes/lifecycle/systemd/test_systemd_worker_state.py -k inspect`.
-- **`discard_unrecoverable()` clears every slot file without a parseable state and still requires
-  root.** `Mode: focused-test` — same file, one clearing case and one non-root refusal. Red:
-  `AttributeError`. Green: as above, `-k discard_unrecoverable`.
-- **Each of cases 1-4 clears facts and releases the fence in one `recover` call.**
-  `Mode: focused-test` — `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`,
-  one case per residual case, each constructing the fault and asserting both the cleared slot and
-  the released row. Red: the case-specific failure named in Problem above. Green:
-  `just test-verbose tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py -k residual`.
-- **Case 5 is refused with its own disposition.** `Mode: focused-test` — same file, one case
-  asserting the distinct per-slot code and that no fence was released and no file removed. Red:
-  the refusal is indistinguishable from the cgroup-unreadable refusal. Green: as above,
-  `-k unreadable_identity`.
-- **A live unit is refused in each of the five cases.** `Mode: focused-test` — same file, one
-  parametrized case over the five faults with a populated cgroup, asserting no termination and no
-  file removal in every arm. Green: as above, `-k live_is_refused`.
-- **The protocol identity is unchanged.** `Mode: focused-test` — same file, a case asserting
-  `lifecycle_protocol_identity()` equals the value recorded on the base commit. Red: a
-  hypothetical request/response field change. Green: as above, `-k protocol_identity`.
-- **Migration ordering.** `Mode: task-test-not-applicable` — the changed surface is the migration
-  file's ordinal position, which has no executable observation of its own; the repository's
-  `migration-order-check` recipe is the consumer that validates it, and it runs in `just ci`.
+The per-task **Verification** inventories in
+`docs/workflow/plans/2026-09-16-recover-residual-slots.md` carry one entry per material changed
+contract, with the observable contract, test case, expected red failure, and exact focused green
+command. They are not restated here: in the full-spec lane the plan owns that inventory, and two
+copies drift.
 
-Beyond the focused tests: `just lint`, `just type`, `just test-changed`, then the full
-`just ci` including `lock-check`, `lint-workflows`, and `container-arch-check`, which no workflow
-runs (#2582).
+Coverage of the success criteria above: criterion 1 by Task 4's four residual cases; criterion 2
+by Task 4's unreadable-identity case; criterion 3 by Task 4's parametrized live-unit case;
+criterion 4 by Task 3's equivalence case, which pins that every outcome still comes from
+`_identity_outcome` over a real observation; criterion 5 by Task 4's protocol-identity case
+against a literal captured from the base commit; criterion 6 by the plan's closing verification.
+
+One contract has no task-specific executable observation: **migration ordering**.
+`Mode: task-test-not-applicable` — the changed surface is the migration file's ordinal position,
+which has no observation of its own; the repository's `migration-order-check` recipe is the
+consumer that validates it, and it runs in `just ci`.
+
+Beyond the focused tests: `just lint`, `just type`, `just test-changed`, then the full `just ci`
+including `lock-check`, `lint-workflows`, and `container-arch-check`, which no workflow runs
+(#2582).
