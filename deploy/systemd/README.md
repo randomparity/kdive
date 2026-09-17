@@ -82,7 +82,10 @@ plain `qemu:///session`, whose socket is per-uid, it reaches root's own daemon i
 different account's domains. Either way escalation is the wrong credential for the endpoint.
 Because the reap unlinks overlays as the operator on that path, the operator must be able to
 **write** `/var/lib/kdive/rootfs`, not merely list it. The installed mode-`2770` directory grants
-that; a directory that has drifted away from it reports one refused removal per overlay.
+that. A directory that has drifted away from it is refused up front, before anything is stopped or
+dropped, so the run does not lose the data volumes to a reap it could never finish. The refusal
+needs an overlay to be at stake: an unwritable directory holding none has nothing to remove, and
+that reap still succeeds.
 On a host with no lifecycle contract the endpoint resolves to root-owned `qemu:///system` and the
 same reap keeps `sudo`, which is why the privilege is derived from the endpoint rather than fixed.
 This governs the reap specifically, and creation is a separate question from access: the provider

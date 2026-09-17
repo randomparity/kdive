@@ -135,6 +135,38 @@ if [[ "$wipe" == "1" ]]; then
     echo "or stop the stack without reaping by re-running without --wipe" >&2
     exit 1
   }
+  # ADR-0662 routes the overlay `rm` through reap_run, so on the session branch it is the invoking
+  # account's and unlinking needs WRITE on the overlay DIRECTORY. The `! -r || ! -x` refusal beside
+  # the sweep never covered that: it was written when the removal was root's and could not be
+  # denied, so listability was the whole of what the sweep could lose.
+  #
+  # HERE rather than beside the sweep, for the same reason the liveness probe is here: the sweep
+  # runs after `docker compose --profile obs down -v`, so discovering it there means the volumes
+  # are already gone while every overlay survives one denied `rm` at a time -- the half-wipe this
+  # gate refuses wholesale.
+  #
+  # Gated on a NON-EMPTY glob, never on the mode alone. An unwritable directory holding no
+  # overlays has nothing to remove, so the reap genuinely succeeds; refusing it would report a
+  # clean reap as a failure, which is the defect #2515 closed. The glob is the calling shell's and
+  # needs list access to expand, so a directory that is not listable yields no matches here and
+  # falls through to the sweep's `! -r || ! -x` refusal, which already names that case.
+  #
+  # Session branch only: on the escalating branch root's `rm` does not need write, and a
+  # root-owned 0755 overlay directory is the ordinary bare-host shape, so testing `-w`
+  # unconditionally would refuse a host that works today.
+  if ((!reap_as_root)) && [[ -d "$KDIVE_ROOTFS_DIR" && ! -w "$KDIVE_ROOTFS_DIR" ]]; then
+    shopt -s nullglob
+    gate_overlays=("${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2)
+    shopt -u nullglob
+    if ((${#gate_overlays[@]})); then
+      echo "cannot reap the ${#gate_overlays[@]} overlay(s) in ${KDIVE_ROOTFS_DIR} for --wipe:" >&2
+      echo "  not writable as $(id -un), and a session endpoint's overlays are removed as the" >&2
+      echo "  invoking account (ADR-0662), so every removal would be refused" >&2
+      echo "nothing has been stopped or dropped; re-run as the account that owns it or one in" >&2
+      echo "its group (ls -ld names them), or re-run without --wipe to stop the stack" >&2
+      exit 1
+    fi
+  fi
 fi
 
 if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
@@ -238,6 +270,11 @@ if [[ "$wipe" == "1" ]]; then
     # is ever attempted. Hence this refusal rather than an empty sweep. On the session branch the
     # asymmetry is gone (ADR-0662), but the refusal stays: it is what makes the escalating branch
     # safe, and an operator who cannot list the directory has the same problem either way.
+    #
+    # Write on the directory is NOT tested here. The --wipe gate proved it before anything was
+    # stopped, which is the only place a refusal can still spare the data volumes; like the
+    # liveness probe it proves it at gate time, and a mode that changed since then lands in the
+    # end-state grading below as a surviving overlay carrying rm's own diagnostic.
     unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory \
 and an unreadable one cannot be told apart; re-run as the account that owns it or one in its \
 group (ls -ld names them)")

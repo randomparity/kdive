@@ -1709,6 +1709,99 @@ def test_wipe_reaps_a_system_endpoint_under_sudo(tmp_path: Path) -> None:
     assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
+def test_wipe_refuses_an_unwritable_overlay_directory_before_dropping_the_volumes(
+    tmp_path: Path,
+) -> None:
+    """ADR-0662 moved the overlay `rm` onto the invoking account, so listable is no longer enough.
+
+    The `! -r || ! -x` refusal beside the sweep was written when the removal was root's and could
+    not be denied. Unlinking needs *write* on the directory, which neither of those tests covers,
+    and `0500` is the mode that separates them: the glob still expands, so without this gate the
+    run reaches the removals and every one of them is refused.
+
+    Reachable without an exotic host: `stack-services.sh` runs
+    `sudo install -d -o "$(id -un)" -m 0755` on this same path when it is not already writable, so
+    an account other than the operator running bring-up leaves the installer's mode-`2770`
+    directory as a `0755` one the operator can no longer write.
+
+    Asserted where it matters, which is *when* the refusal lands rather than that it lands at all.
+    The sweep runs after `docker compose --profile obs down -v`, so a refusal there would arrive
+    with the data volumes already gone and every overlay still present -- the half-wipe the
+    up-front gate exists to refuse wholesale. The empty event log is what carries that: not a
+    banner absent from stdout, but no teardown step having run.
+    """
+    result = _wipe_reap(
+        tmp_path,
+        domains=(),
+        overlays=("alpha-overlay.qcow2",),
+        rootfs_mode=0o500,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "events").exists(), (tmp_path / "events").read_text(encoding="utf-8")
+    assert "=== stopping host processes ===" not in result.stdout
+    assert "not writable" in result.stderr, result.stderr
+    assert str(tmp_path / "rootfs") in result.stderr
+    # A refusal that names no way forward is a worse operator experience than the denied rm was.
+    assert "re-run as the account that owns it" in result.stderr
+    assert "nothing has been stopped or dropped" in result.stderr
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
+def test_wipe_reaps_an_unwritable_but_empty_overlay_directory_cleanly(tmp_path: Path) -> None:
+    """The gate is keyed on an overlay being at stake, not on the directory's mode.
+
+    This is the arm that separates the refusal from #2515's defect, and it is not hypothetical: a
+    permissions-only `! -w` test was written earlier in this change's review round and reverted
+    for failing exactly here. An unwritable directory holding no overlays has nothing to remove,
+    so the reap removes everything there was to remove and succeeds. Grading that as a failure is
+    #2515 -- a report that does not describe the end state -- re-introduced in the opposite
+    direction from the one #2515 found it in.
+
+    The domains are left at their default so the run is a *fully successful* reap rather than a
+    no-op: two domains really do go away, and the run still has to reach `done` and exit 0.
+    """
+    result = _wipe_reap(tmp_path, overlays=(), rootfs_mode=0o500)
+    assert result.returncode == 0, result.stderr
+    assert "not writable" not in result.stderr, result.stderr
+    assert "removed domain kdive-alpha" in result.stdout
+    assert "removed domain kdive-beta" in result.stdout
+    assert "reaped 2 item(s)" in result.stdout
+    assert result.stdout.rstrip().endswith("done")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
+def test_wipe_keeps_sweeping_an_unwritable_overlay_directory_on_a_system_endpoint(
+    tmp_path: Path,
+) -> None:
+    """The gate is branch-local: on the escalating branch root's `rm` does not need write.
+
+    A root-owned `0755` overlay directory is the ordinary bare-host shape, so a `! -w` test
+    applied to both branches would refuse a host that works today -- the same defect aimed the
+    other way. The assertion is that the run reached the removal, not merely that it printed no
+    refusal: an arm checking only for the absence of the message would pass just as well against
+    a run that died somewhere else.
+
+    The run's exit status is deliberately not asserted. The stub `sudo` is a pass-through, so the
+    `rm` it records runs with the test account's own rights against a directory that account
+    cannot write, and the overlay survives. That is the harness, not the script; the escalation
+    log is the part that is evidence.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _recording_sudo(log),
+        domains=(),
+        overlays=("alpha-overlay.qcow2",),
+        rootfs_mode=0o500,
+        uri="qemu:///system",
+    )
+    assert "not writable" not in result.stderr, result.stderr
+    escalated = log.read_text(encoding="utf-8")
+    assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
+
+
 def _stack_status_libvirt_slice(tmp_path: Path) -> Path:
     """stack-status.sh's setup plus its libvirt section, runnable on its own.
 
