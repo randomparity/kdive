@@ -76,8 +76,9 @@ done
 #   ADR-0662 settles it: ONE privilege, derived from the endpoint, for observation and mutation
 #   alike, so the two can no longer disagree.
 #
-#   probe_kdive_domains -- the up-front gate's LIVENESS check, which ADR-0662's decision
-#   does not reach: it governs "the enumeration that grades the reap", and this one grades nothing. It runs as the INVOKING ACCOUNT, and that is load-bearing. The probe is the
+#   probe_kdive_domains -- the up-front gate's LIVENESS check, which ADR-0662's decision does not
+#   reach: it governs "the enumeration that grades the reap", and this one grades nothing. It runs
+#   as the INVOKING ACCOUNT, and that is load-bearing. The probe is the
 #   operator's own authorization for the endpoint they aimed at, so an operator who cannot reach
 #   that daemon is refused before anything is stopped or dropped. Escalate it and `sudo` becomes
 #   the thing that makes an unreachable endpoint reachable: a run aimed at the wrong daemon would
@@ -130,13 +131,21 @@ if [[ "$wipe" == "1" ]]; then
   # domains.
   #
   # The query is stripped because the published URIs carry the socket path there, not the scope.
-  # Classification is textual and an unclassifiable value falls to the escalating branch, so the
-  # failure direction is today's behaviour rather than a silent loss of privilege.
+  # The fragment goes with it: `*/session` is anchored at end-of-string, so a `#fragment` left on
+  # the end would put a genuine session endpoint on the ESCALATING branch -- the direction that
+  # aims root at an operator-owned daemon, which is what this classifier exists to avoid.
+  #
+  # Classification is textual, and the direction is worth stating precisely rather than
+  # reassuringly. A value whose PATH COMPONENT is not `/session` falls to the escalating branch,
+  # which is main's behaviour. A value whose path component IS `/session` while its `socket=`
+  # names another daemon de-escalates -- but loudly, through the writability gate and the
+  # end-state re-read, never as a silent success. Deliberately NOT grown into a URI parser:
+  # ADR-0662 rejected asking libvirt, and wrong-daemon endpoints stay with #2559.
   #
   # HERE, not at the top of the file: KDIVE_LIBVIRT_URI may be unset in the LIBVIRT_OPTIONAL
   # degraded state, and a top-level `case` would kill a plain teardown on a broken contract under
   # `set -u`. This point is past require_libvirt_uri, so the endpoint is in hand.
-  case "${KDIVE_LIBVIRT_URI%%\?*}" in
+  case "${KDIVE_LIBVIRT_URI%%[?#]*}" in
   */session) reap_as_root=0 ;;
   *) reap_as_root=1 ;;
   esac

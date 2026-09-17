@@ -1735,6 +1735,31 @@ def test_wipe_reaps_a_system_endpoint_under_sudo(tmp_path: Path) -> None:
     assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
 
 
+def test_wipe_does_not_escalate_a_session_endpoint_carrying_a_fragment(tmp_path: Path) -> None:
+    """A `#fragment` must not push a session endpoint onto the escalating branch.
+
+    The classifier matches `*/session` anchored at end-of-string, so anything trailing the path
+    defeats it. The query is stripped because the published URIs carry `socket=` there; a fragment
+    has to go with it for the same reason, and leaving it on is the harmful direction of the
+    misclassification -- it aims root at an operator-owned daemon, which is exactly what deriving
+    the privilege from the endpoint exists to prevent.
+
+    Asserted as the absence of any escalation across the whole run, the same way the plain session
+    arm is: a log file that was never created is what says no call asked for root.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _recording_sudo(log),
+        overlays=("alpha-overlay.qcow2",),
+        uri="qemu:///session#frag",
+    )
+    assert result.returncode == 0, result.stderr
+    assert not log.exists(), log.read_text(encoding="utf-8")
+    assert "removed domain kdive-alpha" in result.stdout
+    assert list((tmp_path / "rootfs").iterdir()) == []
+
+
 def test_wipe_refuses_an_endpoint_the_operator_cannot_reach_even_when_sudo_can(
     tmp_path: Path,
 ) -> None:
