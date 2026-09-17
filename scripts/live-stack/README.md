@@ -29,9 +29,12 @@ elevates via sudo to socket-activate the system daemon.
 `stack-down.sh --wipe` **exits non-zero when the reap is incomplete**, naming each domain still
 defined and each overlay still present, with the diagnostic `virsh` or `rm` gave for it. Both
 halves are graded by re-reading the end state, not by the exit status of the call that attempted
-the removal. An unreachable libvirt endpoint is refused at the gate, before anything is stopped or
-dropped; every other failure is discovered after `docker compose down -v` has run, so the data
-volumes are already gone when it is reported and the error says so.
+the removal. Two failures are refused at the gate, before anything is stopped or dropped: an
+unreachable libvirt endpoint, and — on a session endpoint, where the overlays are unlinked as the
+invoking account — an overlay directory that still holds overlays and is not writable. Every other
+failure is discovered after `docker compose down -v` has run, so the data volumes are already gone
+when it is reported and the error says so. An unwritable overlay directory holding *no* overlays is
+not a failure at all: there is nothing to unlink, and the reap succeeds.
 
 `--wipe` names the endpoint it consulted on every zero-domain report, because a daemon that is
 running but holds no `kdive-*` domains answers an enumeration exactly as a clean host does. If it

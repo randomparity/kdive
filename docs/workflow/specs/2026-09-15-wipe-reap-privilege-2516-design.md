@@ -117,12 +117,20 @@ caller lacks.
    the existing `! -r || ! -x` refusal already turns an unlistable directory into a named failure
    rather than an empty sweep, which is the only outcome the asymmetry could corrupt.
    The session branch inverts which half is weaker: `rm` is now the calling shell's, so unlinking
-   needs **write** on the directory, which `-r`/`-x` never covered. No precondition is added for
-   it here. A `! -w` refusal was written and reverted inside this change's review round — keyed on
-   permissions alone it reported a fully successful reap of an empty directory as a failure, which
-   is #2515's defect — and the residue is carried out as an unresolved finding. It is not a
-   regression this change introduces: before it, the same host produced one denied `rm` per
-   overlay, graded on the same end state.
+   needs **write** on the directory, which `-r`/`-x` never covered. That **is** a regression this
+   change introduces, and the precondition below is what closes it. The earlier reading — that the
+   same host already produced one denied `rm` per overlay — was wrong: on `main` the block's only
+   `rm` is an unconditional `sudo rm -f`, so root unlinks whatever the directory's mode, no denial
+   is produced, and write on the directory is never required. Routing that `rm` through the
+   endpoint-derived privilege is what makes it required.
+   The precondition is in the up-front `--wipe` gate: on the session branch, an overlay directory
+   that is not writable and holds at least one `*-overlay.qcow2` refuses the run before anything
+   is stopped or dropped. It is keyed on that **non-empty glob**, never on the mode alone, and
+   that condition is load-bearing rather than incidental — a bare `! -w` refusal was written and
+   reverted inside this change's review round because, keyed on permissions alone, it reported a
+   fully successful reap of an empty overlay directory as a failure, which is #2515's defect. The
+   gate bounds the writability class only; an unreadable directory still refuses at the sweep,
+   after the volume drop, as it does on `main`.
 4. #2515's reporting contract is unchanged: the existing reap arms stay green untouched.
 5. `deploy/systemd/README.md` states the operator-credential expectation for the `--wipe` reap.
 
@@ -132,6 +140,6 @@ caller lacks.
 | --- | --- |
 | Success 1 | `focused-test`: `test_wipe_reaps_a_session_endpoint_without_sudo` — a recording `sudo` stub is never invoked across the whole run |
 | Success 2 | `focused-test`: `test_wipe_reaps_a_system_endpoint_under_sudo` — the stub's log carries the `list`, the `undefine`, and the `rm` |
-| Success 3 | `focused-test`: both arms assert over the whole run, so all three enumerations -- the gate's, the reap's and the end-state re-read -- are inside the assertion on either branch. The non-session branch's overlay residue is asserted as stated, not as absent: `test_wipe_reaps_a_system_endpoint_under_sudo` requires the `rm` in the escalation log while the surrounding tests stay the shell's |
+| Success 3 | `focused-test`: both arms assert over the whole run, so all three enumerations -- the gate's, the reap's and the end-state re-read -- are inside the assertion on either branch. The non-session branch's overlay residue is asserted as stated, not as absent: `test_wipe_reaps_a_system_endpoint_under_sudo` requires the `rm` in the escalation log while the surrounding tests stay the shell's. The writability precondition adds four arms: `test_wipe_refuses_an_unwritable_overlay_directory_before_dropping_the_volumes` (refused with an empty teardown event log, so the refusal precedes the volume drop), `test_wipe_reaps_an_unwritable_but_empty_overlay_directory_cleanly` (the non-empty-glob condition — a clean reap is not graded as a failure), `test_wipe_keeps_sweeping_an_unwritable_overlay_directory_on_a_system_endpoint` (branch-local, so the escalating branch is not refused), and `test_wipe_refuses_a_readable_but_non_traversable_overlay_directory_at_the_gate` (`0400` expands the glob, so it is caught here rather than at the sweep) |
 | Success 4 | `focused-test`: the existing `test_wipe_*` arms, run unmodified |
 | Success 5 | `task-test-not-applicable`: operator prose with no executable consumer; a test searching for wording would assert nothing about behaviour |

@@ -45,10 +45,20 @@ observation and mutation always carry the same identity.
 - Classification is textual: an endpoint whose scope is not in its path would be misclassified.
   Both published URIs and the bare-host default carry it there.
 - The overlay `rm` becomes the invoking account's on the session branch, so the operator must be
-  able to **write** the overlay directory, not merely list it. The installed `2770` directory
-  grants that; a host whose directory has drifted away from it gets one denied `rm` per overlay,
-  reported by the existing end-state grading. No precondition is added for it here — see the
-  unresolved finding carried out of this change's review round.
+  able to **write** the overlay directory, not merely list it. That requirement is one this
+  decision introduces: before it the block's only `rm` was an unconditional `sudo rm -f`, so root
+  unlinked regardless of the directory's mode and write was never needed. The guard beside the
+  sweep tests `! -r || ! -x` — listability — and cannot see it, because it was written when the
+  removal could not be refused.
+- A precondition is therefore added for it, in the up-front `--wipe` gate: on the session branch,
+  an overlay directory that is not writable and holds at least one `*-overlay.qcow2` refuses the
+  run before anything is stopped or dropped. The gate is where it has to live — the sweep runs
+  after `docker compose --profile obs down -v`, so a refusal there arrives with the data volumes
+  already gone. It is keyed on that **non-empty glob** rather than on the mode alone, and that
+  condition is load-bearing: a bare `! -w` refusal grades a clean reap of an *empty* overlay
+  directory as a failure, which is the defect #2515 closed. The installed `2770` directory is
+  writable by its owner and never reaches the refusal. This bounds the writability class only; an
+  unreadable directory still refuses at the sweep, after the volume drop, as it does today.
 - Which *daemon* answers is unchanged for the published `?socket=` endpoints, where the socket
   path selects it; for a plain `qemu:///session` it changes from root's per-uid daemon to the
   invoking account's, which is the point.
