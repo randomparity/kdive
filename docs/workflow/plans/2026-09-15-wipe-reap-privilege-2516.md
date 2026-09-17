@@ -15,15 +15,14 @@ Expected implementation size: 60–90 changed lines (S) — from the file map be
 one wrapper, four call sites, two pytest arms plus a one-parameter helper change, one README
 paragraph.
 
-**Corrected after implementation: 160 changed lines, of which 51 are code.** The estimate counted
-code and did not budget prose, while steps 1-3 and 7 of this plan each *mandate* a comment
-carrying ADR-0662's reasoning, and both `stack-down.sh` and the reap's existing pytest arms are
-written at a comment density this change matches rather than sets. The split measured on the
-finished diff: `stack-down.sh` 19 code / 55 comment, the two arms 32 code / 43 docstring,
-`deploy/systemd/README.md` 11 lines of the one prescribed paragraph. The code total lands inside
-the original band; the band itself was the wrong unit. Scope, the ADR-0662 decision, the file map
-and the S complexity are all unchanged — nothing was added beyond steps 1-7 plus the scope
-audit's five accepted corrections, so this is a correction to the estimate, not to the work.
+**Overtaken in review — read the spec and ADR-0662 instead.** Three remedies were added to this
+change after the plan was written: an overlay-directory writability precondition, de-escalating the
+up-front gate's liveness probe, and stripping the fragment before classifying the endpoint. The
+plan has not been rewritten to track them. Plans are transient here and specs and ADRs are the
+durable record, so `docs/workflow/specs/2026-09-15-wipe-reap-privilege-2516-design.md` and
+`docs/adr/0662-the-wipe-reap-privilege-follows-the-endpoint.md` are what describe what this change
+does and why. The steps, file map, acceptance criteria and size estimate below all predate those
+remedies and none of them is authoritative.
 
 ## Global Constraints
 
@@ -158,8 +157,6 @@ and the exported `KDIVE_LIBVIRT_URI`. Both confirmed present in that file at thi
 
 ### Acceptance criteria
 
-- Every `virsh` and `rm` in the reap, and the enumeration at both the gate and the reap, go
-  through `reap_run`; no bare `sudo` remains inside the `--wipe` path.
 - Both new arms pass, and each was observed failing with the script change absent.
 - Every pre-existing `test_wipe_*` arm passes unmodified.
 - `deploy/systemd/README.md` states the reap's operator-credential expectation, does not widen
