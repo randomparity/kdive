@@ -147,9 +147,18 @@ if [[ "$wipe" == "1" ]]; then
   #
   # Gated on a NON-EMPTY glob, never on the mode alone. An unwritable directory holding no
   # overlays has nothing to remove, so the reap genuinely succeeds; refusing it would report a
-  # clean reap as a failure, which is the defect #2515 closed. The glob is the calling shell's and
-  # needs list access to expand, so a directory that is not listable yields no matches here and
-  # falls through to the sweep's `! -r || ! -x` refusal, which already names that case.
+  # clean reap as a failure, which is the defect #2515 closed.
+  #
+  # The glob is the calling shell's and needs READ on the directory, not traversal -- bash matches
+  # names straight out of readdir without stat'ing them. So a directory with no read bit yields no
+  # matches here and falls through to the sweep's `! -r || ! -x` refusal, while a readable but
+  # non-traversable one is caught HERE instead. Either is a true report: unwritable is all this
+  # message claims, and both modes are.
+  #
+  # That fall-through is a narrower guarantee than it looks, so it is stated rather than implied:
+  # the sweep's refusal runs AFTER the volume drop, so this gate closes the writability class of
+  # half-wipe and the unreadable class still refuses too late. Left that way deliberately -- it is
+  # the behaviour main already has, and hoisting it is a separate question from this one.
   #
   # Session branch only: on the escalating branch root's `rm` does not need write, and a
   # root-owned 0755 overlay directory is the ordinary bare-host shape, so testing `-w`
@@ -162,8 +171,14 @@ if [[ "$wipe" == "1" ]]; then
       echo "cannot reap the ${#gate_overlays[@]} overlay(s) in ${KDIVE_ROOTFS_DIR} for --wipe:" >&2
       echo "  not writable as $(id -un), and a session endpoint's overlays are removed as the" >&2
       echo "  invoking account (ADR-0662), so every removal would be refused" >&2
-      echo "nothing has been stopped or dropped; re-run as the account that owns it or one in" >&2
-      echo "its group (ls -ld names them), or re-run without --wipe to stop the stack" >&2
+      # Not the sweep's "owner or one in its group": that advice is true for LISTING, and this is
+      # about write. The drifted shape this gate exists for is a root-owned 0755 directory, whose
+      # group has r-x and no write -- so on the one host the refusal is most likely to name, half
+      # of that advice cannot work. The installed 2770 shape is where the group can, and it never
+      # reaches this message because it is writable.
+      echo "nothing has been stopped or dropped; re-run as the account that owns it, or one in" >&2
+      echo "its group if the mode grants the group write (ls -ld names both), or re-run without" >&2
+      echo "--wipe to stop the stack" >&2
       exit 1
     fi
   fi

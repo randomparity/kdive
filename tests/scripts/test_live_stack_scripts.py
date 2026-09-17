@@ -1744,7 +1744,41 @@ def test_wipe_refuses_an_unwritable_overlay_directory_before_dropping_the_volume
     assert str(tmp_path / "rootfs") in result.stderr
     # A refusal that names no way forward is a worse operator experience than the denied rm was.
     assert "re-run as the account that owns it" in result.stderr
+    # ...and the way forward has to be true on the shape the refusal actually names. The sweep's
+    # "owner or one in its group" is advice about *listing*; on the root-owned 0755 directory this
+    # gate exists for, the group has r-x and no write, so group membership unlinks nothing. The
+    # qualifier is the whole difference between guidance and a wrong turn.
+    assert "if the mode grants the group write" in result.stderr
     assert "nothing has been stopped or dropped" in result.stderr
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads and writes a 0400 directory regardless")
+def test_wipe_refuses_a_readable_but_non_traversable_overlay_directory_at_the_gate(
+    tmp_path: Path,
+) -> None:
+    """The glob needs READ on the directory, not traversal, so `0400` is caught here not there.
+
+    Bash matches `*-overlay.qcow2` straight out of `readdir` without stat'ing the entries, so the
+    read bit alone expands the glob. `0400` therefore reaches the gate with a non-empty match and
+    an unwritable directory, and is refused before anything is stopped -- even though it would
+    also have failed the sweep's `! -r || ! -x` test further down.
+
+    Which refusal wins matters, because they do not land in the same place: the sweep's runs after
+    `docker compose --profile obs down -v`. Pinning it here is what keeps the gate's comment from
+    drifting back to the intuitive-but-wrong claim that anything failing `-r || -x` yields an
+    empty glob; a mode with no read bit does, and this one does not.
+    """
+    result = _wipe_reap(
+        tmp_path,
+        domains=(),
+        overlays=("alpha-overlay.qcow2",),
+        rootfs_mode=0o400,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "events").exists(), (tmp_path / "events").read_text(encoding="utf-8")
+    assert "not writable" in result.stderr, result.stderr
+    assert "not listable" not in result.stderr, result.stderr
     assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
 
 
