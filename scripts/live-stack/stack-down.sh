@@ -64,8 +64,9 @@ done
 # invocation, so that property holds wherever the list is read.
 #
 # TWO entry points, because the two readers want different privilege for different reasons. The
-# privilege is bound to the NAME rather than passed as an argument, so a later call site cannot
-# get it wrong by leaving one off -- there is no default to inherit, only a choice of function.
+# privilege is bound to the NAME rather than passed as an argument, so a later CALL SITE picks a
+# privilege by choosing an entry point, never by remembering an argument. `_kdive_domains_via` is
+# the shared body, not an entry point -- read the list through one of the two names below.
 #
 #   enumerate_kdive_domains -- the list that GRADES the reap. It carries the endpoint's privilege,
 #   alongside the destroy, undefine and rm it grades. This used to enumerate as the invoking
@@ -76,8 +77,7 @@ done
 #   alike, so the two can no longer disagree.
 #
 #   probe_kdive_domains -- the up-front gate's LIVENESS check, which ADR-0662's decision
-#   deliberately does not reach: it governs "the enumeration that grades the reap", and this one
-#   grades nothing. It runs as the INVOKING ACCOUNT, and that is load-bearing. The probe is the
+#   does not reach: it governs "the enumeration that grades the reap", and this one grades nothing. It runs as the INVOKING ACCOUNT, and that is load-bearing. The probe is the
 #   operator's own authorization for the endpoint they aimed at, so an operator who cannot reach
 #   that daemon is refused before anything is stopped or dropped. Escalate it and `sudo` becomes
 #   the thing that makes an unreachable endpoint reachable: a run aimed at the wrong daemon would

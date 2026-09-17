@@ -20,8 +20,8 @@ as the invoking account, everything else keeps `sudo`. That decision governs the
 grades the reap, the `destroy` and `undefine` that perform it, and the overlay `rm`, so
 observation and mutation always carry the same identity.
 
-The up-front `--wipe` gate's **liveness probe** is outside that scope, by the same sentence: it
-grades nothing. It proves the endpoint answers before the teardown begins, and it runs as the
+The Decision above governs those four calls. The up-front `--wipe` gate's **liveness probe** is not
+one of them, because it grades nothing. It proves the endpoint answers before the teardown begins, and it runs as the
 **invoking account** on both branches. That keeps it the operator's own authorization for the
 daemon they aimed at — the one check that can still tell an operator they are pointed somewhere
 they have no business reaping.
@@ -41,7 +41,8 @@ they have no business reaping.
   overrides the endpoint to `qemu:///system` is refused there, because the contract keeps them out
   of root's daemon.
   That refusal is the reason for the carve-out, and it is worth stating as a property rather than
-  a preference: **escalation must not be what makes an unreachable endpoint reachable.** Had the
+  a preference: **for this gate, escalation must not be what makes an unreachable endpoint
+  reachable.** Had the
   probe followed the endpoint's privilege, `sudo virsh` would answer it on every non-session
   endpoint and the gate could never refuse one. A run aimed at the wrong daemon would then pass
   the gate, drop the compose data volumes irreversibly, find zero domains where it looked, and
