@@ -5,6 +5,9 @@
   **non-gated** criterion tier (§1 non-gated portion: #3/#4/#6), its in-process
   `RequestContext` construction (§3), the teardown-via-`Discovery.list_owned` assertion
   (§2, #5), and the pinned fixtures + preflight (§4) remain in force.
+  §4's missing-fixture skip is **narrowed for the native `live_vm` tier's `KDIVE_GUEST_IMAGE`**,
+  by [ADR-0664](0664-native-live-vm-tier-fails-loud-on-a-missing-guest-image.md);
+  `KDIVE_KERNEL_SRC` and every other tier are unaffected.
 - **Date:** 2026-06-04
 - **Issue:** #26 (M0: End-to-end walking-skeleton integration test)
 - **Depends on:** every M0 plane (#3–#25) — this issue exercises their handlers, not
@@ -164,6 +167,20 @@ test depend on network availability and upstream artifact stability at run time,
 multi-minute downloads inside a "test." Separating fixture *production* (scripts, run once by
 the operator) from fixture *consumption* (the test, which only checks presence) keeps the
 gated test fast to start and its skip reason honest.
+
+### Amendment (2026-09-16): the native `live_vm` tier fails loud on a missing guest image (#2547)
+
+This is an amendment rather than a rewrite because a later decision partly supersedes one claim
+in this section, and the record stays append-only. This section's preflight idiom holds that "a
+missing fixture is a clear, actionable skip, never a confusing mid-path failure." #2518 (epic
+#2497) narrows that claim for one prerequisite in one tier:
+[ADR-0664](0664-native-live-vm-tier-fails-loud-on-a-missing-guest-image.md) records that the
+native `live_vm` tier's `KDIVE_GUEST_IMAGE` check now fails the run rather than skipping it when
+the variable is unset or points at a missing file.
+
+Everything else in this section is unchanged: `KDIVE_KERNEL_SRC` still skips in every tier, and
+the `live_stack` tier's own `KDIVE_GUEST_IMAGE` check still skips on the same variable — see
+ADR-0664 for the boundary and why the two tiers are allowed to disagree.
 
 ## Consequences
 

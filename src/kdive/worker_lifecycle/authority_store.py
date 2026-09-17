@@ -209,6 +209,35 @@ async def authenticate_worker_incarnation(
     return _record(row)
 
 
+_MAX_RECOVERABLE_ROWS = 16
+
+
+async def recoverable_worker_incarnations(
+    conn: AsyncConnection, unit: str
+) -> tuple[LocalWorkerIncarnation, ...]:
+    """Return the active local rows one fixed slot holds, named by its derived prefix."""
+    require_top_level_transaction(conn, "recoverable_worker_incarnations")
+    async with conn.transaction():
+        rows = await (
+            await conn.execute(
+                "SELECT incarnation, authority_binding, fence_protocol "
+                "FROM public.recoverable_worker_incarnations(%s)",
+                (unit,),
+            )
+        ).fetchall()
+    if len(rows) > _MAX_RECOVERABLE_ROWS:
+        raise RuntimeError(f"slot unit {unit} holds an implausible number of active fences")
+    return tuple(
+        LocalWorkerIncarnation(
+            cast(str, row[0]),
+            "local",
+            cast(LocalAuthorityBinding, _validated_binding("local", row[1])),
+            cast(int, row[2]),
+        )
+        for row in rows
+    )
+
+
 @overload
 async def terminate_worker_incarnation(
     conn: AsyncConnection,

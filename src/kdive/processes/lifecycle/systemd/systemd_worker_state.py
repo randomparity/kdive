@@ -11,6 +11,8 @@ import socket
 import stat
 import warnings
 from contextlib import suppress
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
@@ -108,6 +110,23 @@ with warnings.catch_warnings():
             }
 
 
+class SlotResidue(StrEnum):
+    """What one slot directory holds, before any validation is attempted."""
+
+    EMPTY = "empty"
+    STATE_ABSENT = "state-absent"
+    STATE_UNREADABLE = "state-unreadable"
+    STATE_VALID = "state-valid"
+
+
+@dataclass(frozen=True, slots=True)
+class SlotInspection:
+    """A validation-free reading of one slot, with its state where one parses."""
+
+    residue: SlotResidue
+    state: SlotState | None
+
+
 class SlotStore:
     """Persist one derived systemd worker slot without caller-selected descendants."""
 
@@ -175,6 +194,29 @@ class SlotStore:
             return SlotState.model_validate_json(data)
         except ValueError as exc:
             raise StateConflict(f"slot {self.slot} state is malformed") from exc
+        finally:
+            os.close(descriptor)
+
+    def inspect(self) -> SlotInspection:
+        """Report what this slot holds without letting an unreadable document raise.
+
+        ``load`` collapses "no slot", "no document" and "unparseable document" into ``None`` or a
+        raised ``StateConflict``. Recovery has to tell them apart to report which residual case it
+        met; it must not branch on ``EMPTY``, which a provisioned host never produces because the
+        installer pre-creates all eight slot directories.
+        """
+        descriptor = self._slot_descriptor(create=False)
+        if descriptor is None:
+            return SlotInspection(SlotResidue.EMPTY, None)
+        try:
+            try:
+                data = self._read(descriptor, "state.json")
+            except FileNotFoundError:
+                return SlotInspection(SlotResidue.STATE_ABSENT, None)
+            try:
+                return SlotInspection(SlotResidue.STATE_VALID, SlotState.model_validate_json(data))
+            except ValueError:
+                return SlotInspection(SlotResidue.STATE_UNREADABLE, None)
         finally:
             os.close(descriptor)
 
@@ -254,6 +296,33 @@ class SlotStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+    def discard_unrecoverable(self) -> bool:
+        """Remove every retained file for this slot, reporting whether anything was removed.
+
+        ``cleanup_terminated`` is the evidenced path and keeps its guards. This is the
+        unevidenced one ADR-0657 allows for a slot proven dead: it keeps the root requirement
+        and the slot-permission validation ``_slot_descriptor`` performs, and drops only the
+        comparison against a retained state that, in #2533's cases 1 and 2, does not exist.
+        The caller releases the fence first, so a crash here leaves files with no fence rather
+        than a fence with no files.
+        """
+        self._require_root()
+        descriptor = self._slot_descriptor(create=False)
+        if descriptor is None:
+            return False
+        removed = False
+        try:
+            for name in ("worker.env", "worker-incarnation.credential", "release", "state.json"):
+                try:
+                    os.unlink(name, dir_fd=descriptor)
+                except FileNotFoundError:
+                    continue
+                removed = True
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return removed
 
     def _slot_descriptor(self, *, create: bool) -> int | None:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW

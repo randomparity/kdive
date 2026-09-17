@@ -475,8 +475,8 @@ test-compose-volumes:
 
 # Lint and format-check the shell scripts across the repo's listed directories.
 lint-shell:
-    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples deploy/systemd .github/scripts | xargs shellcheck
-    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples deploy/systemd .github/scripts
+    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts | xargs shellcheck
+    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts
 
 # Lint and syntax-check the Ansible automation (deploy/ansible).
 lint-ansible:
