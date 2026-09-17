@@ -20,6 +20,12 @@ as the invoking account, everything else keeps `sudo`. That decision governs the
 grades the reap, the `destroy` and `undefine` that perform it, and the overlay `rm`, so
 observation and mutation always carry the same identity.
 
+The up-front `--wipe` gate's **liveness probe** is outside that scope, by the same sentence: it
+grades nothing. It proves the endpoint answers before the teardown begins, and it runs as the
+**invoking account** on both branches. That keeps it the operator's own authorization for the
+daemon they aimed at — the one check that can still tell an operator they are pointed somewhere
+they have no business reaping.
+
 ## Consequences
 
 - On a provisioned host the reap needs no root. The operator reaches the mode-`0770` socket and
@@ -28,20 +34,23 @@ observation and mutation always carry the same identity.
   `operator:kdive-live-libvirt` mode `2770`. `kdive-live-libvirt` membership is how the *worker*
   accounts reach the same two paths; both are access paths the contract publishes, and neither
   is root's.
-- On a bare host the up-front `--wipe` gate now enumerates under `sudo`, so an operator who
-  cannot escalate is refused before anything is stopped rather than mid-wipe. That moves the
-  run's first escalation ahead of the irreversibility warning and the `Type 'wipe'` confirmation,
-  so a host configured to prompt asks for the password before the operator has confirmed, and the
-  refreshed sudo timestamp outlives an abort at the confirmation. Kept, but not because the
-  ordering is forced: the confirmation block itself precedes every destructive step, so moving
-  the gate below it would still refuse before anything is stopped. The reason to keep the gate
-  first is narrower — refusing before asking spares the operator a confirmation on a run that
-  cannot proceed, and `--wipe --yes` skips the prompt entirely, so the ordering only ever shows
-  on the interactive bare-host path. Two alternatives were weighed and declined as
-  confirmation-UX changes independent of this decision: moving the gate below the confirmation,
-  and printing the irreversibility warning ahead of the gate while leaving the prompt where it
-  is (which splits the warning from the confirmation it qualifies, and warns about
-  irreversibility on runs the gate then refuses).
+- The gate's probe runs as the invoking account on every endpoint, so an operator is refused up
+  front whenever the daemon they aimed at will not answer *them*. On a bare host, where the
+  operator is normally in the `libvirt` group, it answers and the run proceeds to a reap that
+  escalates — the behaviour before this decision, unchanged. On a provisioned host an operator who
+  overrides the endpoint to `qemu:///system` is refused there, because the contract keeps them out
+  of root's daemon.
+  That refusal is the reason for the carve-out, and it is worth stating as a property rather than
+  a preference: **escalation must not be what makes an unreachable endpoint reachable.** Had the
+  probe followed the endpoint's privilege, `sudo virsh` would answer it on every non-session
+  endpoint and the gate could never refuse one. A run aimed at the wrong daemon would then pass
+  the gate, drop the compose data volumes irreversibly, find zero domains where it looked, and
+  sweep every overlay whose domains are alive on the daemon it did not ask — reporting success and
+  exiting 0. Grading and mutation still share one identity, which is what this decision is for;
+  the probe needs no identity agreement with them precisely because it grades nothing.
+  Because the first escalation is therefore at the reap, after the `Type 'wipe'` confirmation, a
+  host configured to prompt for a password asks only on a run the operator has already confirmed,
+  and no sudo timestamp is refreshed by a run that aborts at the prompt.
 - Classification is textual: an endpoint whose scope is not in its path would be misclassified.
   Both published URIs and the bare-host default carry it there.
 - The overlay `rm` becomes the invoking account's on the session branch, so the operator must be

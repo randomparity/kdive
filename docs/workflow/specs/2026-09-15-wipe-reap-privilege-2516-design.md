@@ -109,7 +109,13 @@ caller lacks.
 
 1. On a session endpoint none of the four reap commands — enumeration, `destroy`, `undefine`,
    overlay `rm` — runs under `sudo`.
-2. On a non-session endpoint all four keep `sudo`.
+2. On a non-session endpoint all four keep `sudo`. The up-front gate's liveness probe is not one
+   of the four: it grades nothing, so it runs as the invoking account on **both** branches and
+   stays the operator's own authorization for the endpoint they aimed at. An operator who cannot
+   reach that daemon is refused before anything is stopped or dropped. This is what keeps
+   escalation from being the thing that makes an unreachable endpoint reachable — with an
+   escalated probe, a run aimed at the wrong daemon passes the gate, drops the data volumes, finds
+   zero domains, and sweeps overlays whose domains are alive elsewhere, exiting 0.
 3. The libvirt enumeration that grades the domain reap carries the same privilege as the domain
    mutations, on both branches. The overlay half is symmetric only on the session branch: on the
    non-session branch the `-d`/`-r`/`-x` tests, the glob and the `[[ ! -e ]]` re-read stay in the
@@ -140,6 +146,7 @@ caller lacks.
 | --- | --- |
 | Success 1 | `focused-test`: `test_wipe_reaps_a_session_endpoint_without_sudo` — a recording `sudo` stub is never invoked across the whole run |
 | Success 2 | `focused-test`: `test_wipe_reaps_a_system_endpoint_under_sudo` — the stub's log carries the `list`, the `undefine`, and the `rm` |
-| Success 3 | `focused-test`: both arms assert over the whole run, so all three enumerations -- the gate's, the reap's and the end-state re-read -- are inside the assertion on either branch. The non-session branch's overlay residue is asserted as stated, not as absent: `test_wipe_reaps_a_system_endpoint_under_sudo` requires the `rm` in the escalation log while the surrounding tests stay the shell's. The writability precondition adds four arms: `test_wipe_refuses_an_unwritable_overlay_directory_before_dropping_the_volumes` (refused with an empty teardown event log, so the refusal precedes the volume drop), `test_wipe_reaps_an_unwritable_but_empty_overlay_directory_cleanly` (the non-empty-glob condition — a clean reap is not graded as a failure), `test_wipe_keeps_sweeping_an_unwritable_overlay_directory_on_a_system_endpoint` (branch-local, so the escalating branch is not refused), and `test_wipe_refuses_a_readable_but_non_traversable_overlay_directory_at_the_gate` (`0400` expands the glob, so it is caught here rather than at the sweep) |
+| Success 2 (probe) | `focused-test`: `test_wipe_refuses_an_endpoint_the_operator_cannot_reach_even_when_sudo_can` -- a system endpoint that answers root and refuses the invoking account is refused at the gate, with an empty teardown event log, the overlays still present, and the escalation log never created |
+| Success 3 | `focused-test`: both arms assert over the whole run, so the reap's enumeration and the end-state re-read are inside the assertion on either branch; the gate's probe is deliberately outside it, being unescalated on both branches by Success 2. The non-session branch's overlay residue is asserted as stated, not as absent: `test_wipe_reaps_a_system_endpoint_under_sudo` requires the `rm` in the escalation log while the surrounding tests stay the shell's. The writability precondition adds four arms: `test_wipe_refuses_an_unwritable_overlay_directory_before_dropping_the_volumes` (refused with an empty teardown event log, so the refusal precedes the volume drop), `test_wipe_reaps_an_unwritable_but_empty_overlay_directory_cleanly` (the non-empty-glob condition — a clean reap is not graded as a failure), `test_wipe_keeps_sweeping_an_unwritable_overlay_directory_on_a_system_endpoint` (branch-local, so the escalating branch is not refused), and `test_wipe_refuses_a_readable_but_non_traversable_overlay_directory_at_the_gate` (`0400` expands the glob, so it is caught here rather than at the sweep) |
 | Success 4 | `focused-test`: the existing `test_wipe_*` arms, run unmodified |
 | Success 5 | `task-test-not-applicable`: operator prose with no executable consumer; a test searching for wording would assert nothing about behaviour |
