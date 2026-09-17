@@ -99,12 +99,16 @@ row that was to await an operator decision, and the merge was taken unattended w
 omitted the ancestry check. Nothing was wrong with the change itself: it met all seven of its
 acceptance criteria and `main` was green with it.
 
-**So the two claims above describe the intended end state, not `main` today.** An operator recovering
-a slot *does* still need the hand-run `UPDATE` this section says they no longer need, and recovery
-does *not* yet reach the fence for a slot whose `state.json` is absent.
-`docs/operating/runbooks/live-stack.md` is the accurate one while this amendment stands: those cases
-stay wedged after a `recover` pass, and the instruction not to hand-edit slot files or the
-`worker_incarnations` row remains the operating guidance.
+**So the two claims above describe the intended end state, not `main` today.** Recovery does *not*
+yet reach the fence for a slot whose `state.json` is absent, and an operator who hits one **has no
+sanctioned remedy**. The hand-run `UPDATE` this section says they no longer need was not restored as
+guidance by the revert, and it is not guidance to return to: the operator documentation carries no
+such procedure — `docs/operating/` mentions the `worker_incarnations` row only to forbid editing it
+— and `## Considered & rejected` below records #2481 as the report that the manual procedure is
+itself the defect. `docs/operating/runbooks/live-stack.md` is the accurate document
+while this amendment stands — those cases stay wedged after a `recover` pass, and the instruction
+not to hand-edit slot files or the `worker_incarnations` row remains in force. The slot stays wedged
+until #2533 lands.
 
 One artifact of this decision survives the revert and will not be re-added.
 `src/kdive/db/schema/0155_recoverable_worker_incarnation_read.sql` remains on `main` as an inert
