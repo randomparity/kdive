@@ -46,19 +46,21 @@ the lifecycle contract — session endpoint, operator in `kdive-live-libvirt`; (
 - An operator on a session host outside `kdive-live-libvirt` is refused at the gate rather than
   escalating around it. Accepted: that is the contract's access path, and the README already
   tells them to start a new login session.
-- An operator on a bare host without `sudo` is refused at the gate instead of mid-wipe.
-  Accepted: strictly earlier than the existing failure, and bounded to a refusal.
-- On the non-session branch the gate's enumeration is now the run's first `sudo`, so a host
-  configured to prompt asks for the password before the irreversibility warning and the
-  `Type 'wipe'` confirmation, and the refreshed sudo timestamp outlives an abort at that prompt.
-  Accepted: refusing before asking spares the operator a confirmation on a run that cannot
-  proceed, and `--wipe --yes` skips the prompt entirely, so the ordering only shows on the
-  interactive bare-host path. Not because the ordering is forced — the confirmation block itself
-  precedes every destructive step, so moving the gate below it would still refuse before anything
-  is stopped. Two alternatives were weighed and declined as confirmation-UX changes independent
-  of the privilege decision: moving the gate below the confirmation, and printing the warning
-  ahead of the gate while leaving the confirmation where it is (which separates the warning from
-  the confirmation it qualifies and warns about irreversibility on runs the gate then refuses).
+- An operator on a bare host who reaches `qemu:///system` unescalated but cannot `sudo` passes the
+  gate, because the gate probes as them and the daemon answers. `docker compose --profile obs
+  down -v` then drops the volumes and the reap's first escalated call fails. Accepted: a **loud**
+  half-wipe — the end-state grading names every survivor and the run exits non-zero — and
+  unchanged from `main`, whose gate probes bare for the same reason this one does.
+- The gate performs no `sudo` at all, so the run's first escalation is at the reap, after the
+  irreversibility warning and the `Type 'wipe'` confirmation. Accepted, and better than the
+  alternative: a host configured to prompt asks only on a run the operator has already confirmed,
+  and a run aborted at that confirmation refreshes no sudo timestamp.
+- An operator on a bare host who holds `sudo` but is outside the host's `libvirt` group is refused
+  at the gate, even though the escalated reap would have succeeded. Accepted as the price of the
+  probe being the operator's own authorization for the endpoint: escalating it is what would make
+  an unreachable endpoint reachable, turning a `--wipe` aimed at the wrong daemon into a full
+  overlay sweep that reports success. A refusal the operator can fix by group membership is the
+  cheaper failure. Unchanged from `main`, which probes bare for the same reason.
 - A URI whose scope is not in its path is misclassified. Accepted, but **not** because it is
   unreachable — an earlier draft of this entry said so and was wrong. The two published URIs and
   the bare-host default all carry the scope in the path, but they are only three of the four
