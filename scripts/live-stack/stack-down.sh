@@ -59,23 +59,42 @@ done
 # Cited by name, not by line: that passage has already moved once.
 #
 # ONE virsh call, not a status probe plus a separate name read: a daemon lost between two calls
-# would return an empty list with exit 0, which is the silent no-op this function exists to refuse,
-# reached through the gap between the probe and the data.
+# would return an empty list with exit 0, which is the silent no-op this exists to refuse, reached
+# through the gap between the probe and the data. Both entry points below share this single
+# invocation, so that property holds wherever the list is read.
 #
-# Routed through reap_run, not bare. This used to enumerate as the invoking account while destroy
-# and undefine escalated, so for an explicit per-identity endpoint (`qemu:///session`,
-# `qemu+ssh://`) the list that GRADES the reap could come from a different daemon than the one the
-# removal MUTATED -- #2515 recorded the reporting consequence and left the privilege to #2516.
-# ADR-0662 settles it: ONE privilege, derived from the endpoint, for observation and mutation
-# alike, so the two can no longer disagree.
-enumerate_kdive_domains() {
+# TWO entry points, because the two readers want different privilege for different reasons. The
+# privilege is bound to the NAME rather than passed as an argument, so a later call site cannot
+# get it wrong by leaving one off -- there is no default to inherit, only a choice of function.
+#
+#   enumerate_kdive_domains -- the list that GRADES the reap. It carries the endpoint's privilege,
+#   alongside the destroy, undefine and rm it grades. This used to enumerate as the invoking
+#   account while the mutations escalated, so for an explicit per-identity endpoint
+#   (`qemu:///session`, `qemu+ssh://`) the list could come from a different daemon than the one the
+#   removal MUTATED -- #2515 recorded the reporting consequence and left the privilege to #2516.
+#   ADR-0662 settles it: ONE privilege, derived from the endpoint, for observation and mutation
+#   alike, so the two can no longer disagree.
+#
+#   probe_kdive_domains -- the up-front gate's LIVENESS check, which ADR-0662's decision
+#   deliberately does not reach: it governs "the enumeration that grades the reap", and this one
+#   grades nothing. It runs as the INVOKING ACCOUNT, and that is load-bearing. The probe is the
+#   operator's own authorization for the endpoint they aimed at, so an operator who cannot reach
+#   that daemon is refused before anything is stopped or dropped. Escalate it and `sudo` becomes
+#   the thing that makes an unreachable endpoint reachable: a run aimed at the wrong daemon would
+#   pass the gate, drop the data volumes, find zero domains there, and sweep every overlay whose
+#   domains are alive on the daemon it did not ask -- reporting success. Needing no identity
+#   agreement with the mutations is exactly why it can afford to stay unescalated.
+_kdive_domains_via() {
   local out
-  out="$(reap_run virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
+  out="$("$@" virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
     printf '%s' "${out:-virsh list failed and said nothing}"
     return 1
   }
   grep -E '^kdive-' <<<"$out" || true
 }
+
+enumerate_kdive_domains() { _kdive_domains_via reap_run; }
+probe_kdive_domains() { _kdive_domains_via; }
 
 # ADR-0662: the --wipe reap's privilege follows the endpoint it was published. reap_as_root is set
 # in the --wipe branch below and DELIBERATELY nowhere else -- under `set -u` a call from outside
@@ -128,7 +147,12 @@ if [[ "$wipe" == "1" ]]; then
   # and the shape ADR-0659 prescribes refusing wholesale instead. Enumeration is read-only, so it
   # is safe before anything is stopped. The reap enumerates again regardless: this proves liveness
   # at gate time, not at reap time, and a daemon lost in between still lands in `unreaped` there.
-  gate_out="$(enumerate_kdive_domains)" || {
+  #
+  # probe_kdive_domains, NOT enumerate_kdive_domains: this call runs as the invoking account on
+  # both branches, so it is the operator's own authorization for the endpoint and refuses a daemon
+  # they cannot reach. See the two entry points above for why escalating it is the one thing that
+  # turns this gate from a refusal into a rubber stamp.
+  gate_out="$(probe_kdive_domains)" || {
     echo "cannot reach ${KDIVE_LIBVIRT_URI} to reap kdive domains for --wipe:" >&2
     echo "  ${gate_out}" >&2
     echo "nothing has been stopped or dropped; restore the endpoint and retry," >&2

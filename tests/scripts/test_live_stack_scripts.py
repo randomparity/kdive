@@ -1385,6 +1385,32 @@ def _recording_sudo(log: Path) -> str:
     return f'sudo() {{ echo "$*" >>"{log}"; "$@"; }}\n'
 
 
+def _system_daemon_closed_to_the_operator(log: Path) -> str:
+    """A host where the system daemon answers root and refuses the invoking account.
+
+    This is the provisioned-host shape: the lifecycle contract publishes a per-uid session socket
+    precisely so operator and worker accounts stay out of root's daemon, so `virsh -c
+    qemu:///system` is a permission error for them and succeeds only under `sudo`. The stub
+    distinguishes the two by having `sudo` mark the call it is running, which is the only thing
+    separating them here -- everything else behaves as `_REAP_STUBS`.
+    """
+    return (
+        f'sudo() {{ echo "$*" >>"{log}"; _escalated=1; "$@"; local rc=$?; _escalated=0; '
+        "return $rc; }\n"
+        "virsh() {\n"
+        '  if [[ "${_escalated:-0}" != "1" ]]; then\n'
+        '    echo "error: failed to connect to the hypervisor: Permission denied" >&2\n'
+        "    return 1\n"
+        "  fi\n"
+        '  case "$3" in\n'
+        '  list) ls "$defined" ;;\n'
+        '  undefine) command rm -f "${defined}/$4" ;;\n'
+        "  esac\n"
+        "  return 0\n"
+        "}\n"
+    )
+
+
 def _wipe_reap(
     tmp_path: Path,
     lib_extra: str = "",
@@ -1707,6 +1733,46 @@ def test_wipe_reaps_a_system_endpoint_under_sudo(tmp_path: Path) -> None:
     assert "virsh -c qemu:///system destroy kdive-alpha" in escalated, escalated
     assert "virsh -c qemu:///system undefine kdive-alpha" in escalated, escalated
     assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
+
+
+def test_wipe_refuses_an_endpoint_the_operator_cannot_reach_even_when_sudo_can(
+    tmp_path: Path,
+) -> None:
+    """The gate's probe is the operator's own authorization, so `sudo` must not answer it for them.
+
+    ADR-0662 gives the reap one privilege derived from the endpoint, but its decision governs *the
+    enumeration that grades the reap* -- and the up-front gate's probe grades nothing. Routing the
+    probe through that privilege too would escalate it on every non-session endpoint, and `sudo
+    virsh` always connects, so the refusal would be gone.
+
+    The case that makes it matter is the provisioned host, which is the deployment the lifecycle
+    contract exists for: the published endpoint is a per-uid session socket and the operator is
+    deliberately kept out of root's daemon. An operator who overrides the endpoint to
+    `qemu:///system` -- which `libvirt-uri.sh` itself suggests as a repair -- is aiming at a daemon
+    holding none of their domains. Unescalated, that probe is a permission error and the run stops
+    here. Escalated, it would succeed, the volumes would be dropped, the endpoint would honestly
+    report zero domains, and every overlay would be swept out from under domains still running on
+    the session daemon -- with the run printing `done` and exiting 0.
+
+    The empty event log is the assertion that carries it: not a banner absent from stdout, but no
+    teardown step having run.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _system_daemon_closed_to_the_operator(log),
+        overlays=("alpha-overlay.qcow2",),
+        uri="qemu:///system",
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "events").exists(), (tmp_path / "events").read_text(encoding="utf-8")
+    assert "=== stopping host processes ===" not in result.stdout
+    assert "Permission denied" in result.stderr, result.stderr
+    assert "nothing has been stopped or dropped" in result.stderr
+    # The overlays are the thing an escalated probe would have swept, so assert they survived.
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+    # And the run never reached a call that would have escalated: the gate refused first.
+    assert not log.exists(), log.read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
