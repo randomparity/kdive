@@ -1371,6 +1371,46 @@ def _counting_virsh(fail_list_from: int) -> str:
     )
 
 
+def _recording_sudo(log: Path) -> str:
+    """A `sudo` that records the command line it was handed and then runs it.
+
+    Appended *after* `_REAP_STUBS`, so it replaces that module's pass-through rather than
+    sitting beside it. It still runs the command, which is what keeps the reap's exit code an
+    assertion instead of collateral: an arm that recorded escalations by refusing them would
+    prove which calls asked for root and nothing at all about whether the reap still works.
+
+    `echo` writes to `log` through its own redirection, so the record survives the
+    `>/dev/null 2>&1` and `2>&1 >/dev/null` the reap wraps three of its four calls in.
+    """
+    return f'sudo() {{ echo "$*" >>"{log}"; "$@"; }}\n'
+
+
+def _system_daemon_closed_to_the_operator(log: Path) -> str:
+    """A host where the system daemon answers root and refuses the invoking account.
+
+    This is the provisioned-host shape: the lifecycle contract publishes a per-uid session socket
+    precisely so operator and worker accounts stay out of root's daemon, so `virsh -c
+    qemu:///system` is a permission error for them and succeeds only under `sudo`. The stub
+    distinguishes the two by having `sudo` mark the call it is running, which is the only thing
+    separating them here -- everything else behaves as `_REAP_STUBS`.
+    """
+    return (
+        f'sudo() {{ echo "$*" >>"{log}"; _escalated=1; "$@"; local rc=$?; _escalated=0; '
+        "return $rc; }\n"
+        "virsh() {\n"
+        '  if [[ "${_escalated:-0}" != "1" ]]; then\n'
+        '    echo "error: failed to connect to the hypervisor: Permission denied" >&2\n'
+        "    return 1\n"
+        "  fi\n"
+        '  case "$3" in\n'
+        '  list) ls "$defined" ;;\n'
+        '  undefine) command rm -f "${defined}/$4" ;;\n'
+        "  esac\n"
+        "  return 0\n"
+        "}\n"
+    )
+
+
 def _wipe_reap(
     tmp_path: Path,
     lib_extra: str = "",
@@ -1378,6 +1418,7 @@ def _wipe_reap(
     domains: tuple[str, ...] = ("kdive-alpha", "kdive-beta"),
     overlays: tuple[str, ...] = (),
     rootfs_mode: int | None = None,
+    uri: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `stack-down.sh --wipe --yes` past the libvirt gate with a staged host.
 
@@ -1386,8 +1427,17 @@ def _wipe_reap(
     whether its removals are permitted to succeed. `rootfs_mode` stages the overlay directory's
     permissions for the run and is restored afterwards, so a failing assertion cannot leave
     `tmp_path` unremovable.
+
+    `uri` overrides the endpoint the run resolves. It is set in the environment rather than in
+    the contract file because that is the only way to reach a *non-session* endpoint at all:
+    `load_published_libvirt_uri`'s allowlist admits the two session URIs and nothing else, while
+    `resolve_libvirt_uri` honours a caller-supplied value by design (ADR-0659). On a host that
+    publishes a contract, an override that disagrees with it is reported and honoured
+    (ADR-0661) -- stderr, never a refusal, so the run still reaches the reap.
     """
     _, staged = _published_contract(tmp_path)
+    if uri is not None:
+        staged["KDIVE_LIBVIRT_URI"] = uri
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
     for name in overlays:
@@ -1632,6 +1682,249 @@ def test_wipe_refuses_to_read_an_unlistable_overlay_directory_as_empty(tmp_path:
     # A refusal that names no way forward is a worse operator experience than the no-op was.
     assert "re-run as the account that owns it" in result.stderr
     assert not result.stdout.rstrip().endswith("done")
+
+
+def test_wipe_reaps_a_session_endpoint_without_sudo(tmp_path: Path) -> None:
+    """#2516 acceptance 1, ADR-0662: on a session endpoint the reap escalates nowhere.
+
+    The published endpoint is an operator-owned session socket, and the installer writes it
+    `operator_uid:group_gid:770` beside `/var/lib/kdive/rootfs` at `operator:kdive-live-libvirt`
+    `2770`. Root owns neither, so `sudo` there bypasses the ownership gate instead of satisfying
+    it -- and on a plain `qemu:///session` it reaches root's own per-uid daemon, which is a
+    different host altogether from the one the operator was looking at.
+
+    The assertion is over the *whole run*, not over the removals: the `--wipe` gate's
+    enumeration, the reap's enumeration, the end-state re-read, `destroy`, `undefine` and the
+    overlay `rm` all have to come in under one identity, so an escalation anywhere in the run is
+    the defect. A log file that does not exist is what says none of them asked for root.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(tmp_path, _recording_sudo(log), overlays=("alpha-overlay.qcow2",))
+    assert result.returncode == 0, result.stderr
+    assert not log.exists(), log.read_text(encoding="utf-8")
+    # The reap still has to have happened: an arm asserting only the absence of `sudo` would
+    # pass just as well against a reap that was skipped entirely.
+    assert "removed domain kdive-alpha" in result.stdout
+    assert list((tmp_path / "rootfs").iterdir()) == []
+
+
+def test_wipe_reaps_a_system_endpoint_under_sudo(tmp_path: Path) -> None:
+    """The other direction, and the reason the fix is not an unconditional `sudo` removal.
+
+    `resolve_libvirt_uri` still resolves root-owned `qemu:///system` on a host with no lifecycle
+    contract, so dropping escalation everywhere would break the reap on exactly the bare dev host
+    it works on today. Every one of the four reap commands keeps `sudo` there.
+
+    The `list` assertion is the half #2515 left open and named #2516 for: the enumeration used to
+    run bare while the mutations escalated, so the list that *graded* a reap could come from a
+    different daemon than the one the removal *mutated*. Asserting it here is what holds the two
+    together.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _recording_sudo(log),
+        overlays=("alpha-overlay.qcow2",),
+        uri="qemu:///system",
+    )
+    assert result.returncode == 0, result.stderr
+    escalated = log.read_text(encoding="utf-8")
+    assert "virsh -c qemu:///system list --all --name" in escalated, escalated
+    assert "virsh -c qemu:///system destroy kdive-alpha" in escalated, escalated
+    assert "virsh -c qemu:///system undefine kdive-alpha" in escalated, escalated
+    assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
+
+
+def test_wipe_does_not_escalate_a_session_endpoint_carrying_a_fragment(tmp_path: Path) -> None:
+    """A `#fragment` must not push a session endpoint onto the escalating branch.
+
+    The classifier matches `*/session` anchored at end-of-string, so anything trailing the path
+    defeats it. The query is stripped because the published URIs carry `socket=` there; a fragment
+    has to go with it for the same reason, and leaving it on is the harmful direction of the
+    misclassification -- it aims root at an operator-owned daemon, which is exactly what deriving
+    the privilege from the endpoint exists to prevent.
+
+    Asserted as the absence of any escalation across the whole run, the same way the plain session
+    arm is: a log file that was never created is what says no call asked for root.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _recording_sudo(log),
+        overlays=("alpha-overlay.qcow2",),
+        uri="qemu:///session#frag",
+    )
+    assert result.returncode == 0, result.stderr
+    assert not log.exists(), log.read_text(encoding="utf-8")
+    assert "removed domain kdive-alpha" in result.stdout
+    assert list((tmp_path / "rootfs").iterdir()) == []
+
+
+def test_wipe_refuses_an_endpoint_the_operator_cannot_reach_even_when_sudo_can(
+    tmp_path: Path,
+) -> None:
+    """The gate's probe is the operator's own authorization, so `sudo` must not answer it for them.
+
+    ADR-0662 gives the reap one privilege derived from the endpoint, but its decision governs *the
+    enumeration that grades the reap* -- and the up-front gate's probe grades nothing. Routing the
+    probe through that privilege too would escalate it on every non-session endpoint, and `sudo
+    virsh` always connects, so the refusal would be gone.
+
+    The case that makes it matter is the provisioned host, which is the deployment the lifecycle
+    contract exists for: the published endpoint is a per-uid session socket and the operator is
+    deliberately kept out of root's daemon. An operator who overrides the endpoint to
+    `qemu:///system` -- which `libvirt-uri.sh` itself suggests as a repair -- is aiming at a daemon
+    holding none of their domains. Unescalated, that probe is a permission error and the run stops
+    here. Escalated, it would succeed, the volumes would be dropped, the endpoint would honestly
+    report zero domains, and every overlay would be swept out from under domains still running on
+    the session daemon -- with the run printing `done` and exiting 0.
+
+    The empty event log is the assertion that carries it: not a banner absent from stdout, but no
+    teardown step having run.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _system_daemon_closed_to_the_operator(log),
+        overlays=("alpha-overlay.qcow2",),
+        uri="qemu:///system",
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "events").exists(), (tmp_path / "events").read_text(encoding="utf-8")
+    assert "=== stopping host processes ===" not in result.stdout
+    assert "Permission denied" in result.stderr, result.stderr
+    assert "nothing has been stopped or dropped" in result.stderr
+    # The overlays are the thing an escalated probe would have swept, so assert they survived.
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+    # And the run never reached a call that would have escalated: the gate refused first.
+    assert not log.exists(), log.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
+def test_wipe_refuses_an_unwritable_overlay_directory_before_dropping_the_volumes(
+    tmp_path: Path,
+) -> None:
+    """ADR-0662 moved the overlay `rm` onto the invoking account, so listable is no longer enough.
+
+    The `! -r || ! -x` refusal beside the sweep was written when the removal was root's and could
+    not be denied. Unlinking needs *write* on the directory, which neither of those tests covers,
+    and `0500` is the mode that separates them: the glob still expands, so without this gate the
+    run reaches the removals and every one of them is refused.
+
+    Reachable without an exotic host: `stack-services.sh` runs
+    `sudo install -d -o "$(id -un)" -m 0755` on this same path when it is not already writable, so
+    an account other than the operator running bring-up leaves the installer's mode-`2770`
+    directory as a `0755` one the operator can no longer write.
+
+    Asserted where it matters, which is *when* the refusal lands rather than that it lands at all.
+    The sweep runs after `docker compose --profile obs down -v`, so a refusal there would arrive
+    with the data volumes already gone and every overlay still present -- the half-wipe the
+    up-front gate exists to refuse wholesale. The empty event log is what carries that: not a
+    banner absent from stdout, but no teardown step having run.
+    """
+    result = _wipe_reap(
+        tmp_path,
+        domains=(),
+        overlays=("alpha-overlay.qcow2",),
+        rootfs_mode=0o500,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "events").exists(), (tmp_path / "events").read_text(encoding="utf-8")
+    assert "=== stopping host processes ===" not in result.stdout
+    assert "not writable" in result.stderr, result.stderr
+    assert str(tmp_path / "rootfs") in result.stderr
+    # A refusal that names no way forward is a worse operator experience than the denied rm was.
+    assert "re-run as the account that owns it" in result.stderr
+    # ...and the way forward has to be true on the shape the refusal actually names. The sweep's
+    # "owner or one in its group" is advice about *listing*; on the root-owned 0755 directory this
+    # gate exists for, the group has r-x and no write, so group membership unlinks nothing. The
+    # qualifier is the whole difference between guidance and a wrong turn.
+    assert "if the mode grants the group write" in result.stderr
+    assert "nothing has been stopped or dropped" in result.stderr
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads and writes a 0400 directory regardless")
+def test_wipe_refuses_a_readable_but_non_traversable_overlay_directory_at_the_gate(
+    tmp_path: Path,
+) -> None:
+    """The glob needs READ on the directory, not traversal, so `0400` is caught here not there.
+
+    Bash matches `*-overlay.qcow2` straight out of `readdir` without stat'ing the entries, so the
+    read bit alone expands the glob. `0400` therefore reaches the gate with a non-empty match and
+    an unwritable directory, and is refused before anything is stopped -- even though it would
+    also have failed the sweep's `! -r || ! -x` test further down.
+
+    Which refusal wins matters, because they do not land in the same place: the sweep's runs after
+    `docker compose --profile obs down -v`. Pinning it here is what keeps the gate's comment from
+    drifting back to the intuitive-but-wrong claim that anything failing `-r || -x` yields an
+    empty glob; a mode with no read bit does, and this one does not.
+    """
+    result = _wipe_reap(
+        tmp_path,
+        domains=(),
+        overlays=("alpha-overlay.qcow2",),
+        rootfs_mode=0o400,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "events").exists(), (tmp_path / "events").read_text(encoding="utf-8")
+    assert "not writable" in result.stderr, result.stderr
+    assert "not listable" not in result.stderr, result.stderr
+    assert (tmp_path / "rootfs" / "alpha-overlay.qcow2").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
+def test_wipe_reaps_an_unwritable_but_empty_overlay_directory_cleanly(tmp_path: Path) -> None:
+    """The gate is keyed on an overlay being at stake, not on the directory's mode.
+
+    This is the arm that separates the refusal from #2515's defect, and it is not hypothetical: a
+    permissions-only `! -w` test was written earlier in this change's review round and reverted
+    for failing exactly here. An unwritable directory holding no overlays has nothing to remove,
+    so the reap removes everything there was to remove and succeeds. Grading that as a failure is
+    #2515 -- a report that does not describe the end state -- re-introduced in the opposite
+    direction from the one #2515 found it in.
+
+    The domains are left at their default so the run is a *fully successful* reap rather than a
+    no-op: two domains really do go away, and the run still has to reach `done` and exit 0.
+    """
+    result = _wipe_reap(tmp_path, overlays=(), rootfs_mode=0o500)
+    assert result.returncode == 0, result.stderr
+    assert "not writable" not in result.stderr, result.stderr
+    assert "removed domain kdive-alpha" in result.stdout
+    assert "removed domain kdive-beta" in result.stdout
+    assert "reaped 2 item(s)" in result.stdout
+    assert result.stdout.rstrip().endswith("done")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 directory regardless of mode")
+def test_wipe_keeps_sweeping_an_unwritable_overlay_directory_on_a_system_endpoint(
+    tmp_path: Path,
+) -> None:
+    """The gate is branch-local: on the escalating branch root's `rm` does not need write.
+
+    A root-owned `0755` overlay directory is the ordinary bare-host shape, so a `! -w` test
+    applied to both branches would refuse a host that works today -- the same defect aimed the
+    other way. The assertion is that the run reached the removal, not merely that it printed no
+    refusal: an arm checking only for the absence of the message would pass just as well against
+    a run that died somewhere else.
+
+    The run's exit status is deliberately not asserted. The stub `sudo` is a pass-through, so the
+    `rm` it records runs with the test account's own rights against a directory that account
+    cannot write, and the overlay survives. That is the harness, not the script; the escalation
+    log is the part that is evidence.
+    """
+    log = tmp_path / "escalations"
+    result = _wipe_reap(
+        tmp_path,
+        _recording_sudo(log),
+        domains=(),
+        overlays=("alpha-overlay.qcow2",),
+        rootfs_mode=0o500,
+        uri="qemu:///system",
+    )
+    assert "not writable" not in result.stderr, result.stderr
+    escalated = log.read_text(encoding="utf-8")
+    assert f"rm -f {tmp_path}/rootfs/alpha-overlay.qcow2" in escalated, escalated
 
 
 def _stack_status_libvirt_slice(tmp_path: Path) -> Path:

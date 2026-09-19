@@ -53,25 +53,59 @@ done
 # contract resolved, never that anything answers it.
 #
 # What this distinguishes is an endpoint that answers from one that does not, and NOTHING MORE. It
-# does not cover the wrong-daemon URI of libvirt-uri.sh:119-122: a daemon that is running but holds
-# no kdive domains answers with exit 0 and no output, which is why every zero-domain report below
-# names the endpoint it consulted rather than calling the host clean.
+# does not cover the wrong-daemon URI libvirt-uri.sh's resolve_libvirt_uri comment records: a
+# daemon that is running but holds no kdive domains answers with exit 0 and no output, which is why
+# every zero-domain report below names the endpoint it consulted rather than calling the host clean.
+# Cited by name, not by line: that passage has already moved once.
 #
 # ONE virsh call, not a status probe plus a separate name read: a daemon lost between two calls
-# would return an empty list with exit 0, which is the silent no-op this function exists to refuse,
-# reached through the gap between the probe and the data.
+# would return an empty list with exit 0, which is the silent no-op this exists to refuse, reached
+# through the gap between the probe and the data. Both entry points below share this single
+# invocation, so that property holds wherever the list is read.
 #
-# Bare virsh, while destroy and undefine below run under sudo -- so for an explicit per-identity
-# endpoint (`qemu:///session`, `qemu+ssh://`) the list that GRADES the reap can come from a
-# different daemon than the one the removal MUTATED. Which privilege each reap call should hold is
-# #2516's question and is not settled here; the reporting consequence is.
-enumerate_kdive_domains() {
+# TWO entry points, because the two readers want different privilege for different reasons. The
+# privilege is bound to the NAME rather than passed as an argument, so a later CALL SITE picks a
+# privilege by choosing an entry point, never by remembering an argument. `_kdive_domains_via` is
+# the shared body, not an entry point -- read the list through one of the two names below.
+#
+#   enumerate_kdive_domains -- the list that GRADES the reap. It carries the endpoint's privilege,
+#   alongside the destroy, undefine and rm it grades. This used to enumerate as the invoking
+#   account while the mutations escalated, so for an explicit per-identity endpoint
+#   (`qemu:///session`, `qemu+ssh://`) the list could come from a different daemon than the one the
+#   removal MUTATED -- #2515 recorded the reporting consequence and left the privilege to #2516.
+#   ADR-0662 settles it: ONE privilege, derived from the endpoint, for observation and mutation
+#   alike, so the two can no longer disagree.
+#
+#   probe_kdive_domains -- the up-front gate's LIVENESS check, which ADR-0662's decision does not
+#   reach: it governs "the enumeration that grades the reap", and this one grades nothing. It runs
+#   as the INVOKING ACCOUNT, and that is load-bearing. The probe is the
+#   operator's own authorization for the endpoint they aimed at, so an operator who cannot reach
+#   that daemon is refused before anything is stopped or dropped. Escalate it and `sudo` becomes
+#   the thing that makes an unreachable endpoint reachable: a run aimed at the wrong daemon would
+#   pass the gate, drop the data volumes, find zero domains there, and sweep every overlay whose
+#   domains are alive on the daemon it did not ask -- reporting success. Needing no identity
+#   agreement with the mutations is exactly why it can afford to stay unescalated.
+_kdive_domains_via() {
   local out
-  out="$(virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
+  out="$("$@" virsh -c "$KDIVE_LIBVIRT_URI" list --all --name 2>&1)" || {
     printf '%s' "${out:-virsh list failed and said nothing}"
     return 1
   }
   grep -E '^kdive-' <<<"$out" || true
+}
+
+enumerate_kdive_domains() { _kdive_domains_via reap_run; }
+probe_kdive_domains() { _kdive_domains_via; }
+
+# ADR-0662: the --wipe reap's privilege follows the endpoint it was published. reap_as_root is set
+# in the --wipe branch below and DELIBERATELY nowhere else -- under `set -u` a call from outside
+# that branch dies with `reap_as_root: unbound variable` rather than silently picking a privilege.
+reap_run() {
+  if ((reap_as_root)); then
+    sudo "$@"
+  else
+    "$@"
+  fi
 }
 
 # --wipe is the one operation here that needs the endpoint, so it is refused up front rather than
@@ -86,6 +120,35 @@ if [[ "$wipe" == "1" ]]; then
     echo "to stop the stack without reaping, re-run without --wipe" >&2
     exit 1
   }
+  # ADR-0662. resolve_libvirt_uri publishes two daemon scopes to one variable: the lifecycle
+  # contract's operator-owned session endpoint, and the qemu:///system fallback on a host without
+  # that contract, which is root's. One fixed privilege cannot be right for both.
+  #
+  # `sudo` against the session socket BYPASSES the ownership gate rather than satisfying it -- the
+  # installer writes that socket `operator_uid:group_gid:770` and /var/lib/kdive/rootfs
+  # `operator:kdive-live-libvirt` 2770, and root owns neither -- while against a plain
+  # `qemu:///session` it reaches root's own per-uid daemon, which is a different host's worth of
+  # domains.
+  #
+  # The query is stripped because the published URIs carry the socket path there, not the scope.
+  # The fragment goes with it: `*/session` is anchored at end-of-string, so a `#fragment` left on
+  # the end would put a genuine session endpoint on the ESCALATING branch -- the direction that
+  # aims root at an operator-owned daemon, which is what this classifier exists to avoid.
+  #
+  # Classification is textual, and the direction is worth stating precisely rather than
+  # reassuringly. A value whose PATH COMPONENT is not `/session` falls to the escalating branch,
+  # which is main's behaviour. A value whose path component IS `/session` while its `socket=`
+  # names another daemon de-escalates -- but loudly, through the writability gate and the
+  # end-state re-read, never as a silent success. Deliberately NOT grown into a URI parser:
+  # ADR-0662 rejected asking libvirt, and wrong-daemon endpoints stay with #2559.
+  #
+  # HERE, not at the top of the file: KDIVE_LIBVIRT_URI may be unset in the LIBVIRT_OPTIONAL
+  # degraded state, and a top-level `case` would kill a plain teardown on a broken contract under
+  # `set -u`. This point is past require_libvirt_uri, so the endpoint is in hand.
+  case "${KDIVE_LIBVIRT_URI%%[?#]*}" in
+  */session) reap_as_root=0 ;;
+  *) reap_as_root=1 ;;
+  esac
   # Liveness, and it belongs HERE rather than at the reap. require_libvirt_uri proves the contract
   # resolved; a daemon that is stopped behind a perfectly valid contract passes it. Discovering
   # that at the reap means `docker compose --profile obs down -v` has already run, so the volumes
@@ -93,13 +156,65 @@ if [[ "$wipe" == "1" ]]; then
   # and the shape ADR-0659 prescribes refusing wholesale instead. Enumeration is read-only, so it
   # is safe before anything is stopped. The reap enumerates again regardless: this proves liveness
   # at gate time, not at reap time, and a daemon lost in between still lands in `unreaped` there.
-  gate_out="$(enumerate_kdive_domains)" || {
+  #
+  # probe_kdive_domains, NOT enumerate_kdive_domains: this call runs as the invoking account on
+  # both branches, so it is the operator's own authorization for the endpoint and refuses a daemon
+  # they cannot reach. See the two entry points above for why escalating it is the one thing that
+  # turns this gate from a refusal into a rubber stamp.
+  gate_out="$(probe_kdive_domains)" || {
     echo "cannot reach ${KDIVE_LIBVIRT_URI} to reap kdive domains for --wipe:" >&2
     echo "  ${gate_out}" >&2
     echo "nothing has been stopped or dropped; restore the endpoint and retry," >&2
     echo "or stop the stack without reaping by re-running without --wipe" >&2
     exit 1
   }
+  # ADR-0662 routes the overlay `rm` through reap_run, so on the session branch it is the invoking
+  # account's and unlinking needs WRITE on the overlay DIRECTORY. The `! -r || ! -x` refusal beside
+  # the sweep never covered that: it was written when the removal was root's and could not be
+  # denied, so listability was the whole of what the sweep could lose.
+  #
+  # HERE rather than beside the sweep, for the same reason the liveness probe is here: the sweep
+  # runs after `docker compose --profile obs down -v`, so discovering it there means the volumes
+  # are already gone while every overlay survives one denied `rm` at a time -- the half-wipe this
+  # gate refuses wholesale.
+  #
+  # Gated on a NON-EMPTY glob, never on the mode alone. An unwritable directory holding no
+  # overlays has nothing to remove, so the reap genuinely succeeds; refusing it would report a
+  # clean reap as a failure, which is the defect #2515 closed.
+  #
+  # The glob is the calling shell's and needs READ on the directory, not traversal -- bash matches
+  # names straight out of readdir without stat'ing them. So a directory with no read bit yields no
+  # matches here and falls through to the sweep's `! -r || ! -x` refusal, while a readable but
+  # non-traversable one is caught HERE instead. Either is a true report: unwritable is all this
+  # message claims, and both modes are.
+  #
+  # That fall-through is a narrower guarantee than it looks, so it is stated rather than implied:
+  # the sweep's refusal runs AFTER the volume drop, so this gate closes the writability class of
+  # half-wipe and the unreadable class still refuses too late. Left that way deliberately -- it is
+  # the behaviour main already has, and hoisting it is a separate question from this one.
+  #
+  # Session branch only: on the escalating branch root's `rm` does not need write, and a
+  # root-owned 0755 overlay directory is the ordinary bare-host shape, so testing `-w`
+  # unconditionally would refuse a host that works today.
+  if ((!reap_as_root)) && [[ -d "$KDIVE_ROOTFS_DIR" && ! -w "$KDIVE_ROOTFS_DIR" ]]; then
+    shopt -s nullglob
+    gate_overlays=("${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2)
+    shopt -u nullglob
+    if ((${#gate_overlays[@]})); then
+      echo "cannot reap the ${#gate_overlays[@]} overlay(s) in ${KDIVE_ROOTFS_DIR} for --wipe:" >&2
+      echo "  not writable as $(id -un), and a session endpoint's overlays are removed as the" >&2
+      echo "  invoking account (ADR-0662), so every removal would be refused" >&2
+      # Not the sweep's "owner or one in its group": that advice is true for LISTING, and this is
+      # about write. The drifted shape this gate exists for is a root-owned 0755 directory, whose
+      # group has r-x and no write -- so on the one host the refusal is most likely to name, half
+      # of that advice cannot work. The installed 2770 shape is where the group can, and it never
+      # reaches this message because it is writable.
+      echo "nothing has been stopped or dropped; re-run as the account that owns it, or one in" >&2
+      echo "its group if the mode grants the group write (ls -ld names both), or re-run without" >&2
+      echo "--wipe to stop the stack" >&2
+      exit 1
+    fi
+  fi
 fi
 
 if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
@@ -166,8 +281,8 @@ if [[ "$wipe" == "1" ]]; then
       # a reap failure. `2>&1 >/dev/null` in that order captures stderr only -- fd2 to the
       # substitution, then fd1 to /dev/null -- and it is kept verbatim, because which refusal this
       # was decides the operator's next move.
-      sudo virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" >/dev/null 2>&1 || true
-      undefine_err["$dom"]="$(sudo virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>&1 >/dev/null || true)"
+      reap_run virsh -c "$KDIVE_LIBVIRT_URI" destroy "$dom" >/dev/null 2>&1 || true
+      undefine_err["$dom"]="$(reap_run virsh -c "$KDIVE_LIBVIRT_URI" undefine "$dom" 2>&1 >/dev/null || true)"
     done
     # Neither call's status is the verdict. `virsh undefine` on a RUNNING domain succeeds by
     # converting it to a transient one WITHOUT stopping it, so an undefine that returned 0 after a
@@ -196,10 +311,18 @@ if [[ "$wipe" == "1" ]]; then
   elif [[ ! -d "$KDIVE_ROOTFS_DIR" ]]; then
     echo "  no overlay directory at ${KDIVE_ROOTFS_DIR}"
   elif [[ ! -r "$KDIVE_ROOTFS_DIR" || ! -x "$KDIVE_ROOTFS_DIR" ]]; then
-    # The overlay glob is the CALLING SHELL's, expanded with the caller's own privilege, while the
-    # removal below runs under sudo. On an account outside the directory's owner and group it
-    # expands to nothing, so a host full of overlays is byte-identical to a clean one -- the one
-    # place a removal failure cannot surface the no-op, because no removal is ever attempted.
+    # The overlay glob is the CALLING SHELL's, expanded with the caller's own privilege, and on the
+    # escalating branch the removal below does not share it. On an account outside the directory's
+    # owner and group the glob expands to nothing, so a host full of overlays is byte-identical to
+    # a clean one -- the one place a removal failure cannot surface the no-op, because no removal
+    # is ever attempted. Hence this refusal rather than an empty sweep. On the session branch the
+    # asymmetry is gone (ADR-0662), but the refusal stays: it is what makes the escalating branch
+    # safe, and an operator who cannot list the directory has the same problem either way.
+    #
+    # Write on the directory is NOT tested here. The --wipe gate proved it before anything was
+    # stopped, which is the only place a refusal can still spare the data volumes; like the
+    # liveness probe it proves it at gate time, and a mode that changed since then lands in the
+    # end-state grading below as a surviving overlay carrying rm's own diagnostic.
     unreaped+=("overlays in ${KDIVE_ROOTFS_DIR}: not listable as $(id -un), so an empty directory \
 and an unreadable one cannot be told apart; re-run as the account that owns it or one in its \
 group (ls -ld names them)")
@@ -209,7 +332,7 @@ group (ls -ld names them)")
     for overlay in "${KDIVE_ROOTFS_DIR}"/*-overlay.qcow2; do
       # Graded on the end state, like the domain half above and for the same reason: `rm`'s exit
       # status is what it attempted, and the line this block prints claims what is gone.
-      rm_err="$(sudo rm -f "$overlay" 2>&1 >/dev/null || true)"
+      rm_err="$(reap_run rm -f "$overlay" 2>&1 >/dev/null || true)"
       if [[ ! -e "$overlay" ]]; then
         reaped+=("overlay ${overlay}")
         overlays_removed=$((overlays_removed + 1))
@@ -222,9 +345,9 @@ group (ls -ld names them)")
     # directory held their backing disks. A host cleaned in a previous pass looks the same, which
     # is why this warns instead of refusing -- sweeping genuinely orphaned overlays is a purpose
     # of --wipe, and refusing them would trade a silent wrong outcome for a loud one. But a
-    # wrong-daemon URI (libvirt-uri.sh:119-122, which its own repair guidance can hand an operator)
-    # lands here too, and there the domains are alive on another daemon and have just lost their
-    # disks. Saying so is what keeps `no kdive domains` from reading as "there was nothing to do".
+    # wrong-daemon URI (libvirt-uri.sh's resolve_libvirt_uri comment, which its own repair guidance
+    # can hand an operator) lands here too, and there the domains are alive on another daemon and
+    # have just lost their disks. Saying so keeps `no kdive domains` from reading as "nothing to do".
     if ((zero_domains && overlays_removed)); then
       echo "WARNING: removed ${overlays_removed} overlay(s) while ${KDIVE_LIBVIRT_URI} reported zero" >&2
       echo "kdive domains. If the domains live on another daemon they are now without their disks." >&2
