@@ -874,13 +874,13 @@ def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile
         decoded.seek(0)
         return decoded
     candidates = (
-        (b"\x1f\x8b\x08", lambda source: gzip.GzipFile(fileobj=source, mode="rb")),
-        (b"BZh", lambda source: bz2.BZ2File(source)),
-        (b"\xfd7zXZ\x00", _open_lzma),
-        (b"\x28\xb5\x2f\xfd", _open_zstd),
+        (b"\x1f\x8b\x08", _copy_gzip_member_bounded),
+        (b"BZh", _copy_bzip2_bounded),
+        (b"\xfd7zXZ\x00", _copy_xz_bounded),
+        (b"\x28\xb5\x2f\xfd", _copy_zstd_frame_bounded),
     )
     candidate_count = 0
-    for magic, opener in candidates:
+    for magic, copy_bounded in candidates:
         for offset in _magic_offsets(boot, magic):
             candidate_count += 1
             if candidate_count > _EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX:
@@ -891,11 +891,7 @@ def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile
                 )
             boot.seek(offset)
             try:
-                if magic == b"\x1f\x8b\x08":
-                    _copy_gzip_member_bounded(boot, decoded, budget)
-                else:
-                    with opener(boot) as source:
-                        _copy_kernel_bounded(source, decoded, budget)
+                copy_bounded(boot, decoded, budget)
             except EOFError, OSError, zlib.error, lzma.LZMAError, zstd.ZstdError:
                 decoded.seek(0)
                 decoded.truncate()
@@ -917,7 +913,10 @@ def _magic_offsets(source: IO[bytes], magic: bytes) -> Iterator[int]:
     overlap = b""
     position = 0
     count = 0
-    while chunk := source.read(_RANGE_CHUNK_BYTES):
+    while True:
+        source.seek(position)
+        if not (chunk := source.read(_RANGE_CHUNK_BYTES)):
+            break
         data = overlap + chunk
         start = 0
         while (index := data.find(magic, start)) >= 0:
@@ -943,6 +942,40 @@ def _copy_kernel_bounded(
 ) -> int:
     total = 0
     while chunk := source.read(min(_RANGE_CHUNK_BYTES, budget.remaining + 1)):
+        total += len(chunk)
+        budget.remaining -= len(chunk)
+        if budget.remaining < 0:
+            raise _build_failure(
+                "decoded boot/vmlinuz exceeds the aggregate decompression work limit",
+                max_bytes=_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES,
+            )
+        destination.write(chunk)
+    return total
+
+
+def _copy_bzip2_bounded(source: IO[bytes], destination: IO[bytes], budget: _DecodeBudget) -> int:
+    with bz2.BZ2File(source) as stream:
+        return _copy_kernel_bounded(stream, destination, budget)
+
+
+def _copy_xz_bounded(source: IO[bytes], destination: IO[bytes], budget: _DecodeBudget) -> int:
+    with lzma.LZMAFile(source) as stream:
+        return _copy_kernel_bounded(stream, destination, budget)
+
+
+def _copy_zstd_frame_bounded(
+    source: _BinaryReader, destination: IO[bytes], budget: _DecodeBudget
+) -> int:
+    """Copy one complete zstd frame without interpreting the bzImage trailer."""
+    decompressor = zstd.ZstdDecompressor()
+    total = 0
+    while not decompressor.eof:
+        compressed = b""
+        if decompressor.needs_input:
+            compressed = source.read(_RANGE_CHUNK_BYTES)
+            if not compressed:
+                raise EOFError
+        chunk = decompressor.decompress(compressed, min(_RANGE_CHUNK_BYTES, budget.remaining + 1))
         total += len(chunk)
         budget.remaining -= len(chunk)
         if budget.remaining < 0:
@@ -1136,14 +1169,6 @@ def _validated_release(value: bytes) -> str:
     if _KERNEL_RELEASE_RE.fullmatch(release) is None:
         raise _build_failure("boot/vmlinuz release is not canonical")
     return release
-
-
-def _open_lzma(source: IO[bytes]) -> lzma.LZMAFile:
-    return lzma.LZMAFile(source)  # noqa: SIM115
-
-
-def _open_zstd(source: IO[bytes]) -> zstd.ZstdFile:
-    return zstd.ZstdFile(source, mode="rb")  # noqa: SIM115
 
 
 def _gnu_build_ids_from_notes(data: bytes) -> set[str]:

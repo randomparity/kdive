@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import bz2
 import gzip
 import hashlib
 import io
+import lzma
 import struct
 import tarfile
+from compression import zstd
 
 import pytest
 
@@ -64,20 +67,30 @@ def _boot_elf(
     return bytes(body) + bytes(note_header) + bytes(load_header) + notes + banner
 
 
+_KERNEL_CODECS = {
+    "gzip": gzip.compress,
+    "bzip2": bz2.compress,
+    "xz": lzma.compress,
+    "zstd": zstd.compress,
+}
+
+
 def _bzimage(
     *,
     header_release: str = "6.9.0",
     decoded_release: str = "6.9.0",
     build_ids: tuple[bytes, ...] = (_BUILD_ID,),
     compressed_trailer: bytes = b"",
+    codec: str = "gzip",
+    pad: int = 0,
 ) -> bytes:
     header = bytearray(0x400)
     header[0x202:0x206] = b"HdrS"
     struct.pack_into("<H", header, 0x20E, 0x100)
     encoded_release = header_release.encode() + b"\x00"
     header[0x300 : 0x300 + len(encoded_release)] = encoded_release
-    kernel = _boot_elf(e_machine=_EM_X86_64, release=decoded_release, build_ids=build_ids)
-    return bytes(header) + gzip.compress(kernel) + compressed_trailer
+    kernel = _boot_elf(e_machine=_EM_X86_64, release=decoded_release, build_ids=build_ids, pad=pad)
+    return bytes(header) + _KERNEL_CODECS[codec](kernel) + compressed_trailer
 
 
 _BZIMAGE_BODY = _bzimage()
@@ -388,26 +401,64 @@ def test_x86_boot_header_rejects_truncated_version_field() -> None:
         validation._boot_release(io.BytesIO(header), "x86_64")
 
 
-def test_external_boot_scan_accepts_x86_gzip_member_with_bzimage_trailer() -> None:
-    boot = _bzimage(compressed_trailer=b"x86 setup trailer")
+@pytest.mark.parametrize("codec", sorted(_KERNEL_CODECS))
+def test_external_boot_scan_accepts_x86_compressed_member_with_bzimage_trailer(
+    codec: str,
+) -> None:
+    boot = _bzimage(codec=codec, compressed_trailer=b"x86 setup trailer")
 
     _validate_kernel_blob(_combined_kernel_tar(boot=boot))
 
 
-def test_external_boot_scan_rejects_truncated_x86_gzip_member() -> None:
-    boot = _bzimage()[:-1]
+@pytest.mark.parametrize("codec", sorted(_KERNEL_CODECS))
+def test_external_boot_scan_rejects_truncated_x86_member(codec: str) -> None:
+    boot = _bzimage(codec=codec)[:-1]
 
     with pytest.raises(CategorizedError, match="does not contain a supported"):
         _validate_kernel_blob(_combined_kernel_tar(boot=boot))
 
 
+def test_external_boot_scan_rejects_truncated_zstd_frame_after_output() -> None:
+    boot = _bzimage(codec="zstd", pad=600_000)[:-1]
+
+    with pytest.raises(CategorizedError, match="does not contain a supported"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=boot))
+
+
+def test_external_boot_scan_rejects_multi_frame_zstd_payload() -> None:
+    kernel = _boot_elf(e_machine=_EM_X86_64)
+    split = len(kernel) // 2
+    header = _bzimage()[:0x400]
+    boot = header + zstd.compress(kernel[:split]) + zstd.compress(kernel[split:])
+
+    with pytest.raises(CategorizedError, match="ELF metadata extends past the object"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=boot))
+
+
+@pytest.mark.parametrize("chunk_bytes", [1024, 8192])
+def test_external_boot_scan_is_independent_of_candidate_decoder_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+    chunk_bytes: int,
+) -> None:
+    header = bytearray(_bzimage()[:0x400])
+    header[1000:1003] = b"\x1f\x8b\x08"
+    kernel = gzip.compress(_boot_elf(e_machine=_EM_X86_64))
+    boot = bytes(header) + bytes(6000 - len(header)) + kernel
+    boot += bytes(9000 - len(boot))
+    monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", chunk_bytes)
+
+    _validate_kernel_blob(_combined_kernel_tar(boot=boot))
+
+
+@pytest.mark.parametrize("codec", sorted(_KERNEL_CODECS))
 def test_external_boot_scan_rejects_decoded_kernel_over_limit(
     monkeypatch: pytest.MonkeyPatch,
+    codec: str,
 ) -> None:
     monkeypatch.setattr(validation, "_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES", 32)
 
     with pytest.raises(CategorizedError, match="decoded boot/vmlinuz exceeds"):
-        _validate_kernel_blob(_KERNEL_TAR)
+        _validate_kernel_blob(_combined_kernel_tar(boot=_bzimage(codec=codec)))
 
 
 def test_external_boot_scan_rejects_metadata_outside_read_limit(
