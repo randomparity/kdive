@@ -508,3 +508,185 @@ def test_observational_load_rejects_untrusted_slots_metadata(
         store.load()
 
     assert calls == []
+
+
+def test_inspect_distinguishes_missing_directory_from_missing_document(
+    store: SlotStore, settings
+) -> None:
+    inspection = store.inspect()
+    assert inspection.residue is worker_state.SlotResidue.EMPTY
+    assert inspection.state is None
+    assert not store.slots_path.exists()
+
+    store.prepare(settings)
+    store.state_path.unlink()
+    inspection = store.inspect()
+    assert inspection.residue is worker_state.SlotResidue.STATE_ABSENT
+    assert inspection.state is None
+    assert store.environment_path.exists()
+    assert store.credential_path.exists()
+
+
+@pytest.mark.parametrize("document", [b"{broken", b"{}", b"\xff"])
+def test_inspect_reports_malformed_state_without_weakening_load(
+    store: SlotStore, settings, document: bytes
+) -> None:
+    store.prepare(settings)
+    store.state_path.write_bytes(document)
+
+    inspection = store.inspect()
+
+    assert inspection.residue is worker_state.SlotResidue.STATE_UNREADABLE
+    assert inspection.state is None
+    assert store.state_path.read_bytes() == document
+    with pytest.raises(StateConflict, match="malformed"):
+        store.load()
+
+
+def test_inspect_returns_valid_state_without_reading_ancillary_files(
+    store: SlotStore, settings
+) -> None:
+    prepared = store.prepare(settings)
+    store.environment_path.unlink()
+    store.credential_path.unlink()
+    os.mkfifo(store.credential_path)
+
+    inspection = store.inspect()
+
+    assert inspection.residue is worker_state.SlotResidue.STATE_VALID
+    assert inspection.state == prepared
+
+
+@pytest.mark.parametrize("state_document", ["absent", "malformed", "valid"])
+def test_discard_unrecoverable_removes_only_fixed_files(
+    store: SlotStore, settings, state_document: str
+) -> None:
+    store.prepare(settings)
+    if state_document == "absent":
+        store.state_path.unlink()
+    elif state_document == "malformed":
+        store.state_path.write_text("{broken", encoding="ascii")
+    store.release_path.write_text("residual release", encoding="ascii")
+    unrelated = store.slot_path / "unrelated"
+    unrelated.write_text("keep", encoding="ascii")
+
+    assert store.discard_unrecoverable() is True
+
+    assert list(store.slot_path.iterdir()) == [unrelated]
+    assert unrelated.read_text(encoding="ascii") == "keep"
+    assert store.discard_unrecoverable() is False
+
+
+def test_discard_unrecoverable_does_not_create_missing_slot(store: SlotStore) -> None:
+    assert store.discard_unrecoverable() is False
+    assert not store.slots_path.exists()
+
+
+def test_discard_unrecoverable_requires_root(
+    store: SlotStore, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = store.prepare(settings)
+    monkeypatch.setattr(worker_state.os, "geteuid", lambda: 1234)
+
+    with pytest.raises(PermissionError, match="only root"):
+        store.discard_unrecoverable()
+
+    assert store.load() == prepared
+    assert store.environment_path.exists()
+    assert store.credential_path.exists()
+
+
+@pytest.mark.parametrize("operation", ["inspect", "discard_unrecoverable"])
+@pytest.mark.parametrize("directory", ["slots", "1"])
+@pytest.mark.parametrize("field", ["st_mode", "st_uid", "st_gid"])
+def test_residual_operations_reject_unsafe_directory_metadata(
+    store: SlotStore,
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    directory: str,
+    field: str,
+) -> None:
+    store.prepare(settings)
+    real_fstat = worker_state.os.fstat
+
+    def unsafe_metadata(descriptor: int):
+        metadata = real_fstat(descriptor)
+        if Path(os.readlink(f"/proc/self/fd/{descriptor}")).name == directory:
+            value = 0 if field == "st_mode" else 9999
+            return SimpleNamespace(**(vars(metadata) | {field: value}))
+        return metadata
+
+    monkeypatch.setattr(worker_state.os, "fstat", unsafe_metadata)
+
+    with pytest.raises(StateConflict, match="directory"):
+        getattr(store, operation)()
+
+    assert store.state_path.exists()
+    assert store.environment_path.exists()
+    assert store.credential_path.exists()
+
+
+def test_discard_unrecoverable_fsyncs_slot_after_removals(
+    store: SlotStore, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.prepare(settings)
+    synced: list[tuple[Path, list[Path]]] = []
+    real_fsync = os.fsync
+
+    def fsync(descriptor: int) -> None:
+        target = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        synced.append((target, list(target.iterdir())))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(worker_state.os, "fsync", fsync)
+
+    assert store.discard_unrecoverable() is True
+    assert synced == [(store.slot_path, [])]
+    assert store.discard_unrecoverable() is False
+    assert synced == [(store.slot_path, []), (store.slot_path, [])]
+
+
+def test_discard_unrecoverable_unlinks_symlink_without_following_it(
+    store: SlotStore, settings
+) -> None:
+    store.prepare(settings)
+    outside = store.root / "keep"
+    outside.write_text("preserve", encoding="ascii")
+    store.state_path.unlink()
+    store.state_path.symlink_to(outside)
+
+    assert store.discard_unrecoverable() is True
+
+    assert outside.read_text(encoding="ascii") == "preserve"
+    assert not store.state_path.is_symlink()
+
+
+@pytest.mark.parametrize("unsafe_file", ["mode", "fifo", "symlink", "oversize"])
+def test_inspect_refuses_unsafe_state_files(store: SlotStore, settings, unsafe_file: str) -> None:
+    store.prepare(settings)
+    if unsafe_file == "mode":
+        store.state_path.chmod(0o666)
+    elif unsafe_file == "oversize":
+        store.state_path.write_bytes(b" " * 65_537)
+    else:
+        store.state_path.unlink()
+        if unsafe_file == "fifo":
+            os.mkfifo(store.state_path)
+        else:
+            store.state_path.symlink_to(store.environment_path)
+
+    with pytest.raises(StateConflict):
+        store.inspect()
+
+
+def test_discard_unrecoverable_propagates_unlink_failure(store: SlotStore, settings) -> None:
+    store.prepare(settings)
+    store.credential_path.unlink()
+    store.credential_path.mkdir()
+
+    with pytest.raises(IsADirectoryError):
+        store.discard_unrecoverable()
+
+    assert store.state_path.exists()
+    assert store.credential_path.is_dir()

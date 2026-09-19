@@ -11,6 +11,8 @@ import socket
 import stat
 import warnings
 from contextlib import suppress
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
@@ -108,6 +110,23 @@ with warnings.catch_warnings():
             }
 
 
+class SlotResidue(StrEnum):
+    """Raw fixed-slot facts available to the privileged recovery coordinator."""
+
+    EMPTY = "empty"
+    STATE_ABSENT = "state_absent"
+    STATE_UNREADABLE = "state_unreadable"
+    STATE_VALID = "state_valid"
+
+
+@dataclass(frozen=True)
+class SlotInspection:
+    """Observed residue with parsed state only when the document is valid."""
+
+    residue: SlotResidue
+    state: SlotState | None
+
+
 class SlotStore:
     """Persist one derived systemd worker slot without caller-selected descendants."""
 
@@ -175,6 +194,43 @@ class SlotStore:
             return SlotState.model_validate_json(data)
         except ValueError as exc:
             raise StateConflict(f"slot {self.slot} state is malformed") from exc
+        finally:
+            os.close(descriptor)
+
+    def inspect(self) -> SlotInspection:
+        """Inspect trusted slot facts without requiring the state document to parse."""
+        descriptor = self._slot_descriptor(create=False)
+        if descriptor is None:
+            return SlotInspection(SlotResidue.EMPTY, None)
+        try:
+            try:
+                data = self._read(descriptor, "state.json")
+            except FileNotFoundError:
+                return SlotInspection(SlotResidue.STATE_ABSENT, None)
+            try:
+                state = SlotState.model_validate_json(data)
+            except ValueError:
+                return SlotInspection(SlotResidue.STATE_UNREADABLE, None)
+            return SlotInspection(SlotResidue.STATE_VALID, state)
+        finally:
+            os.close(descriptor)
+
+    def discard_unrecoverable(self) -> bool:
+        """Clear fixed facts after recovery has released every applicable fence."""
+        self._require_root()
+        descriptor = self._slot_descriptor(create=False)
+        if descriptor is None:
+            return False
+        removed = False
+        try:
+            for name in ("worker.env", "worker-incarnation.credential", "release", "state.json"):
+                try:
+                    os.unlink(name, dir_fd=descriptor)
+                except FileNotFoundError:
+                    continue
+                removed = True
+            os.fsync(descriptor)
+            return removed
         finally:
             os.close(descriptor)
 
