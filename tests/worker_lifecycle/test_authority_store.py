@@ -6,10 +6,12 @@ import asyncio
 import hashlib
 import importlib.util
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from psycopg import AsyncConnection, errors, sql
+from psycopg.pq import TransactionStatus
 from pydantic import SecretStr
 
 import kdive.worker_lifecycle.authority_store as incarnations
@@ -18,12 +20,106 @@ from kdive.worker_lifecycle.authority_store import (
     DockerAuthorityBinding,
     IncarnationConflict,
     KubernetesAuthorityBinding,
+    LocalAuthorityBinding,
+    LocalWorkerIncarnation,
+    recoverable_worker_incarnations,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
 from tests.reconciler.conftest import connect
 
 _PROTOCOL = CURRENT_WORKER_FENCE_PROTOCOL
+
+
+@pytest.fixture
+def recoverable_connection() -> MagicMock:
+    conn = MagicMock(spec=AsyncConnection)
+    conn.info.transaction_status = TransactionStatus.IDLE
+    conn.execute = AsyncMock()
+    return conn
+
+
+def _local_binding(generation: str) -> LocalAuthorityBinding:
+    return LocalAuthorityBinding(
+        unit="kdive-live-worker@1.service",
+        generation=generation,
+        boot_id="boot-1",
+        invocation_id="invocation-1",
+        host="host-1",
+    )
+
+
+@pytest.mark.parametrize("count", [0, 2, 16])
+def test_recoverable_read_preserves_sql_order_and_local_records(
+    recoverable_connection: MagicMock, count: int
+) -> None:
+    rows = [
+        (f"local-systemd:kdive-live-worker@1.service:{i:032x}", _local_binding(f"{i:032x}"), i)
+        for i in reversed(range(count))
+    ]
+    conn = recoverable_connection
+    conn.execute.return_value.fetchall.return_value = rows
+
+    result = asyncio.run(recoverable_worker_incarnations(conn, "kdive-live-worker@1.service"))
+
+    assert result == tuple(
+        LocalWorkerIncarnation(name, "local", binding, p) for name, binding, p in rows
+    )
+    conn.execute.assert_awaited_once_with(
+        "SELECT incarnation, authority_binding, fence_protocol "
+        "FROM public.recoverable_worker_incarnations(%s)",
+        ("kdive-live-worker@1.service",),
+    )
+    conn.transaction.return_value.__aenter__.assert_awaited_once()
+    conn.transaction.return_value.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.parametrize("count", [17, 18])
+def test_recoverable_read_rejects_overflow(recoverable_connection: MagicMock, count: int) -> None:
+    conn = recoverable_connection
+    conn.execute.return_value.fetchall.return_value = [
+        (f"worker-{i}", _local_binding(f"{i:032x}"), _PROTOCOL) for i in range(count)
+    ]
+
+    with pytest.raises(RuntimeError, match="recoverable.*16"):
+        asyncio.run(recoverable_worker_incarnations(conn, "kdive-live-worker@1.service"))
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        None,
+        {},
+        {"container_id": "container-1"},
+        {**_local_binding("a" * 32), "host": ""},
+        {**_local_binding("a" * 32), "boot_id": 1},
+        {**_local_binding("a" * 32), "unexpected": "extra"},
+    ],
+)
+def test_recoverable_read_rejects_malformed_local_binding(
+    recoverable_connection: MagicMock, binding: object
+) -> None:
+    conn = recoverable_connection
+    conn.execute.return_value.fetchall.return_value = [("worker-1", binding, _PROTOCOL)]
+
+    with pytest.raises(RuntimeError, match="invalid local authority binding"):
+        asyncio.run(recoverable_worker_incarnations(conn, "kdive-live-worker@1.service"))
+
+
+@pytest.mark.parametrize("status", [TransactionStatus.INTRANS, TransactionStatus.INERROR])
+def test_recoverable_read_requires_top_level_transaction(
+    recoverable_connection: MagicMock, status: TransactionStatus
+) -> None:
+    conn = recoverable_connection
+    conn.info.transaction_status = status
+
+    with pytest.raises(
+        RuntimeError, match="recoverable_worker_incarnations needs a transaction-free"
+    ):
+        asyncio.run(recoverable_worker_incarnations(conn, "kdive-live-worker@1.service"))
+
+    conn.transaction.assert_not_called()
+    conn.execute.assert_not_awaited()
 
 
 def test_authority_store_has_no_legacy_run_service_facade() -> None:
