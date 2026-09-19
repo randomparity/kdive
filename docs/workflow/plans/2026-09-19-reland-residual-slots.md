@@ -6,9 +6,8 @@ contract.
 
 **Architecture:** Extend the existing `SystemdWorkerLifecycle` seam. `SlotStore` exposes raw residue
 and fixed-file cleanup; `PostgresAuthority` wraps retained migration 0155's read function and the
-unchanged exact termination function; the coordinator classifies a slot's complete active-row set
-before any release. The ordinary evidence path remains first and falls back only for the two
-verified residual exceptions.
+unchanged exact termination function; the coordinator classifies a slot's complete applicable
+local active-row set before any release. Structurally valid foreign-host rows are preserved.
 
 **Tech stack:** Python 3.14, Pydantic models, psycopg 3 async connections, PostgreSQL functions,
 pytest, `uv`, `just`, systemd.
@@ -113,7 +112,7 @@ Acceptance: no SQL, table, role grant, write function, or fence protocol changes
 
 Rollback: revert this task commit; retained migration 0155 remains installed but inert.
 
-## Task 3: Classify complete row sets and recover atomically per slot
+## Task 3: Classify complete local row sets before recovery writes
 
 **Files:** modify `src/kdive/processes/lifecycle/systemd/systemd_worker_lifecycle.py` and
 `tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`.
@@ -134,18 +133,23 @@ Rollback: revert this task commit; retained migration 0155 remains installed but
 
 **Verification**
 
-- Contract: cases 1-4 each release the complete local matching active-row set before clearing
-  files, and ordinary valid-state termination stays first. Mode: focused-test. Add one named test
-  per issue case plus multiple-row, no-row residue, and evidenced-first/fallback tests. Before code,
-  missing protocol methods and unchanged residual behavior fail. Green command:
+- Contract: cases 1-4 each classify the complete applicable local active-row set before the first
+  release and clear files only after all releases. Mode: focused-test. Add one named test per issue
+  case plus multiple-row, no-row residue, and a valid retained generation paired with an older
+  unclassifiable sibling. Before code, missing protocol methods and unchanged residual behavior
+  fail. Green command:
   `just test-verbose tests/processes/lifecycle/systemd/test_systemd_worker_lifecycle.py`.
 - Contract: case 5 refuses with its distinct code and ADR-0657 comment, preserving rows/files.
   Mode: focused-test. Add same-boot `BootObservation` tests for valid and raw residue; before code
   the sweep raises `SystemdUnavailable`. Use the same green command.
 - Contract: populated cgroup and unknown membership fail closed for each residual input, unmanaged
-  workers refuse the whole sweep, foreign host/unit rows refuse before any release, and one
-  unclassifiable row prevents partial release. Mode: focused-test. Add parameterized liveness and
-  classification-order tests; before code existing recovery lacks the row path. Same green command.
+  workers refuse the whole sweep, structurally valid foreign-host rows are skipped and preserved,
+  incoherent local rows refuse before any release, and one unclassifiable local row prevents any
+  release. Mode: focused-test. Add parameterized liveness and classification-order tests; before
+  code existing recovery lacks the row path. Same green command.
+- Contract: a failure in a later sequential release retains every slot file; retry re-queries and
+  releases the active remainder. Mode: focused-test. Fail the second release, then retry with the
+  first row absent and verify cleanup occurs only after the remainder succeeds. Same green command.
 - Contract: no fabricated or cross-invocation outcome. Mode: focused-test. Assert release outcomes
   from current observation versus stored identity, including successor identity yielding `killed`
   without consuming successor result fields. Same green command.
@@ -157,13 +161,14 @@ Rollback: revert this task commit; retained migration 0155 remains installed but
 3. Add `PostgresAuthority.recoverable/release` with unchanged exact terminate semantics.
 4. Factor identity comparison into `_identity_outcome`; keep `_terminal_observation` behavior
    byte-for-byte equivalent for existing callers.
-5. Replace `load`-only recovery with inspection plus an evidenced-first retirement. On only
-   `EvidenceRejected` or `StateConflict`, query row-derived recovery.
-6. Validate each row's exact unit and local hostname; derive outcomes for the complete row set;
-   return the identity or incoherent refusal before writes. Then release rows sequentially. A
-   release failure stops file cleanup, leaving remaining evidence visible.
-7. Clear files only after successful complete release/no-row classification; reset failed identity
-   only for a retained `UnitObservation`. Preserve completed/refused slot results on later failures.
+5. Replace `load`-only recovery with inspection and query the prefix-derived active rows before any
+   mutation for valid and unreadable state alike.
+6. Skip structurally valid foreign-host rows. Validate each applicable local row's exact unit,
+   derive every outcome, and return the unreadable-identity or incoherent-row refusal before the
+   first write. Then release local rows sequentially with each row's stored binding.
+7. If a later release fails, retain every file; retry re-queries the active remainder. Clear files
+   only after successful complete release/no-row classification and reset failed identity only for
+   a retained `UnitObservation`. Preserve completed/refused slot results on later failures.
 8. Add the unmanaged-worker guard already used by `start` so an out-of-unit worker cannot evade the
    per-slot cgroup check.
 9. Run focused tests, `just lint`, `just type`, and `just test-changed`; commit the task.
