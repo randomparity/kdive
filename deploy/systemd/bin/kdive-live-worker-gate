@@ -14,6 +14,7 @@ _POLL_SECONDS = 0.05
 _MAX_CREDENTIAL_BYTES = 4096
 _MAX_MARKER_BYTES = 256
 _INVOCATION = re.compile(r"[0-9a-f]{32}")
+_RELEASE_MARKER = re.compile(rb"(?P<generation>[0-9a-f]{32})\n(?P<invocation>[0-9a-f]{32})\n")
 _WORKER_ENV_NAMES = frozenset(
     {
         "AWS_ACCESS_KEY_ID",
@@ -130,9 +131,13 @@ def _wait_for_release(slot, release, generation, invocation, deadline):
                 _fail(slot, "release marker deadline expired")
             time.sleep(min(_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
             continue
-        expected = f"{generation}\n{invocation}\n".encode("ascii")
-        if marker != expected:
+        match = _RELEASE_MARKER.fullmatch(marker)
+        if match is None or match["generation"] != generation.encode("ascii"):
             _fail(slot, "release marker binding invariant failed")
+        # ADR-0657 keeps the binding strict while making a valid successor invocation
+        # distinguishable from a malformed or generation-mismatched marker.
+        if match["invocation"] != invocation.encode("ascii"):
+            _fail(slot, "out-of-band restart detected")
         return
 
 
