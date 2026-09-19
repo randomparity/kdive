@@ -122,6 +122,20 @@ Status is deliberately left at **Accepted**. A partially-shipped ADR would ordin
 Proposed ADR cited from that tree — so the flip that would describe reality more accurately is the
 one the guards forbid. This amendment carries that meaning instead.
 
+### Amendment (2026-09-19): the implementation is restored (#2533)
+
+This amendment supersedes only the implementation-status qualification in the 2026-09-17
+amendment. The accepted decision and the history of its first merge and revert remain unchanged.
+
+The reimplementation uses the retained migration and restores recovery for all four recoverable
+residual cases: absent or malformed `state.json`, a drifted stored binding, and rejected ordinary
+termination evidence. A provisioned systemd host verified each case clears the four fixed slot
+facts and leaves no active applicable fence; a live unit refuses recovery before mutation for
+every residual shape. Case 5 remains an explicit refusal: unreadable retained identity without
+proof of a different boot returns `recovery_refused_unreadable_identity`, preserving the slot
+files and fence. No manual edit of the slot files or `worker_incarnations` is required or
+sanctioned. The operator runbook now describes this restored behavior.
+
 ## Considered & rejected
 
 - **Add a recovery-specific terminate that skips the binding comparison.** judgment: it puts the

@@ -405,10 +405,12 @@ still accounts for. It never fabricates a termination outcome — see
 **Then bring the stack back up.** Re-run `scripts/live-stack/stack-services.sh`; it is
 idempotent.
 
-**What `recover` does not reach.** A slot with an absent or malformed `state.json`, a drifted
-binding, rejected evidence, or an unreadable boot ID stays wedged after a `recover` pass. That
-gap is issue #2533; do not hand-edit the slot files or the `worker_incarnations` row to work
-around it.
+**Residual slots.** For a slot proven dead, `recover` also clears the slot facts and releases
+the applicable fences when `state.json` is absent or malformed, the stored binding has drifted,
+or ordinary termination evidence was rejected (cases 1-4 of #2533). Case 5 remains a refusal:
+when retained identity is unreadable and recovery cannot prove a different boot, it returns
+`recovery_refused_unreadable_identity` and preserves the slot files and fence. Do not hand-edit
+the slot files or the `worker_incarnations` row to work around that refusal.
 
 ### The app tier does not hot-reload — re-run `stack-services.sh` after editing source
 
