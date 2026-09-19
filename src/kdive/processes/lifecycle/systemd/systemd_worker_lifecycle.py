@@ -375,6 +375,13 @@ class SystemdWorkerLifecycle:
         if isinstance(recovery, SlotResult):
             return recovery
         state = inspection.state
+        if retained_identity and (state is None or state.phase is not SlotPhase.TERMINATED):
+            # A successful RemainAfterExit unit remains active/exited until stopped. Its proven
+            # dead fence rows were released above, but its retained identity must be cleared
+            # before removing the facts that let ordinary stop reach this slot.
+            self._systemd_call(
+                stop_deadline, self._runtime.stop_retained, store.unit, stop_deadline
+            )
         if state is not None and state.phase is SlotPhase.PREPARED:
             # This generation holds no fence; older active siblings were still classified and
             # released above, before discarding any of this generation's facts.
@@ -385,10 +392,9 @@ class SystemdWorkerLifecycle:
             removed = True
         else:
             removed = self._store_call(stop_deadline, store.discard_unrecoverable)
-        if retained_identity:
-            # Only a unit systemd still accounts for can be holding an identity to release; a
-            # BootObservation is already the inactive, empty-identity state `require_inactive`
-            # wants, so resetting it would be a no-op that hides which slots this call touched.
+        if retained_identity and observation.active_state == "failed":
+            # `stop` does not clear a failed unit's identity. `reset-failed` is a no-op for a
+            # successful retained unit, which the preceding stop has already cleared.
             self._systemd_call(stop_deadline, self._runtime.reset_failed, store.unit, stop_deadline)
         if state is not None:
             return SlotResult(

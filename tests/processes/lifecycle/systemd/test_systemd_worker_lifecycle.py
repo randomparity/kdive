@@ -200,6 +200,7 @@ class FakeRuntime:
         self.current: dict[str, UnitObservation | BootObservation] = {}
         self.unmanaged: tuple[UnmanagedWorker, ...] = ()
         self.start_failures: dict[str, Exception] = {}
+        self.stop_failures: dict[str, Exception] = {}
         self.observe_failures: dict[str, Exception] = {}
         self.keep_populated: set[str] = set()
         self.advance_on_start = 0.0
@@ -282,6 +283,8 @@ class FakeRuntime:
         self.stop_budgets.append(deadline.remaining())
         self.stopped.append(unit)
         self.events.append(f"systemd:stop:{unit}")
+        if failure := self.stop_failures.get(unit):
+            raise failure
         if unit not in self.unstoppable:
             self.current.pop(unit, None)
 
@@ -291,8 +294,11 @@ class FakeRuntime:
         self.resets.append(unit)
         self.events.append(f"systemd:reset-failed:{unit}")
         # `systemctl reset-failed` drops a failed unit's ActiveState and InvocationID, leaving
-        # the inactive, empty-identity unit `observe` reports as a BootObservation.
-        self.current.pop(unit, None)
+        # the inactive, empty-identity unit `observe` reports as a BootObservation. It is a
+        # no-op for a successful retained unit.
+        observation = self.current.get(unit)
+        if isinstance(observation, UnitObservation) and observation.active_state == "failed":
+            self.current.pop(unit)
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
         return self.unmanaged
@@ -425,12 +431,17 @@ def _observation(
     status: int = 0,
 ) -> UnitObservation:
     unit = f"kdive-live-worker@{slot}.service"
+    terminal_failure = membership == "empty" and result != "success"
     return UnitObservation(
         unit=unit,
         boot_id=boot_id,
         invocation_id=invocation_id or f"{slot:x}" * 32,
-        active_state="active" if membership == "populated" else "inactive",
-        sub_state="running" if membership == "populated" else "dead",
+        active_state=(
+            "active" if membership == "populated" else "failed" if terminal_failure else "inactive"
+        ),
+        sub_state=(
+            "running" if membership == "populated" else "failed" if terminal_failure else "dead"
+        ),
         result=result,
         exec_main_status=status,
         control_group=f"/system.slice/{unit}",
@@ -2269,7 +2280,8 @@ def test_recover_retires_a_restarted_slot_and_clears_its_failed_unit_identity() 
     assert not stores[0].environment and not stores[0].credential and not stores[0].release
     assert runtime.resets == [started.unit]
     assert started.unit not in runtime.current
-    assert events[-2:] == [
+    assert events[-3:] == [
+        "systemd:stop:kdive-live-worker@1.service",
         "state:discard-unrecoverable",
         "systemd:reset-failed:kdive-live-worker@1.service",
     ]
@@ -2293,7 +2305,7 @@ def test_recover_clears_a_failed_unit_whose_slot_facts_stop_already_removed() ->
     assert runtime.resets == [unit]
     assert unit not in runtime.current
     assert authority.terminations == []
-    assert events == [f"systemd:reset-failed:{unit}"]
+    assert events == [f"systemd:stop:{unit}", f"systemd:reset-failed:{unit}"]
     assert [(result.slot, result.phase, result.message) for result in response.slots] == [
         (1, None, "cleared the retained unit identity")
     ]
@@ -2355,6 +2367,7 @@ def test_recover_discards_a_prepared_slot_without_publishing_evidence() -> None:
     assert stores[0].state is None
     assert authority.registered == set() and authority.terminations == []
     assert events == [
+        "systemd:stop:kdive-live-worker@1.service",
         "state:discard-prepared",
         "systemd:reset-failed:kdive-live-worker@1.service",
     ]
@@ -2545,10 +2558,12 @@ def _assert_residual_cleared(case: int) -> None:
     assert authority.released == [(expected, "killed" if case == 3 else "succeeded")]
     assert stores[0].state is None and stores[0].load_failure is None
     assert not stores[0].environment and not stores[0].credential and not stores[0].release
-    assert events.index(f"database:release:{expected.incarnation}") < events.index(
-        "state:discard-unrecoverable"
+    assert (
+        events.index(f"database:release:{expected.incarnation}")
+        < events.index(f"systemd:stop:{stores[0].unit}")
+        < events.index("state:discard-unrecoverable")
     )
-    assert runtime.resets == [stores[0].unit]
+    assert runtime.stopped == [stores[0].unit] and runtime.resets == []
 
 
 def test_recover_case_1_absent_state_releases_the_stored_row() -> None:
@@ -2772,6 +2787,59 @@ def test_recover_no_active_rows_clears_raw_residue_without_evidence(case: int) -
     assert stores[0].load_failure is None and not authority.released and not runtime.resets
 
 
+@pytest.mark.parametrize("residue", ["valid", "raw"])
+def test_recover_stops_successfully_exited_retained_units_before_starting_again(
+    residue: str,
+) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(1)
+    unit = stores[0].unit
+    if residue == "raw":
+        stores[0].state = None
+        authority.active.clear()
+    runtime.current[unit] = replace(
+        _observation(1, "empty", result="success", status=0),
+        active_state="active",
+        sub_state="exited",
+    )
+
+    recovered = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+    started = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
+    )
+
+    assert recovered.ok and started.ok
+    assert runtime.stopped == [unit] and unit in runtime.current
+    assert events.index(f"systemd:stop:{unit}") < events.index("state:discard-unrecoverable")
+    if residue == "valid":
+        row = next(iter(authority.released))[0]
+        assert events.index(f"database:release:{row.incarnation}") < events.index(
+            f"systemd:stop:{unit}"
+        )
+
+
+def test_recover_stop_failure_retains_slot_files_after_releasing_proven_dead_fence() -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(1)
+    unit = stores[0].unit
+    runtime.current[unit] = replace(
+        _observation(1, "empty", result="success", status=0),
+        active_state="active",
+        sub_state="exited",
+    )
+    runtime.stop_failures[unit] = SystemdUnavailable("systemd unavailable")
+    before = stores[0].inspect()
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "dependency_unavailable"
+    assert len(authority.released) == 1
+    assert stores[0].inspect() == before
+    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert events == [
+        f"database:release:{authority.released[0][0].incarnation}",
+        f"systemd:stop:{unit}",
+    ]
+
+
 @pytest.mark.parametrize(
     ("result", "status", "expected"),
     [
@@ -2841,8 +2909,8 @@ def test_recover_releases_all_rows_before_clearing_slot_files() -> None:
     assert events == [
         f"database:release:{first.incarnation}",
         f"database:release:{second.incarnation}",
+        f"systemd:stop:{stores[0].unit}",
         "state:discard-unrecoverable",
-        f"systemd:reset-failed:{stores[0].unit}",
     ]
 
 
