@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import socket
 import time
 from collections.abc import Callable, Coroutine, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -34,15 +32,12 @@ from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     load_slot_redaction_values,
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_state import (
-    SlotInspection,
     SlotState,
     StateConflict,
 )
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     IncarnationConflict,
-    LocalWorkerIncarnation,
-    recoverable_worker_incarnations,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
@@ -53,32 +48,6 @@ _STOP_SECONDS = 45.0
 _DIAGNOSTIC_SECONDS = 30.0
 _POLL_SECONDS = 0.1
 _RECOVERY_REFUSED = "recovery_refused"
-# ADR-0657 (`docs/adr/0657-a-successor-invocation-is-terminal-evidence.md`, lines 62-66, the
-# "clears facts, never evidence" paragraph) forbids running for a slot whose invocation identity
-# is unreadable: recovery may not fabricate a `TerminationOutcome` nor attribute one invocation's
-# exit facts to another. ADR-0574 makes absence within the retained boot a non-event, so systemd
-# reporting no invocation on that boot leaves nothing able to prove the registered invocation
-# ended. That slot is refused, with its own code so an operator and a log filter can tell it from
-# a live-process refusal, which is transient. Relaxing this takes an ADR amendment; the operator's
-# remedy is a reboot, which yields a different boot ID and so real evidence.
-_RECOVERY_REFUSED_IDENTITY = "recovery_refused_unreadable_identity"
-# A row the accessor returned that does not describe this slot on this host -- a stored `unit`
-# disagreeing with the incarnation prefix it was found by, or a `host` that is not ours. It is not
-# the unreadable-identity case and must not share its code: that one is cleared by a reboot, which
-# yields a fresh boot ID, while this one is a row only an operator can reconcile.
-_RECOVERY_REFUSED_INCOHERENT = "recovery_refused_incoherent_row"
-_REFUSAL_MESSAGES = {
-    _RECOVERY_REFUSED: "fixed worker unit still has live processes",
-    _RECOVERY_REFUSED_IDENTITY: (
-        "registered invocation identity is unreadable; ADR-0657 forbids recovering it"
-    ),
-    _RECOVERY_REFUSED_INCOHERENT: ("registered fence row does not describe this slot on this host"),
-}
-_REFUSALS = frozenset(_REFUSAL_MESSAGES)
-# Only these phases still have to derive an outcome from a current observation. `_retire_slot`
-# discards a prepared generation and cleans an already-terminated one without consulting one, so
-# neither can meet the unreadable invocation identity the refusal above exists for.
-_OBSERVED_PHASES = frozenset(SlotPhase) - {SlotPhase.PREPARED, SlotPhase.TERMINATED}
 _log = logging.getLogger(__name__)
 
 
@@ -94,13 +63,6 @@ class LifecycleDeadlineExceeded(RuntimeError):
     """A lifecycle operation exhausted its shared absolute monotonic deadline."""
 
 
-# The two failures #2533 names for cases 3 and 4: the retained binding no longer matches the row,
-# so the evidenced path cannot commit and recovery falls back to the row's own binding.
-# Deliberately broad -- every `StateConflict` out of the evidenced path means the retained facts
-# cannot be trusted, which is exactly when the row should be believed instead.
-_RESIDUAL_FALLBACK: tuple[type[Exception], ...] = (EvidenceRejected, StateConflict)
-
-
 class _AuthorityUnavailable(RuntimeError):
     """The exact-incarnation database authority did not complete."""
 
@@ -114,15 +76,6 @@ class _ActivationFailure(RuntimeError):
         self.cleaned = cleaned
 
 
-@dataclass(frozen=True, slots=True)
-class _Recovery:
-    """What retiring one slot produced, before it is rendered as a result."""
-
-    state: SlotState | None = None
-    cleared: bool = False
-    refusal: str | None = None
-
-
 class IncarnationAuthority(Protocol):
     """Register and terminate exact immutable worker-incarnation facts."""
 
@@ -132,14 +85,6 @@ class IncarnationAuthority(Protocol):
 
     async def terminate(self, state: SlotState, outcome: TerminationOutcome) -> None:
         """Commit terminal evidence only for the same exact registered binding."""
-        ...
-
-    async def recoverable(self, unit: str) -> tuple[LocalWorkerIncarnation, ...]:
-        """Return the active local rows one fixed slot still holds."""
-        ...
-
-    async def release(self, record: LocalWorkerIncarnation, outcome: TerminationOutcome) -> None:
-        """Commit terminal evidence using the row's own stored binding."""
         ...
 
 
@@ -161,10 +106,6 @@ class SlotStorage(Protocol):
     def discard_prepared(self, state: SlotState) -> None: ...
 
     def cleanup_terminated(self, state: SlotState) -> None: ...
-
-    def inspect(self) -> SlotInspection: ...
-
-    def discard_unrecoverable(self) -> bool: ...
 
 
 class SystemdControl(Protocol):
@@ -236,22 +177,6 @@ class PostgresAuthority:
             )
         if not accepted:
             raise EvidenceRejected(f"database rejected termination evidence for slot {state.slot}")
-
-    async def recoverable(self, unit: str) -> tuple[LocalWorkerIncarnation, ...]:
-        """Return the active local rows one fixed slot still holds."""
-        async with self.pool.connection() as connection:
-            return await recoverable_worker_incarnations(connection, unit)
-
-    async def release(self, record: LocalWorkerIncarnation, outcome: TerminationOutcome) -> None:
-        """Commit terminal evidence using the row's own stored binding (ADR-0667)."""
-        async with self.pool.connection() as connection:
-            accepted = await terminate_worker_incarnation(
-                connection, record.incarnation, "local", record.authority_binding, outcome
-            )
-        if not accepted:
-            raise EvidenceRejected(
-                f"database rejected termination evidence for {record.incarnation}"
-            )
 
 
 class SystemdWorkerLifecycle:
@@ -349,20 +274,6 @@ class SystemdWorkerLifecycle:
         stop_deadline = _BudgetDeadline(operation_deadline, _STOP_SECONDS)
         results: list[SlotResult] = []
         try:
-            # The per-slot refusal below reads cgroup membership, which sees only workers inside
-            # a unit's own cgroup. A `kdive worker` running outside every fixed unit defeats it,
-            # and recovery releases fences, so it takes the same guard `start` takes before
-            # replacing the fleet rather than the weaker of the two liveness checks.
-            unmanaged = self._systemd_call(operation_deadline, self._runtime.unmanaged_workers)
-            if unmanaged:
-                # `_map_failure` renders `LifecycleConflict` with a canned message, so without
-                # this the operator gets `conflict` and an empty slot list with nothing naming
-                # the cause. Recovery is the escape hatch; it owes a trace of why it refused.
-                _log.warning(
-                    "recovery refused the sweep: unmanaged worker processes are running count=%d",
-                    len(unmanaged),
-                )
-                raise LifecycleConflict("unmanaged worker processes require operator recovery")
             for store in self._stores:
                 result = await self._recover_slot(store, operation_deadline, stop_deadline)
                 if result is not None:
@@ -371,11 +282,11 @@ class SystemdWorkerLifecycle:
             return _with_completed_slots(
                 self._failure_response(exc, operation_deadline), tuple(results)
             )
-        if any(result.code in _REFUSALS for result in results):
+        if any(result.code == _RECOVERY_REFUSED for result in results):
             return LifecycleResponse(
                 ok=False,
                 code="conflict",
-                message="recovery refused one or more fixed worker slots",
+                message="recovery refused a fixed worker unit with live processes",
                 retry_action="operator_recovery",
                 slots=tuple(results),
             )
@@ -400,154 +311,24 @@ class SystemdWorkerLifecycle:
                     code=_RECOVERY_REFUSED,
                     message="fixed worker unit still has live processes",
                 )
-        inspection = self._store_call(stop_deadline, store.inspect)
-        recovery = await self._retire_inspected_slot(
-            store, inspection, observation, deadline, stop_deadline
+        state = self._store_call(stop_deadline, store.load)
+        retired = (
+            None
+            if state is None
+            else await self._retire_slot(store, state, observation, deadline, stop_deadline)
         )
-        if recovery.refusal is not None:
-            return SlotResult(
-                slot=store.slot,
-                unit=store.unit,
-                code=recovery.refusal,
-                message=_REFUSAL_MESSAGES[recovery.refusal],
-            )
         if retained_identity:
             # Only a unit systemd still accounts for can be holding an identity to release; a
             # BootObservation is already the inactive, empty-identity state `require_inactive`
             # wants, so resetting it would be a no-op that hides which slots this call touched.
             self._systemd_call(stop_deadline, self._runtime.reset_failed, store.unit, stop_deadline)
-        if recovery.state is not None:
-            return _result(recovery.state)
-        if recovery.cleared:
-            return SlotResult(
-                slot=store.slot, unit=store.unit, message="retired the residual worker slot"
-            )
+        if retired is not None:
+            return _result(retired)
         if retained_identity:
             return SlotResult(
                 slot=store.slot, unit=store.unit, message="cleared the retained unit identity"
             )
         return None
-
-    async def _retire_inspected_slot(
-        self,
-        store: SlotStorage,
-        inspection: SlotInspection,
-        observation: UnitObservation | BootObservation,
-        deadline: Deadline,
-        stop_deadline: Deadline,
-    ) -> _Recovery:
-        if inspection.state is not None:
-            identity = (
-                _state_identity(inspection.state)
-                if inspection.state.phase in _OBSERVED_PHASES
-                else None
-            )
-            if identity is not None and _identity_is_unreadable(identity, observation):
-                return _Recovery(refusal=_RECOVERY_REFUSED_IDENTITY)
-            try:
-                retired = await self._retire_slot(
-                    store, inspection.state, observation, deadline, stop_deadline
-                )
-            except _RESIDUAL_FALLBACK as exc:
-                # #2533 cases 3 and 4: the retained binding no longer matches the row, so the
-                # evidenced path cannot commit. The row is the fence holder, so fall back to
-                # proving *its* identity dead and releasing it with its own stored binding.
-                _log.warning(
-                    "recovery falling back to the registered binding unit=%s slot=%d cause=%s",
-                    store.unit,
-                    store.slot,
-                    type(exc).__name__,
-                )
-            else:
-                # The evidenced path retired the retained generation, but a slot can hold an
-                # older active row too -- `prepare` mints a fresh generation for a slot whose
-                # files were lost out of band and registers it beside the row still held. Sweep
-                # what is left before calling the slot done, or this reports `ok` with a fence
-                # still held and leaves the slot half-released.
-                residual = await self._retire_residual_slot(
-                    store, inspection, observation, deadline, stop_deadline
-                )
-                if residual.refusal is not None:
-                    return residual
-                return _Recovery(state=retired, cleared=residual.cleared)
-        return await self._retire_residual_slot(
-            store, inspection, observation, deadline, stop_deadline
-        )
-
-    async def _retire_residual_slot(
-        self,
-        store: SlotStorage,
-        inspection: SlotInspection,
-        observation: UnitObservation | BootObservation,
-        deadline: Deadline,
-        stop_deadline: Deadline,
-    ) -> _Recovery:
-        releasable: list[tuple[LocalWorkerIncarnation, TerminationOutcome]] = []
-        for record in await self._authority_records(store, deadline):
-            if record.authority_binding["host"] != socket.gethostname():
-                # Another host's fence. The incarnation prefix carries no host, so a shared
-                # database can surface one, and it is not this host's to release (ADR-0667).
-                # Refuse the slot rather than skipping the row: falling through would delete this
-                # slot's files while that fence is still held, which is exactly the ordering the
-                # failure model forbids. A host that cannot account for every row over its own
-                # slot cannot safely clear that slot's facts either.
-                _log.warning(
-                    "recovery refused a slot holding a foreign-host fence unit=%s slot=%d",
-                    store.unit,
-                    store.slot,
-                )
-                return _Recovery(refusal=_RECOVERY_REFUSED_INCOHERENT)
-            identity = _registered_identity(store, record)
-            if identity is None:
-                return _Recovery(refusal=_RECOVERY_REFUSED_INCOHERENT)
-            if _identity_is_unreadable(identity, observation):
-                return _Recovery(refusal=_RECOVERY_REFUSED_IDENTITY)
-            outcome = _identity_outcome(identity, observation)
-            if outcome is None:
-                return _Recovery(refusal=_RECOVERY_REFUSED)
-            releasable.append((record, outcome))
-        for record, outcome in releasable:
-            await self._release(record, outcome, deadline)
-        removed = self._store_call(stop_deadline, store.discard_unrecoverable)
-        cleared = bool(releasable) or removed
-        if cleared:
-            # The residue is why this slot needed the residual path at all, and it is the only
-            # place the absent-versus-malformed distinction reaches an operator. Recovery must not
-            # branch on it; reporting it is what it is for.
-            _log.warning(
-                "recovery retired a residual slot unit=%s slot=%d residue=%s released=%d",
-                store.unit,
-                store.slot,
-                inspection.residue,
-                len(releasable),
-            )
-        return _Recovery(cleared=cleared)
-
-    async def _authority_records(
-        self, store: SlotStorage, deadline: Deadline
-    ) -> tuple[LocalWorkerIncarnation, ...]:
-        try:
-            return await self._authority_call(
-                deadline, lambda: self._authority.recoverable(store.unit)
-            )
-        except LifecycleDeadlineExceeded:
-            raise
-        except Exception as exc:
-            raise _AuthorityUnavailable("worker recovery authority unavailable") from exc
-
-    async def _release(
-        self, record: LocalWorkerIncarnation, outcome: TerminationOutcome, deadline: Deadline
-    ) -> None:
-        try:
-            await self._authority_call(deadline, lambda: self._authority.release(record, outcome))
-        except EvidenceRejected:
-            raise
-        except LifecycleDeadlineExceeded:
-            raise
-        except IncarnationConflict:
-            raise
-        except Exception as exc:
-            raise _AuthorityUnavailable("worker termination authority unavailable") from exc
 
     async def _retire_slot(
         self,
@@ -883,18 +664,17 @@ class SystemdWorkerLifecycle:
         except Exception as exc:
             raise _AuthorityUnavailable("worker termination authority unavailable") from exc
 
-    async def _authority_call[T](
+    async def _authority_call(
         self,
         deadline: Deadline,
-        operation: Callable[[], Coroutine[Any, Any, T]],
-    ) -> T:
+        operation: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
         remaining = _require_time(deadline)
         try:
-            result = await asyncio.wait_for(operation(), timeout=remaining)
+            await asyncio.wait_for(operation(), timeout=remaining)
         except TimeoutError as exc:
             raise LifecycleDeadlineExceeded("database operation exceeded request deadline") from exc
         _require_time(deadline)
-        return result
 
     @staticmethod
     def _systemd_call(deadline: Deadline, operation: Callable[..., Any], *args: object) -> Any:
@@ -982,75 +762,18 @@ def _require_prepared_observation(
         raise SystemdUnavailable("worker cgroup membership is unavailable")
 
 
-@dataclass(frozen=True, slots=True)
-class _InvocationIdentity:
-    """One exact systemd invocation, from retained state or from the registered binding."""
-
-    unit: str
-    slot: int
-    boot_id: str
-    invocation_id: str
-
-
-def _state_identity(state: SlotState) -> _InvocationIdentity | None:
-    """Return the retained invocation identity, or ``None`` for an unbound phase."""
-    if state.boot_id is None or state.invocation_id is None:
-        return None
-    return _InvocationIdentity(state.unit, state.slot, state.boot_id, state.invocation_id)
-
-
-def _identity_is_unreadable(
-    identity: _InvocationIdentity, observation: UnitObservation | BootObservation
-) -> bool:
-    """Report the one case ADR-0657:62-66 forbids recovering.
-
-    A ``BootObservation`` on the *retained* boot means systemd has no invocation identity for this
-    unit, and ADR-0574 forbids reading that absence as termination. Nothing can prove the
-    registered invocation ended, so recovery refuses rather than clearing. A different boot ID is
-    not this case: that is real evidence, and ``_identity_outcome`` maps it to ``killed``.
-    """
-    return isinstance(observation, BootObservation) and observation.boot_id == identity.boot_id
-
-
-def _registered_identity(
-    store: SlotStorage, record: LocalWorkerIncarnation
-) -> _InvocationIdentity | None:
-    """Return the invocation identity the fence claims, or ``None`` if the row is incoherent.
-
-    ``_validated_binding`` has already rejected a binding with missing or empty members, so the
-    only inconsistency left is a stored ``unit`` disagreeing with the incarnation prefix the row
-    was found by. Such a row cannot be trusted to name an invocation, so it is refused.
-    """
-    binding = record.authority_binding
-    if binding["unit"] != store.unit:
-        return None
-    return _InvocationIdentity(store.unit, store.slot, binding["boot_id"], binding["invocation_id"])
-
-
 def _terminal_observation(
     state: SlotState, observation: UnitObservation | BootObservation
 ) -> TerminationOutcome | None:
-    # The foreign-unit check stays ahead of `_state_identity`, even though `_identity_outcome`
-    # repeats it: the original checked the unit first, so moving it would swap which
-    # `LifecycleConflict` a foreign observation of an unbound state raises.
     if observation.unit != state.unit:
         raise LifecycleConflict("systemd returned a foreign unit observation")
-    identity = _state_identity(state)
-    if identity is None:
+    if state.boot_id is None or state.invocation_id is None:
         raise LifecycleConflict("bound lifecycle phase has no exact invocation")
-    return _identity_outcome(identity, observation)
-
-
-def _identity_outcome(
-    identity: _InvocationIdentity, observation: UnitObservation | BootObservation
-) -> TerminationOutcome | None:
-    if observation.unit != identity.unit:
-        raise LifecycleConflict("systemd returned a foreign unit observation")
-    if observation.boot_id != identity.boot_id:
+    if observation.boot_id != state.boot_id:
         return "killed"
     if isinstance(observation, BootObservation):
         raise SystemdUnavailable("worker invocation is absent on the retained boot")
-    if observation.invocation_id != identity.invocation_id:
+    if observation.invocation_id != state.invocation_id:
         # A unit carries one invocation at a time and is assigned a new INVOCATION_ID only when it
         # leaves an inactive state, so a successor identity on the retained boot proves the
         # retained invocation ended. Its own exit facts went with it, and the observed result and
@@ -1062,9 +785,9 @@ def _identity_outcome(
         _log.warning(
             "retained worker invocation was replaced out of band unit=%s slot=%d "
             "retained_invocation=%s observed_invocation=%s",
-            identity.unit,
-            identity.slot,
-            identity.invocation_id,
+            state.unit,
+            state.slot,
+            state.invocation_id,
             observation.invocation_id,
         )
         return "killed"
@@ -1104,7 +827,7 @@ def _with_completed_slots(
         {
             result.slot: result
             for result in response.slots
-            if merged.get(result.slot) is None or merged[result.slot].code not in _REFUSALS
+            if merged.get(result.slot) is None or merged[result.slot].code != _RECOVERY_REFUSED
         }
     )
     return LifecycleResponse(

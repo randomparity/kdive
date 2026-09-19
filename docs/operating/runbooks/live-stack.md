@@ -405,43 +405,10 @@ still accounts for. It never fabricates a termination outcome — see
 **Then bring the stack back up.** Re-run `scripts/live-stack/stack-services.sh`; it is
 idempotent.
 
-**The residual slots `recover` now reaches.** A slot whose `state.json` is absent or malformed,
-whose retained binding drifted from its `worker_incarnations` row, or whose termination evidence
-that row rejected, is retired by a `recover` pass: the row is named by the slot's derived
-incarnation prefix and released with the binding it actually stores, then the on-disk facts are
-cleared. Such a slot reports `retired the residual worker slot`.
-
-**The one slot `recover` still refuses, by decision and not for want of a fix.** If systemd
-reports no invocation for the unit on the *retained* boot, the slot's invocation identity is
-unreadable: absence within a boot is not termination evidence, so nothing can prove the registered
-invocation ended.
-[ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md) **forbids** recovering
-such a slot — a recovery operation may not fabricate a `TerminationOutcome`, attribute one
-invocation's exit facts to another, or run for a slot whose invocation identity is unreadable — so
-`recover` refuses it rather than clearing it, with the per-slot code
-`recovery_refused_unreadable_identity`. That is the code the lifecycle journal and the response
-both carry; grep for it. The rest of the sweep still runs. The remedy is a reboot, which yields a
-different boot ID and therefore real evidence. Relaxing the refusal would take an amendment to
-ADR-0657, not a bug fix.
-
-A slot reported `recovery_refused_incoherent_row` is a different problem, and a reboot will not
-clear it: the database holds an active `worker_incarnations` row over that slot which does not
-describe this slot on this host — its stored binding names a different unit, or a different host.
-Recovery refuses the whole slot rather than releasing that row or clearing the slot's files around
-it. A slot that had only a *prepared* generation is the exception: that generation holds no fence,
-and it is discarded before the refusal is decided. Read the row's `authority_binding` and reconcile
-it with the host that actually owns it; the warning in the lifecycle journal names the slot and
-unit, not the foreign host. How recovery names a row without a readable `state.json` is recorded in
-[ADR-0667](../../adr/0667-recovery-names-the-fence-row-by-the-slot-derived-incarnation.md).
-
-**When `recover` refuses the whole sweep.** If any `kdive worker` process is running outside the
-eight fixed unit cgroups, `recover` refuses before touching any slot and returns `code=conflict`
-with `retry_action=operator_recovery` and an **empty slot list** — no slot was examined, so none is
-reported. Cgroup membership cannot see such a process, and recovery releases fences, so it takes
-the same guard `start` takes rather than the weaker check. The lifecycle journal carries a warning
-naming the count. Stop those processes, then re-run `recover`.
-
-Do not hand-edit the slot files or the `worker_incarnations` row in any of these cases.
+**What `recover` does not reach.** A slot with an absent or malformed `state.json`, a drifted
+binding, rejected evidence, or an unreadable boot ID stays wedged after a `recover` pass. That
+gap is issue #2533; do not hand-edit the slot files or the `worker_incarnations` row to work
+around it.
 
 ### The app tier does not hot-reload — re-run `stack-services.sh` after editing source
 

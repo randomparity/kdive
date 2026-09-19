@@ -86,6 +86,42 @@ Recovery now reaches the fence for a slot whose `state.json` is absent, where be
 the failed unit identity, and it reports a same-boot absence as its own refusal rather than as a
 systemd outage. Three `recover` tests #2532 wrote to pin the residual behaviour change with it.
 
+### Amendment (2026-09-17): the implementation was reverted; the decision stands unimplemented (#2533)
+
+This is an amendment rather than a rewrite because the decision above was not withdrawn or
+reconsidered — it was implemented, merged, and then taken back for a reason that has nothing to do
+with its merits. The original record is preserved; what follows qualifies every operator-facing
+claim in this section.
+
+PR #2592 implemented this decision and merged on 2026-09-16. PR #2597 reverted that merge on
+2026-09-17, because #2592 was merged without the authority to do so — this is a `risk:daytime-only`
+row that was to await an operator decision, and the merge was taken unattended with a guard that
+omitted the ancestry check. Nothing was wrong with the change itself: it met all seven of its
+acceptance criteria and `main` was green with it.
+
+**So the two claims above describe the intended end state, not `main` today.** Recovery does *not*
+yet reach the fence for a slot whose `state.json` is absent, and an operator who hits one **has no
+sanctioned remedy**. The hand-run `UPDATE` this section says they no longer need was not restored as
+guidance by the revert, and it is not guidance to return to: the operator documentation carries no
+such procedure — `docs/operating/` mentions the `worker_incarnations` row only to forbid editing it
+— and `## Considered & rejected` below records #2481 as the report that the manual procedure is
+itself the defect. `docs/operating/runbooks/live-stack.md` is the accurate document
+while this amendment stands — those cases stay wedged after a `recover` pass, and the instruction
+not to hand-edit slot files or the `worker_incarnations` row remains in force. The slot stays wedged
+until #2533 lands.
+
+One artifact of this decision survives the revert and will not be re-added.
+`src/kdive/db/schema/0155_recoverable_worker_incarnation_read.sql` remains on `main` as an inert
+read-only function with no callers, because ADR-0015 makes applied migrations forward-only and
+byte-immutable and the schema guard rejects a delete. A second attempt at #2533 builds on that
+migration rather than introducing one; if this decision is abandoned instead, retiring the function
+is itself a forward migration.
+
+Status is deliberately left at **Accepted**. A partially-shipped ADR would ordinarily return to
+**Proposed**, but the retained migration cites `ADR-0667` in `src/`, and `adr-status-check` rejects a
+Proposed ADR cited from that tree — so the flip that would describe reality more accurately is the
+one the guards forbid. This amendment carries that meaning instead.
+
 ## Considered & rejected
 
 - **Add a recovery-specific terminate that skips the binding comparison.** judgment: it puts the
