@@ -309,6 +309,8 @@ def test_real_systemd_workers_register_heartbeat_and_terminate(
             _assert_stopped(proof_context, rows)
         else:
             _lifecycle("stop")
+    if count == 3:
+        _assert_partial_start_rollback_clears_released_first_slot(proof_context)
 
 
 def _assert_retained_after_database_outage(
@@ -419,6 +421,79 @@ def _reset_fleet() -> None:
     """Return every fixed unit to the inactive, empty-identity state the next test needs."""
     _lifecycle("stop")
     _lifecycle("recover")
+
+
+def _assert_partial_start_rollback_clears_released_first_slot(proof_context: ProofContext) -> None:
+    """A rejected second slot must not leave the first slot's released cgroup retained."""
+    unit = "kdive-live-worker@2.service"
+    drop_in = Path(f"/run/systemd/system/{unit}.d/kdive-live-proof-2596.conf")
+    preflight = subprocess.run(
+        ("sudo", "test", "!", "-e", str(drop_in)),
+        cwd=support.ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert preflight.returncode == 0
+
+    try:
+        installed = subprocess.run(
+            (
+                "sudo",
+                "systemctl",
+                "edit",
+                "--runtime",
+                "--drop-in=kdive-live-proof-2596.conf",
+                "--stdin",
+                unit,
+            ),
+            cwd=support.ROOT,
+            check=False,
+            capture_output=True,
+            input="[Service]\nExecStart=\nExecStart=/bin/false\n",
+            text=True,
+            timeout=30,
+        )
+        assert installed.returncode == 0
+
+        status, response = _lifecycle_result("start", 2)
+        assert status == 4 and not response.ok
+        assert response.code == "conflict" and response.retry_action == "operator_recovery"
+    finally:
+        subprocess.run(
+            ("sudo", "rm", "-f", str(drop_in)),
+            cwd=support.ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        subprocess.run(
+            ("sudo", "systemctl", "daemon-reload"),
+            cwd=support.ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _reset_fleet()
+        assert not _active_rows(proof_context.admin_dsn)
+        for slot in (1, 2):
+            properties = _properties(f"kdive-live-worker@{slot}.service")
+            assert properties["ActiveState"] == "inactive"
+            assert properties["ControlGroup"] == ""
+            assert properties["InvocationID"] == ""
+            assert not _slot_artifacts_exist(slot)
+        removed = subprocess.run(
+            ("sudo", "test", "!", "-e", str(drop_in)),
+            cwd=support.ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert removed.returncode == 0
 
 
 def test_recover_clears_the_failed_identity_that_blocks_the_next_start(
