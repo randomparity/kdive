@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -11,8 +12,75 @@ import pytest
 
 import tests.live_vm.systemd_worker_lifecycle_support as support
 
+pytest_plugins = ("pytester",)
+
 _ROOT = Path(__file__).resolve().parents[2]
 _HOSTED_PROOF = "tests/live_vm/test_systemd_worker_lifecycle.py"
+
+
+def _live_proof_function(name: str) -> tuple[ast.FunctionDef, str]:
+    source = (_ROOT / _HOSTED_PROOF).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    return function, ast.get_source_segment(source, function) or ""
+
+
+def _write_cgroup_events(tmp_path: Path, content: bytes) -> Path:
+    events = tmp_path / "system.slice" / "worker.service" / "cgroup.events"
+    events.parent.mkdir(parents=True)
+    events.write_bytes(content)
+    return events
+
+
+@pytest.mark.parametrize(("value", "expected"), [(b"0", False), (b"1", True)])
+def test_cgroup_populated_reads_exact_boolean_record(
+    tmp_path: Path, value: bytes, expected: bool
+) -> None:
+    _write_cgroup_events(tmp_path, b"populated " + value + b"\nfrozen 0\n")
+
+    assert support.cgroup_populated("/system.slice/worker.service", root=tmp_path) is expected
+
+
+def test_cgroup_populated_accepts_blank_or_disappeared_group(tmp_path: Path) -> None:
+    assert support.cgroup_populated("", root=tmp_path) is False
+    assert support.cgroup_populated("/system.slice/absent.service", root=tmp_path) is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"",
+        b"frozen 0\n",
+        b"populated\n",
+        b"populated 2\n",
+        b"populated 0 extra\n",
+        b"populated 0\npopulated 1\n",
+        b"populated \xff\n",
+    ],
+)
+def test_cgroup_populated_rejects_malformed_present_evidence(
+    tmp_path: Path, content: bytes
+) -> None:
+    _write_cgroup_events(tmp_path, content)
+
+    with pytest.raises((UnicodeDecodeError, ValueError)):
+        support.cgroup_populated("/system.slice/worker.service", root=tmp_path)
+
+
+def test_cgroup_populated_propagates_non_not_found_io_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_cgroup_events(tmp_path, b"populated 0\n")
+
+    def refuse_read(*_args: object, **_kwargs: object) -> str:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", refuse_read)
+
+    with pytest.raises(PermissionError, match="permission denied"):
+        support.cgroup_populated("/system.slice/worker.service", root=tmp_path)
 
 
 def test_hosted_systemd_proof_collects_exactly_six_cases() -> None:
@@ -194,4 +262,151 @@ def test_outage_recovery_failure_preserves_primary_and_gates_unit_cleanup(
         if failure_stage == "worker_cleanup"
         else "PostgreSQL restoration failed"
     )
-    assert any(expected_note in note for note in original.__notes__)
+    note = next(note for note in original.__notes__ if expected_note in note)
+    assert str(recovery_error) in note
+    assert "Traceback (most recent call last)" in note
+    assert "test_systemd_worker_lifecycle_support.py" in note
+
+
+@pytest.mark.parametrize("failure_stage", (None, "restore", "reset"))
+def test_cleanup_after_case_orders_and_reports_failures(failure_stage: str | None) -> None:
+    events: list[str] = []
+
+    def restore() -> None:
+        events.append("restore")
+        if failure_stage == "restore":
+            raise RuntimeError("restore failed")
+
+    def reset() -> None:
+        events.append("reset")
+        if failure_stage == "reset":
+            raise RuntimeError("reset failed")
+
+    if failure_stage is None:
+        support.cleanup_after_case(
+            restore_database=restore,
+            cleanup_workers=reset,
+        )
+    else:
+        with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+            support.cleanup_after_case(
+                restore_database=restore,
+                cleanup_workers=reset,
+            )
+    expected = ["restore"] if failure_stage == "restore" else ["restore", "reset"]
+    assert events == expected
+
+
+def _proof_plugin_conftest(events: Path, *, reset_failure: bool = False) -> str:
+    reset_body = (
+        'raise RuntimeError("cleanup boom")'
+        if reset_failure
+        else f'Path({str(events)!r}).open("a", encoding="utf-8").write("reset\\n")'
+    )
+    return f"""
+from pathlib import Path
+import sys
+import pytest
+sys.path.insert(0, {str(_ROOT)!r})
+import tests.live_vm.systemd_worker_lifecycle_support as support
+import tests.live_vm.test_systemd_worker_lifecycle as live
+
+pytest_plugins = ("tests.live_vm.test_systemd_worker_lifecycle",)
+
+@pytest.fixture
+def proof_context(monkeypatch):
+    context = live.ProofContext(
+        admin_dsn="postgresql://admin",
+        worker_dsn="postgresql://worker",
+        postgres=live.ComposePostgres(container_id="sentinel-postgres", volume_name="volume"),
+    )
+    def restore(container_id):
+        assert container_id == "sentinel-postgres"
+        Path({str(events)!r}).open("a", encoding="utf-8").write("restore\\n")
+    def reset():
+        {reset_body}
+    monkeypatch.setattr(support, "restore_postgres", restore)
+    monkeypatch.setattr(live, "_reset_fleet", reset)
+    return context
+"""
+
+
+def test_live_fixture_isolates_body_failures_and_reports_teardown_failure(
+    pytester: pytest.Pytester,
+) -> None:
+    events = pytester.path / "events"
+    pytester.makeconftest(_proof_plugin_conftest(events, reset_failure=True))
+    pytester.makepyfile(
+        """
+def test_startup_failure():
+    raise RuntimeError("startup boom")
+
+def test_post_start_assertion_failure():
+    from pathlib import Path
+    Path("events").open("a", encoding="utf-8").write("started\\n")
+    assert False, "body boom"
+"""
+    )
+
+    result = pytester.runpytest_subprocess("-q")
+
+    result.assert_outcomes(failed=2, errors=2)
+    output = result.stdout.str()
+    assert "startup boom" in output
+    assert "body boom" in output
+    assert "cleanup boom" in output
+    assert events.read_text(encoding="utf-8").splitlines() == [
+        "restore",
+        "started",
+        "restore",
+    ]
+
+
+def test_live_fixture_wires_exact_case_cleanup_boundary() -> None:
+    fixture, source = _live_proof_function("_isolate_proof_case")
+    decorator = next(
+        item
+        for item in fixture.decorator_list
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Attribute)
+        and item.func.attr == "fixture"
+    )
+    keywords = {item.arg: ast.literal_eval(item.value) for item in decorator.keywords}
+
+    assert keywords == {"autouse": True}
+    assert [argument.arg for argument in fixture.args.args] == ["proof_context"]
+    assert "support.cleanup_after_case(" in source
+    assert "support.restore_postgres(proof_context.postgres.container_id)" in source
+    assert "cleanup_workers=_reset_fleet" in source
+
+
+def test_basic_worker_cases_keep_terminal_proof_on_success() -> None:
+    _, source = _live_proof_function("test_real_systemd_workers_register_heartbeat_and_terminate")
+
+    assert "_assert_stopped(proof_context, rows)" in source
+
+
+def test_expected_lifecycle_failures_use_nonchecking_runner() -> None:
+    _, source = _live_proof_function("_assert_retained_after_database_outage")
+
+    assert "status, response = _lifecycle_result(operation)" in source
+    assert "assert status == 4" in source
+    assert 'assert retained.control_group == ""' in source
+    assert "_lifecycle(operation)" not in source
+
+
+def test_outage_cleanup_retires_then_recovers_failed_identity() -> None:
+    _, source = _live_proof_function("_assert_stopped_after_outage")
+
+    retire = source.index("_assert_terminated(context, rows)")
+    recover = source.index('_lifecycle("recover")')
+    inactive = source.index("_assert_units_inactive(rows)")
+    assert retire < recover < inactive
+
+
+def test_out_of_band_restart_waits_for_terminal_systemd_state() -> None:
+    _, source = _live_proof_function("_restart_out_of_band")
+
+    assert "deadline = time.monotonic() + 10" in source
+    assert 'properties["ActiveState"] == "failed"' in source
+    assert "time.sleep(0.1)" in source

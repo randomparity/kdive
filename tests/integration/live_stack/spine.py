@@ -206,6 +206,77 @@ async def scalar(client: LiveStackClient, name: str, **args: object) -> ToolResp
     return env
 
 
+async def full_artifact_text(client: LiveStackClient, artifact_id: str, phase_name: str) -> str:
+    """Fetch the full plaintext content of a redacted artifact across all byte windows."""
+    chunks: list[str] = []
+    byte_offset = 0
+    while True:
+        env = ok(
+            await scalar(
+                client,
+                "artifacts.get",
+                request={"artifact_id": artifact_id, "byte_offset": byte_offset},
+            ),
+            phase_name,
+        )
+        content = env.data.get("content")
+        if isinstance(content, str) and content:
+            chunks.append(content)
+        if not bool(env.data.get("content_truncated", False)):
+            break
+        next_offset = env.data.get("next_offset")
+        if next_offset is None:
+            break
+        byte_offset = int(str(next_offset))
+    return "".join(chunks)
+
+
+def console_part_ids(listing: ToolResponse) -> list[str]:
+    """Return console-part artifact ids in the order supplied by ``artifacts.list``."""
+    return [
+        item.object_id for item in listing.items if "console-part-" in item.refs.get("object", "")
+    ]
+
+
+async def poll_for_new_console_part(
+    client: LiveStackClient,
+    system_id: str,
+    initial_ids: set[str],
+    marker: str,
+    *,
+    deadline_s: float,
+    interval_s: float,
+) -> tuple[str, str]:
+    """Return a new immutable console part containing ``marker`` and its full plaintext."""
+    deadline = time.monotonic() + deadline_s
+    inspected_ids: set[str] = set()
+    current_ids: list[str] = []
+    while True:
+        listing = ok(
+            await scalar(client, "artifacts.list", system_id=system_id),
+            "poll-parts",
+        )
+        current_ids = console_part_ids(listing)
+        candidates = [
+            artifact_id
+            for artifact_id in current_ids
+            if artifact_id not in initial_ids and artifact_id not in inspected_ids
+        ]
+        for artifact_id in candidates:
+            text = await full_artifact_text(client, artifact_id, "read-new-part")
+            inspected_ids.add(artifact_id)
+            if marker in text:
+                return artifact_id, text
+        if time.monotonic() >= deadline:
+            raise SpinePhaseError(
+                "console-parts",
+                f"no marker-bearing console-part artifacts within {deadline_s:g}s "
+                f"(initial={len(initial_ids)}, current={len(current_ids)}, "
+                f"inspected={len(inspected_ids)})",
+            )
+        await asyncio.sleep(interval_s)
+
+
 # --- async-drain helpers (ADR-0045 §2) ------------------------------------------------------
 
 
