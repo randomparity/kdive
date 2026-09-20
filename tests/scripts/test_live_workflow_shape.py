@@ -1058,32 +1058,12 @@ def _proof_guard(spine: str, summary_var: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("stream", "expected"),
+    ("proof_name", "summary_var"),
     [
-        ("SKIPPED [1] test.py: previous run had 1 passed\n6 skipped in 0.01s\n", False),
-        ("6 passed in 0.01s\n", True),
+        ("tcg", "tcg_summary"),
+        ("native", "native_summary"),
+        ("systemd", "systemd_summary"),
     ],
-)
-def test_hosted_lifecycle_proof_guard_executes_the_shared_predicate(
-    tmp_path: pathlib.Path,
-    stream: str,
-    expected: bool,
-) -> None:
-    summary = tmp_path / "systemd.summary"
-    summary.write_text(stream, encoding="utf-8")
-    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
-    shell = f'systemd_summary="$1"\nrc=0\n{_proof_guard(proof["run"], "systemd_summary")}\n'
-    result = subprocess.run(
-        ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c", shell, "proof-guard", str(summary)],
-        cwd=_ROOT,
-        check=False,
-    )
-    assert (result.returncode == 0) is expected
-
-
-@pytest.mark.parametrize(
-    ("spine_name", "summary_var"),
-    [("tcg", "tcg_summary"), ("native", "native_summary")],
 )
 @pytest.mark.parametrize(
     ("stream", "expected"),
@@ -1094,15 +1074,21 @@ def test_hosted_lifecycle_proof_guard_executes_the_shared_predicate(
 )
 def test_workflow_proof_guards_execute_the_shared_predicate(
     tmp_path: pathlib.Path,
-    spine_name: str,
+    proof_name: str,
     summary_var: str,
     stream: str,
     expected: bool,
 ) -> None:
-    summary = tmp_path / f"{spine_name}.summary"
+    summary = tmp_path / f"{proof_name}.summary"
     summary.write_text(stream, encoding="utf-8")
-    spine = _tcg_spine() if spine_name == "tcg" else _native_spine()
-    shell = f'{summary_var}="$1"\nrc=0\n{_proof_guard(spine, summary_var)}\n'
+    if proof_name == "tcg":
+        proof = _tcg_spine()
+    elif proof_name == "native":
+        proof = _native_spine()
+    else:
+        _, step = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+        proof = step["run"]
+    shell = f'{summary_var}="$1"\nrc=0\n{_proof_guard(proof, summary_var)}\n'
     result = subprocess.run(
         ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c", shell, "proof-guard", str(summary)],
         cwd=_ROOT,
