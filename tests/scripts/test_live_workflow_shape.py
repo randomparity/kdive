@@ -1017,7 +1017,7 @@ def test_hosted_spine_fails_loud_on_a_zero_proof_tier() -> None:
     """pytest exits 0 when every test skips; pin the '<N> passed' summary gate that makes an
     all-skip or zero-collect live_vm_tcg tier RED naming the tier instead of green."""
     spine = _tcg_spine()
-    assert "[1-9][0-9]* passed" in spine
+    assert 'pytest-terminal-summary-has-passes.sh "$tcg_summary"' in spine
     assert "ran ZERO live_vm_tcg proofs" in spine
 
 
@@ -1035,7 +1035,7 @@ def test_native_spine_fails_loud_on_a_zero_proof_tier() -> None:
     """
     spine = " ".join(_native_spine().split())
     guard = (
-        "if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' \"$native_summary\"; then "
+        'if ! scripts/pytest-terminal-summary-has-passes.sh "$native_summary"; then '
         'echo "native live_vm spine: ran ZERO native live_vm proofs '
         "(no '<N> passed' summary, pytest rc=$rc); "
         'a skipped tier must never read green" >&2 '

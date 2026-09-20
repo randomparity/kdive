@@ -104,13 +104,27 @@ def test_no_tests_collected_fails_the_remote_recipe(tmp_path: Path) -> None:
 
 
 def test_passing_remote_run_succeeds(tmp_path: Path) -> None:
-    result = _run_recipe("test-live-remote", tmp_path, uv_exit_code=0)
+    result = _run_recipe(
+        "test-live-remote", tmp_path, uv_exit_code=0, uv_stdout="1 passed in 0.01s\n"
+    )
     assert result.returncode == 0, result.stderr
 
 
 def test_failing_remote_run_propagates_its_exit_code(tmp_path: Path) -> None:
-    result = _run_recipe("test-live-remote", tmp_path, uv_exit_code=1)
+    result = _run_recipe(
+        "test-live-remote", tmp_path, uv_exit_code=1, uv_stdout="1 failed, 1 passed in 0.01s\n"
+    )
     assert result.returncode == 1, result.stderr
+
+
+def test_skip_reason_cannot_satisfy_remote_proof_gate(tmp_path: Path) -> None:
+    result = _run_recipe(
+        "test-live-remote",
+        tmp_path,
+        uv_exit_code=0,
+        uv_stdout="SKIPPED [1] test.py: previous run had 1 passed\n4 skipped in 0.01s\n",
+    )
+    assert result.returncode != 0
 
 
 def test_absent_preflight_env_fails_the_tcg_recipe(tmp_path: Path) -> None:

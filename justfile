@@ -308,7 +308,7 @@ test-live:
     # `pipefail` above is load-bearing: without it `| tee` would report tee's status and turn a
     # genuinely failing proof run into a second silent green.
     uv run python -m pytest -m "live_vm and not live_vm_tcg" -q | tee "$summary" || rc=$?
-    if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$summary"; then
+    if ! ./scripts/pytest-terminal-summary-has-passes.sh "$summary"; then
       echo "just test-live: no '<N> passed' summary from the native live_vm tier (pytest rc=$rc)." >&2
       echo "A skipped, empty, or wholly failed tier proved nothing and must never read green." >&2
       echo "Read the SKIPPED reasons above: a proof-level gate outside the native preflight" >&2
@@ -338,7 +338,7 @@ test-live-tcg:
     # `pipefail` above is load-bearing: without it `| tee` would report tee's status and turn a
     # genuinely failing proof run into a second silent green.
     uv run python -m pytest -m live_vm_tcg --strict-markers -q | tee "$summary" || rc=$?
-    if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$summary"; then
+    if ! ./scripts/pytest-terminal-summary-has-passes.sh "$summary"; then
       echo "just test-live-tcg: no '<N> passed' summary from the live_vm_tcg tier (pytest rc=$rc)." >&2
       echo "A skipped, empty, or wholly failed tier proved nothing and must never read green." >&2
       echo "Read the SKIPPED reasons above: a proof-level gate outside the tcg preflight contract" >&2
@@ -362,14 +362,20 @@ test-live-tcg:
 test-live-remote:
     #!/usr/bin/env bash
     set -euo pipefail
+    summary="$(mktemp)"
+    trap 'rm -f "$summary"' EXIT
     rc=0
-    uv run python -m pytest -m live_vm_remote --strict-markers -q || rc=$?
+    uv run python -m pytest -m live_vm_remote --strict-markers -q | tee "$summary" || rc=$?
     if [[ "$rc" -eq 5 ]]; then
       echo "no live_vm_remote test ran — this recipe proved nothing, so it is not a pass." >&2
       echo "pytest collected nothing. Either no test carries the marker (ADR-0425 shipped the" >&2
       echo "gate ahead of the first remote proof), or a carrier skipped at module level." >&2
       echo "Mark the remote-libvirt proofs and call require_live_vm_remote() INSIDE the test —" >&2
       echo "an absent remote env is then a reported skip, not an empty run (#1627)." >&2
+      exit 1
+    fi
+    if ! ./scripts/pytest-terminal-summary-has-passes.sh "$summary"; then
+      echo "no live_vm_remote test ran — this recipe proved nothing, so it is not a pass." >&2
       exit 1
     fi
     exit "$rc"
