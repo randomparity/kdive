@@ -7,6 +7,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -153,9 +154,7 @@ def _properties(unit: str) -> dict[str, str]:
 
 
 def _cgroup_populated(control_group: str) -> bool:
-    events = Path("/sys/fs/cgroup") / control_group.removeprefix("/") / "cgroup.events"
-    values = dict(line.split() for line in events.read_text(encoding="utf-8").splitlines())
-    return values["populated"] == "1"
+    return support.cgroup_populated(control_group)
 
 
 def _wait_for_empty_cgroup(control_group: str, timeout: float = 10) -> None:
@@ -423,6 +422,15 @@ def _reset_fleet() -> None:
     """Return every fixed unit to the inactive, empty-identity state the next test needs."""
     _lifecycle("stop")
     _lifecycle("recover")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_proof_case(proof_context: ProofContext) -> Iterator[None]:
+    yield
+    support.cleanup_after_case(
+        restore_database=lambda: support.restore_postgres(proof_context.postgres.container_id),
+        cleanup_workers=_reset_fleet,
+    )
 
 
 def _assert_slot_artifacts_absent(slot: int) -> None:
