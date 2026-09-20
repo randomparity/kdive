@@ -9,8 +9,10 @@ lifecycle outcome and identity code consumes the resulting `UnitObservation` unc
 
 **Tech stack:** Python 3.14, pytest, systemd, `uv`, `just`.
 
-Expected implementation size: 120–220 changed lines (M) — derived from one runtime classifier,
-two focused unit-test modules, and one bounded live-host regression.
+Expected implementation size: 260–300 changed lines (M) — corrected after implementation measured
+275 changed source/test lines. The original range undercounted the accepted/refused matrix rewrite,
+the three explicit lifecycle-consumer proofs, and fail-safe live-host rollback assertions; all remain
+inside the reviewed four-file surface and fixed M denominator.
 
 ## Global constraints
 
