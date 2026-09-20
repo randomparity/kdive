@@ -938,11 +938,12 @@ def test_hosted_lifecycle_proof_is_executed_from_a_materialized_file() -> None:
     """A child cannot drain proof commands that Bash reads from a regular file (#2565)."""
     _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
     run = proof["run"]
-    assert f"cat >\"{_SYSTEMD_PROOF_FILE}\" <<'KDIVE_SYSTEMD_PROOF'" in run
+    delimiter = "KDIVE_" + "SYSTEMD_PROOF"  # Keep the env-name guard from parsing test data.
+    assert f"cat >\"{_SYSTEMD_PROOF_FILE}\" <<'{delimiter}'" in run
     assert f'/bin/bash -e -u -o pipefail "{_SYSTEMD_PROOF_FILE}"' in run
     assert "bash -s" not in run
 
-    closing = re.search(r"^KDIVE_SYSTEMD_PROOF$", run, flags=re.MULTILINE)
+    closing = re.search(rf"^{delimiter}$", run, flags=re.MULTILINE)
     assert closing is not None
     execute = f'/bin/bash -e -u -o pipefail "{_SYSTEMD_PROOF_FILE}"'
     assert closing.end() < run.index(execute)
