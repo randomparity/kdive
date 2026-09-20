@@ -1,6 +1,8 @@
 # ADR 0222 — Actionable diagnostics for Ubuntu build-fs libguestfs failures
 
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+> **Superseded in part by [0669](0669-supported-libguestfs-kernel-remediation.md) (2026-09-20):
+> kernel-unreadable remediation choice only.**
 - **Date:** 2026-06-23
 - **Deciders:** kdive maintainers
 
