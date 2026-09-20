@@ -89,6 +89,7 @@ def test_cgroup_populated_propagates_non_not_found_io_errors(
         ("failed", "failed", "signal", "15"),
         ("active", "exited", "success", "0"),
         ("active", "exited", "success", "15"),
+        ("active", "exited", "success", "0000"),
     ],
 )
 def test_released_terminal_state_accepts_runtime_supported_shapes(

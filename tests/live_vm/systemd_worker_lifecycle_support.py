@@ -57,7 +57,6 @@ def assert_released_terminal_state(
     status_is_valid = (
         exec_main_status.isascii()
         and exec_main_status.isdecimal()
-        and len(exec_main_status) <= 3
         and int(exec_main_status, 10) in range(256)
     )
     assert status_is_valid, f"unsupported systemd ExecMainStatus={exec_main_status}"
