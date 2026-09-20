@@ -8,8 +8,8 @@ and ordered recovery; a function-scoped pytest fixture owns per-case restoration
 
 **Tech stack:** Python 3.14, pytest, systemd, Docker Compose, `uv`, `just`.
 
-Measured implementation size: 229 changed lines against the frozen 100-line denominator (S). This
-is a non-blocking 229% expansion warning: strict malformed-cgroup coverage and subprocess proof of
+Measured implementation size: 238 changed lines against the frozen 100-line denominator (S). This
+is a non-blocking 238% expansion warning: strict malformed-cgroup coverage and subprocess proof of
 the real fixture's body/teardown behavior account for the increase. The reviewed three-file test
 surface and production exclusions are unchanged.
 
