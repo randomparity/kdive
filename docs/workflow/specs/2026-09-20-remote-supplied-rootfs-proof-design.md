@@ -27,8 +27,8 @@ base volume XML/path evidence before and after each arm.
 The carrier proves these bounded behaviors:
 
 1. Supplied source: provision using `LocalComponentRef`; observe actual upload invocation,
-   real pool base volume, overlay XML backing path, running domain and responsive guest
-   agent. Teardown through the production provisioner; require domain, overlay and base
+   real pool base volume, overlay XML backing path, running domain and connected guest-agent
+   channel. Teardown through the production provisioner; require domain, overlay and base
    absent before fixture fallback cleanup.
 2. Partial upload: exercise both an interrupted send after at least one real transmitted
    chunk and a finish fault after real stream transmission. Use a real libvirt stream;
