@@ -53,6 +53,7 @@ from tests.integration.live_stack.spine import (
     build_and_upload_kernel,
     build_profile,
     drain_job,
+    full_artifact_text,
     mint_role_token,
     ok,
     phase,
@@ -253,41 +254,6 @@ async def _poll_for_new_parts(
         await asyncio.sleep(_PARTS_POLL_INTERVAL_S)
 
 
-async def _full_text(op: LiveStackClient, artifact_id: str, phase_name: str) -> str:
-    """Fetch the full plaintext content of a redacted artifact, paging through all windows.
-
-    Args:
-        op: The live-stack client to use for tool calls.
-        artifact_id: The UUID of the redacted artifact to fetch.
-        phase_name: The current phase name (for SpinePhaseError labelling).
-
-    Returns:
-        The complete decoded text of the artifact across all paged windows.
-    """
-    chunks: list[str] = []
-    byte_offset = 0
-    while True:
-        env = ok(
-            await scalar(
-                op,
-                "artifacts.get",
-                request={"artifact_id": artifact_id, "byte_offset": byte_offset},
-            ),
-            phase_name,
-        )
-        content = env.data.get("content")
-        if isinstance(content, str) and content:
-            chunks.append(content)
-        truncated = bool(env.data.get("content_truncated", False))
-        if not truncated:
-            break
-        next_offset = env.data.get("next_offset")
-        if next_offset is None:
-            break
-        byte_offset = int(str(next_offset))
-    return "".join(chunks)
-
-
 def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
     """Post-readiness console-part artifacts exist and contain lines absent from frozen evidence.
 
@@ -414,7 +380,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
 
             # Fetch the newest new console-part artifact's full plaintext.
             async with phase("read-newest-part"):
-                part_text = await _full_text(op, newest_part_id, "read-newest-part")
+                part_text = await full_artifact_text(op, newest_part_id, "read-newest-part")
 
             # Fetch the frozen per-Run boot-window console evidence (the ``console-<run>``
             # artifact captured at the time the boot step completed).
@@ -425,7 +391,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     "runs.get returned no refs.console for a succeeded run "
                     "(boot evidence absent — #892 bootstrap failure)"
                 )
-                frozen_text = await _full_text(op, str(console_ref), "read-frozen-evidence")
+                frozen_text = await full_artifact_text(op, str(console_ref), "read-frozen-evidence")
 
             # Core #892 assertions.
             assert proof_marker in part_text, (
