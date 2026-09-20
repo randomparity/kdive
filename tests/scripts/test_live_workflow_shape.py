@@ -80,6 +80,24 @@ def test_native_block_preflights_debug_stepping_with_both_native_families() -> N
     assert "preflight-env.sh throwaway provisioned debug-stepping" in run
 
 
+def test_native_spine_checks_lifecycle_compatibility_before_destructive_setup() -> None:
+    """A stale persistent host must fail before the reaper or stack can mutate it (#2548)."""
+    spine = _native_spine()
+    compatibility = "scripts/live-stack/worker-lifecycle.sh compatibility"
+
+    assert spine.count(compatibility) == 1
+    assert spine.index(compatibility) < spine.index(
+        'for uri in "$KDIVE_LIBVIRT_URI" qemu:///system'
+    )
+    assert spine.index(compatibility) < spine.index("docker compose down -v")
+    assert spine.index(compatibility) < spine.index("live-stack/stack-services.sh --skip-obs")
+
+    native_steps = _load(_LIVE)["jobs"]["native"]["steps"]
+    cleanup = next(step for step in native_steps if step.get("name") == "Clean up live stack")
+    assert cleanup["if"] == "always() && steps.native-spine.outputs.stack_started == 'true'"
+    assert 'echo "stack_started=true" >> "$GITHUB_OUTPUT"' in spine
+
+
 def _native_guest_image() -> str:
     prefix = "export KDIVE_GUEST_IMAGE="
     found = [ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix)]

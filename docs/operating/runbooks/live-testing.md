@@ -366,6 +366,11 @@ dependency for one of these: declare it in the owning Ansible role in the same
 change, or the next clean runner reprovision breaks (see the cross-platform and
 provisioning-parity notes in [AGENTS.md](../../../AGENTS.md)).
 
+The scheduled native workflow first compares the checkout's lifecycle protocol identity with the
+installed persistent-host contract. A mismatch stops before the native reaper or stack startup and
+names runner reprovisioning as the remedy. Do not add a workflow install or `sudo` workaround:
+Ansible owns that privileged lifecycle contract (ADR-0582).
+
 External-boot authority operations are an opt-in provider path, not another live-test tier.
 Read the [authority setup and diagnosis](self-hosted-kvm-runner.md#external-boot-authority-diagnosis)
 for its local mutation enablement, readiness, journal, socket, and mutual-TLS prerequisites.

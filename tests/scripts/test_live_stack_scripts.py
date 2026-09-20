@@ -141,6 +141,29 @@ def test_lifecycle_protocol_mismatch_fails_before_mutation(tmp_path: Path, opera
     assert not marker.exists(), "a mismatch must stop before any mutation prerequisite or request"
 
 
+def test_lifecycle_compatibility_command_succeeds_without_a_lifecycle_request(
+    tmp_path: Path,
+) -> None:
+    from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
+        lifecycle_protocol_identity,
+    )
+
+    installed_python = _installed_protocol_python(tmp_path, lifecycle_protocol_identity())
+    lifecycle = _copied_lifecycle(tmp_path, installed_python)
+
+    result = subprocess.run(
+        ["bash", str(lifecycle), "compatibility"],
+        cwd=tmp_path,
+        env={**os.environ, "KDIVE_PYTHON": sys.executable, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
 def test_lifecycle_matching_protocol_ignores_shadows_and_reaches_request(tmp_path: Path) -> None:
     from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
         lifecycle_protocol_identity,

@@ -16,7 +16,7 @@ readonly WORKER_EXECUTABLE="${here}/worker-from-checkout"
 
 usage() {
   echo "usage: scripts/live-stack/worker-lifecycle.sh" \
-    "start COUNT|status|stop|diagnostics|recover" >&2
+    "compatibility|start COUNT|status|stop|diagnostics|recover" >&2
 }
 
 require_exact_file() {
@@ -304,6 +304,13 @@ PY
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
+  compatibility)
+    [[ $# == 1 ]] || {
+      usage
+      exit 2
+    }
+    require_compatible_lifecycle
+    ;;
   start)
     [[ "${2:-}" =~ ^[1-8]$ ]] || {
       usage
