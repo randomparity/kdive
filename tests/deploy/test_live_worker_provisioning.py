@@ -2177,6 +2177,25 @@ def test_external_boot_recovery_root_defaults_are_declared() -> None:
     assert "live_vm_host_worker_recovery_root_owner" not in defaults
 
 
+def test_runner_external_boot_capacity_fits_measured_free_space() -> None:
+    defaults = _yaml(DEFAULTS)
+    runner = defaults | _yaml(ROOT / "deploy/ansible/inventory/group_vars/live_vm_runners.yml")
+    capacity_bytes = runner["live_vm_host_external_boot_capacity_bytes"]
+    concurrent = runner["live_vm_host_external_boot_concurrent_activations"]
+    assert isinstance(capacity_bytes, int)
+    assert isinstance(concurrent, int)
+    # Issue #2563 measured this many available bytes with the gate's df command.
+    measured_free_bytes = 208_365_330_432
+    assert capacity_bytes * concurrent <= measured_free_bytes
+    assert concurrent == 6
+    assert capacity_bytes == defaults["live_vm_host_external_boot_capacity_bytes"] == 32 * 1024**3
+    assert capacity_bytes * concurrent == 192 * 1024**3
+    assert defaults["live_vm_host_external_boot_concurrent_activations"] == 8
+    assert runner["live_vm_host_worker_accounts"] == [
+        f"kdive-worker-{slot}" for slot in range(1, 9)
+    ]
+
+
 def test_external_boot_capacity_is_checked_before_worker_release() -> None:
     defaults = _yaml(DEFAULTS)
     capacity_bytes = defaults["live_vm_host_external_boot_capacity_bytes"]
