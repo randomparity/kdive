@@ -56,7 +56,7 @@ the old ADR receives a Status pointer and retains matcher, classification, stder
 
 - `tests/images/planes/test_build_common.py`: injected matching stderr proves unchanged category
   and the replacement remediation contract; focused command:
-  `just test-verbose tests/images/planes/test_build_common.py::test_run_guestfs_tool_maps_unreadable_kernel_to_configuration_error`.
+  `just test-verbose tests/images/planes/test_build_common.py::test_run_guestfs_tool_maps_unreadable_host_kernel_to_configuration_error`.
 - `tests/scripts/test_check_local_libvirt.py`: unreadable boot fixture proves the safe, durable
   preflight hint; focused command:
   `just test-verbose tests/scripts/test_check_local_libvirt.py::test_unreadable_host_kernel_fails_with_chmod_hint`.
