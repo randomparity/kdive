@@ -268,7 +268,9 @@ def _assert_started(context: ProofContext, count: int) -> tuple[IncarnationRow, 
     for unit in evidence:
         row = by_unit[unit.unit]
         assert row.binding["invocation_id"] == unit.invocation_id
-        assert unit.control_group == f"/system.slice/{unit.unit}"
+        assert unit.control_group == (
+            rf"/system.slice/system-kdive\x2dlive\x2dworker.slice/{unit.unit}"
+        )
         slot = int(unit.unit.removeprefix("kdive-live-worker@").split(".")[0])
         assert _slot_artifacts_exist(slot)
         _wait_for_heartbeat(slot)
@@ -423,6 +425,20 @@ def _reset_fleet() -> None:
     _lifecycle("recover")
 
 
+def _assert_slot_artifacts_absent(slot: int) -> None:
+    for name in ("state.json", "worker-incarnation.credential", "worker.env", "release"):
+        result = subprocess.run(
+            ("sudo", "test", "!", "-e", str(_STATE_ROOT / str(slot) / name)),
+            cwd=support.ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert not result.stdout and not result.stderr
+        assert result.returncode == 0, f"slot {slot} retained {name}"
+
+
 def _assert_partial_start_rollback_clears_released_first_slot(proof_context: ProofContext) -> None:
     """A rejected second slot must not leave the first slot's released cgroup retained."""
     unit = "kdive-live-worker@2.service"
@@ -438,6 +454,11 @@ def _assert_partial_start_rollback_clears_released_first_slot(proof_context: Pro
     assert preflight.returncode == 0
 
     try:
+        with psycopg.connect(proof_context.admin_dsn) as connection:
+            previous = connection.execute(
+                "SELECT incarnation FROM worker_incarnations WHERE authority_kind = 'local' "
+                "AND authority_binding->>'unit' = 'kdive-live-worker@1.service'"
+            ).fetchall()
         installed = subprocess.run(
             (
                 "sudo",
@@ -460,6 +481,24 @@ def _assert_partial_start_rollback_clears_released_first_slot(proof_context: Pro
         status, response = _lifecycle_result("start", 2)
         assert status == 4 and not response.ok
         assert response.code == "conflict" and response.retry_action == "operator_recovery"
+        assert [
+            (slot.slot, slot.unit, slot.phase) for slot in response.slots if slot.slot == 1
+        ] == [(1, "kdive-live-worker@1.service", SlotPhase.TERMINATED)]
+        properties = _properties("kdive-live-worker@1.service")
+        assert properties["ActiveState"] == "inactive"
+        assert properties["ControlGroup"] == ""
+        assert properties["InvocationID"] == ""
+        _assert_slot_artifacts_absent(1)
+        with psycopg.connect(proof_context.admin_dsn) as connection:
+            retired = connection.execute(
+                "SELECT state, outcome FROM worker_incarnations WHERE authority_kind = 'local' "
+                "AND authority_binding->>'unit' = 'kdive-live-worker@1.service' "
+                "AND NOT (incarnation = ANY(%s))",
+                ([row[0] for row in previous],),
+            ).fetchall()
+        assert len(retired) == 1
+        assert retired[0][0] == "terminated"
+        assert retired[0][1] in {"succeeded", "failed", "killed"}
     finally:
         subprocess.run(
             ("sudo", "rm", "-f", str(drop_in)),
@@ -484,7 +523,7 @@ def _assert_partial_start_rollback_clears_released_first_slot(proof_context: Pro
             assert properties["ActiveState"] == "inactive"
             assert properties["ControlGroup"] == ""
             assert properties["InvocationID"] == ""
-            assert not _slot_artifacts_exist(slot)
+            _assert_slot_artifacts_absent(slot)
         removed = subprocess.run(
             ("sudo", "test", "!", "-e", str(drop_in)),
             cwd=support.ROOT,
