@@ -206,6 +206,31 @@ async def scalar(client: LiveStackClient, name: str, **args: object) -> ToolResp
     return env
 
 
+async def full_artifact_text(client: LiveStackClient, artifact_id: str, phase_name: str) -> str:
+    """Fetch the full plaintext content of a redacted artifact across all byte windows."""
+    chunks: list[str] = []
+    byte_offset = 0
+    while True:
+        env = ok(
+            await scalar(
+                client,
+                "artifacts.get",
+                request={"artifact_id": artifact_id, "byte_offset": byte_offset},
+            ),
+            phase_name,
+        )
+        content = env.data.get("content")
+        if isinstance(content, str) and content:
+            chunks.append(content)
+        if not bool(env.data.get("content_truncated", False)):
+            break
+        next_offset = env.data.get("next_offset")
+        if next_offset is None:
+            break
+        byte_offset = int(str(next_offset))
+    return "".join(chunks)
+
+
 # --- async-drain helpers (ADR-0045 §2) ------------------------------------------------------
 
 

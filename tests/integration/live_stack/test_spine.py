@@ -64,6 +64,39 @@ def _system(status: str, *, category: ErrorCategory | None = None) -> ToolRespon
     )
 
 
+def test_full_artifact_text_nests_request_and_pages() -> None:
+    client = _client(
+        [
+            ToolResponse.success(
+                "artifact-1",
+                "ready",
+                data={"content": "first", "content_truncated": True, "next_offset": 5},
+            ),
+            ToolResponse.success(
+                "artifact-1",
+                "ready",
+                data={"content": "second", "content_truncated": False},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        spine.full_artifact_text(_live_client(client), "artifact-1", "read-artifact")
+    )
+
+    assert result == "firstsecond"
+    assert client.calls == [
+        (
+            "artifacts.get",
+            {"request": {"artifact_id": "artifact-1", "byte_offset": 0}},
+        ),
+        (
+            "artifacts.get",
+            {"request": {"artifact_id": "artifact-1", "byte_offset": 5}},
+        ),
+    ]
+
+
 def test_record_provision_evidence_target_creates_private_exact_record(tmp_path: Path) -> None:
     target = tmp_path / "provision-target"
 
