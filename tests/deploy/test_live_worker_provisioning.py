@@ -252,6 +252,18 @@ def test_provider_authority_rechecks_the_installed_environment_despite_revision_
     assert "when" not in install, "a matching revision cannot hide a removed or drifted venv"
 
 
+def test_project_venv_sync_repairs_drift_without_checkout_change() -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    sync = next(task for task in tasks if task["name"].startswith("Build the venv"))
+
+    assert "when" not in sync, "an unchanged checkout cannot prove that the venv converged"
+    assert sync["register"] == "live_vm_host_project_sync"
+    assert sync["changed_when"] == (
+        "live_vm_host_project_sync.stderr is search("
+        "'(?m)^(Installed|Uninstalled|Creating virtual environment) ')"
+    )
+
+
 def test_production_identity_preflight_does_not_inherit_become_root_or_create_placeholders() -> (
     None
 ):
