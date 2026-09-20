@@ -219,17 +219,16 @@
   # uv defaults to a managed CPython whose minor version may differ from the distro's
   # python3-guestfs .so; pin to /usr/bin/python3 (Ubuntu 26.04's 3.14) so the symlinked native
   # module ABI-matches.
-  # Run whenever the checkout advanced (main is a moving ref), NOT `creates:`-gated — a creates
-  # guard would freeze the venv's deps at first-provision while the source moved on, so a live
-  # dependency added to main would never reach the venv the worker imports from. On a converged
-  # host (main unchanged) the git task is unchanged, so uv sync is skipped and the run is 0-changed.
+  # Run unconditionally: checkout state cannot reveal a venv left incomplete by an earlier failed
+  # sync. uv reports whether it changed the environment, preserving a 0-changed converged rerun.
   ansible.builtin.command:
     cmd: "{{ live_vm_host_uv_bin }} sync --python /usr/bin/python3 --group live"
     chdir: "{{ live_vm_venv }}"
   become: true
   become_user: "{{ github_runner_user }}"
-  when: live_vm_host_checkout is changed
-  changed_when: true
+  register: live_vm_host_project_sync
+  changed_when: >-
+    live_vm_host_project_sync.stderr is search('(?m)^(Installed|Uninstalled|Creating virtual environment) ')
 
 - name: Locate the system libguestfs binding files
   # Debian installs python3-guestfs into the version-agnostic /usr/lib/python3/dist-packages
