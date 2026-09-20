@@ -7,6 +7,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -153,9 +154,7 @@ def _properties(unit: str) -> dict[str, str]:
 
 
 def _cgroup_populated(control_group: str) -> bool:
-    events = Path("/sys/fs/cgroup") / control_group.removeprefix("/") / "cgroup.events"
-    values = dict(line.split() for line in events.read_text(encoding="utf-8").splitlines())
-    return values["populated"] == "1"
+    return support.cgroup_populated(control_group)
 
 
 def _wait_for_empty_cgroup(control_group: str, timeout: float = 10) -> None:
@@ -279,6 +278,19 @@ def _assert_started(context: ProofContext, count: int) -> tuple[IncarnationRow, 
 
 
 def _assert_stopped(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> None:
+    _assert_terminated(context, rows)
+    _assert_units_inactive(rows)
+
+
+def _assert_stopped_after_outage(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> None:
+    """Prove the retry retired the rows, then clear the failed unit identity it cannot."""
+    _assert_terminated(context, rows)
+    response = _lifecycle("recover")
+    assert response.ok, response.model_dump_json()
+    _assert_units_inactive(rows)
+
+
+def _assert_terminated(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> None:
     response = _lifecycle("stop")
     assert response.ok, response.model_dump_json()
     assert all(slot.phase is SlotPhase.TERMINATED for slot in response.slots)
@@ -288,12 +300,16 @@ def _assert_stopped(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> 
         assert terminal.outcome in {"succeeded", "failed", "killed"}
     assert not _lifecycle("status").slots
     for row in rows:
+        slot = int(row.binding["unit"].split("@")[1].split(".")[0])
+        assert not _slot_artifacts_exist(slot)
+
+
+def _assert_units_inactive(rows: tuple[IncarnationRow, ...]) -> None:
+    for row in rows:
         properties = _properties(row.binding["unit"])
         assert properties["ActiveState"] == "inactive"
         assert properties["ControlGroup"] == ""
         assert properties["InvocationID"] == ""
-        slot = int(row.binding["unit"].split("@")[1].split(".")[0])
-        assert not _slot_artifacts_exist(slot)
 
 
 @pytest.mark.parametrize("count", (1, 3))
@@ -319,7 +335,8 @@ def _assert_retained_after_database_outage(
     context: ProofContext, before: UnitEvidence, row: IncarnationRow
 ) -> None:
     for operation in ("status", "stop"):
-        response = _lifecycle(operation)
+        status, response = _lifecycle_result(operation)
+        assert status == 4
         assert not response.ok
         assert response.code == "dependency_unavailable"
         assert response.retry_action == "restore_database"
@@ -329,7 +346,7 @@ def _assert_retained_after_database_outage(
     retained = _unit_evidence(1)
     assert retained.unit == before.unit
     assert retained.invocation_id == before.invocation_id
-    assert retained.control_group == before.control_group
+    assert retained.control_group == ""
     assert retained.active_state == "active"
     assert retained.sub_state == "exited"
     assert not retained.populated
@@ -373,7 +390,7 @@ def test_database_outage_retains_exact_invocation_until_stop_retry(
             failure,
             restore_database=lambda: support.restore_postgres(container_id),
             prove_retained_row=lambda: _assert_active_after_database_recovery(proof_context, row),
-            cleanup_workers=lambda: _assert_stopped(proof_context, rows),
+            cleanup_workers=lambda: _assert_stopped_after_outage(proof_context, rows),
         )
     if failure is not None:
         raise failure.with_traceback(failure.__traceback__)
@@ -412,9 +429,15 @@ def _restart_out_of_band(unit: str, retained_invocation: str) -> str:
         text=True,
         timeout=60,
     )
-    properties = _properties(unit)
+    deadline = time.monotonic() + 10
+    while True:
+        properties = _properties(unit)
+        if properties["ActiveState"] == "failed":
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"out-of-band restart did not reach failed state: {properties}")
+        time.sleep(0.1)
     successor = properties["InvocationID"]
-    assert properties["ActiveState"] == "failed", properties
     assert len(successor) == 32 and successor != retained_invocation, properties
     return successor
 
@@ -423,6 +446,15 @@ def _reset_fleet() -> None:
     """Return every fixed unit to the inactive, empty-identity state the next test needs."""
     _lifecycle("stop")
     _lifecycle("recover")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_proof_case(proof_context: ProofContext) -> Iterator[None]:
+    yield
+    support.cleanup_after_case(
+        restore_database=lambda: support.restore_postgres(proof_context.postgres.container_id),
+        cleanup_workers=_reset_fleet,
+    )
 
 
 def _assert_slot_artifacts_absent(slot: int) -> None:
