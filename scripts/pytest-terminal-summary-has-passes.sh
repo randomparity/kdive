@@ -9,7 +9,9 @@ fi
 
 # Pytest may color its terminal summary. Output before the last non-empty line, including -ra
 # skip reasons, is intentionally not evidence that this invocation proved a test.
-last_line="$(sed -E $'s/\033\\[[0-?]*[ -/]*[@-~]//g' "$1" | awk 'NF { last = $0 } END { print last }')"
+# Byte ranges in the ANSI matcher are deliberate; locale collation can make GNU sed reject
+# `[ -/]` as an invalid range before it reads the summary.
+last_line="$(LC_ALL=C sed -E $'s/\033\\[[0-?]*[ -/]*[@-~]//g' "$1" | awk 'NF { last = $0 } END { print last }')"
 
 [[ "$last_line" =~ ^[0-9] ]] &&
   [[ "$last_line" =~ (^|[[:space:],])[1-9][0-9]*[[:space:]]passed([,[:space:]]|$) ]] &&
