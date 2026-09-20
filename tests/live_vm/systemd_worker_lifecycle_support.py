@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import traceback
@@ -19,6 +20,7 @@ ROLE_MEMBERS = {
     "kdive-reconciler-member": "kdive_reconciler",
     "kdive-witness-member": "kdive_lifecycle_witness",
 }
+_SYSTEMD_VALUE = re.compile(r"[A-Za-z0-9_.@:-]+")
 
 
 def cgroup_populated(control_group: str, *, root: Path = Path("/sys/fs/cgroup")) -> bool:
@@ -51,6 +53,7 @@ def assert_released_terminal_state(
     *, active_state: str, sub_state: str, result: str, exec_main_status: str
 ) -> None:
     """Require one of the runtime's supported empty-cgroup terminal shapes."""
+    assert _SYSTEMD_VALUE.fullmatch(result), f"unsupported systemd Result={result}"
     status_is_valid = (
         exec_main_status.isascii()
         and exec_main_status.isdecimal()

@@ -111,6 +111,8 @@ def test_released_terminal_state_accepts_runtime_supported_shapes(
         ("active", "exited", "exit-code", "1"),
         ("active", "running", "success", "0"),
         ("failed", "failed", "success", "1"),
+        ("failed", "failed", "", "15"),
+        ("failed", "failed", "bad result", "15"),
         ("failed", "failed", "signal", "-1"),
         ("failed", "failed", "signal", "256"),
         ("failed", "failed", "signal", "9999"),
