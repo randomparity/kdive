@@ -268,7 +268,11 @@ async def _full_text(op: LiveStackClient, artifact_id: str, phase_name: str) -> 
     byte_offset = 0
     while True:
         env = ok(
-            await scalar(op, "artifacts.get", artifact_id=artifact_id, byte_offset=byte_offset),
+            await scalar(
+                op,
+                "artifacts.get",
+                request={"artifact_id": artifact_id, "byte_offset": byte_offset},
+            ),
             phase_name,
         )
         content = env.data.get("content")
