@@ -931,6 +931,33 @@ def test_hosted_lifecycle_proof_refreshes_control_and_libvirt_groups() -> None:
     assert "kdive-live-control" in run and "kdive-live-libvirt" in run
 
 
+_SYSTEMD_PROOF_FILE = "$RUNNER_TEMP/systemd-worker-proof.sh"
+
+
+def test_hosted_lifecycle_proof_is_executed_from_a_materialized_file() -> None:
+    """A child cannot drain proof commands that Bash reads from a regular file (#2565)."""
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    run = proof["run"]
+    assert f"cat >\"{_SYSTEMD_PROOF_FILE}\" <<'KDIVE_SYSTEMD_PROOF'" in run
+    assert f'/bin/bash -e -u -o pipefail "{_SYSTEMD_PROOF_FILE}"' in run
+    assert "bash -s" not in run
+
+    closing = re.search(r"^KDIVE_SYSTEMD_PROOF$", run, flags=re.MULTILINE)
+    assert closing is not None
+    execute = f'/bin/bash -e -u -o pipefail "{_SYSTEMD_PROOF_FILE}"'
+    assert closing.end() < run.index(execute)
+
+
+def test_hosted_lifecycle_proof_captures_and_checks_its_pytest_summary() -> None:
+    """The proof preserves pytest's status and rejects a successful run with no passes."""
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    run = " ".join(proof["run"].replace("\\\n", " ").split())
+    assert '-m live_vm --strict-markers -q | tee "$systemd_summary" || rc=$?' in run
+    assert 'pytest-terminal-summary-has-passes.sh "$systemd_summary"' in run
+    assert "ran ZERO systemd worker lifecycle proofs" in run
+    assert 'exit "$rc"' in run
+
+
 # --- hosted tcg pre-clean: stale /run/kdive/live-libvirt residue (#2033) ----------------------
 #
 # A reused hosted VM can carry an operator-owned session daemon plus socket/pid residue from an
@@ -1028,6 +1055,30 @@ def _proof_guard(spine: str, summary_var: str) -> str:
     start = next(i for i, line in enumerate(lines) if line.strip() == call)
     end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "fi")
     return textwrap.dedent("\n".join(lines[start : end + 1]))
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        ("SKIPPED [1] test.py: previous run had 1 passed\n6 skipped in 0.01s\n", False),
+        ("6 passed in 0.01s\n", True),
+    ],
+)
+def test_hosted_lifecycle_proof_guard_executes_the_shared_predicate(
+    tmp_path: pathlib.Path,
+    stream: str,
+    expected: bool,
+) -> None:
+    summary = tmp_path / "systemd.summary"
+    summary.write_text(stream, encoding="utf-8")
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    shell = f'systemd_summary="$1"\nrc=0\n{_proof_guard(proof["run"], "systemd_summary")}\n'
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c", shell, "proof-guard", str(summary)],
+        cwd=_ROOT,
+        check=False,
+    )
+    assert (result.returncode == 0) is expected
 
 
 @pytest.mark.parametrize(
