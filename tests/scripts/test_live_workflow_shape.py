@@ -80,6 +80,29 @@ def test_native_block_preflights_debug_stepping_with_both_native_families() -> N
     assert "preflight-env.sh throwaway provisioned debug-stepping" in run
 
 
+def test_native_spine_checks_lifecycle_compatibility_before_destructive_setup() -> None:
+    """A stale persistent host must fail before the reaper or stack can mutate it (#2548)."""
+    spine = _native_spine()
+    compatibility = "scripts/live-stack/worker-lifecycle.sh compatibility"
+
+    assert spine.count(compatibility) == 1
+    assert spine.index(compatibility) < spine.index(
+        'for uri in "$KDIVE_LIBVIRT_URI" qemu:///system'
+    )
+    assert spine.index(compatibility) < spine.index("docker compose down -v")
+    assert spine.index(compatibility) < spine.index("live-stack/stack-services.sh --skip-obs")
+
+    native_steps = _load(_LIVE)["jobs"]["native"]["steps"]
+    cleanup = next(step for step in native_steps if step.get("name") == "Clean up live stack")
+    assert cleanup["if"] == "always() && steps.native-spine.outputs.cleanup_required == 'true'"
+    cleanup_marker = 'echo "cleanup_required=true" >> "$GITHUB_OUTPUT"'
+    assert cleanup_marker in spine
+    assert spine.index(compatibility) < spine.index(cleanup_marker)
+    assert spine.index(cleanup_marker) < spine.index(
+        'for uri in "$KDIVE_LIBVIRT_URI" qemu:///system'
+    )
+
+
 def _native_guest_image() -> str:
     prefix = "export KDIVE_GUEST_IMAGE="
     found = [ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix)]
@@ -649,16 +672,25 @@ def test_tcg_job_captures_bounded_worker_readiness_components() -> None:
 
 
 @pytest.mark.parametrize(
-    ("job", "condition"),
-    (("tcg", "always()"), ("native", "failure() || cancelled()")),
+    ("job", "condition", "cleanup_condition"),
+    (
+        ("tcg", "always()", "always()"),
+        (
+            "native",
+            "failure() || cancelled()",
+            "always() && steps.native-spine.outputs.cleanup_required == 'true'",
+        ),
+    ),
 )
-def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condition: str) -> None:
+def test_live_job_captures_lifecycle_diagnostics_before_cleanup(
+    job: str, condition: str, cleanup_condition: str
+) -> None:
     """Diagnostics are observational and must run before destructive teardown (#1939).
 
     The diagnostics step never fails the job (`exit 0`), neutralizes workflow-command
     injection from journal text (::stop-commands:: token), and degrades to a warning when
-    the witness withholds evidence. Cleanup runs on every outcome; diagnostics must have
-    their chance first — after teardown there is nothing left to read.
+    the witness withholds evidence. Once cleanup is armed, diagnostics must have their chance
+    first — after teardown there is nothing left to read.
     """
     diagnostic_index, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
     cleanup_index, cleanup = _named_step(job, "Clean up live stack")
@@ -670,7 +702,7 @@ def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condit
     assert "printf '::%s::" in diagnostic["run"]
     assert "::${" not in diagnostic["run"]
     assert "exit 0" in diagnostic["run"]
-    assert cleanup["if"] == "always()"
+    assert cleanup["if"] == cleanup_condition
     assert "scripts/live-stack/stack-down.sh" in cleanup["run"]
     assert diagnostic_index < cleanup_index
 

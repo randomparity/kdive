@@ -703,6 +703,7 @@ jobs:
           persist-credentials: false
 
       - name: Run both native families (reaper -> stack -> mint -> preflight -> test, one shell)
+        id: native-spine
         # ONE run: block. Reuse /opt/kdive's libguestfs venv as the interpreter and overlay the
         # tested sources via PYTHONPATH — never mutate /opt/kdive, never uv sync in the workspace.
         env:
@@ -724,6 +725,12 @@ jobs:
           # child can ever swallow unread spine bytes.
           cat >"$RUNNER_TEMP/spine-native.sh" <<'KDIVE_NATIVE_SPINE'
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+
+          # Persistent native runners keep their privileged lifecycle contract under Ansible
+          # ownership (ADR-0582). Check that it matches this checkout before the reaper or stack
+          # can mutate state. A mismatch names reprovisioning; this job never installs the contract.
+          scripts/live-stack/worker-lifecycle.sh compatibility
+          echo "cleanup_required=true" >> "$GITHUB_OUTPUT"
 
           # Use the exact dedicated session endpoint published by provisioning for the fixed
           # workers. Parse it as literal data; never source the root-owned assignment as shell.
@@ -863,7 +870,7 @@ jobs:
           exit 0
 
       - name: Clean up live stack
-        if: always()
+        if: always() && steps.native-spine.outputs.cleanup_required == 'true'
         run: |
           # shellcheck source=scripts/live-stack/libvirt-uri.sh
           source scripts/live-stack/libvirt-uri.sh
