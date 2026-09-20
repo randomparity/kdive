@@ -8,8 +8,10 @@ and ordered recovery; a function-scoped pytest fixture owns per-case restoration
 
 **Tech stack:** Python 3.14, pytest, systemd, Docker Compose, `uv`, `just`.
 
-Expected implementation size: 80–130 changed lines (S), with no denominator change from the frozen
-scope.
+Measured implementation size: 229 changed lines against the frozen 100-line denominator (S). This
+is a non-blocking 229% expansion warning: strict malformed-cgroup coverage and subprocess proof of
+the real fixture's body/teardown behavior account for the increase. The reviewed three-file test
+surface and production exclusions are unchanged.
 
 ## Constraints
 
@@ -62,9 +64,9 @@ helper to restore the exact proof database and then `_reset_fleet`.
    the fixture-facing wrapper around ordered recovery.
 2. Add the fixture after lifecycle helpers are defined. Its teardown calls `cleanup_after_case`;
    pytest reports any raised cleanup error separately from a body failure.
-3. Keep `_assert_stopped(proof_context, rows)` on the basic cases' successful body path. Remove
-   only their failure-prone wrapper and the redundant worker-only `try/finally` blocks from the
-   three recover cases. Keep the outage recovery block and partial-start drop-in cleanup.
+3. Keep `_assert_stopped(proof_context, rows)` on the basic cases' successful body path and retain
+   the three recover cases' existing `try/finally` cleanup. The fixture covers failures before or
+   inside those blocks. Keep the outage recovery block and partial-start drop-in cleanup.
 4. Extend support tests to assert restoration precedes cleanup, restoration failure gates cleanup,
    cleanup failure is raised, and an existing primary failure note carries the secondary message
    and traceback.

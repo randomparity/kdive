@@ -42,9 +42,10 @@ before returning; the fixture is the fail-safe boundary around that block.
 The basic worker cases keep `_assert_stopped` on their successful path: terminal database rows,
 empty lifecycle status, inactive identity-free units, and removed slot artifacts are proof
 assertions, not merely cleanup. Their fixture is the failure-safe fallback if startup or any later
-assertion aborts. Remove only redundant worker-only `try/finally` blocks from the three recover
-cases. Keep the partial-start helper's local `finally`, which also owns a temporary systemd
-drop-in, and keep the outage case's ordered restoration/evidence logic.
+assertion aborts. Keep the existing inline cleanup in the three recover cases as their normal path;
+the fixture covers failures in `_assert_started` before those blocks begin and failures inside the
+blocks' cleanup. Keep the partial-start helper's local `finally`, which also owns a temporary
+systemd drop-in, and keep the outage case's ordered restoration/evidence logic.
 
 No production lifecycle, unit, database, workflow, protocol, or persisted-state contract changes.
 The hosted workflow invocation remains owned by #2565; residual production recovery remains owned
