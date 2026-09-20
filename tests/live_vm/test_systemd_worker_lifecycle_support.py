@@ -366,3 +366,11 @@ def test_live_fixture_wires_exact_case_cleanup_boundary() -> None:
     assert "support.cleanup_after_case(" in source
     assert "support.restore_postgres(proof_context.postgres.container_id)" in source
     assert "cleanup_workers=_reset_fleet" in source
+
+
+def test_basic_worker_cases_keep_terminal_proof_on_success() -> None:
+    source = inspect.getsource(
+        inspect.unwrap(live_proof.test_real_systemd_workers_register_heartbeat_and_terminate)
+    )
+
+    assert "_assert_stopped(proof_context, rows)" in source
