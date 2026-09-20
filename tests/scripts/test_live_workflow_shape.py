@@ -672,16 +672,25 @@ def test_tcg_job_captures_bounded_worker_readiness_components() -> None:
 
 
 @pytest.mark.parametrize(
-    ("job", "condition"),
-    (("tcg", "always()"), ("native", "failure() || cancelled()")),
+    ("job", "condition", "cleanup_condition"),
+    (
+        ("tcg", "always()", "always()"),
+        (
+            "native",
+            "failure() || cancelled()",
+            "always() && steps.native-spine.outputs.cleanup_required == 'true'",
+        ),
+    ),
 )
-def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condition: str) -> None:
+def test_live_job_captures_lifecycle_diagnostics_before_cleanup(
+    job: str, condition: str, cleanup_condition: str
+) -> None:
     """Diagnostics are observational and must run before destructive teardown (#1939).
 
     The diagnostics step never fails the job (`exit 0`), neutralizes workflow-command
     injection from journal text (::stop-commands:: token), and degrades to a warning when
-    the witness withholds evidence. Cleanup runs on every outcome; diagnostics must have
-    their chance first — after teardown there is nothing left to read.
+    the witness withholds evidence. Once cleanup is armed, diagnostics must have their chance
+    first — after teardown there is nothing left to read.
     """
     diagnostic_index, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
     cleanup_index, cleanup = _named_step(job, "Clean up live stack")
@@ -693,7 +702,7 @@ def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condit
     assert "printf '::%s::" in diagnostic["run"]
     assert "::${" not in diagnostic["run"]
     assert "exit 0" in diagnostic["run"]
-    assert cleanup["if"] == "always()"
+    assert cleanup["if"] == cleanup_condition
     assert "scripts/live-stack/stack-down.sh" in cleanup["run"]
     assert diagnostic_index < cleanup_index
 
