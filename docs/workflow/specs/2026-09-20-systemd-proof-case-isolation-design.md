@@ -76,7 +76,7 @@ The hosted workflow invocation remains owned by #2565; residual production recov
 by #2533 and #2596.
 
 Integrate #2608's nested artifact request and shared paging helper without changing the production
-`artifacts.get` contract. Move console-part polling into non-collected test support. The poll scans
+`artifacts.get` contract. Keep console-part polling in the authorized shared test support. The poll scans
 each new immutable part at most once, continues when a part lacks the unique marker, and returns
 the first marker-bearing part with its full text. Tied artifact timestamps and listing order do not
 select the result. Keep the five-minute deadline and five-second interval in the live caller while
@@ -142,9 +142,9 @@ selection, or production artifact behavior.
   client observe flat `artifact_id` and `byte_offset` arguments; the implementation sends both
   pages inside `request` and returns their concatenated plaintext.
 - **Marker-bearing part selection — Mode: focused-test.** Run `uv run python -m pytest
-  tests/integration/live_stack/test_console_parts.py -q`. Before implementation the support
-  function is absent; afterward a scripted listing sequence proves the first new non-marker part
-  is not returned or fetched twice and the later marker-bearing part supplies both id and text.
+  tests/integration/live_stack/test_spine.py -q`. A scripted listing sequence proves the first new
+  non-marker part is not returned or fetched twice and the later marker-bearing part supplies both
+  id and text.
 - **Combined live gate — Mode: live-test.** Dispatch `live.yml` for the exact integrated head and
   require both jobs to complete successfully, including all six systemd cases and the native
   console-parts assertion.

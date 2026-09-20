@@ -97,6 +97,98 @@ def test_full_artifact_text_nests_request_and_pages() -> None:
     ]
 
 
+def _console_part(artifact_id: str, index: int) -> ToolResponse:
+    return ToolResponse.success(
+        artifact_id,
+        "ready",
+        refs={"object": f"local/systems/system-1/console-part-1-{index:06d}"},
+    )
+
+
+def _artifact_listing(*parts: ToolResponse) -> ToolResponse:
+    return ToolResponse.collection("system-1", "ready", list(parts))
+
+
+def _artifact_content(artifact_id: str, content: str) -> ToolResponse:
+    return ToolResponse.success(
+        artifact_id,
+        "ready",
+        data={"content": content, "content_truncated": False},
+    )
+
+
+def test_poll_skips_new_console_part_without_marker_and_returns_later_match() -> None:
+    marker = "proof-marker"
+    client = _client(
+        [
+            _artifact_listing(_console_part("early", 1), _console_part("old", 0)),
+            _artifact_content("early", "boot output only"),
+            _artifact_listing(
+                _console_part("early", 1),
+                _console_part("later", 2),
+                _console_part("old", 0),
+            ),
+            _artifact_content("later", f"prefix {marker} suffix"),
+        ]
+    )
+
+    result = asyncio.run(
+        spine.poll_for_new_console_part(
+            _live_client(client),
+            "system-1",
+            {"old"},
+            marker,
+            deadline_s=1.0,
+            interval_s=0.0,
+        )
+    )
+
+    assert result == ("later", f"prefix {marker} suffix")
+    assert client.calls == [
+        ("artifacts.list", {"system_id": "system-1"}),
+        (
+            "artifacts.get",
+            {"request": {"artifact_id": "early", "byte_offset": 0}},
+        ),
+        ("artifacts.list", {"system_id": "system-1"}),
+        (
+            "artifacts.get",
+            {"request": {"artifact_id": "later", "byte_offset": 0}},
+        ),
+    ]
+
+
+def test_poll_times_out_after_inspecting_each_immutable_part_once() -> None:
+    client = _client(
+        [
+            _artifact_listing(_console_part("early", 1), _console_part("old", 0)),
+            _artifact_content("early", "boot output only"),
+        ]
+    )
+
+    with pytest.raises(
+        SpinePhaseError,
+        match=r"no marker-bearing console-part artifacts within 0s .*inspected=1",
+    ):
+        asyncio.run(
+            spine.poll_for_new_console_part(
+                _live_client(client),
+                "system-1",
+                {"old"},
+                "proof-marker",
+                deadline_s=0.0,
+                interval_s=0.0,
+            )
+        )
+
+    assert [call for call in client.calls if call[0] == "artifacts.get"] == [
+        (
+            "artifacts.get",
+            {"request": {"artifact_id": "early", "byte_offset": 0}},
+        )
+    ]
+
+
 def test_record_provision_evidence_target_creates_private_exact_record(tmp_path: Path) -> None:
     target = tmp_path / "provision-target"
 

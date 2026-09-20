@@ -44,20 +44,18 @@ from kdive.security.secrets.system_bootstrap_key import (
     materialized_private_key,
 )
 from tests.integration.live_stack.conftest import require_issuer, require_stack
-from tests.integration.live_stack.console_parts import (
-    console_part_ids,
-    poll_for_new_console_part,
-)
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
     await_system_state,
     build_and_upload_kernel,
     build_profile,
+    console_part_ids,
     drain_job,
     full_artifact_text,
     mint_role_token,
     ok,
     phase,
+    poll_for_new_console_part,
     scalar,
     seed_metering,
     worker_libvirt_uri,

@@ -5,8 +5,8 @@ also exercises the corrected console-artifact request and marker-bearing part se
 
 **Architecture:** Keep all changes in test and live-proof support. The systemd support module owns
 cgroup reads and ordered recovery; a function-scoped pytest fixture owns per-case restoration and
-fleet reset. Shared live-stack support owns full artifact paging, while non-collected console-part
-support owns marker-aware polling over immutable part artifacts.
+fleet reset. Shared live-stack support owns full artifact paging and marker-aware polling over
+immutable part artifacts.
 
 **Tech stack:** Python 3.14, pytest, systemd, Docker Compose, `uv`, `just`.
 
@@ -97,9 +97,7 @@ Rollback: revert the task commit; the workflow's outer cleanup remains available
 ## Task 3: Integrate artifact paging and marker-aware polling
 
 **Files:** merge the two #2608 commits, modify
-`tests/integration/test_console_parts_live.py`, create
-`tests/integration/live_stack/console_parts.py` and
-`tests/integration/live_stack/test_console_parts.py`, and retain the #2608 changes in
+`tests/integration/test_console_parts_live.py`, and retain the #2608 changes in
 `tests/integration/live_stack/spine.py` and `tests/integration/live_stack/test_spine.py`.
 
 **Interfaces:** retain `full_artifact_text(client, artifact_id, phase_name) -> str`. Add
@@ -121,10 +119,10 @@ inspected set, and return `(artifact_id, text)` only when `marker in text`. If n
   Expected red: reverting the #2608 implementation records flat artifact arguments. Green command:
   `uv run python -m pytest
   tests/integration/live_stack/test_spine.py::test_full_artifact_text_nests_request_and_pages -q`.
-- **Marker-aware polling — Mode: focused-test.** Test
-  `tests/integration/live_stack/test_console_parts.py`. Expected red: the support function is
-  absent before this task. Green command: `uv run python -m pytest
-  tests/integration/live_stack/test_console_parts.py -q`.
+- **Marker-aware polling — Mode: focused-test.** Test the marker-aware cases in
+  `tests/integration/live_stack/test_spine.py`. Expected red: the support function is absent
+  before this task. Green command: `uv run python -m pytest
+  tests/integration/live_stack/test_spine.py -q`.
 
 **Steps**
 
