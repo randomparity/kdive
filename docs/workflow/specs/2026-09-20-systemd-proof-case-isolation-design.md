@@ -21,7 +21,8 @@ used a success-only subprocess wrapper, an out-of-band restart sampled a `Type=s
 its gate process reached the terminal failed state, and outage cleanup expected `stop` to clear a
 failed unit identity even though the lifecycle contract assigns that residual cleanup to
 `recover`. The proof must decode expected nonzero responses, wait boundedly for the terminal
-systemd state, and prove stop retirement before invoking recovery to clear the identity.
+systemd state, accept the blank `ControlGroup` that follows cgroup removal, and prove stop
+retirement before invoking recovery to clear the identity.
 
 ## Scope
 

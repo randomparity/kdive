@@ -346,7 +346,7 @@ def _assert_retained_after_database_outage(
     retained = _unit_evidence(1)
     assert retained.unit == before.unit
     assert retained.invocation_id == before.invocation_id
-    assert retained.control_group == before.control_group
+    assert retained.control_group == ""
     assert retained.active_state == "active"
     assert retained.sub_state == "exited"
     assert not retained.populated

@@ -391,6 +391,7 @@ def test_expected_lifecycle_failures_use_nonchecking_runner() -> None:
 
     assert "status, response = _lifecycle_result(operation)" in source
     assert "assert status == 4" in source
+    assert 'assert retained.control_group == ""' in source
     assert "_lifecycle(operation)" not in source
 
 
