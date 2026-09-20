@@ -13,8 +13,8 @@ post-install hook. A globbed statoverride is a literal nonmatching path.
 
 ## Decision
 
-Supersede only ADR-0222's kernel-remediation choice. The operator-visible guidance leads with the
-supported local-libvirt provisioning command,
+Supersede only ADR-0222's kernel-remediation choice. The Debian/Ubuntu operator-visible guidance
+leads with the supported local-libvirt provisioning command,
 `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host`; another worker deployment
 uses its owning provisioning play. Guidance states `root:kvm 0640`, requires the worker to belong to
 `kvm`, and says provisioning installs the durable upgrade hook. A labelled one-off fallback uses

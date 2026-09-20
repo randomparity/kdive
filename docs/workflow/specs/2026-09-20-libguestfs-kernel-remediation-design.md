@@ -14,7 +14,7 @@ successor rather than a decision rewrite.
 ## Scope
 
 Change only the diagnostic and local preflight wording, their focused tests, ADR-0669, and the
-ADR-0222 status amendment. The shared diagnostic leads with local-libvirt preparation:
+ADR-0222 status amendment. The Debian/Ubuntu shared diagnostic leads with local-libvirt preparation:
 `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host`; other deployments use
 their owning provisioning play. It states `root:kvm 0640`, requires the worker to belong to `kvm`,
 and says provisioning installs the durable upgrade hook. Its explicitly temporary fallback is
@@ -45,9 +45,9 @@ the old ADR receives a Status pointer and retains matcher, classification, stder
 ## Success
 
 - For kernel-unreadable stderr matches, the existing message, matcher, and `CONFIGURATION_ERROR`
-  path return remediation mentioning the supported local command, `root:kvm 0640`, `kvm` membership,
-  the durable hook, deployment-owned alternative provisioning, `/boot/vmlinu?-*`, `sudo chgrp kvm`,
-  and `sudo chmod 0640`.
+  path retain the Debian/Ubuntu qualification and return remediation mentioning the supported local
+  command, `root:kvm 0640`, `kvm` membership, the durable hook, deployment-owned alternative
+  provisioning, `/boot/vmlinu?-*`, `sudo chgrp kvm`, and `sudo chmod 0640`.
 - The affected image and script tests reject `0644` and `dpkg-statoverride`; the script test also
   proves the both-architecture glob and durable-hook qualification.
 - ADR-0669 records the replacement choice and ADR-0222 has only its supersession pointer changed.

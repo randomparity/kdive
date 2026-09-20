@@ -10,7 +10,7 @@ one status pointer, and a narrow ADR from the file map below.
 ## Global Constraints
 
 - Preserve the existing kernel matcher, CONFIGURATION_ERROR classification, stderr passthrough, and
-  passt remediation.
+  passt remediation and Debian/Ubuntu qualification.
 - Local-libvirt names `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host`;
   other workers name their owning provisioning play.
 - State `root:kvm 0640` and require the worker in `kvm`; fallback uses `/boot/vmlinu?-*`, `sudo
@@ -49,8 +49,9 @@ stderr; later source changes make these assertions pass.
 **Verification:** Mode: focused-test — the old `0644` assertion fails after replacement; focused
 commands below pass after implementation.
 
-1. Assert the runtime hint has the supported path, worker `kvm` membership, group/mode, hook,
-   deployment qualification, safe `sudo` glob, and no `0644`/`dpkg-statoverride`.
+1. Assert the runtime hint retains Debian/Ubuntu scope and has the supported path, worker `kvm`
+   membership, group/mode, hook, deployment qualification, safe `sudo` glob, and no
+   `0644`/`dpkg-statoverride`.
 2. Assert the preflight hint has the hook-qualified fallback and no unsafe suggestions.
 3. Run both focused node IDs with `just test-verbose`; expect exit 0 after Task 3.
 
