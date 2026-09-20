@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import inspect
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -11,12 +11,20 @@ from typing import Any
 import pytest
 
 import tests.live_vm.systemd_worker_lifecycle_support as support
-import tests.live_vm.test_systemd_worker_lifecycle as live_proof
 
 pytest_plugins = ("pytester",)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _HOSTED_PROOF = "tests/live_vm/test_systemd_worker_lifecycle.py"
+
+
+def _live_proof_function(name: str) -> tuple[ast.FunctionDef, str]:
+    source = (_ROOT / _HOSTED_PROOF).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    return function, ast.get_source_segment(source, function) or ""
 
 
 def _write_cgroup_events(tmp_path: Path, content: bytes) -> Path:
@@ -355,22 +363,24 @@ def test_post_start_assertion_failure():
 
 
 def test_live_fixture_wires_exact_case_cleanup_boundary() -> None:
-    fixture = live_proof._isolate_proof_case
-    marker = fixture._fixture_function_marker
-    wrapped = inspect.unwrap(fixture)
+    fixture, source = _live_proof_function("_isolate_proof_case")
+    decorator = next(
+        item
+        for item in fixture.decorator_list
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Attribute)
+        and item.func.attr == "fixture"
+    )
+    keywords = {item.arg: ast.literal_eval(item.value) for item in decorator.keywords}
 
-    assert marker.autouse is True
-    assert marker.scope == "function"
-    assert tuple(inspect.signature(wrapped).parameters) == ("proof_context",)
-    source = inspect.getsource(wrapped)
+    assert keywords == {"autouse": True}
+    assert [argument.arg for argument in fixture.args.args] == ["proof_context"]
     assert "support.cleanup_after_case(" in source
     assert "support.restore_postgres(proof_context.postgres.container_id)" in source
     assert "cleanup_workers=_reset_fleet" in source
 
 
 def test_basic_worker_cases_keep_terminal_proof_on_success() -> None:
-    source = inspect.getsource(
-        inspect.unwrap(live_proof.test_real_systemd_workers_register_heartbeat_and_terminate)
-    )
+    _, source = _live_proof_function("test_real_systemd_workers_register_heartbeat_and_terminate")
 
     assert "_assert_stopped(proof_context, rows)" in source
