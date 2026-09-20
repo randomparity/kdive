@@ -94,8 +94,13 @@ def test_native_spine_checks_lifecycle_compatibility_before_destructive_setup() 
 
     native_steps = _load(_LIVE)["jobs"]["native"]["steps"]
     cleanup = next(step for step in native_steps if step.get("name") == "Clean up live stack")
-    assert cleanup["if"] == "always() && steps.native-spine.outputs.stack_started == 'true'"
-    assert 'echo "stack_started=true" >> "$GITHUB_OUTPUT"' in spine
+    assert cleanup["if"] == "always() && steps.native-spine.outputs.cleanup_required == 'true'"
+    cleanup_marker = 'echo "cleanup_required=true" >> "$GITHUB_OUTPUT"'
+    assert cleanup_marker in spine
+    assert spine.index(compatibility) < spine.index(cleanup_marker)
+    assert spine.index(cleanup_marker) < spine.index(
+        'for uri in "$KDIVE_LIBVIRT_URI" qemu:///system'
+    )
 
 
 def _native_guest_image() -> str:

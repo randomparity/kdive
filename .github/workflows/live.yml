@@ -721,6 +721,7 @@ jobs:
           # ownership (ADR-0582). Check that it matches this checkout before the reaper or stack
           # can mutate state. A mismatch names reprovisioning; this job never installs the contract.
           scripts/live-stack/worker-lifecycle.sh compatibility
+          echo "cleanup_required=true" >> "$GITHUB_OUTPUT"
 
           # Use the exact dedicated session endpoint published by provisioning for the fixed
           # workers. Parse it as literal data; never source the root-owned assignment as shell.
@@ -793,7 +794,6 @@ jobs:
           # systemd worker accounts use the operator-owned session libvirt socket, so the domain
           # and console log remain runner-owned/readable.
           scripts/live-stack/stack-services.sh --skip-obs
-          echo "stack_started=true" >> "$GITHUB_OUTPUT"
           # stack-services.sh sources env.sh in its OWN process; source it here for
           # KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
@@ -861,7 +861,7 @@ jobs:
           exit 0
 
       - name: Clean up live stack
-        if: always() && steps.native-spine.outputs.stack_started == 'true'
+        if: always() && steps.native-spine.outputs.cleanup_required == 'true'
         run: |
           # shellcheck source=scripts/live-stack/libvirt-uri.sh
           source scripts/live-stack/libvirt-uri.sh
