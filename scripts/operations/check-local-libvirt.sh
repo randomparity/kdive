@@ -274,7 +274,7 @@ if _host_kernels_readable; then
 else
   note_fail \
     "a host kernel under ${BOOT_DIR} (vmlinuz-* on x86_64, vmlinux-* on ppc64le) is not readable by this user (libguestfs build-fs appliance, ADR-0222)" \
-    "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which declares the mode, or for a one-off: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* (the glob matches both arches; re-apply after a kernel upgrade)"
+    "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which sets root:kvm 0640 and installs the durable post-upgrade hook, or for a one-off only: sudo chgrp kvm ${BOOT_DIR}/vmlinu?-* && sudo chmod 0640 ${BOOT_DIR}/vmlinu?-* (the glob matches both arches; re-apply only this fallback after a kernel upgrade)"
 fi
 
 if _dir_writable "${INSTALL_STAGING}"; then
