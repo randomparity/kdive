@@ -32,6 +32,19 @@ def test_checker_only_accepts_a_passing_terminal_summary(
     assert (result.returncode == 0) is expected
 
 
+def test_checker_accepts_colored_summary_under_utf8_locale(tmp_path: Path) -> None:
+    summary = tmp_path / "summary"
+    summary.write_text("\x1b[32m13 passed, 1 failed in 1.23s\x1b[0m\n")
+
+    result = subprocess.run(
+        [str(_CHECKER), str(summary)],
+        check=False,
+        env={**os.environ, "LC_ALL": "en_US.UTF-8"},
+    )
+
+    assert result.returncode == 0
+
+
 @pytest.mark.parametrize("width", [40, 120])
 @pytest.mark.parametrize(
     ("body", "expected"),
