@@ -8,10 +8,11 @@ and ordered recovery; a function-scoped pytest fixture owns per-case restoration
 
 **Tech stack:** Python 3.14, pytest, systemd, Docker Compose, `uv`, `just`.
 
-Measured implementation size: 248 changed lines against the frozen 100-line denominator (S). This
-is a non-blocking 248% expansion warning: strict malformed-cgroup coverage and subprocess proof of
-the real fixture's body/teardown behavior account for the increase. The reviewed three-file test
-surface and production exclusions are unchanged.
+Measured implementation size: 309 changed lines against the frozen 100-line denominator (S). This
+is a non-blocking 309% expansion warning: strict malformed-cgroup coverage, subprocess proof of
+the real fixture's body/teardown behavior, and three proof-harness assumptions exposed by the
+first isolated live run account for the increase. The reviewed three-file test surface and
+production exclusions are unchanged.
 
 ## Constraints
 
@@ -80,6 +81,11 @@ helper to restore the exact proof database and then `_reset_fleet`.
 6. Collect the live file and assert the six node IDs are unchanged. Add a narrow source guard that
    the basic cases still call `_assert_stopped` on the normal path. Run `just test-changed`, `just
    lint`, and `just type`.
+7. From the first isolated live result, pin the three newly reachable proof mechanics: expected
+   dependency failures use `_lifecycle_result` and exit status 4; out-of-band restart setup polls
+   for the terminal failed state for at most ten monotonic seconds; outage cleanup proves `stop`
+   retirement, then calls `recover` to clear the failed unit identity. Add source guards for those
+   contracts and rerun the focused support file, lint, and type checks.
 
 Acceptance: an exception anywhere after a case starts workers still reaches ordered fixture
 cleanup, cleanup failures remain visible alongside the primary failure, and the normal success

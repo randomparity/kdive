@@ -384,3 +384,28 @@ def test_basic_worker_cases_keep_terminal_proof_on_success() -> None:
     _, source = _live_proof_function("test_real_systemd_workers_register_heartbeat_and_terminate")
 
     assert "_assert_stopped(proof_context, rows)" in source
+
+
+def test_expected_lifecycle_failures_use_nonchecking_runner() -> None:
+    _, source = _live_proof_function("_assert_retained_after_database_outage")
+
+    assert "status, response = _lifecycle_result(operation)" in source
+    assert "assert status == 4" in source
+    assert "_lifecycle(operation)" not in source
+
+
+def test_outage_cleanup_retires_then_recovers_failed_identity() -> None:
+    _, source = _live_proof_function("_assert_stopped_after_outage")
+
+    retire = source.index("_assert_terminated(context, rows)")
+    recover = source.index('_lifecycle("recover")')
+    inactive = source.index("_assert_units_inactive(rows)")
+    assert retire < recover < inactive
+
+
+def test_out_of_band_restart_waits_for_terminal_systemd_state() -> None:
+    _, source = _live_proof_function("_restart_out_of_band")
+
+    assert "deadline = time.monotonic() + 10" in source
+    assert 'properties["ActiveState"] == "failed"' in source
+    assert "time.sleep(0.1)" in source

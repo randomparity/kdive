@@ -15,6 +15,14 @@ owned by individual test bodies, the next three cases inherit the residual fleet
 initial `start` with a conflict. The exact-head live result is therefore two passed cases, one real
 failure, and three consequential failures.
 
+The first exact-head verification after isolating cases exposed three more proof-harness
+assumptions that earlier cascades had hidden. Expected `status` and `stop` dependency failures
+used a success-only subprocess wrapper, an out-of-band restart sampled a `Type=simple` unit before
+its gate process reached the terminal failed state, and outage cleanup expected `stop` to clear a
+failed unit identity even though the lifecycle contract assigns that residual cleanup to
+`recover`. The proof must decode expected nonzero responses, wait boundedly for the terminal
+systemd state, and prove stop retirement before invoking recovery to clear the identity.
+
 ## Scope
 
 Move cgroup-population observation into the non-collected proof support module. A blank systemd
@@ -38,6 +46,12 @@ exception is attached to the primary with its message and formatted traceback ra
 exception class.
 The outage case keeps its narrower recovery block because it must inspect retained database state
 before returning; the fixture is the fail-safe boundary around that block.
+
+Expected lifecycle failures use the existing nonchecking response decoder and require exit status
+4. Out-of-band restart setup polls for `ActiveState=failed` for at most ten monotonic seconds,
+avoiding the transient `active/running` state systemd may expose immediately after a `Type=simple`
+start. After the outage database is restored, cleanup first proves `stop` retired the row and
+removed slot artifacts, then calls `recover` and requires an inactive unit with empty identity.
 
 The basic worker cases keep `_assert_stopped` on their successful path: terminal database rows,
 empty lifecycle status, inactive identity-free units, and removed slot artifacts are proof
@@ -67,8 +81,11 @@ by #2533 and #2596.
 3. Isolated pytest subprocesses prove teardown runs after startup and post-start assertion failures,
    and prove a body failure plus teardown failure are both reported.
 4. The basic cases still assert full terminal evidence on their successful path.
-5. The exact six-case hosted proof passes in one run, including the outage and three recovery cases.
-6. Focused guardrails and `just ci` pass without production or workflow changes.
+5. Expected dependency failures are decoded and asserted rather than raised by the subprocess
+   wrapper, restart setup waits for the terminal failed invocation, and outage cleanup proves the
+   stop-then-recover sequence.
+6. The exact six-case hosted proof passes in one run, including the outage and three recovery cases.
+7. Focused guardrails and `just ci` pass without production or workflow changes.
 
 ## Validation
 
