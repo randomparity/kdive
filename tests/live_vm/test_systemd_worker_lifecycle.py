@@ -65,6 +65,8 @@ class UnitEvidence:
     control_group: str
     active_state: str
     sub_state: str
+    result: str
+    exec_main_status: str
     populated: bool
 
 
@@ -147,7 +149,7 @@ def _properties(unit: str) -> dict[str, str]:
     output = support.run(
         "systemctl",
         "show",
-        "--property=ActiveState,SubState,ControlGroup,InvocationID",
+        "--property=ActiveState,SubState,Result,ExecMainStatus,ControlGroup,InvocationID",
         unit,
     )
     return dict(line.split("=", 1) for line in output.splitlines())
@@ -175,6 +177,8 @@ def _unit_evidence(slot: int) -> UnitEvidence:
         control_group=control_group,
         active_state=properties["ActiveState"],
         sub_state=properties["SubState"],
+        result=properties["Result"],
+        exec_main_status=properties["ExecMainStatus"],
         populated=_cgroup_populated(control_group),
     )
 
@@ -347,9 +351,13 @@ def _assert_retained_after_database_outage(
     assert retained.unit == before.unit
     assert retained.invocation_id == before.invocation_id
     assert retained.control_group == ""
-    assert retained.active_state == "active"
-    assert retained.sub_state == "exited"
     assert not retained.populated
+    support.assert_released_terminal_state(
+        active_state=retained.active_state,
+        sub_state=retained.sub_state,
+        result=retained.result,
+        exec_main_status=retained.exec_main_status,
+    )
     assert _slot_artifacts_exist(1)
     assert row.binding["invocation_id"] == retained.invocation_id
 
