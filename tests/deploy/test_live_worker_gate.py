@@ -119,12 +119,31 @@ def test_gate_waits_while_release_marker_is_absent(tmp_path: Path) -> None:
     assert stderr == ""
 
 
+def test_gate_reports_deadline_when_release_marker_stays_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    namespace = runpy.run_path(str(GATE), run_name="kdive_gate_test")
+    monkeypatch.setattr(namespace["time"], "monotonic", lambda: 120.0)
+
+    with pytest.raises(SystemExit):
+        namespace["_wait_for_release"](
+            1,
+            tmp_path / "missing-release",
+            _GENERATION,
+            _INVOCATION,
+            120.0,
+        )
+
+    assert "release marker deadline expired" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "marker",
     [
         "malformed\n",
         f"{'c' * 32}\n{_INVOCATION}\n",
-        f"{_GENERATION}\n{'d' * 32}\n",
         f"{_GENERATION}\n{_INVOCATION}\nextra\n",
     ],
 )
@@ -150,6 +169,34 @@ def test_gate_refuses_malformed_or_stale_release_marker(
         namespace["main"]()
     stderr = capsys.readouterr().err
     assert "slot 1" in stderr
+    assert "release marker binding invariant failed" in stderr
+    assert _GENERATION not in stderr
+    assert _INVOCATION not in stderr
+    assert not capture.exists()
+
+
+def test_gate_reports_out_of_band_restart_for_successor_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    python = tmp_path / "fake-python"
+    capture = tmp_path / "capture.json"
+    _write_fake_python(python, capture)
+    env, slot = _gate_env(tmp_path, python)
+    (slot / "release").write_text(f"{_GENERATION}\n{'d' * 32}\n", encoding="ascii")
+
+    monkeypatch.setattr(os, "environ", env)
+    monkeypatch.setattr(sys, "argv", [str(GATE), "1"])
+    _patch_root_owned_files(monkeypatch)
+    monkeypatch.setattr(os, "execve", lambda *_args: pytest.fail("stale marker reached exec"))
+    namespace = runpy.run_path(str(GATE), run_name="kdive_gate_test")
+
+    with pytest.raises(SystemExit):
+        namespace["main"]()
+    stderr = capsys.readouterr().err
+    assert "out-of-band restart detected" in stderr
+    assert "release marker binding invariant failed" not in stderr
     assert _GENERATION not in stderr
     assert _INVOCATION not in stderr
     assert not capture.exists()
