@@ -389,15 +389,9 @@ jobs:
       - name: Prove systemd worker lifecycle against disposable Postgres
         run: |
           set -euo pipefail
-          operator_name="$(id -un)"
-          preserve_names="PATH,CI,GITHUB_ACTIONS,GITHUB_WORKSPACE,RUNNER_ARCH,RUNNER_OS"
-          preserve_names+=",RUNNER_TEMP,RUNNER_TOOL_CACHE,UV_CACHE_DIR,XDG_RUNTIME_DIR"
-          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT"
-          exec sudo --preserve-env="$preserve_names" \
-            --user="$operator_name" --group=kdive-live-control \
-            env "HOME=$HOME" "USER=$operator_name" "LOGNAME=$operator_name" \
-            /bin/bash -s -e -u -o pipefail \
-            <<'KDIVE_SYSTEMD_PROOF'
+          # #2565/#2054: a child of stack-services.sh can drain stdin. Materialize the proof
+          # before changing users so Bash reads every remaining command from a regular file.
+          cat >"$RUNNER_TEMP/systemd-worker-proof.sh" <<'KDIVE_SYSTEMD_PROOF'
           control_gid="$(getent group kdive-live-control | cut -d: -f3)"
           libvirt_gid="$(getent group kdive-live-libvirt | cut -d: -f3)"
           for required_gid in "$control_gid" "$libvirt_gid"; do
@@ -413,10 +407,25 @@ jobs:
           scripts/live-stack/stack-services.sh --reset-db --skip-obs --skip-libvirt
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
+          rc=0
+          systemd_summary="$(mktemp)"
           KDIVE_RUN_SYSTEMD_WORKER_PROOF=1 uv run python -m pytest \
             tests/live_vm/test_systemd_worker_lifecycle.py \
-            -m live_vm --strict-markers -q
+            -m live_vm --strict-markers -q | tee "$systemd_summary" || rc=$?
+          if ! scripts/pytest-terminal-summary-has-passes.sh "$systemd_summary"; then
+            echo "hosted systemd proof: ran ZERO systemd worker lifecycle proofs (no '<N> passed' summary, pytest rc=$rc); a skipped tier must never read green" >&2
+            exit 1
+          fi
+          exit "$rc"
           KDIVE_SYSTEMD_PROOF
+          operator_name="$(id -un)"
+          preserve_names="PATH,CI,GITHUB_ACTIONS,GITHUB_WORKSPACE,RUNNER_ARCH,RUNNER_OS"
+          preserve_names+=",RUNNER_TEMP,RUNNER_TOOL_CACHE,UV_CACHE_DIR,XDG_RUNTIME_DIR"
+          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT"
+          exec sudo --preserve-env="$preserve_names" \
+            --user="$operator_name" --group=kdive-live-control \
+            env "HOME=$HOME" "USER=$operator_name" "LOGNAME=$operator_name" \
+            /bin/bash -e -u -o pipefail "$RUNNER_TEMP/systemd-worker-proof.sh"
 
       - name: Clean up lifecycle proof stack
         if: success()
