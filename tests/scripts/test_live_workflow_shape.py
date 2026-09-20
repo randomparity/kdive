@@ -11,6 +11,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import textwrap
 
 import pytest
 import yaml
@@ -1019,6 +1020,44 @@ def test_hosted_spine_fails_loud_on_a_zero_proof_tier() -> None:
     spine = _tcg_spine()
     assert 'pytest-terminal-summary-has-passes.sh "$tcg_summary"' in spine
     assert "ran ZERO live_vm_tcg proofs" in spine
+
+
+def _proof_guard(spine: str, summary_var: str) -> str:
+    lines = spine.splitlines()
+    call = f'if ! scripts/pytest-terminal-summary-has-passes.sh "${summary_var}"; then'
+    start = next(i for i, line in enumerate(lines) if line.strip() == call)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "fi")
+    return textwrap.dedent("\n".join(lines[start : end + 1]))
+
+
+@pytest.mark.parametrize(
+    ("spine_name", "summary_var"),
+    [("tcg", "tcg_summary"), ("native", "native_summary")],
+)
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        ("SKIPPED [1] test.py: previous run had 1 passed\n4 skipped in 0.01s\n", False),
+        ("1 passed in 0.01s\n", True),
+    ],
+)
+def test_workflow_proof_guards_execute_the_shared_predicate(
+    tmp_path: pathlib.Path,
+    spine_name: str,
+    summary_var: str,
+    stream: str,
+    expected: bool,
+) -> None:
+    summary = tmp_path / f"{spine_name}.summary"
+    summary.write_text(stream, encoding="utf-8")
+    spine = _tcg_spine() if spine_name == "tcg" else _native_spine()
+    shell = f'{summary_var}="$1"\nrc=0\n{_proof_guard(spine, summary_var)}\n'
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c", shell, "proof-guard", str(summary)],
+        cwd=_ROOT,
+        check=False,
+    )
+    assert (result.returncode == 0) is expected
 
 
 def test_native_spine_fails_loud_on_a_zero_proof_tier() -> None:

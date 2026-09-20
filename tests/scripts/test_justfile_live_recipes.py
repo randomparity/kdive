@@ -143,7 +143,10 @@ def test_all_skipped_tcg_run_fails_naming_the_tier(tmp_path: Path) -> None:
         "test-live-tcg",
         tmp_path,
         uv_exit_code=0,
-        uv_stdout="4 skipped, 18584 deselected in 12.34s\n",
+        uv_stdout=(
+            "SKIPPED [1] test.py: previous run had 1 passed\n"
+            "4 skipped, 18584 deselected in 12.34s\n"
+        ),
         extra_env=_satisfied_tcg_env(tmp_path),
     )
     assert result.returncode != 0, (
@@ -243,7 +246,9 @@ def test_all_skipped_native_run_fails_naming_the_tier(tmp_path: Path) -> None:
         "test-live",
         tmp_path,
         uv_exit_code=0,
-        uv_stdout="3 skipped, 18584 deselected in 9.10s\n",
+        uv_stdout=(
+            "SKIPPED [1] test.py: previous run had 1 passed\n3 skipped, 18584 deselected in 9.10s\n"
+        ),
         extra_env=_satisfied_native_env(tmp_path),
     )
     assert result.returncode != 0, (
