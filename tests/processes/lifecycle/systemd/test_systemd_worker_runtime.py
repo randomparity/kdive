@@ -175,58 +175,79 @@ def test_observe_returns_boot_only_evidence_for_inactive_empty_unit(
     )
 
 
-def test_observe_preserves_failed_invocation_after_systemd_releases_cgroup(
-    fake_host: tuple[Path, Path],
-) -> None:
-    failed = (
-        "ActiveState=failed\n"
-        "SubState=failed\n"
-        "Result=exit-code\n"
-        "ExecMainStatus=1\n"
+def _released_cgroup_properties(active_state: str, sub_state: str, result: str, status: int) -> str:
+    return (
+        f"ActiveState={active_state}\n"
+        f"SubState={sub_state}\n"
+        f"Result={result}\n"
+        f"ExecMainStatus={status}\n"
         "ControlGroup=\n"
         f"InvocationID={_INVOCATION_ID}\n"
     )
 
-    observation = _runtime(fake_host, FakeRunner(failed)).observe(_WORKER_UNIT, FakeDeadline(120.0))
+
+@pytest.mark.parametrize(
+    ("active_state", "sub_state", "result", "status"),
+    [
+        ("failed", "failed", "exit-code", 1),
+        ("active", "exited", "success", 0),
+        ("active", "exited", "success", 15),
+    ],
+)
+def test_observe_preserves_terminal_invocation_after_systemd_releases_cgroup(
+    fake_host: tuple[Path, Path],
+    active_state: str,
+    sub_state: str,
+    result: str,
+    status: int,
+) -> None:
+    observation = _runtime(
+        fake_host,
+        FakeRunner(_released_cgroup_properties(active_state, sub_state, result, status)),
+    ).observe(_WORKER_UNIT, FakeDeadline(120.0))
 
     assert observation == UnitObservation(
         unit=_WORKER_UNIT,
         boot_id=_BOOT_ID,
         invocation_id=_INVOCATION_ID,
-        active_state="failed",
-        sub_state="failed",
-        result="exit-code",
-        exec_main_status=1,
+        active_state=active_state,
+        sub_state=sub_state,
+        result=result,
+        exec_main_status=status,
         control_group="",
         membership="empty",
     )
 
 
-def test_observe_preserves_remain_after_exit_invocation_after_cgroup_empties(
+@pytest.mark.parametrize(
+    ("active_state", "sub_state", "result", "status"),
+    [
+        ("active", "exited", "exit-code", 1),
+        ("active", "running", "success", 0),
+        ("failed", "failed", "success", 1),
+    ],
+)
+def test_observe_rejects_unsupported_released_cgroup_state(
     fake_host: tuple[Path, Path],
+    active_state: str,
+    sub_state: str,
+    result: str,
+    status: int,
 ) -> None:
-    exited = (
-        "ActiveState=active\n"
-        "SubState=exited\n"
-        "Result=success\n"
-        "ExecMainStatus=0\n"
-        "ControlGroup=\n"
-        f"InvocationID={_INVOCATION_ID}\n"
-    )
+    with pytest.raises(SystemdConflict) as raised:
+        _runtime(
+            fake_host,
+            FakeRunner(_released_cgroup_properties(active_state, sub_state, result, status)),
+        ).observe(_WORKER_UNIT, FakeDeadline(120.0))
 
-    observation = _runtime(fake_host, FakeRunner(exited)).observe(_WORKER_UNIT, FakeDeadline(120.0))
-
-    assert observation == UnitObservation(
-        unit=_WORKER_UNIT,
-        boot_id=_BOOT_ID,
-        invocation_id=_INVOCATION_ID,
-        active_state="active",
-        sub_state="exited",
-        result="success",
-        exec_main_status=0,
-        control_group="",
-        membership="empty",
+    message = str(raised.value)
+    assert (
+        message == "systemd released cgroup in unsupported state "
+        f"ActiveState={active_state} SubState={sub_state} Result={result} "
+        f"ExecMainStatus={status}"
     )
+    assert "partial unit identity" not in message
+    assert _INVOCATION_ID not in message
 
 
 def test_observe_preserves_remain_after_exit_invocation_after_systemd_unlinks_cgroup(

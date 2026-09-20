@@ -577,7 +577,9 @@ class SystemdRuntime:
                 raise SystemdConflict(f"systemd ControlGroup does not match fixed unit {unit}")
             membership = self._membership(control_group)
         else:
-            self._require_released_terminal_identity(properties)
+            if properties["ActiveState"] == "inactive":
+                raise SystemdConflict("systemctl show returned a partial unit identity")
+            self._require_released_terminal_state(properties)
             membership = "empty"
         return UnitObservation(
             unit=unit,
@@ -861,20 +863,23 @@ class SystemdRuntime:
         return True
 
     @staticmethod
-    def _require_released_terminal_identity(properties: dict[str, str]) -> None:
+    def _require_released_terminal_state(properties: dict[str, str]) -> None:
         failed = (
             properties["ActiveState"] == "failed"
             and properties["SubState"] == "failed"
             and properties["Result"] != "success"
         )
-        remain_after_exit = (
+        retained_exit = (
             properties["ActiveState"] == "active"
             and properties["SubState"] == "exited"
             and properties["Result"] == "success"
-            and properties["ExecMainStatus"] == "0"
         )
-        if not failed and not remain_after_exit:
-            raise SystemdConflict("systemctl show returned a partial unit identity")
+        if not failed and not retained_exit:
+            raise SystemdConflict(
+                "systemd released cgroup in unsupported state "
+                f"ActiveState={properties['ActiveState']} SubState={properties['SubState']} "
+                f"Result={properties['Result']} ExecMainStatus={properties['ExecMainStatus']}"
+            )
 
     @staticmethod
     def _require_inactive_properties(properties: dict[str, str]) -> None:

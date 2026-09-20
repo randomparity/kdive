@@ -1122,6 +1122,18 @@ def test_empty_invocation_result_maps_to_terminal_outcome(
     assert stores[0].state is not None and stores[0].state.outcome == outcome
 
 
+def test_status_records_released_success_exit_with_nonzero_status_as_failed() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert stores[0].state is not None and stores[0].state.outcome == "failed"
+
+
 def test_stop_commits_evidence_before_unit_and_state_cleanup() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, events = _fleet(states={1: started})
@@ -1143,6 +1155,19 @@ def test_stop_commits_evidence_before_unit_and_state_cleanup() -> None:
         if operation in {"observe", "signal-terminate", "stop-retained"}
     ]
     assert len({id(deadline) for deadline in stop_path_deadlines}) == 1
+
+
+def test_stop_clears_released_success_exit_with_nonzero_status() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert stores[0].state is None
+    assert runtime.stopped == [started.unit]
 
 
 def test_stop_cleanup_does_not_reset_a_stopped_template_instance() -> None:
@@ -2467,6 +2492,32 @@ def test_recover_publishes_the_outcome_the_retained_invocation_itself_reports() 
     ]
     assert stores[0].state is None
     assert runtime.resets == [started.unit]
+
+
+def test_recover_clears_released_success_exit_with_nonzero_status() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert stores[0].state is None
+    assert runtime.stopped == [started.unit]
+
+
+def test_recover_refuses_populated_success_exit_with_nonzero_status() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "populated", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == "conflict" and response.retry_action == "operator_recovery"
+    assert stores[0].state == started
+    assert authority.terminations == [] and runtime.stopped == []
 
 
 def test_recover_reports_slots_it_already_retired_when_a_later_slot_fails() -> None:
