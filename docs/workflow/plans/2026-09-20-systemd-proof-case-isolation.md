@@ -1,26 +1,26 @@
-# Systemd proof case isolation — implementation plan
+# Combined live-proof gate recovery — implementation plan
 
-**Goal:** Make all six real-systemd cases independent and accept normal cgroup removal after worker
-exit.
+**Goal:** Make all six real-systemd cases independent and produce one exact-head live result that
+also exercises the corrected console-artifact request and marker-bearing part selection.
 
-**Architecture:** Keep all changes in the live-proof harness. The support module owns cgroup reads
-and ordered recovery; a function-scoped pytest fixture owns per-case restoration and fleet reset.
+**Architecture:** Keep all changes in test and live-proof support. The systemd support module owns
+cgroup reads and ordered recovery; a function-scoped pytest fixture owns per-case restoration and
+fleet reset. Shared live-stack support owns full artifact paging, while non-collected console-part
+support owns marker-aware polling over immutable part artifacts.
 
 **Tech stack:** Python 3.14, pytest, systemd, Docker Compose, `uv`, `just`.
 
-Measured implementation size: 310 changed lines against the frozen 100-line denominator (S). This
-is a non-blocking 310% expansion warning: strict malformed-cgroup coverage, subprocess proof of
-the real fixture's body/teardown behavior, and three proof-harness assumptions exposed by the
-first isolated live run account for the increase. The reviewed three-file test surface and
-production exclusions are unchanged.
+Expected implementation size: 500–650 changed lines (M) — the existing 517-line #2566 proof
+harness plus #2608 paging coverage and marker-aware polling support.
 
 ## Constraints
 
 - Base branch: `main`; branch: `feat/systemd-proof-cleanup-2566`; sibling worktree only.
 - Preserve the six-case roster and the corrected per-template cgroup expectation.
-- Change only the three live-proof files and these design artifacts.
+- Change only the three systemd live-proof files, the console live proof, shared live-stack test
+  support and its focused tests, and these design artifacts.
 - Do not change production lifecycle behavior, hosted workflow invocation, provisioning, or
-  residual-worker recovery.
+  residual-worker recovery, artifact API behavior, or console capture and rotation.
 - Public artifacts contain no private host, user, network, or location identifiers.
 
 ## Task 1: Make cgroup absence explicit proof behavior
@@ -94,14 +94,69 @@ path still proves terminal rows, empty status, inactive units, and absent slot a
 
 Rollback: revert the task commit; the workflow's outer cleanup remains available.
 
-## Task 3: Verify and ship
+## Task 3: Integrate artifact paging and marker-aware polling
 
-1. Stage the exact five changed paths, run `prek run`, re-add only rewritten staged paths, and
+**Files:** merge the two #2608 commits, modify
+`tests/integration/test_console_parts_live.py`, create
+`tests/integration/live_stack/console_parts.py` and
+`tests/integration/live_stack/test_console_parts.py`, and retain the #2608 changes in
+`tests/integration/live_stack/spine.py` and `tests/integration/live_stack/test_spine.py`.
+
+**Interfaces:** retain `full_artifact_text(client, artifact_id, phase_name) -> str`. Add
+`poll_for_new_console_part(client, system_id, initial_ids, marker, *, deadline_s,
+interval_s) -> tuple[str, str]`. The returned pair is the marker-bearing artifact id and its full
+plaintext. `test_console_parts_live.py` supplies the existing 300-second deadline and five-second
+interval and no longer fetches the selected part a second time.
+
+The support loop has this exact state transition: list current parts, discard initial and already
+inspected ids, fetch each remaining immutable part with `full_artifact_text`, add it to the
+inspected set, and return `(artifact_id, text)` only when `marker in text`. If none matches, compare
+`time.monotonic()` with the fixed deadline, raise `SpinePhaseError` after expiry, or await
+`asyncio.sleep(interval_s)` before relisting. Listing, paging, and read failures propagate.
+
+**Verification**
+
+- **Nested artifact request — Mode: focused-test.** Test
+  `tests/integration/live_stack/test_spine.py::test_full_artifact_text_nests_request_and_pages`.
+  Expected red: reverting the #2608 implementation records flat artifact arguments. Green command:
+  `uv run python -m pytest
+  tests/integration/live_stack/test_spine.py::test_full_artifact_text_nests_request_and_pages -q`.
+- **Marker-aware polling — Mode: focused-test.** Test
+  `tests/integration/live_stack/test_console_parts.py`. Expected red: the support function is
+  absent before this task. Green command: `uv run python -m pytest
+  tests/integration/live_stack/test_console_parts.py -q`.
+
+**Steps**
+
+1. Merge the reviewed #2608 branch into this branch without rewriting its two commits. Confirm the
+   paging test passes and the combined diff contains no production files.
+2. Add a scripted fake-client test whose first listing introduces one immutable part without the
+   marker and whose second introduces a marker-bearing part. Assert the first part is fetched once,
+   the later id and full text are returned, and artifact reads retain nested request paging.
+3. Implement the non-collected support function. Track inspected artifact ids, scan every unseen
+   post-snapshot candidate, and sleep only when no candidate contains the marker. On deadline,
+   raise `SpinePhaseError` with initial, current, and inspected counts.
+4. Replace the live module's local listing and polling helpers with the support call and consume
+   its returned plaintext directly.
+5. Run both focused commands, `just test-changed`, `just lint`, and `just type`.
+
+Acceptance: immutable parts lacking the marker cannot cause a false failure, no part is fetched
+twice while polling, tied timestamps do not control selection, and the production capture and API
+surfaces remain unchanged.
+
+Rollback: revert the marker-polling commit and the merge commit together; neither changes external
+state.
+
+## Task 4: Verify and ship
+
+1. Stage the exact changed paths, run `prek run`, re-add only rewritten staged paths, and
    commit with Conventional Commit subjects.
 2. Run `just ci > /tmp/kdive-2566-ci.log 2>&1 < /dev/null` and preserve its exit status.
 3. Push the exact reviewed head, open the issue-linked pull request, and wait for all required
    checks.
-4. Dispatch `live.yml` at that exact head. Require the systemd proof to report six passed cases and
-   its outer cleanup step to succeed. Treat later TCG-tier behavior as separate evidence.
+4. Dispatch `live.yml` at that exact head. Require the systemd proof to report six passed cases,
+   the native console-parts proof to pass, both jobs to complete successfully, and cleanup steps to
+   succeed.
 5. Merge with history only after the branch is current, checks are green, review is approved, and
-   exact-head live evidence is green; then clean the branch and worktree.
+   exact-head live evidence is green; then close PR #2609 as superseded and clean both owned
+   branches and worktrees.

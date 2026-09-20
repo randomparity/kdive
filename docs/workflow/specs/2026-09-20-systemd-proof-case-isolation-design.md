@@ -1,6 +1,6 @@
-# Systemd proof case isolation
+# Combined live-proof gate recovery
 
-Issue #2566.
+Issues #2566 and #2608.
 
 ## Problem
 
@@ -23,6 +23,15 @@ failed unit identity even though the lifecycle contract assigns that residual cl
 `recover`. The proof must decode expected nonzero responses, wait boundedly for the terminal
 systemd state, accept the blank `ControlGroup` that follows cgroup removal, and prove stop
 retirement before invoking recovery to clear the identity.
+
+After those corrections passed all six systemd cases, the same exact-head workflow reached a
+separate native console-parts proof and failed before its assertions because that test still sent
+the retired flat `artifacts.get` arguments. Correcting the request exposed a synchronization
+defect: the poll returns as soon as any immutable part appears after the initial snapshot, even
+when that part was sealed by an already-running rotation before the marker reached the console.
+Retained proof artifacts showed the chosen part lacked the marker while later parts from the same
+System contained it. Because every dispatched SHA runs both live jobs, the two issue branches must
+be integrated to produce one mergeable exact-head result.
 
 ## Scope
 
@@ -66,6 +75,14 @@ No production lifecycle, unit, database, workflow, protocol, or persisted-state 
 The hosted workflow invocation remains owned by #2565; residual production recovery remains owned
 by #2533 and #2596.
 
+Integrate #2608's nested artifact request and shared paging helper without changing the production
+`artifacts.get` contract. Move console-part polling into non-collected test support. The poll scans
+each new immutable part at most once, continues when a part lacks the unique marker, and returns
+the first marker-bearing part with its full text. Tied artifact timestamps and listing order do not
+select the result. Keep the five-minute deadline and five-second interval in the live caller while
+allowing focused tests to use bounded injected values. Do not change capture, rotation, workflow
+selection, or production artifact behavior.
+
 ## Failure model
 
 - Fixture setup failure starts no case and therefore creates no new worker cleanup obligation.
@@ -74,6 +91,12 @@ by #2533 and #2596.
 - A vanished cgroup path is accepted only as process-absence evidence; unit identity and retained
   lifecycle facts continue to come from systemd properties and PostgreSQL.
 - An unexpected permission, decoding, or malformed-content error remains visible.
+- A new immutable console part without the marker is an intermediate observation and is checked
+  only once; absence of a marker-bearing part through the deadline remains a failure.
+- Artifact-list ordering among tied timestamps is not trusted; each newly observed candidate in
+  the bounded listing is eligible for content inspection.
+- Production capture and rotation failures remain outside this test-only integration and are not
+  converted into polling success.
 
 ## Success
 
@@ -87,6 +110,12 @@ by #2533 and #2596.
    stop-then-recover sequence.
 6. The exact six-case hosted proof passes in one run, including the outage and three recovery cases.
 7. Focused guardrails and `just ci` pass without production or workflow changes.
+8. Focused paging coverage proves `artifacts.get` receives the nested request on initial and
+   continuation reads.
+9. Focused polling coverage proves an early new part without the marker is skipped and read only
+   once, then a later marker-bearing part is returned regardless of listing order.
+10. One exact-head workflow passes both the native KVM and hosted TCG jobs before PR #2607 merges;
+    PR #2609 is then closed as superseded by that merged integration.
 
 ## Validation
 
@@ -108,3 +137,14 @@ by #2533 and #2596.
 - **Hosted systemd proof — Mode: live-test.** Dispatch the exact branch head through `live.yml` and
   require all six `tests/live_vm/test_systemd_worker_lifecycle.py` cases to pass. The workflow's
   existing cleanup step remains the outer fail-safe.
+- **Artifact request paging — Mode: focused-test.** Run `uv run python -m pytest
+  tests/integration/live_stack/test_spine.py -q`. Reverting the nested request makes the fake
+  client observe flat `artifact_id` and `byte_offset` arguments; the implementation sends both
+  pages inside `request` and returns their concatenated plaintext.
+- **Marker-bearing part selection — Mode: focused-test.** Run `uv run python -m pytest
+  tests/integration/live_stack/test_console_parts.py -q`. Before implementation the support
+  function is absent; afterward a scripted listing sequence proves the first new non-marker part
+  is not returned or fetched twice and the later marker-bearing part supplies both id and text.
+- **Combined live gate — Mode: live-test.** Dispatch `live.yml` for the exact integrated head and
+  require both jobs to complete successfully, including all six systemd cases and the native
+  console-parts assertion.
