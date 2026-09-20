@@ -83,6 +83,58 @@ def test_cgroup_populated_propagates_non_not_found_io_errors(
         support.cgroup_populated("/system.slice/worker.service", root=tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("active_state", "sub_state", "result", "exec_main_status"),
+    [
+        ("failed", "failed", "signal", "15"),
+        ("active", "exited", "success", "0"),
+        ("active", "exited", "success", "15"),
+        ("active", "exited", "success", "0000"),
+    ],
+)
+def test_released_terminal_state_accepts_runtime_supported_shapes(
+    active_state: str,
+    sub_state: str,
+    result: str,
+    exec_main_status: str,
+) -> None:
+    support.assert_released_terminal_state(
+        active_state=active_state,
+        sub_state=sub_state,
+        result=result,
+        exec_main_status=exec_main_status,
+    )
+
+
+@pytest.mark.parametrize(
+    ("active_state", "sub_state", "result", "exec_main_status"),
+    [
+        ("active", "exited", "exit-code", "1"),
+        ("active", "running", "success", "0"),
+        ("failed", "failed", "success", "1"),
+        ("failed", "failed", "", "15"),
+        ("failed", "failed", "bad result", "15"),
+        ("failed", "failed", "signal", "-1"),
+        ("failed", "failed", "signal", "256"),
+        ("failed", "failed", "signal", "9999"),
+        ("failed", "failed", "signal", "not-a-status"),
+    ],
+)
+def test_released_terminal_state_rejects_unsupported_or_malformed_evidence(
+    active_state: str,
+    sub_state: str,
+    result: str,
+    exec_main_status: str,
+) -> None:
+    with pytest.raises(AssertionError):
+        support.assert_released_terminal_state(
+            active_state=active_state,
+            sub_state=sub_state,
+            result=result,
+            exec_main_status=exec_main_status,
+        )
+
+
 def test_hosted_systemd_proof_collects_exactly_six_cases() -> None:
     """The gated suite never runs in CI, so this list is the only thing that notices a change.
 
