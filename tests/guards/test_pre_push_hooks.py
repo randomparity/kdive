@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+PUSH_WRAPPER = "scripts/run-pre-push-ci.sh"
 
 
 def test_hook_stage_contract() -> None:
@@ -17,11 +18,12 @@ def test_hook_stage_contract() -> None:
     push = [hook for hook in hooks if hook["id"] == "pre-push-ci"]
     assert len(push) == 1
     assert config["default_stages"] == ["pre-commit"]
-    assert push[0]["entry"] == "just ci"
+    assert push[0]["entry"] == PUSH_WRAPPER
     assert push[0]["stages"] == ["pre-push"]
     assert push[0]["always_run"] is True
     assert push[0]["pass_filenames"] is False
     assert push[0]["language"] == "system"
+    assert "git rev-parse --local-env-vars" in (ROOT / PUSH_WRAPPER).read_text()
     for hook in hooks:
         if hook["id"] != "pre-push-ci":
             assert hook.get("stages", config["default_stages"]) == ["pre-commit"]
@@ -49,9 +51,17 @@ def repository(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     probe = tmp_path / "probe"
+    foreign = tmp_path / "foreign"
+    foreign_toplevel = tmp_path / "foreign-toplevel"
     stub = bin_dir / "just"
     stub.write_text(
         '#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = ci ] || exit 91\n'
+        'git init --quiet "$HOOK_FOREIGN"\n'
+        'printf fixture > "$HOOK_FOREIGN/fixture"\n'
+        'git -C "$HOOK_FOREIGN" add fixture\n'
+        'git -C "$HOOK_FOREIGN" -c user.name=Fixture -c user.email=fixture@example.invalid '
+        "commit --quiet -m fixture\n"
+        'git -C "$HOOK_FOREIGN" rev-parse --show-toplevel > "$HOOK_FOREIGN_TOPLEVEL"\n'
         'cat payload > "$HOOK_PROBE"\nexit "${HOOK_EXIT:-0}"\n'
     )
     stub.chmod(0o755)
@@ -59,6 +69,8 @@ def repository(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
         PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         PREK_HOME=str(tmp_path / "prek"),
         HOOK_PROBE=str(probe),
+        HOOK_FOREIGN=str(foreign),
+        HOOK_FOREIGN_TOPLEVEL=str(foreign_toplevel),
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_CONFIG_NOSYSTEM="1",
         GIT_AUTHOR_NAME="Test",
@@ -73,6 +85,12 @@ def repository(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     push = [
         hook for repo in config["repos"] for hook in repo["hooks"] if hook["id"] == "pre-push-ci"
     ]
+    # Git hooks expose these repository-local variables. Inject them into the real hook
+    # command so the disposable push proves the wrapper drops the complete dynamic set.
+    push[0]["entry"] = (
+        f"env GIT_DIR={root / '.git'} GIT_WORK_TREE={root} "
+        f"GIT_INDEX_FILE={root / '.git' / 'index'} {PUSH_WRAPPER}"
+    )
     commit = {
         "id": "commit-check",
         "name": "commit check",
@@ -84,6 +102,10 @@ def repository(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     config["repos"] = [{"repo": "local", "hooks": [commit, *push]}]
     (root / ".pre-commit-config.yaml").write_text(yaml.safe_dump(config))
     shutil.copyfile(ROOT / "justfile", root / "justfile")
+    wrapper = root / PUSH_WRAPPER
+    wrapper.parent.mkdir()
+    shutil.copyfile(ROOT / PUSH_WRAPPER, wrapper)
+    wrapper.chmod(0o755)
     (root / "payload").write_text("initial")
     checked(root, env, "git", "add", ".")
     checked(root, env, "git", "commit", "-m", "initial")
@@ -111,9 +133,17 @@ def test_push_exit(repository: tuple[Path, dict[str, str], Path], exit_code: int
 
 def test_push_checks_checkout(repository: tuple[Path, dict[str, str], Path]) -> None:
     root, env, probe = repository
+    config_before = (root / ".git/config").read_bytes()
+    head_before = checked(root, env, "git", "rev-parse", "HEAD")
+    index_before = (root / ".git/index").read_bytes()
     checked(root, env, "git", "push", "origin", "HEAD^:refs/heads/older")
     assert probe.read_text() == "checkout"
     assert checked(root, env, "git", "show", "HEAD^:payload") == "initial"
+    assert (root / ".git/config").read_bytes() == config_before
+    assert checked(root, env, "git", "rev-parse", "HEAD") == head_before
+    assert (root / ".git/index").read_bytes() == index_before
+    assert checked(root, env, "git", "status", "--porcelain") == ""
+    assert Path(env["HOOK_FOREIGN_TOPLEVEL"]).read_text().strip() == env["HOOK_FOREIGN"]
 
 
 def test_empty_commit_and_delete(repository: tuple[Path, dict[str, str], Path]) -> None:
