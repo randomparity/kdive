@@ -1,4 +1,8 @@
 ---
+# Operator account for host files, session libvirt and lifecycle control. runner.yml binds
+# its runner account explicitly; standalone inventories can choose another operator.
+live_vm_host_operator_user: github-runner
+
 # The remote-libvirt `live_vm` family (#1424, ADR-0425, `just test-live-remote`) needs NO
 # additional host package here: it connects OUT to a remote qemu+tls:// host over the libvirt TLS
 # client stack (`libvirt-clients` + `gnutls-bin`) the `libvirt_stack` role already declares, and

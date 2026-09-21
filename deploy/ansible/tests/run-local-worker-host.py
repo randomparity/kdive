@@ -44,6 +44,73 @@ def tasks(output: str, *, include_tags: bool = False) -> list[str]:
     return lines if include_tags else [line.split("\tTAGS:", 1)[0] for line in lines]
 
 
+def live_vm_operator_identity() -> None:
+    """Load real role defaults without applying the host, then execute its identity lookup."""
+    runner_play = yaml.safe_load((ANSIBLE / "playbooks/runner.yml").read_text())[0]
+    verify = yaml.safe_load((ANSIBLE / "roles/live_vm_host/tasks/verify.yml").read_text())
+    operator = subprocess.check_output(["id", "-un"], text=True).strip()
+    uid = subprocess.check_output(["id", "-u"], text=True).strip()
+    cases = (
+        ("default", {}, ["live_vm_host_operator_user == 'github-runner'"], []),
+        (
+            "override",
+            {"live_vm_host_operator_user": operator},
+            [f"live_vm_host_uid | string == '{uid}'"],
+            verify[:2],
+        ),
+        (
+            "runner",
+            runner_play.get("vars", {}) | {"github_runner_user": "ci-operator-probe"},
+            ["live_vm_host_operator_user == github_runner_user"],
+            [],
+        ),
+    )
+    with tempfile.TemporaryDirectory(prefix="kdive-live-vm-operator-") as temp_dir:
+        identity_probe = Path(temp_dir) / "identity.yml"
+        for label, variables, assertions, identity_tasks in cases:
+            if label != "runner":
+                assertions = ["github_runner_user is not defined", *assertions]
+            identity_probe.write_text(
+                yaml.safe_dump(
+                    [
+                        {
+                            "hosts": "localhost",
+                            "connection": "local",
+                            "gather_facts": False,
+                            "vars": variables,
+                            "tasks": [
+                                {
+                                    "ansible.builtin.import_role": {"name": "live_vm_host"},
+                                    "tags": ["never"],
+                                },
+                                *[task | {"tags": ["identity_probe"]} for task in identity_tasks],
+                                {
+                                    "ansible.builtin.assert": {"that": assertions},
+                                    "tags": ["identity_probe"],
+                                },
+                            ],
+                        }
+                    ]
+                )
+            )
+            result = playbook(identity_probe, "--tags", "identity_probe")
+            require(
+                result.returncode == 0,
+                f"live_vm_host {label} identity failed:\n{result.stdout}\n{result.stderr}",
+            )
+    for path in (ANSIBLE / "roles/live_vm_host").rglob("*.yml"):
+        require(
+            "github_runner_user" not in json.dumps(yaml.safe_load(path.read_text())),
+            f"{path.relative_to(ANSIBLE)} still depends on the runner role's identity",
+        )
+    syntax = playbook(ANSIBLE / "playbooks/runner.yml", "--syntax-check")
+    require(syntax.returncode == 0, "runner syntax check failed")
+    print("ok live_vm_host: independent default, operator lookup and explicit runner binding")
+
+
+live_vm_operator_identity()
+
+
 runner = playbook(ANSIBLE / "playbooks/runner.yml", "--list-tasks")
 require(runner.returncode == 0, "runner task listing failed")
 expected_tasks = (TESTS / "fixtures/runner-tasks-2391.txt").read_text().splitlines()
@@ -677,8 +744,9 @@ def container_daemon_grant_target() -> None:
         if task.get("ansible.builtin.import_role", {}).get("tasks_from") == "container_runtime.yml"
     )
     require(
-        call.get("vars", {}).get("local_worker_host_operator_user") == "{{ github_runner_user }}",
-        "the runner call site does not rebind the operator variable to the runner account",
+        call.get("vars", {}).get("local_worker_host_operator_user")
+        == "{{ live_vm_host_operator_user }}",
+        "the runner call site does not pass the live_vm_host operator variable",
     )
 
 

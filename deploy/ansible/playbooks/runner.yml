@@ -3,6 +3,8 @@
   hosts: live_vm_runners
   become: true
   gather_facts: true
+  vars:
+    live_vm_host_operator_user: "{{ github_runner_user }}"
   pre_tasks:
     - name: Validate dormant authority inputs before any runner-host mutation
       ansible.builtin.include_role:
