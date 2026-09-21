@@ -2,8 +2,15 @@
 
 ## Status
 
-Open
-review-by: 2026-11-08
+> **Resolved by repository-owner-authorized cleanup in #2624** (2026-09-21)
+
+Live GitHub readback confirmed removal of the `CHANGELOG_DEPLOY_KEY` Actions secret,
+the `changelog-sync (auto)` deploy key, and the *protect main* ruleset's `DeployKey`
+bypass. The remaining ruleset matched its captured pre-cleanup configuration, including
+required pull requests, merge/rebase-only methods, deletion and force-push prohibitions,
+and required checks `lint · type · test`, `records`, and `pr-body-scan`.
+PR #2361 had already closed #2337 and removed the workflow consumer. The historical
+concern and deferral below are preserved.
 
 ## Concern
 
