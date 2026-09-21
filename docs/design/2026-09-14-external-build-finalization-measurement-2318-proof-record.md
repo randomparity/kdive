@@ -160,6 +160,11 @@ Long sequential request counts are expected to scale approximately inversely wit
 size, with a plateau once a chunk spans an object and fixed-request overhead unchanged.
 These historical values are retained, not remeasured; no derived counts are measurements.
 
+Supersession annotation (2026-09-21, #2570): these rows also include the standalone kernel
+`_digest_object` pass removed by #2570. Their `store_requests`, `store_bytes`, and read
+amplification are historical three-pass values, not current validation totals. No post-#2570
+measurement or derived replacement request count is recorded here.
+
 | Field | 103-MB class | 2-GB class |
 |---|---|---|
 | arch | x86_64 | x86_64 |
@@ -217,16 +222,16 @@ admits on both axes at once. Both are far under 300 s, so the decision does not 
 model is used; the two-term fit is recorded because the one-term version would be a claim two
 rows cannot carry.
 
-**The validator reads the object about three times over.** `_validate_kernel_bundle`
-decompresses a prefix bounded by `_KERNEL_TAR_SCAN_MAX_BYTES` (128 MiB, `validation.py:56`), then
-three separate end-to-end passes follow: `_preflight_external_boot_archive`
-(`validation.py:642`), `_scan_external_boot_archive` (`validation.py:547`), and `_digest_object`
-(called at `validation.py:445`). Two of the three fully decompress the archive. This is the read
-amplification #2314 established analytically, now measured at 3.31× and 3.03× of the compressed
-object.
+**At measurement time, the validator read the object about three times over.**
+`_validate_kernel_bundle` decompressed a prefix bounded by `_KERNEL_TAR_SCAN_MAX_BYTES` (128 MiB,
+`validation.py:56`), then `_preflight_external_boot_archive`, `_scan_external_boot_archive`, and
+the standalone kernel `_digest_object` made separate passes. #2570 folds that digest into the
+archive scan and drains only unread raw bytes, so this topology and the measured 3.31×/3.03× read
+amplification are historical rather than current totals.
 
-**Object-store round trips are a fifth of the scan, on loopback.** 6914 ms of the large row's
-34 811 ms scan is time inside the store, at 5.18 ms per request across 1335 requests. The other
+**At measurement time, object-store round trips were a fifth of the scan, on loopback.** 6914 ms
+of the large row's 34 811 ms scan is time inside the store, at 5.18 ms per request across 1335
+historical requests. The other
 27 896 ms is decompression, hashing and parsing. That split is what makes the network-store
 question answerable: holding the work term fixed, an object store adding **~199 ms** per request
 over loopback would put the measured bundle at the budget, and **~167 ms** would put a

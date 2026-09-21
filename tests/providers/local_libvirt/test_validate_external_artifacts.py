@@ -10,6 +10,7 @@ import lzma
 import random
 import struct
 import tarfile
+from collections.abc import Callable
 from compression import zstd
 
 import pytest
@@ -22,6 +23,7 @@ from kdive.build_artifacts.validation import (
     validate_external_artifacts,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.serialization import JsonValue
 
 _EM_PPC64 = 21
 _EM_X86_64 = 62
@@ -145,6 +147,68 @@ class _FakeStore:
     ) -> bytes:
         self.range_calls.append((key, start, length, version_id))
         return self._blobs[key][start : start + length]
+
+
+class _KeyFailStore(_FakeStore):
+    def __init__(
+        self, blobs: dict[str, bytes], heads: dict[str, HeadResult], *, failing_key: str
+    ) -> None:
+        super().__init__(blobs, heads)
+        self._failing_key = failing_key
+
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        if key == self._failing_key:
+            raise CategorizedError(
+                "initrd unavailable", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+        return super().get_range(key, start=start, length=length, version_id=version_id)
+
+
+def _legacy_external_boot_evidence(
+    store: _FakeStore,
+    *,
+    keys: dict[str, str],
+    heads: dict[str, HeadResult],
+    arch: str,
+    build_id: str,
+) -> dict[str, object]:
+    bundle_head = heads["kernel"]
+    archive = validation._scan_external_boot_archive(  # noqa: SLF001
+        store, keys["kernel"], bundle_head.size_bytes, arch
+    )
+    initrd_head = heads.get("initrd")
+    initrd = (
+        {
+            "sha256": validation._digest_object(  # noqa: SLF001
+                store, keys["initrd"], initrd_head.size_bytes
+            ),
+            "size_bytes": initrd_head.size_bytes,
+        }
+        if initrd_head is not None
+        else None
+    )
+    return {
+        "schema": "external-boot-evidence-v1",
+        "bundle_sha256": validation._digest_object(  # noqa: SLF001
+            store, keys["kernel"], bundle_head.size_bytes
+        ),
+        "initrd": initrd,
+        "archive_member_count": archive["archive_member_count"],
+        "archive_uncompressed_bytes": archive["archive_uncompressed_bytes"],
+        "vmlinuz_sha256": archive["vmlinuz_sha256"],
+        "vmlinuz_size_bytes": archive["vmlinuz_size_bytes"],
+        "decoded_kernel_size_bytes": archive["decoded_kernel_size_bytes"],
+        "elf_metadata_bytes": archive["elf_metadata_bytes"],
+        "architecture": archive["architecture"],
+        "release": archive["release"],
+        "gnu_build_id": archive["gnu_build_id"],
+        "gnu_build_id_size_bytes": archive["gnu_build_id_size_bytes"],
+        "module_source_manifest": archive["module_source_manifest"],
+        "module_member_count": archive["module_member_count"],
+        "module_uncompressed_bytes": archive["module_uncompressed_bytes"],
+    }
 
 
 def _elf_with_build_id(
@@ -321,6 +385,90 @@ def test_validation_returns_server_owned_external_boot_evidence() -> None:
     assert evidence["release"] == "6.9.0"
     assert evidence["vmlinuz_sha256"] == "sha256:" + hashlib.sha256(_BZIMAGE_BODY).hexdigest()
     assert evidence["module_member_count"] == 2
+
+
+def test_external_boot_evidence_reuses_the_scan_digest_for_trailing_padding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", 64)
+    kernel = _KERNEL_TAR + bytes(256)
+    blobs = {"k": kernel, "i": b"initrd-bytes"}
+    keys = {"kernel": "k", "initrd": "i"}
+    heads = {
+        name: HeadResult(len(blobs[key]), "csum", "e", STORE_MTIME, f"{key}-version")
+        for name, key in keys.items()
+    }
+    legacy_store = _FakeStore(blobs, heads)
+    expected = _legacy_external_boot_evidence(
+        legacy_store, keys=keys, heads=heads, arch="x86_64", build_id=""
+    )
+    original_scan = validation._scan_external_boot_archive
+
+    def scan_without_trailing_read(
+        store: _FakeStore,
+        key: str,
+        size_bytes: int,
+        arch: str,
+        *,
+        range_observer: Callable[[int, bytes], None] | None = None,
+    ) -> dict[str, JsonValue]:
+        archive = original_scan(store, key, size_bytes, arch)
+        assert range_observer is not None
+        range_observer(0, kernel[:64])
+        return archive
+
+    monkeypatch.setattr(validation, "_scan_external_boot_archive", scan_without_trailing_read)
+    store = _FakeStore(blobs, heads)
+
+    actual = validation._external_boot_evidence(  # noqa: SLF001
+        store, keys=keys, heads=heads, arch="x86_64", build_id=""
+    )
+
+    assert actual == expected
+    kernel_calls = [call for call in store.range_calls if call[0] == "k"]
+    legacy_kernel_calls = [call for call in legacy_store.range_calls if call[0] == "k"]
+    assert len(kernel_calls) < len(legacy_kernel_calls)
+
+
+def test_external_boot_evidence_defers_drain_until_after_existing_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_drain(self: object) -> None:
+        raise CategorizedError(
+            "trailing kernel unavailable", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+        )
+
+    monkeypatch.setattr(validation._ObjectDigest, "drain", fail_drain)
+    blobs = {"k": _KERNEL_TAR, "v": _elf_with_build_id(bytes.fromhex("01234567"))}
+    keys = {"kernel": "k", "vmlinux": "v"}
+    heads = {
+        name: HeadResult(len(blobs[key]), "csum", "e", STORE_MTIME, f"{key}-version")
+        for name, key in keys.items()
+    }
+
+    with pytest.raises(CategorizedError, match="does not match boot/vmlinuz"):
+        validation._external_boot_evidence(  # noqa: SLF001
+            _FakeStore(blobs, heads),
+            keys=keys,
+            heads=heads,
+            arch="x86_64",
+            build_id="01234567",
+        )
+
+    initrd_blobs = {"k": _KERNEL_TAR, "i": b"initrd-bytes"}
+    initrd_keys = {"kernel": "k", "initrd": "i"}
+    initrd_heads = {
+        name: HeadResult(len(initrd_blobs[key]), "csum", "e", STORE_MTIME, f"{key}-version")
+        for name, key in initrd_keys.items()
+    }
+    with pytest.raises(CategorizedError, match="initrd unavailable"):
+        validation._external_boot_evidence(  # noqa: SLF001
+            _KeyFailStore(initrd_blobs, initrd_heads, failing_key="i"),
+            keys=initrd_keys,
+            heads=initrd_heads,
+            arch="x86_64",
+            build_id="",
+        )
 
 
 def test_external_boot_scan_rejects_normalized_boot_alias() -> None:
