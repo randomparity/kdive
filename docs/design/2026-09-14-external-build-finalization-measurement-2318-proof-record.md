@@ -154,6 +154,12 @@ measures at the caller. It runs 121 ms above the server's `total_ms` on the larg
 and response transit plus envelope handling — and both numbers are recorded so the gap is
 visible rather than assumed away.
 
+Supersession annotation (2026-09-21, #2569): these x86_64 rows measured the old 4 MiB
+validation store-fetch chunk. The new chunk is 8 MiB; local decoding remains 4 MiB.
+Long sequential request counts are expected to scale approximately inversely with fetch
+size, with a plateau once a chunk spans an object and fixed-request overhead unchanged.
+These historical values are retained, not remeasured; no derived counts are measurements.
+
 | Field | 103-MB class | 2-GB class |
 |---|---|---|
 | arch | x86_64 | x86_64 |
@@ -327,6 +333,12 @@ and named as a reopening condition in ADR-0656.
 No `initrd.img` — the Run is unbound (no System, no VM), finalization only.
 
 ### Row
+
+Supersession annotation (2026-09-21, #2569): this ppc64le row measured the old 4 MiB
+validation store-fetch chunk. The new chunk is 8 MiB; local decoding remains 4 MiB.
+Long sequential request counts are expected to scale approximately inversely with fetch
+size, with a plateau once a chunk spans an object and fixed-request overhead unchanged.
+These historical values are retained, not remeasured; no derived counts are measurements.
 
 | Field | ppc64le (2-GB class) |
 |---|---|
