@@ -204,6 +204,15 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "including snapshot/revert/resume and debug stepping; unset → those tests skip.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_ROOTFS",
+        "test",
+        None,
+        "Absolute worker-local path to a bootable qcow2 with qemu-guest-agent for the supplied "
+        "ROOTFS live_vm_remote carrier (#1516, ADR-0440); unset → this carrier skips. Requires "
+        "KDIVE_LIVE_VM_REMOTE_URI, KDIVE_LIVE_VM_REMOTE_BASE_IMAGE, and "
+        "KDIVE_LIVE_VM_REMOTE_GDB_ADDR, but no kernel, initrd, store, or reconciler.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_REMOTE_URI",
         "test",
         None,

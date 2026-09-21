@@ -425,6 +425,45 @@ An absent URI skips the carrier; a set URI with any missing or malformed compani
 libvirt is contacted. After either success or failure, confirm that no `kdive-<uuid>` domain,
 overlay, kernel volume, or initrd volume from the invocation remains.
 
+#### Supplied ROOTFS carrier
+
+ADR-0440's worker-local ROOTFS flow has its own narrow gate. Set
+`KDIVE_LIVE_VM_REMOTE_ROOTFS` to an absolute local path to a bootable x86_64 qcow2 with
+qemu-guest-agent enabled, plus the existing remote URI, base-image volume, and GDB address
+variables above. The source is read on the test worker and streamed over libvirt; it need not
+exist on the remote host. The operator-staged comparison volume must already exist in the
+`default` pool and support disk/GRUB boot with qemu-guest-agent. The repository's
+`ubuntu-2404-kdive-remote-base` image definition supplies that prerequisite.
+No kernel/initrd, object store, reconciler, SSH account, or running KDIVE stack is needed by
+this carrier. The URI must retain verified mutual TLS; `no_verify` and `tls_priority` are
+rejected. Existing libvirt client credentials, including an operator-configured `pkipath`,
+are used.
+
+Run just this carrier from the checkout under test:
+
+```sh
+uv run python -m pytest tests/live_vm/test_remote_supplied_rootfs.py -m live_vm_remote -v
+```
+
+An unset ROOTFS input skips all seven cases; once set, missing or malformed inputs fail.
+Seven passed cases, not a skip-only exit zero, are the acceptance evidence. The carrier proves
+supplied-image upload, guest-agent-ready boot and overlay backing, partial-send and finish
+fault cleanup, failed-provision reclaim for supplied and operator profiles, operator-staged
+boot without upload, and rejection of non-qcow2 before volume creation. Successful teardown
+also has to remove the per-System supplied base.
+
+Each case uses a fresh System UUID, checks initial absence, and observes production cleanup
+before its fallback cleanup runs. Fallback cleanup attempts domain removal and each exact
+scratch volume independently, preserves an original assertion alongside cleanup failures,
+and compares the comparison volume's stable XML, including its identity, size, format, mode,
+and modification time. Libvirt's dynamic owner/group, access/change times, and allocated
+blocks can change when QEMU opens a read-only backing image; those are excluded. The carrier
+never deletes the comparison volume. A killed test process or unreachable TLS service can
+prevent cleanup; after restoring connectivity, inspect and remove only the exact
+invocation-owned names from the failed run.
+Do not delete operator-owned base images. This native x86_64 proof does not claim ppc64le
+coverage.
+
 ### `live_vm_tcg` — the emulated foreign-arch spine
 
 ```
