@@ -165,6 +165,12 @@ Supersession annotation (2026-09-21, #2570): these rows also include the standal
 amplification are historical three-pass values, not current validation totals. No post-#2570
 measurement or derived replacement request count is recorded here.
 
+Supersession annotation (2026-09-21, #2571): these rows include the separate
+`_preflight_external_boot_archive` decoder removed by #2571. Raw header, extension, and padded-byte
+guards now interpose on the semantic scan's single gzip decoder (ADR-0671). These rows were not
+remeasured, so their scan timings and request totals remain historical; no replacement timing is
+inferred for either architecture.
+
 | Field | 103-MB class | 2-GB class |
 |---|---|---|
 | arch | x86_64 | x86_64 |
@@ -227,7 +233,9 @@ rows cannot carry.
 `validation.py:56`), then `_preflight_external_boot_archive`, `_scan_external_boot_archive`, and
 the standalone kernel `_digest_object` made separate passes. #2570 folds that digest into the
 archive scan and drains only unread raw bytes, so this topology and the measured 3.31×/3.03× read
-amplification are historical rather than current totals.
+amplification are historical rather than current totals. #2571 then removes the separate
+preflight decoder by placing its raw guards ahead of tarfile on the archive scan's decompressed
+stream. The bounded shape-prefix validation remains separate.
 
 **At measurement time, object-store round trips were a fifth of the scan, on loopback.** 6914 ms
 of the large row's 34 811 ms scan is time inside the store, at 5.18 ms per request across 1335
@@ -344,6 +352,10 @@ validation store-fetch chunk. The new chunk is 8 MiB; local decoding remains 4 M
 Long sequential request counts are expected to scale approximately inversely with fetch
 size, with a plateau once a chunk spans an object and fixed-request overhead unchanged.
 These historical values are retained, not remeasured; no derived counts are measurements.
+
+Supersession annotation (2026-09-21, #2571): this row also measured the separate raw-tar
+preflight decoder that ADR-0671 removes. The raw guards now share the semantic scan's gzip stream.
+No POWER rerun or replacement timing was performed, so the row remains historical evidence only.
 
 | Field | ppc64le (2-GB class) |
 |---|---|

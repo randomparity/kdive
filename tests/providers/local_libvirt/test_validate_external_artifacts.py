@@ -12,6 +12,7 @@ import struct
 import tarfile
 from collections.abc import Callable
 from compression import zstd
+from typing import IO, Literal
 
 import pytest
 
@@ -806,6 +807,28 @@ def test_external_boot_raw_member_ceiling_counts_extension_headers(
         _validate_kernel_blob(buf.getvalue())
 
 
+def test_external_boot_pax_header_is_not_a_logical_archive_member() -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        member = tarfile.TarInfo("boot/vmlinuz")
+        member.pax_headers = {"comment": "guarded metadata"}
+        member.size = len(_BZIMAGE_BODY)
+        tar.addfile(member, io.BytesIO(_BZIMAGE_BODY))
+        _tar_add(tar, "lib/modules/6.9.0/modules.dep", b"")
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+    blob = buf.getvalue()
+    store = _FakeStore(
+        {"k": blob},
+        {"k": HeadResult(len(blob), "csum", "e", STORE_MTIME, "test-version")},
+    )
+
+    evidence = validation._scan_external_boot_archive(  # noqa: SLF001
+        store, "k", len(blob), "x86_64"
+    )
+
+    assert evidence["archive_member_count"] == 3
+
+
 def test_external_boot_raw_padded_byte_ceiling_includes_tar_framing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -962,6 +985,36 @@ def test_external_boot_archive_validation_buffers_range_reads() -> None:
     assert out.output.kernel_ref == "k"
     assert len(kernel_calls) <= 8
     assert {call[3] for call in kernel_calls} == {"test-version"}
+
+
+def test_external_boot_scan_uses_one_archive_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    decoder_count = 0
+    original_gzip_file = validation.gzip.GzipFile
+    original_tar_open = validation.tarfile.open
+
+    def counted_gzip_file(*, fileobj: IO[bytes], mode: str) -> gzip.GzipFile:
+        nonlocal decoder_count
+        decoder_count += 1
+        return original_gzip_file(fileobj=fileobj, mode=mode)
+
+    def counted_tar_open(*, fileobj: IO[bytes], mode: Literal["r|", "r|gz"]) -> tarfile.TarFile:
+        nonlocal decoder_count
+        if "gz" in mode:
+            decoder_count += 1
+        return original_tar_open(fileobj=fileobj, mode=mode)
+
+    monkeypatch.setattr(validation.gzip, "GzipFile", counted_gzip_file)
+    monkeypatch.setattr(validation.tarfile, "open", counted_tar_open)
+    store = _FakeStore(
+        {"k": _KERNEL_TAR},
+        {"k": HeadResult(len(_KERNEL_TAR), "csum", "e", STORE_MTIME, "test-version")},
+    )
+
+    validation._scan_external_boot_archive(  # noqa: SLF001
+        store, "k", len(_KERNEL_TAR), "x86_64"
+    )
+
+    assert decoder_count == 1
 
 
 @pytest.mark.parametrize("module_size", [1024, 9 * 1024 * 1024])

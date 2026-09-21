@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import tarfile
 
 import pytest
 
@@ -39,6 +40,19 @@ class _ReaderStore:
 def _pattern(size: int) -> bytes:
     unit = bytes(range(251))
     return (unit * (size // len(unit) + 1))[:size]
+
+
+def _tar_record(
+    payload: bytes,
+    *,
+    member_type: bytes = tarfile.REGTYPE,
+    name: str = "member",
+) -> bytes:
+    member = tarfile.TarInfo(name)
+    member.type = member_type
+    member.size = len(payload)
+    padding = bytes(-len(payload) % tarfile.BLOCKSIZE)
+    return member.tobuf() + payload + padding
 
 
 def test_ranged_reader_buffers_sequential_reads() -> None:
@@ -272,3 +286,99 @@ def test_object_digest_drain_rejects_invalid_store_responses(
         assert exc.value is store.failure
     else:
         assert exc.value.category is ErrorCategory.BUILD_FAILURE
+
+
+@pytest.mark.parametrize("read_size", [1, 511, 512, 10_240, -1])
+def test_guarded_tar_reader_streams_valid_framing_with_varied_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    read_size: int,
+) -> None:
+    monkeypatch.setattr(validation, "_DECODE_CHUNK_BYTES", 1024)
+    framed = _tar_record(b"payload") + bytes(tarfile.BLOCKSIZE)
+    source = io.BytesIO(framed + b"not part of the tar walk")
+    reader = validation._GuardedTarReader(source)
+
+    assert reader.read(0) == b""
+    chunks = []
+    while chunk := reader.read(read_size):
+        chunks.append(chunk)
+
+    assert b"".join(chunks) == framed
+    assert source.tell() == len(framed)
+
+
+def test_guarded_tar_reader_accepts_exact_raw_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    framed = _tar_record(b"x") + bytes(tarfile.BLOCKSIZE)
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS", 1)
+    monkeypatch.setattr(
+        validation,
+        "_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES",
+        tarfile.BLOCKSIZE * 2,
+    )
+    reader = validation._GuardedTarReader(io.BytesIO(framed))
+
+    assert b"".join(iter(lambda: reader.read(257), b"")) == framed
+
+
+@pytest.mark.parametrize(
+    "member_type",
+    [
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    ],
+)
+def test_guarded_tar_reader_rejects_extension_before_releasing_header_or_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    member_type: bytes,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_EXTENSION_MAX_BYTES", 3)
+    source = io.BytesIO(_tar_record(b"four", member_type=member_type))
+    reader = validation._GuardedTarReader(source)
+
+    with pytest.raises(CategorizedError, match="extension metadata exceeds"):
+        reader.read(tarfile.BLOCKSIZE)
+
+    assert source.tell() == tarfile.BLOCKSIZE
+
+
+def test_guarded_tar_reader_rejects_truncated_header() -> None:
+    reader = validation._GuardedTarReader(io.BytesIO(b"x" * (tarfile.BLOCKSIZE - 1)))
+
+    with pytest.raises(CategorizedError, match="truncated tar header"):
+        reader.read(tarfile.BLOCKSIZE)
+
+
+def test_guarded_tar_reader_rejects_malformed_header() -> None:
+    reader = validation._GuardedTarReader(io.BytesIO(b"x" * tarfile.BLOCKSIZE))
+
+    with pytest.raises(tarfile.TarError):
+        reader.read(tarfile.BLOCKSIZE)
+
+
+def test_guarded_tar_reader_rejects_truncated_padded_payload() -> None:
+    member = tarfile.TarInfo("member")
+    member.size = 4
+    reader = validation._GuardedTarReader(io.BytesIO(member.tobuf() + b"abc"))
+
+    assert reader.read(tarfile.BLOCKSIZE) == member.tobuf()
+    assert reader.read(4) == b"abc"
+    with pytest.raises(CategorizedError, match="ended before its recorded member size"):
+        reader.read(1)
+
+
+def test_guarded_tar_reader_propagates_source_failure() -> None:
+    failure = CategorizedError("store unavailable", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    class _FailedSource:
+        def read(self, size: int = -1, /) -> bytes:
+            del size
+            raise failure
+
+    with pytest.raises(CategorizedError) as exc:
+        validation._GuardedTarReader(_FailedSource()).read(tarfile.BLOCKSIZE)
+
+    assert exc.value is failure
