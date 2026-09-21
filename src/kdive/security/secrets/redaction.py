@@ -72,9 +72,26 @@ class Redactor:
         self._secret_key_pattern = re.compile(r"(?i)(password|passwd|token|api[_-]?key|secret)")
 
     def redact_text(self, text: str) -> str:
-        redacted = text
+        # Match the original text so replacement cannot hide another secret's overlap.
+        spans: list[tuple[int, int]] = []
         for value in self._secret_values:
-            redacted = redacted.replace(value, REDACTION)
+            start = text.find(value)
+            while start != -1:
+                spans.append((start, start + len(value)))
+                start = text.find(value, start + 1)
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        pieces: list[str] = []
+        cursor = 0
+        for start, end in merged:
+            pieces.extend((text[cursor:start], REDACTION))
+            cursor = end
+        pieces.append(text[cursor:])
+        redacted = "".join(pieces)
         return self._key_value_pattern.sub(
             lambda match: f"{match.group(1)}{match.group(2)}{REDACTION}", redacted
         )
