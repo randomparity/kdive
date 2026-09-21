@@ -84,7 +84,7 @@ repos:
         pass_filenames: false
       - id: pre-push-ci
         name: full local gate (just ci)
-        entry: just ci
+        entry: scripts/run-pre-push-ci.sh
         language: system
         stages: [pre-push]
         always_run: true
