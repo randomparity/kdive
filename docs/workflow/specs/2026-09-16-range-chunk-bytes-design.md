@@ -4,7 +4,8 @@
 
 The 4 MiB validation chunk incurred 1484 requests in the recorded ppc64le finalization.
 Larger chunks reduce sequential store requests without changing evidence.
-#2476's scanner cursor fix landed in #2599; equivalence needs proof against that source.
+#2599 fixed scanner seeks, but corrupt gzip candidates still make decode accounting
+chunk-dependent. Implementation is blocked pending a scope decision on that conflict.
 
 ## Scope
 
@@ -28,8 +29,8 @@ semaphore changes, mandatory POWER remeasurement, other validation optimization,
 - **Accepted failure classes:** roughly six simultaneous explicit chunk buffers (~48 MiB):
   reader window, retained boot-copy chunk, scanner chunk/data pair, compressed input and
   decoded output. Replacement/copy peaks and native codec workspace add memory; two existing
-  64 MiB spools are separate. This is not a total-RSS bound. Serial admission prevents
-  concurrent scans multiplying this per-process cost; raising it requires reassessment.
+  64 MiB spools are separate. This is not a total-RSS bound. Ordinary uncancelled calls
+  serialize; cancelled awaiters can leave overlapping scan threads (ADR-0656, Cancellation).
 - **Covered elsewhere:** #2570/#2571 own pass elimination; admission control owns concurrency.
   POWER remeasurement is excluded; resolved debt 0015 is historical evidence.
 - **Threat model:** no new boundary; tenant-controlled archive/codec bytes still cross the
