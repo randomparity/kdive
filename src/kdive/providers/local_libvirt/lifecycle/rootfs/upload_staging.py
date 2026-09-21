@@ -66,15 +66,28 @@ if ctypes.sizeof(ctypes.c_long) != 8:
     raise RuntimeError("local-libvirt rootfs staging requires a 64-bit native off_t")
 
 _libc = ctypes.CDLL(None, use_errno=True)
-_fallocate = _libc.fallocate
-_fallocate.restype = ctypes.c_int
-_fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_long, ctypes.c_long]
+_fallocate = None
+
+
+def _resolve_fallocate():
+    """Resolve Linux ``fallocate(2)`` on first use."""
+    global _fallocate
+    if _fallocate is not None:
+        return _fallocate
+    try:
+        native = _libc.fallocate
+    except AttributeError as error:
+        raise OSError(errno.ENOSYS, os.strerror(errno.ENOSYS)) from error
+    native.restype = ctypes.c_int
+    native.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_long, ctypes.c_long]
+    _fallocate = native
+    return native
 
 
 def _native_fallocate(fd: int, length: int) -> None:
     """Allocate ``length`` bytes with Linux ``fallocate(2)``, preserving native errno."""
     ctypes.set_errno(0)
-    if _fallocate(fd, 0, 0, length) == 0:
+    if _resolve_fallocate()(fd, 0, 0, length) == 0:
         return
     error_number = ctypes.get_errno()
     raise OSError(error_number, os.strerror(error_number))
