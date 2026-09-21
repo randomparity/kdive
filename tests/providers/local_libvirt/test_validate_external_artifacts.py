@@ -387,6 +387,47 @@ def test_validation_returns_server_owned_external_boot_evidence() -> None:
     assert evidence["module_member_count"] == 2
 
 
+def test_external_boot_evidence_matches_pre_stream_guard_baseline() -> None:
+    initrd = b"initrd-bytes"
+    blobs = {"k": _KERNEL_TAR, "i": initrd}
+    heads = {
+        "kernel": HeadResult(len(blobs["k"]), "csum", "e", STORE_MTIME, "k-version"),
+        "initrd": HeadResult(len(blobs["i"]), "csum", "e", STORE_MTIME, "i-version"),
+    }
+
+    evidence = validation._external_boot_evidence(  # noqa: SLF001
+        _FakeStore(blobs, heads),
+        keys={"kernel": "k", "initrd": "i"},
+        heads=heads,
+        arch="x86_64",
+        build_id="",
+    )
+
+    assert evidence == {
+        "schema": "external-boot-evidence-v1",
+        "bundle_sha256": "sha256:" + hashlib.sha256(_KERNEL_TAR).hexdigest(),
+        "initrd": {
+            "sha256": "sha256:" + hashlib.sha256(initrd).hexdigest(),
+            "size_bytes": len(initrd),
+        },
+        "archive_member_count": 3,
+        "archive_uncompressed_bytes": 1128,
+        "vmlinuz_sha256": "sha256:" + hashlib.sha256(_BZIMAGE_BODY).hexdigest(),
+        "vmlinuz_size_bytes": 1121,
+        "decoded_kernel_size_bytes": 221,
+        "elf_metadata_bytes": 221,
+        "architecture": "x86_64",
+        "release": "6.9.0",
+        "gnu_build_id": "deadbeef",
+        "gnu_build_id_size_bytes": 4,
+        "module_source_manifest": (
+            "sha256:879ae1ae8277cb5d5fbb1349f6a705dae21cd3fad61405da407faca7f40d00fe"
+        ),
+        "module_member_count": 2,
+        "module_uncompressed_bytes": 7,
+    }
+
+
 def test_external_boot_evidence_reuses_the_scan_digest_for_trailing_padding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -746,6 +787,33 @@ def test_external_boot_scan_bounds_pax_metadata_before_tarfile_consumes_it(
 
     with pytest.raises(CategorizedError, match="extension metadata exceeds"):
         _validate_kernel_blob(buf.getvalue())
+
+
+def test_external_boot_raw_member_ceiling_counts_extension_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS", 3)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        member = tarfile.TarInfo("boot/vmlinuz")
+        member.pax_headers = {"comment": "guarded metadata"}
+        member.size = len(_BZIMAGE_BODY)
+        tar.addfile(member, io.BytesIO(_BZIMAGE_BODY))
+        _tar_add(tar, "lib/modules/6.9.0/modules.dep", b"")
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+
+    with pytest.raises(CategorizedError, match="external-boot member limit"):
+        _validate_kernel_blob(buf.getvalue())
+
+
+def test_external_boot_raw_padded_byte_ceiling_includes_tar_framing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logical_bytes = len(_BZIMAGE_BODY) + len(b"\x7fELFmod")
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES", logical_bytes)
+
+    with pytest.raises(CategorizedError, match="raw tar byte limit"):
+        _validate_kernel_blob(_KERNEL_TAR)
 
 
 @pytest.mark.parametrize("release", [".6.9.0", "6.9/0", "6.9.0-" + "x" * 59, "6.9.0é"])
