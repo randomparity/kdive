@@ -23,7 +23,7 @@ run the same recipes locally rather than reinventing the underlying command:
 
 | task | runs |
 |------|------|
-| `just setup` | check host deps, `uv sync --locked`, stage the capture-bootstrap manifest, install + run git hooks |
+| `just setup` | check host deps, sync dependencies, stage the capture-bootstrap manifest, install commit/push hooks and run commit hooks |
 | `just lint` | `ruff check` + `ruff format --check` |
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
@@ -51,9 +51,9 @@ Both compose with the recipes below (`just test-verbose <path>::<block>` for ful
 output on just that block).
 
 **Choosing how to run the suite (agent guidance):** iterate on changed code with
-`just test-changed`, rerun failures with `just test-lf`, and treat `just test` as the
-pre-push gate. Default recipes run quietly (`-q` plus `-ra` from `addopts`), but that only
-drops the per-test progress line and the header — it bounds nothing on the failure path.
+`just test-changed`, rerun failures with `just test-lf`, and use the full `just ci`
+pre-push gate described below. Default recipes run quietly (`-q` plus `-ra` from `addopts`),
+but that only drops the per-test progress line and the header — it bounds nothing on the failure path.
 What bounds it is `--tb=short`, carried by `just test`, `just test-lf`, and
 `just test-changed` alike (ADR-0577): a `file:line: in func` entry and its source line for
 every frame, in place of the full source context and argument values pytest's default
@@ -90,6 +90,19 @@ command whose own status replaces the one you care about.
 
 Reserve `just ci` for pre-push parity; while iterating, invoke the specific recipe you
 need (`just lint`, `just type`, `prek run`).
+
+**Automatic local pre-push gate:** `just setup` installs both hook types; existing clones
+must rerun `just install-hooks`. Eligible non-bypassed pushes run `just ci`, including the
+full suite, lock validation, workflow lint and container-architecture check. This takes
+minutes and needs the existing gate tools/services; Docker-dependent tests still skip when
+Docker is unavailable. Commit-time hooks and the fast-loop recipes keep their current work.
+
+The gate checks the current local checkout under prek's working-tree semantics, so push
+a clean checked-out branch and avoid concurrent edits. It does not attest every pushed
+SHA or ref in a multi-ref push. Deletion-only/no-op pushes may run no checks. `--no-verify`,
+`SKIP=pre-push-ci`, removed hooks and unconfigured clones bypass it; remote enforcement
+remains CI/operator policy. A prior manual run does not suppress the automatic run, and a
+green local gate is not live-tier proof. See [ADR-0670](docs/adr/0670-local-pre-push-gate.md).
 
 **Before `git commit` (agent guidance):** let the mutating hooks rewrite the tree *before* the
 commit attempt rather than during it. Four hooks in `.pre-commit-config.yaml` rewrite files in
