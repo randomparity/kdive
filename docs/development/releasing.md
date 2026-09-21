@@ -47,8 +47,8 @@ and a clean, current `main` checkout at the intended release version.
    metadata, generates notes, and creates or updates the GitHub Release and its assets.
    [release-image](../../.github/workflows/release-image.yml) publishes the container image.
    Both check the tag against the project version; neither replaces the pre-release CI check.
-4. Merge the post-release version bump before other normal PRs. Its push triggers changelog
-   synchronization, which uses the new tag to create the dated release section.
+4. Merge the post-release version bump before other normal PRs. Include the changelog regenerated
+   locally against the new tag in that PR, as described under *Version bumps* above.
 
 Check both publication results before treating the release as available: success in one workflow
 says nothing about the other. A rerun can overwrite GitHub Release assets or move image tags.
@@ -162,14 +162,13 @@ through a base refresh and a full CI cycle, which cost more than the freshness w
 ([ADR-0633](../adr/0633-regenerate-the-committed-changelog-at-release-time.md), #2337).
 
 > **Branch protection.** `main` is guarded by the *protect main* ruleset (require-PR + required
-> `lint · type · test`, no force-push/deletion, merge/rebase only — squash is blocked to keep
-> `git bisect` history intact). Nothing in CI writes to `main`: every change arrives as a reviewed
-> PR. The `CHANGELOG_DEPLOY_KEY` Actions secret, the `changelog-sync (auto)` repository deploy
-> key, and the ruleset's `DeployKey` bypass that admitted it are left with **no consumer** —
-> removing all three is a repository-owner step in GitHub settings, which no pull request can
-> perform. It is tracked by
-> [deferral record 0012](../debt/0012-changelog-write-deploy-key-and-bypass-have-no-consumer.md),
-> not by #2337, which closes when this change merges.
+> `lint · type · test`, `records`, and `pr-body-scan`, no force-push/deletion, merge/rebase only —
+> squash is blocked to keep `git bisect` history intact). Nothing in CI writes to `main`:
+> every change arrives as a reviewed PR. The unused changelog Actions secret, write deploy key
+> and `DeployKey` bypass were removed
+> through repository-owner-authorized cleanup on 2026-09-21 (#2624), with the remaining ruleset
+> controls unchanged. See
+> [resolved record 0012](../debt/0012-changelog-write-deploy-key-and-bypass-have-no-consumer.md).
 
 ## Version reporting
 
