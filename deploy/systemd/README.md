@@ -116,9 +116,19 @@ resolve that disagreement. Run `scripts/live-stack/worker-lifecycle.sh status` a
 including how to read a withheld slot's reason, is in
 [the live-stack runbook](../../docs/operating/runbooks/live-stack.md#recovering-a-wedged-worker-slot).
 
-When `recover` itself is what returned `operator_recovery`, it refused a slot whose unit still has
-live processes. The next step is to stop the work that unit is doing, not to re-run `recover`; the
-runbook paragraph above says so in full.
+When `recover` itself returns `operator_recovery`, read each slot's refusal code rather than
+assuming the unit has live processes:
+
+- `recovery_refused` means the unit still has live processes. Stop the work that unit is doing,
+  not `recover`.
+- `recovery_refused_unreadable_identity` means the retained invocation identity is absent on its
+  retained boot. Reboot before recovery; do not hand-edit the slot files or
+  `worker_incarnations` row.
+- `recovery_refused_incoherent_row` means the stored local authority binding names a different
+  fixed worker unit. Inspect that stored unit binding and use the runbook's retained-evidence
+  recovery path; do not treat this code as evidence of live processes.
+
+The runbook paragraph above gives the corresponding recovery details.
 
 `code=diagnostics_withheld` arrives with `operator_recovery`: `diagnostics` catches every per-slot
 failure inside the capture and reports it as a withheld slot.
