@@ -394,12 +394,20 @@ environment rather than at the installed runner, so run `uv sync` here first.
 scripts/live-stack/worker-lifecycle.sh recover
 ```
 
-For each slot it observes the unit. A slot whose cgroup still holds live processes is refused:
-the response is `code=conflict` with `retry_action=operator_recovery` and a per-slot
-`recovery_refused`. Stop the work that unit is doing rather than forcing past it. For a slot
-proven dead it publishes terminal evidence derived from that same observation, clears the on-disk
-slot facts, releases the `worker_incarnations` fence, and runs `reset-failed` on a unit systemd
-still accounts for. It never fabricates a termination outcome — see
+For each slot it observes the unit. Read a per-slot recovery refusal by its code:
+
+- `recovery_refused` means the cgroup still holds live processes. Stop the work that unit is doing
+  rather than forcing past it.
+- `recovery_refused_unreadable_identity` means recovery cannot prove a different boot for an
+  absent retained invocation identity. Reboot before recovery, and do not hand-edit the slot files
+  or `worker_incarnations` row.
+- `recovery_refused_incoherent_row` means the stored local authority binding names a different
+  fixed worker unit. Inspect that stored unit binding and use the retained-evidence recovery path;
+  do not assume the observed unit has live processes.
+
+For a slot proven dead, `recover` publishes terminal evidence derived from that same observation,
+clears the on-disk slot facts, releases the `worker_incarnations` fence, and runs `reset-failed` on
+a unit systemd still accounts for. It never fabricates a termination outcome — see
 [ADR-0657](../../adr/0657-a-successor-invocation-is-terminal-evidence.md).
 
 **Then bring the stack back up.** Re-run `scripts/live-stack/stack-services.sh`; it is
@@ -407,7 +415,8 @@ idempotent.
 
 **Residual slots.** For a slot proven dead, `recover` also clears the slot facts and releases
 the applicable fences when `state.json` is absent or malformed, the stored binding has drifted,
-or ordinary termination evidence was rejected (cases 1-4 of #2533). Case 5 remains a refusal:
+or ordinary termination evidence was rejected (cases 1-4 of #2533). Its retained-evidence path
+uses the stored binding rather than assuming the observed unit is live. Case 5 remains a refusal:
 when retained identity is unreadable and recovery cannot prove a different boot, it returns
 `recovery_refused_unreadable_identity` and preserves the slot files and fence. Do not hand-edit
 the slot files or the `worker_incarnations` row to work around that refusal.
