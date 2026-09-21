@@ -2,8 +2,19 @@
 
 ## Status
 
-Open
-review-by: 2026-10-04
+> **Resolved by #2622** (2026-09-21)
+
+The shared redactor now matches literal values against the original input, merges overlapping
+spans, and renders their replacements without rescanning inserted markers. Deterministic tests
+cover permutations and registry/explicit combinations for prefix, containment, partial,
+transitive, repeated and self-overlap cases, plus snapshot lifetime and logging output.
+
+The strengthened `test_cmdline_failure_redacts_before_authority_persistence` passes all five
+cases against real Postgres, proving exact stored `failure_context` and job-response projection
+while retaining escaping and byte-bound checks. The affected security, logging, transcript,
+response and artifact regression selection passed 500 tests; one existing real-vmcore proof
+was skipped because its external fixtures were not supplied. The historical lane-isolation
+statements below describe the original finding, not a current isolation guarantee.
 
 ## Concern
 

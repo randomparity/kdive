@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+from itertools import permutations
+
+import pytest
 
 from kdive.security.secrets.redaction import (
     REDACTION,
@@ -72,6 +75,87 @@ def test_redact_url_credentials_fails_closed_on_unparseable_port() -> None:
 def test_redactor_masks_value_with_regex_metacharacters() -> None:
     redactor = Redactor(["a.b*c+(d)"], registry=SecretRegistry())
     assert redactor.redact_text("prefix a.b*c+(d) suffix") == f"prefix {REDACTION} suffix"
+
+
+@pytest.mark.parametrize(
+    ("values", "text", "expected"),
+    [
+        (("west-", "west-privatevalue"), "west-privatevalue", REDACTION),
+        (("middle", "begin-middle-end"), "begin-middle-end", REDACTION),
+        (("abc", "bcd"), "abcd", REDACTION),
+        (("abc", "cde", "efg"), "abcdefg", REDACTION),
+        (("aba",), "ababa", REDACTION),
+        (("aa",), "aaaaa", REDACTION),
+        (("abc", "bcd"), "abcd / abcd", f"{REDACTION} / {REDACTION}"),
+        (("ab", "cd"), "abcd", REDACTION * 2),
+        (("Q",), "QQQ", REDACTION * 3),
+        (("abc", "RED"), "abc RED", f"{REDACTION} {REDACTION}"),
+        (("a.b", ".b*"), "a.b*", REDACTION),
+        (("é🙂", "🙂ê"), "é🙂ê", REDACTION),
+        (("abc", "abc", ""), "abc", REDACTION),
+        (("",), "unchanged", "unchanged"),
+        (("absent",), "", ""),
+        (("abc",), "unchanged", "unchanged"),
+    ],
+    ids=[
+        "prefix",
+        "containment",
+        "partial",
+        "transitive",
+        "self-overlap",
+        "dense",
+        "repeated",
+        "adjacent",
+        "repeated-single-character",
+        "marker-content",
+        "literal-metacharacters",
+        "unicode",
+        "duplicate-empty",
+        "empty-value",
+        "empty-input",
+        "no-match",
+    ],
+)
+def test_redactor_masks_original_overlapping_spans(
+    values: tuple[str, ...], text: str, expected: str
+) -> None:
+    for order in permutations(values):
+        for registered_count in range(len(order) + 1):
+            registry = SecretRegistry()
+            for value in order[:registered_count]:
+                registry.register(value, scope=None)
+            redactor = Redactor(list(order[registered_count:]), registry=registry)
+            assert redactor.redact_text(text) == expected, (order, registered_count)
+
+
+def test_redactor_overlap_snapshot_survives_scope_release() -> None:
+    registry = SecretRegistry()
+    scope = object()
+    registry.register("abc", scope=scope)
+    before = Redactor(registry=registry)
+    registry.register("bcd", scope=scope)
+    overlapping = Redactor(registry=registry)
+    registry.release(scope)
+
+    assert before.redact_text("abcd") == f"{REDACTION}d"
+    assert overlapping.redact_text("abcd") == REDACTION
+    assert Redactor(registry=registry).redact_text("abcd") == "abcd"
+
+
+def test_redaction_filter_masks_overlap_in_message_exception_and_stack() -> None:
+    registry = SecretRegistry()
+    log_filter = SecretRedactionFilter(registry)
+    for value in ("abc", "bcd"):
+        registry.register(value, scope=None)
+    record = logging.LogRecord(
+        "t", logging.ERROR, "", 0, "%s", ("abcd",), (ValueError, ValueError("abcd"), None)
+    )
+    record.stack_info = "abcd"
+
+    assert log_filter.filter(record) is True
+    assert record.getMessage() == REDACTION
+    assert record.exc_text == f"ValueError: {REDACTION}\n"
+    assert record.stack_info == REDACTION
 
 
 def test_redactor_masks_key_value_pairs() -> None:

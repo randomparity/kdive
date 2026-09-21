@@ -712,8 +712,8 @@ def test_core_compares_exact_command_line_bytes(
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
-_SECRET_PREFIX = b"mist veil\\key \x00\x01\xff\\ \xc3\xa9 "
-_REDACTED_PREFIX = "[REDACTED] [REDACTED] \\x00\\x01\\xFF\\\\ é "
+_SECRET_PREFIX = b"mist veil\\key west-privatevalue wxyz wvwvw \x00\x01\xff\\ \xc3\xa9 "
+_REDACTED_PREFIX = "[REDACTED] " * 5 + "\\x00\\x01\\xFF\\\\ é "
 
 
 @pytest.mark.parametrize(
@@ -769,7 +769,7 @@ def test_cmdline_failure_redacts_before_authority_persistence(
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
         registry = SecretRegistry()
-        for secret in ("mist", "veil\\key", "Q"):
+        for secret in ("mist", "veil\\key", "Q", "west-", "west-privatevalue", "wxy", "xyz", "wvw"):
             registry.register(secret, scope=None)
         observer = _CmdlineObserver(case.vehicle.port, observed, expected)
         case.vehicle.port.__dict__["observe"] = observer.observe
