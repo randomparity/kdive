@@ -13,6 +13,9 @@ import logging
 import multiprocessing as mp
 import os
 import stat
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import types
@@ -70,10 +73,57 @@ def test_upload_store_contract_lives_with_the_pipeline() -> None:
     assert upload_contracts.UploadObjectStore.__module__.endswith(".upload_contracts")
 
 
+def test_import_defers_linux_fallocate_resolution() -> None:
+    probe = textwrap.dedent(
+        """
+        import ctypes
+        import errno
+
+        real_cdll = ctypes.CDLL
+        real_libc = real_cdll(None, use_errno=True)
+
+        class LibcWithoutFallocate:
+            def __getattr__(self, name):
+                if name == "fallocate":
+                    raise AttributeError("fallocate is unavailable")
+                return getattr(real_libc, name)
+
+        def cdll_without_fallocate(name, *args, **kwargs):
+            if name is None:
+                return LibcWithoutFallocate()
+            return real_cdll(name, *args, **kwargs)
+
+        ctypes.CDLL = cdll_without_fallocate
+
+        from kdive.providers.local_libvirt.lifecycle.rootfs import upload_staging
+
+        try:
+            upload_staging._native_fallocate(17, 4096)
+        except OSError as error:
+            assert error.errno == errno.ENOSYS
+        else:
+            raise AssertionError("missing fallocate must report ENOSYS when first used")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_native_fallocate_preserves_lengths_above_two_gib(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    native = upload_staging._fallocate
+    try:
+        native = upload_staging._resolve_fallocate()
+    except OSError as error:
+        if error.errno == errno.ENOSYS:
+            pytest.skip("native fallocate is unavailable on this platform")
+        raise
     assert native.restype is ctypes.c_int
     assert native.argtypes == [
         ctypes.c_int,
@@ -1220,7 +1270,7 @@ def test_unsupported_native_reservation_degrades_without_posix_fallocate(
         raise AssertionError("native-allocation degrade must not invoke posix_fallocate emulation")
 
     monkeypatch.setattr(upload_staging, "_native_fallocate", _unsupported)
-    monkeypatch.setattr(os, "posix_fallocate", _forbidden_posix_fallocate)
+    monkeypatch.setattr(os, "posix_fallocate", _forbidden_posix_fallocate, raising=False)
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
     with caplog.at_level(logging.WARNING, logger=upload_acquisition.__name__):
