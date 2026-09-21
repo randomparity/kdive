@@ -22,3 +22,6 @@ live_vm_staging_dirs:
 live_vm_venv: /opt/kdive
 live_vm_repo_url: https://github.com/randomparity/kdive.git
 live_vm_repo_version: main
+# Six 32-GiB recovery reservations require 192 GiB, within the runner's measured
+# 194.1 GiB available (#2563). The capacity gate rechecks free space on provisioning.
+live_vm_host_external_boot_concurrent_activations: 6

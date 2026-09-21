@@ -71,3 +71,54 @@ account can neither traverse nor replace a sibling slot.
 Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
 group list. Interactive operators must start a new login session after installation before using
 the installed socket.
+
+`scripts/live-stack/stack-down.sh --wipe` reaps the kdive domains and their overlays with the
+operator's own credentials, not under `sudo`, whenever the resolved endpoint is a session URI
+(ADR-0662). The operator owns both paths it touches — the socket is `operator:kdive-live-libvirt`
+mode `0770` and `/var/lib/kdive/rootfs` is `operator:kdive-live-libvirt` mode `2770` — so root
+satisfies neither ACL; it bypasses both. The published endpoints name their socket path explicitly,
+so `sudo` there reaches the *same* daemon with root's rights rather than a different one; against a
+plain `qemu:///session`, whose socket is per-uid, it reaches root's own daemon instead and so a
+different account's domains. Either way escalation is the wrong credential for the endpoint.
+Because the reap unlinks overlays as the operator on that path, the operator must be able to
+**write** `/var/lib/kdive/rootfs`, not merely list it. The installed mode-`2770` directory grants
+that. A directory that has drifted away from it is refused up front, before anything is stopped or
+dropped, so the run does not lose the data volumes to a reap it could never finish. The refusal
+needs an overlay to be at stake: an unwritable directory holding none has nothing to remove, and
+that reap still succeeds.
+On a host with no lifecycle contract the endpoint resolves to root-owned `qemu:///system` and the
+same reap keeps `sudo`, which is why the privilege is derived from the endpoint rather than fixed.
+This governs the reap specifically, and creation is a separate question from access: the provider
+data directories are *created* by `sudo install -d -o <operator> -g kdive-live-libvirt -m 2770`,
+so root makes them and hands ownership over. `sudo` is the creation path even though every
+subsequent access is the operator's. `scripts/live-stack/README.md` records the same split for
+bring-up.
+
+## Lifecycle retry actions
+
+Every response from `scripts/live-stack/worker-lifecycle.sh` carries a `retry_action` field
+alongside its `code`. It is a closed set, and it — not the code — says what to do next.
+
+| `retry_action` | What it means | What to do |
+|---|---|---|
+| `none` | the operation succeeded | nothing |
+| `correct_request` | the request itself was rejected: a `start` missing its worker count or settings, or a request frame the witness could not parse | fix the invocation; retrying it unchanged fails the same way |
+| `retry_same_operation` | a transient condition: the request deadline expired, termination evidence was rejected, or another lifecycle request holds the control lock (`code=busy`) | wait for the named condition to clear, then re-run the same command |
+| `restore_systemd` | systemd could not answer for the retained unit | restore systemd, then re-run |
+| `restore_database` | the database authority is unavailable | restore the database, then re-run |
+| `operator_recovery` | any `conflict` response — retained lifecycle facts disagreeing with the observed unit, a worker incarnation disputed by an active fence, retained slot state that breaks a lifecycle rule, a systemd observation disagreeing with the retained lifecycle contract, or `recover` refusing a slot whose cgroup still holds live processes — an unmapped internal error, or a `diagnostics` capture that withheld at least one slot | inspect, then recover — see below |
+
+`operator_recovery` is the one that never clears on its own: no retry of the same request will
+change the outcome, because the retained facts and the observed unit disagree and something has to
+resolve that disagreement. Run `scripts/live-stack/worker-lifecycle.sh status` and
+`scripts/live-stack/worker-lifecycle.sh diagnostics` to find out which slot and why, then
+`scripts/live-stack/worker-lifecycle.sh recover` to retire the slots proven dead. The procedure,
+including how to read a withheld slot's reason, is in
+[the live-stack runbook](../../docs/operating/runbooks/live-stack.md#recovering-a-wedged-worker-slot).
+
+When `recover` itself is what returned `operator_recovery`, it refused a slot whose unit still has
+live processes. The next step is to stop the work that unit is doing, not to re-run `recover`; the
+runbook paragraph above says so in full.
+
+`code=diagnostics_withheld` arrives with `operator_recovery`: `diagnostics` catches every per-slot
+failure inside the capture and reports it as a withheld slot.

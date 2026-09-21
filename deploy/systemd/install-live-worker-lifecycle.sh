@@ -565,6 +565,24 @@ _cleanup_source_link() {
   _created_source_link=""
 }
 
+# The venv build below needs `uv`, and this script runs as root under `sudo`, whose `secure_path`
+# hides a user-local ~/.local/bin: a bare `uv` there exits 127 with no context, after the host has
+# already been mutated (#2506). Resolve it to an absolute path up front instead, and refuse with
+# the remedy. `command -v` also reports functions and builtins, so the result must be a path.
+_resolve_uv_bin() {
+  local resolved
+  resolved="$(command -v uv 2>/dev/null)" || resolved=""
+  if [[ $resolved != /* ]]; then
+    echo "uv is not resolvable from PATH=$PATH; this installer runs as root, and sudo's" \
+      "secure_path hides a user-local uv. Invoke it through 'sudo env \"PATH=\$PATH\"', as" \
+      ".github/workflows/live.yml and docs/operating/runbooks/live-stack.md do; where root is" \
+      "reached through Ansible's become instead, install uv where root resolves it (pip installs" \
+      "the console script to /usr/local/bin)." >&2
+    return 1
+  fi
+  printf '%s\n' "$resolved"
+}
+
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
   return 0
 fi
@@ -601,6 +619,7 @@ done
   echo "fixed local-libvirt fixture catalog is missing from the installation source" >&2
   exit 1
 }
+uv_bin="$(_resolve_uv_bin)" || exit 1
 operator_uid="$(id -u "$operator")"
 _select_libvirt_tuple /etc/os-release
 IFS= read -r witness_dsn || [[ -n $witness_dsn ]]
@@ -737,7 +756,7 @@ fi
 # every request on a host provisioning just reported healthy. Only the project is reinstalled;
 # third-party wheels stay cached (#2532).
 UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv UV_PYTHON_DOWNLOADS=never \
-  uv sync --locked --no-editable --no-dev --group live --reinstall-package kdive \
+  "$uv_bin" sync --locked --no-editable --no-dev --group live --reinstall-package kdive \
   --project /opt/kdive --python-preference only-system
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle

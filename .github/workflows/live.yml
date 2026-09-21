@@ -389,15 +389,9 @@ jobs:
       - name: Prove systemd worker lifecycle against disposable Postgres
         run: |
           set -euo pipefail
-          operator_name="$(id -un)"
-          preserve_names="PATH,CI,GITHUB_ACTIONS,GITHUB_WORKSPACE,RUNNER_ARCH,RUNNER_OS"
-          preserve_names+=",RUNNER_TEMP,RUNNER_TOOL_CACHE,UV_CACHE_DIR,XDG_RUNTIME_DIR"
-          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT"
-          exec sudo --preserve-env="$preserve_names" \
-            --user="$operator_name" --group=kdive-live-control \
-            env "HOME=$HOME" "USER=$operator_name" "LOGNAME=$operator_name" \
-            /bin/bash -s -e -u -o pipefail \
-            <<'KDIVE_SYSTEMD_PROOF'
+          # #2565/#2054: a child of stack-services.sh can drain stdin. Materialize the proof
+          # before changing users so Bash reads every remaining command from a regular file.
+          cat >"$RUNNER_TEMP/systemd-worker-proof.sh" <<'KDIVE_SYSTEMD_PROOF'
           control_gid="$(getent group kdive-live-control | cut -d: -f3)"
           libvirt_gid="$(getent group kdive-live-libvirt | cut -d: -f3)"
           for required_gid in "$control_gid" "$libvirt_gid"; do
@@ -413,10 +407,25 @@ jobs:
           scripts/live-stack/stack-services.sh --reset-db --skip-obs --skip-libvirt
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
+          rc=0
+          systemd_summary="$(mktemp)"
           KDIVE_RUN_SYSTEMD_WORKER_PROOF=1 uv run python -m pytest \
             tests/live_vm/test_systemd_worker_lifecycle.py \
-            -m live_vm --strict-markers -q
+            -m live_vm --strict-markers -q | tee "$systemd_summary" || rc=$?
+          if ! scripts/pytest-terminal-summary-has-passes.sh "$systemd_summary"; then
+            echo "hosted systemd proof: ran ZERO systemd worker lifecycle proofs (no '<N> passed' summary, pytest rc=$rc); a skipped tier must never read green" >&2
+            exit 1
+          fi
+          exit "$rc"
           KDIVE_SYSTEMD_PROOF
+          operator_name="$(id -un)"
+          preserve_names="PATH,CI,GITHUB_ACTIONS,GITHUB_WORKSPACE,RUNNER_ARCH,RUNNER_OS"
+          preserve_names+=",RUNNER_TEMP,RUNNER_TOOL_CACHE,UV_CACHE_DIR,XDG_RUNTIME_DIR"
+          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT"
+          exec sudo --preserve-env="$preserve_names" \
+            --user="$operator_name" --group=kdive-live-control \
+            env "HOME=$HOME" "USER=$operator_name" "LOGNAME=$operator_name" \
+            /bin/bash -e -u -o pipefail "$RUNNER_TEMP/systemd-worker-proof.sh"
 
       - name: Clean up lifecycle proof stack
         if: success()
@@ -568,7 +577,7 @@ jobs:
           tcg_summary="$(mktemp)"
           .venv/bin/python -m pytest -m live_vm_tcg --strict-markers -q | tee "$tcg_summary" \
             || rc=$?
-          if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$tcg_summary"; then
+          if ! scripts/pytest-terminal-summary-has-passes.sh "$tcg_summary"; then
             echo "hosted live_vm_tcg spine: ran ZERO live_vm_tcg proofs (no '<N> passed' summary); a skipped tier must never read green" >&2
             exit 1
           fi
@@ -694,6 +703,7 @@ jobs:
           persist-credentials: false
 
       - name: Run both native families (reaper -> stack -> mint -> preflight -> test, one shell)
+        id: native-spine
         # ONE run: block. Reuse /opt/kdive's libguestfs venv as the interpreter and overlay the
         # tested sources via PYTHONPATH — never mutate /opt/kdive, never uv sync in the workspace.
         env:
@@ -716,6 +726,12 @@ jobs:
           cat >"$RUNNER_TEMP/spine-native.sh" <<'KDIVE_NATIVE_SPINE'
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
 
+          # Persistent native runners keep their privileged lifecycle contract under Ansible
+          # ownership (ADR-0582). Check that it matches this checkout before the reaper or stack
+          # can mutate state. A mismatch names reprovisioning; this job never installs the contract.
+          scripts/live-stack/worker-lifecycle.sh compatibility
+          echo "cleanup_required=true" >> "$GITHUB_OUTPUT"
+
           # Use the exact dedicated session endpoint published by provisioning for the fixed
           # workers. Parse it as literal data; never source the root-owned assignment as shell.
           # Set it before the reaper and warm store so every actor — reaper, worker, mint,
@@ -725,6 +741,24 @@ jobs:
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
           export KDIVE_LIBVIRT_URI
+
+          # This tier holds TWO allocations against the local host at once: mint-system.sh's
+          # (2 vcpu / 4 GB), held for the whole job, and the one live_vm proof that requests an
+          # allocation of its own (2 vcpu / 2 GB; the suite is serial — the spine passes no `-n`).
+          # LocalLibvirtDiscovery.from_env defaults the cap to 1, so the mint took the only slot
+          # and every later allocations.request was denied `at_capacity` mid-suite (#2560). The
+          # 4 vcpu / 6 GB that admits sits well inside the 8 vcpu / ~31 GB this host advertises.
+          #
+          # Placement is load-bearing, and NOT because of mint-system.sh. Per ADR-0384 the cap is
+          # operator-owned: discovery honors this variable when it INSERTS the resources row and
+          # preserves the stored value on every later refresh. The first process to insert here is
+          # the reconciler that stack-services.sh starts, several steps ahead of mint-system.sh —
+          # so the export must precede stack-services.sh, and an export placed anywhere after it
+          # silently no-ops. What makes the insert branch the one taken at all is the pre-job
+          # reaper's `docker compose down -v` below, which drops the tracking volume; a run that
+          # somehow kept a stale resources row would hold cap 1 and reproduce #2560 with this
+          # export still in place. test_live_workflow_shape pins both the value and that ordering.
+          export KDIVE_LIBVIRT_ALLOCATION_CAP=2
 
           # Pre-job reaper: a run cancelled mid-boot (cancel-in-progress is false, but a crash or
           # timeout still leaves state) must not collide with this run's on-box stand-up. `virsh
@@ -797,7 +831,21 @@ jobs:
           # never-uv-sync-in-workspace invariant), and omit the `live` group that carries drgn (a
           # native live_vm test imports drgn in-process). /opt/kdive already has drgn + guestfs, so
           # this also needs no `just` on the self-hosted runner.
-          "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q
+          # A run that proved nothing is RED here, never green (#2540). pytest exits 0 when every
+          # proof skips and 5 when none is collected, so neither code separates "the tier passed"
+          # from "the tier never ran" — the silent green ADR-0389 exists to kill, closed for the
+          # tcg spine at :569 and left open here. The spine file runs under `-o pipefail`, which
+          # is load-bearing: without it `| tee` would report tee's status and a genuinely failing
+          # proof run would trade one silent green for another.
+          rc=0
+          native_summary="$(mktemp)"
+          "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q | tee "$native_summary" \
+            || rc=$?
+          if ! scripts/pytest-terminal-summary-has-passes.sh "$native_summary"; then
+            echo "native live_vm spine: ran ZERO native live_vm proofs (no '<N> passed' summary, pytest rc=$rc); a skipped tier must never read green" >&2
+            exit 1
+          fi
+          exit "$rc"
           KDIVE_NATIVE_SPINE
           exec /bin/bash -e -u -o pipefail "$RUNNER_TEMP/spine-native.sh"
 
@@ -822,7 +870,7 @@ jobs:
           exit 0
 
       - name: Clean up live stack
-        if: always()
+        if: always() && steps.native-spine.outputs.cleanup_required == 'true'
         run: |
           # shellcheck source=scripts/live-stack/libvirt-uri.sh
           source scripts/live-stack/libvirt-uri.sh

@@ -80,8 +80,11 @@ _PASST_FAILURE_RE = re.compile(r"passt exited with status")
 
 _KERNEL_REMEDIATION = (
     "the libguestfs appliance cannot read the host kernel — Debian/Ubuntu ship "
-    "/boot/vmlinuz-* as root:0600. Make them readable (run as the worker user): "
-    "`sudo chmod 0644 /boot/vmlinuz-*` (re-apply after a kernel upgrade, or use dpkg-statoverride)"
+    "/boot/vmlinuz-* as root:0600. Use the supported provisioning path: for local-libvirt, "
+    "`KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host`; for other worker "
+    "deployments, run their owning provisioning play. Provisioning sets root:kvm 0640, ensures the "
+    "worker user is in the kvm group, and installs the durable post-upgrade hook. One-off fallback "
+    "only (not durable): `sudo chgrp kvm /boot/vmlinu?-* && sudo chmod 0640 /boot/vmlinu?-*`"
 )
 _PASST_REMEDIATION = (
     "the libguestfs appliance network (passt) failed. Unload the passt AppArmor profile "

@@ -252,6 +252,18 @@ def test_provider_authority_rechecks_the_installed_environment_despite_revision_
     assert "when" not in install, "a matching revision cannot hide a removed or drifted venv"
 
 
+def test_project_venv_sync_repairs_drift_without_checkout_change() -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    sync = next(task for task in tasks if task["name"].startswith("Build the venv"))
+
+    assert "when" not in sync, "an unchanged checkout cannot prove that the venv converged"
+    assert sync["register"] == "live_vm_host_project_sync"
+    assert sync["changed_when"] == (
+        "live_vm_host_project_sync.stderr is search("
+        "'(?m)^(Installed|Uninstalled|Creating virtual environment) ')"
+    )
+
+
 def test_production_identity_preflight_does_not_inherit_become_root_or_create_placeholders() -> (
     None
 ):
@@ -871,7 +883,7 @@ def test_ansible_bakes_checkout_identity_before_installing_fixed_worker_runtime(
     assert "scripts/stamp-buildinfo.sh" in stamp_block
     assert '- "false"' in stamp_block
     assert 'KDIVE_BUILDINFO_COMMIT: "{{ live_vm_host_checkout.after[0:12] }}"' in stamp_block
-    assert 'become_user: "{{ github_runner_user }}"' in stamp_block
+    assert 'become_user: "{{ live_vm_host_operator_user }}"' in stamp_block
     assert "safe.directory" not in tasks
     assert tasks.index(stamp) < tasks.index(install)
 
@@ -901,7 +913,7 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert source.startswith("#!/bin/bash\nset -euo pipefail\n")
     assert "IFS= read -r witness_dsn" in source
     assert "--witness-dsn" not in source
-    sync = "uv sync --locked --no-editable --no-dev --group live"
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
     prepare = "_prepare_attested_runtime_root /opt/kdive-live-worker-lifecycle root root"
     assert source.index(prepare) < source.index(sync)
     assert "UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv" in source
@@ -938,6 +950,90 @@ def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
     assert "--project /opt/kdive --python-preference only-system" in source
 
 
+def test_installer_resolves_uv_before_it_mutates_the_host() -> None:
+    """A bare ``uv`` exits 127 under ``sudo``, whose ``secure_path`` hides a user-local one.
+
+    The installer runs as root from the provisioning play, so the binary it will need at the
+    end must be resolved -- and refused, with the remedy -- before the first host mutation
+    (#2506).
+    """
+    source = _text(INSTALLER)
+    resolve = 'uv_bin="$(_resolve_uv_bin)"'
+    first_mutation = 'getent group "$control_group" >/dev/null || groupadd'
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
+    assert resolve in source
+    assert sync in source
+    assert source.index(resolve) < source.index(first_mutation)
+    assert source.index(resolve) < source.index(sync)
+
+
+def test_installer_uv_resolution_names_the_remedy_and_refuses(tmp_path: Path) -> None:
+    command = r"""
+source "$1"
+export PATH="$2"
+_resolve_uv_bin
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    # The message has to carry the diagnosis (the PATH that was searched) and the remedy,
+    # because this is the only output the operator gets.
+    assert "uv is not resolvable" in result.stderr
+    assert str(tmp_path) in result.stderr
+    assert "secure_path" in result.stderr
+    assert "/usr/local/bin" in result.stderr
+
+
+def test_installer_never_emits_the_witness_dsn() -> None:
+    """The play reports this installer's stderr from an uncensored task, so stderr is public.
+
+    `no_log: true` still censors the invocation that carries the DSN on stdin, but the failure
+    report outside it prints whatever the installer wrote (#2506). That makes "the installer
+    never echoes the DSN" a load-bearing invariant: pin the lines allowed to name it, so a new
+    diagnostic or a debugging `set -x` fails here instead of shipping a live credential into an
+    Ansible log.
+    """
+    source = _text(INSTALLER)
+    naming_the_dsn = [line.strip() for line in source.splitlines() if "witness_dsn" in line]
+
+    assert naming_the_dsn == [
+        "IFS= read -r witness_dsn || [[ -n $witness_dsn ]]",
+        "[[ -n $witness_dsn ]] || {",
+        'printf \'%s\\n\' "$witness_dsn" >"$credential_temp"',
+    ]
+    # Every spelling of xtrace, not one: the traced line would be the `printf` above.
+    for tracing in ("set -x", "set -o xtrace", "BASH_XTRACEFD", "SHELLOPTS"):
+        assert tracing not in source
+
+
+def test_installer_uv_resolution_returns_an_absolute_path(tmp_path: Path) -> None:
+    stub = tmp_path / "uv"
+    stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    command = r"""
+source "$1"
+export PATH="$2"
+_resolve_uv_bin
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(stub)
+
+
 def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> None:
     """A reinstall must rebuild the manifest, because the manifest describes what it replaced.
 
@@ -947,7 +1043,7 @@ def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> No
     rather than erroring -- the queue never drains and neither side logs anything.
     """
     source = _text(INSTALLER)
-    sync = "uv sync --locked --no-editable --no-dev --group live"
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
     harden = "_harden_runtime_tree /opt/kdive-live-worker-lifecycle"
     build = '"$manifest_python" "$manifest_builder" build'
     install = '"$manifest_python" "$manifest_builder" install'
@@ -1454,8 +1550,9 @@ def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
     ensure_block = tasks[ensure_dir:install]
     assert "state: directory" in ensure_block
     assert 'mode: "0700"' in ensure_block
-    assert "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user" in (
-        ensure_block
+    assert (
+        "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user"
+        in (ensure_block)
     )
     # Linger must be provisioned before the unit: it is what keeps the runner's user manager
     # alive from boot with no login session.
@@ -2081,6 +2178,25 @@ def test_external_boot_recovery_root_defaults_are_declared() -> None:
     assert "live_vm_host_worker_recovery_root_owner" not in defaults
 
 
+def test_runner_external_boot_capacity_fits_measured_free_space() -> None:
+    defaults = _yaml(DEFAULTS)
+    runner = defaults | _yaml(ROOT / "deploy/ansible/inventory/group_vars/live_vm_runners.yml")
+    capacity_bytes = runner["live_vm_host_external_boot_capacity_bytes"]
+    concurrent = runner["live_vm_host_external_boot_concurrent_activations"]
+    assert isinstance(capacity_bytes, int)
+    assert isinstance(concurrent, int)
+    # Issue #2563 measured this many available bytes with the gate's df command.
+    measured_free_bytes = 208_365_330_432
+    assert capacity_bytes * concurrent <= measured_free_bytes
+    assert concurrent == 6
+    assert capacity_bytes == defaults["live_vm_host_external_boot_capacity_bytes"] == 32 * 1024**3
+    assert capacity_bytes * concurrent == 192 * 1024**3
+    assert defaults["live_vm_host_external_boot_concurrent_activations"] == 8
+    assert runner["live_vm_host_worker_accounts"] == [
+        f"kdive-worker-{slot}" for slot in range(1, 9)
+    ]
+
+
 def test_external_boot_capacity_is_checked_before_worker_release() -> None:
     defaults = _yaml(DEFAULTS)
     capacity_bytes = defaults["live_vm_host_external_boot_capacity_bytes"]
@@ -2246,7 +2362,7 @@ def test_installer_forces_a_fresh_project_wheel_into_the_worker_venv() -> None:
     source, sync again, and the second import still returns the first value.
     """
     source = _text(INSTALLER)
-    sync = "uv sync --locked --no-editable --no-dev --group live --reinstall-package kdive"
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live --reinstall-package kdive'
 
     assert sync in source
     # Scoped to the project: third-party wheels stay cached, so a reinstall is not a full rebuild.
@@ -2289,7 +2405,7 @@ def test_verify_asserts_the_installed_venv_carries_this_checkout_protocol() -> N
     assert "-I" in checkout_argv
     assert "lifecycle_protocol_identity()" in checkout_argv[-1]
     # The checkout is writable by the runner account, so root must not import from it.
-    assert checkout["become_user"] == "{{ github_runner_user }}"
+    assert checkout["become_user"] == "{{ live_vm_host_operator_user }}"
     assert "become_user" not in tasks[names.index(installed)]
 
     compared = tasks[names.index(assertion)]["ansible.builtin.assert"]

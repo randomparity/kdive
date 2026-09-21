@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,53 @@ ROLE_MEMBERS = {
     "kdive-reconciler-member": "kdive_reconciler",
     "kdive-witness-member": "kdive_lifecycle_witness",
 }
+_SYSTEMD_VALUE = re.compile(r"[A-Za-z0-9_.@:-]+")
+
+
+def cgroup_populated(control_group: str, *, root: Path = Path("/sys/fs/cgroup")) -> bool:
+    if not control_group:
+        return False
+    events = root / control_group.removeprefix("/") / "cgroup.events"
+    try:
+        lines = events.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return False
+
+    values: dict[str, str] = {}
+    for line in lines:
+        if not line:
+            continue
+        fields = line.split()
+        if len(fields) != 2:
+            raise ValueError(f"malformed cgroup.events record: {line!r}")
+        key, value = fields
+        if key in values:
+            raise ValueError(f"duplicate cgroup.events record: {key}")
+        values[key] = value
+    populated = values.get("populated")
+    if populated not in {"0", "1"}:
+        raise ValueError("cgroup.events populated must be exactly 0 or 1")
+    return populated == "1"
+
+
+def assert_released_terminal_state(
+    *, active_state: str, sub_state: str, result: str, exec_main_status: str
+) -> None:
+    """Require one of the runtime's supported empty-cgroup terminal shapes."""
+    assert _SYSTEMD_VALUE.fullmatch(result), f"unsupported systemd Result={result}"
+    status_is_valid = (
+        exec_main_status.isascii()
+        and exec_main_status.isdecimal()
+        and int(exec_main_status, 10) in range(256)
+    )
+    assert status_is_valid, f"unsupported systemd ExecMainStatus={exec_main_status}"
+    failed = active_state == "failed" and sub_state == "failed" and result != "success"
+    retained_exit = active_state == "active" and sub_state == "exited" and result == "success"
+    assert failed or retained_exit, (
+        "unsupported released-cgroup state "
+        f"ActiveState={active_state} SubState={sub_state} "
+        f"Result={result} ExecMainStatus={exec_main_status}"
+    )
 
 
 def run(*argv: str, timeout: float = 130) -> str:
@@ -101,7 +150,8 @@ def _retain_primary_failure(
 ) -> BaseException:
     if primary is None:
         return secondary
-    primary.add_note(f"{operation} also raised {type(secondary).__name__}")
+    details = "".join(traceback.format_exception(secondary)).strip()
+    primary.add_note(f"{operation} also raised:\n{details}")
     return primary
 
 
@@ -128,3 +178,16 @@ def recover_after_outage(
     except BaseException as cleanup_error:
         failure = _retain_primary_failure(failure, cleanup_error, "worker cleanup failed")
     return failure
+
+
+def cleanup_after_case(
+    *, restore_database: Callable[[], None], cleanup_workers: Callable[[], None]
+) -> None:
+    failure = recover_after_outage(
+        None,
+        restore_database=restore_database,
+        prove_retained_row=lambda: None,
+        cleanup_workers=cleanup_workers,
+    )
+    if failure is not None:
+        raise failure.with_traceback(failure.__traceback__)

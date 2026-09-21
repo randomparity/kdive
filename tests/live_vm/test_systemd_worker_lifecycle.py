@@ -7,6 +7,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -64,6 +65,8 @@ class UnitEvidence:
     control_group: str
     active_state: str
     sub_state: str
+    result: str
+    exec_main_status: str
     populated: bool
 
 
@@ -146,16 +149,14 @@ def _properties(unit: str) -> dict[str, str]:
     output = support.run(
         "systemctl",
         "show",
-        "--property=ActiveState,SubState,ControlGroup,InvocationID",
+        "--property=ActiveState,SubState,Result,ExecMainStatus,ControlGroup,InvocationID",
         unit,
     )
     return dict(line.split("=", 1) for line in output.splitlines())
 
 
 def _cgroup_populated(control_group: str) -> bool:
-    events = Path("/sys/fs/cgroup") / control_group.removeprefix("/") / "cgroup.events"
-    values = dict(line.split() for line in events.read_text(encoding="utf-8").splitlines())
-    return values["populated"] == "1"
+    return support.cgroup_populated(control_group)
 
 
 def _wait_for_empty_cgroup(control_group: str, timeout: float = 10) -> None:
@@ -176,6 +177,8 @@ def _unit_evidence(slot: int) -> UnitEvidence:
         control_group=control_group,
         active_state=properties["ActiveState"],
         sub_state=properties["SubState"],
+        result=properties["Result"],
+        exec_main_status=properties["ExecMainStatus"],
         populated=_cgroup_populated(control_group),
     )
 
@@ -268,7 +271,9 @@ def _assert_started(context: ProofContext, count: int) -> tuple[IncarnationRow, 
     for unit in evidence:
         row = by_unit[unit.unit]
         assert row.binding["invocation_id"] == unit.invocation_id
-        assert unit.control_group == f"/system.slice/{unit.unit}"
+        assert unit.control_group == (
+            rf"/system.slice/system-kdive\x2dlive\x2dworker.slice/{unit.unit}"
+        )
         slot = int(unit.unit.removeprefix("kdive-live-worker@").split(".")[0])
         assert _slot_artifacts_exist(slot)
         _wait_for_heartbeat(slot)
@@ -277,6 +282,19 @@ def _assert_started(context: ProofContext, count: int) -> tuple[IncarnationRow, 
 
 
 def _assert_stopped(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> None:
+    _assert_terminated(context, rows)
+    _assert_units_inactive(rows)
+
+
+def _assert_stopped_after_outage(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> None:
+    """Prove the retry retired the rows, then clear the failed unit identity it cannot."""
+    _assert_terminated(context, rows)
+    response = _lifecycle("recover")
+    assert response.ok, response.model_dump_json()
+    _assert_units_inactive(rows)
+
+
+def _assert_terminated(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> None:
     response = _lifecycle("stop")
     assert response.ok, response.model_dump_json()
     assert all(slot.phase is SlotPhase.TERMINATED for slot in response.slots)
@@ -286,12 +304,16 @@ def _assert_stopped(context: ProofContext, rows: tuple[IncarnationRow, ...]) -> 
         assert terminal.outcome in {"succeeded", "failed", "killed"}
     assert not _lifecycle("status").slots
     for row in rows:
+        slot = int(row.binding["unit"].split("@")[1].split(".")[0])
+        assert not _slot_artifacts_exist(slot)
+
+
+def _assert_units_inactive(rows: tuple[IncarnationRow, ...]) -> None:
+    for row in rows:
         properties = _properties(row.binding["unit"])
         assert properties["ActiveState"] == "inactive"
         assert properties["ControlGroup"] == ""
         assert properties["InvocationID"] == ""
-        slot = int(row.binding["unit"].split("@")[1].split(".")[0])
-        assert not _slot_artifacts_exist(slot)
 
 
 @pytest.mark.parametrize("count", (1, 3))
@@ -309,13 +331,16 @@ def test_real_systemd_workers_register_heartbeat_and_terminate(
             _assert_stopped(proof_context, rows)
         else:
             _lifecycle("stop")
+    if count == 3:
+        _assert_partial_start_rollback_clears_released_first_slot(proof_context)
 
 
 def _assert_retained_after_database_outage(
     context: ProofContext, before: UnitEvidence, row: IncarnationRow
 ) -> None:
     for operation in ("status", "stop"):
-        response = _lifecycle(operation)
+        status, response = _lifecycle_result(operation)
+        assert status == 4
         assert not response.ok
         assert response.code == "dependency_unavailable"
         assert response.retry_action == "restore_database"
@@ -325,10 +350,14 @@ def _assert_retained_after_database_outage(
     retained = _unit_evidence(1)
     assert retained.unit == before.unit
     assert retained.invocation_id == before.invocation_id
-    assert retained.control_group == before.control_group
-    assert retained.active_state == "active"
-    assert retained.sub_state == "exited"
+    assert retained.control_group == ""
     assert not retained.populated
+    support.assert_released_terminal_state(
+        active_state=retained.active_state,
+        sub_state=retained.sub_state,
+        result=retained.result,
+        exec_main_status=retained.exec_main_status,
+    )
     assert _slot_artifacts_exist(1)
     assert row.binding["invocation_id"] == retained.invocation_id
 
@@ -369,7 +398,7 @@ def test_database_outage_retains_exact_invocation_until_stop_retry(
             failure,
             restore_database=lambda: support.restore_postgres(container_id),
             prove_retained_row=lambda: _assert_active_after_database_recovery(proof_context, row),
-            cleanup_workers=lambda: _assert_stopped(proof_context, rows),
+            cleanup_workers=lambda: _assert_stopped_after_outage(proof_context, rows),
         )
     if failure is not None:
         raise failure.with_traceback(failure.__traceback__)
@@ -408,9 +437,15 @@ def _restart_out_of_band(unit: str, retained_invocation: str) -> str:
         text=True,
         timeout=60,
     )
-    properties = _properties(unit)
+    deadline = time.monotonic() + 10
+    while True:
+        properties = _properties(unit)
+        if properties["ActiveState"] == "failed":
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"out-of-band restart did not reach failed state: {properties}")
+        time.sleep(0.1)
     successor = properties["InvocationID"]
-    assert properties["ActiveState"] == "failed", properties
     assert len(successor) == 32 and successor != retained_invocation, properties
     return successor
 
@@ -419,6 +454,125 @@ def _reset_fleet() -> None:
     """Return every fixed unit to the inactive, empty-identity state the next test needs."""
     _lifecycle("stop")
     _lifecycle("recover")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_proof_case(proof_context: ProofContext) -> Iterator[None]:
+    yield
+    support.cleanup_after_case(
+        restore_database=lambda: support.restore_postgres(proof_context.postgres.container_id),
+        cleanup_workers=_reset_fleet,
+    )
+
+
+def _assert_slot_artifacts_absent(slot: int) -> None:
+    for name in ("state.json", "worker-incarnation.credential", "worker.env", "release"):
+        result = subprocess.run(
+            ("sudo", "test", "!", "-e", str(_STATE_ROOT / str(slot) / name)),
+            cwd=support.ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert not result.stdout and not result.stderr
+        assert result.returncode == 0, f"slot {slot} retained {name}"
+
+
+def _assert_partial_start_rollback_clears_released_first_slot(proof_context: ProofContext) -> None:
+    """A rejected second slot must not leave the first slot's released cgroup retained."""
+    unit = "kdive-live-worker@2.service"
+    drop_in = Path(f"/run/systemd/system/{unit}.d/kdive-live-proof-2596.conf")
+    preflight = subprocess.run(
+        ("sudo", "test", "!", "-e", str(drop_in)),
+        cwd=support.ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert preflight.returncode == 0
+
+    try:
+        with psycopg.connect(proof_context.admin_dsn) as connection:
+            previous = connection.execute(
+                "SELECT incarnation FROM worker_incarnations WHERE authority_kind = 'local' "
+                "AND authority_binding->>'unit' = 'kdive-live-worker@1.service'"
+            ).fetchall()
+        installed = subprocess.run(
+            (
+                "sudo",
+                "systemctl",
+                "edit",
+                "--runtime",
+                "--drop-in=kdive-live-proof-2596.conf",
+                "--stdin",
+                unit,
+            ),
+            cwd=support.ROOT,
+            check=False,
+            capture_output=True,
+            input="[Service]\nExecStart=\nExecStart=/bin/false\n",
+            text=True,
+            timeout=30,
+        )
+        assert installed.returncode == 0
+
+        status, response = _lifecycle_result("start", 2)
+        assert status == 4 and not response.ok
+        assert response.code == "conflict" and response.retry_action == "operator_recovery"
+        assert [
+            (slot.slot, slot.unit, slot.phase) for slot in response.slots if slot.slot == 1
+        ] == [(1, "kdive-live-worker@1.service", SlotPhase.TERMINATED)]
+        properties = _properties("kdive-live-worker@1.service")
+        assert properties["ActiveState"] == "inactive"
+        assert properties["ControlGroup"] == ""
+        assert properties["InvocationID"] == ""
+        _assert_slot_artifacts_absent(1)
+        with psycopg.connect(proof_context.admin_dsn) as connection:
+            retired = connection.execute(
+                "SELECT state, outcome FROM worker_incarnations WHERE authority_kind = 'local' "
+                "AND authority_binding->>'unit' = 'kdive-live-worker@1.service' "
+                "AND NOT (incarnation = ANY(%s))",
+                ([row[0] for row in previous],),
+            ).fetchall()
+        assert len(retired) == 1
+        assert retired[0][0] == "terminated"
+        assert retired[0][1] in {"succeeded", "failed", "killed"}
+    finally:
+        subprocess.run(
+            ("sudo", "rm", "-f", str(drop_in)),
+            cwd=support.ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        subprocess.run(
+            ("sudo", "systemctl", "daemon-reload"),
+            cwd=support.ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _reset_fleet()
+        assert not _active_rows(proof_context.admin_dsn)
+        for slot in (1, 2):
+            properties = _properties(f"kdive-live-worker@{slot}.service")
+            assert properties["ActiveState"] == "inactive"
+            assert properties["ControlGroup"] == ""
+            assert properties["InvocationID"] == ""
+            _assert_slot_artifacts_absent(slot)
+        removed = subprocess.run(
+            ("sudo", "test", "!", "-e", str(drop_in)),
+            cwd=support.ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert removed.returncode == 0
 
 
 def test_recover_clears_the_failed_identity_that_blocks_the_next_start(

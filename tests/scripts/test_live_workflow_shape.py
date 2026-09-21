@@ -11,6 +11,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import textwrap
 
 import pytest
 import yaml
@@ -79,6 +80,29 @@ def test_native_block_preflights_debug_stepping_with_both_native_families() -> N
     assert "preflight-env.sh throwaway provisioned debug-stepping" in run
 
 
+def test_native_spine_checks_lifecycle_compatibility_before_destructive_setup() -> None:
+    """A stale persistent host must fail before the reaper or stack can mutate it (#2548)."""
+    spine = _native_spine()
+    compatibility = "scripts/live-stack/worker-lifecycle.sh compatibility"
+
+    assert spine.count(compatibility) == 1
+    assert spine.index(compatibility) < spine.index(
+        'for uri in "$KDIVE_LIBVIRT_URI" qemu:///system'
+    )
+    assert spine.index(compatibility) < spine.index("docker compose down -v")
+    assert spine.index(compatibility) < spine.index("live-stack/stack-services.sh --skip-obs")
+
+    native_steps = _load(_LIVE)["jobs"]["native"]["steps"]
+    cleanup = next(step for step in native_steps if step.get("name") == "Clean up live stack")
+    assert cleanup["if"] == "always() && steps.native-spine.outputs.cleanup_required == 'true'"
+    cleanup_marker = 'echo "cleanup_required=true" >> "$GITHUB_OUTPUT"'
+    assert cleanup_marker in spine
+    assert spine.index(compatibility) < spine.index(cleanup_marker)
+    assert spine.index(cleanup_marker) < spine.index(
+        'for uri in "$KDIVE_LIBVIRT_URI" qemu:///system'
+    )
+
+
 def _native_guest_image() -> str:
     prefix = "export KDIVE_GUEST_IMAGE="
     found = [ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix)]
@@ -137,6 +161,58 @@ def test_native_spine_aliases_the_bare_database_url_for_the_proof_suite() -> Non
     console-part proof skipped on the database gate even once its guest image was wired (#2518).
     """
     assert 'export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"' in _native_spine()
+
+
+_ALLOCATION_CAP_EXPORT = "export KDIVE_LIBVIRT_ALLOCATION_CAP="
+# What the native tier holds against the local-libvirt host at once (#2560):
+#   1  mint-system.sh's allocation, held for the whole job
+# + 1  the one live_vm proof that requests an allocation of its own
+_MINT_ALLOCATIONS = 1
+_SUITE_ALLOCATIONS = 1
+
+
+def test_native_spine_raises_the_allocation_cap_above_the_long_lived_mint() -> None:
+    """The native tier mints a System that holds an allocation for the whole job (#2560).
+
+    `LocalLibvirtDiscovery.from_env` defaults `KDIVE_LIBVIRT_ALLOCATION_CAP` to 1, so discovery
+    advertised `concurrent_allocation_cap: 1` and the mint took the only slot. Every later
+    `allocations.request` was then denied `at_capacity` mid-suite — which is what the console-part
+    proof hit once #2518 let it execute on this tier for the first time.
+
+    The value is the tier's actual concurrency, not the smallest number that unblocks one test:
+    the long-lived mint (2 vcpu / 4 GB) plus the single `live_vm` proof that allocates for itself
+    (2 vcpu / 2 GB), run serially because the spine passes no `-n`. The 4 vcpu / 6 GB that admits
+    sits well inside the 8 vcpus / ~31 GB the host advertised. No per-project quota bounds it:
+    the cap is counted per resource across projects, and these two allocations are funded in
+    different projects (`demo` for the mint, `console-parts-proof` for the proof).
+    """
+    spine = _native_spine()
+    lines = [
+        ln.strip() for ln in spine.splitlines() if ln.strip().startswith(_ALLOCATION_CAP_EXPORT)
+    ]
+    assert len(lines) == 1, (
+        f"expected exactly one `{_ALLOCATION_CAP_EXPORT}` line in the native spine, "
+        f"found {len(lines)}; without it the tier runs at the fail-closed default of 1 and the "
+        "minted System holds the only slot (#2560)"
+    )
+    cap = int(lines[0][len(_ALLOCATION_CAP_EXPORT) :].split(" #")[0].strip().strip("\"'"))
+    assert cap == _MINT_ALLOCATIONS + _SUITE_ALLOCATIONS, (
+        f"the native spine caps concurrent allocations at {cap}, but the tier holds "
+        f"{_MINT_ALLOCATIONS} (mint) + {_SUITE_ALLOCATIONS} (suite) at once; a new proof that "
+        "allocates for itself raises the second term rather than leaving the tier to fail "
+        "`at_capacity` mid-suite"
+    )
+
+    # Anchor on stack-services.sh, NOT mint-system.sh. Per ADR-0384 the cap is operator-owned:
+    # discovery honors this variable when it INSERTS the resources row and preserves the stored
+    # value on every refresh. The reconciler stack-services.sh starts registers discovery at
+    # startup, so it inserts first — an export placed after stack-services.sh but before the mint
+    # reads as correct and silently no-ops, which is how #2560 would come back.
+    assert spine.index(_ALLOCATION_CAP_EXPORT) < spine.index("live-stack/stack-services.sh"), (
+        "KDIVE_LIBVIRT_ALLOCATION_CAP is exported after stack-services.sh; the reconciler it "
+        "starts has already inserted the resource at the old cap, and ADR-0384 keeps that stored "
+        "value through every later refresh"
+    )
 
 
 def _tcg_stage_dir() -> str:
@@ -596,16 +672,25 @@ def test_tcg_job_captures_bounded_worker_readiness_components() -> None:
 
 
 @pytest.mark.parametrize(
-    ("job", "condition"),
-    (("tcg", "always()"), ("native", "failure() || cancelled()")),
+    ("job", "condition", "cleanup_condition"),
+    (
+        ("tcg", "always()", "always()"),
+        (
+            "native",
+            "failure() || cancelled()",
+            "always() && steps.native-spine.outputs.cleanup_required == 'true'",
+        ),
+    ),
 )
-def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condition: str) -> None:
+def test_live_job_captures_lifecycle_diagnostics_before_cleanup(
+    job: str, condition: str, cleanup_condition: str
+) -> None:
     """Diagnostics are observational and must run before destructive teardown (#1939).
 
     The diagnostics step never fails the job (`exit 0`), neutralizes workflow-command
     injection from journal text (::stop-commands:: token), and degrades to a warning when
-    the witness withholds evidence. Cleanup runs on every outcome; diagnostics must have
-    their chance first — after teardown there is nothing left to read.
+    the witness withholds evidence. Once cleanup is armed, diagnostics must have their chance
+    first — after teardown there is nothing left to read.
     """
     diagnostic_index, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
     cleanup_index, cleanup = _named_step(job, "Clean up live stack")
@@ -617,7 +702,7 @@ def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condit
     assert "printf '::%s::" in diagnostic["run"]
     assert "::${" not in diagnostic["run"]
     assert "exit 0" in diagnostic["run"]
-    assert cleanup["if"] == "always()"
+    assert cleanup["if"] == cleanup_condition
     assert "scripts/live-stack/stack-down.sh" in cleanup["run"]
     assert diagnostic_index < cleanup_index
 
@@ -878,6 +963,34 @@ def test_hosted_lifecycle_proof_refreshes_control_and_libvirt_groups() -> None:
     assert "kdive-live-control" in run and "kdive-live-libvirt" in run
 
 
+_SYSTEMD_PROOF_FILE = "$RUNNER_TEMP/systemd-worker-proof.sh"
+
+
+def test_hosted_lifecycle_proof_is_executed_from_a_materialized_file() -> None:
+    """A child cannot drain proof commands that Bash reads from a regular file (#2565)."""
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    run = proof["run"]
+    delimiter = "KDIVE_" + "SYSTEMD_PROOF"  # Keep the env-name guard from parsing test data.
+    assert f"cat >\"{_SYSTEMD_PROOF_FILE}\" <<'{delimiter}'" in run
+    assert f'/bin/bash -e -u -o pipefail "{_SYSTEMD_PROOF_FILE}"' in run
+    assert "bash -s" not in run
+
+    closing = re.search(rf"^{delimiter}$", run, flags=re.MULTILINE)
+    assert closing is not None
+    execute = f'/bin/bash -e -u -o pipefail "{_SYSTEMD_PROOF_FILE}"'
+    assert closing.end() < run.index(execute)
+
+
+def test_hosted_lifecycle_proof_captures_and_checks_its_pytest_summary() -> None:
+    """The proof preserves pytest's status and rejects a successful run with no passes."""
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    run = " ".join(proof["run"].replace("\\\n", " ").split())
+    assert '-m live_vm --strict-markers -q | tee "$systemd_summary" || rc=$?' in run
+    assert 'pytest-terminal-summary-has-passes.sh "$systemd_summary"' in run
+    assert "ran ZERO systemd worker lifecycle proofs" in run
+    assert 'exit "$rc"' in run
+
+
 # --- hosted tcg pre-clean: stale /run/kdive/live-libvirt residue (#2033) ----------------------
 #
 # A reused hosted VM can carry an operator-owned session daemon plus socket/pid residue from an
@@ -965,8 +1078,97 @@ def test_hosted_spine_fails_loud_on_a_zero_proof_tier() -> None:
     """pytest exits 0 when every test skips; pin the '<N> passed' summary gate that makes an
     all-skip or zero-collect live_vm_tcg tier RED naming the tier instead of green."""
     spine = _tcg_spine()
-    assert "[1-9][0-9]* passed" in spine
+    assert 'pytest-terminal-summary-has-passes.sh "$tcg_summary"' in spine
     assert "ran ZERO live_vm_tcg proofs" in spine
+
+
+def _proof_guard(spine: str, summary_var: str) -> str:
+    lines = spine.splitlines()
+    call = f'if ! scripts/pytest-terminal-summary-has-passes.sh "${summary_var}"; then'
+    start = next(i for i, line in enumerate(lines) if line.strip() == call)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "fi")
+    return textwrap.dedent("\n".join(lines[start : end + 1]))
+
+
+@pytest.mark.parametrize(
+    ("proof_name", "summary_var"),
+    [
+        ("tcg", "tcg_summary"),
+        ("native", "native_summary"),
+        ("systemd", "systemd_summary"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        ("SKIPPED [1] test.py: previous run had 1 passed\n4 skipped in 0.01s\n", False),
+        ("1 passed in 0.01s\n", True),
+    ],
+)
+def test_workflow_proof_guards_execute_the_shared_predicate(
+    tmp_path: pathlib.Path,
+    proof_name: str,
+    summary_var: str,
+    stream: str,
+    expected: bool,
+) -> None:
+    summary = tmp_path / f"{proof_name}.summary"
+    summary.write_text(stream, encoding="utf-8")
+    if proof_name == "tcg":
+        proof = _tcg_spine()
+    elif proof_name == "native":
+        proof = _native_spine()
+    else:
+        _, step = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+        proof = step["run"]
+    shell = f'{summary_var}="$1"\nrc=0\n{_proof_guard(proof, summary_var)}\n'
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c", shell, "proof-guard", str(summary)],
+        cwd=_ROOT,
+        check=False,
+    )
+    assert (result.returncode == 0) is expected
+
+
+def test_native_spine_fails_loud_on_a_zero_proof_tier() -> None:
+    """The same gate on the native tier, which shipped without one (#2540).
+
+    `pytest -m "live_vm and not live_vm_tcg"` exits 0 when every proof skips and 5 when none is
+    collected, so neither code separates "the tier passed" from "the tier never ran". ADR-0389
+    exists to kill exactly that green: the native family is its decision point 2.
+
+    Pin the *whole* guard, not just fragments of it. A deleted guard is the obvious regression;
+    the likelier one is a guard still present but defanged — `if !` dropped to `if`, or `exit 1`
+    softened to `exit 0` — either of which leaves every individual substring in place while
+    inverting what the gate does. Matching the block as one string catches both.
+    """
+    spine = " ".join(_native_spine().split())
+    guard = (
+        'if ! scripts/pytest-terminal-summary-has-passes.sh "$native_summary"; then '
+        'echo "native live_vm spine: ran ZERO native live_vm proofs '
+        "(no '<N> passed' summary, pytest rc=$rc); "
+        'a skipped tier must never read green" >&2 '
+        "exit 1 "
+        "fi"
+    )
+    assert guard in spine, "the native spine's zero-proof gate is missing, inverted, or defanged"
+
+
+def test_native_spine_captures_the_summary_it_greps_under_pipefail() -> None:
+    """The gate reads a `tee`-captured summary, and the capture must not eat pytest's status.
+
+    Without `pipefail` the pipeline would report `tee`'s exit code, so a genuinely failing proof
+    run would satisfy the `<N> passed` gate on its partial summary and then exit 0 — trading one
+    silent green for another. `pipefail` itself is pinned by
+    `test_native_spine_is_executed_from_a_materialized_file`, which asserts the
+    `bin/bash -e -u -o pipefail` exec line; what this pins is the capture-and-propagate shape
+    that depends on it, including the `|| rc=$?` that keeps pytest's status alive under `-e`.
+    """
+    # Join the shell line continuation before normalizing, or the trailing `\` survives as its
+    # own token and the pipeline reads as `... "$native_summary" \ || rc=$?`.
+    spine = " ".join(_native_spine().replace("\\\n", " ").split())
+    assert '-m "live_vm and not live_vm_tcg" -q | tee "$native_summary" || rc=$?' in spine
+    assert 'exit "$rc"' in spine
 
 
 # --- spine stdin hygiene: materialize the script, never share bash's stdin (#2054) -----------

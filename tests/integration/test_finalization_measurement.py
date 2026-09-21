@@ -52,6 +52,7 @@ from tests.integration.live_stack.measurement import (
 )
 from tests.integration.live_stack.spine import (
     accepted_run_upload_names,
+    build_profile,
     mint_role_token,
     ok,
     put_presigned,
@@ -182,7 +183,7 @@ def test_external_build_finalization_is_measured(arch: str, tmp_path: Path) -> N
                     "runs.create",
                     **{
                         "investigation_id": investigation_id,
-                        "build_profile": {"schema_version": 1, "arch": arch},
+                        "build_profile": build_profile(arch=arch),
                         "target_kind": "local-libvirt",
                     },
                 ),

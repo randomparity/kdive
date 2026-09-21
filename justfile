@@ -89,9 +89,9 @@ install-ansible-collections:
         --requirements-file deploy/ansible/requirements-ci.lock.yml \
         --collections-path ~/.ansible/collections --no-deps --no-cache
 
-# Install the git pre-commit hooks and run them across the tree once.
+# Install commit and push hooks; run only the commit stage across the tree once.
 install-hooks:
-    prek install
+    prek install --hook-type pre-commit --hook-type pre-push
     prek run -a
 
 # Lint and check formatting (read-only; mirrors CI).
@@ -267,23 +267,55 @@ test-changed:
 # agent-index.md golden path over the served surface and fails on any stall. Non-PR-gate like
 # the live tiers and NOT in `ci` — the harness for the deferred nightly live-LLM agent. It is
 # infra-free (built app over a closed pool + dummy KDIVE_S3_* test env), so it needs no stack.
-# --strict-markers fails a mis-marked test; exit 5 ("no tests collected") is tolerated as a
-# clean skip, other codes propagate.
+# --strict-markers fails a mis-marked test. Exit 5 ("no tests collected") is a FAILURE here, not
+# a clean skip (#2540): the tier has carried marked tests since ADR-0411, so the tolerance's
+# original "marked suite absent" justification no longer holds, and what it now covers is a run
+# that silently stopped selecting them — the same silent green ADR-0389 kills for the live tiers,
+# in a sibling recipe. (An import failure is a collection ERROR, exit 2, which never reached this
+# branch; markers dropped or a carrier moved out of rootdir is what actually yields 5.)
 test-agent-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
     rc=0
     uv run python -m pytest -m agent_smoke --strict-markers -q || rc=$?
     if [[ "$rc" -eq 5 ]]; then
-      echo "no agent_smoke tests collected — skipping cleanly (marked suite absent)"
-      exit 0
+      echo "just test-agent-smoke: pytest collected no agent_smoke test, so this run proved" >&2
+      echo "nothing and is not a pass. Exit 5 means every test was deselected and none was" >&2
+      echo "left to run: either the tier's markers were dropped, or its carrier moved out of" >&2
+      echo "pytest's rootdir. A carrier that fails to IMPORT is a collection error (exit 2)." >&2
+      exit 1
     fi
     exit "$rc"
 
+# Needs a KVM/libvirt host with a kdump-enabled guest. The marker selects all three native
+# families, so preflight declares all three: an unsatisfied contract is RED here, matching the
+# native spine in `.github/workflows/live.yml` rather than skipping through to a green exit.
+#
+# A run that proved nothing is RED here, never green (#2540). pytest exits 0 when every proof
+# skips and 5 when none is collected, so neither code distinguishes "the tier passed" from "the
+# tier never ran" — the silent green ADR-0389 exists to kill. Gate on the same '<N> passed'
+# summary the hosted spine greps, which #2048 closed for the tcg tier and #2517 for its recipe.
+#
 # The emulated foreign-arch tier is `just test-live-tcg`, excluded here so the native run stays fast.
-# Run the native live_vm suite (needs a KVM/libvirt host with a kdump-enabled guest).
+# Run the native live_vm suite (throwaway + provisioned + debug-stepping families).
 test-live:
-    uv run python -m pytest -m "live_vm and not live_vm_tcg" -q
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/live-vm/preflight-env.sh throwaway provisioned debug-stepping
+    summary="$(mktemp)"
+    trap 'rm -f "$summary"' EXIT
+    rc=0
+    # `pipefail` above is load-bearing: without it `| tee` would report tee's status and turn a
+    # genuinely failing proof run into a second silent green.
+    uv run python -m pytest -m "live_vm and not live_vm_tcg" -q | tee "$summary" || rc=$?
+    if ! ./scripts/pytest-terminal-summary-has-passes.sh "$summary"; then
+      echo "just test-live: no '<N> passed' summary from the native live_vm tier (pytest rc=$rc)." >&2
+      echo "A skipped, empty, or wholly failed tier proved nothing and must never read green." >&2
+      echo "Read the SKIPPED reasons above: a proof-level gate outside the native preflight" >&2
+      echo "contract (KDIVE_DATABASE_URL, say) skips every proof while preflight reports success." >&2
+      exit 1
+    fi
+    exit "$rc"
 
 # --strict-markers fails a mis-marked test. Needs the foreign qemu emulator (e.g.
 # qemu-system-ppc64) AND a running stack (`just stack-backends` + fixtures + `just onboard`).
@@ -306,7 +338,7 @@ test-live-tcg:
     # `pipefail` above is load-bearing: without it `| tee` would report tee's status and turn a
     # genuinely failing proof run into a second silent green.
     uv run python -m pytest -m live_vm_tcg --strict-markers -q | tee "$summary" || rc=$?
-    if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$summary"; then
+    if ! ./scripts/pytest-terminal-summary-has-passes.sh "$summary"; then
       echo "just test-live-tcg: no '<N> passed' summary from the live_vm_tcg tier (pytest rc=$rc)." >&2
       echo "A skipped, empty, or wholly failed tier proved nothing and must never read green." >&2
       echo "Read the SKIPPED reasons above: a proof-level gate outside the tcg preflight contract" >&2
@@ -330,14 +362,20 @@ test-live-tcg:
 test-live-remote:
     #!/usr/bin/env bash
     set -euo pipefail
+    summary="$(mktemp)"
+    trap 'rm -f "$summary"' EXIT
     rc=0
-    uv run python -m pytest -m live_vm_remote --strict-markers -q || rc=$?
+    uv run python -m pytest -m live_vm_remote --strict-markers -q | tee "$summary" || rc=$?
     if [[ "$rc" -eq 5 ]]; then
       echo "no live_vm_remote test ran — this recipe proved nothing, so it is not a pass." >&2
       echo "pytest collected nothing. Either no test carries the marker (ADR-0425 shipped the" >&2
       echo "gate ahead of the first remote proof), or a carrier skipped at module level." >&2
       echo "Mark the remote-libvirt proofs and call require_live_vm_remote() INSIDE the test —" >&2
       echo "an absent remote env is then a reported skip, not an empty run (#1627)." >&2
+      exit 1
+    fi
+    if ! ./scripts/pytest-terminal-summary-has-passes.sh "$summary"; then
+      echo "no live_vm_remote test ran — this recipe proved nothing, so it is not a pass." >&2
       exit 1
     fi
     exit "$rc"
@@ -443,8 +481,8 @@ test-compose-volumes:
 
 # Lint and format-check the shell scripts across the repo's listed directories.
 lint-shell:
-    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples deploy/systemd .github/scripts | xargs shellcheck
-    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests examples deploy/systemd .github/scripts
+    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts | xargs shellcheck
+    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts
 
 # Lint and syntax-check the Ansible automation (deploy/ansible).
 lint-ansible:
@@ -700,5 +738,5 @@ chart-version-check:
     fi
     echo "appVersion == pyproject == $pyproject"
 
-# Run the full gate that PR CI runs, reproducible locally.
+# Run the full local gate, including checks beyond the separate PR CI recipe list.
 ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test

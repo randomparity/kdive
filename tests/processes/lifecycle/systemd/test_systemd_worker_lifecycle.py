@@ -6,16 +6,20 @@ import asyncio
 import hashlib
 import os
 import shlex
+import socket
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 import kdive.config as config_registry
 import kdive.processes.lifecycle.systemd.systemd_diagnostics as diagnostics_module
+import kdive.processes.lifecycle.systemd.systemd_worker_lifecycle as lifecycle_module
 import kdive.processes.lifecycle.systemd.systemd_worker_runtime as runtime_module
 import kdive.processes.lifecycle.systemd.systemd_worker_state as state_module
 from kdive.domain.catalog.resources import ResourceKind
@@ -43,6 +47,8 @@ from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     load_slot_redaction_values,
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_state import (
+    SlotInspection,
+    SlotResidue,
     SlotState,
     SlotStore,
     StateConflict,
@@ -54,7 +60,11 @@ from kdive.services.external_boot.routing import (
     AuthorityReservationGeometry,
     authority_reservation_geometry,
 )
-from kdive.worker_lifecycle.authority_store import IncarnationConflict
+from kdive.worker_lifecycle.authority_store import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    IncarnationConflict,
+    LocalWorkerIncarnation,
+)
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
@@ -127,6 +137,27 @@ class FakeStore:
             raise self.load_failure
         return self.state
 
+    def inspect(self) -> SlotInspection:
+        if self.load_failure is not None:
+            return SlotInspection(SlotResidue.STATE_UNREADABLE, None)
+        if self.state is not None:
+            return SlotInspection(SlotResidue.STATE_VALID, self.state)
+        residue = (
+            SlotResidue.STATE_ABSENT
+            if self.environment or self.credential or self.release
+            else SlotResidue.EMPTY
+        )
+        return SlotInspection(residue, None)
+
+    def discard_unrecoverable(self) -> bool:
+        removed = self.inspect().residue is not SlotResidue.EMPTY
+        self.state = None
+        self.load_failure = None
+        self.environment = self.credential = self.release = False
+        if removed:
+            self.events.append("state:discard-unrecoverable")
+        return removed
+
     def persist(self, state: SlotState) -> None:
         if self.persist_failure is not None:
             raise self.persist_failure
@@ -169,6 +200,7 @@ class FakeRuntime:
         self.current: dict[str, UnitObservation | BootObservation] = {}
         self.unmanaged: tuple[UnmanagedWorker, ...] = ()
         self.start_failures: dict[str, Exception] = {}
+        self.stop_failures: dict[str, Exception] = {}
         self.observe_failures: dict[str, Exception] = {}
         self.keep_populated: set[str] = set()
         self.advance_on_start = 0.0
@@ -251,6 +283,8 @@ class FakeRuntime:
         self.stop_budgets.append(deadline.remaining())
         self.stopped.append(unit)
         self.events.append(f"systemd:stop:{unit}")
+        if failure := self.stop_failures.get(unit):
+            raise failure
         if unit not in self.unstoppable:
             self.current.pop(unit, None)
 
@@ -260,8 +294,11 @@ class FakeRuntime:
         self.resets.append(unit)
         self.events.append(f"systemd:reset-failed:{unit}")
         # `systemctl reset-failed` drops a failed unit's ActiveState and InvocationID, leaving
-        # the inactive, empty-identity unit `observe` reports as a BootObservation.
-        self.current.pop(unit, None)
+        # the inactive, empty-identity unit `observe` reports as a BootObservation. It is a
+        # no-op for a successful retained unit.
+        observation = self.current.get(unit)
+        if isinstance(observation, UnitObservation) and observation.active_state == "failed":
+            self.current.pop(unit)
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
         return self.unmanaged
@@ -295,6 +332,11 @@ class FakeAuthority:
         # evidence published for the retained invocation from evidence published for a successor's.
         # PostgreSQL rejects the wrong binding; this records what was actually offered to it.
         self.terminated_bindings: list[tuple[str, str | None, str | None]] = []
+        self.active: dict[str, LocalWorkerIncarnation] = {}
+        self.recovery_queries: list[tuple[str, tuple[LocalWorkerIncarnation, ...]]] = []
+        self.released: list[tuple[LocalWorkerIncarnation, TerminationOutcome]] = []
+        self.fail_release: str | None = None
+        self.recovery_failure: Exception | None = None
 
     async def register(self, state: SlotState, credential_hash: bytes) -> None:
         assert credential_hash == bytes.fromhex(state.credential_hash)
@@ -306,6 +348,7 @@ class FakeAuthority:
         if self.fail_register:
             raise RuntimeError("database unavailable")
         self.registered.add(state.incarnation)
+        self.active[state.incarnation] = _record(state)
 
     async def terminate(self, state: SlotState, outcome: TerminationOutcome) -> None:
         self.events.append(self.terminate_label)
@@ -316,6 +359,39 @@ class FakeAuthority:
         assert state.incarnation in self.registered
         self.terminations.append((state.incarnation, outcome))
         self.terminated_bindings.append((state.incarnation, state.boot_id, state.invocation_id))
+        self.active.pop(state.incarnation, None)
+
+    async def recoverable(self, unit: str) -> tuple[LocalWorkerIncarnation, ...]:
+        if self.recovery_failure is not None:
+            raise self.recovery_failure
+        rows = tuple(
+            row
+            for row in self.active.values()
+            if row.incarnation.startswith(f"local-systemd:{unit}:")
+        )
+        self.recovery_queries.append((unit, rows))
+        return rows
+
+    async def release(self, record: LocalWorkerIncarnation, outcome: TerminationOutcome) -> None:
+        self.events.append(f"database:release:{record.incarnation}")
+        if record.incarnation == self.fail_release:
+            raise EvidenceRejected("database rejected stored binding")
+        assert self.active.pop(record.incarnation) == record
+        self.released.append((record, outcome))
+        self.terminations.append((record.incarnation, outcome))
+        self.terminated_bindings.append(
+            (
+                record.incarnation,
+                record.authority_binding["boot_id"],
+                record.authority_binding["invocation_id"],
+            )
+        )
+
+
+def _record(state: SlotState) -> LocalWorkerIncarnation:
+    return LocalWorkerIncarnation(
+        state.incarnation, "local", state.authority_binding(), CURRENT_WORKER_FENCE_PROTOCOL
+    )
 
 
 def _state(
@@ -355,12 +431,17 @@ def _observation(
     status: int = 0,
 ) -> UnitObservation:
     unit = f"kdive-live-worker@{slot}.service"
+    terminal_failure = membership == "empty" and result != "success"
     return UnitObservation(
         unit=unit,
         boot_id=boot_id,
         invocation_id=invocation_id or f"{slot:x}" * 32,
-        active_state="active" if membership == "populated" else "inactive",
-        sub_state="running" if membership == "populated" else "dead",
+        active_state=(
+            "active" if membership == "populated" else "failed" if terminal_failure else "inactive"
+        ),
+        sub_state=(
+            "running" if membership == "populated" else "failed" if terminal_failure else "dead"
+        ),
         result=result,
         exec_main_status=status,
         control_group=f"/system.slice/{unit}",
@@ -514,6 +595,8 @@ def _fleet(
             )
         if state.phase in {SlotPhase.REGISTERED, SlotPhase.STARTED, SlotPhase.TERMINATED}:
             authority.registered.add(state.incarnation)
+        if state.phase in {SlotPhase.REGISTERED, SlotPhase.STARTED}:
+            authority.active[state.incarnation] = _record(state)
     return stores, runtime, authority, clock, events
 
 
@@ -1039,6 +1122,18 @@ def test_empty_invocation_result_maps_to_terminal_outcome(
     assert stores[0].state is not None and stores[0].state.outcome == outcome
 
 
+def test_status_records_released_success_exit_with_nonzero_status_as_failed() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert stores[0].state is not None and stores[0].state.outcome == "failed"
+
+
 def test_stop_commits_evidence_before_unit_and_state_cleanup() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, events = _fleet(states={1: started})
@@ -1060,6 +1155,19 @@ def test_stop_commits_evidence_before_unit_and_state_cleanup() -> None:
         if operation in {"observe", "signal-terminate", "stop-retained"}
     ]
     assert len({id(deadline) for deadline in stop_path_deadlines}) == 1
+
+
+def test_stop_clears_released_success_exit_with_nonzero_status() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert stores[0].state is None
+    assert runtime.stopped == [started.unit]
 
 
 def test_stop_cleanup_does_not_reset_a_stopped_template_instance() -> None:
@@ -1357,7 +1465,10 @@ def test_diagnostics_reserves_aggregate_acquisition_for_failed_journals() -> Non
     assert not response.ok and response.diagnostics is not None
     assert len(runtime.journal_calls) == 4
     assert sum(byte_limit + 4096 for _, byte_limit, _ in runtime.journal_calls) <= 1_310_720
-    assert response.diagnostics == "[aggregate diagnostics truncated]\n"
+    withheld = "".join(
+        f"[diagnostics withheld for slot {slot}: acquisition_failed]\n" for slot in range(1, 5)
+    )
+    assert response.diagnostics == f"{withheld}[aggregate diagnostics truncated]\n"
 
 
 def test_failed_journal_aggregate_marker_respects_known_forbidden_values() -> None:
@@ -1374,7 +1485,13 @@ def test_failed_journal_aggregate_marker_respects_known_forbidden_values() -> No
 
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
-    assert not response.ok and response.diagnostics == ""
+    # Only the aggregate marker carries the forbidden value, so only it is suppressed; each
+    # withheld slot still names its cause.
+    assert not response.ok
+    assert response.diagnostics == "".join(
+        f"[diagnostics withheld for slot {slot}: acquisition_failed]\n" for slot in range(1, 5)
+    )
+    assert "[aggregate diagnostics truncated]" not in (response.diagnostics or "")
     assert len(runtime.journal_calls) == 4
 
 
@@ -1399,7 +1516,11 @@ def test_diagnostics_withholds_unsafe_source_without_reading_its_journal(
 
     assert not response.ok
     assert response.code == "diagnostics_withheld"
-    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    # The shipped loader funnels every failure into PermissionError, so this is the one producer
+    # of internal_error: it is what keeps the generic arm, and that vocabulary member, reachable.
+    assert response.diagnostics == "[diagnostics withheld for slot 1: internal_error]\n"
+    assert response.slots[0].message == "withheld: internal_error"
+    assert response.slots[0].phase is SlotPhase.STARTED
     assert "sensitive" not in response.model_dump_json()
     assert runtime.public_property_calls == []
     assert runtime.journal_calls == []
@@ -1421,7 +1542,10 @@ def test_diagnostics_withholds_unsafe_state_without_exposing_error_detail(
 
     assert not response.ok
     assert response.code == "diagnostics_withheld"
-    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: state_unreadable]\n"
+    assert response.slots[0].message == "withheld: state_unreadable"
+    # No state was loadable, so the site has no phase to report.
+    assert response.slots[0].phase is None
     assert "credential detail" not in response.model_dump_json()
     assert runtime.journal_calls == []
     assert events == []
@@ -1443,8 +1567,128 @@ def test_diagnostics_withholds_oversized_redaction_value() -> None:
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
     assert not response.ok
-    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: slot_unusable]\n"
+    assert response.slots[0].code == "diagnostics_withheld"
+    assert response.slots[0].message == "withheld: slot_unusable"
     assert runtime.journal_calls == []
+    assert events == []
+
+
+def test_diagnostics_names_acquisition_failed_reason() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    runtime.journal_failure = SystemdUnavailable("journal unavailable")
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("retained-credential",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: acquisition_failed]\n"
+    assert response.slots[0].code == "diagnostics_withheld"
+    assert response.slots[0].message == "withheld: acquisition_failed"
+    assert response.slots[0].phase is SlotPhase.STARTED
+    assert events == []
+
+
+def test_diagnostics_names_peer_redaction_refused_reason() -> None:
+    states = {slot: _state(slot, SlotPhase.STARTED) for slot in (1, 2)}
+    stores, runtime, authority, clock, events = _fleet(states=states)
+    runtime.journal_chunks[states[2].invocation_id or ""] = ("saw ALPHACREDENTIAL",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("ALPHACREDENTIAL",), 2: ("BETACREDENTIAL",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    # Slot 2 renders clean against its own forbidden set and is refused only against the set
+    # slot 1 contributed, which is the one condition this reason separates from the rest.
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.slots[0].code == "ok"
+    assert response.slots[1].code == "diagnostics_withheld"
+    assert response.slots[1].message == "withheld: peer_redaction_refused"
+    assert response.slots[1].phase is SlotPhase.STARTED
+    assert response.diagnostics is not None
+    assert response.diagnostics.endswith(
+        "[diagnostics withheld for slot 2: peer_redaction_refused]\n"
+    )
+    assert "ALPHACREDENTIAL" not in response.model_dump_json()
+    assert events == []
+
+
+def test_diagnostics_names_redaction_refused_when_no_sentinel_survives() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    # Escaping the NUL reintroduces the literal "x00" the redactor just masked, so no sentinel
+    # choice renders the text safely and `_sanitize_diagnostics` refuses. That refusal is a
+    # StateConflict raised inside `_diagnose_slot`'s try, where `acquisition_failures` would
+    # otherwise relabel it as an acquisition failure the operator is told to retry.
+    runtime.journal_chunks[state.invocation_id or ""] = ("saw \x00 here",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("x00",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: redaction_refused]\n"
+    assert response.slots[0].message == "withheld: redaction_refused"
+    assert events == []
+
+
+def test_diagnostics_reason_carries_no_withheld_material() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = ("LEAK-SENTINEL" + "x" * (320 * 1024),)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("truncated",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1: redaction_refused]\n"
+    assert response.slots[0].message == "withheld: redaction_refused"
+    assert "LEAK-SENTINEL" not in response.model_dump_json()
+    assert events == []
+
+
+def test_diagnostics_withheld_marker_respects_known_forbidden_values() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    runtime.journal_failure = SystemdUnavailable("journal unavailable")
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("withheld",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    # The marker itself carries a forbidden value, so it is suppressed whole; the reason still
+    # reaches the operator on the slot result, which is composed only of closed-enum literals.
+    assert not response.ok and response.diagnostics == ""
+    assert response.slots[0].code == "diagnostics_withheld"
+    assert response.slots[0].message == "withheld: acquisition_failed"
     assert events == []
 
 
@@ -1535,8 +1779,18 @@ def test_diagnostics_sanitizes_framework_headers_with_registered_values() -> Non
     assert "payload" in response.diagnostics
 
 
-@pytest.mark.parametrize("secret", ("diagnostics", "truncated"))
-def test_diagnostics_emits_no_fallback_when_truncation_text_collides(secret: str) -> None:
+@pytest.mark.parametrize(
+    ("secret", "expected"),
+    (
+        # The withhold marker itself holds "diagnostics", so it is suppressed whole; it holds no
+        # "truncated", so that parameter emits it. Each side of the suppression rule, stated.
+        ("diagnostics", ""),
+        ("truncated", "[diagnostics withheld for slot 1: redaction_refused]\n"),
+    ),
+)
+def test_diagnostics_emits_no_fallback_when_truncation_text_collides(
+    secret: str, expected: str
+) -> None:
     state = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: state})
     runtime.journal_chunks[state.invocation_id or ""] = ("x" * (320 * 1024),)
@@ -1551,8 +1805,10 @@ def test_diagnostics_emits_no_fallback_when_truncation_text_collides(secret: str
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
     assert not response.ok and response.diagnostics is not None
-    assert response.diagnostics == ""
+    assert response.diagnostics == expected
     assert secret not in response.diagnostics
+    assert "x" not in response.diagnostics
+    assert response.slots[0].message == "withheld: redaction_refused"
 
 
 def test_diagnostics_mask_cannot_reproduce_an_unknown_structural_secret() -> None:
@@ -1794,7 +2050,14 @@ def test_diagnostics_emits_no_fallback_when_aggregate_marker_collides() -> None:
 
     assert not response.ok and response.diagnostics is not None
     assert "aggregate" not in response.model_dump_json()
-    assert len(response.diagnostics.encode()) == 3 * 256 * 1024
+    # Slot 4's marker names redaction_refused and holds no "aggregate", so it is emitted where
+    # the aggregate-truncation marker it replaces was suppressed.
+    marker = b"[diagnostics withheld for slot 4: redaction_refused]\n"
+    assert response.diagnostics.endswith(marker.decode())
+    assert response.slots[3].message == "withheld: redaction_refused"
+    # Exact, not a bound: LifecycleResponse already rejects anything over 1 MiB, so a <= assertion
+    # here could not fail, and an under-emitting regression would pass it silently.
+    assert len(response.diagnostics.encode()) == 3 * 256 * 1024 + len(marker)
 
 
 class _DiagnosticPropertyRunner:
@@ -2044,7 +2307,7 @@ def test_recover_retires_a_restarted_slot_and_clears_its_failed_unit_identity() 
     assert started.unit not in runtime.current
     assert events[-3:] == [
         "systemd:stop:kdive-live-worker@1.service",
-        "state:cleanup",
+        "state:discard-unrecoverable",
         "systemd:reset-failed:kdive-live-worker@1.service",
     ]
     assert [(result.slot, result.phase, result.code) for result in response.slots] == [
@@ -2067,7 +2330,7 @@ def test_recover_clears_a_failed_unit_whose_slot_facts_stop_already_removed() ->
     assert runtime.resets == [unit]
     assert unit not in runtime.current
     assert authority.terminations == []
-    assert events == [f"systemd:reset-failed:{unit}"]
+    assert events == [f"systemd:stop:{unit}", f"systemd:reset-failed:{unit}"]
     assert [(result.slot, result.phase, result.message) for result in response.slots] == [
         (1, None, "cleared the retained unit identity")
     ]
@@ -2129,6 +2392,7 @@ def test_recover_discards_a_prepared_slot_without_publishing_evidence() -> None:
     assert stores[0].state is None
     assert authority.registered == set() and authority.terminations == []
     assert events == [
+        "systemd:stop:kdive-live-worker@1.service",
         "state:discard-prepared",
         "systemd:reset-failed:kdive-live-worker@1.service",
     ]
@@ -2184,17 +2448,18 @@ def test_recover_refuses_a_slot_whose_invocation_identity_is_unreadable() -> Non
     response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
 
     assert not response.ok
-    assert response.code == "dependency_unavailable"
+    assert response.code == "conflict"
+    assert response.slots[0].code == "recovery_refused_unreadable_identity"
     assert stores[0].state == started
     assert authority.terminations == [] and runtime.resets == []
 
 
 def test_recover_reports_a_rejected_binding_without_clearing_the_slot() -> None:
-    """A binding the row no longer matches is #2533's residual; recover must not paper over it."""
+    """The exact stored-binding write must still accept the evidence before files clear."""
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
     runtime.current[started.unit] = _observation(1, "empty", invocation_id="f" * 32)
-    authority.reject_termination = True
+    authority.fail_release = started.incarnation
 
     response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
 
@@ -2227,6 +2492,32 @@ def test_recover_publishes_the_outcome_the_retained_invocation_itself_reports() 
     ]
     assert stores[0].state is None
     assert runtime.resets == [started.unit]
+
+
+def test_recover_clears_released_success_exit_with_nonzero_status() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "empty", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert authority.terminations == [(started.incarnation, "failed")]
+    assert stores[0].state is None
+    assert runtime.stopped == [started.unit]
+
+
+def test_recover_refuses_populated_success_exit_with_nonzero_status() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _observation(1, "populated", result="success", status=15)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == "conflict" and response.retry_action == "operator_recovery"
+    assert stores[0].state == started
+    assert authority.terminations == [] and runtime.stopped == []
 
 
 def test_recover_reports_slots_it_already_retired_when_a_later_slot_fails() -> None:
@@ -2288,3 +2579,440 @@ def test_recover_keeps_a_refusal_visible_when_a_later_slot_fails() -> None:
         (2, "dependency_unavailable"),
     ]
     assert stores[0].state == live and authority.terminations == []
+
+
+def _residual_fleet(case: int):
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    if case in {1, 2}:
+        stores[0].state = None
+    if case == 2:
+        stores[0].load_failure = StateConflict("slot state is malformed")
+    if case == 3:
+        row = authority.active[state.incarnation]
+        authority.active[state.incarnation] = replace(
+            row, authority_binding={**row.authority_binding, "invocation_id": "f" * 32}
+        )
+    if case == 4:
+        authority.reject_termination = True
+    runtime.current[state.unit] = _boot_observation(1) if case == 5 else _observation(1, "empty")
+    return stores, runtime, authority, clock, events
+
+
+def _assert_residual_cleared(case: int) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(case)
+    expected = next(iter(authority.active.values()))
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert not authority.active
+    assert authority.released == [(expected, "killed" if case == 3 else "succeeded")]
+    assert stores[0].state is None and stores[0].load_failure is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert (
+        events.index(f"database:release:{expected.incarnation}")
+        < events.index(f"systemd:stop:{stores[0].unit}")
+        < events.index("state:discard-unrecoverable")
+    )
+    assert runtime.stopped == [stores[0].unit] and runtime.resets == []
+
+
+def test_recover_case_1_absent_state_releases_the_stored_row() -> None:
+    _assert_residual_cleared(1)
+
+
+def test_recover_case_2_malformed_state_releases_the_stored_row() -> None:
+    _assert_residual_cleared(2)
+
+
+def test_recover_case_3_drifted_binding_releases_with_its_stored_identity() -> None:
+    _assert_residual_cleared(3)
+
+
+def test_recover_case_4_ordinary_evidence_rejection_uses_the_stored_binding() -> None:
+    stores, runtime, authority, clock, _ = _residual_fleet(4)
+    coordinator = _coordinator(stores, runtime, authority, clock)
+    assert _run(coordinator.stop(_deadline(clock))).code == "evidence_rejected"
+    assert stores[0].state is not None and authority.active
+
+    response = _run(coordinator.recover(_deadline(clock)))
+
+    assert response.ok and len(authority.released) == 1
+    assert not authority.active and stores[0].state is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+
+
+@pytest.mark.parametrize("residue", ["valid", "absent", "malformed"])
+def test_recover_case_5_same_boot_absence_refuses_without_writes(residue: str) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(5)
+    if residue != "valid":
+        stores[0].state = None
+    if residue == "malformed":
+        stores[0].load_failure = StateConflict("slot state is malformed")
+    before = stores[0].inspect()
+    rows = dict(authority.active)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "conflict" and response.retry_action == "operator_recovery"
+    assert response.slots[0].code == "recovery_refused_unreadable_identity"
+    assert stores[0].inspect() == before
+    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert authority.active == rows and not authority.released
+    assert events == [] and runtime.resets == []
+
+
+@pytest.mark.parametrize("case", range(1, 6))
+@pytest.mark.parametrize("membership", ["populated", "unknown"])
+def test_recover_residual_liveness_guards_preserve_all_facts(
+    case: int, membership: CgroupMembership
+) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(case)
+    runtime.current[stores[0].unit] = _observation(1, membership)
+    before = stores[0].inspect()
+    rows = dict(authority.active)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == ("conflict" if membership == "populated" else "dependency_unavailable")
+    assert stores[0].inspect() == before
+    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert authority.active == rows and not authority.released
+    assert not any(unit == stores[0].unit for unit, _ in authority.recovery_queries)
+    assert events == [] and runtime.resets == []
+
+
+@pytest.mark.parametrize("case", range(1, 6))
+def test_recover_unmanaged_worker_refuses_the_whole_residual_sweep(case: int) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(case)
+    runtime.unmanaged = (UnmanagedWorker(pid=321, uid=1000),)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "conflict" and response.retry_action == "operator_recovery"
+    assert authority.active and not authority.recovery_queries
+    assert events == [] and runtime.resets == []
+    assert stores[0].environment and stores[0].credential and stores[0].release
+
+
+@pytest.mark.parametrize("case", [1, 2, 3, 4])
+def test_recover_classifies_all_local_rows_before_any_release(case: int) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(case)
+    first = next(iter(authority.active.values()))
+    first = replace(first, authority_binding={**first.authority_binding, "boot_id": _NEXT_BOOT_ID})
+    second = _record(_state(1, SlotPhase.STARTED, generation="2" * 32))
+    authority.active = {row.incarnation: row for row in (first, second)}
+    runtime.current[stores[0].unit] = _boot_observation(1)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "conflict"
+    assert response.slots[0].code == "recovery_refused_unreadable_identity"
+    assert tuple(authority.active.values()) == (first, second)
+    assert events == [] and not authority.released
+    assert stores[0].environment and stores[0].credential and stores[0].release
+
+
+@pytest.mark.parametrize("phase", list(SlotPhase))
+def test_recover_valid_state_cannot_bypass_an_unclassifiable_older_sibling(
+    phase: SlotPhase,
+) -> None:
+    state = _state(
+        1, phase, boot_id=_NEXT_BOOT_ID, outcome="killed" if phase is SlotPhase.TERMINATED else None
+    )
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    older = _record(_state(1, SlotPhase.STARTED, generation="0" * 32))
+    authority.active[older.incarnation] = older
+    runtime.current[state.unit] = _boot_observation(1)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "conflict"
+    assert response.slots[0].code == "recovery_refused_unreadable_identity"
+    assert stores[0].state == state and stores[0].environment and stores[0].credential
+    assert older.incarnation in authority.active and not authority.released
+    assert events == [] and runtime.resets == []
+
+
+@pytest.mark.parametrize("phase", [SlotPhase.PREPARED, SlotPhase.TERMINATED])
+def test_recover_prepared_or_terminated_state_releases_older_sibling_first(
+    phase: SlotPhase,
+) -> None:
+    state = _state(1, phase, outcome="killed" if phase is SlotPhase.TERMINATED else None)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    older = _record(_state(1, SlotPhase.STARTED, generation="0" * 32, boot_id=_NEXT_BOOT_ID))
+    authority.active[older.incarnation] = older
+    runtime.current[state.unit] = _boot_observation(1)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok and authority.released == [(older, "killed")]
+    assert stores[0].state is None
+    assert events[0] == f"database:release:{older.incarnation}"
+
+
+@pytest.mark.parametrize("with_local", [False, True])
+def test_recover_preserves_foreign_host_rows(with_local: bool) -> None:
+    stores, runtime, authority, clock, _ = _residual_fleet(1)
+    local = next(iter(authority.active.values()))
+    foreign = _record(_state(1, SlotPhase.STARTED, generation="2" * 32))
+    foreign = replace(
+        foreign,
+        authority_binding={**foreign.authority_binding, "host": f"foreign-{socket.gethostname()}"},
+    )
+    authority.active = {foreign.incarnation: foreign}
+    if with_local:
+        authority.active[local.incarnation] = local
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert authority.active == {foreign.incarnation: foreign}
+    assert authority.released == ([(local, "succeeded")] if with_local else [])
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+
+
+def test_recover_incoherent_local_row_refuses_before_releasing_a_coherent_row() -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(1)
+    incoherent = _record(_state(1, SlotPhase.STARTED, generation="2" * 32))
+    incoherent = replace(
+        incoherent, authority_binding={**incoherent.authority_binding, "unit": stores[1].unit}
+    )
+    authority.active[incoherent.incarnation] = incoherent
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "conflict"
+    assert response.slots[0].code == "recovery_refused_incoherent_row"
+    assert len(authority.active) == 2 and not authority.released
+    assert events == [] and stores[0].environment and stores[0].credential and stores[0].release
+
+
+@pytest.mark.parametrize("case", [1, 2, 3, 4])
+def test_recover_second_release_failure_retains_files_and_retry_queries_remainder(
+    case: int,
+) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(case)
+    first = next(iter(authority.active.values()))
+    second = _record(_state(1, SlotPhase.STARTED, generation="2" * 32, boot_id=_NEXT_BOOT_ID))
+    authority.active[second.incarnation] = second
+    authority.fail_release = second.incarnation
+    before = stores[0].inspect()
+    coordinator = _coordinator(stores, runtime, authority, clock)
+
+    failed = _run(coordinator.recover(_deadline(clock)))
+
+    assert failed.code == "evidence_rejected"
+    assert authority.active == {second.incarnation: second}
+    assert stores[0].inspect() == before
+    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert runtime.resets == [] and "state:discard-unrecoverable" not in events
+    authority.fail_release = None
+
+    retried = _run(coordinator.recover(_deadline(clock)))
+
+    assert retried.ok and not authority.active
+    assert [rows for unit, rows in authority.recovery_queries if unit == stores[0].unit] == [
+        (first, second),
+        (second,),
+    ]
+    assert [row for row, _ in authority.released] == [first, second]
+    assert stores[0].state is None and stores[0].load_failure is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert events.index("state:discard-unrecoverable") > events.index(
+        f"database:release:{second.incarnation}"
+    )
+
+
+@pytest.mark.parametrize("case", [1, 2])
+def test_recover_no_active_rows_clears_raw_residue_without_evidence(case: int) -> None:
+    stores, runtime, authority, clock, _ = _residual_fleet(case)
+    authority.active.clear()
+    runtime.current[stores[0].unit] = _boot_observation(1)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok and len(response.slots) == 1
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert stores[0].load_failure is None and not authority.released and not runtime.resets
+
+
+@pytest.mark.parametrize("residue", ["valid", "raw"])
+def test_recover_stops_successfully_exited_retained_units_before_starting_again(
+    residue: str,
+) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(1)
+    unit = stores[0].unit
+    if residue == "raw":
+        stores[0].state = None
+        authority.active.clear()
+    runtime.current[unit] = replace(
+        _observation(1, "empty", result="success", status=0),
+        active_state="active",
+        sub_state="exited",
+    )
+
+    recovered = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+    started = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
+    )
+
+    assert recovered.ok and started.ok
+    assert runtime.stopped == [unit] and unit in runtime.current
+    assert events.index(f"systemd:stop:{unit}") < events.index("state:discard-unrecoverable")
+    if residue == "valid":
+        row = next(iter(authority.released))[0]
+        assert events.index(f"database:release:{row.incarnation}") < events.index(
+            f"systemd:stop:{unit}"
+        )
+
+
+def test_recover_stop_failure_retains_slot_files_after_releasing_proven_dead_fence() -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(1)
+    unit = stores[0].unit
+    runtime.current[unit] = replace(
+        _observation(1, "empty", result="success", status=0),
+        active_state="active",
+        sub_state="exited",
+    )
+    runtime.stop_failures[unit] = SystemdUnavailable("systemd unavailable")
+    before = stores[0].inspect()
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "dependency_unavailable"
+    assert len(authority.released) == 1
+    assert stores[0].inspect() == before
+    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert events == [
+        f"database:release:{authority.released[0][0].incarnation}",
+        f"systemd:stop:{unit}",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("result", "status", "expected"),
+    [
+        ("success", 0, "succeeded"),
+        ("success", 1, "failed"),
+        ("exit-code", 1, "failed"),
+        ("signal", 9, "killed"),
+        ("core-dump", 11, "killed"),
+        ("timeout", 1, "killed"),
+        ("watchdog", 1, "killed"),
+        ("oom-kill", 9, "killed"),
+    ],
+)
+@pytest.mark.parametrize("identity", ["same", "successor", "reboot"])
+def test_recover_outcome_uses_only_the_stored_rows_identity(
+    result: str, status: int, expected: TerminationOutcome, identity: str
+) -> None:
+    stores, runtime, authority, clock, _ = _residual_fleet(2)
+    row = next(iter(authority.active.values()))
+    runtime.current[stores[0].unit] = _observation(
+        1,
+        "empty",
+        result=result,
+        status=status,
+        invocation_id="f" * 32 if identity == "successor" else None,
+        boot_id=_NEXT_BOOT_ID if identity == "reboot" else _BOOT_ID,
+    )
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok
+    assert authority.released == [(row, expected if identity == "same" else "killed")]
+
+
+@pytest.mark.parametrize(
+    "code", ["recovery_refused_unreadable_identity", "recovery_refused_incoherent_row"]
+)
+def test_recover_keeps_each_residual_refusal_when_a_later_slot_fails(code: str) -> None:
+    stores, runtime, authority, clock, _ = _residual_fleet(5)
+    if code == "recovery_refused_incoherent_row":
+        row = next(iter(authority.active.values()))
+        authority.active[row.incarnation] = replace(
+            row, authority_binding={**row.authority_binding, "unit": stores[2].unit}
+        )
+    stores[1].state = _state(2, SlotPhase.STARTED)
+    runtime.observe_failures[stores[1].unit] = SystemdUnavailable("systemd unavailable")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "dependency_unavailable"
+    assert [(result.slot, result.code) for result in response.slots] == [
+        (1, code),
+        (2, "dependency_unavailable"),
+    ]
+    assert not authority.released and stores[0].environment
+
+
+def test_recover_releases_all_rows_before_clearing_slot_files() -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(1)
+    first = next(iter(authority.active.values()))
+    second = _record(_state(1, SlotPhase.STARTED, generation="2" * 32, boot_id=_NEXT_BOOT_ID))
+    authority.active[second.incarnation] = second
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.ok and authority.released == [(first, "succeeded"), (second, "killed")]
+    assert events == [
+        f"database:release:{first.incarnation}",
+        f"database:release:{second.incarnation}",
+        f"systemd:stop:{stores[0].unit}",
+        "state:discard-unrecoverable",
+    ]
+
+
+@pytest.mark.parametrize("case", [1, 2, 3, 4])
+def test_recover_failed_row_query_preserves_all_slot_files(case: int) -> None:
+    stores, runtime, authority, clock, events = _residual_fleet(case)
+    authority.recovery_failure = RuntimeError("database unavailable")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).recover(_deadline(clock)))
+
+    assert response.code == "dependency_unavailable" and response.retry_action == "restore_database"
+    assert stores[0].environment and stores[0].credential and stores[0].release
+    assert not authority.released and events == []
+
+
+def test_postgres_recovery_adapter_reads_the_bounded_row_accessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _record(_state(1, SlotPhase.STARTED))
+    pool = MagicMock(spec=AsyncConnectionPool)
+    connection = pool.connection.return_value.__aenter__.return_value
+    query = AsyncMock(return_value=(row,))
+    monkeypatch.setattr(lifecycle_module, "recoverable_worker_incarnations", query, raising=False)
+    authority = lifecycle_module.PostgresAuthority(pool)
+    assert hasattr(authority, "recoverable")
+
+    assert asyncio.run(authority.recoverable(row.authority_binding["unit"])) == (row,)
+    query.assert_awaited_once_with(connection, row.authority_binding["unit"])
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_postgres_recovery_adapter_releases_the_unchanged_stored_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    accepted: bool,
+) -> None:
+    row = _record(_state(1, SlotPhase.STARTED))
+    pool = MagicMock(spec=AsyncConnectionPool)
+    connection = pool.connection.return_value.__aenter__.return_value
+    terminate = AsyncMock(return_value=accepted)
+    monkeypatch.setattr(lifecycle_module, "terminate_worker_incarnation", terminate)
+    authority = lifecycle_module.PostgresAuthority(pool)
+    assert hasattr(authority, "release")
+
+    if accepted:
+        asyncio.run(authority.release(row, "killed"))
+    else:
+        with pytest.raises(EvidenceRejected):
+            asyncio.run(authority.release(row, "killed"))
+
+    terminate.assert_awaited_once_with(
+        connection, row.incarnation, "local", row.authority_binding, "killed"
+    )
+    assert terminate.await_args is not None
+    assert terminate.await_args.args[3] is row.authority_binding

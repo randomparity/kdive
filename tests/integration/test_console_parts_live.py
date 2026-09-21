@@ -12,9 +12,9 @@ sweep. Specifically:
 
 1. ``artifacts.list(system_id)`` grows new ``console-part-*`` rows after the Run is terminal
    and a post-readiness workload keeps writing to the serial console.
-2. ``artifacts.get`` on the newest console-part inflates the gzip to plaintext containing the
-   unique post-readiness proof marker written over loopback SSH (local-libvirt domains carry no
-   qemu guest-agent channel) AFTER the boot step completed and captured the frozen evidence.
+2. ``artifacts.get`` inflates new console parts until one contains the unique post-readiness proof
+   marker written over loopback SSH (local-libvirt domains carry no qemu guest-agent channel)
+   AFTER the boot step completed and captured the frozen evidence.
 3. ``artifacts.get`` on the frozen per-Run ``console-<run>`` evidence (``runs.get``
    ``refs["console"]``) does NOT contain that marker — proving it was captured before the
    workload and cannot have drifted post-hoc.
@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
-import time
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -37,7 +36,6 @@ import psycopg
 import pytest
 
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
-from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.libvirt_xml import recorded_ssh_port
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -48,13 +46,16 @@ from kdive.security.secrets.system_bootstrap_key import (
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
-    SpinePhaseError,
     await_system_state,
     build_and_upload_kernel,
+    build_profile,
+    console_part_ids,
     drain_job,
+    full_artifact_text,
     mint_role_token,
     ok,
     phase,
+    poll_for_new_console_part,
     scalar,
     seed_metering,
     worker_libvirt_uri,
@@ -134,16 +135,6 @@ def _provision_profile() -> dict[str, object]:
     }
 
 
-def _build_profile() -> dict[str, object]:
-    """The Run build profile for the x86_64 spine (upload-only lane, ADR-0048).
-
-    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` + the
-    target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
-    (see ``build_and_upload_kernel``), not a server ``kernel_source_ref``/``config`` build.
-    """
-    return {"schema_version": 1, "arch": "x86_64"}
-
-
 def _emit_proof_lines(domain: libvirt.virDomain, key_path: Path, proof_marker: str) -> None:
     """Write post-readiness proof lines to the guest kernel console over loopback SSH.
 
@@ -212,87 +203,6 @@ def _emit_proof_lines(domain: libvirt.virDomain, key_path: Path, proof_marker: s
         )
 
 
-def _console_part_ids(listing: ToolResponse) -> list[str]:
-    """Return artifact ids of console-part-* rows from an artifacts.list response, newest-first.
-
-    Args:
-        listing: The ToolResponse from an ``artifacts.list`` call.
-
-    Returns:
-        Artifact ids whose object key contains ``console-part-``, in listing order
-        (newest-first, as guaranteed by the ``ORDER BY created_at DESC`` listing query).
-    """
-    return [
-        item.object_id for item in listing.items if "console-part-" in item.refs.get("object", "")
-    ]
-
-
-async def _poll_for_new_parts(
-    op: LiveStackClient,
-    system_id: str,
-    initial_ids: set[str],
-) -> str:
-    """Poll ``artifacts.list`` until a new console-part-* artifact appears beyond ``initial_ids``.
-
-    Args:
-        op: The live-stack operator client.
-        system_id: The System whose artifacts to poll.
-        initial_ids: The set of console-part artifact ids seen before the workload started.
-
-    Returns:
-        The newest console-part artifact id not in ``initial_ids``.
-
-    Raises:
-        SpinePhaseError: When no new parts appear within ``_PARTS_POLL_DEADLINE_S``.
-    """
-    deadline = time.monotonic() + _PARTS_POLL_DEADLINE_S
-    while True:
-        listing = ok(await scalar(op, "artifacts.list", system_id=system_id), "poll-parts")
-        current_ids = _console_part_ids(listing)
-        new_ids_set = {aid for aid in current_ids if aid not in initial_ids}
-        if new_ids_set:
-            # current_ids is newest-first; return the newest among the new arrivals.
-            return next(aid for aid in current_ids if aid in new_ids_set)
-        if time.monotonic() >= deadline:
-            raise SpinePhaseError(
-                "console-parts",
-                f"no new console-part artifacts within {_PARTS_POLL_DEADLINE_S:g}s "
-                f"(initial={len(initial_ids)}, current={len(current_ids)})",
-            )
-        await asyncio.sleep(_PARTS_POLL_INTERVAL_S)
-
-
-async def _full_text(op: LiveStackClient, artifact_id: str, phase_name: str) -> str:
-    """Fetch the full plaintext content of a redacted artifact, paging through all windows.
-
-    Args:
-        op: The live-stack client to use for tool calls.
-        artifact_id: The UUID of the redacted artifact to fetch.
-        phase_name: The current phase name (for SpinePhaseError labelling).
-
-    Returns:
-        The complete decoded text of the artifact across all paged windows.
-    """
-    chunks: list[str] = []
-    byte_offset = 0
-    while True:
-        env = ok(
-            await scalar(op, "artifacts.get", artifact_id=artifact_id, byte_offset=byte_offset),
-            phase_name,
-        )
-        content = env.data.get("content")
-        if isinstance(content, str) and content:
-            chunks.append(content)
-        truncated = bool(env.data.get("content_truncated", False))
-        if not truncated:
-            break
-        next_offset = env.data.get("next_offset")
-        if next_offset is None:
-            break
-        byte_offset = int(str(next_offset))
-    return "".join(chunks)
-
-
 def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
     """Post-readiness console-part artifacts exist and contain lines absent from frozen evidence.
 
@@ -302,7 +212,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
 
     1. New ``console-part-*`` artifacts appeared after the Run became terminal — proving
        rotation is keyed on System liveness, not Run terminality (#892).
-    2. ``artifacts.get`` on the newest new part's plaintext contains the unique proof marker.
+    2. ``artifacts.get`` on a new part's plaintext contains the unique proof marker.
     3. ``artifacts.get`` on the frozen per-Run ``console-<run>`` evidence does NOT contain
        the proof marker — proving the boot-window snapshot cannot drift post-hoc.
     """
@@ -367,7 +277,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                         **{
                             "investigation_id": investigation_id,
                             "system_id": system_id,
-                            "build_profile": _build_profile(),
+                            "build_profile": build_profile(),
                         },
                     ),
                     "create-run",
@@ -390,7 +300,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     await scalar(op, "artifacts.list", system_id=system_id),
                     "initial-part-snapshot",
                 )
-                initial_part_ids = set(_console_part_ids(initial_listing))
+                initial_part_ids = set(console_part_ids(initial_listing))
 
             # Emit the post-readiness workload over loopback SSH, authenticated with the
             # System's bootstrap private key (ADR-0289, #963) — the same key
@@ -411,15 +321,18 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     libvirt_conn.close()
 
             # Wait for the reconciler's console_rotate sweep to dispatch a worker job and
-            # the worker to seal at least one NEW console-part artifact beyond the initial
-            # set. The periodic reconciler loop is the advance mechanism (the live stack
-            # runs a background reconciler).
+            # the worker to seal a NEW console-part artifact containing the proof marker.
+            # A rotation already in flight can seal an earlier new part first, so row arrival
+            # alone is not the condition. The live stack's periodic reconciler advances it.
             async with phase("wait-for-new-parts"):
-                newest_part_id = await _poll_for_new_parts(op, system_id, initial_part_ids)
-
-            # Fetch the newest new console-part artifact's full plaintext.
-            async with phase("read-newest-part"):
-                part_text = await _full_text(op, newest_part_id, "read-newest-part")
+                marker_part_id, part_text = await poll_for_new_console_part(
+                    op,
+                    system_id,
+                    initial_part_ids,
+                    proof_marker,
+                    deadline_s=_PARTS_POLL_DEADLINE_S,
+                    interval_s=_PARTS_POLL_INTERVAL_S,
+                )
 
             # Fetch the frozen per-Run boot-window console evidence (the ``console-<run>``
             # artifact captured at the time the boot step completed).
@@ -430,12 +343,12 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     "runs.get returned no refs.console for a succeeded run "
                     "(boot evidence absent — #892 bootstrap failure)"
                 )
-                frozen_text = await _full_text(op, str(console_ref), "read-frozen-evidence")
+                frozen_text = await full_artifact_text(op, str(console_ref), "read-frozen-evidence")
 
             # Core #892 assertions.
             assert proof_marker in part_text, (
-                f"proof marker absent from newest console-part artifact "
-                f"(artifact={newest_part_id!r}, marker={proof_marker!r}); "
+                f"proof marker absent from selected console-part artifact "
+                f"(artifact={marker_part_id!r}, marker={proof_marker!r}); "
                 f"part excerpt (first 500 chars): {part_text[:500]!r}"
             )
             assert proof_marker not in frozen_text, (

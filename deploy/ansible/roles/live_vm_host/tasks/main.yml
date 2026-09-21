@@ -37,7 +37,7 @@
 
 - name: Ensure the runner service account exists in kvm and libvirt
   ansible.builtin.user:
-    name: "{{ github_runner_user }}"
+    name: "{{ live_vm_host_operator_user }}"
     system: true
     create_home: true
     shell: /bin/bash
@@ -58,16 +58,36 @@
     state: present
     update_cache: true
 
-- name: Add the runner service account to the docker group
-  ansible.builtin.user:
-    name: "{{ github_runner_user }}"
-    groups: docker
-    append: true
+- name: Enable the container engine and grant the runner account its socket
+  # One owner for this policy (ADR-0663). The runner previously took the group grant here and
+  # relied on dpkg to start the daemon; the reusable file does both. That gates the grant on the
+  # file's unit probe, where it used to be unconditional — the assert below is what holds the
+  # difference.
+  ansible.builtin.import_role:
+    name: local_worker_host
+    tasks_from: container_runtime.yml
+  vars:
+    local_worker_host_operator_user: "{{ live_vm_host_operator_user }}"
+
+- name: Require the runner's container engine to have installed its service unit
+  # The grant above was unconditional before it moved into the reusable file, and is now gated on
+  # that file's unit probe. Here — unlike the standalone role, which must skip cleanly on a
+  # podman-docker host — the apt install of docker.io a few tasks up is unconditional, so the unit
+  # is not optional and a silent skip could only mean the package stopped shipping it.
+  ansible.builtin.assert:
+    that:
+      - local_worker_host_engine_unit.stat.exists
+    fail_msg: >-
+      {{ live_vm_host_docker_packages | join(', ') }} is installed but
+      {{ local_worker_host_engine_unit_path }} is absent, so the runner account was never added to
+      the container-engine socket group and the on-box stack will fail on the socket.
+  tags: [container_runtime]
 
 - name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
   # Ubuntu ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
   # build (ADR-0222, #694/#1156) — probed by check-local-libvirt.sh as a FAIL — needs them
-  # readable by the non-root runner user. Re-apply after a kernel upgrade (see runbook).
+  # readable by the non-root runner user. This converges the kernels present now; the shared hook
+  # imported below keeps every kernel a LATER upgrade installs converged (#2567, ADR-0668).
   ansible.builtin.find:
     paths: /boot
     patterns: ["vmlinuz-*", "vmlinux-*"]
@@ -84,10 +104,18 @@
   loop_control:
     label: "{{ item.path }}"
 
+- name: Import the shared kernel-upgrade relabel hook
+  # The find above is point-in-time, so a kernel installed by a later upgrade keeps 0600 and the
+  # runner silently loses guest-image builds after the next reboot (#2567). The same file
+  # local_worker_host installs, imported rather than copied: one hook, one set of constants.
+  ansible.builtin.import_role:
+    name: local_worker_host
+    tasks_from: boot_kernel_hook.yml
+
 - name: Enable linger so /run/user/<uid> exists with no login session
-  ansible.builtin.command: "loginctl enable-linger {{ github_runner_user }}"
+  ansible.builtin.command: "loginctl enable-linger {{ live_vm_host_operator_user }}"
   args:
-    creates: "/var/lib/systemd/linger/{{ github_runner_user }}"
+    creates: "/var/lib/systemd/linger/{{ live_vm_host_operator_user }}"
 
 - name: Install uv system-wide (the venv builder; not in the debug toolchain)
   # The service account runs `uv sync` below; /opt is root-owned so uv must be on the
@@ -104,8 +132,8 @@
   ansible.builtin.file:
     path: "{{ live_vm_venv }}"
     state: directory
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_user }}"
+    owner: "{{ live_vm_host_operator_user }}"
+    group: "{{ live_vm_host_operator_user }}"
     mode: "0755"
 
 - name: Check out the remote project source for the venv
@@ -114,7 +142,7 @@
     dest: "{{ live_vm_venv }}"
     version: "{{ live_vm_repo_version }}"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   register: live_vm_host_checkout
   when: not live_vm_repo_url.endswith('.bundle')
 
@@ -129,7 +157,7 @@
   args:
     creates: "{{ live_vm_venv }}/.git"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   register: live_vm_host_bundle_clone
   when: live_vm_repo_url.endswith('.bundle')
 
@@ -137,7 +165,7 @@
   # The git module runs ls-remote through file://, which cannot probe a bundle file.
   ansible.builtin.command: "/usr/bin/git -C {{ live_vm_venv }} rev-parse HEAD"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   register: live_vm_host_bundle_revision_before
   changed_when: false
   when: live_vm_repo_url.endswith('.bundle')
@@ -152,7 +180,7 @@
       - --detach
       - "{{ live_vm_repo_version }}"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   register: live_vm_host_bundle_checkout
   changed_when: live_vm_host_bundle_revision_before.stdout != live_vm_repo_version
   when: live_vm_repo_url.endswith('.bundle')
@@ -160,7 +188,7 @@
 - name: Read the exact Git bundle checkout revision  # noqa: command-instead-of-module
   ansible.builtin.command: "/usr/bin/git -C {{ live_vm_venv }} rev-parse HEAD"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   register: live_vm_host_bundle_revision
   changed_when: false
   failed_when: live_vm_host_bundle_revision.stdout != live_vm_repo_version
@@ -182,7 +210,7 @@
   environment:
     KDIVE_BUILDINFO_COMMIT: "{{ live_vm_host_checkout.after[0:12] }}"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   changed_when: live_vm_host_checkout is changed
 
 - name: Build the venv against the SYSTEM interpreter (ABI-match python3-guestfs)  # noqa: no-handler
@@ -191,17 +219,16 @@
   # uv defaults to a managed CPython whose minor version may differ from the distro's
   # python3-guestfs .so; pin to /usr/bin/python3 (Ubuntu 26.04's 3.14) so the symlinked native
   # module ABI-matches.
-  # Run whenever the checkout advanced (main is a moving ref), NOT `creates:`-gated — a creates
-  # guard would freeze the venv's deps at first-provision while the source moved on, so a live
-  # dependency added to main would never reach the venv the worker imports from. On a converged
-  # host (main unchanged) the git task is unchanged, so uv sync is skipped and the run is 0-changed.
+  # Run unconditionally: checkout state cannot reveal a venv left incomplete by an earlier failed
+  # sync. uv reports whether it changed the environment, preserving a 0-changed converged rerun.
   ansible.builtin.command:
     cmd: "{{ live_vm_host_uv_bin }} sync --python /usr/bin/python3 --group live"
     chdir: "{{ live_vm_venv }}"
   become: true
-  become_user: "{{ github_runner_user }}"
-  when: live_vm_host_checkout is changed
-  changed_when: true
+  become_user: "{{ live_vm_host_operator_user }}"
+  register: live_vm_host_project_sync
+  changed_when: >-
+    live_vm_host_project_sync.stderr is search('(?m)^(Installed|Uninstalled|Creating virtual environment) ')
 
 - name: Locate the system libguestfs binding files
   # Debian installs python3-guestfs into the version-agnostic /usr/lib/python3/dist-packages
@@ -235,14 +262,14 @@
   loop_control:
     label: "{{ item.path }}"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
 
 - name: Create the staging directories owned by the service account
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_user }}"
+    owner: "{{ live_vm_host_operator_user }}"
+    group: "{{ live_vm_host_operator_user }}"
     mode: "0755"
   loop: "{{ live_vm_staging_dirs }}"
 
@@ -253,7 +280,7 @@
 
 - name: Add the runner to the live-worker control and libvirt groups
   ansible.builtin.user:
-    name: "{{ github_runner_user }}"
+    name: "{{ live_vm_host_operator_user }}"
     groups:
       - "{{ live_vm_host_worker_control_group }}"
       - "{{ live_vm_host_worker_libvirt_group }}"
@@ -369,7 +396,7 @@
     name: local_worker_host
     tasks_from: worker_install_dirs.yml
   vars:
-    local_worker_host_operator_user: "{{ github_runner_user }}"
+    local_worker_host_operator_user: "{{ live_vm_host_operator_user }}"
 
 - name: Inspect the fixed-worker authority secrets root without following links
   ansible.builtin.stat:
@@ -812,7 +839,7 @@
       ansible.builtin.file:
         path: "{{ live_vm_host_worker_libvirt_runtime + '/libvirt' }}"
         state: directory
-        owner: "{{ github_runner_user }}"
+        owner: "{{ live_vm_host_operator_user }}"
         group: "{{ live_vm_host_worker_libvirt_group }}"
         mode: "0750"
       when:
@@ -828,7 +855,7 @@
       ansible.builtin.file:
         path: "{{ live_vm_host_worker_libvirt_runtime }}"
         state: directory
-        owner: "{{ github_runner_user }}"
+        owner: "{{ live_vm_host_operator_user }}"
         group: "{{ live_vm_host_worker_libvirt_group }}"
         mode: "0750"
       when:
@@ -845,7 +872,7 @@
     name: local_worker_host
     tasks_from: shared_directories.yml
   vars:
-    local_worker_host_operator_user: "{{ github_runner_user }}"
+    local_worker_host_operator_user: "{{ live_vm_host_operator_user }}"
 
 - name: Create owner-only authority runtime roots
   ansible.builtin.file:
@@ -1224,7 +1251,7 @@
             or (
             live_vm_host_worker_libvirtd_pid_file.stat.isreg
             and not live_vm_host_worker_libvirtd_pid_file.stat.islnk
-            and live_vm_host_worker_libvirtd_pid_file.stat.pw_name == github_runner_user
+            and live_vm_host_worker_libvirtd_pid_file.stat.pw_name == live_vm_host_operator_user
             and live_vm_host_worker_libvirtd_pid_file.stat.mode in ['0600', '0644']
             )
           - >-
@@ -1232,7 +1259,7 @@
             or (
             live_vm_host_worker_libvirt_socket_residue.stat.issock
             and not live_vm_host_worker_libvirt_socket_residue.stat.islnk
-            and live_vm_host_worker_libvirt_socket_residue.stat.pw_name == github_runner_user
+            and live_vm_host_worker_libvirt_socket_residue.stat.pw_name == live_vm_host_operator_user
             and live_vm_host_worker_libvirt_socket_residue.stat.gr_name
             == live_vm_host_worker_libvirt_group
             and live_vm_host_worker_libvirt_socket_residue.stat.mode == '0770'
@@ -1404,7 +1431,7 @@
             and live_vm_host_worker_libvirt_residue_refresh.results[0].stat.isreg
             and not live_vm_host_worker_libvirt_residue_refresh.results[0].stat.islnk
             and live_vm_host_worker_libvirt_residue_refresh.results[0].stat.pw_name
-            == github_runner_user
+            == live_vm_host_operator_user
             and live_vm_host_worker_libvirt_residue_refresh.results[0].stat.mode
             in ['0600', '0644']
             )
@@ -1421,7 +1448,7 @@
             and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.issock
             and not live_vm_host_worker_libvirt_residue_refresh.results[1].stat.islnk
             and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.pw_name
-            == github_runner_user
+            == live_vm_host_operator_user
             and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.gr_name
             == live_vm_host_worker_libvirt_group
             and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.mode == '0770'
@@ -1478,7 +1505,7 @@
       ansible.builtin.file:
         path: "{{ item.path }}"
         state: directory
-        owner: "{{ github_runner_user }}"
+        owner: "{{ live_vm_host_operator_user }}"
         group: "{{ live_vm_host_worker_libvirt_group }}"
         mode: "0750"
       loop:
@@ -1496,10 +1523,10 @@
 # units for the runner yet, so the copy below is fatal without it (#2044).
 - name: Ensure the runner's systemd user unit directory exists
   ansible.builtin.file:
-    path: "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user"
+    path: "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user"
     state: directory
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_user }}"
+    owner: "{{ live_vm_host_operator_user }}"
+    group: "{{ live_vm_host_operator_user }}"
     mode: "0700"
 
 - name: Consume the shared private authority libvirt endpoint tasks
@@ -1668,7 +1695,7 @@
 
 - name: Install the boot-persistent session libvirtd user unit
   ansible.builtin.copy:
-    dest: "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
+    dest: "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
     content: |
       [Unit]
       Description=kdive dedicated session libvirt daemon (operator-owned)
@@ -1687,8 +1714,8 @@
 
       [Install]
       WantedBy=default.target
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_user }}"
+    owner: "{{ live_vm_host_operator_user }}"
+    group: "{{ live_vm_host_operator_user }}"
     mode: "0644"
 
 # Linger is enabled at the top of this role, so the runner's user manager runs from boot with no
@@ -1705,7 +1732,7 @@
   environment:
     XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
 
 - name: Start the operator-owned dedicated session libvirtd
   ansible.builtin.systemd_service:
@@ -1715,7 +1742,7 @@
   environment:
     XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   when: live_vm_host_worker_libvirtd_should_start
 
 - name: Enable the live-worker lifecycle control socket

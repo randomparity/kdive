@@ -37,6 +37,7 @@ class KubernetesAuthorityBinding(TypedDict):
 type AuthorityBinding = LocalAuthorityBinding | DockerAuthorityBinding | KubernetesAuthorityBinding
 
 CURRENT_WORKER_FENCE_PROTOCOL = 4
+_MAX_RECOVERABLE_ROWS = 16
 
 
 class IncarnationConflict(RuntimeError):
@@ -207,6 +208,32 @@ async def authenticate_worker_incarnation(
             "worker incarnation credential does not identify an active incarnation"
         )
     return _record(row)
+
+
+async def recoverable_worker_incarnations(
+    conn: AsyncConnection, unit: str
+) -> tuple[LocalWorkerIncarnation, ...]:
+    """Read a fixed slot's active local identities, rejecting the SQL overflow sentinel."""
+    require_top_level_transaction(conn, "recoverable_worker_incarnations")
+    async with conn.transaction():
+        rows = await (
+            await conn.execute(
+                "SELECT incarnation, authority_binding, fence_protocol "
+                "FROM public.recoverable_worker_incarnations(%s)",
+                (unit,),
+            )
+        ).fetchall()
+    if len(rows) > _MAX_RECOVERABLE_ROWS:
+        raise RuntimeError("recoverable worker incarnations exceed the 16-row limit")
+    return tuple(
+        LocalWorkerIncarnation(
+            row[0],
+            "local",
+            cast(LocalAuthorityBinding, _validated_binding("local", row[1])),
+            row[2],
+        )
+        for row in rows
+    )
 
 
 @overload

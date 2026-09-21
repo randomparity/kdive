@@ -1,0 +1,23 @@
+---
+# The install-time half of the /boot relabel, in its own file because two roles need it:
+# local_worker_host's boot_kernels.yml and live_vm_host, which carries its own copy of the
+# point-in-time relabel and so has the same upgrade gap. A duplicated relabel is how that gap came
+# to exist in two places; one shared task file is what keeps the fix from repeating the mistake.
+#
+# Self-guarded on the Debian family rather than relying on the caller's guard, so importing it
+# anywhere is safe: boot_kernels.yml's block already carries the same condition, and live_vm_host
+# reaches this through a bare import_role with no surrounding guard of its own.
+- name: Install the kernel-upgrade hook that re-applies the relabel
+  # A kernel upgrade installs a fresh 0600 file under a new name, which a point-in-time find never
+  # sees (#2567). Debian and Ubuntu run every executable in /etc/kernel/postinst.d/ after
+  # installing a kernel, so the platform's own mechanism re-applies the relabel with no operator
+  # re-run. The hook carries the 0640/kvm constants; see ADR-0668 for why it exits 0 rather than
+  # failing the package install.
+  ansible.builtin.copy:
+    src: kernel-postinst-kvm-readable
+    dest: /etc/kernel/postinst.d/kdive-kvm-readable
+    owner: root
+    group: root
+    mode: "0755"
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [boot_kernels]
