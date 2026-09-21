@@ -13,12 +13,27 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
+HOOK_EQUIVALENT_ENV = "KDIVE_AUTHORITY_INSTALL_HOOK_EQUIVALENT"
 
 
 def run(argv, **kwargs):
     result = subprocess.run(argv, text=True, capture_output=True, check=False, **kwargs)
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout.strip()
+
+
+def foreign_git_env():
+    result = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    env = os.environ.copy()
+    for name in result.stdout.splitlines():
+        env.pop(name, None)
+    return env
 
 
 def installation_play(root):
@@ -67,7 +82,7 @@ def installation_play(root):
     return path
 
 
-def main():
+def run_fixture(env):
     with tempfile.TemporaryDirectory(prefix="kdive-authority-install-") as scratch:
         root = Path(scratch)
         source = root / "source"
@@ -82,12 +97,15 @@ def main():
             'version = "0.0.0"\nrequires-python = ">=3.14"\n'
         )
         (package / "__init__.py").write_text('REVISION = "first"\n')
-        env = os.environ | {"UV_PYTHON_DOWNLOADS": "never", "UV_LINK_MODE": "copy"}
+        env = env | {"UV_PYTHON_DOWNLOADS": "never", "UV_LINK_MODE": "copy"}
         run(["uv", "lock", "--project", str(source), "--python", sys.executable], env=env)
-        run(["git", "init", "--quiet", str(source)])
+        run(["git", "init", "--quiet", str(source)], env=env)
 
         def commit():
-            run(["git", "-C", str(source), "add", "pyproject.toml", "uv.lock", "src"])
+            assert run(["git", "-C", str(source), "rev-parse", "--show-toplevel"], env=env) == str(
+                source
+            )
+            run(["git", "-C", str(source), "add", "pyproject.toml", "uv.lock", "src"], env=env)
             run(
                 [
                     "git",
@@ -103,9 +121,10 @@ def main():
                     "--quiet",
                     "-m",
                     "test: stage source revision",
-                ]
+                ],
+                env=env,
             )
-            return run(["git", "-C", str(source), "rev-parse", "HEAD"])
+            return run(["git", "-C", str(source), "rev-parse", "HEAD"], env=env)
 
         playbook = installation_play(root)
         variables = {
@@ -139,7 +158,8 @@ def main():
                     "-I",
                     "-c",
                     "import kdive; print(kdive.REVISION)",
-                ]
+                ],
+                env=env,
             )
             assert installed == expected, f"installed {installed!r}, expected {expected!r}"
             assert (root / "install/revision").read_text().strip() == revision
@@ -164,7 +184,8 @@ def main():
                     "-I",
                     "-c",
                     "import kdive; print(kdive.__file__)",
-                ]
+                ],
+                env=env,
             )
         )
         installed.write_text('REVISION = "corrupt"\n')
@@ -177,6 +198,57 @@ def main():
             "authority_install: same-path source-only upgrade, exact bytes, restart, "
             "idempotence and failed proof passed"
         )
+
+
+def main():
+    env = foreign_git_env()
+    if os.environ.get(HOOK_EQUIVALENT_ENV) == "1":
+        run_fixture(env)
+        return
+
+    with tempfile.TemporaryDirectory(prefix="kdive-authority-install-caller-") as scratch:
+        caller = Path(scratch) / "caller"
+        caller.mkdir()
+        run(["git", "init", "--quiet", str(caller)], env=env)
+        (caller / "caller.txt").write_text("caller\n")
+        run(["git", "-C", str(caller), "add", "caller.txt"], env=env)
+        run(
+            [
+                "git",
+                "-C",
+                str(caller),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "test: create hook caller",
+            ],
+            env=env,
+        )
+        config = caller / ".git/config"
+        config_before = config.read_bytes()
+        head_before = run(["git", "-C", str(caller), "rev-parse", "HEAD"], env=env)
+        hook_env = env | {
+            "GIT_DIR": str(caller / ".git"),
+            "GIT_WORK_TREE": str(caller),
+            "GIT_INDEX_FILE": str(caller / ".git/index"),
+            HOOK_EQUIVALENT_ENV: "1",
+        }
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve())],
+            cwd=ROOT,
+            env=hook_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert config.read_bytes() == config_before
+        assert run(["git", "-C", str(caller), "rev-parse", "HEAD"], env=env) == head_before
+        assert run(["git", "-C", str(caller), "status", "--porcelain"], env=env) == ""
 
 
 if __name__ == "__main__":
