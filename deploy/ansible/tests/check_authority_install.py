@@ -13,7 +13,7 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-HOOK_EQUIVALENT_ENV = "KDIVE_AUTHORITY_INSTALL_HOOK_EQUIVALENT"
+HOOK_EQUIVALENT_ENV = "AUTHORITY_INSTALL_HOOK_EQUIVALENT"
 
 
 def run(argv, **kwargs):
