@@ -4,11 +4,11 @@
 - name: Look up the service account's passwd entry
   ansible.builtin.getent:
     database: passwd
-    key: "{{ github_runner_user }}"
+    key: "{{ live_vm_host_operator_user }}"
 
 - name: Record the service-account uid
   ansible.builtin.set_fact:
-    live_vm_host_uid: "{{ ansible_facts.getent_passwd[github_runner_user][1] }}"
+    live_vm_host_uid: "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][1] }}"
 
 # Part 1: check-local-libvirt.sh (KVM / daemons / venv-import / network / install-staging
 # writability / /boot readability), run AS the service account after a connection reset so the
@@ -24,20 +24,20 @@
     KDIVE_PYTHON: "{{ live_vm_venv }}/.venv/bin/python"
     KDIVE_INSTALL_STAGING: "{{ install_staging_dir }}"
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   changed_when: false
 
 - name: Verify the unreadable-proc carrier dependency
   ansible.builtin.command: bwrap --version
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   changed_when: false
 
 # Part 2: the delta check-local-libvirt.sh does not cover. On the Ubuntu target there is no
 # static disk label to assert (AppArmor/virt-aa-helper permits each domain's disk paths
 # dynamically), so the gate verifies group membership and the short XDG_RUNTIME_DIR directly.
 - name: Assert the service account is in kvm and libvirt
-  ansible.builtin.command: "id -nG {{ github_runner_user }}"
+  ansible.builtin.command: "id -nG {{ live_vm_host_operator_user }}"
   register: live_vm_host_groups
   changed_when: false
   failed_when: >-
@@ -73,7 +73,7 @@
       - live_vm_host_worker_runtime_parent.stat.gr_name == "root"
       - live_vm_host_worker_runtime_parent.stat.mode == "0755"
       - item.stat.isdir
-      - item.stat.pw_name == github_runner_user
+      - item.stat.pw_name == live_vm_host_operator_user
       - item.stat.gr_name == live_vm_host_worker_libvirt_group
       - item.stat.mode == "0750"
   loop: "{{ live_vm_host_worker_socket_namespaces.results }}"
@@ -159,7 +159,7 @@
     that:
       - >-
         ansible_facts.getent_group[live_vm_host_worker_control_group][2].split(',')
-        | reject('equalto', '') | list == [github_runner_user]
+        | reject('equalto', '') | list == [live_vm_host_operator_user]
 
 - name: Inspect the installed lifecycle socket
   ansible.builtin.stat:
@@ -268,7 +268,7 @@
         from kdive.processes.lifecycle.systemd.systemd_worker_contract import
         lifecycle_protocol_identity; print(lifecycle_protocol_identity())
   become: true
-  become_user: "{{ github_runner_user }}"
+  become_user: "{{ live_vm_host_operator_user }}"
   changed_when: false
   register: live_vm_host_worker_checkout_protocol
 
@@ -365,7 +365,7 @@
 
 - name: Verify the selected session libvirtd process is live
   ansible.builtin.command: >-
-    pgrep --uid {{ github_runner_user }} --exact libvirtd
+    pgrep --uid {{ live_vm_host_operator_user }} --exact libvirtd
     --pidfile /run/kdive/live-libvirt/libvirt/libvirtd.pid
   changed_when: false
 
@@ -378,7 +378,7 @@
   ansible.builtin.assert:
     that:
       - live_vm_host_worker_libvirt_socket.stat.issock
-      - live_vm_host_worker_libvirt_socket.stat.pw_name == github_runner_user
+      - live_vm_host_worker_libvirt_socket.stat.pw_name == live_vm_host_operator_user
       - live_vm_host_worker_libvirt_socket.stat.gr_name == live_vm_host_worker_libvirt_group
       - live_vm_host_worker_libvirt_socket.stat.mode == "0770"
 

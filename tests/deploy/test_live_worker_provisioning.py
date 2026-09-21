@@ -883,7 +883,7 @@ def test_ansible_bakes_checkout_identity_before_installing_fixed_worker_runtime(
     assert "scripts/stamp-buildinfo.sh" in stamp_block
     assert '- "false"' in stamp_block
     assert 'KDIVE_BUILDINFO_COMMIT: "{{ live_vm_host_checkout.after[0:12] }}"' in stamp_block
-    assert 'become_user: "{{ github_runner_user }}"' in stamp_block
+    assert 'become_user: "{{ live_vm_host_operator_user }}"' in stamp_block
     assert "safe.directory" not in tasks
     assert tasks.index(stamp) < tasks.index(install)
 
@@ -1550,8 +1550,9 @@ def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
     ensure_block = tasks[ensure_dir:install]
     assert "state: directory" in ensure_block
     assert 'mode: "0700"' in ensure_block
-    assert "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user" in (
-        ensure_block
+    assert (
+        "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user"
+        in (ensure_block)
     )
     # Linger must be provisioned before the unit: it is what keeps the runner's user manager
     # alive from boot with no login session.
@@ -2404,7 +2405,7 @@ def test_verify_asserts_the_installed_venv_carries_this_checkout_protocol() -> N
     assert "-I" in checkout_argv
     assert "lifecycle_protocol_identity()" in checkout_argv[-1]
     # The checkout is writable by the runner account, so root must not import from it.
-    assert checkout["become_user"] == "{{ github_runner_user }}"
+    assert checkout["become_user"] == "{{ live_vm_host_operator_user }}"
     assert "become_user" not in tasks[names.index(installed)]
 
     compared = tasks[names.index(assertion)]["ansible.builtin.assert"]
