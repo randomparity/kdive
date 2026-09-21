@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import io
 import lzma
+import random
 import struct
 import tarfile
 from compression import zstd
@@ -445,9 +446,59 @@ def test_external_boot_scan_is_independent_of_candidate_decoder_cursor(
     kernel = gzip.compress(_boot_elf(e_machine=_EM_X86_64))
     boot = bytes(header) + bytes(6000 - len(header)) + kernel
     boot += bytes(9000 - len(boot))
-    monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", chunk_bytes)
+    monkeypatch.setattr(validation, "_DECODE_CHUNK_BYTES", chunk_bytes)
 
     _validate_kernel_blob(_combined_kernel_tar(boot=boot))
+
+
+@pytest.mark.parametrize("store_chunk", [4 * 1024 * 1024, 8 * 1024 * 1024])
+def test_corrupt_gzip_decoy_keeps_aggregate_rejection_across_store_chunks(
+    monkeypatch: pytest.MonkeyPatch, store_chunk: int
+) -> None:
+    corrupt = bytearray(gzip.compress(bytes(6 * 1024 * 1024)))
+    corrupt[-8] ^= 1  # CRC fails after a 4 MiB output call has already been charged.
+    valid = gzip.compress(_boot_elf(e_machine=_EM_X86_64, pad=7 * 1024 * 1024))
+    boot = _bzimage()[:0x400] + corrupt + valid
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES", 10 * 1024 * 1024)
+    monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", store_chunk)
+
+    with pytest.raises(CategorizedError, match="aggregate decompression work limit"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=boot))
+
+
+@pytest.mark.parametrize("codec", [*sorted(_KERNEL_CODECS), "ppc64le"])
+@pytest.mark.parametrize("boundary_extra", [0, 1])
+def test_external_boot_evidence_is_identical_across_store_chunks(
+    monkeypatch: pytest.MonkeyPatch, codec: str, boundary_extra: int
+) -> None:
+    arch = "ppc64le" if codec == "ppc64le" else "x86_64"
+    boot = _boot_elf() if arch == "ppc64le" else _bzimage(codec=codec, pad=9000)
+    module = random.Random(2569).randbytes(32 * 1024)
+    kernel = _combined_kernel_tar(boot=boot, module_data=module)
+    kernel += bytes(-len(kernel) % 8192 + boundary_extra)
+    assert len(kernel) > 8192 and len(kernel) % 8192 == boundary_extra
+    blobs = {"k": kernel, "i": b"initrd-bytes"}
+    heads = {
+        key: HeadResult(len(blob), "csum", "e", STORE_MTIME, f"{key}-version")
+        for key, blob in blobs.items()
+    }
+    results = []
+    for window in (4096, 8192, 4 * 1024 * 1024, 8 * 1024 * 1024):
+        monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", window)
+        results.append(
+            validate_external_artifacts(
+                _FakeStore(blobs, heads),
+                manifest=[
+                    ManifestEntry("kernel", "csum", len(kernel)),
+                    ManifestEntry("initrd", "csum", len(blobs["i"])),
+                ],
+                keys={"kernel": "k", "initrd": "i"},
+                declared_build_id=None,
+                arch=arch,
+            )
+        )
+    assert results[0].external_boot_evidence is not None
+    assert all(result == results[0] for result in results[1:])
 
 
 @pytest.mark.parametrize("codec", sorted(_KERNEL_CODECS))
@@ -695,6 +746,38 @@ def test_external_boot_archive_validation_buffers_range_reads() -> None:
     assert out.output.kernel_ref == "k"
     assert len(kernel_calls) <= 8
     assert {call[3] for call in kernel_calls} == {"test-version"}
+
+
+@pytest.mark.parametrize("module_size", [1024, 9 * 1024 * 1024])
+def test_external_boot_store_requests_reduce_or_plateau_without_evidence_changes(
+    monkeypatch: pytest.MonkeyPatch, module_size: int
+) -> None:
+    kernel = _combined_kernel_tar(module_data=random.Random(2569).randbytes(module_size))
+    counts = []
+    results = []
+    for window in (4 * 1024 * 1024, 8 * 1024 * 1024):
+        monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", window)
+        store = _FakeStore(
+            {"k": kernel},
+            {"k": HeadResult(len(kernel), "csum", "e", STORE_MTIME, "test-version")},
+        )
+        results.append(
+            validate_external_artifacts(
+                store,
+                manifest=[ManifestEntry("kernel", "csum", len(kernel))],
+                keys={"kernel": "k"},
+                declared_build_id=None,
+            )
+        )
+        assert {call[3] for call in store.range_calls} == {"test-version"}
+        counts.append(len(store.range_calls))
+    assert results[0] == results[1]
+    if module_size > 8 * 1024 * 1024:
+        assert len(kernel) > 8 * 1024 * 1024
+        assert counts[1] < counts[0]
+    else:
+        assert len(kernel) < 4 * 1024 * 1024
+        assert counts[1] == counts[0]
 
 
 def test_build_id_mismatch_is_build_failure() -> None:

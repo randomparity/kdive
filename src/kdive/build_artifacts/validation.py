@@ -54,7 +54,17 @@ _MODULE_SUFFIXES = (".ko", ".ko.xz", ".ko.gz", ".ko.zst")
 # well above a real bzImage so a large-but-legal kernel passes, while a gzip bomb (tiny gzip →
 # gigabytes of tar) is stopped here rather than decompressing unbounded.
 _KERNEL_TAR_SCAN_MAX_BYTES = 128 * 1024 * 1024
-_RANGE_CHUNK_BYTES = 4 * 1024 * 1024
+# Store read-ahead reduces request latency without enlarging local decoder calls (#2569).
+# An 8 MiB reader plus five live 4 MiB chunks (boot copy, scanner chunk/overlap data,
+# compressed input and decoded output, including zstd) can retain about 28 MiB. Copy/replacement
+# peaks, codec workspace and the two existing 64 MiB spools are additional, not a total-RSS bound.
+# The existing complete_build Semaphore(1) serializes ordinary uncancelled calls, making this
+# incremental footprint acceptable. Cancelled awaiters can leave overlapping scan threads
+# (ADR-0656, Cancellation); the semaphore is not a hard process-wide memory limit.
+_RANGE_CHUNK_BYTES = 8 * 1024 * 1024
+# Failed codec candidates charge output returned before an error; changing this quantum can
+# change aggregate-budget rejection. Keep it independent of store read-ahead.
+_DECODE_CHUNK_BYTES = 4 * 1024 * 1024
 _EXTERNAL_BOOT_INITRD_MAX_BYTES = 512 * 1024 * 1024
 _EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS = 200_000
@@ -692,7 +702,7 @@ def _preflight_external_boot_archive(store: ValidatorStore, key: str, size_bytes
 def _discard_exact(source: _BinaryReader, size: int) -> None:
     remaining = size
     while remaining:
-        chunk = source.read(min(_RANGE_CHUNK_BYTES, remaining))
+        chunk = source.read(min(_DECODE_CHUNK_BYTES, remaining))
         if not chunk:
             raise _build_failure("kernel bundle ended before its recorded member size")
         remaining -= len(chunk)
@@ -741,7 +751,7 @@ def _module_manifest_entry(
         digest = hashlib.sha256()
         remaining = member.size
         while remaining:
-            chunk = extracted.read(min(_RANGE_CHUNK_BYTES, remaining))
+            chunk = extracted.read(min(_DECODE_CHUNK_BYTES, remaining))
             if not chunk:
                 raise _build_failure("module file ended before its recorded size", path=relative)
             digest.update(chunk)
@@ -796,7 +806,7 @@ def _inspect_boot_member(
     remaining = member.size
     with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as boot:
         while remaining:
-            chunk = extracted.read(min(_RANGE_CHUNK_BYTES, remaining))
+            chunk = extracted.read(min(_DECODE_CHUNK_BYTES, remaining))
             if not chunk:
                 raise _build_failure("boot/vmlinuz ended before its recorded size")
             digest.update(chunk)
@@ -915,7 +925,7 @@ def _magic_offsets(source: IO[bytes], magic: bytes) -> Iterator[int]:
     count = 0
     while True:
         source.seek(position)
-        if not (chunk := source.read(_RANGE_CHUNK_BYTES)):
+        if not (chunk := source.read(_DECODE_CHUNK_BYTES)):
             break
         data = overlap + chunk
         start = 0
@@ -941,7 +951,7 @@ def _copy_kernel_bounded(
     source: _BinaryReader, destination: IO[bytes], budget: _DecodeBudget
 ) -> int:
     total = 0
-    while chunk := source.read(min(_RANGE_CHUNK_BYTES, budget.remaining + 1)):
+    while chunk := source.read(min(_DECODE_CHUNK_BYTES, budget.remaining + 1)):
         total += len(chunk)
         budget.remaining -= len(chunk)
         if budget.remaining < 0:
@@ -972,10 +982,10 @@ def _copy_zstd_frame_bounded(
     while not decompressor.eof:
         compressed = b""
         if decompressor.needs_input:
-            compressed = source.read(_RANGE_CHUNK_BYTES)
+            compressed = source.read(_DECODE_CHUNK_BYTES)
             if not compressed:
                 raise EOFError
-        chunk = decompressor.decompress(compressed, min(_RANGE_CHUNK_BYTES, budget.remaining + 1))
+        chunk = decompressor.decompress(compressed, min(_DECODE_CHUNK_BYTES, budget.remaining + 1))
         total += len(chunk)
         budget.remaining -= len(chunk)
         if budget.remaining < 0:
@@ -994,12 +1004,12 @@ def _copy_gzip_member_bounded(
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
     total = 0
     while not decompressor.eof:
-        compressed = source.read(_RANGE_CHUNK_BYTES)
+        compressed = source.read(_DECODE_CHUNK_BYTES)
         if not compressed:
             raise EOFError
         while compressed:
             chunk = decompressor.decompress(
-                compressed, min(_RANGE_CHUNK_BYTES, budget.remaining + 1)
+                compressed, min(_DECODE_CHUNK_BYTES, budget.remaining + 1)
             )
             total += len(chunk)
             budget.remaining -= len(chunk)
@@ -1332,10 +1342,10 @@ def _decompress_bounded(
     """
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 + MAX_WBITS selects gzip framing
     out = bytearray()
+    reader = _RangedReader(store, key, total_size)
     offset = 0
     while offset < total_size and len(out) < max_out:
-        length = min(_RANGE_CHUNK_BYTES, total_size - offset)
-        chunk = store.get_range(key, start=offset, length=length)
+        chunk = reader.read(min(_DECODE_CHUNK_BYTES, total_size - offset))
         if not chunk:
             break
         offset += len(chunk)

@@ -50,6 +50,16 @@ def test_ranged_reader_buffers_sequential_reads() -> None:
     assert store.calls == [(0, len(blob))]
 
 
+def test_ranged_reader_fetches_eight_mib_per_window() -> None:
+    window = 8 * 1024 * 1024
+    blob = _pattern(window)
+    store = _ReaderStore(blob)
+    reader = validation._RangedReader(store, "kernel", len(blob))
+
+    assert b"".join(reader.read(1024 * 1024) for _ in range(8)) == blob
+    assert store.calls == [(0, window)]
+
+
 def test_ranged_reader_crosses_buffer_boundary() -> None:
     window = validation._RANGE_CHUNK_BYTES
     blob = _pattern(window + 32)
