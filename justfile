@@ -89,9 +89,9 @@ install-ansible-collections:
         --requirements-file deploy/ansible/requirements-ci.lock.yml \
         --collections-path ~/.ansible/collections --no-deps --no-cache
 
-# Install the git pre-commit hooks and run them across the tree once.
+# Install commit and push hooks; run only the commit stage across the tree once.
 install-hooks:
-    prek install
+    prek install --hook-type pre-commit --hook-type pre-push
     prek run -a
 
 # Lint and check formatting (read-only; mirrors CI).
@@ -738,5 +738,5 @@ chart-version-check:
     fi
     echo "appVersion == pyproject == $pyproject"
 
-# Run the full gate that PR CI runs, reproducible locally.
+# Run the full local gate, including checks beyond the separate PR CI recipe list.
 ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
