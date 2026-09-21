@@ -200,7 +200,16 @@ def test_run_guestfs_tool_maps_unreadable_host_kernel_to_configuration_error(
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "vmlinuz" in str(caught.value)
-    assert "chmod 0644 /boot/vmlinuz-*" in str(caught.value.details["remediation"])
+    remediation = str(caught.value.details["remediation"])
+    assert "Debian/Ubuntu" in remediation
+    assert "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host" in remediation
+    assert "other worker deployments" in remediation
+    assert "root:kvm 0640" in remediation
+    assert "worker user is in the kvm group" in remediation
+    assert "durable post-upgrade hook" in remediation
+    assert "sudo chgrp kvm /boot/vmlinu?-* && sudo chmod 0640 /boot/vmlinu?-*" in remediation
+    assert "chmod 0644" not in remediation
+    assert "dpkg-statoverride" not in remediation
     assert caught.value.details["stage"] == "virt-builder"
     assert "Permission denied" in str(caught.value.details["stderr"])
 

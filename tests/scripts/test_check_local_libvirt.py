@@ -314,11 +314,12 @@ def test_unreadable_host_kernel_fails_with_chmod_hint(tmp_path: Path) -> None:
     # `/boot/vmlinuz-*` string, which is neither what the script prints nor what a ppc64le
     # operator would need to type.
     # 0640 root:kvm, matching what `just prepare-local-libvirt-host` declares — a 0644 remedy
-    # here would hand the operator a wider mode than provisioning establishes (#2479).
+    # here would hand the operator a wider mode than provisioning establishes (#2479). The recipe
+    # installs the durable hook; only the fallback needs to be reapplied after a kernel upgrade.
     assert "just prepare-local-libvirt-host" in result.stderr
-    assert f"chgrp kvm {boot}/vmlinu?-*" in result.stderr
-    assert f"chmod 0640 {boot}/vmlinu?-*" in result.stderr
-    assert f"chmod 0644 {boot}" not in result.stderr
+    assert "installs the durable post-upgrade hook" in result.stderr
+    assert f"sudo chgrp kvm {boot}/vmlinu?-* && sudo chmod 0640 {boot}/vmlinu?-*" in result.stderr
+    assert "chmod 0644" not in result.stderr
     assert "dpkg-statoverride" not in result.stderr
 
 
