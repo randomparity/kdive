@@ -294,19 +294,23 @@ def _script_runtime_dirs() -> list[str]:
 
 
 def test_host_runtime_dirs_cover_every_hardcoded_provider_path() -> None:
-    """Drift guard: these paths are constants in src, so they cannot be pointed elsewhere.
+    """Drift guard: the provider's default runtime paths must be preflighted.
 
     A non-root worker cannot create them under root-owned /var/lib/kdive, so each must be
     provisioned ahead of the run. If someone adds another hardcoded runtime dir, this fails in PR
     CI rather than several minutes into a live gate — which is how the console dir was found.
     Reads the private constants deliberately: they are precisely what the deployment must match.
     """
-    from kdive.providers.local_libvirt.lifecycle import storage
+    from kdive.providers.local_libvirt.settings import LIBVIRT_CONSOLE_ROOT, LIBVIRT_ROOTFS_ROOT
     from kdive.providers.shared import runtime_paths
 
     declared = set(_script_runtime_dirs())
-    for const in (runtime_paths._CONSOLE_DIR, runtime_paths._PCAP_DIR, storage.ROOTFS_DIR):
-        assert const in declared, f"{const} is hardcoded in src but not preflighted"
+    for path in (
+        LIBVIRT_CONSOLE_ROOT.default,
+        runtime_paths._PCAP_DIR,
+        LIBVIRT_ROOTFS_ROOT.default,
+    ):
+        assert path in declared, f"default provider runtime path {path} is not preflighted"
 
 
 def test_host_fails_when_a_runtime_dir_is_not_writable(tmp_path: Path) -> None:
