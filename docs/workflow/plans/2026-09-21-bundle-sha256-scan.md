@@ -6,7 +6,7 @@ validation; its tests own reader and finalization contracts; the proof record ow
 measurement interpretation. Python 3.14 and uv remain in use; no dependency, schema, limit,
 preflight, semaphore, or chunk-size changes are allowed.
 
-Expected implementation size: 90–140 changed lines (M) — one internal digest collector, narrow
+Expected implementation size: 250–310 changed lines (M) — one internal digest collector, narrow
 reader wiring, focused contracts, and one measurement-record correction.
 
 ## File map
@@ -52,8 +52,9 @@ monotonic byte prefix and a missing tail fails rather than producing a partial d
 **Files:** modify `src/kdive/build_artifacts/validation.py` and
 `tests/providers/local_libvirt/test_validate_external_artifacts.py`.
 
-**Interfaces:** `_scan_external_boot_archive(..., digest: _ObjectDigest | None = None)` keeps its
-mapping return; `_external_boot_evidence` owns construction, drain, and `bundle_sha256` assembly.
+**Interfaces:** `_scan_external_boot_archive(..., range_observer: Callable[[int, bytes], None] |
+None = None)` keeps its mapping return; `_external_boot_evidence` owns construction, drain, and
+`bundle_sha256` assembly.
 `_digest_object(store, key, size_bytes)` remains unchanged for initrd.
 
 **Verification:** Mode: focused-test. Build a valid gzip kernel tar with trailing raw padding,

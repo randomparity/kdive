@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 
 import pytest
@@ -224,3 +225,50 @@ def test_ranged_reader_cross_window_empty_response_returns_cached_suffix() -> No
     store.response_limit = None
     assert reader.read(8) == blob[window : window + 8]
     assert store.calls[-1] == (window, 16)
+
+
+def test_object_digest_observes_only_the_monotonic_prefix_and_drains_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", 4)
+    blob = b"abcdefghijkl"
+    store = _ReaderStore(blob)
+    digest = validation._ObjectDigest(store, "kernel", len(blob))
+    reader = validation._RangedReader(store, "kernel", len(blob), range_observer=digest.observe)
+
+    assert reader.read(2) == b"ab"
+    assert reader.seek(8) == 8
+    assert reader.read(2) == b"ij"
+    assert reader.seek(1) == 1
+    assert reader.read(2) == b"bc"
+
+    digest.drain()
+
+    assert digest.value() == "sha256:" + hashlib.sha256(blob).hexdigest()
+    assert store.calls == [(0, 4), (8, 4), (1, 4), (5, 4), (9, 3)]
+
+
+@pytest.mark.parametrize("fault", ["empty", "oversized", "failure"])
+def test_object_digest_drain_rejects_invalid_store_responses(
+    monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    monkeypatch.setattr(validation, "_RANGE_CHUNK_BYTES", 4)
+    store = _ReaderStore(b"abcdefghi")
+    digest = validation._ObjectDigest(store, "kernel", 8)
+    digest.observe(0, b"abcd")
+    if fault == "empty":
+        store.response_limit = 0
+    elif fault == "oversized":
+        store.max_response_extra = 1
+    else:
+        store.failure = CategorizedError(
+            "store unavailable", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+        )
+
+    with pytest.raises(CategorizedError) as exc:
+        digest.drain()
+
+    if fault == "failure":
+        assert exc.value is store.failure
+    else:
+        assert exc.value.category is ErrorCategory.BUILD_FAILURE

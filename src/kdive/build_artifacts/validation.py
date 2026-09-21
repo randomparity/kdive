@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import unicodedata
 import zlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from compression import zstd
 from dataclasses import dataclass, field
 from typing import IO, Literal, Protocol, cast
@@ -430,7 +430,14 @@ def _external_boot_evidence(
             "kernel bundle exceeds the external-boot compressed byte limit",
             max_bytes=_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES,
         )
-    archive = _scan_external_boot_archive(store, keys["kernel"], bundle_head.size_bytes, arch)
+    bundle_digest = _ObjectDigest(store, keys["kernel"], bundle_head.size_bytes)
+    archive = _scan_external_boot_archive(
+        store,
+        keys["kernel"],
+        bundle_head.size_bytes,
+        arch,
+        range_observer=bundle_digest.observe,
+    )
     if build_id and archive["gnu_build_id"] != build_id:
         raise _build_failure(
             "uploaded vmlinux build_id does not match boot/vmlinuz",
@@ -450,9 +457,10 @@ def _external_boot_evidence(
             "sha256": _digest_object(store, keys["initrd"], initrd_head.size_bytes),
             "size_bytes": initrd_head.size_bytes,
         }
+    bundle_digest.drain()
     return {
         "schema": "external-boot-evidence-v1",
-        "bundle_sha256": _digest_object(store, keys["kernel"], bundle_head.size_bytes),
+        "bundle_sha256": bundle_digest.value(),
         "initrd": initrd,
         "archive_member_count": archive["archive_member_count"],
         "archive_uncompressed_bytes": archive["archive_uncompressed_bytes"],
@@ -484,11 +492,57 @@ def _digest_object(store: ValidatorStore, key: str, size_bytes: int) -> str:
     return _SHA256_PREFIX + digest.hexdigest()
 
 
+class _ObjectDigest:
+    """Hash a stored object exactly once at monotonically contiguous offsets."""
+
+    def __init__(self, store: ValidatorStore, key: str, size_bytes: int) -> None:
+        self._store = store
+        self._key = key
+        self._size_bytes = size_bytes
+        self._digest = hashlib.sha256()
+        self._offset = 0
+
+    def observe(self, start: int, data: bytes) -> None:
+        """Include only the contiguous suffix of a fetched range."""
+        if start > self._offset:
+            return
+        prefix = self._offset - start
+        if prefix >= len(data):
+            return
+        suffix = data[prefix:]
+        self._digest.update(suffix)
+        self._offset += len(suffix)
+
+    def drain(self) -> None:
+        """Fetch each missing range through the same bounded response contract."""
+        while self._offset < self._size_bytes:
+            length = min(_RANGE_CHUNK_BYTES, self._size_bytes - self._offset)
+            data = self._store.get_range(self._key, start=self._offset, length=length)
+            if not data:
+                raise _build_failure("artifact ended before its recorded size", key=self._key)
+            if len(data) > length:
+                raise _build_failure("object store range response exceeded the requested bound")
+            self.observe(self._offset, data)
+
+    def value(self) -> str:
+        if self._offset != self._size_bytes:
+            raise _build_failure("artifact ended before its recorded size", key=self._key)
+        return _SHA256_PREFIX + self._digest.hexdigest()
+
+
 class _RangedReader:
-    def __init__(self, store: ValidatorStore, key: str, size: int) -> None:
+    def __init__(
+        self,
+        store: ValidatorStore,
+        key: str,
+        size: int,
+        *,
+        range_observer: Callable[[int, bytes], None] | None = None,
+    ) -> None:
         self._store = store
         self._key = key
         self._size = size
+        self._range_observer = range_observer
         self._offset = 0
         self._buffer_start = 0
         self._buffer = b""
@@ -520,6 +574,8 @@ class _RangedReader:
             return bytes(output)
         if len(data) > fetch_length:
             raise _build_failure("object store range response exceeded the requested bound")
+        if self._range_observer is not None:
+            self._range_observer(cursor, data)
         if fetch_length <= _RANGE_CHUNK_BYTES:
             self._buffer_start = cursor
             self._buffer = data
@@ -555,7 +611,12 @@ class _RangedReader:
 
 
 def _scan_external_boot_archive(
-    store: ValidatorStore, key: str, size_bytes: int, arch: str
+    store: ValidatorStore,
+    key: str,
+    size_bytes: int,
+    arch: str,
+    *,
+    range_observer: Callable[[int, bytes], None] | None = None,
 ) -> dict[str, JsonValue]:
     entries: list[dict[str, JsonValue]] = []
     releases: set[str] = set()
@@ -568,7 +629,7 @@ def _scan_external_boot_archive(
     module_members = 0
     member_count = 0
     _preflight_external_boot_archive(store, key, size_bytes)
-    reader = _RangedReader(store, key, size_bytes)
+    reader = _RangedReader(store, key, size_bytes, range_observer=range_observer)
     try:
         with tarfile.open(fileobj=cast("IO[bytes]", reader), mode="r|gz") as archive:
             for member_count, member in enumerate(archive, start=1):
