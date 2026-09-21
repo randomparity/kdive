@@ -610,6 +610,82 @@ class _RangedReader:
         return position
 
 
+class _GuardedTarReader:
+    """Expose validated raw tar framing without buffering an archive member."""
+
+    _EXTENSION_TYPES = {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    }
+
+    def __init__(self, source: _BinaryReader) -> None:
+        self._source = source
+        self._pending_header = b""
+        self._payload_remaining = 0
+        self._raw_bytes = 0
+        self._headers = 0
+        self._done = False
+
+    def read(self, size: int = -1, /) -> bytes:
+        """Return the next guarded header or bounded payload fragment."""
+        if size == 0:
+            return b""
+        requested = _DECODE_CHUNK_BYTES if size < 0 else size
+        if self._pending_header:
+            output = self._pending_header[:requested]
+            self._pending_header = self._pending_header[len(output) :]
+            return output
+        if self._done:
+            return b""
+        if self._payload_remaining:
+            length = min(requested, self._payload_remaining, _DECODE_CHUNK_BYTES)
+            output = self._source.read(length)
+            if not output:
+                raise _build_failure("kernel bundle ended before its recorded member size")
+            self._payload_remaining -= len(output)
+            return output
+
+        header = self._source.read(tarfile.BLOCKSIZE)
+        if not header:
+            self._done = True
+            return b""
+        if len(header) != tarfile.BLOCKSIZE:
+            raise _build_failure("kernel bundle has a truncated tar header")
+        self._raw_bytes += len(header)
+        if header == tarfile.NUL * tarfile.BLOCKSIZE:
+            self._done = True
+            self._pending_header = header
+            return self.read(size)
+
+        self._headers += 1
+        if self._headers > _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS:
+            raise _build_failure(
+                "kernel bundle exceeds the external-boot member limit",
+                max_members=_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS,
+            )
+        member = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
+        if (
+            member.type in self._EXTENSION_TYPES
+            and member.size > _EXTERNAL_BOOT_EXTENSION_MAX_BYTES
+        ):
+            raise _build_failure(
+                "kernel bundle extension metadata exceeds the byte limit",
+                max_bytes=_EXTERNAL_BOOT_EXTENSION_MAX_BYTES,
+            )
+        blocks = (member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE
+        self._payload_remaining = blocks * tarfile.BLOCKSIZE
+        self._raw_bytes += self._payload_remaining
+        if self._raw_bytes > _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES:
+            raise _build_failure(
+                "kernel bundle exceeds the external-boot raw tar byte limit",
+                max_bytes=_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES,
+            )
+        self._pending_header = header
+        return self.read(size)
+
+
 def _scan_external_boot_archive(
     store: ValidatorStore,
     key: str,
@@ -628,10 +704,11 @@ def _scan_external_boot_archive(
     module_bytes = 0
     module_members = 0
     member_count = 0
-    _preflight_external_boot_archive(store, key, size_bytes)
-    reader = _RangedReader(store, key, size_bytes, range_observer=range_observer)
+    compressed = _RangedReader(store, key, size_bytes, range_observer=range_observer)
+    source = gzip.GzipFile(fileobj=cast("IO[bytes]", compressed), mode="rb")
+    guarded = _GuardedTarReader(source)
     try:
-        with tarfile.open(fileobj=cast("IO[bytes]", reader), mode="r|gz") as archive:
+        with tarfile.open(fileobj=cast("IO[bytes]", guarded), mode="r|") as archive:
             for member_count, member in enumerate(archive, start=1):
                 if member_count > _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS:
                     raise _build_failure(
@@ -674,8 +751,12 @@ def _scan_external_boot_archive(
                 if entry is not None:
                     entries.append(entry)
                     module_members += 1
-    except (OSError, tarfile.TarError) as exc:
+        while guarded.read(_DECODE_CHUNK_BYTES):
+            pass
+    except (EOFError, OSError, tarfile.TarError) as exc:
         raise _build_failure("kernel bundle is not a complete readable gzip tar") from exc
+    finally:
+        source.close()
     if boot_digest is None or boot is None:
         raise _build_failure("kernel bundle has no regular boot/vmlinuz member")
     if len(releases) != 1 or not entries:
@@ -708,65 +789,6 @@ def _scan_external_boot_archive(
         "module_member_count": module_members,
         "module_uncompressed_bytes": module_bytes,
     }
-
-
-def _preflight_external_boot_archive(store: ValidatorStore, key: str, size_bytes: int) -> None:
-    """Bound raw tar work before ``tarfile`` consumes GNU/PAX extension payloads."""
-    reader = _RangedReader(store, key, size_bytes)
-    raw_bytes = 0
-    headers = 0
-    try:
-        with gzip.GzipFile(fileobj=cast("IO[bytes]", reader), mode="rb") as source:
-            while True:
-                header = source.read(tarfile.BLOCKSIZE)
-                if not header:
-                    return
-                if len(header) != tarfile.BLOCKSIZE:
-                    raise _build_failure("kernel bundle has a truncated tar header")
-                raw_bytes += len(header)
-                if header == tarfile.NUL * tarfile.BLOCKSIZE:
-                    return
-                headers += 1
-                if headers > _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS:
-                    raise _build_failure(
-                        "kernel bundle exceeds the external-boot member limit",
-                        max_members=_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS,
-                    )
-                member = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
-                extension_types = {
-                    tarfile.XHDTYPE,
-                    tarfile.XGLTYPE,
-                    tarfile.GNUTYPE_LONGNAME,
-                    tarfile.GNUTYPE_LONGLINK,
-                }
-                if (
-                    member.type in extension_types
-                    and member.size > _EXTERNAL_BOOT_EXTENSION_MAX_BYTES
-                ):
-                    raise _build_failure(
-                        "kernel bundle extension metadata exceeds the byte limit",
-                        max_bytes=_EXTERNAL_BOOT_EXTENSION_MAX_BYTES,
-                    )
-                blocks = (member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE
-                padded_size = blocks * tarfile.BLOCKSIZE
-                raw_bytes += padded_size
-                if raw_bytes > _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES:
-                    raise _build_failure(
-                        "kernel bundle exceeds the external-boot raw tar byte limit",
-                        max_bytes=_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES,
-                    )
-                _discard_exact(source, padded_size)
-    except (OSError, tarfile.TarError) as exc:
-        raise _build_failure("kernel bundle is not a complete readable gzip tar") from exc
-
-
-def _discard_exact(source: _BinaryReader, size: int) -> None:
-    remaining = size
-    while remaining:
-        chunk = source.read(min(_DECODE_CHUNK_BYTES, remaining))
-        if not chunk:
-            raise _build_failure("kernel bundle ended before its recorded member size")
-        remaining -= len(chunk)
 
 
 def _canonical_tar_path(member: tarfile.TarInfo) -> str:
