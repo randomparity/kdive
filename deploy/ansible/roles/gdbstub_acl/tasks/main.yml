@@ -153,19 +153,21 @@
         set -euo pipefail
         # `grep` exits 1 on no match; wrap each filter in `|| true` so "nothing stale to
         # prune" (the steady state) is success, not a pipefail-induced task failure.
-        mapfile -t nums < <(
+        # A `while read` loop, not `mapfile`: the local harness runs this under macOS /bin/bash
+        # 3.2 (ADR-0672). `sort -rn` reads all of `ufw status` before the first delete, and each
+        # delete reads /dev/null so it cannot consume the rule numbers still queued on stdin.
+        pruned=0
+        while IFS= read -r n; do
+          [ -n "$n" ] || continue
+          ufw --force delete "$n" >/dev/null </dev/null
+          pruned=1
+        done < <(
           ufw status numbered \
             | { grep -E "\] +({{ gdbstub_acl_tls_port }}|{{ gdbstub_range }})/tcp +ALLOW IN " || true; } \
             | { awk -v cidr="{{ worker_cidr }}" '{ for (i = 1; i <= NF; i++) if ($i == "IN") { if ($(i + 1) != "" && $(i + 1) != cidr) print; break } }'; } \
             | sed -E 's/^\[ *([0-9]+)\].*/\1/' \
             | sort -rn
         )
-        pruned=0
-        for n in "${nums[@]}"; do
-          [ -n "$n" ] || continue
-          ufw --force delete "$n" >/dev/null
-          pruned=1
-        done
         echo "pruned=$pruned"
       args:
         executable: /bin/bash
