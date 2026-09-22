@@ -136,13 +136,10 @@ Installing a built kernel indexes its modules with the host's `depmod` (ADR-0346
 worker host needs `kmod` — `apt install kmod` on Debian/Ubuntu, `dnf install kmod` on
 Fedora, or `zypper install kmod` on SUSE. Resolution is **not** `PATH`-based: `depmod` is looked for in `/usr/sbin`,
 `/usr/bin`, `/sbin`, and `/bin` only, so a copy installed elsewhere will not be found.
-The service `doctor` (`kdivectl doctor --json`) carries a `depmod_toolchain` check that
-fails with the package name and those four directories when it cannot resolve one. The
-published container image does not yet ship `kmod`, so a worker running from it fails
-this check until
-[debt 0014](../debt/0014-shipped-worker-image-has-no-depmod.md) is resolved — install
-`kmod` in a derived image, or run the worker on a host provisioned by the Ansible roles,
-which already declare it.
+The service `doctor` (`kdivectl doctor --json`) carries a `depmod_toolchain` check when
+local-libvirt is enabled. Supported container deployments disable local-libvirt under ADR-0088,
+so they do not report this local worker-host check. If local-libvirt is enabled, install `kmod`
+on that worker host as described above.
 
 ### Development and CI toolchain
 

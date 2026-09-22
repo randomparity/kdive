@@ -184,6 +184,18 @@ def test_provider_diagnostics_registration_includes_local_and_remote_libvirt() -
     assert by_provider["remote-libvirt"].unavailable_worker_checks
 
 
+def test_provider_diagnostics_omits_local_libvirt_when_disabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
+
+    _set_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
+    config.load()
+
+    assert {item.provider for item in diagnostic_provider_contributions()} == {"remote-libvirt"}
+
+
 def test_static_worker_vantage_ids_match_constructed_production_checks(
     monkeypatch, tmp_path: Path
 ) -> None:

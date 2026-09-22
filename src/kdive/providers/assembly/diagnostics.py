@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from kdive import config
+from kdive.config.core_settings import LOCAL_LIBVIRT_ENABLED
 from kdive.diagnostics.contributions.multiarch_gdb import (
     diagnostic_contribution as local_diagnostics,
 )
@@ -21,4 +23,12 @@ def diagnostic_provider_contributions(
 ) -> tuple[DiagnosticProviderContribution, ...]:
     # local-libvirt has a single contribution (one dispatcher per contribution, keyed by
     # provider); it carries every local worker-vantage check — multiarch-gdb and pseries-fadump.
-    return (local_diagnostics(), remote_diagnostics(authority_sender_factory))
+    local_enabled = (config.get(LOCAL_LIBVIRT_ENABLED) or "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+    return (
+        *((local_diagnostics(),) if local_enabled else ()),
+        remote_diagnostics(authority_sender_factory),
+    )
