@@ -57,6 +57,8 @@ class RootfsCatalogEntry:
             drgn is installed unpinned from distro repos, so the version varies sharply by image
             family; a snapshot, not live upstream truth. The live-introspection capability is
             *computed* from this against the BTF-capability threshold, not stored as a bit.
+            ``None`` records an explicit catalog value of ``"absent"`` for a distribution whose
+            official repositories do not provide drgn; omitting the catalog field remains invalid.
     """
 
     name: str
@@ -67,7 +69,7 @@ class RootfsCatalogEntry:
     kind: RootfsImageKind
     source: RootfsSource
     makedumpfile_version: str
-    drgn_version: str
+    drgn_version: str | None
 
 
 def _catalog_error(message: str, field: str) -> CategorizedError:
@@ -84,6 +86,11 @@ def _require_str(row: dict[Any, Any], field: str) -> str:
     if not isinstance(value, str) or not value:
         raise _catalog_error(f"rootfs catalog row is missing {field}", field)
     return value
+
+
+def _parse_drgn_version(row: dict[Any, Any]) -> str | None:
+    value = _require_str(row, "drgn_version")
+    return None if value == "absent" else value
 
 
 def _parse_source(raw: object) -> RootfsSource:
@@ -117,7 +124,7 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
         kind=_require_rootfs_kind(row),
         source=_parse_source(row.get("source")),
         makedumpfile_version=_require_str(row, "makedumpfile_version"),
-        drgn_version=_require_str(row, "drgn_version"),
+        drgn_version=_parse_drgn_version(row),
     )
 
 

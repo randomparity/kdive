@@ -303,6 +303,50 @@ source = { kind = "virt-builder", template = "fedora-44" }
     assert exc.value.details["field"] == "drgn_version"
 
 
+def test_explicit_absent_drgn_version_parses_as_none(tmp_path: Path) -> None:
+    path = _write_catalog(
+        tmp_path,
+        """
+[[image]]
+name = "no-drgn-package"
+distro = "opensuse-leap"
+version = "15.6"
+family = "suse"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.4"
+drgn_version = "absent"
+source = { kind = "virt-builder", template = "opensuse-leap-15.6" }
+""",
+    )
+
+    assert load_rootfs_catalog(path=path)["no-drgn-package"].drgn_version is None
+
+
+@pytest.mark.parametrize("value", ['""', "42"])
+def test_invalid_drgn_version_is_config_error(tmp_path: Path, value: str) -> None:
+    path = _write_catalog(
+        tmp_path,
+        f"""
+[[image]]
+name = "invalid-drgn"
+distro = "opensuse-leap"
+version = "15.6"
+family = "suse"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.4"
+drgn_version = {value}
+source = {{ kind = "virt-builder", template = "opensuse-leap-15.6" }}
+""",
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        load_rootfs_catalog(path=path)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["field"] == "drgn_version"
+
+
 def test_virt_builder_and_cloud_image_sources_parse() -> None:
     cat = load_rootfs_catalog()
     assert isinstance(cat["fedora-kdive-ready-43"].source, VirtBuilderSource)
