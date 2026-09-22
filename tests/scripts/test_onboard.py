@@ -164,6 +164,20 @@ def test_required_aborts(tmp_path: Path) -> None:
     assert "seed-project" not in logged
 
 
+def test_required_aborts_on_unreachable_configured_endpoint(tmp_path: Path) -> None:
+    bindir, env = _healthy_env(tmp_path)
+    _stub(bindir, "virsh", 'case "$*" in *qemu:///system*) echo "Active: yes";; *) exit 1;; esac')
+    env["KDIVE_LIBVIRT_URI"] = "qemu:///session"
+    env["ONBOARD_PREFLIGHT"] = "required"
+
+    result = _run(env)
+    assert result.returncode == 1
+    assert "cannot connect" in result.stderr
+    assert "KDIVE_LIBVIRT_URI" in result.stderr
+    assert "ONBOARD_PREFLIGHT=required" in result.stderr
+    assert not (tmp_path / "uv.log").exists()
+
+
 def test_required_proceeds(tmp_path: Path) -> None:
     """A passing preflight is not blocked: the gate reads the exit status, not its own mode."""
     _bindir, env = _healthy_env(tmp_path)
