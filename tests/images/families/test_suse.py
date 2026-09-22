@@ -23,7 +23,7 @@ from tests.support.customize_steps import baked_contents, commands, installed, r
 
 _POST_PATH = "/usr/local/sbin/kdive-suse-kdump-post"
 _DUMP_ROOT = "/kdump/mnt/var/crash"
-_LEAP_NETWORK_PATH = "/etc/sysconfig/network/ifcfg-eth0"
+_READINESS_DROPIN_PATH = "/etc/systemd/system/kdive-ready.service.d/suse.conf"
 
 
 def _family() -> FamilyCustomizer:
@@ -131,10 +131,11 @@ def test_cloud_init_uses_the_predictable_suse_interface_name(tmp_path: Path, dis
     assert "    kdive-dhcp:\n" not in cfg
 
 
-def test_leap_bakes_wicked_dhcp_before_customization_boot(tmp_path: Path) -> None:
-    contents = baked_contents(_steps(tmp_path, "opensuse-leap"))
-    assert contents[_LEAP_NETWORK_PATH] == "BOOTPROTO='dhcp4'\nSTARTMODE='auto'\n"
-    assert _LEAP_NETWORK_PATH not in baked_contents(_steps(tmp_path))
+@pytest.mark.parametrize("distro", ["opensuse-tumbleweed", "opensuse-leap"])
+def test_readiness_waits_for_cloud_init_and_sshd(tmp_path: Path, distro: str) -> None:
+    dropin = baked_contents(_steps(tmp_path, distro))[_READINESS_DROPIN_PATH]
+    assert "After=cloud-final.service sshd.service" in dropin
+    assert "Wants=cloud-final.service sshd.service" in dropin
 
 
 def test_kdump_sysconfig_uses_one_no_argument_helper_and_required_programs(tmp_path: Path) -> None:

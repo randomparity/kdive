@@ -92,8 +92,6 @@ _FAMILY_IMAGE_ENV = {
 }
 _SUSE_FAMILIES = ("suse-tumbleweed", "suse-leap-15.6")
 _SUSE_KDUMP_SHUTOFF_DEADLINE_S = 90.0
-_FAMILY_REACHABLE_DEADLINE_S = 90.0
-_FAMILY_REACHABLE_POLL_S = 2.0
 # The ppc64le rootfs for the live TCG boot proof (#1144, epic #1139): a Fedora ppc64le image
 # published under rootfs/local/. Distinct from the x86_64 family images — it boots under TCG
 # emulation on the x86_64 host, so the preflight also gates on that emulator via require_guest_arch.
@@ -861,29 +859,6 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     assert ssh["host"] and isinstance(ssh["port"], int), (
                         f"ssh_info returned no endpoint on a ready System: {ssh!r}"
                     )
-                async with phase(f"{family}:await_ssh_reachable"):
-                    # SUSE's first boot reaches the serial readiness marker before cloud-init
-                    # finishes networking and sshd. Follow the documented agent flow: poll the
-                    # read-only reachability operation before the terminal authorize preflight.
-                    deadline = time.monotonic() + _FAMILY_REACHABLE_DEADLINE_S
-                    while True:
-                        probe = ok(
-                            await scalar(op, "systems.check_ssh_reachable", system_id=system_id),
-                            f"{family}:await_ssh_reachable",
-                        )
-                        done = await drain_job(op, f"{family}:await_ssh_reachable", probe.object_id)
-                        verdict_json = done.refs.get("result")
-                        assert verdict_json is not None, (
-                            f"check_ssh_reachable succeeded with no result verdict: {done!r}"
-                        )
-                        verdict = json.loads(verdict_json)
-                        if verdict.get("reachable"):
-                            break
-                        assert time.monotonic() < deadline, (
-                            f"{family} never became SSH-reachable ({verdict.get('detail')!r}); "
-                            f"console tail: {verdict.get('console_tail')!r}"
-                        )
-                        await asyncio.sleep(_FAMILY_REACHABLE_POLL_S)
                 async with phase(f"{family}:authorize_ssh_key"):
                     env = ok(
                         await scalar(
@@ -911,6 +886,31 @@ def _suse_kdump_provision_profile(image: str) -> dict[str, object]:
     local = cast(dict[str, object], provider["local-libvirt"])
     local["destructive_ops"] = ["force_crash"]
     return profile
+
+
+def _require_v7_0_kernel_tree() -> str:
+    """Require the built upload tree to come from Linux v7.0 and return its release."""
+    tree = os.environ[_KERNEL_TREE_ENV]
+    values: dict[str, str] = {}
+    for target in ("kernelversion", "kernelrelease"):
+        result = subprocess.run(
+            ["make", "-s", "-C", tree, target],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise SpinePhaseError(
+                "suse-kdump:kernel-preflight",
+                f"could not read {target} from KDIVE_KERNEL_SRC (returncode={result.returncode})",
+            )
+        values[target] = result.stdout.strip()
+    if values["kernelversion"] != "7.0.0":
+        raise SpinePhaseError(
+            "suse-kdump:kernel-preflight",
+            f"KDIVE_KERNEL_SRC is Linux {values['kernelversion']!r}, expected '7.0.0'",
+        )
+    return values["kernelrelease"]
 
 
 async def _await_domain_shutoff(
@@ -987,6 +987,33 @@ def test_await_domain_shutoff_rejects_a_running_domain_at_deadline(
         asyncio.run(_await_domain_shutoff("system-8", deadline_s=0.0, interval_s=0.0))
 
 
+def test_require_v7_0_kernel_tree_returns_the_built_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/kernel")
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    assert _require_v7_0_kernel_tree() == "7.0.0-1-default"
+
+
+def test_require_v7_0_kernel_tree_rejects_another_source_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/kernel")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, stdout="7.1.0\n", stderr=""),
+    )
+
+    with pytest.raises(SpinePhaseError, match="expected '7.0.0'"):
+        _require_v7_0_kernel_tree()
+
+
 @pytest.mark.parametrize(
     "envelope",
     [
@@ -1059,6 +1086,8 @@ def test_incomplete_core_assertion_accepts_exact_recovery_contract() -> None:
 def test_suse_current_kernel_reports_incomplete_kdump_core(family: str) -> None:
     """Prove each SUSE image boots KDIVE's kernel and exposes incomplete-core recovery (#825)."""
     issuer, base_url, db_url, image = _reachability_preflight(family)
+    kernel_release = _require_v7_0_kernel_tree()
+    kernel_proof = f"kdive_issue825_kernel={kernel_release}"
     operator_token = _token(issuer, role="operator")
     admin_token = _token(issuer, role="admin")
 
@@ -1125,8 +1154,20 @@ def test_suse_current_kernel_reports_incomplete_kdump_core(family: str) -> None:
                 for step in ("install", "boot"):
                     phase_name = f"{family}:{step}"
                     async with phase(phase_name):
-                        env = ok(await scalar(op, f"runs.{step}", run_id=run_id), phase_name)
+                        kwargs = {"cmdline": kernel_proof} if step == "install" else {}
+                        env = ok(
+                            await scalar(op, f"runs.{step}", run_id=run_id, **kwargs), phase_name
+                        )
                         await drain_job(op, phase_name, env.object_id)
+                async with phase(f"{family}:attribute-kernel"):
+                    xml = subprocess.run(
+                        ["virsh", "-c", worker_libvirt_uri(), "dumpxml", f"kdive-{system_id}"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout
+                    assert run_id in xml, "domain did not boot the per-Run uploaded kernel"
+                    assert kernel_proof in xml, "v7.0 proof token did not reach the booted cmdline"
                 async with phase(f"{family}:crash"):
                     ok(
                         await scalar(admin, "control.force_crash", system_id=system_id),

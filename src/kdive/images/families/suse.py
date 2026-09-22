@@ -44,8 +44,12 @@ _COMMON_DEBUG_PACKAGES = (
     "openssh-server",
 )
 _ZYPPER_REFRESH_CMD = "zypper --non-interactive refresh"
-_LEAP_NETWORK_PATH = "/etc/sysconfig/network/ifcfg-eth0"
-_LEAP_NETWORK_CONTENT = "BOOTPROTO='dhcp4'\nSTARTMODE='auto'\n"
+_READINESS_DROPIN_PATH = "/etc/systemd/system/kdive-ready.service.d/suse.conf"
+_READINESS_DROPIN_CONTENT = """\
+[Unit]
+After=cloud-final.service sshd.service
+Wants=cloud-final.service sshd.service
+"""
 # Both SUSE cloud-init renderers treat the v2 mapping key as an interface name. Keep the shared
 # wildcard match, but name the predictable QEMU interface so NetworkManager/Wicked configure it.
 _SUSE_CLOUD_CFG_CONTENT = KDIVE_CLOUD_CFG_CONTENT.replace("    kdive-dhcp:\n", "    eth0:\n")
@@ -144,10 +148,6 @@ class SuseFamily:
         """Build the ordered steps that turn an openSUSE cloud base into a debug rootfs."""
         _validate(ctx.kind, ctx.distro)
         steps: list[Step] = [RunCommand(_ZYPPER_REFRESH_CMD), InstallPackages(ctx.packages)]
-        if ctx.distro == "opensuse-leap":
-            # Leap 15.6's cloud-init/wicked combination does not render the shared v2 DHCP match;
-            # inject its native interface config offline so zypper has network on the build boot.
-            steps.append(StageFile(_LEAP_NETWORK_PATH, _LEAP_NETWORK_CONTENT))
         steps += [
             RunCommand("systemctl enable sshd.service"),
             RunCommand("systemctl enable kdump.service"),
@@ -161,6 +161,10 @@ class SuseFamily:
             steps += drgn_helper_steps()
             steps += drgn_version_marker_steps()
         steps += makedumpfile_version_marker_steps()
+        # network-online.target establishes DHCP, but SUSE can still start kdive-ready before
+        # cloud-init finishes first-boot work and sshd accepts connections. Preserve the common
+        # ready-implies-SSH contract instead of making every caller add a family-specific poll.
+        steps.append(StageFile(_READINESS_DROPIN_PATH, _READINESS_DROPIN_CONTENT))
         steps.append(
             UploadFile(ctx.readiness_unit_path, f"/etc/systemd/system/{READINESS_MARKER}.service")
         )
