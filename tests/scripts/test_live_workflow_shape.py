@@ -1049,9 +1049,13 @@ def test_preclean_never_touches_state_roots_or_follows_symlinks() -> None:
 
 
 def test_hosted_spine_onboards_the_project_before_the_proofs() -> None:
-    """The proofs need a funded project; funding must precede pytest, not follow it."""
+    """A preflight failure must exit before the normal hosted proof path starts."""
     spine = _tcg_spine()
-    assert spine.index("scripts/live-stack/onboard.sh") < spine.index("-m live_vm_tcg")
+    onboarding = 'onboard_wiring="$(ONBOARD_PREFLIGHT=required scripts/live-stack/onboard.sh)"'
+    assert onboarding in spine
+    assert "set -euo pipefail" in spine
+    assert spine.index(onboarding) < spine.index("if ! grep -q '^export KDIVE_TOKEN='")
+    assert spine.index(onboarding) < spine.index("-m live_vm_tcg")
 
 
 def test_hosted_spine_exports_a_minted_token_and_dies_when_the_mint_fails() -> None:

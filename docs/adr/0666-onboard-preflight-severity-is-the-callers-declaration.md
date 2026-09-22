@@ -125,3 +125,10 @@ carries and `scripts/live-stack/README.md:54` already warns about for `LIBVIRT_O
   insist at `just onboard`, and an operator can set an unprefixed name just as easily.
 - **Do nothing; let the reader correlate the two log entries.** judgment: that is the present
   behaviour, and #2568 is the report that it does not work.
+
+## Resolution
+
+Issue #2626 resolved the hosted `live_vm_tcg` residual on 2026-09-21. Its existing bare
+assignment now declares `ONBOARD_PREFLIGHT=required`, so a failing preflight exits the spine before
+token handling and dependent proof commands. The workflow-shape regression covers that ordering;
+the default advisory behavior of the other onboarding callers remains unchanged.
