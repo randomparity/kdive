@@ -11,6 +11,13 @@ on `main`, so the recorded completion criterion remains open.
 
 ## Concern
 
+**2026-09-22 update:** The account below records the original advisory-gate concern.
+Issue #2626 added `ONBOARD_PREFLIGHT=required` to the hosted caller. The first hosted
+branch run then failed because preflight checked the system daemon while the job
+published a session endpoint. Issue #2648 checks the configured `KDIVE_LIBVIRT_URI`
+and applies group and network prerequisites only to system-daemon endpoints. The
+remaining closure condition is a normal passing hosted TCG run on `main`.
+
 ADR-0666 makes the local-libvirt preflight's severity the caller's declaration: `onboard.sh` reads
 `ONBOARD_PREFLIGHT`, and the caller whose next step provisions declares `required`. Issue #2568
 applied that to `scripts/live-vm/mint-system.sh`, the caller the reported failure came from.
@@ -44,6 +51,10 @@ the declaration.
 
 ## Non-regression boundary
 
+**2026-09-22 update:** The historical boundary below predates the required hosted
+call. Keep that declaration and the bare-assignment exit-status propagation. Session
+endpoints skip system-only checks but still require a connection to their configured URI.
+
 - `onboard.sh` must keep `advisory` as its default, so this tier's present behaviour is the
   documented one rather than an accident.
 - `live.yml:549` must keep the bare-assignment capture. Rewriting it as `eval "$(onboard.sh | ...)"`
@@ -51,6 +62,10 @@ the declaration.
   record more expensive to resolve than it is now.
 
 ## What would resolve it
+
+**2026-09-22 update:** The call-site change below landed in #2626. Closure now
+requires a normal passing hosted `live_vm_tcg` run on `main`; a branch-only proof
+does not close this record.
 
 Declare the severity at the hosted spine's call site:
 
