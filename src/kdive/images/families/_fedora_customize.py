@@ -94,7 +94,9 @@ _STRIP_NET_DISABLE_CMD = (
 )
 
 
-def cloud_init_first_boot_steps(ctx: CustomizeContext) -> list[Step]:
+def cloud_init_first_boot_steps(
+    ctx: CustomizeContext, *, cloud_cfg_content: str = KDIVE_CLOUD_CFG_CONTENT
+) -> list[Step]:
     """Steps that make cloud-init the uniform first-boot mechanism (ADR-0288, ADR-0345).
 
     Bakes the authoritative kdive ``cloud.cfg.d`` drop-in (network + NoCloud pin + root
@@ -110,12 +112,14 @@ def cloud_init_first_boot_steps(ctx: CustomizeContext) -> list[Step]:
 
     Args:
         ctx: The customize context; ``is_cloud_image`` gates the cloud-init install.
+        cloud_cfg_content: Family-specific first-boot configuration when a renderer cannot use
+            the interface-independent default network id.
     """
     steps: list[Step] = []
     if not ctx.is_cloud_image:
         steps.append(InstallPackages(("cloud-init",)))
     steps.append(Mkdir(NOCLOUD_SEED_DIR))
-    steps.append(StageFile(KDIVE_CLOUD_CFG_PATH, KDIVE_CLOUD_CFG_CONTENT))
+    steps.append(StageFile(KDIVE_CLOUD_CFG_PATH, cloud_cfg_content))
     steps.append(StageFile(f"{NOCLOUD_SEED_DIR}/meta-data", _NOCLOUD_META_DATA))
     steps.append(StageFile(f"{NOCLOUD_SEED_DIR}/user-data", _NOCLOUD_USER_DATA))
     steps.append(RunCommand(_STRIP_NET_DISABLE_CMD))

@@ -11,6 +11,7 @@ from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families._fedora_customize import (
     FSTAB,
+    KDIVE_CLOUD_CFG_CONTENT,
     KDUMP_SYSCTL_CONTENT,
     KDUMP_SYSCTL_PATH,
     READINESS_MARKER,
@@ -45,6 +46,9 @@ _COMMON_DEBUG_PACKAGES = (
 _ZYPPER_REFRESH_CMD = "zypper --non-interactive refresh"
 _LEAP_NETWORK_PATH = "/etc/sysconfig/network/ifcfg-eth0"
 _LEAP_NETWORK_CONTENT = "BOOTPROTO='dhcp4'\nSTARTMODE='auto'\n"
+# Both SUSE cloud-init renderers treat the v2 mapping key as an interface name. Keep the shared
+# wildcard match, but name the predictable QEMU interface so NetworkManager/Wicked configure it.
+_SUSE_CLOUD_CFG_CONTENT = KDIVE_CLOUD_CFG_CONTENT.replace("    kdive-dhcp:\n", "    eth0:\n")
 _KDUMP_POST_PATH = "/usr/local/sbin/kdive-suse-kdump-post"
 _KDUMP_DUMP_ROOT = "/kdump/mnt/var/crash"
 _KDUMP_POST_PROGRAMS = ("/usr/bin/mv", "/usr/bin/sync", "/usr/bin/umount", "/usr/sbin/poweroff")
@@ -152,7 +156,7 @@ class SuseFamily:
             RunCommand(f"chmod 0755 {_KDUMP_POST_PATH}"),
             RunCommand(_KDUMP_CONFIG_CMD),
         ]
-        steps += cloud_init_first_boot_steps(ctx)
+        steps += cloud_init_first_boot_steps(ctx, cloud_cfg_content=_SUSE_CLOUD_CFG_CONTENT)
         if "drgn" in ctx.packages:
             steps += drgn_helper_steps()
             steps += drgn_version_marker_steps()

@@ -11,6 +11,7 @@ import pytest
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families import family_for
+from kdive.images.families._fedora_customize import KDIVE_CLOUD_CFG_PATH
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.steps import InstallPackages, RunCommand, Step
 from kdive.images.families.suse import SuseFamily
@@ -121,6 +122,13 @@ def test_steps_bake_cloud_init_and_conditional_provenance(tmp_path: Path) -> Non
     assert _POST_PATH in tumbleweed_text and _POST_PATH in leap_text
     assert "kdive-drgn" in tumbleweed_text
     assert "kdive-drgn" not in leap_text
+
+
+@pytest.mark.parametrize("distro", ["opensuse-tumbleweed", "opensuse-leap"])
+def test_cloud_init_uses_the_predictable_suse_interface_name(tmp_path: Path, distro: str) -> None:
+    cfg = baked_contents(_steps(tmp_path, distro))[KDIVE_CLOUD_CFG_PATH]
+    assert "    eth0:\n" in cfg
+    assert "    kdive-dhcp:\n" not in cfg
 
 
 def test_leap_bakes_wicked_dhcp_before_customization_boot(tmp_path: Path) -> None:
