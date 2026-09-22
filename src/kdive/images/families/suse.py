@@ -23,7 +23,6 @@ from kdive.images.families._fedora_customize import (
 from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.families.steps import (
     InstallPackages,
-    Mkdir,
     RunCommand,
     StageFile,
     Step,
@@ -45,13 +44,6 @@ _COMMON_DEBUG_PACKAGES = (
     "openssh-server",
 )
 _ZYPPER_REFRESH_CMD = "zypper --non-interactive refresh"
-_READINESS_DROPIN_DIR = "/etc/systemd/system/kdive-ready.service.d"
-_READINESS_DROPIN_PATH = f"{_READINESS_DROPIN_DIR}/suse.conf"
-_READINESS_DROPIN_CONTENT = """\
-[Unit]
-After=cloud-final.service sshd.service
-Requires=cloud-final.service sshd.service
-"""
 # Both SUSE cloud-init renderers treat the v2 mapping key as an interface name. Keep the shared
 # wildcard match, but name the predictable QEMU interface so NetworkManager/Wicked configure it.
 _SUSE_CLOUD_CFG_CONTENT = KDIVE_CLOUD_CFG_CONTENT.replace("    kdive-dhcp:\n", "    eth0:\n")
@@ -163,11 +155,6 @@ class SuseFamily:
             steps += drgn_helper_steps()
             steps += drgn_version_marker_steps()
         steps += makedumpfile_version_marker_steps()
-        # network-online.target establishes DHCP, but SUSE can still start kdive-ready before
-        # cloud-init finishes first-boot work and sshd accepts connections. Preserve the common
-        # ready-implies-SSH contract instead of making every caller add a family-specific poll.
-        steps.append(Mkdir(_READINESS_DROPIN_DIR))
-        steps.append(StageFile(_READINESS_DROPIN_PATH, _READINESS_DROPIN_CONTENT))
         steps.append(
             UploadFile(ctx.readiness_unit_path, f"/etc/systemd/system/{READINESS_MARKER}.service")
         )

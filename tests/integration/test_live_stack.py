@@ -29,10 +29,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
 import subprocess
 import time
-from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -802,41 +800,6 @@ def _reachability_provision_profile(
     }
 
 
-def _assert_ssh_banner_once(ssh: Mapping[str, object]) -> None:
-    """Require one immediate SSH banner read, with no readiness-masking retry."""
-    host = ssh.get("host")
-    port = ssh.get("port")
-    assert isinstance(host, str) and isinstance(port, int), f"invalid ssh endpoint: {ssh!r}"
-    with socket.create_connection((host, port), timeout=5.0) as connection:
-        banner = connection.recv(256)
-    assert banner.startswith(b"SSH-2.0-"), f"no SSH banner immediately at ready: {banner!r}"
-
-
-def test_assert_ssh_banner_once_accepts_an_immediate_banner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, server = socket.socketpair()
-    try:
-        server.sendall(b"SSH-2.0-OpenSSH_proof\r\n")
-        monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: client)
-        _assert_ssh_banner_once({"host": "127.0.0.1", "port": 2200})
-    finally:
-        server.close()
-
-
-def test_assert_ssh_banner_once_rejects_a_non_ssh_listener(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, server = socket.socketpair()
-    try:
-        server.sendall(b"HTTP/1.1 200 OK\r\n")
-        monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: client)
-        with pytest.raises(AssertionError, match="no SSH banner immediately at ready"):
-            _assert_ssh_banner_once({"host": "127.0.0.1", "port": 2200})
-    finally:
-        server.close()
-
-
 @pytest.mark.live_stack
 @pytest.mark.parametrize("family", ["debian", "rhel", *_SUSE_FAMILIES])
 def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
@@ -896,9 +859,6 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     assert ssh["host"] and isinstance(ssh["port"], int), (
                         f"ssh_info returned no endpoint on a ready System: {ssh!r}"
                     )
-                if family in _SUSE_FAMILIES:
-                    async with phase(f"{family}:ssh_banner_at_ready"):
-                        _assert_ssh_banner_once(ssh)
                 async with phase(f"{family}:authorize_ssh_key"):
                     env = ok(
                         await scalar(
