@@ -26,6 +26,44 @@ while (($#)); do
 done
 readonly ASSUME_YES
 
+# Developer-host Bash floor (ADR-0673). This block stays Bash 3.2 compatible because it runs
+# before the Bash 4 constructs below: an old interpreter must reach the remedy, not a nameref
+# error. The PATH bash matters too, because `just` recipes and `#!/usr/bin/env bash` use it.
+readonly BASH_FLOOR_MAJOR=4 BASH_FLOOR_MINOR=4
+
+# Succeed when "major.minor" meets the floor; an empty or unparsable version fails.
+bash_meets_floor() {
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+)$ ]] || return 1
+  local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+  ((major > BASH_FLOOR_MAJOR || (major == BASH_FLOOR_MAJOR && minor >= BASH_FLOOR_MINOR)))
+}
+
+stop_below_bash_floor() {
+  local version="$1" location="$2"
+  printf "Bash >= %s.%s is required; found %s at %s.\n" \
+    "${BASH_FLOOR_MAJOR}" "${BASH_FLOOR_MINOR}" "${version}" "${location}" >&2
+  printf "  Linux: install bash from your distribution.\n" >&2
+  printf "  macOS: brew install bash, then put \"\$(brew --prefix)/bin\" before /bin on PATH" >&2
+  printf " (docs/operating/install.md).\n" >&2
+  exit 1
+}
+
+check_bash_floor() {
+  local path_bash path_version=""
+  bash_meets_floor "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}" ||
+    stop_below_bash_floor "${BASH_VERSION}" "${BASH}"
+  path_bash="$(command -v bash || true)"
+  if [[ -n "${path_bash}" ]]; then
+    # shellcheck disable=SC2016  # the child bash expands BASH_VERSINFO, not this shell
+    path_version="$("${path_bash}" -c 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"' \
+      2>/dev/null || true)"
+  fi
+  bash_meets_floor "${path_version}" ||
+    stop_below_bash_floor "${path_version:-unknown}" "${path_bash:-no bash on PATH}"
+}
+
+check_bash_floor
+
 readonly OS_RELEASE_FILE="${KDIVE_OS_RELEASE:-/etc/os-release}"
 
 # The RedHat family ships the host's own emulator here, off PATH: no EL package provides
@@ -241,6 +279,13 @@ require_command() {
 require_tool() {
   local tier="$1" name="$2" instruction="$3"
   command_exists "${name}" || note_manual "${tier}" "${name}" "${instruction}"
+}
+
+# Record a missing GNU tool package; the developer recipes use GNU-only flags (ADR-0673).
+note_gnu() {
+  local formula="$1"
+  note_manual recommended "GNU ${formula}" \
+    "install GNU ${formula}; on macOS: brew install ${formula}, then put \"\$(brew --prefix)/opt/${formula}/libexec/gnubin\" before /usr/bin on PATH"
 }
 
 # A header package exposes no binary, so probe pkg-config instead of the PATH.
@@ -495,6 +540,11 @@ probe_all() {
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
+  # GNU-only flags that BSD userlands reject: served-doc-links uses `realpath -m`, the Ansible
+  # harnesses use `stat -c`. Probe the flags, not the names, since BSD ships all four tools.
+  { realpath -m --relative-to=/ /x && stat -c %n /; } >/dev/null 2>&1 || note_gnu coreutils
+  find / -maxdepth 0 -printf '' >/dev/null 2>&1 || note_gnu findutils
+  grep -qP x <<<x >/dev/null 2>&1 || note_gnu grep
   # Docker is named as a package only for the exact distributions whose engine package is known,
   # because a hint that names no package cannot be acted on and a hint that names the wrong one is
   # worse: the tier installs as one transaction, so a package the distro lacks takes git and make

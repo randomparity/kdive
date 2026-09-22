@@ -23,12 +23,26 @@ from tests.host_capabilities import requires_bash
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-setup-deps.sh"
 BASH = shutil.which("bash")
 
-# The script collects required-tool reports through a `local -n` nameref (bash >= 4.3).
-pytestmark = requires_bash(4, 3, "local -n namerefs")
+# The script stops below Bash 4.4, the developer-host floor (ADR-0673).
+pytestmark = requires_bash(4, 4, "the developer-host Bash floor")
 
 # run_privileged only escalates via sudo when EUID != 0; under a root pytest (some CI
 # containers) sudo is skipped and the sudo-log assertions have no file to read.
 skip_if_root = pytest.mark.skipif(os.geteuid() == 0, reason="sudo path only runs as non-root")
+
+
+def _with_bash(path: str, tmp_path: Path) -> str:
+    """Append a directory holding only the real ``bash`` to ``path``.
+
+    The checker's Bash floor runs the ``bash`` on ``PATH``, so every controlled PATH needs one.
+    A directory of its own, not the real bash's parent, keeps ``/usr/bin`` tools out of reach.
+    """
+    assert BASH is not None, "bash is required to run the checker"
+    bash_dir = tmp_path / "bash-only"
+    if not bash_dir.exists():
+        bash_dir.mkdir()
+        os.symlink(BASH, bash_dir / "bash")
+    return os.pathsep.join(p for p in (path, str(bash_dir)) if p)
 
 
 def _run(
@@ -44,7 +58,7 @@ def _run(
     os_release = tmp_path / "os-release"
     os_release.write_text(f'ID={os_release_id}\nID_LIKE="{os_release_like}"\n')
     env = {
-        "PATH": path,
+        "PATH": _with_bash(path, tmp_path),
         "KDIVE_OS_RELEASE": str(os_release),
         "HOME": str(tmp_path),
         # Pin the off-PATH emulator location to an absent path. Its default is the real
@@ -477,7 +491,7 @@ def test_interactive_accept_uses_plain_sudo(tmp_path: Path) -> None:
     os_release = tmp_path / "os-release"
     os_release.write_text("ID=debian\n")
     env = {
-        "PATH": str(b),
+        "PATH": _with_bash(str(b), tmp_path),
         "KDIVE_OS_RELEASE": str(os_release),
         "HOME": str(tmp_path),
         "KDIVE_PYTHON": str(venv_py),
@@ -892,7 +906,7 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
         [BASH, "scripts/check-setup-deps.sh"],  # relative path; KDIVE_PYTHON unset
         cwd=str(repo),
         env={
-            "PATH": str(bindir),
+            "PATH": _with_bash(str(bindir), tmp_path),
             "KDIVE_OS_RELEASE": str(os_release),
             "HOME": str(tmp_path),
             "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
@@ -1097,3 +1111,83 @@ def test_unlistable_boot_dir_reports_the_provisioning_remedy(tmp_path: Path) -> 
     assert "just prepare-local-libvirt-host" in result.stderr, result.stderr
     assert "sudo chgrp kvm" not in result.stderr, result.stderr
     assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize(
+    "bash_body",
+    ["#!/bin/sh\nprintf 3.2\n", "#!/bin/sh\nexit 3\n", "#!/bin/sh\nprintf garbage\n"],
+    ids=["old", "failing", "unparsable"],
+)
+def test_path_bash_below_floor_stops_before_any_probe(tmp_path: Path, bash_body: str) -> None:
+    """A PATH bash that is old, fails, or answers nonsense stops the run with the remedy."""
+    b = _bin(tmp_path)
+    _stub(b, "bash", bash_body)
+
+    result = _run("debian", str(b), tmp_path)
+
+    assert result.returncode == 1
+    assert "Bash >= 4.4" in result.stderr
+    assert "brew install bash" in result.stderr
+    assert "dependencies missing" not in result.stderr
+
+
+_SYSTEM_BASH = Path("/bin/bash")
+
+
+def _system_bash_below_floor() -> bool:
+    if not _SYSTEM_BASH.exists():
+        return False
+    proc = subprocess.run(
+        [str(_SYSTEM_BASH), "-c", 'printf "%s %s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    major, minor = (int(n) for n in proc.stdout.split())
+    return (major, minor) < (4, 4)
+
+
+@pytest.mark.skipif(not _system_bash_below_floor(), reason="/bin/bash already meets the floor")
+def test_old_interpreter_stops_before_any_probe(tmp_path: Path) -> None:
+    """Running the checker itself under an old bash (macOS /bin/bash 3.2) stops with the remedy."""
+    result = subprocess.run(
+        [str(_SYSTEM_BASH), str(SCRIPT)],
+        env={"PATH": _with_bash(str(_bin(tmp_path)), tmp_path), "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "brew install bash" in result.stderr
+    assert "invalid option" not in result.stderr
+
+
+_GNU_FEATURES = ("GNU coreutils", "GNU findutils", "GNU grep")
+
+
+def test_missing_gnu_features_are_recommended_with_gnubin_hints(tmp_path: Path) -> None:
+    """Without GNU tools on PATH each package is named in Recommended with its gnubin step."""
+    result = _run("debian", str(_bin(tmp_path)), tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    recommended = next(
+        line for line in result.stderr.splitlines() if line.startswith("Recommended")
+    )
+    for feature in _GNU_FEATURES:
+        assert feature in recommended
+    for formula in ("coreutils", "findutils", "grep"):
+        assert f"/opt/{formula}/libexec/gnubin" in result.stderr
+
+
+def test_gnu_features_present_are_not_reported(tmp_path: Path) -> None:
+    """Tools that accept the probed GNU flags clear every GNU entry."""
+    b = _bin(tmp_path)
+    for tool in ("realpath", "stat", "find", "grep"):
+        _stub(b, tool, "#!/bin/sh\nexit 0\n")
+
+    result = _run("debian", str(b), tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    for feature in _GNU_FEATURES:
+        assert feature not in result.stderr
