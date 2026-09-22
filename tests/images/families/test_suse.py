@@ -13,7 +13,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import KDIVE_CLOUD_CFG_PATH
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
-from kdive.images.families.steps import InstallPackages, RunCommand, Step
+from kdive.images.families.steps import InstallPackages, Mkdir, RunCommand, StageFile, Step
 from kdive.images.families.suse import SuseFamily
 from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
@@ -24,6 +24,7 @@ from tests.support.customize_steps import baked_contents, commands, installed, r
 _POST_PATH = "/usr/local/sbin/kdive-suse-kdump-post"
 _DUMP_ROOT = "/kdump/mnt/var/crash"
 _READINESS_DROPIN_PATH = "/etc/systemd/system/kdive-ready.service.d/suse.conf"
+_READINESS_DROPIN_DIR = "/etc/systemd/system/kdive-ready.service.d"
 
 
 def _family() -> FamilyCustomizer:
@@ -133,9 +134,17 @@ def test_cloud_init_uses_the_predictable_suse_interface_name(tmp_path: Path, dis
 
 @pytest.mark.parametrize("distro", ["opensuse-tumbleweed", "opensuse-leap"])
 def test_readiness_waits_for_cloud_init_and_sshd(tmp_path: Path, distro: str) -> None:
-    dropin = baked_contents(_steps(tmp_path, distro))[_READINESS_DROPIN_PATH]
+    steps = _steps(tmp_path, distro)
+    dropin = baked_contents(steps)[_READINESS_DROPIN_PATH]
     assert "After=cloud-final.service sshd.service" in dropin
     assert "Wants=cloud-final.service sshd.service" in dropin
+    mkdir_index = steps.index(Mkdir(_READINESS_DROPIN_DIR))
+    stage_index = next(
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, StageFile) and step.path == _READINESS_DROPIN_PATH
+    )
+    assert mkdir_index < stage_index
 
 
 def test_kdump_sysconfig_uses_one_no_argument_helper_and_required_programs(tmp_path: Path) -> None:
