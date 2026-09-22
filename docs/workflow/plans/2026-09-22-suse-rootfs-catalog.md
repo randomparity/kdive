@@ -12,8 +12,10 @@ the existing computed capability and local-libvirt harvest contracts.
 **Tech stack:** Python 3.14, pytest, TOML, zypper, systemd, dracut/kdump, libguestfs, libvirt,
 FastMCP live-stack harness, `uv`, and `just`.
 
-Expected implementation size: 700–1000 changed lines (L), including the design artifacts, family
-tests, catalog snapshots, two live parameters, and documentation.
+Revised implementation size: 2000–2300 changed lines (L), including the design artifacts, family
+tests, catalog snapshots, baseline-initrd support, the bounded initrd transform, two live
+parameters, and documentation. The original 700–1000 L estimate did not include the boot and
+network compatibility work exposed by the real images or the negative-path live-helper coverage.
 
 ## Constraints
 
@@ -66,10 +68,12 @@ images or unknown SUSE distros.
 2. Add post-capture-script tests for exact success detection, fixed-root/direct-child selection,
    zero and multiple candidates, fixed-name incomplete rename, sync/unmount/poweroff, and
    `/etc/sysconfig/kdump` wiring through `KDUMP_REQUIRED_PROGRAMS` and a no-argument
-   `KDUMP_POSTSCRIPT`. Model both Leap's direct execution and Tumbleweed's shell evaluation and
-   require each to invoke the same helper path. Pin the rendered order so kdump configuration
-   occurs after package installation, and require every external command the script calls to be
-   included in the capture initramfs.
+   `KDUMP_POSTSCRIPT`. Retain vmcore-conversion stderr through SUSE's supported
+   `MAKEDUMPFILE_OPTIONS` field, and require either exact unsupported/incomplete warning to
+   override a successful exit status. Model both Leap's direct execution and Tumbleweed's shell
+   evaluation and require each to invoke the same helper path. Pin the rendered order so kdump
+   configuration occurs after package installation, and require every external command the
+   script calls to be included in the capture initramfs.
 3. Implement the package sets, capabilities, ordered steps, post-capture script, sysconfig update,
    and guestfish normalization. Reuse existing shared constants and helper-step functions; do not
    change the RHEL or Debian classes.
@@ -115,9 +119,9 @@ Rollback: revert the task commit; no published image row or database migration i
 
 ## Task 4: Build and diagnose both images on KVM
 
-**Files:** implementation fixes remain limited to Tasks 1–3 surfaces unless a directly exposed
-rootfs-build prerequisite is missing; update provisioning ownership in the same change if the live
-build proves a host dependency is undeclared.
+**Files:** implementation fixes remain limited to the rootfs build and SUSE family surfaces unless
+a directly exposed prerequisite is missing; update provisioning ownership in the same change if
+the live build proves a host dependency is undeclared.
 
 **Steps**
 
@@ -129,7 +133,11 @@ build proves a host dependency is undeclared.
 3. Inspect the produced provenance and require the expected distro identity, installed package
    set, makedumpfile version, AppArmor posture, and conditional drgn version/capability.
 4. If a build fails, use the detect-curse workflow before changing code. Add focused coverage for
-   every verified code defect and rerun only the affected image until both builds complete.
+   every verified code defect and rerun only the affected image until both builds complete. The
+   real builds require three compatibility corrections: recognize SUSE's
+   `/boot/initrd-<kernel-version>` name; remove Tumbleweed's fixed KIWI repartition hook through a
+   2 GiB-bounded streaming zstd/newc transform after the whole-disk repack; and configure the
+   predictable `eth0` cloud-init connection identifier for both rows.
 5. Record artifact digests and exact source commit for the later live proof without publishing
    private machine paths.
 
@@ -152,10 +160,21 @@ parameter.
 **Steps**
 
 1. Add the two named image cases to the SSH-reachability proof without weakening the existing
-   Debian/RHEL cases.
+   Debian/RHEL cases, then invoke `systems.authorize_ssh_key` and require its terminal success.
+   Keep ADR-0294's bounded product-path retry: live diagnosis confirmed ADR-0272 deliberately
+   defines provision `ready` as domain start rather than serial-marker or SSH readiness, so a
+   SUSE-only readiness drop-in and immediate raw-banner check cannot strengthen that contract.
+   Fix the shared banner probe to close and reconnect when QEMU's host forward accepts before sshd
+   answers, bounding each read inside its flow deadline; cover the accepted-but-late-banner
+   sequence with a deterministic fake-clock test. Retain the viewer probe's 15-second bound but
+   give the authorization preflight 30 seconds under ADR-0672, because the Leap live console
+   showed sshd starting immediately after the shorter terminal window.
 2. Add a SUSE-only, two-parameter live test that allocates, provisions, creates a Run, uploads and
-   boots the v7.0 kernel, and force-crashes. Before requesting capture, poll the named libvirt
-   domain through `worker_libvirt_uri()` and require shutoff under a deadline below the existing
+   boots the v7.0 kernel, and force-crashes. Before upload, require the source tree's
+   `kernelversion` to equal `7.0.0` and require the actual bzImage header release to equal
+   `kernelrelease`; after boot, require the domain XML to name the per-Run staged kernel and carry
+   a release-specific proof token. Before requesting capture, poll the named libvirt domain
+   through `worker_libvirt_uri()` and require shutoff under a deadline below the existing
    120-second harvester fallback. Then poll `vmcore.fetch` to terminal failure. Assert the response
    is `readiness_failure`, carries
    `failure_detail_reason = "kdump_core_incomplete"`, and names the existing `host_dump` recovery.
@@ -165,12 +184,16 @@ parameter.
 4. Add focused tests for the direct domain-shutoff poll and any new job-failure assertion helper,
    including wrong domain state, deadline exhaustion, wrong category, missing reason, wrong
    remediation, canceled job, and timeout.
-5. Bring up the host-process live stack from the exact checkout, onboard the demo project, set both
+5. If the live capture returns a successful artifact despite the catalog's v7.0-incapable signal,
+   inspect the guest's own status inputs before changing the provider contract. SUSE's final
+   README records only process success; capture makedumpfile stderr and fail closed on its exact
+   unsupported/incomplete warnings.
+6. Bring up the host-process live stack from the exact checkout, onboard the demo project, set both
    image variables, and run the four SUSE parameters: two SSH and two incomplete-capture cases.
-6. Confirm the deployed server/worker/reconciler source matches the tested commit. Record per-case
+7. Confirm the deployed server/worker/reconciler source matches the tested commit. Record per-case
    result, duration, artifact digest, and commit without public machine identifiers.
-7. Stop quest-created services and account for retained volumes/artifacts.
-8. Commit the proof driver and runbook update as one conventional `test` or `docs`-paired commit,
+8. Stop quest-created services and account for retained volumes/artifacts.
+9. Commit the proof driver and runbook update as one conventional `test` or `docs`-paired commit,
    splitting only if repository hooks require independently valid changes.
 
 Acceptance: each image independently proves baseline lifecycle and SSH; each boots the v7.0 test

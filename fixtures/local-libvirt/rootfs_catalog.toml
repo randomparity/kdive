@@ -3,8 +3,9 @@
 # sha256-pinned url. family selects the FamilyCustomizer (rhel|debian|suse).
 #
 # makedumpfile_version: the curated build-time makedumpfile version this release's repos install,
-# verified against distro package indexes (2026-09-22) and guarded by
-# tests/images/test_rootfs_catalog.py. It is the per-image operand of the computed kdump-capability
+# verified against distro package indexes (baseline rows 2026-06-26; SUSE rows 2026-09-22) and
+# guarded by tests/images/test_rootfs_catalog.py. It is the per-image operand of the computed
+# kdump-capability
 # predicate (kdive.images.kdump_support, ADR-0253): an agent reads the capability for its target
 # kernel via images.describe, rather than a stored kernel-relative bit. A row whose makedumpfile is
 # too old for the target kernel computes `incapable` and hits the cause-neutral
@@ -13,7 +14,8 @@
 # binary's version. Not live upstream truth.
 #
 # drgn_version: the curated build-time drgn version this release's repos install, verified against
-# distro package indexes (2026-09-22) and guarded by tests/images/test_rootfs_catalog.py. drgn is
+# distro package indexes (baseline rows 2026-07-12; SUSE rows 2026-09-22) and guarded by
+# tests/images/test_rootfs_catalog.py. drgn is
 # installed unpinned from the distro repos (rhel: EPEL, debian: python3-drgn), so the version
 # tracks each release's current repo and varies sharply by family. It is the per-image operand of
 # the computed live-drgn-introspection predicate (kdive.images.drgn_support, ADR-0328): an agent

@@ -4,7 +4,8 @@
 
 Issue #825 and its parent epic #822 authorize the SUSE-family slice of the local-libvirt rootfs
 catalog. The frozen scope is the latest complete `WORK:SCOPE` comment carrying token
-`q825-eb2c81ec`. The operator approved this design on 2026-09-22.
+`q825-eb2c81ec`. The operator approved the quest and its frozen scope on 2026-09-22; this revision
+also records the boot and readiness corrections found while proving that approved scope live.
 
 [ADR-0251](../../adr/0251-local-multidistro-rootfs-catalog.md) governs the catalog,
 `FamilyCustomizer`, customization-boot, and incomplete-core disclosure contracts. This design is
@@ -125,6 +126,36 @@ the Debian AppArmor path does. It does not touch SELinux configuration or reques
 The implementation stays local to `SuseFamily`; extracting the two small guestfish operations from
 the existing Debian family would change unrelated code without adding a third behavior.
 
+SUSE names its baseline initrd `/boot/initrd-<kernel-version>`, so the shared kernel selector
+accepts that spelling in addition to the existing `initramfs-<kernel-version>.img` and
+`initrd.img-<kernel-version>` forms. Tumbleweed's Minimal VM initrd also contains KIWI's
+`20-kiwi-repart-disk.sh` pre-mount hook. That hook assumes the source appliance's partitioned disk
+layout and powers off after waiting for a partition that cannot exist once KDIVE repacks the image
+as whole-disk ext4. During SUSE normalization, a bounded streaming zstd/newc transform removes only
+that exact hook pathname. The transform refuses an initrd whose expanded archive exceeds 2 GiB,
+replaces the file atomically, and leaves an archive without the hook byte-for-byte unchanged.
+
+Both SUSE rows use `eth0` as the cloud-init network stanza identifier, retaining the wildcard MAC
+match used by the other families. That predictable identifier lets cloud-init generate a usable
+NetworkManager or Wicked connection for QEMU's NIC instead of binding the connection to the
+arbitrary YAML key. This keeps cloud-init as the uniform first-boot network owner required by
+ADR-0288; there is no family-specific interface file.
+
+The shared readiness unit remains ordered after `network-online.target`, which both SUSE images
+back with their native wait-online service. Baseline provisioning does not consume this serial
+marker: ADR-0272 deliberately defines the System's `ready` state as successful domain start, and
+ADR-0294 proves eventual guest reachability through the product's bounded
+`systems.authorize_ssh_key` path. Live testing rejected a SUSE-only readiness drop-in and a raw
+banner assertion because neither can change the baseline provisioning contract and the latter
+duplicates a client path ADR-0294 explicitly rejected. It also exposed a shared probe defect:
+QEMU accepts a host-forward TCP connection before the guest sshd exists, while the probe held that
+banner-less connection for its whole flow deadline. The probe now caps each banner read at two
+seconds and reconnects within the deadline. A non-SSH banner still fails immediately, and the
+terminal verdict distinguishes a never-accepted TCP connection from an accepted connection that
+never produced an SSH banner. [ADR-0672](../../adr/0672-authorize-ssh-has-a-longer-preflight-window.md)
+keeps the viewer probe at 15 seconds but gives authorization 30 seconds after Leap live evidence
+showed sshd starting immediately after the shorter window expired.
+
 ### SUSE kdump compatibility adapter
 
 The image stages `/usr/local/sbin/kdive-suse-kdump-post` as a fixed, non-user-controlled script
@@ -133,16 +164,26 @@ without arguments. That single command is valid under both supported kdump imple
 15.6 executes the configured value directly, while Tumbleweed evaluates it as a shell command.
 The adapter searches only the fixed SUSE file-target root `/kdump/mnt/var/crash`.
 
+SUSE's save script decides that a vmcore succeeded from makedumpfile's exit status and writes only
+that result to `README.txt`. Makedumpfile 1.7.4 and 1.7.7 return success for a v7.0 dump while also
+warning that the kernel is unsupported and the result may be incomplete. Those warnings go to the
+crash console, not the README. The image therefore appends one static redirection to SUSE's
+supported `MAKEDUMPFILE_OPTIONS`: vmcore-conversion stderr is retained at
+`/tmp/kdive-makedumpfile-stderr` inside the disposable capture initramfs. The postscript reads that
+fixed file and treats either exact makedumpfile warning as an incomplete result. No vendor script
+is patched and no version-to-kernel compatibility table is duplicated in the guest.
+
 After SUSE has written its final `README.txt`, the adapter:
 
 1. enumerates direct child directories containing `vmcore`;
 2. keeps the complete name only when exactly one such directory exists and its `README.txt`
-   contains the exact record `vmcore status: saved successfully`;
+   contains the exact record `vmcore status: saved successfully`, and neither the README nor the
+   captured makedumpfile stderr contains an exact unsupported/incomplete warning;
 3. otherwise renames every direct-child `vmcore` to `vmcore-incomplete`;
 4. synchronizes filesystems, unmounts them, and forces the capture guest off.
 
-A successful vmcore keeps its final name. A failed or truncated vmcore is never left under the
-complete name. Zero candidates is a no-op for the core names and the existing no-core path applies;
+A successful, warning-free vmcore keeps its final name. A failed, truncated, or explicitly
+unsupported vmcore is never left under the complete name. Zero candidates is a no-op for the core names and the existing no-core path applies;
 multiple candidates fail closed by losing every complete name. Each KDIVE System starts from a
 fresh per-System overlay and `force_crash` moves it into the terminal `CRASHED` state, so the
 ordinary lifecycle has one current capture directory. The multiple-candidate behavior remains a
@@ -190,18 +231,27 @@ The live-stack suite receives distinct inputs for the two artifacts:
 - `KDIVE_GUEST_IMAGE_SUSE_LEAP_15_6`.
 
 The existing per-family SSH proof is generalized to named image cases and covers both SUSE rows
-independently. A SUSE incomplete-capture proof is parameterized over the same two inputs and uses
-the ordinary HTTP lifecycle:
+independently. After the System reaches `ready`, it invokes the terminal
+`systems.authorize_ssh_key` job. Its bounded product-path retry is the existing ADR-0294 contract,
+with ADR-0672's 30-second authorization preflight:
+a succeeded drain proves the NIC leased, the forward bridged, sshd answered, and authenticated SSH
+worked without inventing a stronger provision-readiness meaning. The reconnecting banner probe is
+load-bearing for SUSE's longer baseline boot. A SUSE incomplete-capture proof is parameterized over
+the same two inputs and uses the ordinary HTTP lifecycle:
 
 1. allocate and provision the selected image;
-2. create a Run, build and upload the current v7.0 kernel, install it, and boot it;
-3. force-crash under the existing destructive-operation gate;
-4. poll the named libvirt domain to shutoff through the worker's published URI, with a deadline
+2. create a Run, require `KDIVE_KERNEL_SRC` to report `kernelversion = 7.0.0`, and require the
+   actual `arch/x86/boot/bzImage` header release to equal the tree's `kernelrelease`; then build
+   and upload that artifact, install it with a release-specific command-line proof token, and boot
+   it;
+3. inspect the running domain XML to require the per-Run staged kernel path and proof token;
+4. force-crash under the existing destructive-operation gate;
+5. poll the named libvirt domain to shutoff through the worker's published URI, with a deadline
    below the harvester's 120-second fallback, before requesting capture;
-5. request `vmcore.fetch` and wait for the terminal capture job;
-6. require `readiness_failure`, `failure_detail_reason = "kdump_core_incomplete"`, and the existing
+6. request `vmcore.fetch` and wait for the terminal capture job;
+7. require `readiness_failure`, `failure_detail_reason = "kdump_core_incomplete"`, and the existing
    recovery text naming `method="host_dump"`;
-7. release the allocation in a failure-safe `finally` block.
+8. release the allocation in a failure-safe `finally` block.
 
 The test does not accept a generic capture failure, an empty `/var/crash`, a successful partial
 core, or a host-side timeout as proof. A live run records the exact built commit and artifact paths
@@ -239,6 +289,11 @@ direct children of a fixed root, checks a fixed status string, renames only the 
 beneath that root, and terminates the disposable crash kernel. Focused tests inspect the rendered
 command and script; the live proof establishes the initramfs execution path.
 
+The initrd normalizer reads only the selected local image's trusted baseline initrd, rejects
+malformed newc records and unsupported compression, enforces the 2 GiB expanded-size limit before
+writing each chunk, and removes one fixed pathname. It does not interpret archive filenames as
+host paths or extract entries onto the host filesystem.
+
 No authentication, authorization, tenant boundary, persisted schema, secret handling, or host
 command boundary changes.
 
@@ -247,7 +302,9 @@ command boundary changes.
 1. `family_for("suse")` returns the new customizer; unsupported SUSE identities and build kind
    fail with categorized configuration errors.
 2. Focused tests prove zypper ordering, package divergence, capability evidence, service and
-   sysconfig configuration, marker/helper coupling, AppArmor normalization, and readiness order.
+   sysconfig configuration, marker/helper coupling, AppArmor normalization, baseline-initrd
+   selection, bounded KIWI-hook removal, network configuration, shared readiness upload, and
+   reconnecting a QEMU forward that accepts before sshd answers.
 3. The catalog loads both pinned rows, maps Leap's explicit absent drgn evidence to `None`, and
    computes both rows kdump-incapable for v7.0 without changing existing rows.
 4. Both qcow2 images build through the real customization boot and record installed packages,
