@@ -2,7 +2,12 @@
 
 ## Status
 
-> **Resolved by #2626** (2026-09-21)
+Open
+
+Previously marked resolved by #2626 (2026-09-21). Reopened by #2648 on 2026-09-22:
+the required gate works, but hosted run 35677000822 failed its system-only libvirt
+checks against a published session endpoint. The normal hosted proof has not passed
+on `main`, so the recorded completion criterion remains open.
 
 ## Concern
 

@@ -93,6 +93,15 @@ direction, an operator who exports `ONBOARD_PREFLIGHT=required` in their shell h
 every `onboard.sh` a later script runs, including `demo-up.sh:66` — the cost ADR-0659's category
 carries and `scripts/live-stack/README.md:54` already warns about for `LIBVIRT_OPTIONAL`.
 
+### Amendment (2026-09-22): system-only checks do not describe hosted TCG (#2648)
+
+The earlier claim that the native host's system-daemon setup makes the three
+`qemu:///system` probes harmless does not cover hosted TCG. Hosted run 35677000822
+exported a published session URI but failed the `libvirt` group, system connection,
+and system `default` network checks after #2626 made its gate required. Issue #2648
+changes the preflight to probe the configured endpoint and require those other two
+prerequisites only for local system-daemon URIs. Caller-declared severity is unchanged.
+
 ## Considered & rejected
 
 - **Hard-fail on any preflight `FAIL` (#2568 direction 1).** verified: `demo-up.sh:53-54` sets
@@ -133,3 +142,10 @@ assignment now declares `ONBOARD_PREFLIGHT=required`, so a failing preflight exi
 token handling and dependent proof commands. The workflow-shape regression covers that ordering;
 the default advisory behavior of the other onboarding callers remains unchanged. The Consequences
 paragraph above records the residual's 2026-09-16 state; it is not the current hosted-TCG behavior.
+
+### Amendment (2026-09-22): hosted proof remains open (#2648)
+
+The #2626 resolution established the required call-site gate, but its normal hosted
+proof did not pass. Run 35677000822 stopped at the mismatched system-only preflight
+checks described above. Debt 0016 is reopened until a normal `live_vm_tcg` run passes
+on `main`; a branch run alone does not complete that criterion.

@@ -106,10 +106,10 @@ POWER-specific host checks:
   provisioning own worker staging, console and overlay directories.
 
 The [local preflight](../../scripts/operations/check-local-libvirt.sh) can diagnose host tools,
-imports and readable kernels, using `KDIVE_PYTHON` to select the worker interpreter. It also
-checks the older system connection and default network, so its success is not proof of the
-installed session authority or a working capture. The live-stack and live-testing checks own
-those deployment proofs.
+imports and readable kernels, using `KDIVE_PYTHON` to select the worker interpreter. It checks
+the configured libvirt endpoint; only local system-daemon URIs require the `libvirt` group and
+active `default` network. Its success does not prove the installed session authority or a
+working capture. The live-stack and live-testing checks own those deployment proofs.
 
 ### Capture-child attestation
 
