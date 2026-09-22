@@ -998,17 +998,6 @@ def _assert_incomplete_core_failure(env: ToolResponse) -> None:
     )
 
 
-def _assert_suse_capture_outcome(family: str, env: ToolResponse) -> None:
-    """Require Tumbleweed success or Leap's recoverable incomplete-core failure."""
-    if family == "suse-tumbleweed":
-        assert env.status == "succeeded", f"Tumbleweed kdump capture failed: {env.model_dump()!r}"
-        assert env.refs.get("result"), (
-            f"Tumbleweed capture returned no result: {env.model_dump()!r}"
-        )
-        return
-    _assert_incomplete_core_failure(env)
-
-
 def test_await_domain_shutoff_polls_the_named_domain(monkeypatch: pytest.MonkeyPatch) -> None:
     """The SUSE proof waits through a running state and addresses only its own domain."""
     states = iter(["running\n", "shut off\n"])
@@ -1194,21 +1183,10 @@ def test_incomplete_core_assertion_accepts_exact_recovery_contract() -> None:
     )
 
 
-def test_suse_capture_assertion_accepts_tumbleweed_success() -> None:
-    _assert_suse_capture_outcome(
-        "suse-tumbleweed",
-        ToolResponse(
-            object_id="job-1",
-            status="succeeded",
-            refs={"result": "artifact-1"},
-        ),
-    )
-
-
 @pytest.mark.live_stack
 @pytest.mark.parametrize("family", _SUSE_FAMILIES)
-def test_suse_current_kernel_capture_outcome(family: str) -> None:
-    """Prove Tumbleweed captures v7.0 while Leap exposes incomplete-core recovery (#825)."""
+def test_suse_current_kernel_reports_incomplete_kdump_core(family: str) -> None:
+    """Prove each SUSE image boots KDIVE's kernel and exposes incomplete-core recovery (#825)."""
     issuer, base_url, db_url, image = _reachability_preflight(family)
     kernel_release = _require_v7_0_kernel_tree()
     kernel_proof = f"kdive_issue825_kernel={kernel_release}"
@@ -1314,7 +1292,7 @@ def test_suse_current_kernel_capture_outcome(family: str) -> None:
                             break
                         if time.monotonic() >= deadline:
                             raise SpinePhaseError(f"{family}:capture", "drain_timeout")
-                    _assert_suse_capture_outcome(family, terminal)
+                    _assert_incomplete_core_failure(terminal)
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)

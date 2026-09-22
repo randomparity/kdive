@@ -205,6 +205,23 @@ def test_postscript_fails_closed_for_ambiguous_dump_directories(tmp_path: Path) 
     assert len(list(root.glob("*/vmcore-incomplete"))) == 2
 
 
+def test_postscript_marks_a_completed_unsupported_kernel_dump_incomplete(tmp_path: Path) -> None:
+    dump = tmp_path / "crash" / "current"
+    dump.mkdir(parents=True)
+    (dump / "vmcore").write_text("degraded", encoding="utf-8")
+    (dump / "README.txt").write_text(
+        "The kernel version is not supported.\n"
+        "The makedumpfile operation may be incomplete.\n"
+        "vmcore status: saved successfully\n",
+        encoding="utf-8",
+    )
+
+    _run_postscript(tmp_path, "direct")
+
+    assert not (dump / "vmcore").exists()
+    assert (dump / "vmcore-incomplete").exists()
+
+
 def test_postscript_handles_no_core(tmp_path: Path) -> None:
     root = _run_postscript(tmp_path, "direct")
     assert not list(root.glob("*/vmcore*"))

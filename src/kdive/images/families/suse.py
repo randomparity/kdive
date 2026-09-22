@@ -63,12 +63,18 @@ for dump_dir in "$dump_root"/*; do
     [ -f "$dump_dir/vmcore" ] || continue
     candidate_count=$((candidate_count + 1))
     if [ -f "$dump_dir/README.txt" ]; then
+        saved=0
+        unsupported=0
         while IFS= read -r line; do
-            if [ "$line" = "vmcore status: saved successfully" ]; then
-                successful_dir=$dump_dir
-                break
-            fi
+            [ "$line" = "vmcore status: saved successfully" ] && saved=1
+            case "$line" in
+                "The kernel version is not supported."|\
+                "The makedumpfile operation may be incomplete.") unsupported=1 ;;
+            esac
         done < "$dump_dir/README.txt"
+        if [ "$saved" -eq 1 ] && [ "$unsupported" -eq 0 ]; then
+            successful_dir=$dump_dir
+        fi
     fi
 done
 
