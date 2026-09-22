@@ -948,6 +948,20 @@ def test_await_domain_shutoff_polls_the_named_domain(monkeypatch: pytest.MonkeyP
     assert all(call[-2:] == ["domstate", "kdive-system-7"] for call in calls)
 
 
+def test_await_domain_shutoff_rejects_a_running_domain_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running domain at the deadline is not misreported as kdump completion."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, stdout="running\n", stderr=""),
+    )
+
+    with pytest.raises(SpinePhaseError, match="domain did not shut off within 0s"):
+        asyncio.run(_await_domain_shutoff("system-8", deadline_s=0.0, interval_s=0.0))
+
+
 @pytest.mark.parametrize(
     "envelope",
     [
@@ -962,11 +976,37 @@ def test_await_domain_shutoff_polls_the_named_domain(monkeypatch: pytest.MonkeyP
             error_category=ErrorCategory.READINESS_FAILURE.value,
             data={"failure_detail_reason": "no_core"},
         ),
+        ToolResponse(
+            object_id="job-1",
+            status="failed",
+            error_category=ErrorCategory.CONFIGURATION_ERROR.value,
+            data={
+                "failure_detail_reason": "kdump_core_incomplete",
+                "failure_detail_remediation": 'Retry with method="host_dump".',
+            },
+        ),
+        ToolResponse(
+            object_id="job-1",
+            status="failed",
+            error_category=ErrorCategory.READINESS_FAILURE.value,
+            data={
+                "failure_detail_reason": "kdump_core_incomplete",
+                "failure_detail_remediation": "Use a newer rootfs.",
+            },
+        ),
         ToolResponse.success("job-1", "succeeded"),
         ToolResponse.success("job-1", "canceled"),
         ToolResponse.success("job-1", "running"),
     ],
-    ids=["generic-failure", "no-core", "success", "canceled", "running"],
+    ids=[
+        "generic-failure",
+        "no-core",
+        "wrong-category",
+        "wrong-remediation",
+        "success",
+        "canceled",
+        "running",
+    ],
 )
 def test_incomplete_core_assertion_rejects_every_other_terminal(envelope: ToolResponse) -> None:
     """Generic failure, no-core, success, cancellation, and timeout-like states do not pass."""
