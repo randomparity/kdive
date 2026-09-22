@@ -194,6 +194,14 @@ def test_local_runtime_dsns_are_distinct_and_migration_owner_is_absent() -> None
     assert all("kdive-migration" not in dsn for dsn in runtime.values())
 
 
+def test_app_services_disable_local_libvirt() -> None:
+    services = _services()
+    assert all(
+        services[service]["environment"]["KDIVE_LOCAL_LIBVIRT_ENABLED"] == "false"
+        for service in _APP_SERVICES
+    )
+
+
 def test_external_role_provisioning_can_disable_local_bootstrap_and_override_runtime_dsns() -> None:
     model = _config(
         {

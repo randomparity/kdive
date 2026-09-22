@@ -196,6 +196,7 @@ services:
       KDIVE_DATABASE_URL: ${KDIVE_SERVER_DATABASE_URL:-postgresql://kdive-server-member:kdive-server-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HTTP_HOST: 0.0.0.0
       KDIVE_HTTP_PORT: "8000"
+      KDIVE_LOCAL_LIBVIRT_ENABLED: "false"
       # Bind the aux health/metrics listener to all interfaces INSIDE the container so
       # the in-container healthcheck (and an in-network scrape) reaches it. The port is
       # never published (no host mapping below), so the container network namespace is
@@ -266,6 +267,7 @@ services:
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
       KDIVE_WORKER_INCARNATION_KIND: docker
       KDIVE_WORKER_INCARNATION_ID: docker:${KDIVE_WORKER_INCARNATION_NONCE:-unmanaged}
+      KDIVE_LOCAL_LIBVIRT_ENABLED: "false"
     healthcheck:
       <<: *readyz_cadence
       test:
@@ -305,6 +307,7 @@ services:
       <<: *backends
       KDIVE_DATABASE_URL: ${KDIVE_RECONCILER_DATABASE_URL:-postgresql://kdive-reconciler-member:kdive-reconciler-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9466
+      KDIVE_LOCAL_LIBVIRT_ENABLED: "false"
     healthcheck:
       <<: *readyz_cadence
       test:
