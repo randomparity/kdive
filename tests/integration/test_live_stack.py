@@ -29,9 +29,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
+import socket
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -801,6 +802,41 @@ def _reachability_provision_profile(
     }
 
 
+def _assert_ssh_banner_once(ssh: Mapping[str, object]) -> None:
+    """Require one immediate SSH banner read, with no readiness-masking retry."""
+    host = ssh.get("host")
+    port = ssh.get("port")
+    assert isinstance(host, str) and isinstance(port, int), f"invalid ssh endpoint: {ssh!r}"
+    with socket.create_connection((host, port), timeout=5.0) as connection:
+        banner = connection.recv(256)
+    assert banner.startswith(b"SSH-2.0-"), f"no SSH banner immediately at ready: {banner!r}"
+
+
+def test_assert_ssh_banner_once_accepts_an_immediate_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, server = socket.socketpair()
+    try:
+        server.sendall(b"SSH-2.0-OpenSSH_proof\r\n")
+        monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: client)
+        _assert_ssh_banner_once({"host": "127.0.0.1", "port": 2200})
+    finally:
+        server.close()
+
+
+def test_assert_ssh_banner_once_rejects_a_non_ssh_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, server = socket.socketpair()
+    try:
+        server.sendall(b"HTTP/1.1 200 OK\r\n")
+        monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: client)
+        with pytest.raises(AssertionError, match="no SSH banner immediately at ready"):
+            _assert_ssh_banner_once({"host": "127.0.0.1", "port": 2200})
+    finally:
+        server.close()
+
+
 @pytest.mark.live_stack
 @pytest.mark.parametrize("family", ["debian", "rhel", *_SUSE_FAMILIES])
 def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
@@ -860,6 +896,8 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     assert ssh["host"] and isinstance(ssh["port"], int), (
                         f"ssh_info returned no endpoint on a ready System: {ssh!r}"
                     )
+                async with phase(f"{family}:ssh_banner_at_ready"):
+                    _assert_ssh_banner_once(ssh)
                 async with phase(f"{family}:authorize_ssh_key"):
                     env = ok(
                         await scalar(
@@ -889,6 +927,21 @@ def _suse_kdump_provision_profile(image: str) -> dict[str, object]:
     return profile
 
 
+def _bzimage_release(path: Path) -> str:
+    """Read the x86 boot-protocol version banner from a bzImage without host tools."""
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0x20E)
+            offset_bytes = stream.read(2)
+            if len(offset_bytes) != 2:
+                return ""
+            stream.seek(0x200 + int.from_bytes(offset_bytes, "little"))
+            banner = stream.read(256).split(b"\0", 1)[0].decode("ascii")
+    except OSError, UnicodeDecodeError:
+        return ""
+    return banner.partition(" ")[0]
+
+
 def _require_v7_0_kernel_tree() -> str:
     """Require the built upload artifact to be Linux v7.0 and return its release."""
     tree = os.environ[_KERNEL_TREE_ENV]
@@ -913,15 +966,8 @@ def _require_v7_0_kernel_tree() -> str:
         )
     release = values["kernelrelease"]
     bzimage = Path(tree) / "arch/x86/boot/bzImage"
-    artifact = subprocess.run(
-        ["file", "--brief", str(bzimage)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    match = re.search(r"\bversion ([^,\s]+)", artifact.stdout)
-    artifact_release = match.group(1) if match else ""
-    if artifact.returncode != 0 or artifact_release != release:
+    artifact_release = _bzimage_release(bzimage)
+    if artifact_release != release:
         raise SpinePhaseError(
             "suse-kdump:kernel-preflight",
             f"bzImage release {artifact_release!r} does not match kernelrelease {release!r}",
@@ -1009,13 +1055,14 @@ def test_require_v7_0_kernel_tree_returns_the_built_release(
     monkeypatch.setenv(_KERNEL_TREE_ENV, "/kernel")
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if args[0] == "file":
-            value = "Linux kernel x86 boot executable, bzImage, version 7.0.0-1-default\n"
-        else:
-            value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
         return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
 
     monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(
+        "tests.integration.test_live_stack._bzimage_release",
+        lambda _path: "7.0.0-1-default",
+    )
     assert _require_v7_0_kernel_tree() == "7.0.0-1-default"
 
 
@@ -1039,15 +1086,27 @@ def test_require_v7_0_kernel_tree_rejects_a_stale_bzimage(
     monkeypatch.setenv(_KERNEL_TREE_ENV, "/kernel")
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if args[0] == "file":
-            value = "Linux kernel x86 boot executable, bzImage, version 6.15.0-stale\n"
-        else:
-            value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
         return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
 
     monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(
+        "tests.integration.test_live_stack._bzimage_release", lambda _path: "6.15.0-stale"
+    )
     with pytest.raises(SpinePhaseError, match="bzImage release '6.15.0-stale'"):
         _require_v7_0_kernel_tree()
+
+
+def test_bzimage_release_reads_the_artifact_header(tmp_path: Path) -> None:
+    version_offset = 0x40
+    image = bytearray(0x200 + version_offset + 64)
+    image[0x20E:0x210] = version_offset.to_bytes(2, "little")
+    banner = b"7.0.0-proof (builder) #1 SMP\0"
+    image[0x200 + version_offset : 0x200 + version_offset + len(banner)] = banner
+    path = tmp_path / "bzImage"
+    path.write_bytes(image)
+
+    assert _bzimage_release(path) == "7.0.0-proof"
 
 
 @pytest.mark.parametrize(
