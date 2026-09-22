@@ -33,8 +33,8 @@ extends its current owner.
   Ansible runs the prune task as root on worker hosts and in the local harness.
 - Invariants: the prune deletes only stale rules, highest number first; a host that meets
   the floor keeps its current exit status.
-- Accepted: a non-GNU tool that accepts the probed flags passes (the recipes need only
-  those flags); the probe reads only the first `bash` on `PATH`.
+- Accepted: a non-GNU tool that accepts the probed flags passes; only the first `bash`
+  on `PATH` is read.
 - Covered elsewhere: `scripts/live-stack/*` and `completion.py` (#2647 exclusions).
 
 ## Success
@@ -43,7 +43,7 @@ extends its current owner.
    remedy before any tier report.
 2. A missing GNU feature appears in the Recommended tier with its formula and `gnubin`
    step; the exit status stays as the Required tier sets it.
-3. The three docs state Bash >= 4.4 and the macOS steps.
+3. `install.md` states Bash >= 4.4 and the macOS steps; the other two docs link it.
 4. The prune task runs under `/bin/bash` 3.2 and deletes the same rules in the same order.
 5. A host that meets the floor and has GNU tools gets the same output as before.
 
@@ -52,7 +52,7 @@ extends its current owner.
 - S1 — focused-test: stub `bash` reporting 3.2, and a failing stub, first on `PATH`;
   exit 1 and the remedy. The shared function makes this CI coverage; a `/bin/bash`
   run covers the interpreter read where it is older than 4.4, else skips.
-- S2 — focused-test: empty `PATH` lists the four features and `gnubin` hints; stubs that
+- S2 — focused-test: a `PATH` of only `bash` lists the four features and `gnubin` hints; stubs that
   accept the flags clear them.
 - S3 — task-test-not-applicable: human prose.
 - S4 — focused-test: `run-gdbstub-acl-prune.sh` on macOS `/bin/bash` 3.2 and Linux CI.
