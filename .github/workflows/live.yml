@@ -555,7 +555,7 @@ jobs:
           # read as green. Point KDIVE_PYTHON at this job's venv instead of onboard.sh's
           # `uv run` fallback.
           export KDIVE_PYTHON="$PWD/.venv/bin/python"
-          onboard_wiring="$(scripts/live-stack/onboard.sh)"
+          onboard_wiring="$(ONBOARD_PREFLIGHT=required scripts/live-stack/onboard.sh)"
           if ! grep -q '^export KDIVE_TOKEN=' <<<"$onboard_wiring"; then
             echo "hosted live_vm_tcg spine: onboard.sh minted no KDIVE_TOKEN (funding incomplete); refusing to green-light an unproven tier" >&2
             exit 1

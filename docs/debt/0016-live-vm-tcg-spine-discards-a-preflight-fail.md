@@ -4,6 +4,12 @@
 
 Open (2026-09-16)
 
+> **Resolved by #2626** (2026-09-21): the hosted spine now declares `required` in its existing
+> bare onboarding assignment. The workflow-shape regression proves that a failed onboarding
+> preflight exits before token handling and the TCG proof command, while a successful capture
+> proceeds to the unchanged proof path. A hosted dispatch is not required for this structural
+> workflow change.
+
 ## Concern
 
 ADR-0666 makes the local-libvirt preflight's severity the caller's declaration: `onboard.sh` reads
