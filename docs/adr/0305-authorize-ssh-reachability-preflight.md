@@ -3,10 +3,6 @@
 - Status: Accepted
 - Date: 2026-07-02
 
-> **Partially superseded by [0672](0672-authorize-ssh-has-a-longer-preflight-window.md)**
-> (2026-09-22): authorization now gives supported slow-starting guests a 30-second preflight
-> window while the viewer-facing reachability probe retains its 15-second bound.
-
 - Builds on [ADR-0271](0271-system-direct-ssh-access.md) (`authorize_ssh_key`, the direct-SSH
   handler), [ADR-0289](0289-per-system-ssh-bootstrap-key.md) (the per-System bootstrap key and the
   bounded connect-retry it motivated), [ADR-0298](0298-ssh-reachable-runtime-probe.md) (the
@@ -93,3 +89,10 @@ now after the probe has already seen a banner.
 - The append path's retry window is now backstopped by the pre-flight and is reached only on a guest
   that already presented a banner, so its residual `deadline_s + per-attempt` ceiling applies only
   to a genuinely flaky post-banner append, not to the doomed-guest class this ADR targets.
+
+### Amendment (2026-09-22): authorization preflight deadline (#825)
+
+[ADR-0672](0672-authorize-ssh-has-a-longer-preflight-window.md) partially supersedes this section's
+15-second authorization-preflight claim. Authorization now uses one 30-second monotonic deadline
+per job so supported slow-starting guests can complete; the viewer-facing reachability probe keeps
+its 15-second bound.

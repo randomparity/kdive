@@ -264,7 +264,7 @@ for both parameters; private machine identifiers stay out of public artifacts.
 - Protected invariants: catalog sources stay SHA-256 pinned; capability tags describe installed
   tooling; published provenance comes from the built image; a partial core is never exposed as a
   complete vmcore; the capture guest reaches a harvestable terminal power state; existing RHEL and
-  Debian behavior does not change.
+  Debian family customization does not change.
 - Accepted failures: official repository or image availability can fail a build loudly; rolling
   Tumbleweed package versions may move after the curated snapshot and are disclosed by actual
   build provenance; neither row supports filtered v7.0 capture with the approved package set.
@@ -294,8 +294,12 @@ malformed newc records and unsupported compression, enforces the 2 GiB expanded-
 writing each chunk, and removes one fixed pathname. It does not interpret archive filenames as
 host paths or extract entries onto the host filesystem.
 
-No authentication, authorization, tenant boundary, persisted schema, secret handling, or host
-command boundary changes.
+No authentication policy, tenant boundary, persisted schema, secret handling, or host command
+boundary changes. ADR-0672 deliberately changes the shared SSH transport path for every image
+family: a probe reconnects after a pre-banner close, and `authorize_ssh_key` gives that probe one
+30-second monotonic deadline per job. This can occupy a worker lane for up to that bound before a
+terminal transport failure; its focused tests cover reconnect success, deadline exhaustion, and
+the unchanged fast-fail behavior for non-retryable probe errors.
 
 ## Success criteria
 

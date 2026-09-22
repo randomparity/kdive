@@ -287,6 +287,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_GUEST_IMAGE_DEBIAN` | — | Path to a debian-family *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the debian parameter of that test skips. |
 | `KDIVE_GUEST_IMAGE_PPC64LE` | — | Path to a Fedora ppc64le kdive-ready qcow2 for the live TCG boot proof live_stack test (#1144, epic #1139); unset (or no qemu-system-ppc64) → that test skips. |
 | `KDIVE_GUEST_IMAGE_RHEL` | — | Path to a rhel-family (rocky/centos/fedora) *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips. |
+| `KDIVE_GUEST_IMAGE_SUSE_LEAP_15_6` | — | Path to the openSUSE Leap 15.6 *-kdive-ready qcow2 for the SUSE baseline SSH and v7.0 incomplete-core live_stack proofs (#825); unset → the Leap parameters skip. |
+| `KDIVE_GUEST_IMAGE_SUSE_TUMBLEWEED` | — | Path to the openSUSE Tumbleweed *-kdive-ready qcow2 for the SUSE baseline SSH and v7.0 incomplete-core live_stack proofs (#825); unset → the Tumbleweed parameters skip. |
 | `KDIVE_IMAGE` | — | Container image ref under test for the image smoke test; unset → the smoke test skips. |
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
 | `KDIVE_LIVE_VM_BZIMAGE` | — | Path to the kernel image matching KDIVE_LIVE_VM_VMLINUX for the gated local-libvirt preserve-crash and debug-stepping proofs; unset → those tests skip. |

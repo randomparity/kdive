@@ -151,7 +151,10 @@ longer needed; preserve logs needed to explain a failure.
 
 **Files:** modify `tests/integration/test_live_stack.py` and its focused support tests only if a
 small shared job-failure assertion is extracted; modify the live-testing/image-lifecycle runbook
-for the new environment variables.
+and external-environment registry for the new variables. Modify the shared SSH reachability and
+authorization handlers, their focused tests, the `systems.authorize_ssh_key` registrar contract,
+ADR-0305, and new ADR-0672 only for the bounded pre-banner reconnect and authorization-preflight
+deadline exposed by the required SUSE lifecycle proof.
 
 **Interfaces:** add `KDIVE_GUEST_IMAGE_SUSE_TUMBLEWEED` and
 `KDIVE_GUEST_IMAGE_SUSE_LEAP_15_6`. Each variable selects one independently skippable live

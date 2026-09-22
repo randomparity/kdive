@@ -40,7 +40,7 @@ type SshExec = Callable[[list[str], str], None]
 _SSH_USER = "root"
 _SSH_CONNECT_TIMEOUT_S = 10
 _SSH_RUN_TIMEOUT_S = 30
-_AUTHORIZE_PREFLIGHT_DEADLINE_S = 30.0
+AUTHORIZE_PREFLIGHT_DEADLINE_S = 30.0
 _LOCK = "/root/.ssh/.kdive-authz.lock"
 # A freshly-`ready` System's guest sshd may not be accepting yet (readiness is the boot marker,
 # ~46 ms before sshd binds — ADR-0289 live proof), so the first authorize SSH is refused. Retry
@@ -71,7 +71,7 @@ _REMOTE_SCRIPT = (
 
 async def _real_authorize_probe(host: str, port: int) -> ReachResult:
     """Probe within the authorize flow's longer supported-guest startup window (ADR-0672)."""
-    return await _real_probe(host, port, deadline_s=_AUTHORIZE_PREFLIGHT_DEADLINE_S)
+    return await _real_probe(host, port, deadline_s=AUTHORIZE_PREFLIGHT_DEADLINE_S)
 
 
 def build_authorize_argv(host: str, port: int, key_path: str) -> list[str]:

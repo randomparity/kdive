@@ -62,6 +62,11 @@ the named domain to shut off, and then required `vmcore.fetch` to terminate with
 No successful vmcore artifact satisfies this assertion. The final command completed with `2
 passed`; the SSH command also completed with `2 passed`.
 
+The quiet pytest invocation emitted one duration for each two-parameter command, not a duration
+for each parameter. Per-case stopwatches were not captured, so the table retains only the observed
+aggregate durations rather than inventing a split; each row's independent pass result and the
+two-second ready-to-crashed transition were captured separately.
+
 ## Live-diagnosed false-success cause
 
 Before the final fix, both images produced a vmcore and a final README status of `saved
