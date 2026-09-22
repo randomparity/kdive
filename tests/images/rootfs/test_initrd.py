@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.images.rootfs import initrd
 from kdive.images.rootfs.initrd import remove_zstd_newc_entry
 
 
@@ -55,4 +56,28 @@ def test_remove_zstd_newc_entry_rejects_malformed_archive(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="newc header"):
         remove_zstd_newc_entry(path, "missing")
+    assert path.read_bytes() == original
+
+
+def test_remove_zstd_newc_entry_enforces_expanded_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "initrd"
+    original = zstd.compress(_archive(_entry("etc/large", b"x" * 256)))
+    path.write_bytes(original)
+    monkeypatch.setattr(initrd, "_MAX_UNCOMPRESSED_SIZE", 160)
+
+    with pytest.raises(ValueError, match="decompressed-size limit"):
+        remove_zstd_newc_entry(path, "missing")
+    assert path.read_bytes() == original
+
+
+def test_remove_zstd_newc_entry_rejects_duplicate_target(tmp_path: Path) -> None:
+    target = "var/lib/dracut/hooks/pre-mount/20-kiwi-repart-disk.sh"
+    original = zstd.compress(_archive(_entry(target, b"first"), _entry(target, b"second")))
+    path = tmp_path / "initrd"
+    path.write_bytes(original)
+
+    with pytest.raises(ValueError, match="duplicate target"):
+        remove_zstd_newc_entry(path, target)
     assert path.read_bytes() == original
