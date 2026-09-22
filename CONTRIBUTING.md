@@ -10,7 +10,9 @@ KDIVE is Python 3.14, managed with [`uv`](https://docs.astral.sh/uv/). The
 `justfile` is the single source of truth for build, lint, type, and test
 commands — run the same recipes locally that CI runs.
 
-Development targets Linux. Before installing runner tools, follow the
+Development targets Linux. On macOS, install Bash 4.4 or later and the GNU tools from
+Homebrew first, as the [macOS steps](docs/operating/install.md#bash-and-gnu-tools-all-hosts-homebrew-on-macos)
+describe. Before installing runner tools, follow the
 [host prerequisites](docs/operating/install.md) and the
 [cross-platform prerequisites](docs/development/cross-platform.md). In particular, POWER
 hosts need Rust on PATH before installing tools that build from source; `libvirt-python`

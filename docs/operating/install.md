@@ -180,6 +180,36 @@ uv tool install rust-just
 uv tool install prek
 ```
 
+#### Bash and GNU tools (all hosts; Homebrew on macOS)
+
+Developer scripts need Bash 4.4 or later as the first `bash` on `PATH`, and the GNU
+versions of coreutils, findutils, and grep ([ADR-0672](../adr/0672-developer-host-bash-and-gnu-tools-floor.md)).
+Linux distributions supply these. `just check-deps` stops when Bash is older than 4.4, and
+it reports a missing GNU tool in its Recommended tier.
+
+macOS ships Bash 3.2 and BSD tools. Install the Homebrew versions:
+
+```bash
+brew install bash coreutils findutils grep
+```
+
+Then put them ahead of the system directories. Add these lines to `~/.zprofile`, so login
+shells, terminals, and the git hooks they start get them:
+
+```bash
+eval "$(/opt/homebrew/bin/brew shellenv)"   # /usr/local/bin/brew on Intel Macs
+for formula in coreutils findutils grep; do
+  PATH="$(brew --prefix)/opt/$formula/libexec/gnubin:$PATH"
+done
+export PATH
+```
+
+Open a new terminal and check that `bash --version` shows 4.4 or later and
+`realpath --version` shows GNU coreutils. GUI git clients do not read `~/.zprofile`, so a push
+from one runs the pre-push hook with the system `bash`. Push from a terminal. The `gnubin`
+directories hide the BSD `stat`, `find`, `grep`, and other tools in every shell that reads
+this file.
+
 The full `just ci` gate additionally exercises Docker (disposable Postgres/SeaweedFS via
 testcontainers). Tests that need Docker skip cleanly when it is absent unless
 `KDIVE_REQUIRE_DOCKER=1` is set. Install Docker Engine from your distribution, or from
