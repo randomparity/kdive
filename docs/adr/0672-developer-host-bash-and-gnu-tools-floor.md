@@ -27,14 +27,21 @@ uses only Bash 3.2 constructs.
 
 ## Consequences
 
-macOS contributors run one Homebrew install and one `PATH` edit; a missed step fails at
-`just check-deps` with the remedy, not inside a later recipe. Linux hosts pass unchanged:
-every supported distribution ships Bash >= 4.4 and the GNU tools. This decision replaces
-the direction recorded in the #2647 issue body (port every script to Bash 3.2); the
-earlier 3.2-portable guards from #2627 and #2640 stay as they are.
+macOS contributors run one Homebrew install and one `PATH` edit in a login-shell startup
+file. A missed Bash step fails at `just check-deps` with the remedy; a missed GNU step is
+reported there in the Recommended tier and still fails later in `just ci`. The `gnubin`
+entries shadow the BSD `stat`, `find`, `grep`, and other tools in every shell that reads the
+file, which can change other BSD-assuming scripts on that host. A Linux host that already
+meets the floor (CI runs Bash 5 with GNU tools) sees only the new probes pass; one that does
+not gets the same remedy. This decision replaces the direction in the #2647 issue body
+(port every script to Bash 3.2); the 3.2-portable guards from #2627 and #2640 stay.
 
 ## Considered & rejected
 
+- **Do nothing; document the Homebrew steps only.** judgment: fit — the failures stay deep
+  in a run, which is the defect #2647 reports.
+- **Prepend the Homebrew paths inside the justfile.** judgment: fit — pytest subprocesses,
+  direct script runs, and Ansible `/bin/bash` tasks do not pass through `just`.
 - **Port every developer script to Bash 3.2.** judgment: cost — it rewrites nameref and
   associative-array logic, needs a static guard against regressions that Linux CI (Bash 5)
   cannot catch, and still leaves the GNU flag gaps.
