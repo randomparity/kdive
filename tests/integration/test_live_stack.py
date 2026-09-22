@@ -907,7 +907,7 @@ def _bzimage_release(path: Path) -> str:
 
 
 def _require_v7_0_kernel_tree() -> str:
-    """Require the built upload artifact to be Linux v7.0 and return its release."""
+    """Require an initrd-less-bootable Linux v7.0 artifact and return its release."""
     tree = os.environ[_KERNEL_TREE_ENV]
     values: dict[str, str] = {}
     for target in ("kernelversion", "kernelrelease"):
@@ -935,6 +935,21 @@ def _require_v7_0_kernel_tree() -> str:
         raise SpinePhaseError(
             "suse-kdump:kernel-preflight",
             f"bzImage release {artifact_release!r} does not match kernelrelease {release!r}",
+        )
+    required_builtins = ("CONFIG_VIRTIO_PCI=y", "CONFIG_VIRTIO_BLK=y", "CONFIG_EXT4_FS=y")
+    try:
+        config_lines = set((Path(tree) / ".config").read_text(encoding="utf-8").splitlines())
+    except OSError as exc:
+        raise SpinePhaseError(
+            "suse-kdump:kernel-preflight",
+            f"could not read KDIVE_KERNEL_SRC/.config ({type(exc).__name__})",
+        ) from exc
+    missing = [symbol for symbol in required_builtins if symbol not in config_lines]
+    if missing:
+        required = ", ".join(required_builtins)
+        raise SpinePhaseError(
+            "suse-kdump:kernel-preflight",
+            f"the initrd-less live proof requires {required}; missing {', '.join(missing)}",
         )
     return release
 
@@ -1014,9 +1029,13 @@ def test_await_domain_shutoff_rejects_a_running_domain_at_deadline(
 
 
 def test_require_v7_0_kernel_tree_returns_the_built_release(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv(_KERNEL_TREE_ENV, "/kernel")
+    monkeypatch.setenv(_KERNEL_TREE_ENV, str(tmp_path))
+    (tmp_path / ".config").write_text(
+        "CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n",
+        encoding="utf-8",
+    )
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
@@ -1058,6 +1077,29 @@ def test_require_v7_0_kernel_tree_rejects_a_stale_bzimage(
         "tests.integration.test_live_stack._bzimage_release", lambda _path: "6.15.0-stale"
     )
     with pytest.raises(SpinePhaseError, match="bzImage release '6.15.0-stale'"):
+        _require_v7_0_kernel_tree()
+
+
+def test_require_v7_0_kernel_tree_rejects_modular_rootfs_drivers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, str(tmp_path))
+    (tmp_path / ".config").write_text(
+        "CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=m\nCONFIG_EXT4_FS=m\n",
+        encoding="utf-8",
+    )
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(
+        "tests.integration.test_live_stack._bzimage_release",
+        lambda _path: "7.0.0-1-default",
+    )
+
+    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_PCI=y.*CONFIG_EXT4_FS=y"):
         _require_v7_0_kernel_tree()
 
 
