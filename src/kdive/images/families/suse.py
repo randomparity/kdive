@@ -50,7 +50,7 @@ _READINESS_DROPIN_PATH = f"{_READINESS_DROPIN_DIR}/suse.conf"
 _READINESS_DROPIN_CONTENT = """\
 [Unit]
 After=cloud-final.service sshd.service
-Wants=cloud-final.service sshd.service
+Requires=cloud-final.service sshd.service
 """
 # Both SUSE cloud-init renderers treat the v2 mapping key as an interface name. Keep the shared
 # wildcard match, but name the predictable QEMU interface so NetworkManager/Wicked configure it.

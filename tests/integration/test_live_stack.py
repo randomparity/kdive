@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -889,7 +890,7 @@ def _suse_kdump_provision_profile(image: str) -> dict[str, object]:
 
 
 def _require_v7_0_kernel_tree() -> str:
-    """Require the built upload tree to come from Linux v7.0 and return its release."""
+    """Require the built upload artifact to be Linux v7.0 and return its release."""
     tree = os.environ[_KERNEL_TREE_ENV]
     values: dict[str, str] = {}
     for target in ("kernelversion", "kernelrelease"):
@@ -910,7 +911,22 @@ def _require_v7_0_kernel_tree() -> str:
             "suse-kdump:kernel-preflight",
             f"KDIVE_KERNEL_SRC is Linux {values['kernelversion']!r}, expected '7.0.0'",
         )
-    return values["kernelrelease"]
+    release = values["kernelrelease"]
+    bzimage = Path(tree) / "arch/x86/boot/bzImage"
+    artifact = subprocess.run(
+        ["file", "--brief", str(bzimage)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    match = re.search(r"\bversion ([^,\s]+)", artifact.stdout)
+    artifact_release = match.group(1) if match else ""
+    if artifact.returncode != 0 or artifact_release != release:
+        raise SpinePhaseError(
+            "suse-kdump:kernel-preflight",
+            f"bzImage release {artifact_release!r} does not match kernelrelease {release!r}",
+        )
+    return release
 
 
 async def _await_domain_shutoff(
@@ -993,7 +1009,10 @@ def test_require_v7_0_kernel_tree_returns_the_built_release(
     monkeypatch.setenv(_KERNEL_TREE_ENV, "/kernel")
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        if args[0] == "file":
+            value = "Linux kernel x86 boot executable, bzImage, version 7.0.0-1-default\n"
+        else:
+            value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
         return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
 
     monkeypatch.setattr(subprocess, "run", _run)
@@ -1011,6 +1030,23 @@ def test_require_v7_0_kernel_tree_rejects_another_source_version(
     )
 
     with pytest.raises(SpinePhaseError, match="expected '7.0.0'"):
+        _require_v7_0_kernel_tree()
+
+
+def test_require_v7_0_kernel_tree_rejects_a_stale_bzimage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/kernel")
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[0] == "file":
+            value = "Linux kernel x86 boot executable, bzImage, version 6.15.0-stale\n"
+        else:
+            value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    with pytest.raises(SpinePhaseError, match="bzImage release '6.15.0-stale'"):
         _require_v7_0_kernel_tree()
 
 

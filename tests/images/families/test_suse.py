@@ -137,7 +137,8 @@ def test_readiness_waits_for_cloud_init_and_sshd(tmp_path: Path, distro: str) ->
     steps = _steps(tmp_path, distro)
     dropin = baked_contents(steps)[_READINESS_DROPIN_PATH]
     assert "After=cloud-final.service sshd.service" in dropin
-    assert "Wants=cloud-final.service sshd.service" in dropin
+    assert "Requires=cloud-final.service sshd.service" in dropin
+    assert "Wants=cloud-final.service sshd.service" not in dropin
     mkdir_index = steps.index(Mkdir(_READINESS_DROPIN_DIR))
     stage_index = next(
         index
