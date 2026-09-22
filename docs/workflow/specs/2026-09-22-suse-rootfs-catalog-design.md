@@ -164,8 +164,9 @@ explicit value, `drgn_version = "absent"`, which the loader maps to `None` in
 the sentinel records a reviewed absence rather than allowing accidental omission.
 
 Existing version strings and their behavior do not change. Focused catalog tests require the Leap
-row to parse to `None`, lack the `drgn` capability, and compute live-drgn as incapable because the
-tooling is absent. Tumbleweed records the verified repository version and retains the capability.
+row to parse to `None`, lack the `drgn` capability, and compute live-drgn as `not_applicable`
+because the tooling is absent. Tumbleweed records the verified repository version and retains the
+capability.
 The built image's marker probe remains authoritative provenance: Leap emits no drgn marker and its
 published provenance omits `drgn_version`.
 
