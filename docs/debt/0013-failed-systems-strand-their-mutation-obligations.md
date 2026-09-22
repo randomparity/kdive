@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2026-12-08
+> **Resolved by #2463** (2026-09-13)
 
 ## Concern
 
