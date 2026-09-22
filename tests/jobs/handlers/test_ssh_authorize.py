@@ -45,6 +45,20 @@ def _probe_returning(result: ReachResult) -> Callable[[str, int], Awaitable[Reac
     return _probe
 
 
+def test_authorize_preflight_uses_its_longer_flow_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int, float]] = []
+
+    async def _probe(host: str, port: int, *, deadline_s: float) -> ReachResult:
+        calls.append((host, port, deadline_s))
+        return ReachResult.ok()
+
+    monkeypatch.setattr(ssh_authorize, "_real_probe", _probe)
+    assert asyncio.run(ssh_authorize._real_authorize_probe("127.0.0.1", 22022)) == ReachResult.ok()
+    assert calls == [("127.0.0.1", 22022, 30.0)]
+
+
 def _job(public_key: str = _KEY) -> Job:
     return _job_for(uuid4(), public_key=public_key)
 

@@ -19,11 +19,12 @@ digest) goes to **stderr** (the logger). Only use the printed export after the c
 > first, injects the family customization as a one-shot firstboot unit (file-level, arch-safe),
 > then **boots the image once** (KVM natively, TCG for a foreign arch such as ppc64le on an x86_64
 > host) so the guest self-installs its packages with its own package manager (`dnf` on the `rhel`
-> family, a non-interactive `apt-get` after an `apt-get update` on the `debian` family), and seals
-> the result. This makes foreign-arch image builds possible and removes the build host's dependency
-> on the libguestfs appliance network (`passt`). A build boot needs guest network egress for the
-> package fetch; a failed in-guest install surfaces the guest's error via the console tail rather
-> than a silent timeout.
+> family, a non-interactive `apt-get` after an `apt-get update` on the `debian` family, and
+> non-interactive `zypper` after a metadata refresh on the `suse` family), and seals the result.
+> This makes foreign-arch image builds possible and removes the build host's dependency on the
+> libguestfs appliance network (`passt`). A build boot needs guest network egress for the package
+> fetch; a failed in-guest install surfaces the guest's error via the console tail rather than a
+> silent timeout.
 >
 > The boot path extracts the base's baseline kernel with the libguestfs **Python binding**, so
 > `build-fs` needs `import guestfs` to work from the venv it runs in — for every family, not only
@@ -81,6 +82,26 @@ python -m kdive build-fs \
   --dest /var/lib/kdive/rootfs/local/fedora-kdive-build-44.qcow2
 ```
 
+Build the two cataloged openSUSE debug images independently:
+
+```bash
+python -m kdive build-fs \
+  --image opensuse-tumbleweed-kdive-ready \
+  --workspace ~/.local/share/kdive/build/images \
+  --dest /var/lib/kdive/rootfs/local/opensuse-tumbleweed-kdive-ready.qcow2
+
+python -m kdive build-fs \
+  --image opensuse-leap-kdive-ready-15.6 \
+  --workspace ~/.local/share/kdive/build/images \
+  --dest /var/lib/kdive/rootfs/local/opensuse-leap-kdive-ready-15.6.qcow2
+```
+
+These are x86_64 debug images, not build-host images. Tumbleweed installs the distribution's drgn
+package; Leap 15.6 has no distribution drgn package and records that reviewed absence explicitly.
+Both install their distribution-native makedumpfile, whose cataloged versions report the v7.0
+kernel as outside filtered-kdump support. Use `images.describe` for the target-relative signal
+rather than treating package installation as capture support.
+
 After a successful build, copy the printed `export KDIVE_GUEST_IMAGE=...` line into the shell
 that will run the live proof. Do not evaluate an unchecked command substitution: a failed build
 could leave a previous image selected.
@@ -99,6 +120,20 @@ Follow [live-stack setup](live-stack.md) to configure and start the runtime, the
 `KDIVE_GUEST_IMAGE` to this successful build's destination in the proof environment and record
 its digest. Confirm that the intended proof executed with that image; a skipped test does not
 prove it boots. Building an image alone does not exercise provisioning, boot, or debugging.
+
+The live-stack SUSE proof selects the two artifacts separately:
+
+```bash
+export KDIVE_GUEST_IMAGE_SUSE_TUMBLEWEED=/var/lib/kdive/rootfs/local/opensuse-tumbleweed-kdive-ready.qcow2
+export KDIVE_GUEST_IMAGE_SUSE_LEAP_15_6=/var/lib/kdive/rootfs/local/opensuse-leap-kdive-ready-15.6.qcow2
+just test-live-stack
+```
+
+Each variable gates its own parameter. A successful customization build is evidence only for the
+image build; the family SSH parameter establishes provision/boot/network/sshd, and the SUSE
+current-kernel parameter establishes the expected structured incomplete-core remediation for the
+v7.0 test kernel. A skipped parameter establishes nothing. The dated evidence for the cataloged
+artifacts is in the [SUSE rootfs proof record](../../design/2026-09-22-suse-rootfs-825-proof-record.md).
 
 ## Publish a catalog image
 

@@ -3,8 +3,9 @@
 # sha256-pinned url. family selects the FamilyCustomizer (rhel|debian|suse).
 #
 # makedumpfile_version: the curated build-time makedumpfile version this release's repos install,
-# verified against distro package indexes (2026-06-26) and guarded by
-# tests/images/test_rootfs_catalog.py. It is the per-image operand of the computed kdump-capability
+# verified against distro package indexes (baseline rows 2026-06-26; SUSE rows 2026-09-22) and
+# guarded by tests/images/test_rootfs_catalog.py. It is the per-image operand of the computed
+# kdump-capability
 # predicate (kdive.images.kdump_support, ADR-0253): an agent reads the capability for its target
 # kernel via images.describe, rather than a stored kernel-relative bit. A row whose makedumpfile is
 # too old for the target kernel computes `incapable` and hits the cause-neutral
@@ -13,13 +14,16 @@
 # binary's version. Not live upstream truth.
 #
 # drgn_version: the curated build-time drgn version this release's repos install, verified against
-# distro package indexes (2026-07-12) and guarded by tests/images/test_rootfs_catalog.py. drgn is
+# distro package indexes (baseline rows 2026-07-12; SUSE rows 2026-09-22) and guarded by
+# tests/images/test_rootfs_catalog.py. drgn is
 # installed unpinned from the distro repos (rhel: EPEL, debian: python3-drgn), so the version
 # tracks each release's current repo and varies sharply by family. It is the per-image operand of
 # the computed live-drgn-introspection predicate (kdive.images.drgn_support, ADR-0328): an agent
 # reads whether the image's drgn can introspect a booted kernel from the guest's own in-guest BTF
 # (>= the 0.0.31 BTF-capability threshold) via images.describe, before burning an allocation. A row
-# below the threshold computes `incapable` (e.g. debian-kdive-ready-12 on bookworm's 0.0.22). Fedora
+# below the threshold computes `incapable` (e.g. debian-kdive-ready-12 on bookworm's 0.0.22). The
+# exact string `absent` records that a distro repository has no installable drgn package; the
+# loader maps it to no version and the capability computes `not_applicable`. Fedora
 # 43 currently carries a newer stable drgn (0.1.0) than Fedora 44 (0.0.33, with 0.1.0 still in
 # updates-testing) — the repos, not a typo. Not live upstream truth.
 
@@ -261,6 +265,31 @@ kind = "debug"
 makedumpfile_version = "1.7.7"  # resolute (1:1.7.7-1)
 drgn_version = "0.0.33"  # resolute (python3-drgn 0.0.33-1build1, universe)
 source = { kind = "cloud-image", url = "https://cloud-images.ubuntu.com/releases/resolute/release-20260823/ubuntu-26.04-server-cloudimg-amd64.img", sha256 = "8196be9d7958059cb56c6c75c80fdf6cee8a8885bc149ea791d7db1c7ef93035" }  # pragma: allowlist secret
+
+# openSUSE entries (#825), built from sha256-pinned Minimal VM appliances. Tumbleweed carries the
+# `drgn` package; Leap 15.6 does not, so `absent` is explicit catalog evidence rather than a
+# placeholder version. openSUSE names the SSH service `sshd` and uses AppArmor.
+[[image]]
+name = "opensuse-tumbleweed-kdive-ready"
+distro = "opensuse-tumbleweed"
+version = "20260919"
+family = "suse"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.7"
+drgn_version = "0.1.0"
+source = { kind = "cloud-image", url = "https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-1.0.0-Cloud-Snapshot20260919.qcow2", sha256 = "bddab63272d36e2893b6b50561278511bb29e17000fb21c135fecf0e8553518d" }  # pragma: allowlist secret
+
+[[image]]
+name = "opensuse-leap-kdive-ready-15.6"
+distro = "opensuse-leap"
+version = "15.6"
+family = "suse"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.4"
+drgn_version = "absent"
+source = { kind = "cloud-image", url = "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-15.6.0-Cloud-Build19.146.qcow2", sha256 = "0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd" }  # pragma: allowlist secret
 
 # N/A (ppc64le): Debian publishes only the `generic`/`nocloud` ppc64el variant, not the
 # `genericcloud` variant these x86_64 rows pin. The debian family rides the customization boot

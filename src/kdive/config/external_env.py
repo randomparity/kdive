@@ -66,6 +66,20 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_GUEST_IMAGE_SUSE_TUMBLEWEED",
+        "test",
+        None,
+        "Path to the openSUSE Tumbleweed *-kdive-ready qcow2 for the SUSE baseline SSH and "
+        "v7.0 incomplete-core live_stack proofs (#825); unset → the Tumbleweed parameters skip.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_GUEST_IMAGE_SUSE_LEAP_15_6",
+        "test",
+        None,
+        "Path to the openSUSE Leap 15.6 *-kdive-ready qcow2 for the SUSE baseline SSH and v7.0 "
+        "incomplete-core live_stack proofs (#825); unset → the Leap parameters skip.",
+    ),
+    ExternalEnvVar(
         "KDIVE_GUEST_IMAGE_PPC64LE",
         "test",
         None,

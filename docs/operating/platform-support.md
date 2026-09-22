@@ -76,8 +76,9 @@ The [deadline multiplier](#the-tcg-boot-deadline-multiplier) applies to emulated
 
 `build-fs` customizes catalog images by booting them and running their family package manager.
 The rhel family covers Fedora, Rocky and CentOS Stream; the debian family covers Debian and
-Ubuntu. Both use an in-guest boot pass, so package installation does not need the libguestfs
-appliance network. A shared family path and a catalog entry are not a completed live proof.
+Ubuntu; the suse family covers the cataloged openSUSE releases. All use an in-guest boot pass, so
+package installation does not need the libguestfs appliance network. A shared family path and a
+catalog entry are not a completed live proof.
 
 The current rootfs catalog contains these combinations:
 
@@ -88,6 +89,7 @@ The current rootfs catalog contains these combinations:
 | Rocky 8 | Present | No entry |
 | Debian 12, 13 | Present | No entry |
 | Ubuntu 24.04, 26.04 | Present | No entry |
+| openSUSE Tumbleweed snapshot 20260919; Leap 15.6 | Present | No entry |
 
 The [rootfs catalog](../../fixtures/local-libvirt/rootfs_catalog.toml) owns the entries. A missing row
 here makes no claim about what an upstream distributor currently publishes. Image-specific
@@ -102,6 +104,17 @@ Recorded customization evidence:
 | Fedora 44 x86_64/KVM and ppc64le/TCG | Built and published in the [2026-07-14 unified customization proof](../design/2026-07-13-unified-customization-boot-proof-record-1147.md). This does not establish Fedora 43. |
 | Fedora 44 ppc64le/TCG with EL compatibility fixes | Built and published in the [catalog-parity proof](../design/2026-07-14-ppc64le-catalog-parity-1152-proof-record.md); component checks on EL images did not establish an EL completion. |
 | Rocky 9 x86_64/KVM | Reached the completion marker and published in the [2026-07-15 EL9 proof](../design/2026-07-15-el9-customize-boot-1174-proof-record.md). This does not establish CentOS Stream or EL10. |
+| openSUSE Tumbleweed 20260919 and Leap 15.6 x86_64/KVM | Both catalog images completed the real customization boot and the live HTTP provisioning/SSH proof for #825. The same proof boots the v7.0 kernel and requires the structured incomplete-core recovery described below; see the [SUSE proof record](../design/2026-09-22-suse-rootfs-825-proof-record.md). |
+
+### openSUSE guest-tool limits
+
+`opensuse-tumbleweed-kdive-ready` records makedumpfile 1.7.7 and drgn 0.1.0 from the
+distribution repository. `opensuse-leap-kdive-ready-15.6` records makedumpfile 1.7.4 and no drgn
+package. Both rows therefore report kdump as incapable for the v7.0 target kernel; Leap reports
+`live_drgn` as `not_applicable`, while Tumbleweed advertises the installed drgn capability. The
+catalog entries remain usable debug rootfs images: the live proof distinguishes successful image
+build and SSH boot from the expected incomplete-core capture result. Neither row implies SLES,
+ppc64le, build-host, remote-libvirt, or hosted-CI coverage.
 
 ### Known gap — EL customize-boot on ppc64le
 

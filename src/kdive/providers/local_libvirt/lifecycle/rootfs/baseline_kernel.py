@@ -77,7 +77,12 @@ def select_kernel_and_initrd(
         kernel = kernels[0]
     version = kernel[len(_VMLINUZ_PREFIX) :]
     initrd = next(
-        (n for n in (f"initramfs-{version}.img", f"initrd.img-{version}") if n in names), None
+        (
+            n
+            for n in (f"initramfs-{version}.img", f"initrd.img-{version}", f"initrd-{version}")
+            if n in names
+        ),
+        None,
     )
     return kernel, initrd
 
