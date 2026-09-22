@@ -2,7 +2,10 @@
 
 ## Status
 
-Resolved (2026-09-21)
+Open
+review-by: 2026-10-08
+
+> **Resolved by #2623** (2026-09-21)
 
 ## Concern
 
@@ -21,8 +24,7 @@ been allocated and a guest booted. ADR-0635 adds the `depmod_toolchain` worker-v
 it now surfaces as a `fail` in `ops.diagnostics` and a nonzero `kdivectl doctor` exit on that
 deployment.
 
-The check is a real gap only where local-libvirt is enabled. ADR-0088 excludes local-libvirt from
-supported containers, so those deployments must not register this local worker-host diagnostic.
+The check is reporting a real gap correctly. What is missing is the provisioning.
 
 ## Why deferred
 
@@ -49,10 +51,19 @@ not a diagnostics file.
 
 ## What would resolve it
 
-ADR-0088 settles the deployment boundary: supported containers do not run local-libvirt. The
-diagnostic registration now follows `KDIVE_LOCAL_LIBVIRT_ENABLED`; it remains an honest failure on
-an enabled local-libvirt worker without `depmod`, while supported containers omit the local
-contribution. The four-directory search remains unchanged.
+Decide whether the container shape is meant to stage modules.
+
+If it is: add `kmod` to the runtime `apt-get install` list in `Dockerfile` and `depmod --version`
+to the worker-tool guard, so a missing package fails the image build rather than the first install
+job. Then confirm `ops.diagnostics` reports `depmod_toolchain` as `pass` on a freshly built image.
+
+The self-hosted KVM runner needs nothing: #2331 landed `kmod` in
+`deploy/ansible/roles/live_vm_host/defaults/main.yml:13`, so the Ansible shape already declares it.
+`Dockerfile` is the only remaining gap.
+
+If it is not: record that decision where an operator reads it — `docs/operating/install.md` beside
+the existing `guest_arch_accel` note — and state which deployment shapes are expected to fail this
+check and why.
 
 ## Provenance
 
