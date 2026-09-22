@@ -40,6 +40,7 @@ type SshExec = Callable[[list[str], str], None]
 _SSH_USER = "root"
 _SSH_CONNECT_TIMEOUT_S = 10
 _SSH_RUN_TIMEOUT_S = 30
+_AUTHORIZE_PREFLIGHT_DEADLINE_S = 30.0
 _LOCK = "/root/.ssh/.kdive-authz.lock"
 # A freshly-`ready` System's guest sshd may not be accepting yet (readiness is the boot marker,
 # ~46 ms before sshd binds — ADR-0289 live proof), so the first authorize SSH is refused. Retry
@@ -66,6 +67,11 @@ _REMOTE_SCRIPT = (
     'grep -qxF "$key" /root/.ssh/authorized_keys '
     "|| printf '%s\\n' \"$key\" >> /root/.ssh/authorized_keys\n"
 )
+
+
+async def _real_authorize_probe(host: str, port: int) -> ReachResult:
+    """Probe within the authorize flow's longer supported-guest startup window (ADR-0672)."""
+    return await _real_probe(host, port, deadline_s=_AUTHORIZE_PREFLIGHT_DEADLINE_S)
 
 
 def build_authorize_argv(host: str, port: int, key_path: str) -> list[str]:
@@ -137,11 +143,12 @@ async def _preflight_reachable(probe: ProbeFn, host: str, port: int) -> None:
     """Fast-fail before the append retry when the guest SSH endpoint is unreachable (ADR-0305).
 
     Reuses the ``check_ssh_reachable`` banner probe (ADR-0298, #972) as an authoritative pre-flight:
-    it already retries the ~46 ms sshd-bind race (ADR-0289) internally for up to its ~15 s deadline,
-    so a still-unreachable verdict is definitive, not a race. The raised error is ``terminal`` so
-    the worker dead-letters it instead of requeuing — a doomed authorize must not re-run the append
-    window once per attempt (the observed ~230 s overrun was ``max_attempts`` requeues, each burning
-    the ~90 s in-handler window; #1012). The ``reason`` comes from the shared #1008 vocabulary.
+    the authorize flow gives it a 30-second monotonic deadline (ADR-0672), so a still-unreachable
+    verdict is definitive for this job rather than an ordinary supported-guest startup race. The
+    raised error is ``terminal`` so the worker dead-letters it instead of requeuing — a doomed
+    authorize must not re-run the append window once per attempt (the observed ~230 s overrun was
+    ``max_attempts`` requeues, each burning the ~90 s in-handler window; #1012). The ``reason``
+    comes from the shared #1008 vocabulary.
     """
     result = await probe(host, port)
     if result.reachable:
@@ -194,7 +201,7 @@ async def authorize_ssh_key_handler(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     ssh_exec: SshExec = _real_ssh_exec,
-    probe: ProbeFn = _real_probe,
+    probe: ProbeFn = _real_authorize_probe,
 ) -> str | None:
     """Append the agent public key to the guest root authorized_keys over the bootstrap-key SSH.
 

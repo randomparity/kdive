@@ -368,6 +368,13 @@ def _register_systems_authorize_ssh_key(
         authenticate with it, until the job completes. Once the job succeeds, use
         ``systems.ssh_info`` for the connection coordinates.
 
+        Each authorization job gives guest sshd up to 30 seconds on the worker's monotonic clock
+        to answer its preflight, including reconnecting a forward that accepts before sshd starts.
+        The limit applies once per job. If it expires, the job fails terminally with
+        ``transport_failure``; after confirming the guest is answering with
+        ``systems.check_ssh_reachable``, authorize a different key or reprovision the System before
+        retrying (an identical key replays its prior job).
+
         Reports ``ssh_not_provisioned`` when the System's provider exposes no SSH forward, and
         ``system_domain_not_found`` when a **local-libvirt** System has no libvirt domain on the
         libvirt connection this server reads — an endpoint or liveness fault, not a provisioning
