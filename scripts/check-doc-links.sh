@@ -16,34 +16,60 @@ set -euo pipefail
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
-# Collect markdown files: tracked files when in a git tree, else every *.md under ROOT
-# (the test harness passes a non-git tmp dir). NOT scanned: docs/archive/** (frozen
-# history — its links pointed at the tree as it was and must not be rewritten),
-# other docs/design/** (specs narrate moves and may show illustrative links), and the
-# vendored agent-tooling dirs .claude/**, .agents/**, .codex/** (not project docs).
-mapfile -t files < <(
-  { git ls-files '*.md' 2>/dev/null || true; } |
-    grep -vE '^docs/archive/|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/' |
-    awk '$0 !~ /^docs\/design\// || $0 == "docs/design/top-level-design.md"'
-)
-if ((${#files[@]} == 0)); then
-  mapfile -t files < <(
+readonly EXCLUDE='^docs/archive/|^[.](claude|agents|codex)/|^src/kdive/mcp/resources/_content/'
+
+# Git's -z prevents quoting filenames; this existing line-based scan excludes newline names.
+# Normalize conversion failures so status 128 identifies Git discovery alone.
+if files=$(LC_ALL=C git ls-files -z '*.md' 2>&1 | { tr '\000' '\n' || exit 1; }); then
+  :
+else
+  enumeration_status=$?
+  case "$enumeration_status:$files" in
+  "128:fatal: not a git repository (or any "*) files='' ;;
+  *)
+    printf '%s\ncannot enumerate tracked markdown files; check git/tr diagnostics above\n' "$files" >&2
+    exit 1
+    ;;
+  esac
+fi
+if ! files=$(awk -v exclude="$EXCLUDE" '
+  length && $0 !~ exclude && ($0 !~ /^docs\/design\// ||
+    $0 == "docs/design/top-level-design.md")' <<<"$files"); then
+  printf 'cannot filter markdown files; check awk diagnostics above\n' >&2
+  exit 1
+fi
+if [[ -z "$files" ]]; then
+  if ! files=$(
     find . -type f -name '*.md' \
       \( -not -path './docs/design/*' -o -path './docs/design/top-level-design.md' \) \
       -not -path './docs/archive/*' \
       -not -path './.claude/*' -not -path './.agents/*' -not -path './.codex/*' \
       -not -path './src/kdive/mcp/resources/_content/*' \
-      -printf '%P\n'
-  )
+      -print | awk '{ sub(/^\.\//, ""); print }'
+  ); then
+    printf 'cannot enumerate markdown files under %s; check find/awk diagnostics above\n' "$ROOT" >&2
+    exit 1
+  fi
 fi
 
 broken=0
-for f in "${files[@]}"; do
-  dir="$(dirname "$f")"
-  # Extract [text](target) targets; drop the #fragment; one per line. Fenced code blocks
-  # are stripped first (the awk toggles on triple-backtick fence lines; \140 is the octal
-  # for a backtick, used so this script contains no literal fence marker) so illustrative
-  # example links inside code samples are not treated as real cross-references.
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  dir="$(dirname "./$f")"
+  # Keep the existing fence toggle and Markdown target expression.
+  if ! targets=$(awk '
+    BEGIN { fence = 0 }
+    /^\140\140\140/ { fence = !fence; next }
+    !fence {
+      rest = $0
+      while (match(rest, /\]\([^)]+\)/)) {
+        print substr(rest, RSTART + 2, RLENGTH - 3)
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }' <"$f"); then
+    printf 'cannot extract markdown links from %s; check awk/read diagnostics above\n' "$f" >&2
+    exit 1
+  fi
   while IFS= read -r target; do
     [[ -z "$target" ]] && continue
     case "$target" in
@@ -57,9 +83,8 @@ for f in "${files[@]}"; do
       printf "broken link: %s -> %s\n" "$f" "$target" >&2
       broken=1
     fi
-  done < <(awk 'BEGIN { fence = 0 } /^\140\140\140/ { fence = !fence; next } !fence' "$f" |
-    grep -oE '\]\([^)]+\)' | sed -E 's/^\]\(//; s/\)$//')
-done
+  done <<<"$targets"
+done <<<"$files"
 
 if ((broken)); then
   printf "\nmarkdown link check failed\n" >&2
