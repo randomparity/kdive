@@ -64,16 +64,18 @@ class FamilyCustomizer(Protocol):
     family: str
     #: The family's kdump systemd unit. The shared kdive-ready unit is ordered ``After=`` this so
     #: the serial readiness signal cannot precede kdump arming (ADR-0251 point 6); a wrong/absent
-    #: name silently reopens that race. ``kdump.service`` (rhel) / ``kdump-tools.service`` (debian).
+    #: name silently reopens that race. ``kdump.service`` (rhel/suse) or
+    #: ``kdump-tools.service`` (debian).
     kdump_unit: str
     #: The mandatory-access-control posture the build pipeline records as provenance ``guest_mac``:
     #: ``selinux-permissive`` (rhel — repack drops xattrs, so a first-boot relabel + permissive) or
-    #: ``apparmor`` (debian — profile-based, needs no relabel).
+    #: ``apparmor`` (debian/suse — profile-based, needs no relabel).
     guest_mac: str
     #: The in-guest command the firstboot script prefixes each ``InstallPackages`` step's names
     #: with — the family's package manager in its non-interactive form (``dnf -y install`` /
-    #: ``DEBIAN_FRONTEND=noninteractive apt-get -y install``). Any index refresh the manager needs
-    #: first is a ``RunCommand`` the family emits ahead of the install (ADR-0345).
+    #: ``DEBIAN_FRONTEND=noninteractive apt-get -y install`` / zypper's non-interactive,
+    #: no-recommends form). Any index refresh the manager needs first is a ``RunCommand`` the
+    #: family emits ahead of the install (ADR-0345).
     install_command: str
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:

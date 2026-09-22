@@ -15,8 +15,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import FamilyCustomizer
 from kdive.images.families.debian import DebianFamily
 from kdive.images.families.rhel import RhelFamily
+from kdive.images.families.suse import SuseFamily
 
-_FAMILIES: dict[str, FamilyCustomizer] = {"rhel": RhelFamily(), "debian": DebianFamily()}
+_FAMILIES: dict[str, FamilyCustomizer] = {
+    "rhel": RhelFamily(),
+    "debian": DebianFamily(),
+    "suse": SuseFamily(),
+}
 
 
 def family_for(name_or_family: str) -> FamilyCustomizer:

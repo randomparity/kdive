@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -11,6 +12,9 @@ from pydantic import Field
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.domain.labels import LABEL_MAX_LEN
+from kdive.jobs.handlers.connectivity.ssh_authorize import (
+    AUTHORIZE_PREFLIGHT_DEADLINE_S as _AUTHORIZE_PREFLIGHT_DEADLINE_S,
+)
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.provider_schema import assert_kind_composed
@@ -97,6 +101,18 @@ _INVESTIGATION_ID_DESCRIPTION = (
     "cannot be changed; a later provision on the same Allocation must repeat the same id or omit "
     "it. Omit for a System not tied to an investigation."
 )
+
+
+def _with_authorize_preflight_limit(
+    func: Callable[..., Awaitable[ToolResponse]],
+) -> Callable[..., Awaitable[ToolResponse]]:
+    """Interpolate the enforced preflight deadline before FastMCP reads the docstring."""
+    if func.__doc__ is None:
+        raise AssertionError("systems.authorize_ssh_key wrapper must have a docstring")
+    func.__doc__ = func.__doc__.format(
+        authorize_preflight_deadline_s=f"{_AUTHORIZE_PREFLIGHT_DEADLINE_S:g}"
+    )
+    return func
 
 
 class _SystemsListPayload(ToolPayload):
@@ -354,6 +370,7 @@ def _register_systems_authorize_ssh_key(
         annotations=_docmeta.mutating(),
         meta=_docmeta.maturity_meta("implemented"),
     )
+    @_with_authorize_preflight_limit
     async def systems_authorize_ssh_key(
         system_id: Annotated[str, Field(description="The ready System to authorize the key on.")],
         public_key: Annotated[
@@ -367,6 +384,13 @@ def _register_systems_authorize_ssh_key(
         ``succeeded`` before connecting — the key is not installed, and SSH will not
         authenticate with it, until the job completes. Once the job succeeds, use
         ``systems.ssh_info`` for the connection coordinates.
+
+        Each authorization job gives guest sshd up to {authorize_preflight_deadline_s} seconds on
+        the worker's monotonic clock to answer its preflight, including reconnecting a forward
+        that accepts before sshd starts. The limit applies once per job. If it expires, the job
+        fails terminally with ``transport_failure``; after confirming the guest is answering with
+        ``systems.check_ssh_reachable``, authorize a different key or reprovision the System
+        before retrying (an identical key replays its prior job).
 
         Reports ``ssh_not_provisioned`` when the System's provider exposes no SSH forward, and
         ``system_domain_not_found`` when a **local-libvirt** System has no libvirt domain on the

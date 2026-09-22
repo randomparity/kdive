@@ -246,8 +246,15 @@ def test_catalog_build_capabilities_are_per_distro() -> None:
 
     fedora = catalog_rootfs_build("local-libvirt", "fedora-kdive-ready-44").spec.capabilities
     debian = catalog_rootfs_build("local-libvirt", "debian-kdive-ready-13").spec.capabilities
+    tumbleweed = catalog_rootfs_build(
+        "local-libvirt", "opensuse-tumbleweed-kdive-ready"
+    ).spec.capabilities
+    leap = catalog_rootfs_build("local-libvirt", "opensuse-leap-kdive-ready-15.6").spec.capabilities
 
     assert Capability.SELINUX in fedora and Capability.APPARMOR not in fedora
     assert Capability.APPARMOR in debian and Capability.SELINUX not in debian
-    assert Capability.AGENT not in fedora and Capability.AGENT not in debian
-    assert Capability.SSH in fedora and Capability.SSH in debian
+    assert Capability.APPARMOR in tumbleweed and Capability.APPARMOR in leap
+    assert Capability.DRGN in tumbleweed and Capability.DRGN not in leap
+    for capabilities in (fedora, debian, tumbleweed, leap):
+        assert Capability.AGENT not in capabilities
+        assert Capability.SSH in capabilities

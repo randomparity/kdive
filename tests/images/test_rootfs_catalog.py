@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.drgn_support import live_drgn_capability
+from kdive.images.families import family_for
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS, kdump_capability
 from kdive.images.rootfs.catalog import (
     CloudImageSource,
@@ -43,6 +45,8 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
     "rocky-kdive-ready-10-ppc64le": "1.7.8",
     "centos-stream-kdive-ready-9-ppc64le": "1.7.6",
     "centos-stream-kdive-ready-10-ppc64le": "1.7.8",
+    "opensuse-tumbleweed-kdive-ready": "1.7.7",
+    "opensuse-leap-kdive-ready-15.6": "1.7.4",
 }
 
 # The curated build-time drgn version per release (verified against distro package indexes
@@ -50,7 +54,7 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
 # the per-image operand of the computed live-drgn-introspection predicate (ADR-0328): it must match
 # the structured ``drgn_version`` field in rootfs_catalog.toml. The capability is computed
 # (drgn_support) against the 0.0.31 BTF-capability threshold, not stored.
-_EXPECTED_DRGN: dict[str, str] = {
+_EXPECTED_DRGN: dict[str, str | None] = {
     "fedora-kdive-ready-43": "0.1.0",
     "fedora-kdive-ready-43-cloud": "0.2.0",
     "fedora-kdive-ready-44": "0.0.33",
@@ -69,6 +73,8 @@ _EXPECTED_DRGN: dict[str, str] = {
     "rocky-kdive-ready-10-ppc64le": "0.0.33",
     "centos-stream-kdive-ready-9-ppc64le": "0.0.33",
     "centos-stream-kdive-ready-10-ppc64le": "0.0.33",
+    "opensuse-tumbleweed-kdive-ready": "0.1.0",
+    "opensuse-leap-kdive-ready-15.6": None,
 }
 
 
@@ -119,6 +125,36 @@ def test_loads_debian_family_entries() -> None:
         assert cat[name].distro == name.split("-", 1)[0], name
 
 
+_SUSE_FAMILY_ROWS = (
+    "opensuse-tumbleweed-kdive-ready",
+    "opensuse-leap-kdive-ready-15.6",
+)
+
+
+def test_loads_suse_family_entries() -> None:
+    cat = load_rootfs_catalog()
+    assert set(_SUSE_FAMILY_ROWS) <= set(cat)
+    assert cat[_SUSE_FAMILY_ROWS[0]].distro == "opensuse-tumbleweed"
+    assert cat[_SUSE_FAMILY_ROWS[1]].distro == "opensuse-leap"
+    for name in _SUSE_FAMILY_ROWS:
+        assert cat[name].family == "suse"
+        assert cat[name].arch == "x86_64"
+        assert cat[name].kind == "debug"
+
+
+def test_suse_rows_pin_versioned_cloud_images() -> None:
+    cat = load_rootfs_catalog()
+    tumbleweed = cat["opensuse-tumbleweed-kdive-ready"].source
+    leap = cat["opensuse-leap-kdive-ready-15.6"].source
+    assert isinstance(tumbleweed, CloudImageSource)
+    assert isinstance(leap, CloudImageSource)
+    assert "Snapshot20260919" in tumbleweed.url
+    assert "Build19.146" in leap.url
+    assert tumbleweed.url.endswith(".qcow2") and leap.url.endswith(".qcow2")
+    assert "Minimal-VM.x86_64" in tumbleweed.url
+    assert "Minimal-VM.x86_64" in leap.url
+
+
 def test_ubuntu_rows_pin_dated_release_serials() -> None:
     """An Ubuntu row pins a `release-YYYYMMDD` serial, never the rotating `release/` alias.
 
@@ -166,15 +202,26 @@ def test_catalog_drgn_versions_match_snapshot() -> None:
         assert cat[name].drgn_version == version, name
 
 
-_LIVE_DRGN_INCAPABLE_ROWS = {"debian-kdive-ready-12", "ubuntu-kdive-ready-24.04"}
+_LIVE_DRGN_BELOW_THRESHOLD_ROWS = {
+    "debian-kdive-ready-12",
+    "ubuntu-kdive-ready-24.04",
+}
 
 
-def test_only_below_threshold_rows_are_live_drgn_incapable() -> None:
-    """Guard: only rows shipping drgn < the 0.0.31 BTF threshold compute ``incapable``."""
+def test_catalog_live_drgn_status_matches_tooling_and_version_evidence() -> None:
+    """Absent tooling is not applicable; installed versions resolve against the BTF floor."""
     cat = load_rootfs_catalog()
     for name in _EXPECTED_DRGN:
-        cap = live_drgn_capability(drgn_version=cat[name].drgn_version, drgn_tooling=True)
-        expected = "incapable" if name in _LIVE_DRGN_INCAPABLE_ROWS else "capable"
+        entry = cat[name]
+        family = family_for(entry.family)
+        tooling = Capability.DRGN in family.capabilities(entry.kind, entry.distro, entry.version)
+        cap = live_drgn_capability(drgn_version=entry.drgn_version, drgn_tooling=tooling)
+        if entry.drgn_version is None:
+            expected = "not_applicable"
+        elif name in _LIVE_DRGN_BELOW_THRESHOLD_ROWS:
+            expected = "incapable"
+        else:
+            expected = "capable"
         assert cap.status == expected, name
 
 
@@ -243,7 +290,18 @@ def test_no_ppc64le_row_for_deferred_or_unported_distros() -> None:
     ppc = [e for e in cat.values() if e.arch == "ppc64le"]
     assert ppc, "expected ppc64le rows in the catalog"
     assert not [e for e in ppc if e.family == "debian"], "no proven debian-family ppc64le base"
+    assert not [e for e in ppc if e.family == "suse"], "no proven SUSE ppc64le base"
     assert "rocky-kdive-ready-8-ppc64le" not in cat, "Rocky 8 has no ppc64le port"
+
+
+def test_debug_row_drgn_evidence_matches_family_capability() -> None:
+    cat = load_rootfs_catalog()
+    for entry in cat.values():
+        if entry.kind != "debug":
+            continue
+        family = family_for(entry.family)
+        capabilities = family.capabilities(entry.kind, entry.distro, entry.version)
+        assert (entry.drgn_version is not None) is (Capability.DRGN in capabilities), entry.name
 
 
 _CAPABLE_ROWS = {"fedora-kdive-ready-44", "fedora-kdive-ready-44-ppc64le"}
@@ -297,6 +355,50 @@ makedumpfile_version = "1.7.9"
 source = { kind = "virt-builder", template = "fedora-44" }
 """,
     )
+    with pytest.raises(CategorizedError) as exc:
+        load_rootfs_catalog(path=path)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["field"] == "drgn_version"
+
+
+def test_explicit_absent_drgn_version_parses_as_none(tmp_path: Path) -> None:
+    path = _write_catalog(
+        tmp_path,
+        """
+[[image]]
+name = "no-drgn-package"
+distro = "opensuse-leap"
+version = "15.6"
+family = "suse"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.4"
+drgn_version = "absent"
+source = { kind = "virt-builder", template = "opensuse-leap-15.6" }
+""",
+    )
+
+    assert load_rootfs_catalog(path=path)["no-drgn-package"].drgn_version is None
+
+
+@pytest.mark.parametrize("value", ['""', "42"])
+def test_invalid_drgn_version_is_config_error(tmp_path: Path, value: str) -> None:
+    path = _write_catalog(
+        tmp_path,
+        f"""
+[[image]]
+name = "invalid-drgn"
+distro = "opensuse-leap"
+version = "15.6"
+family = "suse"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.4"
+drgn_version = {value}
+source = {{ kind = "virt-builder", template = "opensuse-leap-15.6" }}
+""",
+    )
+
     with pytest.raises(CategorizedError) as exc:
         load_rootfs_catalog(path=path)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR

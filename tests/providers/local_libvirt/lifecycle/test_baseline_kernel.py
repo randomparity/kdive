@@ -108,6 +108,12 @@ def test_debian_kernel_pairs_with_initrd_img() -> None:
     assert select_kernel_and_initrd(entries) == (f"vmlinuz-{v}", f"initrd.img-{v}")
 
 
+def test_suse_kernel_pairs_with_initrd() -> None:
+    v = "7.2.6-1-default"
+    entries = [f"/boot/vmlinuz-{v}", f"/boot/initrd-{v}"]
+    assert select_kernel_and_initrd(entries) == (f"vmlinuz-{v}", f"initrd-{v}")
+
+
 def test_kernel_without_initramfs_returns_none() -> None:
     assert select_kernel_and_initrd([f"/boot/vmlinuz-{_V}"]) == (f"vmlinuz-{_V}", None)
 

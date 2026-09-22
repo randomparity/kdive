@@ -27,13 +27,24 @@ def test_mac_tag_unmapped_raises_naming_posture() -> None:
         _mac_tag("tomoyo")
 
 
-_KINDS: tuple[RootfsImageKind, ...] = ("debug", "build")
-# EVERY (distro, version) pair whose packages() output is distinct, so the evidence check covers
-# the EL-major branch in RhelFamily.packages() (EL8/EL9 vs EL10/Fedora) — not just one
-# representative. A tag declared but unbacked on *any* of these fails the guard.
-_PROBE_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
-    "rhel": (("fedora", "44"), ("rocky", "8"), ("rocky", "9"), ("rocky", "10")),
-    "debian": (("debian", "12"), ("debian", "13")),
+# EVERY supported (distro, version, kind) case whose packages() output is distinct. SUSE is
+# intentionally debug-only, so an unconditional family x kind product would call an unsupported
+# contract and make the evidence guard weaker rather than broader.
+_PROBE_CASES: dict[str, tuple[tuple[str, str, RootfsImageKind], ...]] = {
+    "rhel": tuple(
+        (distro, version, kind)
+        for distro, version in (("fedora", "44"), ("rocky", "8"), ("rocky", "9"), ("rocky", "10"))
+        for kind in ("debug", "build")
+    ),
+    "debian": tuple(
+        (distro, version, kind)
+        for distro, version in (("debian", "12"), ("debian", "13"))
+        for kind in ("debug", "build")
+    ),
+    "suse": (
+        ("opensuse-tumbleweed", "20260920", "debug"),
+        ("opensuse-leap", "15.6", "debug"),
+    ),
 }
 
 
@@ -55,13 +66,12 @@ def _evidenced(
 
 @pytest.mark.parametrize("family", _FAMILIES.values(), ids=list(_FAMILIES))
 def test_every_declared_tag_is_evidenced(family: FamilyCustomizer) -> None:
-    for name, version in _PROBE_PAIRS[family.family]:
-        for kind in _KINDS:
-            packages = family.packages(kind, name, version)
-            for tag in family.capabilities(kind, name, version):
-                assert _evidenced(packages, family.guest_mac, kind, tag), (
-                    f"{family.family}/{name}-{version}/{kind}: {tag} unbacked"
-                )
+    for name, version, kind in _PROBE_CASES[family.family]:
+        packages = family.packages(kind, name, version)
+        for tag in family.capabilities(kind, name, version):
+            assert _evidenced(packages, family.guest_mac, kind, tag), (
+                f"{family.family}/{name}-{version}/{kind}: {tag} unbacked"
+            )
 
 
 def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) -> None:
@@ -74,28 +84,27 @@ def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) 
     readiness = tmp_path / "kdive-ready.service"
     readiness.write_text("[Unit]\n")
     for family in _FAMILIES.values():
-        for name, version in _PROBE_PAIRS[family.family]:
-            for kind in _KINDS:
-                ctx = CustomizeContext(
-                    kind=kind,
-                    packages=family.packages(kind, name, version),
-                    readiness_unit_path=readiness,
-                    is_cloud_image=True,
-                    distro=name,
-                    version=version,
-                    fadump_capture=False,
+        for name, version, kind in _PROBE_CASES[family.family]:
+            ctx = CustomizeContext(
+                kind=kind,
+                packages=family.packages(kind, name, version),
+                readiness_unit_path=readiness,
+                is_cloud_image=True,
+                distro=name,
+                version=version,
+                fadump_capture=False,
+            )
+            # Only file-creating steps count — a path merely referenced by a RunCommand is
+            # never materialized, and the validator does an exact ``exists <path>``.
+            created = baked_paths(family.customize_steps(ctx))
+            declared = family.capabilities(kind, name, version)
+            for element, path in GUEST_CONTRACT_PATHS.items():
+                baked = path in created
+                wants = Capability(element) in declared
+                assert baked == wants, (
+                    f"{family.family}/{name}-{version}/{kind}: declares {element}={wants} but "
+                    f"customize_steps {'omits' if wants else 'leaks'} its marker {path}"
                 )
-                # Only file-creating steps count — a path merely referenced by a RunCommand is
-                # never materialized, and the validator does an exact ``exists <path>``.
-                created = baked_paths(family.customize_steps(ctx))
-                declared = family.capabilities(kind, name, version)
-                for element, path in GUEST_CONTRACT_PATHS.items():
-                    baked = path in created
-                    wants = Capability(element) in declared
-                    assert baked == wants, (
-                        f"{family.family}/{name}-{version}/{kind}: declares {element}={wants} but "
-                        f"customize_steps {'omits' if wants else 'leaks'} its marker {path}"
-                    )
 
 
 @pytest.mark.parametrize("family", _FAMILIES.values(), ids=list(_FAMILIES))
@@ -106,6 +115,5 @@ def test_guest_mac_maps_to_a_tag(family: FamilyCustomizer) -> None:
 
 def test_no_local_family_declares_agent() -> None:
     for family in _FAMILIES.values():
-        for name, version in _PROBE_PAIRS[family.family]:
-            for kind in _KINDS:
-                assert Capability.AGENT not in family.capabilities(kind, name, version)
+        for name, version, kind in _PROBE_CASES[family.family]:
+            assert Capability.AGENT not in family.capabilities(kind, name, version)
