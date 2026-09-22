@@ -132,10 +132,16 @@ _resolve_emulator() {
   return 1
 }
 _in_libvirt_group() { [[ " $(id -nG 2>/dev/null) " == *" libvirt "* ]]; }
-_virsh_connects() { virsh -c qemu:///system list >/dev/null 2>&1; }
+_is_system_libvirt_uri() {
+  case "${LIBVIRT_URI}" in
+  qemu:///system | qemu:///system\?* | qemu+unix:///system | qemu+unix:///system\?*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+_virsh_connects() { virsh -c "${LIBVIRT_URI}" list >/dev/null 2>&1; }
 _default_net_active() {
   local out
-  out="$(virsh -c qemu:///system net-info default 2>/dev/null || true)"
+  out="$(virsh -c "${LIBVIRT_URI}" net-info default 2>/dev/null || true)"
   [[ "$out" == *"Active:"*[Yy]es* ]]
 }
 _venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
@@ -234,24 +240,33 @@ fi
 
 # ── libvirt connectivity ─────────────────────────────────────────────────────
 printf "\n%s\n" "-- libvirt" >&2
-if _in_libvirt_group; then
-  note_ok "invoking user is in the 'libvirt' group"
-else
-  note_fail "invoking user is not in the 'libvirt' group" \
-    "sudo usermod -aG libvirt \"\$USER\" and re-login"
+if _is_system_libvirt_uri; then
+  if _in_libvirt_group; then
+    note_ok "invoking user is in the 'libvirt' group"
+  else
+    note_fail "invoking user is not in the 'libvirt' group" \
+      "sudo usermod -aG libvirt \"\$USER\" and re-login"
+  fi
 fi
 if _cmd virsh; then
   if _virsh_connects; then
-    note_ok "virsh connects to qemu:///system"
+    note_ok "virsh connects to configured libvirt endpoint"
   else
-    note_fail "cannot connect to qemu:///system" \
-      "start the libvirt daemon: systemctl enable --now virtqemud.socket (or libvirtd)"
+    if _is_system_libvirt_uri; then
+      note_fail "cannot connect to configured libvirt endpoint (KDIVE_LIBVIRT_URI)" \
+        "start the system libvirt daemon: systemctl enable --now virtqemud.socket (or libvirtd); check the configured socket"
+    else
+      note_fail "cannot connect to configured libvirt endpoint (KDIVE_LIBVIRT_URI)" \
+        "check KDIVE_LIBVIRT_URI and its daemon/socket (for sessions: XDG_RUNTIME_DIR and linger)"
+    fi
   fi
-  if _default_net_active; then
-    note_ok "libvirt 'default' network is active"
-  else
-    note_fail "libvirt 'default' network is not active" \
-      "virsh -c qemu:///system net-start default && virsh -c qemu:///system net-autostart default"
+  if _is_system_libvirt_uri; then
+    if _default_net_active; then
+      note_ok "libvirt 'default' network is active"
+    else
+      note_fail "libvirt 'default' network is not active" \
+        "virsh -c \"\${KDIVE_LIBVIRT_URI:-qemu:///system}\" net-start default && virsh -c \"\${KDIVE_LIBVIRT_URI:-qemu:///system}\" net-autostart default"
+    fi
   fi
 fi
 

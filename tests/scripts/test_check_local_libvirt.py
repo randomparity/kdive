@@ -295,6 +295,59 @@ def _healthy_bin(tmp_path: Path) -> tuple[Path, Path]:
     return bindir, py
 
 
+def test_published_session_checks_its_uri_without_system_prerequisites(tmp_path: Path) -> None:
+    bindir, py = _healthy_bin(tmp_path)
+    uri = "qemu+unix:///session?socket=/tmp/libvirt-sock"
+    _stub(bindir, "id", "echo kvm")  # hosted runner has no libvirt group
+    _stub(bindir, "virsh", f'[ "$*" = "-c {uri} list" ]')
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_LIBVIRT_URI"] = uri
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "libvirt' group" not in result.stderr
+    assert "default' network" not in result.stderr
+
+
+def test_unreachable_configured_session_fails_even_if_system_works(tmp_path: Path) -> None:
+    bindir, py = _healthy_bin(tmp_path)
+    _stub(bindir, "virsh", 'case "$*" in *qemu:///system*) echo "Active: yes";; *) exit 1;; esac')
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_LIBVIRT_URI"] = "qemu:///session"
+
+    result = _run(env)
+    assert result.returncode == 1
+    assert "cannot connect" in result.stderr
+    assert "KDIVE_LIBVIRT_URI" in result.stderr
+    assert "qemu:///session" not in result.stderr
+
+
+def test_default_system_network_must_be_active(tmp_path: Path) -> None:
+    bindir, py = _healthy_bin(tmp_path)
+    _stub(bindir, "virsh", 'case "$*" in *net-info*) echo "Active: no";; esac\nexit 0')
+    result = _run(_healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path)))
+
+    assert result.returncode == 1
+    assert "default' network is not active" in result.stderr
+
+
+def test_explicit_local_system_socket_checks_its_network(tmp_path: Path) -> None:
+    bindir, py = _healthy_bin(tmp_path)
+    uri = "qemu+unix:///system?socket=/tmp/system-libvirt-sock"
+    _stub(
+        bindir,
+        "virsh",
+        f'case "$*" in "-c {uri} list") exit 0;; '
+        f'"-c {uri} net-info default") echo "Active: yes";; *) exit 1;; esac',
+    )
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_LIBVIRT_URI"] = uri
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "default' network is active" in result.stderr
+
+
 def test_unreadable_host_kernel_fails_with_chmod_hint(tmp_path: Path) -> None:
     """An unreadable /boot/vmlinuz-* fails the preflight before the slow build (ADR-0222)."""
     bindir, py = _healthy_bin(tmp_path)
