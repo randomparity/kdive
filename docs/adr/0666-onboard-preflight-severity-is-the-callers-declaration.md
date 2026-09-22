@@ -131,4 +131,5 @@ carries and `scripts/live-stack/README.md:54` already warns about for `LIBVIRT_O
 Issue #2626 resolved the hosted `live_vm_tcg` residual on 2026-09-21. Its existing bare
 assignment now declares `ONBOARD_PREFLIGHT=required`, so a failing preflight exits the spine before
 token handling and dependent proof commands. The workflow-shape regression covers that ordering;
-the default advisory behavior of the other onboarding callers remains unchanged.
+the default advisory behavior of the other onboarding callers remains unchanged. The Consequences
+paragraph above records the residual's 2026-09-16 state; it is not the current hosted-TCG behavior.
