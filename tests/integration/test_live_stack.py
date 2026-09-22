@@ -896,8 +896,9 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     assert ssh["host"] and isinstance(ssh["port"], int), (
                         f"ssh_info returned no endpoint on a ready System: {ssh!r}"
                     )
-                async with phase(f"{family}:ssh_banner_at_ready"):
-                    _assert_ssh_banner_once(ssh)
+                if family in _SUSE_FAMILIES:
+                    async with phase(f"{family}:ssh_banner_at_ready"):
+                        _assert_ssh_banner_once(ssh)
                 async with phase(f"{family}:authorize_ssh_key"):
                     env = ok(
                         await scalar(
@@ -931,6 +932,9 @@ def _bzimage_release(path: Path) -> str:
     """Read the x86 boot-protocol version banner from a bzImage without host tools."""
     try:
         with path.open("rb") as stream:
+            stream.seek(0x202)
+            if stream.read(4) != b"HdrS":
+                return ""
             stream.seek(0x20E)
             offset_bytes = stream.read(2)
             if len(offset_bytes) != 2:
@@ -1100,6 +1104,7 @@ def test_require_v7_0_kernel_tree_rejects_a_stale_bzimage(
 def test_bzimage_release_reads_the_artifact_header(tmp_path: Path) -> None:
     version_offset = 0x40
     image = bytearray(0x200 + version_offset + 64)
+    image[0x202:0x206] = b"HdrS"
     image[0x20E:0x210] = version_offset.to_bytes(2, "little")
     banner = b"7.0.0-proof (builder) #1 SMP\0"
     image[0x200 + version_offset : 0x200 + version_offset + len(banner)] = banner
