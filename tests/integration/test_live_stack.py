@@ -92,6 +92,8 @@ _FAMILY_IMAGE_ENV = {
 }
 _SUSE_FAMILIES = ("suse-tumbleweed", "suse-leap-15.6")
 _SUSE_KDUMP_SHUTOFF_DEADLINE_S = 90.0
+_FAMILY_REACHABLE_DEADLINE_S = 90.0
+_FAMILY_REACHABLE_POLL_S = 2.0
 # The ppc64le rootfs for the live TCG boot proof (#1144, epic #1139): a Fedora ppc64le image
 # published under rootfs/local/. Distinct from the x86_64 family images — it boots under TCG
 # emulation on the x86_64 host, so the preflight also gates on that emulator via require_guest_arch.
@@ -859,6 +861,29 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     assert ssh["host"] and isinstance(ssh["port"], int), (
                         f"ssh_info returned no endpoint on a ready System: {ssh!r}"
                     )
+                async with phase(f"{family}:await_ssh_reachable"):
+                    # SUSE's first boot reaches the serial readiness marker before cloud-init
+                    # finishes networking and sshd. Follow the documented agent flow: poll the
+                    # read-only reachability operation before the terminal authorize preflight.
+                    deadline = time.monotonic() + _FAMILY_REACHABLE_DEADLINE_S
+                    while True:
+                        probe = ok(
+                            await scalar(op, "systems.check_ssh_reachable", system_id=system_id),
+                            f"{family}:await_ssh_reachable",
+                        )
+                        done = await drain_job(op, f"{family}:await_ssh_reachable", probe.object_id)
+                        verdict_json = done.refs.get("result")
+                        assert verdict_json is not None, (
+                            f"check_ssh_reachable succeeded with no result verdict: {done!r}"
+                        )
+                        verdict = json.loads(verdict_json)
+                        if verdict.get("reachable"):
+                            break
+                        assert time.monotonic() < deadline, (
+                            f"{family} never became SSH-reachable ({verdict.get('detail')!r}); "
+                            f"console tail: {verdict.get('console_tail')!r}"
+                        )
+                        await asyncio.sleep(_FAMILY_REACHABLE_POLL_S)
                 async with phase(f"{family}:authorize_ssh_key"):
                     env = ok(
                         await scalar(
