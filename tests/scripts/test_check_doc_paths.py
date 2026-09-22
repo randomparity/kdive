@@ -139,6 +139,25 @@ def test_tool_failure_cannot_certify_paths(
     assert "doc paths resolve" not in result.stdout
 
 
+def test_converter_failure_is_not_git_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.md").write_text("No references\n")
+    real_tr = shutil.which("tr")
+    assert real_tr is not None
+    _tool_stub(
+        tmp_path,
+        monkeypatch,
+        "tr",
+        f'{shlex.quote(real_tr)} "$@"\necho injected-converter-failure >&2\nexit 128',
+    )
+    result = _run(tmp_path)
+    assert result.returncode != 0
+    assert "injected-converter-failure" in result.stderr
+    assert "cannot enumerate" in result.stderr
+    assert "doc paths resolve" not in result.stdout
+
+
 @pytest.mark.parametrize("partial", [False, True], ids=["empty", "partial"])
 def test_extractor_failure_cannot_certify_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial: bool
