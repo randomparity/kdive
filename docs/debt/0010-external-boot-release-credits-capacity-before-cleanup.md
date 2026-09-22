@@ -2,7 +2,7 @@
 
 ## Status
 
-Open
+> **Resolved by #2270** (2026-09-06)
 review-by: 2027-03-03
 
 ## Concern
@@ -99,6 +99,21 @@ One of:
 Done when a test asserts the recovery store's charged bytes and its occupied objects agree at every
 commit boundary of one full activate → release → cleanup sequence, and when an activation whose
 cleanup never commits does not leave bytes permanently credited.
+
+## Resolution
+
+[ADR-0614](../adr/0614-derived-external-boot-release-phases.md) resolves the active public-release
+path. It derives recovery and cleanup phases from the immutable release request, requires the
+cleanup phase to return an `absent` observation, and consumes the resulting cleanup receipt in the
+same final transaction that releases the reservation and marks cleanup complete. [PR
+#2270](https://github.com/randomparity/kdive/pull/2270) shipped that flow in
+`src/kdive/jobs/handlers/external_boot/lifecycle.py` and
+`src/kdive/db/schema/0143_external_boot_release_phases.sql`.
+
+`tests/db/test_migration_0143_external_boot_release_phases.py::test_cleanup_receipt_is_exact_and_final_credit_is_idempotent`
+exercises the receipt and final-credit boundary. This resolves the stale concern for an active
+public release without changing ADR-0614's supported low-level release handling for already
+recovered legacy callers.
 
 ## Provenance
 
