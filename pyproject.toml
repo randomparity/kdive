@@ -75,7 +75,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 "src/kdive/cli/commands/_generated_verbs.py" = ["E501"]
 
 [tool.ty.environment]
-# kdive runs only on Linux (every CI job is ubuntu-latest; no `sys.platform` branches in src/),
+# kdive runs only on Linux (all CI and live jobs run on Linux; no `sys.platform` branches in src/),
 # but without a pin ty resolves the stdlib for the host it runs on. On a macOS development host
 # that flags Linux-only members (`os.pipe2`, `os.listxattr`, `socket.SO_PEERCRED`, ...) as
 # unresolved, so `just type`, the ty hook, and `just install-hooks` fail there while CI passes.
