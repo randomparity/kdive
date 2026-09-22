@@ -23,6 +23,7 @@ from tests.support.customize_steps import baked_contents, commands, installed, r
 
 _POST_PATH = "/usr/local/sbin/kdive-suse-kdump-post"
 _DUMP_ROOT = "/kdump/mnt/var/crash"
+_MAKEDUMPFILE_STDERR = "/tmp/kdive-makedumpfile-stderr"
 
 
 def _family() -> FamilyCustomizer:
@@ -133,6 +134,7 @@ def test_cloud_init_uses_the_predictable_suse_interface_name(tmp_path: Path, dis
 def test_kdump_sysconfig_uses_one_no_argument_helper_and_required_programs(tmp_path: Path) -> None:
     text = rendered(_steps(tmp_path))
     assert f'KDUMP_POSTSCRIPT="{_POST_PATH}"' in text
+    assert f"2>{_MAKEDUMPFILE_STDERR}" in text
     assert f"{_POST_PATH} $DIR" not in text
     assert "KDUMP_REQUIRED_PROGRAMS" in text
     for program in (
@@ -156,6 +158,7 @@ def _run_postscript(tmp_path: Path, invocation: str) -> Path:
     root = tmp_path / "crash"
     script = tmp_path / "kdive-suse-kdump-post"
     contents = contents.replace(_DUMP_ROOT, str(root))
+    contents = contents.replace(_MAKEDUMPFILE_STDERR, str(tmp_path / "makedumpfile-stderr"))
     for path in ("/usr/bin/mv", "/usr/bin/sync", "/usr/bin/umount", "/usr/sbin/poweroff"):
         contents = contents.replace(path, Path(path).name)
     script.write_text(contents, encoding="utf-8")
@@ -213,6 +216,27 @@ def test_postscript_marks_a_completed_unsupported_kernel_dump_incomplete(tmp_pat
         "The kernel version is not supported.\n"
         "The makedumpfile operation may be incomplete.\n"
         "vmcore status: saved successfully\n",
+        encoding="utf-8",
+    )
+
+    _run_postscript(tmp_path, "direct")
+
+    assert not (dump / "vmcore").exists()
+    assert (dump / "vmcore-incomplete").exists()
+
+
+def test_postscript_reads_unsupported_kernel_warning_from_makedumpfile_stderr(
+    tmp_path: Path,
+) -> None:
+    dump = tmp_path / "crash" / "current"
+    dump.mkdir(parents=True)
+    (dump / "vmcore").write_text("degraded", encoding="utf-8")
+    (dump / "README.txt").write_text(
+        "vmcore status: saved successfully\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "makedumpfile-stderr").write_text(
+        "The kernel version is not supported.\nThe makedumpfile operation may be incomplete.\n",
         encoding="utf-8",
     )
 

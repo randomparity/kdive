@@ -49,6 +49,7 @@ _ZYPPER_REFRESH_CMD = "zypper --non-interactive refresh"
 _SUSE_CLOUD_CFG_CONTENT = KDIVE_CLOUD_CFG_CONTENT.replace("    kdive-dhcp:\n", "    eth0:\n")
 _KDUMP_POST_PATH = "/usr/local/sbin/kdive-suse-kdump-post"
 _KDUMP_DUMP_ROOT = "/kdump/mnt/var/crash"
+_MAKEDUMPFILE_STDERR = "/tmp/kdive-makedumpfile-stderr"
 _KDUMP_POST_PROGRAMS = ("/usr/bin/mv", "/usr/bin/sync", "/usr/bin/umount", "/usr/sbin/poweroff")
 _KDUMP_POST_CONTENT = f"""\
 #!/bin/sh
@@ -57,6 +58,16 @@ set -eu
 dump_root={_KDUMP_DUMP_ROOT}
 candidate_count=0
 successful_dir=
+makedumpfile_unsupported=0
+
+if [ -f {_MAKEDUMPFILE_STDERR} ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            "The kernel version is not supported."|\
+            "The makedumpfile operation may be incomplete.") makedumpfile_unsupported=1 ;;
+        esac
+    done < {_MAKEDUMPFILE_STDERR}
+fi
 
 for dump_dir in "$dump_root"/*; do
     [ -d "$dump_dir" ] || continue
@@ -64,7 +75,7 @@ for dump_dir in "$dump_root"/*; do
     candidate_count=$((candidate_count + 1))
     if [ -f "$dump_dir/README.txt" ]; then
         saved=0
-        unsupported=0
+        unsupported=$makedumpfile_unsupported
         while IFS= read -r line; do
             [ "$line" = "vmcore status: saved successfully" ] && saved=1
             case "$line" in
@@ -90,12 +101,15 @@ fi
 /usr/sbin/poweroff -f
 """
 _KDUMP_CONFIG_CMD = (
-    "sed -i '/^[[:space:]]*#\\?[[:space:]]*KDUMP_\\(REQUIRED_PROGRAMS\\|POSTSCRIPT\\)"
-    "[[:space:]]*=/d' /etc/sysconfig/kdump && "
+    "sed -i -e '/^[[:space:]]*#\\?[[:space:]]*KDUMP_"
+    "\\(REQUIRED_PROGRAMS\\|POSTSCRIPT\\)[[:space:]]*=/d' "
+    f"-e '\\|{_MAKEDUMPFILE_STDERR}|d' /etc/sysconfig/kdump && "
     "printf '%s\\n' "
     f"'KDUMP_REQUIRED_PROGRAMS=\"$KDUMP_REQUIRED_PROGRAMS {_KDUMP_POST_PATH} "
     f"{' '.join(_KDUMP_POST_PROGRAMS)}\"' "
-    f"'KDUMP_POSTSCRIPT=\"{_KDUMP_POST_PATH}\"' >> /etc/sysconfig/kdump"
+    f"'KDUMP_POSTSCRIPT=\"{_KDUMP_POST_PATH}\"' "
+    f"'MAKEDUMPFILE_OPTIONS=\"$MAKEDUMPFILE_OPTIONS 2>{_MAKEDUMPFILE_STDERR}\"' "
+    ">> /etc/sysconfig/kdump"
 )
 _GUESTFISH_TIMEOUT_S = 5 * 60
 _KIWI_REPART_HOOK = "var/lib/dracut/hooks/pre-mount/20-kiwi-repart-disk.sh"
