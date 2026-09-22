@@ -8,6 +8,8 @@ ellipses (docs/... , docs/…) must NOT be flagged.
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,8 +21,7 @@ from tests.host_capabilities import requires_bash
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-doc-paths.sh"
 BASH = shutil.which("bash")
 
-# The script reads matches with `mapfile` (bash >= 4.0).
-pytestmark = requires_bash(4, 0, "mapfile")
+pytestmark = requires_bash(3, 2, "portable documentation path guard")
 
 
 def _run(root: Path) -> subprocess.CompletedProcess[str]:
@@ -113,3 +114,119 @@ def test_current_architecture_is_checked(tmp_path: Path, tracked: bool) -> None:
     assert result.returncode == 1, result.stdout
     assert "top-level-design.md" in result.stderr
     assert "docs/missing.md" in result.stderr
+
+
+def _tool_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, body: str) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    stub = tools / name
+    stub.write_text(f"#!/bin/sh\n{body}\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+
+
+@pytest.mark.parametrize("tool", ["git", "find", "tr", "awk"])
+@pytest.mark.parametrize("partial", [False, True], ids=["empty", "partial"])
+def test_tool_failure_cannot_certify_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, partial: bool
+) -> None:
+    (tmp_path / "justfile").write_text("# No references\n")
+    output = "printf 'justfile\\n'\n" if partial else ""
+    _tool_stub(tmp_path, monkeypatch, tool, output + "echo injected-tool-failure >&2\nexit 23")
+    result = _run(tmp_path)
+    assert result.returncode != 0
+    assert "injected-tool-failure" in result.stderr
+    assert "doc paths resolve" not in result.stdout
+
+
+@pytest.mark.parametrize("partial", [False, True], ids=["empty", "partial"])
+def test_extractor_failure_cannot_certify_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial: bool
+) -> None:
+    (tmp_path / "justfile").write_text("# No references\n")
+    real_awk = shutil.which("awk")
+    assert real_awk is not None
+    output = "printf 'docs/\\n'\n" if partial else ""
+    _tool_stub(
+        tmp_path,
+        monkeypatch,
+        "awk",
+        f'case "$1" in *fence*) {output}echo injected-extractor-failure >&2; exit 23;; esac\n'
+        f'exec {shlex.quote(real_awk)} "$@"',
+    )
+    result = _run(tmp_path)
+    assert result.returncode != 0
+    assert "injected-extractor-failure" in result.stderr
+    assert "justfile" in result.stderr
+    assert "doc paths resolve" not in result.stdout
+
+
+@pytest.mark.parametrize("tool,option", [("grep", "-oP"), ("find", "-printf")])
+def test_missing_path_with_portable_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, option: str
+) -> None:
+    (tmp_path / "justfile").write_text("docs/missing.md\n")
+    real_tool = shutil.which(tool)
+    assert real_tool is not None
+    _tool_stub(
+        tmp_path,
+        monkeypatch,
+        tool,
+        f'for arg do if [ "$arg" = {shlex.quote(option)} ]; then exit 23; fi; done\n'
+        f'exec {shlex.quote(real_tool)} "$@"',
+    )
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert "missing doc path: justfile references docs/missing.md" in result.stderr
+
+
+def test_missing_path_without_mapfile(tmp_path: Path) -> None:
+    (tmp_path / "justfile").write_text("docs/missing.md\n")
+    assert BASH is not None
+    result = subprocess.run(
+        [
+            BASH,
+            "-c",
+            'enable -n mapfile 2>/dev/null || :; source "$1" "$2"',
+            "guard-test",
+            str(SCRIPT),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "missing doc path: justfile references docs/missing.md" in result.stderr
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["filesystem", "git"])
+@pytest.mark.parametrize("name", ["a b.md", "a\\b.md", "a\tb.md", 'a"b.md', "-a.md", "a=b.md"])
+def test_source_filename_is_literal(tmp_path: Path, tracked: bool, name: str) -> None:
+    (tmp_path / name).write_text("docs/missing.md\n")
+    if tracked:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert f"{name} references docs/missing.md" in result.stderr
+
+
+@pytest.mark.parametrize("text", ["", "No references\n", "docs/… docs/<seg>\n"])
+def test_no_matches_pass(tmp_path: Path, text: str) -> None:
+    (tmp_path / "a.md").write_text(text)
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "doc paths resolve" in result.stdout
+
+
+def test_multiple_references_keep_boundaries_and_deduplicate(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text(
+        "xdocs/ignored /docs/ignored _docs/ignored .docs/ignored -docs/ignored\n"
+        "(docs/one.md), docs/two.md. `docs/one.md`\n"
+    )
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert "ignored" not in result.stderr
+    assert result.stderr.count("references docs/one.md\n") == 1
+    assert result.stderr.count("references docs/two.md\n") == 1

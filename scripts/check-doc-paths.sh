@@ -31,15 +31,31 @@ set -euo pipefail
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
-readonly EXCLUDE='^docs/archive/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths\.py$'
+readonly EXCLUDE='^docs/archive/|^CHANGELOG[.]md$|^[.](claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths[.]py$'
 
-mapfile -t files < <(
-  { git ls-files 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' '*.py' 2>/dev/null || true; } |
-    grep -vE "${EXCLUDE}" |
-    awk '$0 !~ /^docs\/design\// || $0 == "docs/design/top-level-design.md"'
-)
-if ((${#files[@]} == 0)); then
-  mapfile -t files < <(
+# -z avoids Git quoting backslashes, tabs, and quotes in filenames. The existing
+# line-based scan does not support filenames containing newlines.
+if files=$(LC_ALL=C git ls-files -z 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' '*.py' 2>&1 |
+  tr '\000' '\n'); then
+  :
+else
+  enumeration_status=$?
+  case "$enumeration_status:$files" in
+  "128:fatal: not a git repository (or any "*) files='' ;;
+  *)
+    printf '%s\ncannot enumerate tracked files; check git/tr diagnostics above\n' "$files" >&2
+    exit 1
+    ;;
+  esac
+fi
+if ! files=$(awk -v exclude="$EXCLUDE" '
+  length && $0 !~ exclude && ($0 !~ /^docs\/design\// ||
+    $0 == "docs/design/top-level-design.md")' <<<"$files"); then
+  printf 'cannot filter source files; check awk diagnostics above\n' >&2
+  exit 1
+fi
+if [[ -z "$files" ]]; then
+  if ! files=$(
     find . -type f \( -name justfile -o -path './scripts/*' -o -name '*.yml' \
       -o -name '*.yaml' -o -name '*.md' -o -name '*.py' \) \
       \( -not -path './docs/design/*' -o -path './docs/design/top-level-design.md' \) \
@@ -48,17 +64,37 @@ if ((${#files[@]} == 0)); then
       -not -path './.claude/*' -not -path './.agents/*' -not -path './.codex/*' \
       -not -path './src/kdive/mcp/resources/_content/*' \
       -not -path './tests/scripts/test_check_doc_paths.py' \
-      -printf '%P\n'
-  )
+      -print | awk '{ sub(/^\.\//, ""); print }'
+  ); then
+    printf 'cannot enumerate source files under %s; check find/awk diagnostics above\n' "$ROOT" >&2
+    exit 1
+  fi
 fi
 
 missing=0
-for f in "${files[@]}"; do
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
   [[ -e "$f" ]] || continue
   # docs/ followed by path chars. Fenced code blocks are stripped first (the awk toggles on
   # triple-backtick fence lines; \140 is the octal for a backtick, so this script holds no
   # literal fence marker) so example paths in code samples are not policed; design/archive
   # records (except the current architecture) are excluded from the file set above.
+  if ! refs=$(awk '
+    BEGIN { fence = 0 }
+    /^\140\140\140/ { fence = !fence; next }
+    !fence {
+      offset = 1
+      while (match(substr($0, offset), /docs\/[A-Za-z0-9._\/-]+/)) {
+        start = offset + RSTART - 1
+        ref = substr($0, start, RLENGTH)
+        if ((start == 1 || substr($0, start - 1, 1) !~ /[A-Za-z0-9_.\/-]/) &&
+            !seen[ref]++) print ref
+        offset = start + RLENGTH
+      }
+    }' <"$f"); then
+    printf 'cannot extract doc paths from %s; check awk/read diagnostics above\n' "$f" >&2
+    exit 1
+  fi
   while IFS= read -r ref; do
     [[ -z "$ref" ]] && continue
     # Skip illustrative ellipses (ASCII ... or unicode …) and <placeholders>.
@@ -70,9 +106,8 @@ for f in "${files[@]}"; do
       printf "missing doc path: %s references %s\n" "$f" "$ref" >&2
       missing=1
     fi
-  done < <(awk 'BEGIN { fence = 0 } /^\140\140\140/ { fence = !fence; next } !fence' "$f" |
-    grep -oP '(?<![A-Za-z0-9_./-])docs/[A-Za-z0-9._/-]+' | sort -u)
-done
+  done <<<"$refs"
+done <<<"$files"
 
 if ((missing)); then
   printf "\ndoc path-existence check failed\n" >&2
