@@ -35,6 +35,7 @@ from kdive.serialization import JsonValue
 
 _PROBE_DEADLINE_S = 15.0
 _CONNECT_TIMEOUT_S = 5.0
+_BANNER_READ_TIMEOUT_S = 2.0
 _BANNER_MAX_BYTES = 255
 _BACKOFF_S = 0.5
 
@@ -112,18 +113,21 @@ async def _real_probe(
 ) -> ReachResult:
     """Probe ``host:port`` for an SSH banner, retrying connection-level failures until the deadline.
 
-    Returns ``reachable`` iff a banner beginning ``SSH-`` arrives; ``no SSH banner`` when a
-    connection is accepted but no ``SSH-`` line arrives before the deadline; ``unreachable`` when
-    nothing accepts a connection before the deadline. Sends no bytes and never returns the raw
-    banner. ``asyncio.TimeoutError`` is an ``OSError`` subclass, so the connect ``except OSError``
-    also covers a connect timeout.
+    Returns ``reachable`` iff a banner beginning ``SSH-`` arrives; ``no SSH banner`` when at least
+    one connection is accepted but no ``SSH-`` line arrives before the deadline; ``unreachable``
+    when nothing accepts a connection before the deadline. QEMU's host forward accepts before the
+    guest sshd exists, so a banner-less accepted connection is closed and retried rather than held
+    for the whole deadline. Sends no bytes and never returns the raw banner.
+    ``asyncio.TimeoutError`` is an ``OSError`` subclass, so the connect ``except OSError`` also
+    covers a connect timeout.
     """
     loop = asyncio.get_running_loop()
     end = loop.time() + deadline_s
+    connected = False
     while True:
         remaining = end - loop.time()
         if remaining <= 0:
-            return ReachResult.tcp_unreachable()
+            return ReachResult.missing_banner() if connected else ReachResult.tcp_unreachable()
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
@@ -132,9 +136,11 @@ async def _real_probe(
         except OSError:  # refused / reset / connect-timeout: sshd may still be binding — retry
             await asyncio.sleep(min(_BACKOFF_S, max(0.0, end - loop.time())))
             continue
+        connected = True
         try:
             banner = await asyncio.wait_for(
-                reader.read(_BANNER_MAX_BYTES), timeout=max(0.1, end - loop.time())
+                reader.read(_BANNER_MAX_BYTES),
+                timeout=min(_BANNER_READ_TIMEOUT_S, max(0.1, end - loop.time())),
             )
         except OSError:
             banner = b""
@@ -144,7 +150,12 @@ async def _real_probe(
                 await writer.wait_closed()
         if banner.startswith(b"SSH-"):
             return ReachResult.ok()
-        return ReachResult.missing_banner()
+        if banner:
+            return ReachResult.missing_banner()
+        remaining = end - loop.time()
+        if remaining <= 0:
+            return ReachResult.missing_banner()
+        await asyncio.sleep(min(_BACKOFF_S, remaining))
 
 
 def _layer_breakdown(result: ReachResult) -> tuple[ProbeLayer | None, list[JsonValue]]:

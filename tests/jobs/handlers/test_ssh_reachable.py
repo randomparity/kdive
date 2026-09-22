@@ -644,6 +644,38 @@ def test_probe_reachable_pins_connect_and_banner_timeouts(monkeypatch: pytest.Mo
     assert writer.closed is True  # writer.wait_closed raised OSError but suppress(OSError) ate it
 
 
+def test_probe_reconnects_when_forward_accepts_before_sshd_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(0.0)
+    timeouts: list[object] = []
+    conns: list[tuple[str, int]] = []
+    sleeps: list[float] = []
+    readers = iter(
+        (
+            (_FakeReader(b""), _FakeWriter()),
+            (_FakeReader(b"SSH-2.0-late\r\n"), _FakeWriter()),
+        )
+    )
+
+    def _connect(_host: str, _port: int):
+        return next(readers)
+
+    _install_fake_asyncio(
+        monkeypatch,
+        clock,
+        connect=_connect,
+        sleeps=sleeps,
+        timeouts=timeouts,
+        conns=conns,
+    )
+    result = _drive(_real_probe("h", 22, deadline_s=3.0))
+
+    assert result == ReachResult.ok()
+    assert conns == [("h", 22), ("h", 22)]
+    assert sleeps == [pytest.approx(_BACKOFF_S)]
+
+
 def test_probe_backoff_and_deadline_boundary_are_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _Clock(0.0)
     timeouts: list[object] = []
