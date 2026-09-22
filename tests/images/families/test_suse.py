@@ -22,6 +22,7 @@ from tests.support.customize_steps import baked_contents, commands, installed, r
 
 _POST_PATH = "/usr/local/sbin/kdive-suse-kdump-post"
 _DUMP_ROOT = "/kdump/mnt/var/crash"
+_LEAP_NETWORK_PATH = "/etc/sysconfig/network/ifcfg-eth0"
 
 
 def _family() -> FamilyCustomizer:
@@ -122,6 +123,12 @@ def test_steps_bake_cloud_init_and_conditional_provenance(tmp_path: Path) -> Non
     assert "kdive-drgn" not in leap_text
 
 
+def test_leap_bakes_wicked_dhcp_before_customization_boot(tmp_path: Path) -> None:
+    contents = baked_contents(_steps(tmp_path, "opensuse-leap"))
+    assert contents[_LEAP_NETWORK_PATH] == "BOOTPROTO='dhcp4'\nSTARTMODE='auto'\n"
+    assert _LEAP_NETWORK_PATH not in baked_contents(_steps(tmp_path))
+
+
 def test_kdump_sysconfig_uses_one_no_argument_helper_and_required_programs(tmp_path: Path) -> None:
     text = rendered(_steps(tmp_path))
     assert f'KDUMP_POSTSCRIPT="{_POST_PATH}"' in text
@@ -204,16 +211,56 @@ def test_postscript_handles_no_core(tmp_path: Path) -> None:
 
 def test_normalize_writes_fstab_and_removes_crypttab(tmp_path: Path) -> None:
     scripts: list[str] = []
+    rewrites: list[Path] = []
 
     def _fake_run_guestfs(argv: list[str], **kwargs: object) -> str:
-        scripts.append(str(kwargs.get("input_text", "")))
+        script = str(kwargs.get("input_text", ""))
+        scripts.append(script)
+        for line in script.splitlines():
+            if line.startswith("download /boot/initrd "):
+                Path(line.removeprefix("download /boot/initrd ")).write_bytes(b"initrd")
         return ""
 
-    SuseFamily().normalize(tmp_path / "image.qcow2", _run_guestfs=_fake_run_guestfs)
-    assert len(scripts) == 1
+    def _fake_rewrite(path: Path, entry: str) -> bool:
+        assert path.read_bytes() == b"initrd"
+        assert entry.endswith("/20-kiwi-repart-disk.sh")
+        rewrites.append(path)
+        path.write_bytes(b"normalized")
+        return True
+
+    SuseFamily().normalize(
+        tmp_path / "image.qcow2",
+        _run_guestfs=_fake_run_guestfs,
+        _rewrite_initrd=_fake_rewrite,
+    )
+    assert len(scripts) == 2
     assert "/etc/fstab" in scripts[0]
     assert "rm-f /etc/crypttab" in scripts[0]
     assert "selinux" not in scripts[0].lower()
+    assert "download /boot/initrd " in scripts[0]
+    assert "upload " in scripts[1] and " /boot/initrd" in scripts[1]
+    assert len(rewrites) == 1
+
+
+def test_normalize_does_not_upload_an_unchanged_initrd(tmp_path: Path) -> None:
+    scripts: list[str] = []
+
+    def _fake_run_guestfs(argv: list[str], **kwargs: object) -> str:
+        script = str(kwargs.get("input_text", ""))
+        scripts.append(script)
+        for line in script.splitlines():
+            if line.startswith("download /boot/initrd "):
+                Path(line.removeprefix("download /boot/initrd ")).write_bytes(b"initrd")
+        return ""
+
+    SuseFamily().normalize(
+        tmp_path / "image.qcow2",
+        _run_guestfs=_fake_run_guestfs,
+        _rewrite_initrd=lambda _path, _entry: False,
+    )
+
+    assert len(scripts) == 1
+    assert "download /boot/initrd " in scripts[0]
 
 
 def test_installed_helper_commands_are_not_accidental_packages(tmp_path: Path) -> None:

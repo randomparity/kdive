@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Callable
+from compression import zstd
 from pathlib import Path
 
 from kdive.domain.catalog.images import Capability
@@ -28,6 +29,7 @@ from kdive.images.families.steps import (
     WriteFile,
 )
 from kdive.images.planes._build_common import run_guestfs_tool
+from kdive.images.rootfs.initrd import remove_zstd_newc_entry
 from kdive.images.rootfs.kinds import RootfsImageKind
 from kdive.providers.shared.build_timeouts import appliance_budget_s
 
@@ -41,6 +43,8 @@ _COMMON_DEBUG_PACKAGES = (
     "openssh-server",
 )
 _ZYPPER_REFRESH_CMD = "zypper --non-interactive refresh"
+_LEAP_NETWORK_PATH = "/etc/sysconfig/network/ifcfg-eth0"
+_LEAP_NETWORK_CONTENT = "BOOTPROTO='dhcp4'\nSTARTMODE='auto'\n"
 _KDUMP_POST_PATH = "/usr/local/sbin/kdive-suse-kdump-post"
 _KDUMP_DUMP_ROOT = "/kdump/mnt/var/crash"
 _KDUMP_POST_PROGRAMS = ("/usr/bin/mv", "/usr/bin/sync", "/usr/bin/umount", "/usr/sbin/poweroff")
@@ -86,8 +90,10 @@ _KDUMP_CONFIG_CMD = (
     f"'KDUMP_POSTSCRIPT=\"{_KDUMP_POST_PATH}\"' >> /etc/sysconfig/kdump"
 )
 _GUESTFISH_TIMEOUT_S = 5 * 60
+_KIWI_REPART_HOOK = "var/lib/dracut/hooks/pre-mount/20-kiwi-repart-disk.sh"
 
 type RunGuestfs = Callable[..., str]
+type RewriteInitrd = Callable[[Path, str], bool]
 
 
 def _validate(kind: RootfsImageKind, distro: str) -> None:
@@ -134,6 +140,10 @@ class SuseFamily:
         """Build the ordered steps that turn an openSUSE cloud base into a debug rootfs."""
         _validate(ctx.kind, ctx.distro)
         steps: list[Step] = [RunCommand(_ZYPPER_REFRESH_CMD), InstallPackages(ctx.packages)]
+        if ctx.distro == "opensuse-leap":
+            # Leap 15.6's cloud-init/wicked combination does not render the shared v2 DHCP match;
+            # inject its native interface config offline so zypper has network on the build boot.
+            steps.append(StageFile(_LEAP_NETWORK_PATH, _LEAP_NETWORK_CONTENT))
         steps += [
             RunCommand("systemctl enable sshd.service"),
             RunCommand("systemctl enable kdump.service"),
@@ -153,20 +163,62 @@ class SuseFamily:
         steps.append(RunCommand(f"systemctl enable {READINESS_MARKER}.service"))
         return steps
 
-    def normalize(self, qcow2: Path, *, _run_guestfs: RunGuestfs = run_guestfs_tool) -> None:
-        """Normalize the whole-disk ext4 layout without SELinux-specific mutations."""
-        with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as fstab_handle:
-            fstab_handle.write(FSTAB)
-            fstab_path = Path(fstab_handle.name)
-        script = f"upload {fstab_path} /etc/fstab\nrm-f /etc/crypttab\n"
-        try:
-            _run_guestfs(
-                ["guestfish", "--rw", "-a", str(qcow2), "-i"],
-                stage="guestfish",
-                timeout_s=appliance_budget_s(_GUESTFISH_TIMEOUT_S),
-                missing_message="guestfish is not installed; cannot normalize the rootfs image",
-                failure_message="guestfish normalization failed",
-                input_text=script,
-            )
-        finally:
-            fstab_path.unlink(missing_ok=True)
+    def normalize(
+        self,
+        qcow2: Path,
+        *,
+        _run_guestfs: RunGuestfs = run_guestfs_tool,
+        _rewrite_initrd: RewriteInitrd = remove_zstd_newc_entry,
+    ) -> None:
+        """Normalize the ext4 layout and remove a stale KIWI partition-resize hook.
+
+        Tumbleweed's appliance initrd carries a hook for its original partition table. KDIVE
+        repacks the image as a partitionless whole-disk filesystem, so retaining that hook makes
+        dracut wait for a nonexistent partition before it can mount ``/dev/vda``. Leap lacks the
+        hook; the bounded rewrite returns ``False`` and leaves its initrd byte-identical.
+        """
+        with tempfile.TemporaryDirectory(prefix="kdive-suse-normalize-") as temp_dir:
+            temp = Path(temp_dir)
+            fstab_path = temp / "fstab"
+            initrd_path = temp / "initrd"
+            fstab_path.write_text(FSTAB, encoding="utf-8")
+            self._normalize_and_download(qcow2, fstab_path, initrd_path, _run_guestfs)
+            try:
+                rewritten = _rewrite_initrd(initrd_path, _KIWI_REPART_HOOK)
+            except (OSError, ValueError, zstd.ZstdError) as exc:
+                raise CategorizedError(
+                    "SUSE initrd normalization failed",
+                    category=ErrorCategory.PROVISIONING_FAILURE,
+                    details={"error": type(exc).__name__},
+                ) from exc
+            if rewritten:
+                self._upload_initrd(qcow2, initrd_path, _run_guestfs)
+
+    @staticmethod
+    def _normalize_and_download(
+        qcow2: Path, fstab_path: Path, initrd_path: Path, run_guestfs: RunGuestfs
+    ) -> None:
+        script = (
+            f"upload {fstab_path} /etc/fstab\n"
+            "rm-f /etc/crypttab\n"
+            f"download /boot/initrd {initrd_path}\n"
+        )
+        run_guestfs(
+            ["guestfish", "--rw", "-a", str(qcow2), "-i"],
+            stage="guestfish",
+            timeout_s=appliance_budget_s(_GUESTFISH_TIMEOUT_S),
+            missing_message="guestfish is not installed; cannot normalize the rootfs image",
+            failure_message="guestfish normalization failed",
+            input_text=script,
+        )
+
+    @staticmethod
+    def _upload_initrd(qcow2: Path, initrd_path: Path, run_guestfs: RunGuestfs) -> None:
+        run_guestfs(
+            ["guestfish", "--rw", "-a", str(qcow2), "-i"],
+            stage="guestfish",
+            timeout_s=appliance_budget_s(_GUESTFISH_TIMEOUT_S),
+            missing_message="guestfish is not installed; cannot normalize the rootfs image",
+            failure_message="guestfish initrd upload failed",
+            input_text=f"upload {initrd_path} /boot/initrd\n",
+        )
