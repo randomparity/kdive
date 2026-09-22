@@ -34,9 +34,10 @@ cd "${ROOT}"
 readonly EXCLUDE='^docs/archive/|^CHANGELOG[.]md$|^[.](claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths[.]py$'
 
 # -z avoids Git quoting backslashes, tabs, and quotes in filenames. The existing
-# line-based scan does not support filenames containing newlines.
+# line-based scan does not support filenames containing newlines. Normalize conversion
+# failures so status 128 identifies Git discovery alone.
 if files=$(LC_ALL=C git ls-files -z 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' '*.py' 2>&1 |
-  tr '\000' '\n'); then
+  { tr '\000' '\n' || exit 1; }); then
   :
 else
   enumeration_status=$?
