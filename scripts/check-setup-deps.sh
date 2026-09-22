@@ -26,7 +26,7 @@ while (($#)); do
 done
 readonly ASSUME_YES
 
-# Developer-host Bash floor (ADR-0672). This block stays Bash 3.2 compatible because it runs
+# Developer-host Bash floor (ADR-0673). This block stays Bash 3.2 compatible because it runs
 # before the Bash 4 constructs below: an old interpreter must reach the remedy, not a nameref
 # error. The PATH bash matters too, because `just` recipes and `#!/usr/bin/env bash` use it.
 readonly BASH_FLOOR_MAJOR=4 BASH_FLOOR_MINOR=4
@@ -281,7 +281,7 @@ require_tool() {
   command_exists "${name}" || note_manual "${tier}" "${name}" "${instruction}"
 }
 
-# Record a missing GNU tool package; the developer recipes use GNU-only flags (ADR-0672).
+# Record a missing GNU tool package; the developer recipes use GNU-only flags (ADR-0673).
 note_gnu() {
   local formula="$1"
   note_manual recommended "GNU ${formula}" \

@@ -1,6 +1,6 @@
 # Developer host Bash and GNU tools floor
 
-Issue: #2647. Decision: [ADR-0672](../../adr/0672-developer-host-bash-and-gnu-tools-floor.md).
+Issue: #2647. Decision: [ADR-0673](../../adr/0673-developer-host-bash-and-gnu-tools-floor.md).
 
 ## Problem
 

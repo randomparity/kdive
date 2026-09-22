@@ -23,7 +23,7 @@ from tests.host_capabilities import requires_bash
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-setup-deps.sh"
 BASH = shutil.which("bash")
 
-# The script stops below Bash 4.4, the developer-host floor (ADR-0672).
+# The script stops below Bash 4.4, the developer-host floor (ADR-0673).
 pytestmark = requires_bash(4, 4, "the developer-host Bash floor")
 
 # run_privileged only escalates via sudo when EUID != 0; under a root pytest (some CI

@@ -183,7 +183,7 @@ uv tool install prek
 #### Bash and GNU tools (all hosts; Homebrew on macOS)
 
 Developer scripts need Bash 4.4 or later as the first `bash` on `PATH`, and the GNU
-versions of coreutils, findutils, and grep ([ADR-0672](../adr/0672-developer-host-bash-and-gnu-tools-floor.md)).
+versions of coreutils, findutils, and grep ([ADR-0673](../adr/0673-developer-host-bash-and-gnu-tools-floor.md)).
 Linux distributions supply these. `just check-deps` stops when Bash is older than 4.4, and
 it reports a missing GNU tool in its Recommended tier.
 

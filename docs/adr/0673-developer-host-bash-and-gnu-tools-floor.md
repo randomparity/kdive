@@ -1,4 +1,4 @@
-# 0672 — Developer hosts supply Bash 4.4 and GNU tools on PATH
+# 0673 — Developer hosts supply Bash 4.4 and GNU tools on PATH
 
 ## Status
 

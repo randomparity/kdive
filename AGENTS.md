@@ -175,7 +175,7 @@ Follow the [installation prerequisites](docs/operating/install.md) and
 [cross-platform guide](docs/development/cross-platform.md) before installing `just`/`prek`
 or syncing dependencies. Developer scripts need Bash >= 4.4 and GNU coreutils/findutils/grep
 first on `PATH`; on macOS that means Homebrew ([macOS steps](docs/operating/install.md#bash-and-gnu-tools-all-hosts-homebrew-on-macos),
-ADR-0672). Normal development and the optional `live` group have different
+ADR-0673). Normal development and the optional `live` group have different
 native requirements; POWER also needs Rust and the documented source-build prerequisites.
 `just check-deps` checks the host; it cannot install the runner that invokes it.
 

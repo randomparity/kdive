@@ -154,7 +154,7 @@
         # `grep` exits 1 on no match; wrap each filter in `|| true` so "nothing stale to
         # prune" (the steady state) is success, not a pipefail-induced task failure.
         # A `while read` loop, not `mapfile`: the local harness runs this under macOS /bin/bash
-        # 3.2 (ADR-0672). `sort -rn` reads all of `ufw status` before the first delete, and each
+        # 3.2 (ADR-0673). `sort -rn` reads all of `ufw status` before the first delete, and each
         # delete reads /dev/null so it cannot consume the rule numbers still queued on stdin.
         pruned=0
         while IFS= read -r n; do
