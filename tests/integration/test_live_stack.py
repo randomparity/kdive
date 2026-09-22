@@ -32,6 +32,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -83,7 +84,14 @@ _ARTIFACT_NAME = "accounting-report.json"
 
 # Per-family *-kdive-ready rootfs images for the SSH-reachability proof (#956, ADR-0294). Each is a
 # distinct artifact; a host with only one family's image proves that family and skips the other.
-_FAMILY_IMAGE_ENV = {"debian": "KDIVE_GUEST_IMAGE_DEBIAN", "rhel": "KDIVE_GUEST_IMAGE_RHEL"}
+_FAMILY_IMAGE_ENV = {
+    "debian": "KDIVE_GUEST_IMAGE_DEBIAN",
+    "rhel": "KDIVE_GUEST_IMAGE_RHEL",
+    "suse-tumbleweed": "KDIVE_GUEST_IMAGE_SUSE_TUMBLEWEED",
+    "suse-leap-15.6": "KDIVE_GUEST_IMAGE_SUSE_LEAP_15_6",
+}
+_SUSE_FAMILIES = ("suse-tumbleweed", "suse-leap-15.6")
+_SUSE_KDUMP_SHUTOFF_DEADLINE_S = 90.0
 # The ppc64le rootfs for the live TCG boot proof (#1144, epic #1139): a Fedora ppc64le image
 # published under rootfs/local/. Distinct from the x86_64 family images — it boots under TCG
 # emulation on the x86_64 host, so the preflight also gates on that emulator via require_guest_arch.
@@ -793,7 +801,7 @@ def _reachability_provision_profile(
 
 
 @pytest.mark.live_stack
-@pytest.mark.parametrize("family", ["debian", "rhel"])
+@pytest.mark.parametrize("family", ["debian", "rhel", *_SUSE_FAMILIES])
 def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
     """Prove the always-rendered loopback SSH forward reaches a per-family guest sshd (#956).
 
@@ -864,6 +872,219 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     # A *succeeded* drain is the reachability proof: a non-succeeded drain raises a
                     # SpinePhaseError naming this family + the job's error_category.
                     await drain_job(op, f"{family}:authorize_ssh_key", env.object_id)
+            finally:
+                if allocation_id:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
+
+    asyncio.run(_run())
+
+
+def _suse_kdump_provision_profile(image: str) -> dict[str, object]:
+    """A SUSE profile that opts into KDUMP and the force-crash gate."""
+    profile = _reachability_provision_profile(image)
+    provider = cast(dict[str, object], profile["provider"])
+    local = cast(dict[str, object], provider["local-libvirt"])
+    local["destructive_ops"] = ["force_crash"]
+    return profile
+
+
+async def _await_domain_shutoff(
+    system_id: str,
+    *,
+    deadline_s: float = _SUSE_KDUMP_SHUTOFF_DEADLINE_S,
+    interval_s: float = 2.0,
+) -> None:
+    """Wait until kdump powers off the named domain before the 120s harvester fallback."""
+    deadline = time.monotonic() + deadline_s
+    domain = f"kdive-{system_id}"
+    last_state = ""
+    while True:
+        result = subprocess.run(
+            ["virsh", "-c", worker_libvirt_uri(), "domstate", domain],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        last_state = result.stdout.strip().lower()
+        if result.returncode == 0 and last_state in {"shut off", "shutoff"}:
+            return
+        if time.monotonic() >= deadline:
+            raise SpinePhaseError(
+                "suse-kdump:shutoff",
+                f"domain did not shut off within {deadline_s:g}s "
+                f"(returncode={result.returncode}, state={last_state!r})",
+            )
+        await asyncio.sleep(interval_s)
+
+
+def _assert_incomplete_core_failure(env: ToolResponse) -> None:
+    """Require the specific, recoverable incomplete-core terminal envelope."""
+    assert env.status == "failed", f"capture did not fail as expected: {env.model_dump()!r}"
+    assert env.error_category == "readiness_failure", (
+        f"capture failed under the wrong category: {env.model_dump()!r}"
+    )
+    assert env.data.get("failure_detail_reason") == "kdump_core_incomplete", (
+        f"capture did not disclose an incomplete core: {env.model_dump()!r}"
+    )
+    remediation = env.data.get("failure_detail_remediation")
+    assert isinstance(remediation, str) and 'method="host_dump"' in remediation, (
+        f"capture did not name the host_dump recovery: {env.model_dump()!r}"
+    )
+
+
+def test_await_domain_shutoff_polls_the_named_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SUSE proof waits through a running state and addresses only its own domain."""
+    states = iter(["running\n", "shut off\n"])
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=next(states), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    asyncio.run(_await_domain_shutoff("system-7", deadline_s=1.0, interval_s=0.0))
+
+    assert len(calls) == 2
+    assert all(call[-2:] == ["domstate", "kdive-system-7"] for call in calls)
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        ToolResponse(
+            object_id="job-1",
+            status="failed",
+            error_category=ErrorCategory.READINESS_FAILURE.value,
+        ),
+        ToolResponse(
+            object_id="job-1",
+            status="failed",
+            error_category=ErrorCategory.READINESS_FAILURE.value,
+            data={"failure_detail_reason": "no_core"},
+        ),
+        ToolResponse.success("job-1", "succeeded"),
+        ToolResponse.success("job-1", "canceled"),
+        ToolResponse.success("job-1", "running"),
+    ],
+    ids=["generic-failure", "no-core", "success", "canceled", "running"],
+)
+def test_incomplete_core_assertion_rejects_every_other_terminal(envelope: ToolResponse) -> None:
+    """Generic failure, no-core, success, cancellation, and timeout-like states do not pass."""
+    with pytest.raises(AssertionError):
+        _assert_incomplete_core_failure(envelope)
+
+
+def test_incomplete_core_assertion_accepts_exact_recovery_contract() -> None:
+    """The accepted failure names its category, reason, and usable host_dump recovery."""
+    _assert_incomplete_core_failure(
+        ToolResponse(
+            object_id="job-1",
+            status="failed",
+            error_category=ErrorCategory.READINESS_FAILURE.value,
+            data={
+                "failure_detail_reason": "kdump_core_incomplete",
+                "failure_detail_remediation": 'Retry with method="host_dump".',
+            },
+        )
+    )
+
+
+@pytest.mark.live_stack
+@pytest.mark.parametrize("family", _SUSE_FAMILIES)
+def test_suse_current_kernel_reports_incomplete_kdump_core(family: str) -> None:
+    """Prove each SUSE image boots KDIVE's kernel and exposes incomplete-core recovery (#825)."""
+    issuer, base_url, db_url, image = _reachability_preflight(family)
+    operator_token = _token(issuer, role="operator")
+    admin_token = _token(issuer, role="admin")
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        admin = LiveStackClient.over_http(base_url, admin_token)
+        allocation_id = ""
+        async with op, admin:
+            await seed_metering(db_url, _PROJECT)
+            try:
+                async with phase(f"{family}:allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            **{
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        f"{family}:allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase(f"{family}:provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_suse_kdump_provision_profile(image),
+                        ),
+                        f"{family}:provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, f"{family}:provision", system_id, "ready")
+                async with phase(f"{family}:create-run"):
+                    investigation = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            project=_PROJECT,
+                            title=f"{family}-kdump-825",
+                        ),
+                        f"{family}:create-run",
+                    )
+                    run = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            investigation_id=investigation.object_id,
+                            system_id=system_id,
+                            build_profile=build_profile(),
+                        ),
+                        f"{family}:create-run",
+                    )
+                    run_id = run.object_id
+                async with phase(f"{family}:upload-build"):
+                    await build_and_upload_kernel(
+                        op, run_id=run_id, phase_name=f"{family}:upload-build"
+                    )
+                for step in ("install", "boot"):
+                    phase_name = f"{family}:{step}"
+                    async with phase(phase_name):
+                        env = ok(await scalar(op, f"runs.{step}", run_id=run_id), phase_name)
+                        await drain_job(op, phase_name, env.object_id)
+                async with phase(f"{family}:crash"):
+                    ok(
+                        await scalar(admin, "control.force_crash", system_id=system_id),
+                        f"{family}:crash",
+                    )
+                    await await_system_state(admin, f"{family}:crash", system_id, "crashed")
+                async with phase(f"{family}:shutoff"):
+                    await _await_domain_shutoff(system_id)
+                async with phase(f"{family}:capture"):
+                    env = ok(
+                        await scalar(op, "vmcore.fetch", run_id=run_id, method="kdump"),
+                        f"{family}:capture",
+                    )
+                    deadline = time.monotonic() + 180.0
+                    while True:
+                        terminal = await scalar(
+                            op, "jobs.wait", job_id=env.object_id, timeout_s=60.0
+                        )
+                        if terminal.status in {"succeeded", "failed", "canceled"}:
+                            break
+                        if time.monotonic() >= deadline:
+                            raise SpinePhaseError(f"{family}:capture", "drain_timeout")
+                    _assert_incomplete_core_failure(terminal)
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)
