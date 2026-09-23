@@ -8,8 +8,11 @@
 # /usr/local/bin, which secure_path does list, so this converges both callers to a `uv` root can
 # resolve without duplicating the install task.
 - name: Install uv system-wide (the venv builder; not in the debug toolchain)
-  # --break-system-packages: Ubuntu 26.04's system Python is PEP 668 externally-managed, so a
-  # plain system `pip install` errors; the flag is accepted (and a no-op) on pip >= 23.
+  # --break-system-packages: on a PEP 668 externally-managed system Python (Ubuntu 26.04 among
+  # this role's supported families) a plain system `pip install` errors without it; the flag is
+  # accepted -- and a no-op where PEP 668 does not apply -- on pip >= 23, which python3-pip
+  # provides on all three supported families (packages_debian.yml, packages_redhat.yml,
+  # packages_suse.yml install it before this task runs).
   ansible.builtin.pip:
     name: uv
     state: present
