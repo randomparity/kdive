@@ -26,6 +26,37 @@ require(
     "role order differs",
 )
 
+# The lifecycle installer below (deploy/systemd/install-live-worker-lifecycle.sh) runs as root
+# through this play's `become: true` and resolves `uv` with a bare `command -v uv`; a host
+# provisioned per docs/operating/install.md installs uv to ~/.local/bin, which root's sudo
+# secure_path does not list, so the installer fails without a manual `uv` placement (#2665). Roles
+# always run before a play's own `tasks:`, so local_worker_host installing a root-resolvable uv
+# (reusing live_vm_host's mechanism rather than duplicating it) is what makes the lifecycle
+# installer below resolvable with no manual step -- assert the role actually carries that task.
+LOCAL_WORKER_HOST = ANSIBLE / "roles/local_worker_host"
+require(
+    "import_tasks: uv.yml" in (LOCAL_WORKER_HOST / "tasks/main.yml").read_text(),
+    "local_worker_host must install a root-resolvable uv (see #2665) before this play's own "
+    "tasks run, or the lifecycle installer below fails on a host with only a user-local uv",
+)
+uv_task = yaml.safe_load((LOCAL_WORKER_HOST / "tasks/uv.yml").read_text())[0]
+uv_pip = uv_task.get("ansible.builtin.pip", {})
+require(
+    uv_pip.get("name") == "uv" and uv_pip.get("state") == "present",
+    "the shared uv install task local_worker_host imports no longer installs uv via pip",
+)
+uv_defaults = yaml.safe_load((LOCAL_WORKER_HOST / "defaults/main.yml").read_text())
+require(
+    uv_defaults.get("live_vm_host_uv_bin") == "/usr/local/bin/uv",
+    "live_vm_host_uv_bin must resolve to the path pip installs and secure_path lists",
+)
+# live_vm_host imports the same task file (tasks_from: uv.yml) rather than a second pip install,
+# so this play's fix and the runner's stay one mechanism, not a duplicate that can drift (#2665).
+require(
+    "tasks_from: uv.yml" in (ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text(),
+    "live_vm_host must reuse the same shared uv install task local_worker_host uses",
+)
+
 pre_tasks = {task["name"]: task for task in play["pre_tasks"]}
 require(
     "Require the operator account to exist before host mutation" in pre_tasks,
@@ -225,6 +256,6 @@ require(
 )
 
 print(
-    "local-libvirt-host: preflight, localhost role composition, locked live sync, DSN stdin, "
-    "guestfs ABI handling, and the play-scoped system-interpreter pin pass"
+    "local-libvirt-host: preflight, localhost role composition, root-resolvable uv, locked live "
+    "sync, DSN stdin, guestfs ABI handling, and the play-scoped system-interpreter pin pass"
 )
