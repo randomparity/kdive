@@ -14,7 +14,8 @@ package task, which currently omits the headers and command.
 
 On Ubuntu, the shared Debian worker package task installs headers for the running kernel,
 requires an executable extractor in those headers, exposes it as `extract-vmlinux` on the
-operator's `PATH`, and verifies the operator can invoke it. The runner's import binds the
+operator's `PATH`, and verifies the operator resolves its executable path. A fresh rebuild
+proves actual invocation. The runner's import binds the
 shared role's operator variable to its own runner account; the standalone role already
 requires its operator variable. The role fails with an actionable
 message when a matching header package or extractor is unavailable. The symlink is refreshed by

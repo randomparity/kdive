@@ -324,8 +324,8 @@ package) if any is absent: `virt-ls`/`virt-copy-out` (libguestfs-tools),
 in the `live_vm_host` role package set. A **compressed** guest kernel (x86 bzImage)
 additionally needs `extract-vmlinux` on `PATH`. The Ubuntu x86 runner role installs
 headers matching the running kernel, links their script into `/usr/local/bin`, and verifies
-it as the runner account. A cold rebuild fails before rootfs construction when the command
-is missing; an existing warm set does not require it.
+its executable path as the runner account. A cold rebuild fails before rootfs construction
+when the command is missing; an existing warm set does not require it.
 A bare-`vmlinux`-ELF guest kernel (ppc64le pseries) does not need it.
 
 ### Disk budget
