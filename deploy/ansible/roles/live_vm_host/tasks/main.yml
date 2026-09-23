@@ -670,6 +670,12 @@
     cmd: >-
       {{ live_vm_host_uv_bin }} pip install --python
       {{ live_vm_host_authority_runtime_install }}/.venv/bin/python {{ live_vm_venv }}
+  environment:
+    # Same root cause as every other site (#2666): this installs the full project, pulling
+    # grpcio, which has no ppc64le wheel and whose vendored BoringSSL has no ppc64le target.
+    # Inert on an arch where grpcio installs from a wheel.
+    GRPC_PYTHON_BUILD_SYSTEM_OPENSSL: "1"
+    GRPC_PYTHON_BUILD_SYSTEM_ZLIB: "1"
   when:
     - live_vm_host_authority_enabled | bool
     - live_vm_host_checkout is changed or live_vm_host_authority_venv is changed

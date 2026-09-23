@@ -297,6 +297,21 @@ def test_witness_venv_install_pins_grpc_system_openssl_and_zlib() -> None:
     }
 
 
+def test_authority_venv_install_pins_grpc_system_openssl_and_zlib() -> None:
+    """The optional external-boot authority venv, embedded in this role, installs the full
+    project (`{{ live_vm_venv }}`) via `uv pip install` -- the same grpcio source-build gap on
+    ppc64le as every other site (#2666); found during self-review, not in the original site list.
+    """
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    install = next(
+        task for task in tasks if task["name"] == "Install KDIVE into the authority venv"
+    )
+    assert install["environment"] == {
+        "GRPC_PYTHON_BUILD_SYSTEM_OPENSSL": "1",
+        "GRPC_PYTHON_BUILD_SYSTEM_ZLIB": "1",
+    }
+
+
 def test_provider_authority_install_pins_grpc_system_openssl_and_zlib() -> None:
     """The provider-authority root `uv sync` shares the same root cause and fix (#2666, #2666
     triage: operator-approved in scope as the same root cause)."""
