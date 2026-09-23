@@ -30,6 +30,7 @@ AUTHORITY_PREFLIGHT = ROLE / "tasks" / "authority_preflight.yml"
 AUTHORITY_ENV_TEMPLATE = ROLE / "templates" / "provider-authority.env.j2"
 AUTHORITY_SERVICE_TEMPLATE = ROLE / "templates" / "external-boot-authority.service.j2"
 RUNNER_PLAY = ROOT / "deploy" / "ansible" / "playbooks" / "runner.yml"
+LOCAL_PLAY = ROOT / "deploy" / "ansible" / "playbooks" / "local-libvirt-host.yml"
 PROVIDER_AUTHORITY = ROLE.parent / "provider_authority_host"
 LOCAL_WORKER = ROLE.parent / "local_worker_host"
 
@@ -2229,6 +2230,32 @@ def test_runner_external_boot_capacity_fits_measured_free_space() -> None:
     assert runner["live_vm_host_worker_accounts"] == [
         f"kdive-worker-{slot}" for slot in range(1, 9)
     ]
+
+
+def test_local_play_external_boot_capacity_fits_typical_free_space() -> None:
+    # #2664: the local-libvirt host play (`just prepare-local-libvirt-host`) reads no inventory
+    # group, so the runner-only #2563 override never reaches it; it must lower its own
+    # concurrency in the play's own vars instead.
+    defaults = _yaml(DEFAULTS)
+    plays = yaml.safe_load(_text(LOCAL_PLAY))
+    assert isinstance(plays, list) and len(plays) == 1
+    local_vars = plays[0]["vars"]
+    capacity_bytes = defaults["live_vm_host_external_boot_capacity_bytes"]
+    concurrent = local_vars["live_vm_host_external_boot_concurrent_activations"]
+    assert isinstance(capacity_bytes, int)
+    assert isinstance(concurrent, int)
+    # Issue #2664 measured this many available bytes with the gate's df command, on an Ubuntu
+    # 26.04.1 POWER9 host with a 196 GB root filesystem -- a typical developer/lab host, not the
+    # self-hosted runner #2563 sized for.
+    measured_free_bytes = 141_997_105_152
+    assert capacity_bytes * concurrent <= measured_free_bytes
+    assert concurrent == 4
+    assert capacity_bytes * concurrent == 128 * 1024**3
+    # The shared role default and the runner override (#2563) are untouched by this local-play
+    # fix.
+    assert defaults["live_vm_host_external_boot_concurrent_activations"] == 8
+    runner = _yaml(ROOT / "deploy/ansible/inventory/group_vars/live_vm_runners.yml")
+    assert runner["live_vm_host_external_boot_concurrent_activations"] == 6
 
 
 def test_external_boot_capacity_is_checked_before_worker_release() -> None:

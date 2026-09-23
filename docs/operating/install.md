@@ -253,6 +253,14 @@ re-applies those modes to a kernel a later upgrade installs, so no re-run is nee
 membership takes effect, then run `just check-local-libvirt`. Do not use `examples/local-libvirt/install-host.sh` as a
 second installer; it only calls this recipe for compatibility with the example walkthrough.
 
+The play's external-boot recovery capacity gate reserves
+`live_vm_host_external_boot_concurrent_activations` (4 by default here, 128 GiB at 32 GiB each)
+free bytes per worker slot, sized for a typical developer or lab host rather than the
+self-hosted CI runner's own override. A host with less free space than that fails the gate with
+the byte counts it needs; lower the count by passing an extra `-e` to `ansible-playbook`
+directly (bypassing the `just` recipe, which does not forward extra arguments), for example
+`-e live_vm_host_external_boot_concurrent_activations=2`.
+
 | Family | Host-preparation status | Limits and proof strength |
 |---|---|---|
 | Debian / Ubuntu | Supported | Structurally checked. Ubuntu 26.04 live apply remains operator-provided and is not recorded by this checkout. |
