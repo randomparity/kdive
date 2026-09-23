@@ -235,15 +235,43 @@ def test_filter_by_project_narrows_results(migrated_url: str) -> None:
 
 
 def test_filter_by_project_unreadable_project_is_empty(migrated_url: str) -> None:
-    """A project outside the caller's readable set behaves like ``allocations.list`` (#2688)."""
+    """A project outside the caller's readable set behaves like ``allocations.list`` (#2688).
+
+    Seeds a real System in the requested-but-unreadable project so this fails if the
+    narrowing ever widens access, not merely if the project happens to have no rows.
+    """
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_budget_quota(pool, "proj")
+            await _seed_budget_quota(pool, "other")
             res = await _seed_resource(pool)
-            alloc = await _seed_allocation(pool, project="proj", resource_id=res)
-            await _seed_system(pool, allocation_id=alloc, project="proj")
-            resp = await _list_systems(pool, _ctx(projects=("proj",)), project="unreadable")
+            mine = await _seed_allocation(pool, project="proj", resource_id=res)
+            theirs = await _seed_allocation(pool, project="other", resource_id=res)
+            await _seed_system(pool, allocation_id=mine, project="proj")
+            await _seed_system(pool, allocation_id=theirs, project="other")
+            # "other" is not among the caller's projects at all.
+            resp = await _list_systems(pool, _ctx(projects=("proj",)), project="other")
+        assert resp.status == "ok"
+        assert resp.items == []
+
+    asyncio.run(_run())
+
+
+def test_filter_by_project_member_without_role_is_empty(migrated_url: str) -> None:
+    """A project the caller is a member of but holds no role on is still unreadable (#2688)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "other")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, project="other", resource_id=res)
+            await _seed_system(pool, allocation_id=alloc, project="other")
+            # Member of "other" but with no role granted on it (roles claim omits it).
+            ctx = RequestContext(
+                principal="user-1", agent_session="s", projects=("proj", "other"), roles={}
+            )
+            resp = await _list_systems(pool, ctx, project="other")
         assert resp.status == "ok"
         assert resp.items == []
 
