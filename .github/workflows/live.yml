@@ -807,6 +807,46 @@ jobs:
           # KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
+          # A false capture-manifest readiness check keeps every job queued without a
+          # provision attempt. Probe that exact verifier before the long mint poll, and
+          # publish only an allowlisted reason and bounded duration, never its path-bearing
+          # exception. This also distinguishes attestation drift from the 2s health timeout.
+          manifest_probe=(/opt/kdive-live-worker-lifecycle/.venv/bin/python)
+          if sudo -n --user=kdive-worker-1 --group=kdive-worker-1 true 2>/dev/null; then
+            manifest_probe=(sudo -n --user=kdive-worker-1 --group=kdive-worker-1 \
+              env "PYTHONPATH=${GITHUB_WORKSPACE}/src" \
+              /opt/kdive-live-worker-lifecycle/.venv/bin/python)
+            echo "capture_manifest_probe_identity=fixed_worker"
+          else
+            echo "capture_manifest_probe_identity=operator"
+          fi
+          "${manifest_probe[@]}" - <<'PY'
+          import time
+
+          start = time.monotonic()
+          try:
+              from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
+
+              verify_capture_bootstrap_manifest()
+          except Exception as error:
+              message = str(error)
+              if message.startswith("capture bootstrap fingerprint drift:"):
+                  reason = "fingerprint_drift"
+              elif message == "capture bootstrap runtime ELF closure drift":
+                  reason = "runtime_elf_closure_drift"
+              elif message == "capture bootstrap import-trace drift":
+                  reason = "import_trace_drift"
+              elif "capture bootstrap manifest" in message:
+                  reason = "manifest_invalid"
+              else:
+                  reason = "unclassified"
+              elapsed = min(time.monotonic() - start, 999.0)
+              print(f"capture_manifest_probe status=rejected reason={reason} elapsed_s={elapsed:.2f}")
+              raise SystemExit(1) from None
+          else:
+              elapsed = min(time.monotonic() - start, 999.0)
+              print(f"capture_manifest_probe status=accepted reason=none elapsed_s={elapsed:.2f}")
+          PY
           # Keep the published URI exported for mint, preflight and pytest; env.sh honors it.
           export KDIVE_PROVISION_EVIDENCE_TARGET="$RUNNER_TEMP/kdive-provision-evidence.target"
           KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
