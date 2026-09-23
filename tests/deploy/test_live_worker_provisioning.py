@@ -264,6 +264,52 @@ def test_project_venv_sync_repairs_drift_without_checkout_change() -> None:
     )
 
 
+def test_runner_venv_sync_pins_grpc_system_openssl_and_zlib() -> None:
+    """The runner-owned venv sync also builds grpcio from source on ppc64le (#2666).
+
+    The exported ``GRPC_PYTHON_BUILD_SYSTEM_OPENSSL``/``_ZLIB`` an interactive operator sets
+    never reaches an unattended Ansible task; the flags must be set on the task itself. Inert
+    (unset) on an arch where grpcio installs from a wheel, so setting them unconditionally is
+    safe.
+    """
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    sync = next(task for task in tasks if task["name"].startswith("Build the venv"))
+    assert sync["environment"] == {
+        "GRPC_PYTHON_BUILD_SYSTEM_OPENSSL": "1",
+        "GRPC_PYTHON_BUILD_SYSTEM_ZLIB": "1",
+    }
+
+
+def test_witness_venv_install_pins_grpc_system_openssl_and_zlib() -> None:
+    """The root-owned lifecycle witness venv install populates root's `uv` cache from empty.
+
+    This is the exact failure the issue reports: grpcio has no ppc64le wheel, its vendored
+    BoringSSL has no ppc64le target, and root's `uv` cache carries none of an operator's
+    exported flags (#2666).
+    """
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    install = next(
+        task for task in tasks if task["name"] == "Install KDIVE into the lifecycle witness venv"
+    )
+    assert install["environment"] == {
+        "GRPC_PYTHON_BUILD_SYSTEM_OPENSSL": "1",
+        "GRPC_PYTHON_BUILD_SYSTEM_ZLIB": "1",
+    }
+
+
+def test_provider_authority_install_pins_grpc_system_openssl_and_zlib() -> None:
+    """The provider-authority root `uv sync` shares the same root cause and fix (#2666, #2666
+    triage: operator-approved in scope as the same root cause)."""
+    tasks = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/install.yml"))
+    install = next(task for task in tasks if "frozen dependency lock" in task["name"])
+    assert install["environment"] == {
+        "UV_PROJECT_ENVIRONMENT": "/opt/kdive-provider-authority/.venv",
+        "UV_PYTHON_DOWNLOADS": "never",
+        "GRPC_PYTHON_BUILD_SYSTEM_OPENSSL": "1",
+        "GRPC_PYTHON_BUILD_SYSTEM_ZLIB": "1",
+    }
+
+
 def test_production_identity_preflight_does_not_inherit_become_root_or_create_placeholders() -> (
     None
 ):
@@ -950,6 +996,25 @@ def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
     assert "--project /opt/kdive --python-preference only-system" in source
 
 
+def test_installer_pins_grpc_system_openssl_and_zlib_for_the_sync() -> None:
+    """grpcio has no ppc64le wheel and its source build needs the system TLS/zlib libraries.
+
+    The installer runs as root under ``sudo``/Ansible ``become``, which does not carry an
+    operator's exported ``GRPC_PYTHON_BUILD_SYSTEM_OPENSSL``/``_ZLIB``, and root's ``uv``
+    cache is separate from the operator's (#2666). The flags must reach the same command
+    that carries ``UV_PROJECT_ENVIRONMENT``; they are inert (unset) on an arch where grpcio
+    installs from a wheel, so setting them unconditionally is safe.
+    """
+    source = _text(INSTALLER)
+    sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
+    prefix = (
+        "UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv "
+        "UV_PYTHON_DOWNLOADS=never \\\n"
+        "  GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1 GRPC_PYTHON_BUILD_SYSTEM_ZLIB=1 \\\n  " + sync
+    )
+    assert prefix in source
+
+
 def test_installer_resolves_uv_before_it_mutates_the_host() -> None:
     """A bare ``uv`` exits 127 under ``sudo``, whose ``secure_path`` hides a user-local one.
 
@@ -1567,6 +1632,34 @@ def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
     packages = defaults["live_vm_host_packages"]
     assert isinstance(packages, list)
     assert "kmod" in packages
+
+
+def test_local_worker_host_packages_provision_openssl_and_zlib_headers_per_family() -> None:
+    """grpcio's ppc64le source build needs the system OpenSSL/zlib development headers on every
+    supported distro family, not just the flags that select them (#2666)."""
+    defaults = _yaml(DEFAULTS)
+    debian_packages = defaults["live_vm_host_packages"]
+    redhat_packages = defaults["local_worker_host_packages_redhat"]
+    suse_packages = defaults["local_worker_host_packages_suse"]
+    assert isinstance(debian_packages, list)
+    assert isinstance(redhat_packages, list)
+    assert isinstance(suse_packages, list)
+    assert "libssl-dev" in debian_packages
+    assert "zlib1g-dev" in debian_packages
+    assert "openssl-devel" in redhat_packages
+    assert "zlib-devel" in redhat_packages
+    assert "libopenssl-devel" in suse_packages
+    assert "zlib-devel" in suse_packages
+
+
+def test_provider_authority_host_packages_provision_openssl_and_zlib_headers_per_family() -> None:
+    """The provider-authority host's root `uv sync` shares the same source-build gap (#2666)."""
+    defaults = yaml.safe_load(_text(PROVIDER_AUTHORITY / "defaults/main.yml"))
+    packages = defaults["provider_authority_host_packages"]
+    assert "libssl-dev" in packages["Debian"]
+    assert "zlib1g-dev" in packages["Debian"]
+    assert "openssl-devel" in packages["RedHat"]
+    assert "zlib-devel" in packages["RedHat"]
 
 
 def test_ubuntu_native_runner_provisions_extractor_for_refresh_account() -> None:

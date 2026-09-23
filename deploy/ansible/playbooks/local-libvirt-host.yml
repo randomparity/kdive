@@ -160,6 +160,13 @@
       ansible.builtin.command:
         argv: [uv, sync, --locked, --group, live, --dry-run]
         chdir: "{{ local_libvirt_host_source }}"
+      environment:
+        # grpcio (core dependency via opentelemetry-exporter-otlp-proto-grpc) has no ppc64le
+        # wheel; its vendored BoringSSL has no ppc64le target, so the source build needs the
+        # system OpenSSL/zlib. An operator's exported flags never reach this unattended task,
+        # so they are set here. Inert on an arch where grpcio installs from a wheel (#2666).
+        GRPC_PYTHON_BUILD_SYSTEM_OPENSSL: "1"
+        GRPC_PYTHON_BUILD_SYSTEM_ZLIB: "1"
       become: true
       become_user: "{{ local_libvirt_host_operator_user }}"
       register: local_libvirt_host_live_sync_plan
@@ -169,6 +176,9 @@
       ansible.builtin.command:
         argv: [uv, sync, --locked, --group, live]
         chdir: "{{ local_libvirt_host_source }}"
+      environment:
+        GRPC_PYTHON_BUILD_SYSTEM_OPENSSL: "1"
+        GRPC_PYTHON_BUILD_SYSTEM_ZLIB: "1"
       become: true
       become_user: "{{ local_libvirt_host_operator_user }}"
       changed_when: >-

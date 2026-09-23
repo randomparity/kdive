@@ -47,8 +47,19 @@ provider_authority_host_system_remote_bases: []
 # ADR-0622 test-only control surface; absent unless explicitly enabled on a disposable proof host.
 provider_authority_host_fault_proof_enabled: false
 provider_authority_host_packages:
-  Debian: [acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev, libkdumpfile-dev, e2fsprogs]
-  RedHat: [acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel, elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel, e2fsprogs]
+  # libssl-dev/zlib1g-dev and openssl-devel/zlib-devel: grpcio (core dependency via
+  # opentelemetry-exporter-otlp-proto-grpc) has no ppc64le wheel and its vendored BoringSSL has
+  # no ppc64le target, so the root `uv sync` below (tasks/install.yml) source-builds it against
+  # the system OpenSSL/zlib (#2666).
+  Debian: [
+    acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev,
+    libkdumpfile-dev, e2fsprogs, libssl-dev, zlib1g-dev,
+  ]
+  RedHat: [
+    acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel,
+    elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel, e2fsprogs, openssl-devel,
+    zlib-devel,
+  ]
 provider_authority_host_local_packages:
   Debian: [libguestfs-tools, python3-guestfs]
   RedHat: [libguestfs-tools-c, python3-libguestfs]

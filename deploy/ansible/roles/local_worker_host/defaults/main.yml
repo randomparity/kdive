@@ -27,6 +27,8 @@ live_vm_host_packages:  # noqa: var-naming[no-role-prefix]
   - libelf-dev         # drgn build
   - libdw-dev          # drgn build
   - libkdumpfile-dev   # drgn kdump support
+  - libssl-dev         # grpcio source build on ppc64le (no wheel, no BoringSSL target, #2666)
+  - zlib1g-dev         # grpcio source build on ppc64le (paired with libssl-dev above, #2666)
 
 # pip installs the uv console script to /usr/local/bin, which root's sudo secure_path lists
 # (#2506, #2665) unlike a user-local ~/.local/bin install. Reference uv by absolute path in a
@@ -89,6 +91,8 @@ local_worker_host_packages_redhat:
   - elfutils-libelf-devel
   - elfutils-devel
   - libkdumpfile-devel
+  - openssl-devel       # grpcio source build on ppc64le (no wheel, no BoringSSL target, #2666)
+  - zlib-devel          # grpcio source build on ppc64le (paired with openssl-devel above, #2666)
 
 # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
 # testcontainers gate, split into engine and compose halves because they carry different gates.
@@ -138,6 +142,8 @@ local_worker_host_packages_suse:
   - libelf-devel
   - libdw-devel
   - libkdumpfile-devel
+  - libopenssl-devel    # grpcio source build on ppc64le (no wheel, no BoringSSL target, #2666)
+  - zlib-devel          # grpcio source build on ppc64le (paired with libopenssl-devel, #2666)
 
 # The Tumbleweed counterparts, kept out of the list above for the same reason: that list also
 # installs on SLES, which preflight.yml admits and which ships Docker only in the Containers
