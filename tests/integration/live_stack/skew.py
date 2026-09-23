@@ -29,6 +29,12 @@ from urllib.parse import urlsplit
 
 from kdive.config.core_settings import HEALTH_BIND_ADDR
 from kdive.health.aux_bind import PROCESS_DEFAULT_PORTS
+from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
+    MonotonicDeadline,
+    SubprocessCommandRunner,
+    SystemdConflict,
+    SystemdUnavailable,
+)
 
 #: An abbreviated-or-full git object name. Guards `_resolve` against a responder reporting a
 #: ref name ("HEAD", "main"), which would otherwise resolve against *this* checkout.
@@ -38,6 +44,8 @@ _ABBREV_SHA = re.compile(r"[0-9a-f]{7,40}")
 POLICY_ENV = "KDIVE_STACK_SKEW_POLICY"
 _GIT_TIMEOUT = 5.0
 _PROBE_TIMEOUT = 3.0
+_INVENTORY_TIMEOUT = 3.0
+_INVENTORY_BYTES = 256 * 1024
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -78,6 +86,14 @@ class ProcessSkew:
 
     def __str__(self) -> str:
         return f"{self.process}: {self.verdict.value} — {self.detail}"
+
+
+@dataclass(frozen=True, slots=True)
+class SkewProbe:
+    """Verdicts and the exact running worker set that justified their coverage."""
+
+    results: list[ProcessSkew]
+    worker_pids: frozenset[int] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +299,37 @@ def repo_facts() -> RepoFacts | None:
 # --- probing the deployed processes ---------------------------------------------------------
 
 
+def _parse_worker_pids(output: str) -> frozenset[int] | None:
+    workers: set[int] = set()
+    for row in output.splitlines():
+        fields = row.split(maxsplit=2)
+        if len(fields) != 3 or not fields[0].isdecimal():
+            return None
+        pid, command, args = fields
+        if command not in {"python", "python3", "python3.14"}:
+            continue
+        suffix = " -m kdive worker"
+        if not args.endswith(suffix):
+            continue
+        launcher = args[: -len(suffix)].rsplit("/", 1)[-1]
+        if launcher in {"python", "python3", "python3.14"}:
+            workers.add(int(pid))
+            if len(workers) > 8:
+                return None
+    return frozenset(workers)
+
+
+def running_worker_pids() -> frozenset[int] | None:
+    """Read a bounded host process snapshot; unknown when it cannot be trusted."""
+    try:
+        output = SubprocessCommandRunner(MonotonicDeadline.after(_INVENTORY_TIMEOUT)).run(
+            ("ps", "-ww", "-eo", "pid=,comm=,args="), byte_limit=_INVENTORY_BYTES
+        )
+    except SystemdUnavailable, SystemdConflict:
+        return None
+    return _parse_worker_pids(output)
+
+
 def readyz_urls(base_url: str, env: dict[str, str] | None = None) -> dict[str, str]:
     """Aux ``/readyz`` URL per app process, on the host serving ``base_url``.
 
@@ -336,7 +383,8 @@ def probe_stack_skew(
     *,
     facts: RepoFacts | None = None,
     fetch: Callable[[str], dict[str, object] | None] = _fetch_version,
-) -> list[ProcessSkew]:
+    inventory: Callable[[], frozenset[int] | None] = running_worker_pids,
+) -> SkewProbe:
     """Grade every app process reachable behind ``base_url``'s host (ADR-0482 §3).
 
     Args:
@@ -346,13 +394,21 @@ def probe_stack_skew(
             omitted. Injected so a test can construct the no-answer case outright — staging it
             on a port cannot, because binding an ephemeral port and closing it releases the
             port back to a range a busy host's wildcard listeners answer on (#1713).
+        inventory: Bounded read of running worker PIDs, injected for deterministic tests.
     """
     resolved = facts if facts is not None else repo_facts()
     if resolved is None:
-        return [
-            ProcessSkew("checkout", SkewVerdict.UNKNOWN, "cannot resolve HEAD; not a git checkout")
-        ]
+        return SkewProbe(
+            [
+                ProcessSkew(
+                    "checkout", SkewVerdict.UNKNOWN, "cannot resolve HEAD; not a git checkout"
+                )
+            ],
+            None,
+        )
+    before = inventory()
     results = []
+    reported_workers = 0
     for process, url in readyz_urls(base_url).items():
         version = fetch(url)
         if version is None:
@@ -364,6 +420,8 @@ def probe_stack_skew(
                 )
             )
             continue
+        if process == "worker":
+            reported_workers += 1
         commit = version.get("commit")
         started_at = version.get("started_at")
         results.append(
@@ -374,7 +432,20 @@ def probe_stack_skew(
                 facts=resolved,
             )
         )
-    return results
+    after = inventory()
+    if before is None or after is None:
+        detail = "cannot read running worker inventory; check ps access and retry the preflight"
+    elif before != after:
+        detail = "worker fleet changed during probe; retry the preflight after stack bring-up"
+    elif not after or len(after) != reported_workers:
+        detail = (
+            f"probed {reported_workers} worker build(s), but {len(after)} worker(s) run; "
+            "check scripts/live-stack/stack-status.sh and restart the app tier"
+        )
+    else:
+        return SkewProbe(results, after)
+    results.append(ProcessSkew("worker-inventory", SkewVerdict.UNKNOWN, detail))
+    return SkewProbe(results, None)
 
 
 # --- policy -----------------------------------------------------------------------------

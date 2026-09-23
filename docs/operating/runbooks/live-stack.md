@@ -454,13 +454,21 @@ confusing test failure:
 | `stale_restart` | at `HEAD`, but an **uncommitted** `src/kdive` change is newer than its start | **skips** — run `scripts/live-stack/stack-services.sh` |
 | `behind` | the deployed commit is an ancestor of `HEAD` | warns, names the commit distance |
 | `diverged` | not an ancestor of `HEAD` (other branch, or `HEAD` rewritten) | warns |
-| `unknown` | the process reports no build, or is not answering | warns |
+| `unknown` | a process reports no build, is not answering, or running workers lack probe coverage | warns |
 
 Only `stale_restart` skips, because its remedy is one command. It is deliberately narrow: the
 timestamp of a file that still matches `HEAD` proves nothing (a `git worktree add`, a branch
 round-trip or a stash pop rewrites mtimes without changing content), so only an *uncommitted*
 change newer than the process start counts. `behind` and `diverged` warn, so a deliberate run
 against an older deployment is never blocked.
+
+The preflight counts exact running `python -m kdive worker` host processes with a
+bounded process-table read. It probes worker 1 at its default listener. If another
+worker is running without a matching build probe, or the process table cannot be
+read consistently, it warns `worker-inventory: unknown` instead of reporting the
+whole worker set as fresh. A cached verdict is reused only while the validated
+worker PID set remains the same. On a multi-worker stack, use
+`scripts/live-stack/worker-lifecycle.sh diagnostics` to inspect each worker.
 
 One limit worth knowing: the comparison is against the checkout the **tests** run from. If you
 run the suite from a git worktree while the stack was started from a different checkout, a real
