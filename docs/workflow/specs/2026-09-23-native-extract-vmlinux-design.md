@@ -41,7 +41,7 @@ compressed kernels. Hosted TCG behavior does not change.
 
 ## Scope and validation
 
-The change touches the shared Debian package task, its defaults, `warm-store.sh`, focused tests,
+The change touches the shared Debian package task, `warm-store.sh`, focused tests,
 and the native runner runbook. It excludes #2657 readiness/timeout, #2658 candidate/publication,
 and hosted ppc64le bare-ELF behavior. It is separate from epic #2655. No ADR or migration is
 warranted: the existing host prerequisite is being provisioned, not changing a public contract.
