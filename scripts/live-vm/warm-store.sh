@@ -56,8 +56,8 @@ main() {
     return 0
   fi
 
-  # Native x86 guests carry compressed vmlinuz images. Check this optional tool only when
-  # rebuilding; a valid warm set needs no host extractor and bare-ELF guests do not use it.
+  # The new guest kernel's format is unknown until after the rootfs build. Require the native
+  # x86 extractor before that expensive work; a valid warm set needs no host extractor.
   if [ "$(uname -m)" = x86_64 ]; then
     require_tools "extract-vmlinux:reapply the Ubuntu runner role (matching linux-headers)"
   fi

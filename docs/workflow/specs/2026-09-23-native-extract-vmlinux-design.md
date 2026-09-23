@@ -21,9 +21,11 @@ requires its operator variable. The role fails with an actionable
 message when a matching header package or extractor is unavailable. The symlink is refreshed by
 reapplying the role after a running-kernel change; the runbook names this maintenance step.
 
-Only a cold native warm-store rebuild checks for the command before the expensive rootfs build.
-A warm set remains consumable without it. A compressed kernel continues to use the existing
-`kernel_build_id` extraction; the hosted TCG and bare-ELF paths do not change.
+Only a cold native x86 warm-store rebuild checks for the command before the expensive rootfs
+build. A warm set remains consumable without it. The guest artifact's format is unknown until
+that build finishes, so even a future bare-ELF x86 guest must satisfy this early host
+prerequisite. The existing `kernel_build_id` path still reads bare ELF directly and decompresses
+compressed kernels. Hosted TCG behavior does not change.
 
 ## Failure model
 

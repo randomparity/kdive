@@ -320,7 +320,7 @@ def test_cold_warm_store_requires_extractor_before_building(tmp_path: Path) -> N
     store = tmp_path / "store"
     store.mkdir()
     marker = tmp_path / "build.calls"
-    _produce_stubs(bindir, build_marker=marker)
+    _produce_stubs(bindir, build_marker=marker)  # would yield ELF, but its format is not known yet
     _debuginfod_ok(bindir)
     (bindir / "extract-vmlinux").unlink()
     _stub(bindir, "uname", "echo x86_64")  # exercise the native-x86 preflight on any test host
@@ -329,6 +329,22 @@ def test_cold_warm_store_requires_extractor_before_building(tmp_path: Path) -> N
     )
     assert r.returncode != 0 and "extract-vmlinux" in r.stderr
     assert not marker.exists()
+
+
+@_needs_inherit_errexit
+def test_bare_elf_foreign_arch_warm_store_needs_no_extractor(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)  # the staged kernel is bare ELF
+    _debuginfod_ok(bindir)
+    (bindir / "extract-vmlinux").unlink()
+    _stub(bindir, "uname", "echo ppc64le")
+    r = subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    assert r.returncode == 0, r.stderr
 
 
 @_needs_inherit_errexit
