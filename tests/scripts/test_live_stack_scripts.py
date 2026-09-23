@@ -2766,7 +2766,7 @@ def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> Non
             "ready": False,
             "checks": {
                 "postgres": True,
-                "seaweedfs": True,
+                "minio": True,
                 "capture_bootstrap_manifest": False,
                 "capture_recovery": True,
             },
@@ -2791,7 +2791,7 @@ def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> Non
     assert result.returncode == 0
     assert result.stderr == ""
     assert result.stdout == (
-        "worker_readiness ready=false postgres=true seaweedfs=true "
+        "worker_readiness ready=false postgres=true minio=true "
         "capture_bootstrap_manifest=false capture_recovery=true\n"
     )
     assert "version" not in result.stdout
