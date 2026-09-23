@@ -59,14 +59,17 @@ def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None
 
 1. Contract: retry after a cancelled caller joins the running finalize. Mode: focused-test.
    `tests/mcp/lifecycle/test_complete_build_single_flight.py::test_retry_after_cancel_joins_running_finalize`.
-   Red today: `validator.calls == 2` (the retry scans again). Green:
+   Red today: the `joined the in-flight finalize` barrier times out and B scans again
+   (`validator.calls == 2`). Green:
    `just test-verbose tests/mcp/lifecycle/test_complete_build_single_flight.py`, exit 0.
 2. Contract: an unawaited finalize commits and leaves no entry. Mode: focused-test.
-   `…::test_cancelled_only_caller_still_commits`. Red today: the test module fails to import `_IN_FLIGHT`;
-   with the name stubbed, the Run stays `created` after release. Same green command.
+   `…::test_cancelled_only_caller_still_commits`. The test reads the task with
+   `_IN_FLIGHT.get(run_id)`. Red today: the import of `_IN_FLIGHT` fails; with an empty dict
+   stubbed, `get` returns `None` and the Run stays `created`. Same green command.
 3. Contract: a failure reaches every joiner; the next call validates again. Mode: focused-test.
-   `…::test_failure_reaches_joiners_and_next_call_retries`. Red today: `validator.calls == 3`
-   instead of 2. Same green command.
+   `…::test_failure_reaches_joiners_and_next_call_retries`. Red today: the join barrier times
+   out; the callers serialize on the slot, so one gets the failure and the other `succeeded`.
+   Same green command.
 4. Contract: concurrent callers validate once. Mode: focused-test.
    `tests/adversarial/test_complete_build_concurrency.py::test_concurrent_complete_build_yields_one_ledger_row`
    with `assert validator.calls == 1`. Red today: flaky 1 or 2 — so the new test 1 is its red
@@ -74,13 +77,18 @@ def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None
    `just test-verbose tests/adversarial/test_complete_build_concurrency.py`, exit 0.
 5. Contract: post-slot recorded-result check. Mode: focused-test.
    `tests/services/runs/test_complete_build.py::test_recorded_result_after_slot_skips_validation`.
+   The test holds `_EXTERNAL_BUILD_VALIDATION_SLOTS`, so a pre-slot check cannot pass it.
    Red today: the validator raises `AssertionError("recorded success must bypass validation")`.
    Green: `just test-verbose tests/services/runs/test_complete_build.py -k recorded_result_after_slot`,
    exit 0.
+5a. Contract: a re-mint during a joined finalize keeps `upload_window_replaced`. Mode:
+   focused-test. `…single_flight.py::test_remint_during_joined_finalize_rejects_both`. Red today:
+   the join barrier times out and B validates the new window and succeeds. Same green command as
+   entry 1.
 6. Contract: tool docstring retry rule and its generated reference. Mode: focused-test via the
    existing generator gate: `just docs-check` fails when `runs.md` is stale; green after
    `just docs`.
-7. Surface: ADR-0675 and the ADR-0656 notes. Mode: task-test-not-applicable — decision prose
+7. Surface: ADR-0675 and the ADR-0656 amendment blocks. Mode: task-test-not-applicable — decision prose
    with no executable consumer beyond `just records` and `just adr-status-check`, which run as
    guardrails.
 
@@ -91,19 +99,30 @@ def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None
    given `CategorizedError` on its first call. Each test uses
    `pool(migrated_url)`, `seed_external_run_with_manifest`, `ctx()`, and
    `CompleteBuildHandlers(validate_complete_build=validator)`:
+   Helper `_joined(caplog)` polls (10 ms steps, 10 s bound) until a record containing
+   `joined the in-flight finalize` exists; the tests set `caplog.set_level(logging.INFO)`.
    - test 1: start caller A as a task; `await asyncio.to_thread(started.wait, 10)`; cancel A and
-     assert `CancelledError`; start caller B; `await asyncio.sleep(0)`; set `release`; assert B is
-     `succeeded`, `validator.calls == 1`, one `run_steps` build row.
-   - test 2: as test 1 without B; after `release`, await the task in `_IN_FLIGHT[run_id]` with
-     `asyncio.wait`; assert Run `succeeded` and `run_id not in _IN_FLIGHT`.
+     assert `CancelledError`; start caller B; `await _joined(caplog)`; set `release`; assert B is
+     `succeeded`, `validator.calls == 1`, one `run_steps` build row, one joined record.
+   - test 2: as test 1 without B; take `task = _IN_FLIGHT.get(run_id)`, assert it is not `None`,
+     set `release`, `await asyncio.wait({task})`; assert Run `succeeded` and
+     `run_id not in _IN_FLIGHT`.
    - test 3: validator raises
      `CategorizedError("bad bundle", category=ErrorCategory.CONFIGURATION_ERROR)` once; start
-     A and B, release; both responses are failures with the same category; a third call succeeds
-     and `validator.calls == 2`.
+     A, wait for `started`, start B, `await _joined(caplog)`, release; both responses are failures
+     with the same category; a third call succeeds and `validator.calls == 2`.
+   - test 4: start A, wait for `started`; replace the manifest row with the direct-SQL re-mint of
+     `test_complete_build_finalizer_declines_when_the_window_is_reminted_mid_validation`; start
+     B, `await _joined(caplog)`, release; both responses carry
+     `data["reason"] == "upload_window_replaced"`; a third call succeeds and
+     `validator.calls == 2`.
 2. Write the service test beside
    `test_complete_build_finalizer_returns_recorded_success_after_reassembly_failure`: single-PUT
-   manifest, `_record_build_step(pool, run_id, recorded)` first, `unexpected_validator`, then
-   `complete_build(pool, run_id, CompleteBuildFinalizer(...)) == recorded`.
+   manifest and `unexpected_validator`. `await _EXTERNAL_BUILD_VALIDATION_SLOTS.acquire()`; start
+   `complete_build(pool, run_id, CompleteBuildFinalizer(...))` as a task; poll (10 ms, 10 s bound)
+   until `_EXTERNAL_BUILD_VALIDATION_SLOTS._waiters` is non-empty (the only public signal,
+   `locked()`, is already true); `_record_build_step(pool, run_id, recorded)`; release the slot;
+   assert the task result `== recorded`. Release in a `finally`.
 3. Tighten the adversarial assertion to `validator.calls == 1` and update its docstring.
 4. Run entries 1–5 and keep the red output.
 5. Service: in `_validate_uploads`, after `await _EXTERNAL_BUILD_VALIDATION_SLOTS.acquire()` and
@@ -130,7 +149,8 @@ def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None
                                         cmdline=cmdline, source_provenance=source_provenance)
    ```
 
-   `_join_or_start`: `task = _IN_FLIGHT.get(uid)`; when `None`, `asyncio.create_task(...,
+   `_join_or_start`: `task = _IN_FLIGHT.get(uid)`; when `None` or `task.done()`,
+   `asyncio.create_task(...,
    name=f"runs.complete_build:{uid}")`, store it, `task.add_done_callback(partial(_forget, uid))`;
    else `_log.info("runs.complete_build joined the in-flight finalize for run %s", uid)`; then
    `return await asyncio.shield(task)`. `_forget` deletes the entry only when `_IN_FLIGHT.get(uid)
@@ -140,9 +160,14 @@ def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None
 7. Registrar docstring: replace the last paragraph with the retry rule — after a request timeout,
    call `runs.complete_build` again for the same Run; it joins the running finalize or returns the
    recorded result; do not re-mint while a finalize runs. Run `just docs`.
-8. Add the two `> **Amended by [ADR-0675](0675-single-flight-external-build-finalization.md)
-   (#2680).**` notes to ADR-0656 after *Cancellation* and after *Recovery after transport
-   interruption*. Set ADR-0675 Status to `Accepted (2026-09-23)`.
+8. Append `### Amendment (2026-09-23): single-flight finalization (#2680)` blocks, in the
+   `docs/adr/README.md` form, at the end of ADR-0656 `## Decision` and `## Consequences`. Link
+   ADR-0675 and name each qualified claim: *Retry and idempotency* (a concurrent second attempt
+   repeats the scan), *Cancellation* (an abandoned scan keeps running with no owner), *Upload-window
+   fencing* (the scan stays inside the request), *Recovery after transport interruption* (a
+   re-call redoes the work), *Instrumentation* (a record count is a scan count), and
+   *Consequences* (the docstring stays accurate; an abandoned scan outlives its slot). Set
+   ADR-0675 Status to `Accepted (2026-09-23)`.
 9. Green: entries 1–6, then `just lint`, `just type`, `just docs-check`, `just records`,
    `just adr-status-check`, `just test-changed`. Commit.
 

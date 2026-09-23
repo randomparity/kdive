@@ -46,8 +46,17 @@ recorded result.
   recorded result and ignores its own arguments.
 - The measurement record stays one per finalize. A joiner reaches no service code and emits only
   an info log line, so a scan is never counted twice.
+- A joiner that re-minted and re-uploaded joins the old window's finalize, which ends with
+  `upload_window_replaced`. The next call starts a new finalize against the current window. The
+  join key is the Run, not the (Run, window) pair of ADR-0656 *Retry and idempotency*.
 - A finalize whose callers are all gone still publishes. The Run then shows `succeeded` to
   `runs.get` and to the next `complete_build`.
+- Each running finalize holds one pool connection from start to commit, independent of its
+  callers, and on the chunked path also the Investigation and Run locks. N Runs finalizing at
+  once hold N of the server pool's 10 connections (`src/kdive/db/pool.py`), for about the sum of
+  their scans, because the scans share one validation slot.
+- The post-slot recheck emits an `already_recorded` measurement record with no scan, so a count of
+  records is no longer a count of scans; `scan_ms` tells them apart.
 - The state lives in one server process. A restart loses a running finalize. A retry that reaches
   another replica starts a second scan; the Run lock at publish keeps the result correct. Issue
   #2681 owns a durable finalize for those cases, with its trigger conditions.
@@ -63,8 +72,14 @@ recorded result.
 - **Durable job-based finalization now.** judgment: cost — a new job kind, migration, worker
   handler, and public contract change for a failure the in-process owner removes at the default
   single replica; #2681 records when it becomes necessary.
-- **MCP progress notifications to extend the client timeout.** judgment: fit — a client resets
-  its timeout on progress only when it opts in, and the server cannot require that.
+- **MCP progress notifications to extend the client timeout.** verified: the MCP TypeScript SDK
+  documents `resetTimeoutOnProgress` as an optional per-call client option and 60 s as the
+  protocol default (`docs/clients/calling.md`,
+  github.com/modelcontextprotocol/typescript-sdk, main, read 2026-09-23); the server cannot set
+  that option for the client.
+- **Shield a detached finalize with no map, and rely on the post-slot recheck.** judgment: fit —
+  a concurrent caller then queues on the slot and scans the Run again after a failed finalize
+  instead of receiving the shared failure, which #2680 requires.
 - **Cut the scan time below 60 s.** verified: the rows in #2680 show 4.5 s of store wait in a
   66 s scan after the pass fusion, so the rest is gunzip, tar, and hashing on one core; a bundle
   near the 2 GiB limit (`_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES`,

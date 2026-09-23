@@ -16,7 +16,7 @@ finalize runs inside the request task on the request's connection. With a 60 s c
 2. A caller cancel does not stop the finalize. The finalize runs to its commit or its rejection.
 3. A finalize whose only caller was cancelled still commits and leaves no in-flight entry.
 4. A finalize rejection or exception reaches every joined caller. The next call after that
-   starts a new finalize.
+   starts a new finalize; a finished task still in the map counts as absent.
 5. After it acquires the validation slot, the service reads the recorded build result again and
    returns it without calling the validator.
 6. Unchanged: the response shape; the upload-window fencing; `upload_window_replaced`; publication
@@ -35,7 +35,7 @@ Owner: `src/kdive/mcp/tools/lifecycle/runs/complete_build.py`, because it holds 
   `_authorize`: `RUNS.get`, the project check, `require_role(CONTRIBUTOR)`, and the recorded-result
   fast path. It releases that connection before it awaits the finalize. A joiner holds no
   connection.
-- `_join_or_start` looks up the Run. When no task exists, it creates
+- `_join_or_start` looks up the Run. When no task exists, or the task is already done, it creates
   `asyncio.create_task(self._finalize(...))`, stores it, and adds `_forget` as its done-callback.
   When a task exists, it logs `runs.complete_build joined the in-flight finalize for run <id>`. In
   both cases it returns `await asyncio.shield(task)`.
@@ -54,14 +54,21 @@ Owner: `src/kdive/mcp/tools/lifecycle/runs/complete_build.py`, because it holds 
 ## Failure model
 
 1. **Actors and deployments** — an agent through an MCP client with a 60–300 s request timeout;
-   the local-libvirt stack and the Helm chart at the default `server.replicas: 1`.
+   several agents finalizing different Runs at once; the local-libvirt stack and the Helm chart at
+   the default `server.replicas: 1`.
 2. **Invariants and assets at stake** — one publication per upload window; no Run marked
    `succeeded` without a validated upload; the upload window of a re-mint is never deleted; pool
-   connections are returned.
+   connections are returned. Each running finalize holds one pool connection (and, when chunked,
+   the Investigation and Run locks) from start to commit, independent of callers; N concurrent
+   finalizes hold N of the pool's 10 connections for about the sum of their scans.
 3. **Accepted failure classes**
    - A server restart during a finalize loses it; the next call scans again. Same cost as today.
    - With more than one replica, a retry on another replica scans in parallel; the Run lock keeps
-     publication single-owner. Bounded CPU cost.
+     publication single-owner. A chunked retry blocked on the Run lock can also get
+     `no_upload_manifest` for a Run the other replica just finalized (the refresh-`None` branch
+     has no recorded-result check). Existing behavior, carried to #2681.
+   - A caller that re-minted and re-uploaded joins the old window's finalize and gets
+     `upload_window_replaced`; the next call validates the current window. One extra round trip.
    - A joiner gets the running finalize's result for different `build_id` or `cmdline` arguments.
      Same rule as the existing post-commit idempotency.
    - Server shutdown cancels a running finalize task; its transaction rolls back.
@@ -73,14 +80,17 @@ Owner: `src/kdive/mcp/tools/lifecycle/runs/complete_build.py`, because it holds 
 Postgres-backed tests use the existing `tests/mcp/complete_build_support.py` helpers and a
 validator that blocks on a `threading.Event`:
 
-- cancel the first caller during the scan, then call again: one validator call, one `run_steps`
-  build row, the retry is `succeeded`;
+- cancel the first caller during the scan, then call again and wait until the `joined the
+  in-flight finalize` log line appears before the scan is released: one validator call, one
+  `run_steps` build row, the retry is `succeeded`;
 - two concurrent callers: exactly one validator call (the adversarial test tightens `in (1, 2)`
   to `== 1`);
 - cancel the only caller, release the scan: the Run becomes `succeeded` and `_IN_FLIGHT` is empty;
-- a validator that raises once: both joiners get the same failure category, and a third call
-  validates again;
-- service: a build step recorded before `complete()` reaches the slot returns that result and
-  never calls the validator.
+- a validator that raises once, with the second caller joined (same log barrier): both get the
+  same failure category, and a third call validates again;
+- re-mint during a blocked finalize, then join: both callers get `upload_window_replaced`, and the
+  next call validates the new window;
+- service: with the validation slot held by the test, `complete()` queues on it; the test records
+  a build step, releases the slot, and gets that result with no validator call.
 
 A live proof on the ppc64le stack repeats the #2680 scenario with the agent's 60 s client.
