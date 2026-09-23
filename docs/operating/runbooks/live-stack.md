@@ -355,6 +355,13 @@ exits, and the unit is left `failed` holding that identity, so the next `start` 
 `retry_action` is what tells you a retry will not clear it; the values are defined in
 [the systemd unit reference](../../../deploy/systemd/README.md#lifecycle-retry-actions).
 
+On a Debian-family host provisioned by the `local_worker_host` Ansible role, the `needrestart`
+trigger above is prevented: the role installs `/etc/needrestart/conf.d/kdive.conf`, which
+excludes every `kdive-live-worker@N.service` instance from `needrestart`'s automatic restart
+(#2663). A host provisioned before that role change, or a non-Debian host with its own
+restart-on-upgrade tooling, can still hit this trigger and needs the recovery below; other
+distros ship no `needrestart` default and need no equivalent file.
+
 **Read the cause first.** The client prints one JSON line, so pipe it:
 
 ```bash

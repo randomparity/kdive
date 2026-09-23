@@ -6,6 +6,18 @@
     update_cache: true
   tags: [authority_prerequisites]
 
+# No when of its own: this file is only ever imported under main.yml's
+# `ansible_facts['os_family'] == 'Debian'` guard, and needrestart is a Debian/Ubuntu tool with
+# no RedHat or Suse equivalent to guard against here.
+- name: Prevent needrestart from restarting the fixed worker units after package upgrades
+  ansible.builtin.copy:
+    src: needrestart-kdive.conf
+    dest: /etc/needrestart/conf.d/kdive.conf
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [authority_prerequisites]
+
 - name: Prepare the native x86 Ubuntu kernel extractor
   when:
     - ansible_facts['distribution'] == 'Ubuntu'
