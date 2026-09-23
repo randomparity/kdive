@@ -24,8 +24,11 @@ _APT_UPDATE_RUN = re.compile(
     r"^RUN\b(?P<block>(?:.*\\\n)*.*apt-get update.*(?:\\\n.*)*)$",
     re.MULTILINE,
 )
-#: The sed/equivalent switch from the http mirror to https, scoped to the sources file.
-_HTTPS_SWITCH = re.compile(r"http://deb\.debian\.org.*https://deb\.debian\.org")
+#: The sed/equivalent switch from the http mirror to https, scoped to the sources file: the
+#: rewrite and the path must appear together, or a switch aimed at the wrong file would count.
+_HTTPS_SWITCH = re.compile(
+    r"http://deb\.debian\.org.*https://deb\.debian\.org.*/etc/apt/sources\.list\.d/debian\.sources"
+)
 
 
 def _dockerfile() -> str:
