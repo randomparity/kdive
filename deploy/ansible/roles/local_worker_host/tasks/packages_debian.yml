@@ -9,6 +9,21 @@
 # No when of its own: this file is only ever imported under main.yml's
 # `ansible_facts['os_family'] == 'Debian'` guard, and needrestart is a Debian/Ubuntu tool with
 # no RedHat or Suse equivalent to guard against here.
+#
+# needrestart is not in live_vm_host_packages and plain Debian (unlike stock Ubuntu server
+# images) does not ship it by default, so /etc/needrestart/conf.d may not exist yet.
+# ansible.builtin.copy fails outright -- "Destination directory ... does not exist" -- rather
+# than creating a missing parent, so the directory is ensured first. A pre-created drop-in is
+# inert until needrestart is installed (by this host or a later apt run) and picks it up then.
+- name: Ensure needrestart's drop-in directory exists before installing the override
+  ansible.builtin.file:
+    path: /etc/needrestart/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [authority_prerequisites]
+
 - name: Prevent needrestart from restarting the fixed worker units after package upgrades
   ansible.builtin.copy:
     src: needrestart-kdive.conf

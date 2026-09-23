@@ -126,10 +126,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 327, f"runner listed {len(actual_tasks)} baseline tasks, expected 327")
+require(len(actual_tasks) == 328, f"runner listed {len(actual_tasks)} baseline tasks, expected 328")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 327 ordered task names and tags match the updated baseline")
+print("ok runner: 328 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -595,12 +595,37 @@ NEEDRESTART_CONF = ANSIBLE / "roles/local_worker_host/files/needrestart-kdive.co
 packages_debian_tasks = yaml.safe_load(
     (ANSIBLE / "roles/local_worker_host/tasks/packages_debian.yml").read_text()
 )
+
+
+def is_needrestart(task: dict, module: str) -> bool:
+    return module in task and "needrestart" in task.get("name", "").lower()
+
+
 require(
-    any("needrestart" in t.get("name", "").lower() for t in packages_debian_tasks),
+    any(is_needrestart(t, "ansible.builtin.copy") for t in packages_debian_tasks),
     "packages_debian.yml no longer installs the needrestart override for the worker units",
 )
+needrestart_mkdir = next(
+    t for t in packages_debian_tasks if is_needrestart(t, "ansible.builtin.file")
+)
 needrestart_task = next(
-    t for t in packages_debian_tasks if "needrestart" in t.get("name", "").lower()
+    t for t in packages_debian_tasks if is_needrestart(t, "ansible.builtin.copy")
+)
+# ansible.builtin.copy fails outright ("Destination directory ... does not exist") rather than
+# creating a missing parent, and needrestart is not in live_vm_host_packages, so a Debian host
+# without needrestart already installed has no /etc/needrestart/conf.d yet. Reproduced against
+# this exact ansible-core version: a copy task targeting a missing parent directory fails the
+# whole play instead of converging it, which would break every Debian-family provisioning run
+# on such a host, not just the ones needrestart itself would race.
+mkdir_install = needrestart_mkdir.get("ansible.builtin.file", {})
+require(
+    mkdir_install.get("path") == "/etc/needrestart/conf.d"
+    and mkdir_install.get("state") == "directory",
+    "the needrestart drop-in directory is no longer ensured before the override is copied into it",
+)
+require(
+    packages_debian_tasks.index(needrestart_mkdir) < packages_debian_tasks.index(needrestart_task),
+    "the needrestart drop-in directory must be ensured before the override is copied into it",
 )
 needrestart_install = needrestart_task.get("ansible.builtin.copy", {})
 require(
@@ -615,12 +640,12 @@ require(
     needrestart_install.get("mode") == "0644",
     "the needrestart override is no longer installed mode 0644",
 )
-# No when of its own: packages_debian.yml is only ever imported under main.yml's
-# `ansible_facts['os_family'] == 'Debian'` guard (exercised by package_route() above), so an
-# own `when` here would duplicate rather than depend on the existing conditional.
+# Neither task carries its own `when`: packages_debian.yml is only ever imported under
+# main.yml's `ansible_facts['os_family'] == 'Debian'` guard (exercised by package_route()
+# above), so an own `when` here would duplicate rather than depend on the existing conditional.
 require(
-    "when" not in needrestart_task,
-    "the needrestart override task added its own guard instead of the existing Debian import",
+    "when" not in needrestart_mkdir and "when" not in needrestart_task,
+    "the needrestart tasks added their own guard instead of the existing Debian import",
 )
 needrestart_conf = NEEDRESTART_CONF.read_text()
 require(

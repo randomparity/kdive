@@ -45,6 +45,7 @@ live_vm_host : Assert the runner host is Ubuntu/Debian (system Python 3.14 + pyt
 live_vm_host : Install external-boot authority prerequisites	TAGS: [authority_prerequisites]
 live_vm_host : Ensure the runner service account exists in kvm and libvirt	TAGS: []
 live_vm_host : Install the kernel-debug toolchain + venv build deps (Debian)	TAGS: [authority_prerequisites]
+live_vm_host : Ensure needrestart's drop-in directory exists before installing the override	TAGS: [authority_prerequisites]
 live_vm_host : Prevent needrestart from restarting the fixed worker units after package upgrades	TAGS: [authority_prerequisites]
 live_vm_host : Install headers matching the running kernel	TAGS: []
 live_vm_host : Inspect the matching header extractor	TAGS: []
