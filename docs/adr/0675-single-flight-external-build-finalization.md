@@ -39,8 +39,9 @@ recorded result.
 
 ## Consequences
 
-- With a 60 s client and a 66 s scan, the first retry returns `build_ref`. In general, a finalize
-  needs `ceil(scan / client_timeout) - 1` retries, and each retry makes progress.
+- With a 60 s client and a 66 s scan, the first retry returns `build_ref`. A longer finalize,
+  including time queued behind other Runs' scans, needs about one retry per client timeout it
+  spans, and each retry makes progress.
 - A joiner receives the running finalize's result even when its own `build_id`, `cmdline`, or
   source label differs. This extends the existing rule that a call after the commit returns the
   recorded result and ignores its own arguments.
