@@ -322,10 +322,13 @@ guest → `https://debuginfod.fedoraproject.org`).
 package) if any is absent: `virt-ls`/`virt-copy-out` (libguestfs-tools),
 `eu-readelf` (`elfutils`), and `debuginfod-find` (`debuginfod`) — the last two are
 in the `live_vm_host` role package set. A **compressed** guest kernel (x86 bzImage)
-additionally needs `extract-vmlinux` on `PATH`; it is not a standalone package —
-it ships in the kernel source scripts, so symlink it (per running kernel):
-`sudo ln -sf "/usr/src/linux-headers-$(uname -r)/scripts/extract-vmlinux" /usr/local/bin/`.
-A bare-`vmlinux`-ELF guest kernel (ppc64le pseries) does not need it.
+additionally needs `extract-vmlinux` on `PATH`. The Ubuntu x86 runner role installs
+headers matching the running kernel, links their script into `/usr/local/bin`, and verifies
+its executable path as the runner account. A cold native x86 rebuild fails before rootfs
+construction when the command is missing; an existing warm set does not require it. The format
+of a new guest kernel is unknown until after rootfs construction, so this early x86 check also
+applies if a future guest ships bare ELF. `kernel_build_id` still reads bare ELF directly, and
+hosted ppc64le staging does not require the extractor.
 
 ### Disk budget
 
@@ -399,7 +402,9 @@ refresh cannot swap the artifacts out from under an in-flight domain.
   `playbooks/runner.yml --limit <host>` through the documented runner provisioning path; the
   `live_vm_host` role rebuilds and verifies the root-owned manifest as the fixed worker. Confirm
   `/readyz` reports `ready=true` before dispatching the native tier again.
-- **After a kernel upgrade**, nothing is needed: `playbooks/runner.yml` installs an
+- **After a kernel upgrade**, reapply `playbooks/runner.yml --limit <host>` after booting the
+  new kernel so its matching headers and `extract-vmlinux` link are current. Kernel-read
+  permissions do not need manual repair: the playbook installs an
   `/etc/kernel/postinst.d` hook that re-applies `0640 root:kvm` to `/boot/vmlinuz-*` as each new
   kernel is installed (ADR-0668). A new kernel ships `0600 root:root`, which would otherwise fail
   the libguestfs appliance build for the non-root runner user.

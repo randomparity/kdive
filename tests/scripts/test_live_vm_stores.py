@@ -218,6 +218,7 @@ def _produce_stubs(
         'printf "\\177ELF" > "${destdir}/$(basename "$src")"',
     )
     _stub(bindir, "eu-readelf", f'echo "    Build ID: {build_id}"')
+    _stub(bindir, "extract-vmlinux", 'cat "$1"')
 
 
 def test_produce_rootfs_and_kernel(tmp_path: Path) -> None:
@@ -313,6 +314,40 @@ def test_warm_store_requires_debuginfod_urls_before_building(tmp_path: Path) -> 
 
 
 @_needs_inherit_errexit
+def test_cold_warm_store_requires_extractor_before_building(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    marker = tmp_path / "build.calls"
+    _produce_stubs(bindir, build_marker=marker)  # would yield ELF, but its format is not known yet
+    _debuginfod_ok(bindir)
+    (bindir / "extract-vmlinux").unlink()
+    _stub(bindir, "uname", "echo x86_64")  # exercise the native-x86 preflight on any test host
+    r = subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    assert r.returncode != 0 and "extract-vmlinux" in r.stderr
+    assert not marker.exists()
+
+
+@_needs_inherit_errexit
+def test_bare_elf_foreign_arch_warm_store_needs_no_extractor(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)  # the staged kernel is bare ELF
+    _debuginfod_ok(bindir)
+    (bindir / "extract-vmlinux").unlink()
+    _stub(bindir, "uname", "echo ppc64le")
+    r = subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    assert r.returncode == 0, r.stderr
+
+
+@_needs_inherit_errexit
 def test_warm_store_dies_on_pin_kernel_mismatch(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -388,6 +423,7 @@ def test_warm_store_second_run_is_warm_and_skips_build(tmp_path: Path) -> None:
     env = _warm_env(bindir, store)
     first = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
     assert first.returncode == 0, first.stderr
+    (bindir / "extract-vmlinux").unlink()  # cached artifacts do not need host extraction
     second = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
     assert second.returncode == 0, second.stderr
     assert marker.read_text().count("x") == 1  # warm: build ran once, not twice
