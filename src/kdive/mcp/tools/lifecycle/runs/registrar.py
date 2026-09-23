@@ -531,9 +531,10 @@ def _register_runs_complete_build(
 
         A large bundle can take longer to validate than your client's request timeout. The
         finalize keeps running when your request times out: call `runs.complete_build` again for
-        the same Run. That call waits for the running finalize, or returns its recorded result,
-        and does not start the validation again. A call that joins a running finalize gets that
-        finalize's answer, whatever its own arguments.
+        the same Run. While that finalize still runs on the server, the call waits for it and
+        gets its answer, whatever its own arguments; once it has succeeded, the call returns the
+        recorded result. If the earlier finalize failed, or the server restarted, the call
+        validates the upload again, which takes as long as the first attempt.
 
         Do not re-mint while a finalize is still running: re-minting replaces the window that
         finalize is validating, so it is rejected with `reason: "upload_window_replaced"`. Wait
