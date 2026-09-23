@@ -129,5 +129,5 @@ Next, in the shell you launch your MCP client from:
   export KDIVE_TOKEN=\$(${example_dir}/mint-token.sh)
 
 No guest image yet? Build and register one (Fedora 44 is the kdump-capable default):
-  ${example_dir}/build-image.sh fedora-kdive-ready-44
+  ${example_dir}/build-image.sh ${guest_image_name}
 EOF
