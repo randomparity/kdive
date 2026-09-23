@@ -147,8 +147,9 @@ def test_bad_arguments_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -
     result = asyncio.run(_run())
     content = _call_result(result)
     assert content["error_category"] == "configuration_error"
-    # The detail should name the inner tool
+    # The detail should name the inner tool and the exact tools.search follow-up call (#2690).
     assert "runs.get" in (content.get("detail") or "")
+    assert 'tools.search(names=["runs.get"], detail="full")' in content["detail"]
     assert "tools.search" in content["suggested_next_actions"]
     errors = content["data"]["field_errors"]
     assert {"field": "run_id", "kind": "missing_argument"} in errors
@@ -158,6 +159,8 @@ def test_bad_arguments_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -
     accepted = content["data"]["accepted_fields"]
     assert "run_id" in accepted
     assert "include_console_artifacts" in accepted
+    # runs.get takes flat parameters — no nested model to resolve (#2690).
+    assert "nested_accepted_fields" not in content["data"]
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +192,49 @@ def test_unexpected_argument_is_configuration_error(monkeypatch: pytest.MonkeyPa
 
 
 # ---------------------------------------------------------------------------
+# Test 3f: a nested wrapper-model tool discloses the nested model's fields (#2690)
+# ---------------------------------------------------------------------------
+
+
+def test_bad_arguments_nested_wrapper_lists_nested_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A binding failure against a single-`request`-parameter tool names the nested fields too.
+
+    Reproduces the exact report (#2690): an agent guessing flat ``length_bytes``/``offset_bytes``
+    against ``artifacts.get(request: ArtifactsGetRequest)`` gets only ``accepted_fields:
+    ["request"]`` today — the wrapper key, not what's inside it. ``data.nested_accepted_fields``
+    resolves the top-level property's ``$ref`` one level into ``tool.parameters["$defs"]`` so the
+    caller does not need a second tools.search round trip, and the envelope detail names that
+    exact follow-up call.
+    """
+    monkeypatch.setattr(gateway, "current_context", _viewer_ctx)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool(
+            "tools.invoke",
+            {"name": "artifacts.get", "arguments": {"length_bytes": 5, "offset_bytes": 3}},
+        )
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    # The wrapper key alone, unchanged (pre-existing accepted_fields contract).
+    assert content["data"]["accepted_fields"] == ["request"]
+    nested = content["data"]["nested_accepted_fields"]
+    assert set(nested) == {"request"}
+    assert set(nested["request"]) == {
+        "artifact_id",
+        "find",
+        "byte_offset",
+        "max_bytes",
+        "direction",
+    }
+    # The exact follow-up call, not just a bare pointer to tools.search.
+    assert 'tools.search(names=["artifacts.get"], detail="full")' in content["detail"]
+
+
+# ---------------------------------------------------------------------------
 # Test 3c: accepted_fields is withheld when the caller cannot see the tool (#2304)
 # ---------------------------------------------------------------------------
 
@@ -211,6 +257,7 @@ def test_bad_arguments_without_visibility_omits_accepted_fields() -> None:
     assert content["error_category"] == "configuration_error"
     assert "accepted_fields" not in content["data"]
     assert "field_errors" not in content["data"]
+    assert "nested_accepted_fields" not in content["data"]
     # Withholding the schema detail doesn't withhold the tools.search pointer itself —
     # is_binding_failure, which drives suggested_next_actions, is independent of visibility.
     assert "tools.search" in content["suggested_next_actions"]
@@ -235,6 +282,37 @@ def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.Mo
     assert content["error_category"] == "configuration_error"
     assert "accepted_fields" not in content["data"]
     assert "field_errors" not in content["data"]
+    assert "nested_accepted_fields" not in content["data"]
+
+
+# ---------------------------------------------------------------------------
+# Test 3g: a hidden nested-wrapper tool discloses nothing more than today (#2690, #2325)
+# ---------------------------------------------------------------------------
+
+
+def test_bad_arguments_nested_wrapper_hidden_omits_nested_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """artifacts.get (a nested-wrapper tool) withholds the nested schema from a hidden caller.
+
+    Mirrors test_bad_arguments_scope_denied_omits_accepted_fields but against a real
+    single-`request`-parameter tool, proving the new nested-field disclosure sits behind the
+    same tool_visible() gate as the pre-existing accepted_fields/field_errors (ADR-0148).
+    """
+    monkeypatch.setattr(gateway, "current_context", _no_grant_ctx)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool(
+            "tools.invoke",
+            {"name": "artifacts.get", "arguments": {"length_bytes": 5, "offset_bytes": 3}},
+        )
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert content["data"] == {}
 
 
 # ---------------------------------------------------------------------------

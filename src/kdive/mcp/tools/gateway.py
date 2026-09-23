@@ -354,6 +354,36 @@ def _namespace_signal(
     return NamespaceStatus.UNAUTHORIZED, sorted(grants)
 
 
+def _resolve_nested_accepted_fields(
+    parameters: dict[str, JsonValue], properties: dict[str, JsonValue]
+) -> dict[str, JsonValue]:
+    """Resolve each top-level property's ``$ref`` one level into ``parameters["$defs"]``.
+
+    A wrapper-model tool (e.g. ``artifacts.get(request: ArtifactsGetRequest)``) advertises only
+    the wrapper key in ``accepted_fields`` — a caller guessing flat arguments cannot discover the
+    nested model's field names without a second ``tools.search`` round trip (#2690). Resolves one
+    level deep only, matching the exact follow-up call the envelope detail names for anything
+    deeper; a flat-parameter tool has no ``$ref`` property and yields an empty mapping.
+    """
+    defs = parameters.get("$defs")
+    if not isinstance(defs, dict):
+        return {}
+    nested: dict[str, JsonValue] = {}
+    for field_name, field_schema in properties.items():
+        if not isinstance(field_schema, dict):
+            continue
+        ref = field_schema.get("$ref")
+        if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+            continue
+        definition = defs.get(ref.removeprefix("#/$defs/"))
+        if not isinstance(definition, dict):
+            continue
+        nested_properties = definition.get("properties")
+        if isinstance(nested_properties, dict):
+            nested[field_name] = cast("JsonValue", sorted(nested_properties))
+    return nested
+
+
 def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
     """Register the gateway tools (``tools.invoke``, ``tools.search``) on ``app``.
 
@@ -396,8 +426,12 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         caught and converted to ``configuration_error`` envelopes; the latter's
         ``data.field_errors`` names each offending argument and its failure kind — the same
         detail a direct bind would raise — and ``data.accepted_fields`` additionally lists
-        the tool's top-level keys. Both are included only when you could already see that
-        tool through ``tools.search``; both are omitted otherwise.
+        the tool's top-level keys. For a tool whose only parameter wraps a nested model (e.g.
+        ``artifacts.get(request: ArtifactsGetRequest)``), ``data.nested_accepted_fields`` also
+        names that nested model's field names, and the envelope ``detail`` gives the exact
+        ``tools.search(names=[...], detail="full")`` follow-up call. All three are included
+        only when you could already see that tool through ``tools.search``; all are omitted
+        otherwise.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)
@@ -468,10 +502,20 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                         properties = tool.parameters.get("properties")
                         if isinstance(properties, dict):
                             data["accepted_fields"] = cast("JsonValue", sorted(properties))
+                            nested_fields = _resolve_nested_accepted_fields(
+                                tool.parameters, properties
+                            )
+                            if nested_fields:
+                                data["nested_accepted_fields"] = cast("JsonValue", nested_fields)
             envelope = ToolResponse.failure(
                 "tools.invoke",
                 ErrorCategory.CONFIGURATION_ERROR,
-                detail=f"Arguments for {name!r} failed schema validation.",
+                detail=(
+                    f"Arguments for {name!r} failed schema validation. Call "
+                    f'tools.search(names=["{name}"], detail="full") for its exact schema.'
+                    if is_binding_failure
+                    else f"Arguments for {name!r} failed schema validation."
+                ),
                 suggested_next_actions=["tools.search"] if is_binding_failure else [],
                 data=data,
             )
