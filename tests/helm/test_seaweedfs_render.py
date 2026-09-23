@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
+
+import pytest
+
+pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 
 
 def _render(*args: str) -> str:
