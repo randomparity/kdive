@@ -160,12 +160,16 @@ async def main() -> int:
 
         evidence_target = os.environ.get("KDIVE_PROVISION_EVIDENCE_TARGET")
         if evidence_target:
-            record = f"{UUID(prov.object_id)}\t{UUID(system_id)}\n".encode("ascii")
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-            fd = os.open(evidence_target, flags, 0o600)
-            with os.fdopen(fd, "wb") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                stream.write(record)
+            try:
+                record = f"{UUID(prov.object_id)}\t{UUID(system_id)}\n".encode("ascii")
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                fd = os.open(evidence_target, flags, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(record)
+            except (OSError, TypeError, ValueError):
+                print("provision evidence capture failed; check private target and response IDs", file=sys.stderr)
+                return 1
 
         for _ in range(180):  # poll up to ~15 min (native KVM boot); the tcg deadline is generous
             env = _scalar(await client.call_tool("systems.get", system_id=system_id))
