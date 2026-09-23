@@ -178,7 +178,7 @@ async def main() -> int:
                 print(f"systems.get {env.status}: {env.error_category} — {env.detail}", file=sys.stderr)
                 return 1
             await asyncio.sleep(5)
-        print(f"System {system_id} did not reach ready in time", file=sys.stderr)
+        print("System did not reach ready in time", file=sys.stderr)
         return 1
 
 

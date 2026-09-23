@@ -807,38 +807,26 @@ jobs:
           # KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
-          # A false capture-manifest readiness check keeps every job queued without a
-          # provision attempt. Probe that exact verifier before the long mint poll, and
-          # publish only an allowlisted reason and bounded duration, never its path-bearing
-          # exception. This also distinguishes attestation drift from the 2s health timeout.
-          echo "capture_manifest_probe_identity=operator"
-          /opt/kdive-live-worker-lifecycle/.venv/bin/python - <<'PY'
-          import time
-
-          start = time.monotonic()
-          try:
-              from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
-
-              verify_capture_bootstrap_manifest()
-          except Exception as error:
-              message = str(error)
-              if message.startswith("capture bootstrap fingerprint drift:"):
-                  reason = "fingerprint_drift"
-              elif message == "capture bootstrap runtime ELF closure drift":
-                  reason = "runtime_elf_closure_drift"
-              elif message == "capture bootstrap import-trace drift":
-                  reason = "import_trace_drift"
-              elif "capture bootstrap manifest" in message:
-                  reason = "manifest_invalid"
-              else:
-                  reason = "unclassified"
-              elapsed = min(time.monotonic() - start, 999.0)
-              print(f"capture_manifest_probe status=rejected reason={reason} elapsed_s={elapsed:.2f}")
-              raise SystemExit(1) from None
-          else:
-              elapsed = min(time.monotonic() - start, 999.0)
-              print(f"capture_manifest_probe status=accepted reason=none elapsed_s={elapsed:.2f}")
-          PY
+          # A fixed worker that fails readiness never dequeues the provision job. Check its
+          # loopback listener before mint, and expose only the filter's component booleans.
+          # Bound startup retries so persistent host drift fails here rather than after 15 min.
+          readiness_line=""
+          for attempt in {1..10}; do
+            if readiness_line="$({
+              curl --silent --connect-timeout 2 --max-time 4 --max-filesize 4096 \
+                http://127.0.0.1:9465/readyz |
+                python3 scripts/live-stack/filter-worker-readiness-evidence.py
+            } 2>/dev/null)" && [[ "$readiness_line" == "worker_readiness ready=true "* ]]; then
+              echo "$readiness_line"
+              break
+            fi
+            if ((attempt == 10)); then
+              echo "${readiness_line:-worker readiness evidence unavailable}" >&2
+              echo "fixed worker unready before System mint; see docs/operating/runbooks/self-hosted-kvm-runner.md" >&2
+              exit 1
+            fi
+            sleep 2
+          done
           # Keep the published URI exported for mint, preflight and pytest; env.sh honors it.
           export KDIVE_PROVISION_EVIDENCE_TARGET="$RUNNER_TEMP/kdive-provision-evidence.target"
           KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
