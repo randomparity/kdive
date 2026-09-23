@@ -755,7 +755,14 @@ fi
 # (`lifecycle_protocol_identity`), so a stale copy makes `require_compatible_lifecycle` reject
 # every request on a host provisioning just reported healthy. Only the project is reinstalled;
 # third-party wheels stay cached (#2532).
+# `GRPC_PYTHON_BUILD_SYSTEM_OPENSSL`/`_ZLIB`: grpcio (a core dependency via
+# opentelemetry-exporter-otlp-proto-grpc) has no ppc64le wheel, and its vendored BoringSSL has
+# no ppc64le target, so the source build needs the system OpenSSL/zlib. This installer runs as
+# root under Ansible `become`, which does not carry an operator's exported flags, and root's `uv`
+# cache is separate from the operator's, so the flags must be set here (#2666). Inert on an arch
+# where grpcio installs from a wheel and never compiles.
 UV_PROJECT_ENVIRONMENT=/opt/kdive-live-worker-lifecycle/.venv UV_PYTHON_DOWNLOADS=never \
+  GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1 GRPC_PYTHON_BUILD_SYSTEM_ZLIB=1 \
   "$uv_bin" sync --locked --no-editable --no-dev --group live --reinstall-package kdive \
   --project /opt/kdive --python-preference only-system
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python

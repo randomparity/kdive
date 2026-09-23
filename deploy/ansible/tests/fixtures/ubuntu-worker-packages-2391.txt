@@ -18,3 +18,5 @@ login
 libelf-dev
 libdw-dev
 libkdumpfile-dev
+libssl-dev
+zlib1g-dev

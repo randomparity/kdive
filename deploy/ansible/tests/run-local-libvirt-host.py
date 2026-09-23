@@ -153,6 +153,22 @@ require(
     "local_libvirt_host_live_sync_plan" in str(sync["changed_when"]),
     "the project venv sync must report its actual change receipt",
 )
+# grpcio (core dependency via opentelemetry-exporter-otlp-proto-grpc) has no ppc64le wheel and
+# its vendored BoringSSL has no ppc64le target, so this operator-owned sync source-builds it
+# against the system OpenSSL/zlib; an interactively exported flag never reaches this unattended
+# task (#2666). Inert on an arch where grpcio installs from a wheel.
+grpc_env = {
+    "GRPC_PYTHON_BUILD_SYSTEM_OPENSSL": "1",
+    "GRPC_PYTHON_BUILD_SYSTEM_ZLIB": "1",
+}
+require(
+    sync_plan.get("environment") == grpc_env,
+    "the live dependency sync dry-run must pin the grpcio system-OpenSSL/zlib build flags",
+)
+require(
+    sync.get("environment") == grpc_env,
+    "the live dependency sync must pin the grpcio system-OpenSSL/zlib build flags",
+)
 lifecycle = tasks["Install the fixed live-worker lifecycle contract"]
 require(
     task_names.index(sync["name"]) < task_names.index(lifecycle["name"]),

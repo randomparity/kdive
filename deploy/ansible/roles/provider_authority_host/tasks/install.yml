@@ -346,6 +346,12 @@
   environment:
     UV_PROJECT_ENVIRONMENT: /opt/kdive-provider-authority/.venv
     UV_PYTHON_DOWNLOADS: never
+    # Same root cause and fix as the live-worker lifecycle installer/role (#2666): grpcio (core
+    # dependency via opentelemetry-exporter-otlp-proto-grpc) has no ppc64le wheel, its vendored
+    # BoringSSL has no ppc64le target, and an operator's exported flags never reach this
+    # unattended root `uv sync`. Inert on an arch where grpcio installs from a wheel.
+    GRPC_PYTHON_BUILD_SYSTEM_OPENSSL: "1"
+    GRPC_PYTHON_BUILD_SYSTEM_ZLIB: "1"
   register: provider_authority_host_install_result
   changed_when: >-
     provider_authority_host_install_result.stderr is search('(?m)^(Installed|Uninstalled|Creating virtual environment) ')

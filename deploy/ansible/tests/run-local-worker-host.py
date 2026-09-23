@@ -136,7 +136,9 @@ expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_te
 require(
     defaults["live_vm_host_packages"] == expected_packages, "Ubuntu worker package list changed"
 )
-print("ok runner: 20 Ubuntu worker packages match the pre-extraction baseline")
+print(
+    f"ok runner: {len(expected_packages)} Ubuntu worker packages match the pre-extraction baseline"
+)
 
 python_version_script = "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
 system_python = subprocess.check_output(
