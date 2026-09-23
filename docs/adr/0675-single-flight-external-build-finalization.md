@@ -75,9 +75,9 @@ recorded result.
   single replica; #2681 records when it becomes necessary.
 - **MCP progress notifications to extend the client timeout.** verified: the MCP TypeScript SDK
   documents `resetTimeoutOnProgress` as an optional per-call client option and 60 s as the
-  protocol default (`docs/clients/calling.md`,
-  github.com/modelcontextprotocol/typescript-sdk, main, read 2026-09-23); the server cannot set
-  that option for the client.
+  protocol default
+  (<https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/clients/calling.md>,
+  read 2026-09-23); the server cannot set that option for the client.
 - **Shield a detached finalize with no map, and rely on the post-slot recheck.** judgment: fit —
   a concurrent caller then queues on the slot and scans the Run again after a failed finalize
   instead of receiving the shared failure, which #2680 requires.

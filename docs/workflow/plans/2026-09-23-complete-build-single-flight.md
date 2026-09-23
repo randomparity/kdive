@@ -33,7 +33,7 @@ lines, 130–170 test lines, docstring and generated reference lines, and the AD
 - `tests/adversarial/test_complete_build_concurrency.py` — tighten `calls in (1, 2)` to `== 1`.
 - `tests/services/runs/test_complete_build.py` — new service test for the post-slot check.
 - `docs/adr/0656-external-build-completion-contract.md` — two `Amended by ADR-0675` notes.
-- `docs/adr/0675-…` — status to Accepted in this PR, per `docs/adr/README.md`.
+- `docs/adr/0675-single-flight-external-build-finalization.md` — status to Accepted in this PR, per `docs/adr/README.md`.
 
 ## Task 1 — Single-flight finalize with post-slot recheck
 
