@@ -56,7 +56,17 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # This example owns the DEFAULT; scripts/live-stack/env.sh deliberately sets none (#2518), because
 # a general entry point cannot pick one family and architecture for every host. The value below is
 # this walkthrough's image, so a host that built a different one must override it.
-export KDIVE_GUEST_IMAGE="${KDIVE_GUEST_IMAGE:-/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2}"
+#
+# The catalog (fixtures/local-libvirt/rootfs_catalog.toml) names an arch-specific build per host:
+# fedora-kdive-ready-44 is x86_64, fedora-kdive-ready-44-ppc64le is ppc64le. Picking the x86_64
+# name on every host pointed a ppc64le operator at an image for the wrong architecture (#2669).
+# demo-up.sh sources this file and reuses guest_image_name in its "no guest image yet" hint, so
+# the two names cannot drift apart.
+guest_image_name="fedora-kdive-ready-44"
+if [[ "$(uname -m 2>/dev/null || true)" == "ppc64le" ]]; then
+  guest_image_name="fedora-kdive-ready-44-ppc64le"
+fi
+export KDIVE_GUEST_IMAGE="${KDIVE_GUEST_IMAGE:-/var/lib/kdive/rootfs/local/${guest_image_name}.qcow2}"
 
 # The interpreter that runs `python -m kdive ...` and the three processes. Defaults to the
 # repo venv; override for an installed deployment (e.g. /opt/kdive/.venv/bin/python).

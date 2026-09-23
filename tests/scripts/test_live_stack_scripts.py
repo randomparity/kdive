@@ -2089,6 +2089,64 @@ def test_local_libvirt_example_env_resolves_the_published_endpoint(tmp_path: Pat
     assert result.stdout == f"{_PUBLISHED_URI}|demo"
 
 
+@pytest.mark.parametrize(
+    ("host_arch", "expected_image"),
+    [
+        ("ppc64le", "fedora-kdive-ready-44-ppc64le.qcow2"),
+        ("x86_64", "fedora-kdive-ready-44.qcow2"),
+        ("aarch64", "fedora-kdive-ready-44.qcow2"),
+    ],
+)
+def test_local_libvirt_example_guest_image_default_matches_host_arch(
+    tmp_path: Path, host_arch: str, expected_image: str
+) -> None:
+    """#2669: env.sh defaulted KDIVE_GUEST_IMAGE to the x86_64 catalog image
+    (fixtures/local-libvirt/rootfs_catalog.toml) on every host, so a ppc64le operator silently
+    got an image built for the wrong architecture. The default must follow `uname -m`; every
+    non-ppc64le arch keeps the existing x86_64 default. An ambient KDIVE_GUEST_IMAGE (the README
+    documents it as an operator override knob) must not leak into this default-value assertion,
+    so pop it the same way the sibling endpoint test above pops KDIVE_PROJECT."""
+    _, staged = _published_contract(tmp_path)
+    staged.pop("KDIVE_GUEST_IMAGE", None)
+    bin_dir = tmp_path / "bin"
+    uname_stub = bin_dir / "uname"
+    uname_stub.write_text(f"#!/bin/sh\necho {host_arch}\n", encoding="utf-8")
+    uname_stub.chmod(0o755)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_GUEST_IMAGE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"/var/lib/kdive/rootfs/local/{expected_image}"
+
+
+def test_local_libvirt_example_guest_image_override_wins_on_ppc64le(tmp_path: Path) -> None:
+    """An explicit KDIVE_GUEST_IMAGE must still win over the arch-derived default (#2669)."""
+    _, staged = _published_contract(tmp_path)
+    bin_dir = tmp_path / "bin"
+    uname_stub = bin_dir / "uname"
+    uname_stub.write_text("#!/bin/sh\necho ppc64le\n", encoding="utf-8")
+    uname_stub.chmod(0o755)
+    staged["KDIVE_GUEST_IMAGE"] = "/custom/path.qcow2"
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_GUEST_IMAGE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "/custom/path.qcow2"
+
+
+def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:
+    """The "no guest image yet" hint must reuse env.sh's arch-derived guest_image_name (#2669)
+    rather than hardcoding the x86_64 catalog entry, so the build hint and the runtime default
+    cannot drift apart on a ppc64le host."""
+    text = (ROOT / "examples/local-libvirt/demo-up.sh").read_text()
+    assert "${example_dir}/build-image.sh ${guest_image_name}" in text
+    assert "build-image.sh fedora-kdive-ready-44" not in text
+
+
 def test_client_urls_derive_from_the_configurable_ports() -> None:
     # The port var must be the SINGLE source of truth: the client-facing DSN/endpoint defaults must
     # reference the port var, not a second hardcoded literal that could silently drift from compose.

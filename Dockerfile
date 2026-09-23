@@ -35,7 +35,12 @@ COPY --from=uv /uv /usr/local/bin/uv
 # it, but a from-source drgn links the system lib, and without it ppc64le kdump capture
 # silently fails (ADR-0355) — so it is a hard build dep here, not optional.
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The base image's deb822 sources default to http://deb.debian.org; switch to https so the
+# build also works on networks that permit only HTTPS egress (issue #2668). apt still verifies
+# package signatures, so this only changes the transport, and ca-certificates already ships in
+# the python slim base.
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
       gcc libc6-dev libvirt-dev pkg-config \
     && if [ "${TARGETARCH}" = "ppc64le" ]; then \
          apt-get install -y --no-install-recommends \
@@ -85,7 +90,10 @@ FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae0
 # objtool against the libssl-dev/libelf-dev headers. Without these the build lane cannot
 # compile a kernel on the shipped image.
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# See the builder stage's matching RUN above: switch to https before apt-get update so the
+# build also works on networks that permit only HTTPS egress (issue #2668).
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
       gcc make binutils gdb libvirt-clients openssh-client libseccomp2 \
       libelf1 libdw1 zlib1g \
       flex bison bc git rsync xz-utils libssl-dev libelf-dev \
