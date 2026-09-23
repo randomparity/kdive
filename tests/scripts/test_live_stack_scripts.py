@@ -2103,8 +2103,11 @@ def test_local_libvirt_example_guest_image_default_matches_host_arch(
     """#2669: env.sh defaulted KDIVE_GUEST_IMAGE to the x86_64 catalog image
     (fixtures/local-libvirt/rootfs_catalog.toml) on every host, so a ppc64le operator silently
     got an image built for the wrong architecture. The default must follow `uname -m`; every
-    non-ppc64le arch keeps the existing x86_64 default."""
+    non-ppc64le arch keeps the existing x86_64 default. An ambient KDIVE_GUEST_IMAGE (the README
+    documents it as an operator override knob) must not leak into this default-value assertion,
+    so pop it the same way the sibling endpoint test above pops KDIVE_PROJECT."""
     _, staged = _published_contract(tmp_path)
+    staged.pop("KDIVE_GUEST_IMAGE", None)
     bin_dir = tmp_path / "bin"
     uname_stub = bin_dir / "uname"
     uname_stub.write_text(f"#!/bin/sh\necho {host_arch}\n", encoding="utf-8")
