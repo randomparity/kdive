@@ -126,10 +126,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 325, f"runner listed {len(actual_tasks)} baseline tasks, expected 325")
+require(len(actual_tasks) == 326, f"runner listed {len(actual_tasks)} baseline tasks, expected 326")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 325 ordered task names and tags match the updated baseline")
+print("ok runner: 326 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -600,16 +600,107 @@ require(
     uv_definitions == ["roles/local_worker_host/tasks/uv.yml"],
     f"the uv install must be defined exactly once, found {uv_definitions}",
 )
-uv_task = yaml.safe_load((ANSIBLE / "roles/local_worker_host/tasks/uv.yml").read_text())[0]
+UV_PROBE_TASK = (
+    "Probe whether the target interpreter's pip needs and accepts --break-system-packages"
+)
+uv_source = yaml.safe_load((ANSIBLE / "roles/local_worker_host/tasks/uv.yml").read_text())
+uv_by_name = {task["name"]: task for task in uv_source}
+require(
+    UV_PROBE_TASK in uv_by_name, f"the uv PEP 668/pip-version probe is missing: {UV_PROBE_TASK}"
+)
+uv_probe = uv_by_name[UV_PROBE_TASK]
+probe_command = uv_probe.get("ansible.builtin.command", {})
+require(
+    probe_command.get("argv", [None])[0] == "/usr/bin/python3",
+    "the uv probe must run against the target interpreter (/usr/bin/python3), not Ansible's own",
+)
+require(
+    uv_probe.get("changed_when") is False,
+    "the uv PEP 668/pip-version probe must be changed_when: false (#2682)",
+)
+require(
+    uv_probe.get("check_mode") is False,
+    "the uv PEP 668/pip-version probe must stay check-mode safe (#2682)",
+)
+probe_register = uv_probe.get("register")
+require(bool(probe_register), "the uv PEP 668/pip-version probe registers no result to gate on")
+probe_script = probe_command.get("argv", [])[-1] if probe_command.get("argv") else ""
+require(
+    "sysconfig.get_path('stdlib')" in probe_script and "EXTERNALLY-MANAGED" in probe_script,
+    "the uv probe must derive the PEP 668 marker path from the interpreter via sysconfig, not "
+    "a hardcoded per-distro path (#2682)",
+)
+
+uv_task = uv_by_name[UV_TASK]
 uv_pip = uv_task.get("ansible.builtin.pip", {})
 require(uv_pip.get("name") == "uv", "the shared uv install task no longer installs uv via pip")
 require(
     uv_pip.get("state") == "present", "the shared uv install task no longer requires uv present"
 )
+extra_args = str(uv_pip.get("extra_args", ""))
 require(
-    "--break-system-packages" in str(uv_pip.get("extra_args", "")),
-    "the shared uv install task lost its PEP 668 override for Ubuntu 26.04's system Python",
+    "--break-system-packages" in extra_args and f"{probe_register}.stdout" in extra_args,
+    "the shared uv install task's --break-system-packages must be conditioned on the probe's "
+    "result, never unconditional (#2682, EL9 ships pip 21.2.3 which rejects the flag)",
 )
+require(
+    "else omit" in extra_args,
+    "the shared uv install task must omit --break-system-packages when the probe finds neither "
+    "a PEP 668 marker nor pip >= 23.0.1 (#2682)",
+)
+
+
+def uv_break_system_packages_probe_matches_host() -> None:
+    """Run the real probe task and prove its verdict matches this host's actual pip/PEP 668 state.
+
+    A structural check on the Jinja text cannot prove the probe computes the right answer; only
+    running it does. The probe is read-only (changed_when: false, check_mode: false) so this is
+    safe to execute directly, unlike the pip install task itself, which this harness never runs
+    for real (#2682).
+    """
+    # Independently derived, and against /usr/bin/python3 directly -- the harness's own
+    # interpreter (whatever `uv run` resolves) need not be the same one the probe targets, so
+    # reusing its `pip` module or `sysconfig` would not actually prove the probe right.
+    check_script = (
+        "import os, subprocess, sys, sysconfig\n"
+        "out = subprocess.run([sys.executable, '-m', 'pip', '--version'],"
+        " capture_output=True, text=True, check=True).stdout\n"
+        "version = tuple(int(p) for p in out.split()[1].split('.')[:3])\n"
+        "stdlib = sysconfig.get_path('stdlib')\n"
+        "marker = os.path.exists(os.path.join(stdlib, 'EXTERNALLY-MANAGED'))\n"
+        "print('true' if marker or version >= (23, 0, 1) else 'false')\n"
+    )
+    expected = subprocess.run(
+        ["/usr/bin/python3", "-c", check_script],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="kdive-uv-probe-") as temp_dir:
+        probe_only = Path(temp_dir) / "uv_probe.yml"
+        probe_only.write_text(
+            yaml.safe_dump(
+                [
+                    {
+                        "hosts": "localhost",
+                        "connection": "local",
+                        "gather_facts": False,
+                        "tasks": [uv_probe, {"ansible.builtin.debug": {"var": probe_register}}],
+                    }
+                ]
+            )
+        )
+        result = playbook(probe_only)
+    require(result.returncode == 0, f"the uv probe task failed to run:\n{result.stdout}")
+    require(
+        f'"stdout": "{expected}"' in result.stdout,
+        f"the uv probe reported the wrong verdict for this host (expected {expected!r}):\n"
+        f"{result.stdout}",
+    )
+
+
+uv_break_system_packages_probe_matches_host()
+print("ok uv: the PEP 668/pip-version probe matches this host's actual pip state")
 # local_worker_host applies the task to itself, so the localhost local-libvirt play (which applies
 # this role directly, with no live_vm_host in its role list) gets a root-resolvable uv too --
 # the actual #2665 fix; the earlier "defined exactly once" check does not prove it is reachable.
