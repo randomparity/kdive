@@ -147,7 +147,7 @@ Everything is overridable from the environment before running the scripts:
 |----------|---------|---------|
 | `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
-| `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
+| `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` (`…/fedora-kdive-ready-44-ppc64le.qcow2` on a ppc64le host) | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `demo-up.sh` refuses. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for checkout commands, server, and reconciler; fixed workers use their installed lifecycle venv. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
