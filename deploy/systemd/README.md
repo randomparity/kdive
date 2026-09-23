@@ -105,7 +105,7 @@ alongside its `code`. It is a closed set, and it — not the code — says what 
 | `correct_request` | the request itself was rejected: a `start` missing its worker count or settings, or a request frame the witness could not parse | fix the invocation; retrying it unchanged fails the same way |
 | `retry_same_operation` | a transient condition: the request deadline expired, termination evidence was rejected, or another lifecycle request holds the control lock (`code=busy`) | wait for the named condition to clear, then re-run the same command |
 | `restore_systemd` | systemd could not answer for the retained unit | restore systemd, then re-run |
-| `restore_database` | the database authority is unavailable | restore the database, then re-run |
+| `restore_database` | the database authority is unavailable, or its schema is behind this checkout (`database schema is behind this checkout; run migrations`) | restore the database, or apply migrations with `just stack-backends`, then re-run |
 | `operator_recovery` | any `conflict` response — retained lifecycle facts disagreeing with the observed unit, a worker incarnation disputed by an active fence, retained slot state that breaks a lifecycle rule, a systemd observation disagreeing with the retained lifecycle contract, or `recover` refusing a slot whose cgroup still holds live processes — an unmapped internal error, or a `diagnostics` capture that withheld at least one slot | inspect, then recover — see below |
 
 `operator_recovery` is the one that never clears on its own: no retry of the same request will

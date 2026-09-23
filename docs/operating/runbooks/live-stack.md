@@ -108,7 +108,8 @@ just stack-backends
 This is not a prerequisite for step 4: `scripts/live-stack/stack-services.sh` brings the backends
 up itself through the same code path, so running both is redundant. Use `just stack-backends` when
 the backends are all you want — an in-network Compose app tier, a schema inspection, a bucket
-check — and go straight to step 4 otherwise.
+check, or the migrations `worker-lifecycle.sh recover` needs after an upgrade (see **Recover**
+below) — and go straight to step 4 otherwise.
 
 It waits for the three long-running backends — Postgres, SeaweedFS, and the mock OIDC issuer
 — to be **healthy**, runs the one-shot `seaweedfs-init` to completion (creating the
@@ -390,9 +391,19 @@ the Prerequisites above before retrying. A third string,
 `checkout lifecycle compatibility probe failed`, points the other way — at this checkout's own
 environment rather than at the installed runner, so run `uv sync` here first.
 
+Recovery also reads the database through functions this checkout's migrations create, and
+in this procedure `stack-services.sh`, which also applies them, runs only after `recover`. After an
+upgrade, apply them first:
+
 ```bash
+just stack-backends
 scripts/live-stack/worker-lifecycle.sh recover
 ```
+
+If `recover` still prints `database schema is behind this checkout; run migrations`, the database
+lacks a function or table this checkout expects: re-run `just stack-backends` and check its
+migration output. `database authority is unavailable` is the different case of a database that
+did not answer; the witness log names the exception type for either.
 
 For each slot it observes the unit. Read a per-slot recovery refusal by its code:
 
