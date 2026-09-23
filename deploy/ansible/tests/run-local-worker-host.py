@@ -583,6 +583,73 @@ require(
 print("ok boot kernels: the upgrade hook applies 0640 root:kvm to both kernel patterns")
 
 
+# One shared task installs a root-resolvable uv for both callers -- local-libvirt-host.yml's own
+# `become: true` play (this role applied directly) and live_vm_host's venv build -- so a duplicated
+# install task is how #2506/#2665's root-secure_path gap could silently reappear at a second site
+# the way the kernel-upgrade hook once did (#2567). Assert the install task is defined exactly once
+# across the whole role tree.
+UV_TASK = "Install uv system-wide (the venv builder; not in the debug toolchain)"
+uv_definitions = sorted(
+    path.relative_to(ANSIBLE).as_posix()
+    for path in (ANSIBLE / "roles").rglob("tasks/*.yml")
+    if f"name: {UV_TASK}" in path.read_text()
+)
+require(
+    uv_definitions == ["roles/local_worker_host/tasks/uv.yml"],
+    f"the uv install must be defined exactly once, found {uv_definitions}",
+)
+uv_task = yaml.safe_load((ANSIBLE / "roles/local_worker_host/tasks/uv.yml").read_text())[0]
+uv_pip = uv_task.get("ansible.builtin.pip", {})
+require(uv_pip.get("name") == "uv", "the shared uv install task no longer installs uv via pip")
+require(
+    uv_pip.get("state") == "present", "the shared uv install task no longer requires uv present"
+)
+require(
+    "--break-system-packages" in str(uv_pip.get("extra_args", "")),
+    "the shared uv install task lost its PEP 668 override for Ubuntu 26.04's system Python",
+)
+# local_worker_host applies the task to itself, so the localhost local-libvirt play (which applies
+# this role directly, with no live_vm_host in its role list) gets a root-resolvable uv too --
+# the actual #2665 fix; the earlier "defined exactly once" check does not prove it is reachable.
+require(
+    "import_tasks: uv.yml" in (ANSIBLE / "roles/local_worker_host/tasks/main.yml").read_text(),
+    "local_worker_host no longer installs uv for its own callers, so the local-libvirt host play "
+    "still cannot resolve uv as root (#2665)",
+)
+# live_vm_host reaches the one definition the same way it reaches the shared kernel-upgrade hook:
+# import_role with tasks_from, never a second copy of the pip task.
+require(
+    "tasks_from: uv.yml" in (ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text(),
+    "live_vm_host no longer imports the shared uv install task",
+)
+require(
+    "ansible.builtin.pip"
+    not in "\n".join(
+        line
+        for line in (ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text().splitlines()
+        if "uv" in line.lower()
+    ),
+    "live_vm_host carries its own uv pip install instead of reusing the shared task",
+)
+# uv must resolve where root's sudo secure_path looks, which is what makes the installer resolve
+# it under Ansible's become in the first place (#2506, #2665) -- not merely "some absolute path".
+uv_bin_defaults = sorted(
+    path.relative_to(ANSIBLE).as_posix()
+    for path in (ANSIBLE / "roles").rglob("defaults/main.yml")
+    if "live_vm_host_uv_bin:" in path.read_text()
+)
+require(
+    uv_bin_defaults == ["roles/local_worker_host/defaults/main.yml"],
+    f"live_vm_host_uv_bin must be defined exactly once, in local_worker_host, found "
+    f"{uv_bin_defaults}",
+)
+require(
+    defaults.get("live_vm_host_uv_bin") == "/usr/local/bin/uv",
+    "live_vm_host_uv_bin must stay /usr/local/bin/uv, the path secure_path lists and pip installs",
+)
+print("ok uv: one shared install task reaches both local_worker_host and live_vm_host callers")
+
+
 CONTAINER_TASKS = "roles/local_worker_host/tasks/container_runtime.yml"
 DAEMON_PROBE = "Look for a packaged container-engine service unit"
 DAEMON_ENABLE = "Enable and start the container-engine daemon"
