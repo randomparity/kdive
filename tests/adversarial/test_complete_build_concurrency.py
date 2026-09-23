@@ -1,24 +1,32 @@
-"""Concurrent complete_build serializes to one ledger row (ADR-0048 §6).
+"""Concurrent complete_build serializes to one ledger row (ADR-0048 §6, ADR-0675).
 
 Two simultaneous complete_build calls on the same Run must collapse to exactly
-one run_steps 'build' row and one created → succeeded transition.  The per-Run
-advisory lock + ON CONFLICT DO NOTHING + WHERE state='created' UPDATE fence
-provide the guarantee; this test proves it against a live Postgres instance.
+one run_steps 'build' row and one created → succeeded transition.
 
-Validation happens before the lock is acquired, so both racers may call the
-validator (calls==1 or calls==2 are both acceptable).  Only one racer finalizes.
+In one server process the second call joins the first call's finalize (ADR-0675),
+so the validator runs once and the second call never reaches the database fence.
+The replica test below bypasses that map, as a second server process would: both
+finalizes validate, then race to publish, and the per-Run advisory lock + ON
+CONFLICT DO NOTHING + WHERE state='created' UPDATE fence must keep one ledger row.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
+from typing import cast
+
+import pytest
 
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
+from kdive.services.runs import complete_build as complete_build_service
+from kdive.services.runs.complete_build import CompleteBuildFinalizer, ExternalBuildStore
 from tests.mcp.complete_build_support import (
     FakeValidator,
+    complete_build,
     ctx,
     pool,
     seed_external_run_with_manifest,
@@ -52,10 +60,9 @@ def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> N
             assert all(r.status == "succeeded" for r in results), (
                 f"Expected both results to succeed, got: {[r.status for r in results]}"
             )
-            assert validator.calls in (1, 2), (
-                "validator must run at least once and at most once per racer: "
-                f"both may validate before the lock, or the second may hit the "
-                f"idempotent short-read, but got {validator.calls} calls"
+            assert validator.calls == 1, (
+                f"the second racer must join the first racer's finalize, got {validator.calls} "
+                "validator calls"
             )
             async with conn_pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
@@ -70,6 +77,64 @@ def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> N
             assert run is not None and run.state is RunState.SUCCEEDED, (
                 f"Expected run state SUCCEEDED, got: {run.state if run else None}"
             )
+
+    asyncio.run(_run())
+
+
+class _DeleteRecordingStore:
+    """The store surface a single-PUT loser touches: its post-commit version deletes."""
+
+    def __init__(self) -> None:
+        self.deleted: list[tuple[str, str]] = []
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append((key, version_id))
+
+
+class _BarrierValidator(FakeValidator):
+    """Let each racer finish its scan only when the other has finished too."""
+
+    def __init__(self, output: BuildOutput) -> None:
+        super().__init__(output)
+        self.both_scanned = threading.Barrier(2, timeout=10)
+
+    def __call__(self, manifest, keys, declared_build_id, *, arch: str = "x86_64"):
+        self.both_scanned.wait()
+        return super().__call__(manifest, keys, declared_build_id, arch=arch)
+
+
+def test_replica_finalizes_race_to_one_ledger_row(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two processes' finalizes both validate, then the publication fence picks one."""
+
+    async def _run() -> None:
+        async with pool(migrated_url) as conn_pool:
+            run_id = await seed_external_run_with_manifest(conn_pool)
+            validator = _BarrierValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            # One validation slot per process; two processes hold two between them.
+            monkeypatch.setattr(
+                complete_build_service, "_EXTERNAL_BUILD_VALIDATION_SLOTS", asyncio.Semaphore(2)
+            )
+            store = cast("ExternalBuildStore", _DeleteRecordingStore())
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=validator, object_store_factory=lambda: store
+            )
+            results = await asyncio.gather(
+                complete_build(conn_pool, run_id, finalizer),
+                complete_build(conn_pool, run_id, finalizer),
+            )
+            assert results[0].build_ref == results[1].build_ref
+            assert validator.calls == 2
+            async with conn_pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM run_steps WHERE run_id = %s AND step = 'build'",
+                    (run_id,),
+                )
+                row = await cur.fetchone()
+                run = await RUNS.get(conn, run_id)
+            assert row is not None and row[0] == 1
+            assert run is not None and run.state is RunState.SUCCEEDED
 
     asyncio.run(_run())
 

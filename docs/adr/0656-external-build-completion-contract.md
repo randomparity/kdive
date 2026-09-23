@@ -161,6 +161,26 @@ amending it.
 
 It is also the instrument that would falsify this decision, which is the main reason it stays.
 
+### Amendment (2026-09-23): single-flight finalization (#2680)
+
+This block is an amendment, not a rewrite: [ADR-0675](0675-single-flight-external-build-finalization.md)
+met this record's reopening condition for a client with a shorter timeout and changed who owns
+a running finalize, and the passages above stay as the record of what was decided on 2026-09-15.
+It qualifies these claims:
+
+- *Retry and idempotency*: a concurrent second attempt no longer repeats the scan in the same
+  server process; it joins the running finalize for that Run.
+- *Cancellation*: a disconnect no longer leaves a scan without an owner. The finalize runs as a
+  process task that a cancelled caller does not stop, and a retry receives its result. The scan
+  thread still has no cooperative cancellation.
+- *Upload-window fencing*: the scan no longer runs inside the request; it runs inside the
+  finalize task, under the same lock discipline.
+- *Recovery after transport interruption*: a re-call before the commit joins the running
+  finalize instead of redoing the work. A re-call that reaches another replica, or follows a
+  server restart, still redoes it (#2681).
+- *Instrumentation*: a finalize that finds a recorded result after the validation slot emits an
+  `already_recorded` record with no scan, so a record count is no longer a scan count.
+
 ## Consequences
 
 - **The public contract is unchanged.** `runs.complete_build` keeps meaning "wait for the
@@ -208,6 +228,16 @@ and the first two are the ones a real deployment is most likely to meet:
   [debt record 0015](../debt/0015-ppc64le-finalization-measurement-unrun.md), which outlives
   issue #2318 — the issue closes with this pull request, so without that record this reopening
   condition would have no surviving owner.
+
+### Amendment (2026-09-23): single-flight finalization (#2680)
+
+This block is an amendment: [ADR-0675](0675-single-flight-external-build-finalization.md)
+changes two consequences stated above and leaves the rest standing.
+
+- The `runs.complete_build` docstring no longer stays as it was: it now tells the agent to call
+  again after a request timeout, because the call joins the running finalize.
+- An abandoned scan no longer runs on after its slot is released with its result discarded; the
+  finalize that owns it keeps the slot until the scan ends and publishes the result.
 
 ## Considered & rejected
 

@@ -1,8 +1,16 @@
-"""`runs.complete_build` MCP handler."""
+"""`runs.complete_build` MCP handler.
+
+One finalize runs per Run in this process (ADR-0675). It owns its pool connection, so a caller
+whose request is cancelled stops waiting but does not stop the finalize, and a retry for the same
+Run joins it instead of scanning the upload again.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
+from functools import partial
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -43,6 +51,15 @@ from kdive.services.runs.steps import BuildStepResult, platform_owned_cmdline_to
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
 from kdive.store.objectstore import object_store_from_env
 
+_log = logging.getLogger(__name__)
+
+_IN_FLIGHT: dict[UUID, asyncio.Task[ToolResponse]] = {}
+"""The running finalize for each Run in this process (ADR-0675).
+
+The event loop is single-threaded and nothing awaits between the lookup and the insert in
+`_join_or_start`, so the map needs no lock. A task removes its own entry when it ends.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CompleteBuildHandlers:
@@ -81,19 +98,35 @@ class CompleteBuildHandlers:
             return ToolResponse.failure_from_error(run_id, exc)
         with bind_context(principal=ctx.principal):
             async with pool.connection() as conn:
-                return await self._complete_authorized_build(
-                    conn,
-                    ctx,
-                    uid,
-                    run_id,
-                    build_id=build_id,
-                    cmdline=cmdline,
-                    source_provenance=source_provenance,
-                )
+                early = await self._authorize(conn, ctx, uid, run_id)
+            if early is not None:
+                return early
+            return await self._join_or_start(
+                pool,
+                ctx,
+                uid,
+                run_id,
+                build_id=build_id,
+                cmdline=cmdline,
+                source_provenance=source_provenance,
+            )
 
-    async def _complete_authorized_build(
+    async def _authorize(
+        self, conn: AsyncConnection, ctx: RequestContext, uid: UUID, run_id: str
+    ) -> ToolResponse | None:
+        """Reject an unauthorized caller or answer from the recorded result; else ``None``."""
+        run = await RUNS.get(conn, uid)
+        if run is None or run.project not in ctx.projects:
+            return _config_error(run_id)
+        require_role(ctx, run.project, Role.CONTRIBUTOR)
+        recorded = await _existing_build_result(conn, uid)
+        if recorded is not None:
+            return await self._success_envelope(conn, run, recorded)
+        return None
+
+    async def _join_or_start(
         self,
-        conn: AsyncConnection,
+        pool: AsyncConnectionPool,
         ctx: RequestContext,
         uid: UUID,
         run_id: str,
@@ -102,15 +135,71 @@ class CompleteBuildHandlers:
         cmdline: str | None,
         source_provenance: dict[str, str | bool | list[str]] | None,
     ) -> ToolResponse:
-        run = await RUNS.get(conn, uid)
-        if run is None or run.project not in ctx.projects:
-            return _config_error(run_id)
-        require_role(ctx, run.project, Role.CONTRIBUTOR)
+        """Await the Run's running finalize, starting one when none is running (ADR-0675).
 
-        recorded = await _existing_build_result(conn, uid)
-        if recorded is not None:
-            return await self._success_envelope(conn, run, recorded)
+        A joiner gets the running finalize's response even when its own arguments differ, as a
+        call after the commit gets the recorded result. ``shield`` keeps a cancelled caller from
+        cancelling the finalize the other callers share.
+        """
+        task = _IN_FLIGHT.get(uid)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._finalize(
+                    pool,
+                    ctx,
+                    uid,
+                    run_id,
+                    build_id=build_id,
+                    cmdline=cmdline,
+                    source_provenance=source_provenance,
+                ),
+                name=f"runs.complete_build:{uid}",
+            )
+            _IN_FLIGHT[uid] = task
+            task.add_done_callback(partial(_forget, uid))
+        else:
+            _log.info("runs.complete_build joined the in-flight finalize for run %s", uid)
+        return await asyncio.shield(task)
 
+    async def _finalize(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        uid: UUID,
+        run_id: str,
+        *,
+        build_id: str | None,
+        cmdline: str | None,
+        source_provenance: dict[str, str | bool | list[str]] | None,
+    ) -> ToolResponse:
+        async with pool.connection() as conn:
+            run = await RUNS.get(conn, uid)
+            if run is None:
+                return _config_error(run_id)
+            recorded = await _existing_build_result(conn, uid)
+            if recorded is not None:
+                return await self._success_envelope(conn, run, recorded)
+            return await self._complete(
+                conn,
+                ctx,
+                run,
+                run_id,
+                build_id=build_id,
+                cmdline=cmdline,
+                source_provenance=source_provenance,
+            )
+
+    async def _complete(
+        self,
+        conn: AsyncConnection,
+        ctx: RequestContext,
+        run: Run,
+        run_id: str,
+        *,
+        build_id: str | None,
+        cmdline: str | None,
+        source_provenance: dict[str, str | bool | list[str]] | None,
+    ) -> ToolResponse:
         service = CompleteBuildFinalizer(
             validate_complete_build=self.validate_complete_build,
             object_store_factory=self.object_store_factory,
@@ -191,6 +280,14 @@ class CompleteBuildHandlers:
         return _complete_envelope(
             uid, result, server_time=row[0].isoformat(), warning=warning, nudge=nudge
         )
+
+
+def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None:
+    """Drop a finished finalize from the map and log a failure no caller may await."""
+    if _IN_FLIGHT.get(uid) is task:
+        del _IN_FLIGHT[uid]
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        _log.error("runs.complete_build finalize for run %s failed", uid, exc_info=exc)
 
 
 def _remint_error(run_id: str, detail: str, data: dict[str, JsonValue]) -> ToolResponse:
