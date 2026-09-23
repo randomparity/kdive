@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from psycopg import errors as psycopg_errors
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
@@ -323,7 +324,8 @@ class FakeAuthority:
         self.registered: set[str] = set()
         self.register_label = "database:register"
         self.terminate_label = "database:terminate"
-        self.fail_register = False
+        self.register_failure: Exception | None = None
+        self.terminate_failure: Exception | None = None
         self.fail_register_with_fence_conflict = False
         self.fail_terminate_with_fence_conflict = False
         self.reject_termination = False
@@ -345,8 +347,8 @@ class FakeAuthority:
             raise IncarnationConflict(
                 "worker incarnation registration conflicts with durable state"
             )
-        if self.fail_register:
-            raise RuntimeError("database unavailable")
+        if self.register_failure is not None:
+            raise self.register_failure
         self.registered.add(state.incarnation)
         self.active[state.incarnation] = _record(state)
 
@@ -356,6 +358,8 @@ class FakeAuthority:
             raise IncarnationConflict("worker incarnation termination conflicts with durable state")
         if self.reject_termination:
             raise EvidenceRejected("database rejected exact evidence")
+        if self.terminate_failure is not None:
+            raise self.terminate_failure
         assert state.incarnation in self.registered
         self.terminations.append((state.incarnation, outcome))
         self.terminated_bindings.append((state.incarnation, state.boot_id, state.invocation_id))
@@ -1245,7 +1249,7 @@ def test_start_uses_one_absolute_120_second_request_ceiling() -> None:
 
 def test_failed_database_dependency_retains_generation_and_host_objects() -> None:
     stores, runtime, authority, clock, _ = _fleet()
-    authority.fail_register = True
+    authority.register_failure = RuntimeError("database unavailable")
 
     response = _run(
         _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
@@ -2975,6 +2979,71 @@ def test_recover_failed_row_query_preserves_all_slot_files(case: int) -> None:
     assert response.code == "dependency_unavailable" and response.retry_action == "restore_database"
     assert stores[0].environment and stores[0].credential and stores[0].release
     assert not authority.released and events == []
+
+
+_OUTAGE_MESSAGE = "database authority is unavailable"
+_SCHEMA_BEHIND_MESSAGE = "database schema is behind this checkout; run migrations"
+
+
+def _authority_failure_response(wrapper: str, failure: Exception) -> LifecycleResponse:
+    if wrapper == "recover":
+        stores, runtime, authority, clock, _ = _residual_fleet(1)
+        authority.recovery_failure = failure
+        coordinator = _coordinator(stores, runtime, authority, clock)
+        return _run(coordinator.recover(_deadline(clock)))
+    if wrapper == "register":
+        stores, runtime, authority, clock, _ = _fleet()
+        authority.register_failure = failure
+        coordinator = _coordinator(stores, runtime, authority, clock)
+        return _run(coordinator.start(_request(), _deadline(clock)))
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: prepared})
+    runtime.current[prepared.unit] = _observation(1, "populated")
+    authority.terminate_failure = failure
+    return _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+
+@pytest.mark.parametrize("wrapper", ["recover", "register", "terminate"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        psycopg_errors.UndefinedFunction(
+            "function public.recoverable_worker_incarnations(text) does not exist"
+        ),
+        psycopg_errors.UndefinedTable('relation "worker_incarnations" does not exist'),
+    ],
+    ids=["undefined-function", "undefined-table"],
+)
+def test_missing_schema_object_reports_schema_behind_not_a_database_outage(
+    wrapper: str, failure: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    # #2667: a healthy database without this checkout's migrations was reported as an outage.
+    with caplog.at_level("ERROR"):
+        response = _authority_failure_response(wrapper, failure)
+
+    assert (response.code, response.retry_action) == ("dependency_unavailable", "restore_database")
+    assert response.message == _SCHEMA_BEHIND_MESSAGE
+    assert f"cause={type(failure).__name__}" in caplog.text
+
+
+@pytest.mark.parametrize("wrapper", ["recover", "register", "terminate"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("database unavailable"),
+        psycopg_errors.InsufficientPrivilege("permission denied for function"),
+    ],
+    ids=["outage", "other-programming-error"],
+)
+def test_other_authority_failures_keep_the_database_outage_message(
+    wrapper: str, failure: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("ERROR"):
+        response = _authority_failure_response(wrapper, failure)
+
+    assert (response.code, response.retry_action) == ("dependency_unavailable", "restore_database")
+    assert response.message == _OUTAGE_MESSAGE
+    assert f"cause={type(failure).__name__}" in caplog.text
 
 
 def test_postgres_recovery_adapter_reads_the_bounded_row_accessor(

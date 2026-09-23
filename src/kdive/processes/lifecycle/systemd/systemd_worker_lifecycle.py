@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from psycopg import errors
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.processes.lifecycle.systemd.systemd_diagnostics import SystemdDiagnostics
@@ -79,6 +80,19 @@ class LifecycleDeadlineExceeded(RuntimeError):
 
 class _AuthorityUnavailable(RuntimeError):
     """The exact-incarnation database authority did not complete."""
+
+
+class _SchemaBehind(_AuthorityUnavailable):
+    """PostgreSQL answered but lacks a function or table this checkout's migrations create."""
+
+
+def _authority_failure(message: str, exc: Exception) -> _AuthorityUnavailable:
+    # The witness journal is the only place the underlying cause survives: the response
+    # carries a fixed message, and #2667's missing migration was indistinguishable from an outage.
+    _log.error("%s cause=%s", message, type(exc).__name__)
+    if isinstance(exc, (errors.UndefinedFunction, errors.UndefinedTable)):
+        return _SchemaBehind(message)
+    return _AuthorityUnavailable(message)
 
 
 class _ActivationFailure(RuntimeError):
@@ -432,7 +446,7 @@ class SystemdWorkerLifecycle:
         except EvidenceRejected, LifecycleDeadlineExceeded, IncarnationConflict:
             raise
         except Exception as exc:
-            raise _AuthorityUnavailable("worker recovery authority unavailable") from exc
+            raise _authority_failure("worker recovery authority unavailable", exc) from exc
         return recovery
 
     async def _replace_current_fleet(self, deadline: Deadline) -> None:
@@ -720,7 +734,7 @@ class SystemdWorkerLifecycle:
         except IncarnationConflict:
             raise
         except Exception as exc:
-            raise _AuthorityUnavailable("worker registration authority unavailable") from exc
+            raise _authority_failure("worker registration authority unavailable", exc) from exc
 
     async def _terminate(
         self, state: SlotState, outcome: TerminationOutcome, deadline: Deadline
@@ -739,7 +753,7 @@ class SystemdWorkerLifecycle:
             # through to `_AuthorityUnavailable` the way registration once did.
             raise
         except Exception as exc:
-            raise _AuthorityUnavailable("worker termination authority unavailable") from exc
+            raise _authority_failure("worker termination authority unavailable", exc) from exc
 
     async def _authority_call[T](
         self,
@@ -1002,6 +1016,13 @@ def _map_failure(error: Exception, *, diagnostic: bool) -> tuple[ResponseCode, R
             "conflict",
             "operator_recovery",
             "worker incarnation conflicts with an active fence",
+        )
+    if isinstance(error, _SchemaBehind):
+        # Same codes as an outage: a new literal would move the lifecycle protocol identity.
+        return (
+            "dependency_unavailable",
+            "restore_database",
+            "database schema is behind this checkout; run migrations",
         )
     if isinstance(error, _AuthorityUnavailable):
         return "dependency_unavailable", "restore_database", "database authority is unavailable"
