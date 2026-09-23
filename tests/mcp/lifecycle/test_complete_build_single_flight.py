@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -21,6 +21,7 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.runs.complete_build import _IN_FLIGHT, CompleteBuildHandlers
+from kdive.services.runs.steps import BuildStepResult
 from tests.mcp.complete_build_support import (
     FakeValidator,
     build_output,
@@ -222,5 +223,68 @@ def test_remint_during_joined_finalize_rejects_both(
             retry = await _call(handlers, conn_pool, run_id)
             assert retry.status == "succeeded"
             assert validator.calls == 2
+
+    asyncio.run(_run())
+
+
+async def _record_build(conn_pool: Any, run_id: Any) -> None:
+    """Commit a finalize the way the publisher does: a build step and a succeeded Run."""
+    async with conn_pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state, result) "
+            "VALUES (%s, 'build', 'succeeded', %s)",
+            (run_id, Jsonb(BuildStepResult("recorded/kernel", None, "recorded-build").dump())),
+        )
+        await conn.execute("UPDATE runs SET state = 'succeeded' WHERE id = %s", (run_id,))
+
+
+def _start(handlers: CompleteBuildHandlers, conn_pool: Any, run_id: Any) -> Any:
+    """Enter the join step directly, as a caller whose authorize read preceded a commit."""
+    return handlers._join_or_start(
+        conn_pool, ctx(), run_id, str(run_id), build_id=None, cmdline="c", source_provenance=None
+    )
+
+
+def test_finalize_answers_a_commit_that_landed_after_authorize(migrated_url: str) -> None:
+    """A finalize started after another one committed returns the recorded result."""
+
+    async def _run() -> None:
+        async with pool(migrated_url) as conn_pool:
+            run_id = await seed_external_run_with_manifest(conn_pool)
+            validator = _BlockingValidator(run_id)
+            await _record_build(conn_pool, run_id)
+
+            result = await _start(
+                CompleteBuildHandlers(validate_complete_build=validator), conn_pool, run_id
+            )
+
+            assert result.status == "succeeded"
+            assert validator.calls == 0
+
+    asyncio.run(_run())
+
+
+def test_finished_task_in_the_map_starts_a_new_finalize(migrated_url: str) -> None:
+    """A done task not yet dropped by its callback counts as absent (criterion 4)."""
+
+    async def _run() -> None:
+        async with pool(migrated_url) as conn_pool:
+            run_id = await seed_external_run_with_manifest(conn_pool)
+            validator = _BlockingValidator(run_id)
+            validator.release.set()
+            stale: asyncio.Future[ToolResponse] = asyncio.get_running_loop().create_future()
+            stale.set_result(
+                ToolResponse.failure(str(run_id), ErrorCategory.CONFIGURATION_ERROR, detail="stale")
+            )
+            _IN_FLIGHT[run_id] = cast("asyncio.Task[ToolResponse]", stale)
+            try:
+                result = await _start(
+                    CompleteBuildHandlers(validate_complete_build=validator), conn_pool, run_id
+                )
+            finally:
+                _IN_FLIGHT.pop(run_id, None)
+
+            assert result.status == "succeeded"
+            assert validator.calls == 1
 
     asyncio.run(_run())
