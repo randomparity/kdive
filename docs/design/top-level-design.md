@@ -1,5 +1,7 @@
 # KDIVE current architecture
 
+Last reviewed: 2026-09-22 against KDIVE 0.4.1.
+
 ## Purpose
 
 KDIVE is a production, multi-user service that gives agentic coding environments

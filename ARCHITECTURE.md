@@ -1,5 +1,7 @@
 # KDIVE Architecture
 
+Last reviewed: 2026-09-22 against KDIVE 0.4.1.
+
 This is a one-page summary. The authoritative architecture is
 [`docs/design/top-level-design.md`](docs/design/top-level-design.md); read it for
 the precise lifecycles, state machines, and decisions. Architecture decisions are
