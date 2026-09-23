@@ -1,0 +1,16 @@
+---
+# Shared with live_vm_host, in its own file because two callers need a root-resolvable `uv`:
+# this role's own play (local-libvirt-host.yml, `become: true`) runs
+# install-live-worker-lifecycle.sh, whose `_resolve_uv_bin` does a bare `command -v uv`; and
+# live_vm_host's own venv build below runs `uv` by the absolute live_vm_host_uv_bin path. Both
+# reach a host provisioned per docs/operating/install.md's user-local `~/.local/bin` install,
+# which root's sudo secure_path does not list (#2506, #2665). pip installs the console script to
+# /usr/local/bin, which secure_path does list, so this converges both callers to a `uv` root can
+# resolve without duplicating the install task.
+- name: Install uv system-wide (the venv builder; not in the debug toolchain)
+  # --break-system-packages: Ubuntu 26.04's system Python is PEP 668 externally-managed, so a
+  # plain system `pip install` errors; the flag is accepted (and a no-op) on pip >= 23.
+  ansible.builtin.pip:
+    name: uv
+    state: present
+    extra_args: --break-system-packages

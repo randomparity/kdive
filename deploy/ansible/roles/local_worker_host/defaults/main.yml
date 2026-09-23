@@ -28,6 +28,13 @@ live_vm_host_packages:  # noqa: var-naming[no-role-prefix]
   - libdw-dev          # drgn build
   - libkdumpfile-dev   # drgn kdump support
 
+# pip installs the uv console script to /usr/local/bin, which root's sudo secure_path lists
+# (#2506, #2665) unlike a user-local ~/.local/bin install. Reference uv by absolute path in a
+# venv-build command so it is found under become regardless of sudo's PATH handling; override if
+# pip is configured to install console scripts elsewhere. Shared with live_vm_host, which installs
+# and consumes this identically (tasks/uv.yml).
+live_vm_host_uv_bin: /usr/local/bin/uv  # noqa: var-naming[no-role-prefix]
+
 # Fixed host-worker authority contract (ADR-0574). Keep the slot count literal: unit names,
 # account isolation, and lifecycle bounds all use exactly 1..8.
 # Preserve these inventory names across runner and standalone role use.
