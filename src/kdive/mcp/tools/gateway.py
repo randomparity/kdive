@@ -354,6 +354,27 @@ def _namespace_signal(
     return NamespaceStatus.UNAUTHORIZED, sorted(grants)
 
 
+def _property_ref(field_schema: dict[str, JsonValue]) -> str | None:
+    """Return a property's ``$ref``, direct or one level inside an ``anyOf`` (Optional[Model]).
+
+    Pydantic renders a required nested model as a direct ``{"$ref": ...}`` but an optional one
+    (``request: SomeModel | None = None``, e.g. ``images.list``) as
+    ``{"anyOf": [{"$ref": ...}, {"type": "null"}]}`` — the wrapper key does not move, only where
+    the ``$ref`` sits. Both shapes name the same one-parameter-model tool this resolves for.
+    """
+    ref = field_schema.get("$ref")
+    if isinstance(ref, str):
+        return ref
+    variants = field_schema.get("anyOf")
+    if isinstance(variants, list):
+        for variant in variants:
+            if isinstance(variant, dict):
+                variant_ref = variant.get("$ref")
+                if isinstance(variant_ref, str):
+                    return variant_ref
+    return None
+
+
 def _resolve_nested_accepted_fields(
     parameters: dict[str, JsonValue], properties: dict[str, JsonValue]
 ) -> dict[str, JsonValue]:
@@ -372,8 +393,8 @@ def _resolve_nested_accepted_fields(
     for field_name, field_schema in properties.items():
         if not isinstance(field_schema, dict):
             continue
-        ref = field_schema.get("$ref")
-        if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+        ref = _property_ref(field_schema)
+        if ref is None or not ref.startswith("#/$defs/"):
             continue
         definition = defs.get(ref.removeprefix("#/$defs/"))
         if not isinstance(definition, dict):

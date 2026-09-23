@@ -234,6 +234,35 @@ def test_bad_arguments_nested_wrapper_lists_nested_fields(monkeypatch: pytest.Mo
     assert 'tools.search(names=["artifacts.get"], detail="full")' in content["detail"]
 
 
+def test_bad_arguments_optional_nested_wrapper_lists_nested_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Optional-wrapper tool (``request: Model | None = None``) also discloses nested fields.
+
+    ``images.list`` advertises its sole parameter as
+    ``{"anyOf": [{"$ref": ...}, {"type": "null"}]}`` rather than a direct ``$ref`` — pydantic's
+    shape for an optional nested model — so the resolver must look inside ``anyOf`` too, not just
+    at a top-level ``$ref``, or this real currently-registered tool would get no nested disclosure
+    at all (#2690).
+    """
+    monkeypatch.setattr(gateway, "current_context", _no_grant_ctx)  # images.list is PUBLIC_TOOLS
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool(
+            "tools.invoke",
+            {"name": "images.list", "arguments": {"page_token": "abc"}},
+        )
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["error_category"] == "configuration_error"
+    assert content["data"]["accepted_fields"] == ["request"]
+    nested = content["data"]["nested_accepted_fields"]
+    assert set(nested["request"]) == {"scope", "limit", "cursor"}
+
+
 # ---------------------------------------------------------------------------
 # Test 3c: accepted_fields is withheld when the caller cannot see the tool (#2304)
 # ---------------------------------------------------------------------------
