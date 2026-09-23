@@ -604,6 +604,26 @@ def test_tcg_fixed_worker_verifier_sanitizes_import_failure(tmp_path: pathlib.Pa
     assert "/sensitive/import/path" not in result.stderr
 
 
+def test_native_job_captures_exact_provision_boundary_before_cleanup() -> None:
+    spine_index, spine_step = _named_step(
+        "native",
+        "Run both native families (reaper -> stack -> mint -> preflight -> test, one shell)",
+    )
+    evidence_index, evidence = _named_step("native", "Capture persisted provision boundary")
+    readiness_index, readiness = _named_step("native", "Capture worker readiness components")
+    cleanup_index, _ = _named_step("native", "Clean up live stack")
+    target = "$RUNNER_TEMP/kdive-provision-evidence.target"
+
+    assert f'export KDIVE_PROVISION_EVIDENCE_TARGET="{target}"' in spine_step["run"]
+    assert evidence["if"] == "always()"
+    assert target in evidence["run"]
+    assert "timeout --signal=TERM --kill-after=2s 12s" in evidence["run"]
+    assert "scripts/live-stack/provision-queue-diagnostics.sh" in evidence["run"]
+    assert readiness["if"] == "always()"
+    assert "filter-worker-readiness-evidence.py" in readiness["run"]
+    assert spine_index < evidence_index < readiness_index < cleanup_index
+
+
 def test_tcg_job_captures_exact_provision_boundary_on_every_outcome() -> None:
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     spine_index, spine_step = _named_step(
