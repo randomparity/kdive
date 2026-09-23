@@ -811,16 +811,8 @@ jobs:
           # provision attempt. Probe that exact verifier before the long mint poll, and
           # publish only an allowlisted reason and bounded duration, never its path-bearing
           # exception. This also distinguishes attestation drift from the 2s health timeout.
-          manifest_probe=(/opt/kdive-live-worker-lifecycle/.venv/bin/python)
-          if sudo -n --user=kdive-worker-1 --group=kdive-worker-1 true 2>/dev/null; then
-            manifest_probe=(sudo -n --user=kdive-worker-1 --group=kdive-worker-1 \
-              env "PYTHONPATH=${GITHUB_WORKSPACE}/src" \
-              /opt/kdive-live-worker-lifecycle/.venv/bin/python)
-            echo "capture_manifest_probe_identity=fixed_worker"
-          else
-            echo "capture_manifest_probe_identity=operator"
-          fi
-          "${manifest_probe[@]}" - <<'PY'
+          echo "capture_manifest_probe_identity=operator"
+          /opt/kdive-live-worker-lifecycle/.venv/bin/python - <<'PY'
           import time
 
           start = time.monotonic()
