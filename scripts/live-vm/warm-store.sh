@@ -56,6 +56,12 @@ main() {
     return 0
   fi
 
+  # Native x86 guests carry compressed vmlinuz images. Check this optional tool only when
+  # rebuilding; a valid warm set needs no host extractor and bare-ELF guests do not use it.
+  if [ "$(uname -m)" = x86_64 ]; then
+    require_tools "extract-vmlinux:reapply the Ubuntu runner role (matching linux-headers)"
+  fi
+
   new="$(mktemp -d -- "${STORE}/set-XXXXXX")"
   # shellcheck disable=SC2064  # expand $new now so the trap cleans this exact dir on any pre-commit exit.
   trap "rm -rf -- '$new'" EXIT

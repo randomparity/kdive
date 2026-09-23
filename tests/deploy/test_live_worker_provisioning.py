@@ -1569,6 +1569,40 @@ def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
     assert "kmod" in packages
 
 
+def test_ubuntu_native_runner_provisions_extractor_for_refresh_account() -> None:
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks/packages_debian.yml").read_text())
+    block = next(
+        task for task in tasks if task["name"] == "Prepare the native x86 Ubuntu kernel extractor"
+    )
+    assert block["when"] == [
+        "ansible_facts['distribution'] == 'Ubuntu'",
+        "ansible_facts['architecture'] == 'x86_64'",
+    ]
+    install, inspect, require, link, verify = block["block"]
+    assert install["ansible.builtin.apt"]["name"] == "linux-headers-{{ ansible_kernel }}"
+    extractor = "/usr/src/linux-headers-{{ ansible_kernel }}/scripts/extract-vmlinux"
+    assert inspect["ansible.builtin.stat"]["path"] == extractor
+    assert require["ansible.builtin.assert"]["that"] == [
+        "local_worker_host_extract_vmlinux.stat.exists",
+        "local_worker_host_extract_vmlinux.stat.executable",
+    ]
+    assert link["ansible.builtin.file"] == {
+        "src": extractor,
+        "dest": "/usr/local/bin/extract-vmlinux",
+        "state": "link",
+    }
+    argv = verify["ansible.builtin.command"]["argv"]
+    assert argv[:4] == ["/usr/sbin/runuser", "-u", "{{ local_worker_host_operator_user }}", "--"]
+    assert "command -v extract-vmlinux" in argv[-1]
+    runner_tasks = yaml.safe_load(MAIN_TASKS.read_text())
+    runner_import = next(
+        task for task in runner_tasks if task["name"] == "Import reusable Debian worker packages"
+    )
+    assert runner_import["vars"]["local_worker_host_operator_user"] == (
+        "{{ live_vm_host_operator_user }}"
+    )
+
+
 def test_fedora_worker_packages_declare_a_container_runtime_behind_a_fedora_gate() -> None:
     """Fedora hosts need a runtime for the compose stack and testcontainers (#2505).
 

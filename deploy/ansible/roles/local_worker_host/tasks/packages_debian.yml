@@ -5,3 +5,49 @@
     state: present
     update_cache: true
   tags: [authority_prerequisites]
+
+- name: Prepare the native x86 Ubuntu kernel extractor
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - ansible_facts['architecture'] == 'x86_64'
+  block:
+    - name: Install headers matching the running kernel
+      ansible.builtin.apt:
+        name: "linux-headers-{{ ansible_kernel }}"
+        state: present
+        update_cache: true
+
+    - name: Inspect the matching header extractor
+      ansible.builtin.stat:
+        path: "/usr/src/linux-headers-{{ ansible_kernel }}/scripts/extract-vmlinux"
+      register: local_worker_host_extract_vmlinux
+
+    - name: Require the matching header extractor
+      ansible.builtin.assert:
+        that:
+          - local_worker_host_extract_vmlinux.stat.exists
+          - local_worker_host_extract_vmlinux.stat.executable
+        fail_msg: >-
+          linux-headers-{{ ansible_kernel }} did not provide an executable
+          scripts/extract-vmlinux; install matching headers or repair that package,
+          then reapply the runner role.
+
+    - name: Expose the running-kernel extractor on PATH
+      ansible.builtin.file:
+        src: "/usr/src/linux-headers-{{ ansible_kernel }}/scripts/extract-vmlinux"
+        dest: /usr/local/bin/extract-vmlinux
+        state: link
+
+    - name: Verify the operator can resolve the extractor
+      # runuser avoids Ansible's remote-temp ACL requirement when the standalone role uses
+      # connection: local and the controller becomes a second unprivileged account.
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/runuser
+          - -u
+          - "{{ local_worker_host_operator_user }}"
+          - --
+          - /usr/bin/bash
+          - -c
+          - 'command -v extract-vmlinux >/dev/null && test -x "$(command -v extract-vmlinux)"'
+      changed_when: false
