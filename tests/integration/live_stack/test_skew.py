@@ -33,6 +33,7 @@ from tests.integration.live_stack.skew import (
     ProcessSkew,
     RepoFacts,
     SkewPolicy,
+    SkewProbe,
     SkewVerdict,
     classify,
     partition,
@@ -349,19 +350,90 @@ def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
         return None
 
     base = "http://127.0.0.1:8000/mcp"
-    results = probe_stack_skew(base, fetch=nothing_answers)
+    probe = probe_stack_skew(base, fetch=nothing_answers, inventory=lambda: frozenset({101}))
+    results = probe.results
     assert {r.verdict for r in results} == {SkewVerdict.UNKNOWN}
     assert [r.process for r in results] == [
         "lifecycle-witness",
         "reconciler",
         "server",
         "worker",
+        "worker-inventory",
     ]
     # The injected transport is the one consulted, for every process — a `fetch` argument
     # accepted and then ignored would still satisfy the verdicts above on a host with no stack.
     # Derived from readyz_urls, which has its own tests: the port table is pinned there, and
     # restating it here would only redden two tests for one edit.
     assert probed == list(readyz_urls(base).values())
+
+
+@pytest.mark.parametrize(
+    ("snapshots", "expected_unknown"),
+    [
+        ((frozenset({101}), frozenset({101})), False),
+        ((frozenset({101, 102}), frozenset({101, 102})), True),
+        ((None, None), True),
+        ((frozenset({101}), frozenset({101, 102})), True),
+    ],
+)
+def test_probe_requires_coverage_of_stable_worker_inventory(
+    snapshots: tuple[frozenset[int] | None, frozenset[int] | None], expected_unknown: bool
+) -> None:
+    readings = iter(snapshots)
+
+    def fetch(_url: str) -> dict[str, object] | None:
+        return {"commit": _HEAD, "started_at": _STARTED_AT}
+
+    probe = probe_stack_skew(
+        _STACK_URL, facts=_facts(), fetch=fetch, inventory=lambda: next(readings)
+    )
+    assert (SkewVerdict.UNKNOWN in {result.verdict for result in probe.results}) is expected_unknown
+    assert probe.worker_pids == (None if expected_unknown else frozenset({101}))
+
+
+def test_probe_rejects_a_shared_bind_as_worker_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_HEALTH_BIND_ADDR", "127.0.0.1:7000")
+    probe = probe_stack_skew(
+        _STACK_URL,
+        facts=_facts(),
+        fetch=lambda _url: {"commit": _HEAD, "started_at": _STARTED_AT},
+        inventory=lambda: frozenset({101}),
+    )
+    assert any(
+        r.process == "worker-inventory" and r.verdict is SkewVerdict.UNKNOWN for r in probe.results
+    )
+    assert probe.worker_pids is None
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (" 101 python3 /opt/venv/bin/python3 -m kdive worker\n", frozenset({101})),
+        (
+            " 101 python3 /opt/venv/bin/python3 -m kdive worker\n"
+            " 102 python3 /opt/venv/bin/python3 -m kdive server\n"
+            " 103 bash bash -c python3 -m kdive worker\n",
+            frozenset({101}),
+        ),
+        (" 101 python3 /opt/venv/bin/python3 -m kdive worker --extra\n", frozenset()),
+        ("bad process row\n", None),
+        ("\n".join(f"{pid} python3 python3 -m kdive worker" for pid in range(9)), None),
+    ],
+)
+def test_worker_inventory_parses_only_exact_workers(
+    output: str, expected: frozenset[int] | None
+) -> None:
+    assert skew._parse_worker_pids(output) == expected
+
+
+def test_worker_inventory_returns_unknown_on_bounded_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(_self: object, _argv: object, *, byte_limit: int) -> str:
+        raise skew.SystemdUnavailable("ps timed out")
+
+    monkeypatch.setattr(skew.SubprocessCommandRunner, "run", fail)
+    assert skew.running_worker_pids() is None
 
 
 def test_repo_facts_describe_this_actual_checkout() -> None:
@@ -413,6 +485,7 @@ _STACK_URL = "http://127.0.0.1:8000/mcp"
 def stack_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
     monkeypatch.delenv(POLICY_ENV, raising=False)
+    monkeypatch.setattr(conftest, "running_worker_pids", lambda: frozenset({101}))
     conftest._SKEW_CACHE.clear()
     yield
     # Clear on the way out too: these tests seed the *real* conftest cache with fabricated
@@ -421,7 +494,7 @@ def stack_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def _fake_probe(*results: ProcessSkew) -> object:
-    return lambda _base_url: list(results)
+    return lambda _base_url: SkewProbe(list(results), frozenset({101}))
 
 
 def test_require_stack_skips_on_a_stale_restart(
@@ -471,15 +544,54 @@ def test_require_stack_probes_once_per_session(
     # HTTP requests per call.
     calls: list[str] = []
 
-    def counting(base_url: str) -> list[ProcessSkew]:
+    def counting(base_url: str) -> SkewProbe:
         calls.append(base_url)
-        return [ProcessSkew("server", SkewVerdict.FRESH, "ok")]
+        return SkewProbe([ProcessSkew("server", SkewVerdict.FRESH, "ok")], frozenset({101}))
 
     monkeypatch.setattr(conftest, "probe_stack_skew", counting)
     conftest.require_stack()
     conftest.require_stack()
     conftest.require_stack()
     assert calls == [_STACK_URL]
+
+
+def test_require_stack_reprobes_when_worker_fleet_changes(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def probe(base_url: str) -> SkewProbe:
+        calls.append(base_url)
+        if len(calls) == 1:
+            return SkewProbe([ProcessSkew("worker", SkewVerdict.FRESH, "ok")], frozenset({101}))
+        return SkewProbe(
+            [ProcessSkew("worker-inventory", SkewVerdict.UNKNOWN, "second worker unseen")], None
+        )
+
+    monkeypatch.setattr(conftest, "probe_stack_skew", probe)
+    monkeypatch.setattr(conftest, "running_worker_pids", lambda: frozenset({101, 102}))
+    assert conftest.require_stack() == _STACK_URL
+    with pytest.warns(UserWarning, match="second worker unseen"):
+        assert conftest.require_stack() == _STACK_URL
+    assert calls == [_STACK_URL, _STACK_URL]
+
+
+def test_require_stack_rechecks_worker_set_after_probe_was_cached(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fleet can change before cache insertion. The probe carries its validated PID set,
+    # so the next caller must compare against that set instead of an independent post-probe read.
+    calls: list[str] = []
+
+    def probe(base_url: str) -> SkewProbe:
+        calls.append(base_url)
+        return SkewProbe([ProcessSkew("worker", SkewVerdict.FRESH, "ok")], frozenset({101}))
+
+    monkeypatch.setattr(conftest, "probe_stack_skew", probe)
+    monkeypatch.setattr(conftest, "running_worker_pids", lambda: frozenset({101, 102}))
+    conftest.require_stack()
+    conftest.require_stack()
+    assert calls == [_STACK_URL, _STACK_URL]
 
 
 def test_policy_off_does_not_probe_at_all(stack_env: None, monkeypatch: pytest.MonkeyPatch) -> None:

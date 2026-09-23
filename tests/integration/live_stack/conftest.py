@@ -20,10 +20,11 @@ from kdive.diagnostics.contributions.guest_arch_accel import (
 from kdive.mcp.dev_harness import OidcIssuer, oidc_issuer_from_env
 from tests.integration.live_stack.skew import (
     POLICY_ENV,
-    ProcessSkew,
     SkewPolicy,
+    SkewProbe,
     partition,
     probe_stack_skew,
+    running_worker_pids,
     skew_policy,
 )
 
@@ -77,9 +78,9 @@ def require_stack() -> str:
     return base_url
 
 
-# Session-memoized per base URL: require_stack() is called from dozens of tests, and the skew
-# answer cannot change while the same processes keep running.
-_SKEW_CACHE: dict[str, list[ProcessSkew]] = {}
+# Keep the probe's validated worker identities with its verdicts. A new worker must invalidate
+# a fresh result rather than inherit the earlier worker's build.
+_SKEW_CACHE: dict[str, SkewProbe] = {}
 
 
 def _enforce_stack_freshness(base_url: str) -> None:
@@ -87,9 +88,10 @@ def _enforce_stack_freshness(base_url: str) -> None:
     policy = skew_policy()
     if policy is SkewPolicy.OFF:
         return
-    if base_url not in _SKEW_CACHE:
+    cached = _SKEW_CACHE.get(base_url)
+    if cached is None or cached.worker_pids is None or running_worker_pids() != cached.worker_pids:
         _SKEW_CACHE[base_url] = probe_stack_skew(base_url)
-    skip, warn = partition(_SKEW_CACHE[base_url], policy)
+    skip, warn = partition(_SKEW_CACHE[base_url].results, policy)
     for result in warn:
         warnings.warn(f"live-stack version skew — {result}", stacklevel=3)
     if skip:

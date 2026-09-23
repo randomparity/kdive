@@ -789,17 +789,19 @@ outcome, not one standing in for the other. Both provisions still failed
 afterwards at baseline-kernel extraction, because the workspace venv has no
 `guestfs` binding; that is downstream of the fetch and does not affect the arm.
 
-One limit to record: the ADR-0482 skew preflight probes one worker. Its URL set is
-built from the registered per-process ports, so workers 2..N are outside it and a
-`fresh` verdict grades only worker 1 — tracked in
-[deferral record 0002](../../debt/0002-skew-preflight-probes-one-worker.md). On a
-multi-worker stack, run `scripts/live-stack/worker-lifecycle.sh diagnostics` from the
-configured KDIVE checkout and inspect each retained slot's invocation. See the
-[lifecycle command limits](../../../scripts/live-stack/README.md) and the
-[installed host contract](../../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract).
-The host script's build-stamps block grades only server/reconciler logs; it is not a
-per-worker freshness proof. The measurements above describe that dated experiment's
-workers and logs, not the current slot identity contract.
+The ADR-0482 skew preflight reads the host process table before and after probing.
+If it finds more running `python -m kdive worker` processes than worker builds it
+can probe, it reports `worker-inventory: unknown`; it cannot certify those
+workers as fresh. The same applies when the process table cannot be read or the
+worker set changes during the probe. A cached result is rechecked against the
+running worker set before reuse. This closes [deferral record 0002](../../debt/0002-skew-preflight-probes-one-worker.md).
+For a multi-worker stack, run `scripts/live-stack/worker-lifecycle.sh diagnostics`
+from the configured KDIVE checkout and inspect each retained slot's invocation.
+See the [lifecycle command limits](../../../scripts/live-stack/README.md) and
+the [installed host contract](../../../deploy/systemd/README.md#fixed-live-worker-lifecycle-contract).
+The host script's build-stamps block grades only server/reconciler logs; it is
+not a per-worker freshness proof. The measurements above describe that dated
+experiment's workers and logs, not the current slot identity contract.
 
 ## Hard-won quirks
 
