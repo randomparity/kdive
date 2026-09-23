@@ -25,8 +25,12 @@ tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError
 caught and converted to ``configuration_error`` envelopes; the latter's
 ``data.field_errors`` names each offending argument and its failure kind — the same
 detail a direct bind would raise — and ``data.accepted_fields`` additionally lists
-the tool's top-level keys. Both are included only when you could already see that
-tool through ``tools.search``; both are omitted otherwise.
+the tool's top-level keys. For a tool whose only parameter wraps a nested model (e.g.
+``artifacts.get(request: ArtifactsGetRequest)``), ``data.nested_accepted_fields`` also
+names that nested model's field names, and the envelope ``detail`` gives the exact
+``tools.search(names=[...], detail="full")`` follow-up call. All three are included
+only when you could already see that tool through ``tools.search``; all are omitted
+otherwise.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
