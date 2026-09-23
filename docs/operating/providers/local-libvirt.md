@@ -30,7 +30,10 @@ tracks aiming it at the operator's own host.
 1. Prepare the host: `examples/local-libvirt/install-host.sh`, then log out and back in so the new
    group memberships apply.
 2. Bring the stack up: `examples/local-libvirt/demo-up.sh` (idempotent; runs the preflight first).
-3. Build and register a guest image: `examples/local-libvirt/build-image.sh fedora-kdive-ready-44`.
+3. Build and register a guest image: `examples/local-libvirt/build-image.sh fedora-kdive-ready-44`
+   (`fedora-kdive-ready-44` is the x86_64 catalog entry; on a ppc64le host build
+   `fedora-kdive-ready-44-ppc64le` instead — `env.sh`'s `KDIVE_GUEST_IMAGE` default follows
+   `uname -m`).
 4. Mint a token and point an MCP client at the endpoint — see the
    [example walkthrough](../../../examples/local-libvirt/README.md#usage).
 5. [Onboard a project](../project-onboarding.md) with a budget and quota for anything beyond the

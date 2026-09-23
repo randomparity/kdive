@@ -3,6 +3,7 @@
 # local inventory so an MCP agent can provision it by catalog name. Idempotent per image.
 #
 #   examples/local-libvirt/build-image.sh fedora-kdive-ready-44 [debian-kdive-ready-13 ...]
+#   (fedora-kdive-ready-44 is the x86_64 entry; use fedora-kdive-ready-44-ppc64le on ppc64le)
 #
 # Per image: `python -m kdive build-fs --image NAME` publishes
 # /var/lib/kdive/rootfs/local/NAME.qcow2 (+ its provenance sidecar); on an SELinux-enforcing
@@ -21,7 +22,7 @@ source "${example_dir}/selinux-label.sh"
 
 if (($# == 0)); then
   echo "usage: build-image.sh CATALOG_IMAGE [CATALOG_IMAGE...]" >&2
-  echo "  catalog names: fixtures/local-libvirt/rootfs_catalog.toml (e.g. fedora-kdive-ready-44)" >&2
+  echo "  catalog names: fixtures/local-libvirt/rootfs_catalog.toml (e.g. fedora-kdive-ready-44 for x86_64, fedora-kdive-ready-44-ppc64le for ppc64le)" >&2
   exit 2
 fi
 
