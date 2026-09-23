@@ -39,8 +39,12 @@ require(
     "local_worker_host must install a root-resolvable uv (see #2665) before this play's own "
     "tasks run, or the lifecycle installer below fails on a host with only a user-local uv",
 )
-uv_task = yaml.safe_load((LOCAL_WORKER_HOST / "tasks/uv.yml").read_text())[0]
-uv_pip = uv_task.get("ansible.builtin.pip", {})
+uv_tasks_by_name = {
+    task["name"]: task for task in yaml.safe_load((LOCAL_WORKER_HOST / "tasks/uv.yml").read_text())
+}
+uv_pip = uv_tasks_by_name.get(
+    "Install uv system-wide (the venv builder; not in the debug toolchain)", {}
+).get("ansible.builtin.pip", {})
 require(
     uv_pip.get("name") == "uv" and uv_pip.get("state") == "present",
     "the shared uv install task local_worker_host imports no longer installs uv via pip",

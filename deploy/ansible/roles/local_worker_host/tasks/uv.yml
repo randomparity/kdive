@@ -7,13 +7,38 @@
 # which root's sudo secure_path does not list (#2506, #2665). pip installs the console script to
 # /usr/local/bin, which secure_path does list, so this converges both callers to a `uv` root can
 # resolve without duplicating the install task.
+- name: Probe whether the target interpreter's pip needs and accepts --break-system-packages
+  # PEP 668 (an EXTERNALLY-MANAGED marker in the interpreter's own stdlib directory) is what
+  # makes a plain system `pip install` refuse without the flag, and the flag itself is only a
+  # pip >= 23.0.1 option -- below that, pip errors on the unrecognized flag instead of ignoring
+  # it (#2682). This role's supported families do not pair the two the same way: Ubuntu 26.04
+  # and Debian carry both; EL9's system pip is 21.2.3 with no EXTERNALLY-MANAGED marker, so it
+  # needs neither the flag nor understands it. Probe the target interpreter itself with
+  # sysconfig rather than hardcoding a per-distro stdlib path.
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -c
+      - |
+        import os, sysconfig
+        try:
+            import pip
+            version = tuple(int(part) for part in pip.__version__.split('.')[:3])
+        except Exception:
+            version = (0, 0, 0)
+        marker = os.path.exists(os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED'))
+        print('true' if marker or version >= (23, 0, 1) else 'false')
+  register: local_worker_host_uv_break_system_packages
+  changed_when: false
+  check_mode: false
+
 - name: Install uv system-wide (the venv builder; not in the debug toolchain)
-  # --break-system-packages: on a PEP 668 externally-managed system Python (Ubuntu 26.04 among
-  # this role's supported families) a plain system `pip install` errors without it; the flag is
-  # accepted -- and a no-op where PEP 668 does not apply -- on pip >= 23, which python3-pip
-  # provides on all three supported families (packages_debian.yml, packages_redhat.yml,
-  # packages_suse.yml install it before this task runs).
+  # --break-system-packages: needed (PEP 668 applies) and/or accepted (pip >= 23.0.1) per the
+  # probe above -- never assumed across every supported family (#2682, see its comment).
   ansible.builtin.pip:
     name: uv
     state: present
-    extra_args: --break-system-packages
+    extra_args: >-
+      {{ '--break-system-packages' if local_worker_host_uv_break_system_packages.stdout == 'true'
+         else omit }}
