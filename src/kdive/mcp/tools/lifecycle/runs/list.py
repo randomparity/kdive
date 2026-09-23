@@ -37,6 +37,7 @@ _RUNS_LIST_TAG = "runs.list"
 class RunsListRequest:
     """Filter payload for ``runs.list``."""
 
+    project: str | None = None
     system_id: str | None = None
     investigation_id: str | None = None
     state: RunState | None = None
@@ -49,16 +50,30 @@ def _viewer_projects(ctx: RequestContext) -> list[str]:
     return [p for p in ctx.projects if ctx.roles.get(p) is not None]
 
 
+def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
+    """Narrow the caller's readable projects to ``project`` (``allocations.list`` pattern).
+
+    An unreadable ``project`` returns an empty list rather than an error, so the caller
+    gets the same empty collection an absent project would (no existence signal).
+    """
+    readable = _viewer_projects(ctx)
+    return readable if project is None else [project] if project in readable else []
+
+
 def _build_filters(
-    viewer_projects: list[str],
+    projects: list[str],
     *,
     system_id: str | None,
     investigation_id: str | None,
     state: RunState | None,
 ) -> tuple[list[Composable], list[object]] | ToolResponse:
-    """Translate filter args into SQL clauses + params, or a ``configuration_error``."""
+    """Translate filter args into SQL clauses + params, or a ``configuration_error``.
+
+    ``projects`` is the caller's readable projects, already narrowed by any ``project``
+    filter (:func:`_project_filter`).
+    """
     clauses: list[Composable] = [sql.SQL("project = ANY(%s)")]
-    params: list[object] = [viewer_projects]
+    params: list[object] = [projects]
     if system_id is not None:
         uid = _as_uuid(system_id)
         if uid is None:
@@ -82,16 +97,20 @@ async def list_runs(
     ctx: RequestContext,
     request: RunsListRequest,
 ) -> ToolResponse:
-    """List the caller's Runs, filterable by system, investigation, and state.
+    """List the caller's Runs, filterable by project, system, investigation, and state.
 
     Validation precedes scoping: a malformed filter or cursor is a ``configuration_error``
     regardless of the caller's project grants, so the error path never depends on what the
-    caller may see (ADR-0198). An empty viewer-project set then short-circuits to an empty
+    caller may see (ADR-0198). An empty narrowed-project set then short-circuits to an empty
     collection without a query.
+
+    Omit ``project`` to list every readable project. A supplied project narrows within that
+    set; an unreadable project returns an empty collection without revealing whether it
+    exists (matches ``allocations.list``).
     """
-    viewer_projects = _viewer_projects(ctx)
+    projects = _project_filter(ctx, request.project)
     filters = _build_filters(
-        viewer_projects,
+        projects,
         system_id=request.system_id,
         investigation_id=request.investigation_id,
         state=request.state,
@@ -107,7 +126,7 @@ async def list_runs(
         except InvalidCursor:
             return _invalid_cursor_error("runs")
     with bind_context(principal=ctx.principal):
-        if not viewer_projects:
+        if not projects:
             return _runs_collection([], truncated=False, next_cursor=None)
         if after is not None:
             clauses.append(sql.SQL("(created_at, id) < (%s, %s)"))

@@ -217,6 +217,56 @@ def test_filter_by_allocation_id(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_filter_by_project_narrows_results(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            await _seed_budget_quota(pool, "other")
+            res = await _seed_resource(pool)
+            mine = await _seed_allocation(pool, project="proj", resource_id=res)
+            theirs = await _seed_allocation(pool, project="other", resource_id=res)
+            my_sys = await _seed_system(pool, allocation_id=mine, project="proj")
+            await _seed_system(pool, allocation_id=theirs, project="other")
+            ctx = _ctx(projects=("proj", "other"))
+            resp = await _list_systems(pool, ctx, project="proj")
+        assert [r.object_id for r in resp.items] == [str(my_sys)]
+
+    asyncio.run(_run())
+
+
+def test_filter_by_project_unreadable_project_is_empty(migrated_url: str) -> None:
+    """A project outside the caller's readable set behaves like ``allocations.list`` (#2688)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, project="proj", resource_id=res)
+            await _seed_system(pool, allocation_id=alloc, project="proj")
+            resp = await _list_systems(pool, _ctx(projects=("proj",)), project="unreadable")
+        assert resp.status == "ok"
+        assert resp.items == []
+
+    asyncio.run(_run())
+
+
+def test_omitting_project_filter_lists_all_readable_projects(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            await _seed_budget_quota(pool, "other")
+            res = await _seed_resource(pool)
+            mine = await _seed_allocation(pool, project="proj", resource_id=res)
+            theirs = await _seed_allocation(pool, project="other", resource_id=res)
+            await _seed_system(pool, allocation_id=mine, project="proj")
+            await _seed_system(pool, allocation_id=theirs, project="other")
+            ctx = _ctx(projects=("proj", "other"))
+            resp = await _list_systems(pool, ctx)
+        assert len(resp.items) == 2
+
+    asyncio.run(_run())
+
+
 def test_filter_by_state(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

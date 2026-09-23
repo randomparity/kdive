@@ -116,6 +116,7 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 `request` fields:
 
+- `project` (`string (nullable)`, optional) — Optional project to narrow within the caller's readable projects; an unreadable project returns an empty collection. Omitted lists all readable projects.
 - `allocation_id` (`string (nullable)`, optional) — Only Systems under this Allocation id.
 - `state` (``provisioning`, `ready`, `reprovisioning`, `restoring`, `paused`, `crashing`, `crashed`, `tearing_down`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
 - `shape` (`string (nullable)`, optional) — Only Systems with this named shape, or '__custom__' for full-custom.

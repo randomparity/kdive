@@ -264,6 +264,43 @@ def test_filter_by_investigation_id(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_filter_by_project_narrows_results(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            mine = await _seed_run(pool, project="proj", state=RunState.RUNNING)
+            await _seed_run(pool, project="other", state=RunState.RUNNING)
+            ctx = _ctx(projects=("proj", "other"))
+            resp = await _list_runs(pool, ctx, project="proj")
+        assert [r.object_id for r in resp.items] == [str(mine)]
+
+    asyncio.run(_run())
+
+
+def test_filter_by_project_unreadable_project_is_empty(migrated_url: str) -> None:
+    """A project outside the caller's readable set behaves like ``allocations.list`` (#2688)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_run(pool, project="proj", state=RunState.RUNNING)
+            resp = await _list_runs(pool, _ctx(projects=("proj",)), project="unreadable")
+        assert resp.status == "ok"
+        assert resp.items == []
+
+    asyncio.run(_run())
+
+
+def test_omitting_project_filter_lists_all_readable_projects(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_run(pool, project="proj", state=RunState.RUNNING)
+            await _seed_run(pool, project="other", state=RunState.RUNNING)
+            ctx = _ctx(projects=("proj", "other"))
+            resp = await _list_runs(pool, ctx)
+        assert len(resp.items) == 2
+
+    asyncio.run(_run())
+
+
 def test_filter_by_state(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
