@@ -701,6 +701,51 @@ def uv_break_system_packages_probe_matches_host() -> None:
 
 uv_break_system_packages_probe_matches_host()
 print("ok uv: the PEP 668/pip-version probe matches this host's actual pip state")
+
+
+def uv_extra_args_resolves_both_branches() -> None:
+    """Render the pip task's actual extra_args template against a forced register value.
+
+    The earlier substring checks prove the template *mentions* the probe register and
+    `--break-system-packages`, but not which branch each register value takes -- an inverted
+    comparison (`== 'false'` instead of `== 'true'`) would still contain both substrings and
+    pass every prior check, yet add the flag exactly when the probe says it is not needed
+    (#2682). Rendering the exact extracted template through `debug.msg` -- itself a module
+    parameter, so Ansible's `omit` special-casing applies -- proves the sense of the
+    comparison without ever invoking the mutating pip task.
+    """
+    for stdout_value, expect_flag in (("true", True), ("false", False)):
+        with tempfile.TemporaryDirectory(prefix="kdive-uv-extra-args-") as temp_dir:
+            render_probe = Path(temp_dir) / "extra_args.yml"
+            render_probe.write_text(
+                yaml.safe_dump(
+                    [
+                        {
+                            "hosts": "localhost",
+                            "connection": "local",
+                            "gather_facts": False,
+                            "vars": {probe_register: {"stdout": stdout_value}},
+                            "tasks": [{"ansible.builtin.debug": {"msg": extra_args}}],
+                        }
+                    ]
+                )
+            )
+            result = playbook(render_probe)
+        require(
+            result.returncode == 0,
+            f"rendering extra_args with {probe_register}.stdout={stdout_value!r} failed:\n"
+            f"{result.stdout}",
+        )
+        rendered_flag = '"msg": "--break-system-packages"' in result.stdout
+        require(
+            rendered_flag == expect_flag,
+            f"extra_args with {probe_register}.stdout={stdout_value!r} must "
+            f"{'add' if expect_flag else 'omit'} --break-system-packages, got:\n{result.stdout}",
+        )
+
+
+uv_extra_args_resolves_both_branches()
+print("ok uv: extra_args adds --break-system-packages only when the probe says stdout == 'true'")
 # local_worker_host applies the task to itself, so the localhost local-libvirt play (which applies
 # this role directly, with no live_vm_host in its role list) gets a root-resolvable uv too --
 # the actual #2665 fix; the earlier "defined exactly once" check does not prove it is reachable.
