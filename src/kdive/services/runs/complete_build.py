@@ -293,6 +293,11 @@ class CompleteBuildFinalizer:
         with timer.phase("queue_wait"):
             await _EXTERNAL_BUILD_VALIDATION_SLOTS.acquire()
         try:
+            # A finalize for this Run on another connection can commit while this one waits
+            # for the slot; its recorded result answers this call without a scan (ADR-0675).
+            recorded = await _existing_build_result(conn, run_id)
+            if recorded is not None:
+                raise _CompleteBuildAlreadyRecorded(recorded)
             with timer.phase("scan"):
                 validated = await asyncio.to_thread(
                     self._validate_complete_build,

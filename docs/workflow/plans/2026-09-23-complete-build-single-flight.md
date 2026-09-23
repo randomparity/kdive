@@ -145,8 +145,15 @@ def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None
            early = await self._authorize(conn, ctx, uid, run_id)
        if early is not None:
            return early
-       return await self._join_or_start(pool, ctx, uid, run_id, build_id=build_id,
-                                        cmdline=cmdline, source_provenance=source_provenance)
+       return await self._join_or_start(
+           pool,
+           ctx,
+           uid,
+           run_id,
+           build_id=build_id,
+           cmdline=cmdline,
+           source_provenance=source_provenance,
+       )
    ```
 
    `_join_or_start`: `task = _IN_FLIGHT.get(uid)`; when `None` or `task.done()`,

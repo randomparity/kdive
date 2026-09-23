@@ -5,8 +5,8 @@ one run_steps 'build' row and one created → succeeded transition.  The per-Run
 advisory lock + ON CONFLICT DO NOTHING + WHERE state='created' UPDATE fence
 provide the guarantee; this test proves it against a live Postgres instance.
 
-Validation happens before the lock is acquired, so both racers may call the
-validator (calls==1 or calls==2 are both acceptable).  Only one racer finalizes.
+The handler runs one finalize per Run in a process (ADR-0675), so the second racer
+joins the first racer's finalize and the validator runs exactly once.
 """
 
 from __future__ import annotations
@@ -52,10 +52,9 @@ def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> N
             assert all(r.status == "succeeded" for r in results), (
                 f"Expected both results to succeed, got: {[r.status for r in results]}"
             )
-            assert validator.calls in (1, 2), (
-                "validator must run at least once and at most once per racer: "
-                f"both may validate before the lock, or the second may hit the "
-                f"idempotent short-read, but got {validator.calls} calls"
+            assert validator.calls == 1, (
+                f"the second racer must join the first racer's finalize, got {validator.calls} "
+                "validator calls"
             )
             async with conn_pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(

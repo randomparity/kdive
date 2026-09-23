@@ -79,6 +79,12 @@ from the Run and the artifact names, so a prompt re-mint of the same declaration
 what you already uploaded — but the reaper deletes a lapsed window's uncommitted objects
 within a sweep, so assume you will have to re-upload unless the retry succeeds.
 
+A large bundle can take longer to validate than your client's request timeout. The
+finalize keeps running when your request times out: call `runs.complete_build` again for
+the same Run. That call waits for the running finalize, or returns its recorded result,
+and does not start the validation again. A call that joins a running finalize gets that
+finalize's answer, whatever its own arguments.
+
 Do not re-mint while a finalize is still running: re-minting replaces the window that
 finalize is validating, so it is rejected with `reason: "upload_window_replaced"`. Wait
 for the finalize to answer, then act on what it says.

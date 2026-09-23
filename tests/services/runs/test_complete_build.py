@@ -537,6 +537,51 @@ def test_complete_build_finalizer_returns_recorded_success_after_reassembly_fail
     asyncio.run(_run())
 
 
+def test_recorded_result_after_slot_skips_validation(migrated_url: str) -> None:
+    """A finalize queued behind the scan slot returns a result recorded while it waited (#2680).
+
+    The test holds the slot, so a recorded-result check placed before the slot sees nothing and
+    only the check after it can return without a scan.
+    """
+    slots = complete_build_service._EXTERNAL_BUILD_VALIDATION_SLOTS
+
+    async def _queued(task: asyncio.Task[BuildStepResult]) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10.0
+        while not slots._waiters:
+            assert not task.done(), "the finalize finished before it reached the slot"
+            assert loop.time() < deadline, "the finalize never queued on the slot"
+            await asyncio.sleep(0.01)
+
+    async def _run() -> None:
+        async with complete_build_support.pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+            recorded = BuildStepResult(
+                kernel_ref="recorded/kernel", debuginfo_ref=None, build_id="recorded-build"
+            )
+
+            def unexpected_validator(*args: object, **kwargs: object) -> NoReturn:
+                del args, kwargs
+                raise AssertionError("recorded success must bypass validation")
+
+            await slots.acquire()
+            try:
+                task = asyncio.create_task(
+                    complete_build(
+                        pool,
+                        run_id,
+                        CompleteBuildFinalizer(validate_complete_build=unexpected_validator),
+                    )
+                )
+                await _queued(task)
+                await _record_build_step(pool, run_id, recorded)
+            finally:
+                slots.release()
+            assert await task == recorded
+
+    asyncio.run(_run())
+
+
 async def _complete_swallowing_failure(
     pool: AsyncConnectionPool,
     run_id: Any,
@@ -983,6 +1028,17 @@ def test_real_completion_finalizer_and_install_do_not_cycle(
     async def keep_manifest(*args, **kwargs) -> None:
         del args, kwargs
 
+    original_recorded = complete_build_service._existing_build_result
+    recorded_reads = 0
+
+    async def miss_post_slot_recheck(conn, run_id):
+        # The post-slot recheck (ADR-0675) answers this replay before any lock. Model a commit
+        # that lands after that recheck, as a finalize on another replica can, so the replay
+        # still reaches the dual-lock publication path this test is about.
+        nonlocal recorded_reads
+        recorded_reads += 1
+        return None if recorded_reads == 1 else await original_recorded(conn, run_id)
+
     async def replay_completion(finalizer, stale_created_run):
         async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
             return await finalizer.complete(
@@ -1004,6 +1060,9 @@ def test_real_completion_finalizer_and_install_do_not_cycle(
                 patched.setattr(upload_manifest, "delete_manifest", keep_manifest)
                 await complete_build(pool, run_id, finalizer)
                 patched.setattr(complete_build_service, "advisory_xact_lock", paused_lock)
+                patched.setattr(
+                    complete_build_service, "_existing_build_result", miss_post_slot_recheck
+                )
                 replay = asyncio.create_task(replay_completion(finalizer, stale_created_run))
                 await acquired.wait()
                 install = asyncio.create_task(
