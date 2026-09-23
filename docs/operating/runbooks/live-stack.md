@@ -362,6 +362,12 @@ excludes every `kdive-live-worker@N.service` instance from `needrestart`'s autom
 restart-on-upgrade tooling, can still hit this trigger and needs the recovery below; other
 distros ship no `needrestart` default and need no equivalent file.
 
+That exclusion is a tradeoff, not a free fix: `needrestart` is also how an operator normally
+learns a running worker still has an old, now-patched shared library (glibc, libssl, …) mapped
+in memory after a security update. These units no longer get that signal, so recycle worker
+slots periodically through the existing lifecycle (stop/start) as routine maintenance rather
+than waiting for `needrestart` to flag one.
+
 **Read the cause first.** The client prints one JSON line, so pipe it:
 
 ```bash
