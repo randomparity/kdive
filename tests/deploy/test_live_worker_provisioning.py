@@ -2246,11 +2246,13 @@ def test_local_play_external_boot_capacity_fits_typical_free_space() -> None:
     assert isinstance(concurrent, int)
     # Issue #2664 measured this many available bytes with the gate's df command, on an Ubuntu
     # 26.04.1 POWER9 host with a 196 GB root filesystem -- a typical developer/lab host, not the
-    # self-hosted runner #2563 sized for.
+    # self-hosted runner #2563 sized for. 3 is the value the issue reports actually let
+    # provisioning proceed there, leaving headroom for the gate's per-run recheck as the host
+    # fills.
     measured_free_bytes = 141_997_105_152
     assert capacity_bytes * concurrent <= measured_free_bytes
-    assert concurrent == 4
-    assert capacity_bytes * concurrent == 128 * 1024**3
+    assert concurrent == 3
+    assert capacity_bytes * concurrent == 96 * 1024**3
     # The shared role default and the runner override (#2563) are untouched by this local-play
     # fix.
     assert defaults["live_vm_host_external_boot_concurrent_activations"] == 8

@@ -254,12 +254,22 @@ membership takes effect, then run `just check-local-libvirt`. Do not use `exampl
 second installer; it only calls this recipe for compatibility with the example walkthrough.
 
 The play's external-boot recovery capacity gate reserves
-`live_vm_host_external_boot_concurrent_activations` (4 by default here, 128 GiB at 32 GiB each)
+`live_vm_host_external_boot_concurrent_activations` (3 by default here, 96 GiB at 32 GiB each)
 free bytes per worker slot, sized for a typical developer or lab host rather than the
-self-hosted CI runner's own override. A host with less free space than that fails the gate with
-the byte counts it needs; lower the count by passing an extra `-e` to `ansible-playbook`
-directly (bypassing the `just` recipe, which does not forward extra arguments), for example
-`-e live_vm_host_external_boot_concurrent_activations=2`.
+self-hosted CI runner's own override. The gate's failure message names no byte counts; compute
+the requirement yourself as 32 GiB times the knob's value, compared against
+`df -B1 --output=avail` on each worker's recovery root
+(`/var/lib/kdive/live-workers/external-boot-recovery/<worker>`). A host with less free space than
+that needs a lower value, passed as an extra `-e` on the full recipe invocation (the `just`
+recipe itself does not forward extra arguments):
+
+```bash
+export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL='<witness database URL>'
+ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
+  ansible-playbook deploy/ansible/playbooks/local-libvirt-host.yml --ask-become-pass \
+  -e "local_libvirt_host_operator_user=${USER:?set USER to the operator account}" \
+  -e live_vm_host_external_boot_concurrent_activations=2
+```
 
 | Family | Host-preparation status | Limits and proof strength |
 |---|---|---|
