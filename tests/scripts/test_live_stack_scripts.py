@@ -2474,7 +2474,7 @@ def test_provision_queue_diagnostics_prints_exact_complete_tsv(tmp_path: Path) -
     assert result.stdout == (
         "system_id\tsystem_state\tjob_id\tdispatch_lane\tjob_state\tattempt\tworker_id\t"
         "enqueued_at\tlast_heartbeat_at\tlease_expires_at\n"
-        f"{system_id}\tprovisioning\t{job_id}\tdefault\trunning\t3\tNONE\t"
+        "sys-R1\tprovisioning\tjob-R1\tdefault\trunning\t3\tNONE\t"
         "2026-08-26T12:00:00+00:00\t2026-08-26T12:00:02+00:00\tNONE\n"
     )
     assert result.stderr == ""
@@ -2766,7 +2766,7 @@ def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> Non
             "ready": False,
             "checks": {
                 "postgres": True,
-                "seaweedfs": True,
+                "minio": True,
                 "capture_bootstrap_manifest": False,
                 "capture_recovery": True,
             },
@@ -2791,7 +2791,7 @@ def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> Non
     assert result.returncode == 0
     assert result.stderr == ""
     assert result.stdout == (
-        "worker_readiness ready=false postgres=true seaweedfs=true "
+        "worker_readiness ready=false postgres=true minio=true "
         "capture_bootstrap_manifest=false capture_recovery=true\n"
     )
     assert "version" not in result.stdout

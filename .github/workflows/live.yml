@@ -807,7 +807,28 @@ jobs:
           # KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
+          # A fixed worker that fails readiness never dequeues the provision job. Check its
+          # loopback listener before mint, and expose only the filter's component booleans.
+          # Bound startup retries so persistent host drift fails here rather than after 15 min.
+          readiness_line=""
+          for attempt in {1..10}; do
+            if readiness_line="$({
+              curl --silent --connect-timeout 2 --max-time 4 --max-filesize 4096 \
+                http://127.0.0.1:9465/readyz |
+                python3 scripts/live-stack/filter-worker-readiness-evidence.py
+            } 2>/dev/null)" && [[ "$readiness_line" == "worker_readiness ready=true "* ]]; then
+              echo "$readiness_line"
+              break
+            fi
+            if ((attempt == 10)); then
+              echo "${readiness_line:-worker readiness evidence unavailable}" >&2
+              echo "fixed worker unready before System mint; see docs/operating/runbooks/self-hosted-kvm-runner.md" >&2
+              exit 1
+            fi
+            sleep 2
+          done
           # Keep the published URI exported for mint, preflight and pytest; env.sh honors it.
+          export KDIVE_PROVISION_EVIDENCE_TARGET="$RUNNER_TEMP/kdive-provision-evidence.target"
           KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
           export KDIVE_LIVE_VM_SYSTEM_ID
           # env.sh exports no KDIVE_GUEST_IMAGE (#2518), so once this job reaches pytest again the
@@ -848,6 +869,44 @@ jobs:
           exit "$rc"
           KDIVE_NATIVE_SPINE
           exec /bin/bash -e -u -o pipefail "$RUNNER_TEMP/spine-native.sh"
+
+      - name: Capture persisted provision boundary
+        if: always()
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          evidence_status=0
+          timeout --signal=TERM --kill-after=2s 12s \
+            scripts/live-stack/provision-queue-diagnostics.sh \
+            "$RUNNER_TEMP/kdive-provision-evidence.target" || evidence_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((evidence_status != 0)); then
+            echo "provision boundary evidence unavailable" >&2
+          fi
+          exit 0
+
+      - name: Capture worker readiness components
+        if: always()
+        # The fixed slot-1 listener is loopback-only and its /readyz body contains component
+        # booleans plus build identity. Bound the request, then pass it through an exact-shape
+        # filter that emits only the four non-secret booleans. This distinguishes a pre-dequeue
+        # readiness stall without exposing exception text, environment, paths, or credentials.
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          readiness_status=0
+          {
+            curl --silent --show-error --connect-timeout 2 --max-time 8 --max-filesize 4096 \
+              http://127.0.0.1:9465/readyz |
+              python3 scripts/live-stack/filter-worker-readiness-evidence.py
+          } 2>/dev/null || readiness_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((readiness_status != 0)); then
+            echo "worker readiness evidence unavailable" >&2
+          fi
+          exit 0
 
       - name: Capture worker lifecycle diagnostics
         if: failure() || cancelled()

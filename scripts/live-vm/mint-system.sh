@@ -82,6 +82,7 @@ KDIVE_STACK_BASE_URL="$KDIVE_STACK_BASE_URL" \
 import asyncio
 import os
 import sys
+from uuid import UUID
 
 from kdive.mcp.dev_harness import LiveStackClient
 
@@ -157,6 +158,19 @@ async def main() -> int:
             print("systems.provision returned no data.system_id", file=sys.stderr)
             return 1
 
+        evidence_target = os.environ.get("KDIVE_PROVISION_EVIDENCE_TARGET")
+        if evidence_target:
+            try:
+                record = f"{UUID(prov.object_id)}\t{UUID(system_id)}\n".encode("ascii")
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                fd = os.open(evidence_target, flags, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(record)
+            except (OSError, TypeError, ValueError):
+                print("provision evidence capture failed; check private target and response IDs", file=sys.stderr)
+                return 1
+
         for _ in range(180):  # poll up to ~15 min (native KVM boot); the tcg deadline is generous
             env = _scalar(await client.call_tool("systems.get", system_id=system_id))
             # systems.get overloads the envelope's own .status with the System state (spine.py:134
@@ -168,7 +182,7 @@ async def main() -> int:
                 print(f"systems.get {env.status}: {env.error_category} — {env.detail}", file=sys.stderr)
                 return 1
             await asyncio.sleep(5)
-        print(f"System {system_id} did not reach ready in time", file=sys.stderr)
+        print("System did not reach ready in time", file=sys.stderr)
         return 1
 
 

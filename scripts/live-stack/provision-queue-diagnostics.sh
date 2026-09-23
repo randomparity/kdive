@@ -179,13 +179,13 @@ try:
         raise ValueError
     worker = "NONE" if row[6] is None else matched_text(row[6], _WORKER)
     values = [
-        str(system_id),
+        "sys-R1",
         exact_text(row[1], _SYSTEM_STATES),
-        str(job_id),
+        "job-R1",
         matched_text(row[3], _LANE),
         exact_text(row[4], _JOB_STATES),
         str(attempt),
-        worker,
+        "NONE" if worker == "NONE" else "worker-R1",
         timestamp(row[7]),
         timestamp(row[8]),
         timestamp(row[9]),

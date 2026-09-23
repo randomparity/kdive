@@ -393,6 +393,12 @@ refresh cannot swap the artifacts out from under an in-flight domain.
 
 ## Maintenance
 
+- **After a package replaces an attested system library**, the fixed worker may report
+  `capture_bootstrap_manifest=false` and leave provision jobs queued without an attempt. The
+  native workflow checks that worker's readiness before System mint. Reapply
+  `playbooks/runner.yml --limit <host>` through the documented runner provisioning path; the
+  `live_vm_host` role rebuilds and verifies the root-owned manifest as the fixed worker. Confirm
+  `/readyz` reports `ready=true` before dispatching the native tier again.
 - **After a kernel upgrade**, nothing is needed: `playbooks/runner.yml` installs an
   `/etc/kernel/postinst.d` hook that re-applies `0640 root:kvm` to `/boot/vmlinuz-*` as each new
   kernel is installed (ADR-0668). A new kernel ships `0600 root:root`, which would otherwise fail
