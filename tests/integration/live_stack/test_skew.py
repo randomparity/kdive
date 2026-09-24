@@ -18,6 +18,8 @@ import warnings
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import uvicorn
@@ -456,6 +458,40 @@ def test_pytest_header_lists_probed_revisions(
     assert "worker=unknown" in header[0]
     assert "lifecycle-witness=not deployed" in header[0]
     assert conftest._HEADER_PROBES[_STACK_URL].revisions["server"] == _HEAD
+
+
+def test_quiet_pytest_reports_and_retains_initial_revisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.delenv(POLICY_ENV, raising=False)
+    monkeypatch.setattr(
+        integration_conftest,
+        "probe_stack_skew",
+        lambda _url: SkewProbe(
+            [ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")],
+            frozenset({101}),
+            {"worker": None},
+        ),
+    )
+    lines: list[str] = []
+    reporter = SimpleNamespace(write_line=lines.append)
+    manager = SimpleNamespace(get_plugin=lambda _name: reporter)
+    config = SimpleNamespace(option=SimpleNamespace(verbose=-1), pluginmanager=manager)
+    integration_conftest.pytest_sessionstart(cast(pytest.Session, SimpleNamespace(config=config)))
+    assert "worker=unknown" in lines[0]
+    assert conftest._HEADER_PROBES[_STACK_URL].results[0].verdict is SkewVerdict.UNKNOWN
+
+
+def test_header_does_not_probe_when_policy_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.setenv(POLICY_ENV, "off")
+
+    def fail(_url: str) -> SkewProbe:
+        raise AssertionError("off policy must not probe")
+
+    monkeypatch.setattr(integration_conftest, "probe_stack_skew", fail)
+    assert integration_conftest.pytest_report_header() == []
 
 
 def test_probe_enforces_skew_on_a_deployed_witness() -> None:

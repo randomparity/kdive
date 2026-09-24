@@ -12,6 +12,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.auth import RequestContext
@@ -20,16 +21,29 @@ from kdive.security.authz.rbac import Role
 # Re-export the disposable-Postgres fixtures so the integration tests can request them.
 from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url  # noqa: F401
 from tests.integration.live_stack import conftest as stack_conftest
-from tests.integration.live_stack.skew import probe_stack_skew
+from tests.integration.live_stack.skew import SkewPolicy, probe_stack_skew, skew_policy
 from tests.store.conftest import minio_store  # noqa: F401
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Capture the first stack revision even when pytest suppresses its header with ``-q``."""
+    base_url = os.environ.get("KDIVE_STACK_BASE_URL")
+    if not base_url or skew_policy() is SkewPolicy.OFF:
+        return
+    stack_conftest._HEADER_PROBES[base_url] = probe_stack_skew(base_url)
+    if session.config.option.verbose < 0:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            for line in pytest_report_header():
+                reporter.write_line(line)
 
 
 def pytest_report_header() -> list[str]:
     """Include probed app revisions in a live-stack proof's pytest header (#2752)."""
     base_url = os.environ.get("KDIVE_STACK_BASE_URL")
-    if not base_url:
+    if not base_url or skew_policy() is SkewPolicy.OFF:
         return []
-    probe = probe_stack_skew(base_url)
+    probe = stack_conftest._HEADER_PROBES.get(base_url) or probe_stack_skew(base_url)
     stack_conftest._HEADER_PROBES[base_url] = probe
     revisions = [
         f"{result.process}="

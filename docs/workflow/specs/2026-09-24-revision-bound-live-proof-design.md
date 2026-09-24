@@ -30,8 +30,10 @@ absent Kubernetes-only lifecycle witness is inapplicable.
 The revision-bound proof command sets `KDIVE_STACK_SKEW_POLICY=strict` for
 its entire run. The existing preflight skips that proof for any non-fresh
 applicable process. Ordinary callers retain the default policy.
-The skew probe retains each process's reported commit in its result, and the
-integration pytest report header lists those values when a stack URL is set.
+The skew probe retains each process's reported commit in its result. A pytest
+session hook captures the initial probe even under quiet output; verbose runs
+use the report-header hook, and quiet runs print the same line at session
+start. `KDIVE_STACK_SKEW_POLICY=off` performs no reporting probe.
 For a strict proof, admission requires both the header probe and a new probe
 at each test gate to be fresh. A stack that becomes fresh only after the header
 cannot pass under a header naming its earlier revision; rerun pytest to make
@@ -54,5 +56,7 @@ remain separately owned exclusions.
   even if a later admission probe would be fresh.
 - Focused test: a server revision change with unchanged worker PIDs is
   detected by a later strict admission probe.
+- Focused test: quiet pytest captures and prints the initial revisions;
+  `off` never probes for reporting.
 - Documentation: inspect the runbook instruction and examples against the
   implemented API and recipe.
