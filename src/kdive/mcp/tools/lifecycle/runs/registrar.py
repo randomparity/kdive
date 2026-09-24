@@ -53,6 +53,13 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 class _RunsListPayload(ToolPayload):
     """Public payload for ``runs.list`` filters and pagination."""
 
+    project: str | None = Field(
+        default=None,
+        description=(
+            "Optional project to narrow within the caller's readable projects; an unreadable "
+            "project returns an empty collection. Omitted lists all readable projects."
+        ),
+    )
     system_id: str | None = Field(default=None, description="Only Runs bound to this System id.")
     investigation_id: str | None = Field(
         default=None, description="Only Runs under this Investigation id."
@@ -69,6 +76,7 @@ class _RunsListPayload(ToolPayload):
     def to_list_request(self) -> _RunsListRequest:
         """Convert the public MCP payload into the handler request record."""
         return _RunsListRequest(
+            project=self.project,
             system_id=self.system_id,
             investigation_id=self.investigation_id,
             state=self.state,

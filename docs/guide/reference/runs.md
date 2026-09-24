@@ -255,6 +255,7 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 `request` fields:
 
+- `project` (`string (nullable)`, optional) — Optional project to narrow within the caller's readable projects; an unreadable project returns an empty collection. Omitted lists all readable projects.
 - `system_id` (`string (nullable)`, optional) — Only Runs bound to this System id.
 - `investigation_id` (`string (nullable)`, optional) — Only Runs under this Investigation id.
 - `state` (``created`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only Runs in this build-phase state.
