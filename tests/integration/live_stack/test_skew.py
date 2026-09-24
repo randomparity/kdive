@@ -365,6 +365,9 @@ def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
     # Derived from readyz_urls, which has its own tests: the port table is pinned there, and
     # restating it here would only redden two tests for one edit.
     assert probed == list(readyz_urls(base).values())
+    witness = next(result for result in results if result.process == "lifecycle-witness")
+    assert "not deployed" in witness.detail
+    assert "Kubernetes" in witness.detail
 
 
 @pytest.mark.parametrize(

@@ -412,13 +412,12 @@ def probe_stack_skew(
     for process, url in readyz_urls(base_url).items():
         version = fetch(url)
         if version is None:
-            results.append(
-                ProcessSkew(
-                    process,
-                    SkewVerdict.UNKNOWN,
-                    f"no build reported at {url} (process down, or predates ADR-0482)",
-                )
+            detail = (
+                "not deployed in the portable three-role stack (Kubernetes-only role)"
+                if process == "lifecycle-witness"
+                else f"no build reported at {url} (process down, or predates ADR-0482)"
             )
+            results.append(ProcessSkew(process, SkewVerdict.UNKNOWN, detail))
             continue
         if process == "worker":
             reported_workers += 1
