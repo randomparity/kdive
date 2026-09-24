@@ -46,5 +46,5 @@ anonymous folio.
 
 ## Caveats
 
-No crash. Live gdbstub debug is not yet proven on ppc64le guests (tracked by #2678); run the `debug.*`
+No crash. Live gdbstub debug is not yet proven on ppc64le guests (tracked by #2736); run the `debug.*`
 part on an x86_64 host.
