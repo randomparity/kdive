@@ -138,8 +138,9 @@ class CompleteBuildHandlers:
         """Await the Run's running finalize, starting one when none is running (ADR-0675).
 
         A joiner gets the running finalize's response even when its own arguments differ, as a
-        call after the commit gets the recorded result. ``shield`` keeps a cancelled caller from
-        cancelling the finalize the other callers share.
+        call after the commit gets the recorded result. ``wait`` keeps a cancelled caller from
+        cancelling the finalize the other callers share; unlike ``shield``, it leaves ``_forget``
+        the only reporter of a failure no caller awaits any more.
         """
         task = _IN_FLIGHT.get(uid)
         if task is None or task.done():
@@ -159,7 +160,8 @@ class CompleteBuildHandlers:
             task.add_done_callback(partial(_forget, uid))
         else:
             _log.info("runs.complete_build joined the in-flight finalize for run %s", uid)
-        return await asyncio.shield(task)
+        await asyncio.wait((task,))
+        return task.result()
 
     async def _finalize(
         self,
