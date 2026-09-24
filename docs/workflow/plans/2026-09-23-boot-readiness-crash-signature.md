@@ -51,12 +51,17 @@ crash_signature: str | None = None)`;
 None, crash_signature: str | None = None) -> dict[str, object]`.
 
 Verification:
-- Contract: a crashed console scan sets `crash_signature`. Mode: focused-test. Test
-  `test_external_boot_readiness_crash_reports_signature` in `test_session_mechanisms.py`: window
-  reads `b"booting\n"`, `b"UBSAN: shift-out-of-bounds in x.c:1:2\n"`, domain exited; expect
-  `ReadinessResult(True, False, None, "UBSAN:")`. Red: result lacks the field (TypeError on a
-  4-arg construction). Green: `uv run pytest
-  tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py -k readiness -q`.
+- Contract: the console scan sets `crash_signature` on the Run booter's probe. Mode:
+  focused-test. In `test_install.py`: `test_scan_result_crashed_carries_signature` (UBSAN line →
+  `ReadinessResult(True, False, None, "UBSAN:")`), `test_scan_result_ready_and_pending_carry_none`
+  (marker → ok result with `None`; pending running → `None`; pending exited → `None` signature),
+  and `test_real_readiness_crash_reports_signature` (monkeypatch `readiness_mod.read_console_log`
+  to return the UBSAN line, as the existing `_real_readiness` tests do; expect
+  `.crash_signature == "UBSAN:"`). Red: `ImportError` on `_scan_result`. Green: `uv run pytest
+  tests/providers/local_libvirt/test_install.py -k "scan_result or real_readiness" -q`.
+- Contract: the external-boot probe keeps its verdicts and now carries the literal. Mode:
+  focused-test. The two updated tests in Step 4. Green: `uv run pytest
+  tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py -q`.
 - Contract: the booter puts the signature in `details` and the worker persists it. Mode:
   focused-test. Test `test_boot_readiness_failure_carries_crash_signature` in `test_install.py`:
   `_Readiness(answered=True, ok=False, crash_signature="UBSAN:")`; expect
@@ -67,7 +72,7 @@ Verification:
   "boot_readiness_failure or boot_timeout or verdict_to_result" -q`.
 
 Steps:
-1. Add the two tests; add a `crash_signature: str | None = None` field to the `_Readiness`
+1. Add the tests above; add a `crash_signature: str | None = None` field to the `_Readiness`
    fake and pass it into `ReadinessResult`. Run; expect red.
 2. In `readiness.py` add the trailing `ReadinessResult` field; extend `_verdict_to_result`:
 
@@ -130,16 +135,19 @@ Verification:
   `test_failed_boot_attempt_reads_crash_signature` (`"UBSAN:"` → `"UBSAN:"`) and
   `test_failed_boot_attempt_drops_unknown_crash_signature` (`"rm -rf"` → `None`). Red:
   `AttributeError`. Green: `uv run pytest tests/mcp/lifecycle/test_runs_tools.py -k
-  "failed_boot_attempt or boot_readiness or readiness_failure" -q`.
+  "failed_boot_attempt or boot_readiness or readiness_failure or declared_panic or detail" -q`.
 - Contract: `runs.get` renders signature and `detail` per the spec table. Mode: focused-test.
   `test_get_run_declared_panic_with_ubsan_signature` (declared `panic`, `readiness_failure`,
   signature `UBSAN:`) expects `observed_crash_signature == "UBSAN:"`, `detail ==` the crash
-  sentence naming `panic`, `expected_crash_matched is False`;
+  sentence plus the declared `panic` clause, `expected_crash_matched is False`;
   `test_get_run_declared_panic_silent_timeout` (`boot_timeout`, no context) expects `None` and
-  the timeout sentence; `test_envelope_for_run_boot_failure_detail_without_signature`
-  parametrizes the `readiness_failure` and `null`-category sentences. Update
-  `test_get_run_surfaces_failed_boot_attempt` and `test_failed_boot_attempt_surfaces_failed_job`
-  for the added keys. The unchanged success path is held by the existing
+  the timeout sentence plus the `panic` clause;
+  `test_envelope_for_run_boot_failure_detail_without_signature` parametrizes the
+  `readiness_failure` and `null`-category sentences with no expectation (no clause);
+  `test_envelope_for_run_boot_failure_detail_names_console_crash_pattern` declares
+  `{"kind": "console_crash", "pattern": "my oops"}` and expects the clause to name `my oops`.
+  Update `test_get_run_surfaces_failed_boot_attempt`, `test_failed_boot_attempt_surfaces_failed_job`
+  and `test_failed_boot_attempt_null_category` for the added keys. The unchanged success path is held by the existing
   `test_get_run_no_boot_readiness_when_boot_succeeded`. Same green command.
 - Contract: agent-facing docstring and generated reference name both fields. Mode:
   focused-test. `just docs-check` fails red if the reference is stale; green after `just docs`.
@@ -164,8 +172,10 @@ Steps:
    ```
 
 4. `common.py`: `_boot_readiness_data` sets `data["detail"] = _boot_failure_detail(run,
-   boot_readiness)`; `_boot_failure_detail` returns the spec table's sentences, reading the
-   declared kind as `run.expected_boot_failure.get("kind")` when it is a `str`.
+   boot_readiness)`; `_boot_failure_detail` returns the spec table's sentence and, when the Run
+   declared an expectation, appends ``; the declared `K` crash was not recorded as matched``
+   with `K` = the `pattern` string for kind `console_crash`, else the `kind` string; no clause
+   when that value is not a `str`.
 5. `registrar.py`: extend the Boot-failure paragraph of the `runs.get` docstring with
    `observed_crash_signature` and `detail`; run `just docs`.
 6. Run the green commands, `just lint`, `just type`; commit

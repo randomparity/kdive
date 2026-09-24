@@ -50,17 +50,22 @@ full-matches the existing `_CRASH_SIGNATURE` regex. Any other value reads as `No
 `as_data()` adds the `observed_crash_signature` key.
 
 **MCP read model.** `_boot_readiness_data` adds `detail` from `(signature, error_category,
-declared kind)`:
+declared expectation)`:
 
 | Signature | Category | `detail` |
 |---|---|---|
-| `S` | any | ``crash signature `S` observed before the readiness marker`` + with a declared kind `K`: ``; the declared `K` pattern was not matched in the captured boot console`` |
+| `S` | any | ``crash signature `S` observed before the readiness marker`` |
 | none | `boot_timeout` | `no crash signature was recorded before the readiness deadline; the guest did not become ready in the boot window` |
 | none | `readiness_failure` | `no crash signature was recorded; the guest stopped or failed a run-readiness check before becoming ready` |
 | none | other or `null` | `no crash signature was recorded for this boot failure` |
 
-`K` is the declared expectation's `kind` string. The null cases say "recorded", not "observed":
-a provider that does not scan (remote-libvirt) stores nothing and must not read as a clean scan.
+When the Run declared an expectation, every row gains ``; the declared `K` crash was not
+recorded as matched``, where `K` is the preset `kind` (`panic`, `oops`, `hung_task`, `ubsan`) or,
+for `console_crash`, the stored `pattern` literal; a declaration with neither a string `kind`
+nor, for `console_crash`, a string `pattern` adds no clause. The clause states only what the
+failed job records: it makes no claim that a console was captured or searched. The null cases
+say "recorded", not "observed": a provider that does not scan (remote-libvirt) stores nothing
+and must not read as a clean scan.
 
 Persisting the signature (rather than re-scanning the console at read time) is the only option
 that keeps `runs.get` from reading an object-store artifact per call; the scanner already ran,
@@ -77,6 +82,11 @@ and ADR-0594 set the precedent for carrying a closed scalar through `details`.
 3. **Accepted failure classes**
    - Remote-libvirt and window-continuity failures (`_ConsoleWindowFailure`) record no signature;
      they report `null` and a "not recorded" detail, which is true.
+   - The external-boot session and the system-authority readiness probe compute the signature
+     but consume only success/`ok`; their failures never become a Run boot job, so nothing is
+     lost on `runs.get`.
+   - When console capture fails, the declared clause still reads "not recorded as matched",
+     which is what the job records.
    - A failed boot job written before this change has no `failure_detail_crash_signature`; it
      reads as `null`.
    - The signature reflects the pre-marker readiness scan, not the full captured console.
@@ -85,12 +95,14 @@ and ADR-0594 set the precedent for carrying a closed scalar through `details`.
 
 ## Testing
 
-- Readiness: a `CRASHED` console yields `crash_signature == "UBSAN:"`; `READY`/`PENDING` yield
-  `None`; `classify_console` verdicts unchanged.
+- Readiness: `_scan_result` on a `CRASHED` console yields `crash_signature == "UBSAN:"`;
+  `READY`/`PENDING` yield `None`; `_real_readiness` (the Run booter's probe) returns the
+  signature; `classify_console` verdicts unchanged.
 - Booter: an answered-failed readiness with a signature puts `crash_signature` in `details`; a
   timeout does not.
 - Service: `failed_boot_attempt` reads a valid signature from `failure_context` and drops an
   unknown value.
 - `runs.get`: declared `panic` + `UBSAN:` job → signature and the crash detail; declared `panic`
-  + `boot_timeout` with no signature → `null` and the timeout detail; the existing
+  + `boot_timeout` with no signature → `null` and the timeout detail, both ending in the declared
+  `panic` clause; no expectation → no clause; the existing
   `expected_crash_observed` success path shows no `boot_readiness`.
