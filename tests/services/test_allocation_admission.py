@@ -112,7 +112,11 @@ async def _seed_resource(
 
 
 async def _seed_allocation(
-    conn: psycopg.AsyncConnection, resource_id: UUID, state: AllocationState
+    conn: psycopg.AsyncConnection,
+    resource_id: UUID,
+    state: AllocationState,
+    *,
+    project: str = "proj",
 ) -> Allocation:
     return await ALLOCATIONS.insert(
         conn,
@@ -121,7 +125,7 @@ async def _seed_allocation(
             created_at=_DT,
             updated_at=_DT,
             principal="alice",
-            project="proj",
+            project=project,
             resource_id=resource_id,
             state=state,
         ),
@@ -296,6 +300,32 @@ def test_admit_at_cap_denies_with_no_rows(migrated_url: str) -> None:
             assert outcome.in_use == 1 and outcome.cap == 1
             assert await _count_allocs(conn) == 1  # no new row
             assert await _count_audit(conn) == 0  # no audit on denial
+
+    asyncio.run(_run())
+
+
+def test_admit_at_cap_breaks_down_by_project_and_state(migrated_url: str) -> None:
+    # #2687: `in_use` is host-wide across all projects; the denial's `details` carry a
+    # disclosure-safe breakdown — the requesting project's own count vs every other project's
+    # (summed, never naming the other project), and the same total split by occupying state.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn, cap=2)
+            await _seed_budget_quota(conn)
+            await _seed_allocation(conn, res.id, AllocationState.GRANTED, project="proj")
+            await _seed_allocation(conn, res.id, AllocationState.ACTIVE, project="other-team")
+            outcome = await _admit(conn, res)
+            assert outcome.granted is False
+            assert outcome.reason == "at_capacity"
+            assert outcome.in_use == 2
+            assert outcome.details["in_use_own_projects"] == 1
+            assert outcome.details["in_use_other_projects"] == 1
+            assert outcome.details["in_use_by_state"] == {
+                "granted": 1,
+                "active": 1,
+                "releasing": 0,
+            }
+            assert "other-team" not in str(outcome.details)
 
     asyncio.run(_run())
 
