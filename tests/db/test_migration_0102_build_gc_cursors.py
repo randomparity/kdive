@@ -18,7 +18,7 @@ def test_0102_is_retained_in_migration_history(pg_conn: psycopg.Connection) -> N
 def test_0102_precedes_worker_incarnation_migration() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(migration.version, migration.filename) for migration in migrations[-50:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-51:]] == [
         ("0103", "0103_worker_incarnations.sql"),
         ("0104", "0104_worker_fence_roles.sql"),
         ("0105", "0105_worker_fence_functions.sql"),
@@ -69,4 +69,5 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0153", "0153_system_tearing_down_state.sql"),
         ("0154", "0154_worker_image_catalog_insert.sql"),
         ("0155", "0155_recoverable_worker_incarnation_read.sql"),
+        ("0156", "0156_reconciler_audit_log_insert.sql"),
     ]
