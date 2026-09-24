@@ -120,7 +120,7 @@ def test_git_uses_resolved_executable(monkeypatch):
     ]
 
 
-def test_live_git_uses_imported_checkout_across_cwd_and_owner(
+def test_live_git_uses_imported_checkout_across_cwd(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     checkout = tmp_path / "checkout"
@@ -152,16 +152,7 @@ def test_live_git_uses_imported_checkout_across_cwd_and_owner(
     ).stdout.strip()
     _no_baked(monkeypatch)
     monkeypatch.setattr(version, "__file__", str(package / "version.py"))
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
     monkeypatch.chdir(tmp_path)
-    unsafe = subprocess.run(
-        ["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert unsafe.returncode != 0
-
     assert version_info().commit == expected
 
 

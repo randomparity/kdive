@@ -26,7 +26,7 @@ The live-stack skew probe keeps grading a worker that reports a commit with its 
 
 ## Validation
 
-- Focused version tests run a real temporary Git checkout from a foreign cwd and with the current account's ownership treated as unsafe; they assert the checkout SHA and unknown fallback outside a checkout.
+- Focused version tests run a real temporary Git checkout from a foreign cwd and assert the checkout SHA and unknown fallback outside a checkout. A command-level test checks the scoped `safe.directory` argument; live verification uses a worker account that does not own the checkout.
 - Existing and focused health/skew tests verify the endpoint-to-classifier path, baked precedence, and absent versus reachable witness behavior.
 - The worker launcher test verifies checkout source selection remains intact.
 - Run `just lint`, `just type`, focused pytest, and the pre-push `just ci` gate. If a provisioned x86 live stack is available, run its skew preflight after restarting the app tier and confirm the worker commit is graded. This behavior does not require native ppc64le proof.

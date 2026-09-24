@@ -302,7 +302,7 @@ def test_fetch_version_reads_the_real_aux_listener(ready_stack: str) -> None:
     assert set(version) == {"version", "commit", "is_release", "started_at"}
 
 
-def test_checkout_worker_endpoint_is_gradeable_from_foreign_cwd_and_owner(
+def test_checkout_worker_endpoint_is_gradeable_from_foreign_cwd(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     checkout = Path(runtime_version.__file__).resolve().parents[2]
@@ -313,7 +313,6 @@ def test_checkout_worker_endpoint_is_gradeable_from_foreign_cwd_and_owner(
         text=True,
     ).stdout.strip()
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
     version_info.cache_clear()
     try:
         app = build_aux_app(

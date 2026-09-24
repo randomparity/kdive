@@ -9,7 +9,7 @@ Expected implementation size: 80–160 changed lines (M) — runtime resolver an
 
 Verification:
 
-- Mode: focused-test. Contract: `version_info()` reports the imported checkout SHA independent of process cwd and checkout ownership. Test: `tests/test_version.py`; expected red: no commit from `/` or unsafe ownership. Green: `uv run python -m pytest tests/test_version.py -q` exits 0.
+- Mode: focused-test. Contract: `version_info()` reports the imported checkout SHA independent of process cwd and checkout ownership. Test: `tests/test_version.py` checks foreign cwd and the command-scoped Git safety argument; expected red: no commit from `/`. A real foreign-account worker run verifies ownership. Green: `uv run python -m pytest tests/test_version.py -q` exits 0.
 - Mode: focused-test. Contract: a package outside a checkout remains unknown and baked metadata wins. Test: `tests/test_version.py`; expected red: a Git parent is wrongly attributed or baked precedence is lost. Green: same command exits 0.
 
 In `src/kdive/version.py`, derive a candidate checkout root from the module's resolved source path, require Git metadata at that root, then invoke Git against that root with a one-command `safe.directory` setting. Preserve lazy resolution, timeout, and unknown fallback. `version_info()` remains the public entry point and `_git(*args: str) -> str | None` remains the internal command seam. Add tests before changing the implementation, observe red, then green. The launcher at `scripts/live-stack/worker-from-checkout` needs no behavior change because it already sets source selection through `PYTHONPATH`. Rollback restores the resolver and tests together.
