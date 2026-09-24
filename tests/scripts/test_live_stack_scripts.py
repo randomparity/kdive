@@ -4111,6 +4111,7 @@ def test_backends_stage_waits_only_on_the_long_running_backends(tmp_path: Path) 
     assert result.returncode == 0, result.stderr
     wait = [ln for ln in log.read_text().splitlines() if "--wait" in ln]
     assert len(wait) == 1, wait
+    assert "--no-recreate" in wait[0], wait[0]
     assert wait[0].endswith("postgres seaweedfs oidc"), wait[0]
     assert "seaweedfs-init" not in wait[0]
 

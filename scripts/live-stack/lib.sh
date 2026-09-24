@@ -47,7 +47,11 @@ live_stack_backends_up() {
   # Two of the three deployments are non-interactive CI actors that cannot run `docker compose
   # ps` themselves, and --wait's timeout names no service — where the postgres poll this
   # replaces named its own. Dump the table so the job log carries the same signal.
-  if ! docker compose up -d --wait --wait-timeout 120 "${KDIVE_BACKEND_LONG_RUNNING[@]}"; then
+  # The Postgres initdb bind source resolves to each checkout's absolute path. A second worktree
+  # changes Compose's hash and would recreate a healthy database; apply backend config/image
+  # changes explicitly with stack-down.sh before bringing it up again.
+  if ! docker compose up -d --no-recreate --wait --wait-timeout 120 \
+    "${KDIVE_BACKEND_LONG_RUNNING[@]}"; then
     docker compose ps >&2
     return 1
   fi
