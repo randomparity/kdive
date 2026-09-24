@@ -60,6 +60,7 @@ from tests.integration.live_stack.spine import (
     seed_metering,
     worker_libvirt_uri,
 )
+from tests.live_vm import require_native_guest_arch
 from tests.mcp.json_data import data_str
 
 pytestmark = pytest.mark.live_vm
@@ -114,10 +115,10 @@ def _token(issuer: OidcIssuer, *, role: str) -> str:
     return mint_role_token(issuer, project=_PROJECT, agent_session=_AGENT_SESSION, role=role)
 
 
-def _provision_profile() -> dict[str, object]:
+def _provision_profile(arch: str) -> dict[str, object]:
     return {
         "schema_version": 1,
-        "arch": "x86_64",
+        "arch": arch,
         "vcpu": 2,
         "memory_mb": 2048,
         "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -217,6 +218,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
        the proof marker — proving the boot-window snapshot cannot drift post-hoc.
     """
     issuer, base_url, db_url = _preflight()
+    arch = require_native_guest_arch()
     operator_token = _token(issuer, role="operator")
     # UUID hex: 32 hex chars, no special shell characters.
     proof_marker = f"CONSOLE-PARTS-PROOF-{uuid4().hex}"
@@ -250,7 +252,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                         op,
                         "systems.provision",
                         allocation_id=allocation_id,
-                        profile=_provision_profile(),
+                        profile=_provision_profile(arch),
                     ),
                     "provision",
                 )
@@ -277,7 +279,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                         **{
                             "investigation_id": investigation_id,
                             "system_id": system_id,
-                            "build_profile": build_profile(),
+                            "build_profile": build_profile(arch),
                         },
                     ),
                     "create-run",
@@ -285,7 +287,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                 run_id = env.object_id
 
             async with phase("upload-build"):
-                await build_and_upload_kernel(op, run_id=run_id)
+                await build_and_upload_kernel(op, run_id=run_id, arch=arch)
 
             for step in ("install", "boot"):
                 async with phase(step):

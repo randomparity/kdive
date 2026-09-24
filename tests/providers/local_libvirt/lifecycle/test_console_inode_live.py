@@ -21,7 +21,7 @@ import pytest
 
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.testing.live_vm import boot_throwaway_domain
-from tests.live_vm import require_live_vm_throwaway
+from tests.live_vm import require_live_vm_throwaway, require_native_guest_arch
 
 _STALE_MARKER = b"STALE-PRIOR-BOOT-MARKER\n"
 
@@ -32,6 +32,7 @@ def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
     tmp_path: Any,
 ) -> None:  # pragma: no cover - live_vm
     contract = require_live_vm_throwaway("qemu:///session", session_required=True)
+    arch = require_native_guest_arch()
     console = tmp_path / "console" / "throwaway.log"
     storage_module._prepare_console_log(console)
     inode_before = console.stat().st_ino
@@ -39,7 +40,7 @@ def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
 
     with boot_throwaway_domain(
         contract.rootfs,
-        arch="x86_64",
+        arch=arch,
         name=name,
         mode=contract.libvirt_uri,
         console_log=console,
@@ -63,7 +64,7 @@ def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
 
     with boot_throwaway_domain(
         contract.rootfs,
-        arch="x86_64",
+        arch=arch,
         name=name,
         mode=contract.libvirt_uri,
         console_log=console,

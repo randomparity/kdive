@@ -20,13 +20,14 @@ from typing import Any
 import pytest
 
 from kdive.testing.live_vm import boot_throwaway_domain
-from tests.live_vm import require_live_vm_throwaway
+from tests.live_vm import require_live_vm_throwaway, require_native_guest_arch
 
 
 @pytest.mark.live_vm
 @pytest.mark.live_vm_throwaway
 def test_live_vm_snapshotter_create_revert_resume_delete() -> None:  # pragma: no cover - live_vm
     contract = require_live_vm_throwaway("qemu:///system")
+    arch = require_native_guest_arch()
     try:
         import libvirt  # noqa: PLC0415  # operator-provided
     except ImportError:
@@ -44,7 +45,7 @@ def test_live_vm_snapshotter_create_revert_resume_delete() -> None:  # pragma: n
         prepare_console=lambda _name: None,
     )
     with boot_throwaway_domain(
-        contract.rootfs, arch="x86_64", name=name, mode=contract.libvirt_uri, settle_s=2.0
+        contract.rootfs, arch=arch, name=name, mode=contract.libvirt_uri, settle_s=2.0
     ) as live:
         dom: Any = live.domain  # the live libvirt virDomain (C-extension, no stubs)
 

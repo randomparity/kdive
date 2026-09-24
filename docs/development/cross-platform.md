@@ -101,6 +101,10 @@ POWER-specific host checks:
 - On POWER, supermin may read `/boot/vmlinux-*` rather than x86's `/boot/vmlinuz-*`. The
   `live_vm_host` role makes both patterns readable by the KVM group. Reapply provisioning after
   a host kernel update; an operator-root readability check does not prove worker access.
+- The native `live_vm` and spine proofs boot a guest of the host arch, so a POWER host runs them
+  as ppc64le guests. The
+  [live-testing runbook](../operating/runbooks/live-testing.md#live_vm-native--a-real-kernel-on-real-silicon)
+  lists which proofs do and which stay x86_64-only.
 - Image customization needs a workspace traversable by its QEMU identity. Use the
   [image-lifecycle permissions guidance](../operating/runbooks/image-lifecycle.md), and let
   provisioning own worker staging, console and overlay directories.
