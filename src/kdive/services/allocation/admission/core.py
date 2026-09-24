@@ -500,7 +500,9 @@ async def _count_occupying(
     other_projects = 0
     for state, is_own, count in rows:
         n = int(count)
-        by_state[str(state)] = by_state.get(str(state), 0) + n
+        # The WHERE clause already constrains `state` to OCCUPYING_ALLOCATION_STATE_VALUES, so
+        # every key is pre-seeded above; a bare `+=` is safe (no fallback default needed).
+        by_state[str(state)] += n
         if is_own:
             own_projects += n
         else:
