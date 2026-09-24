@@ -41,6 +41,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleVerdict,
     ProbeFailure,
     ReadinessResult,
+    _scan_result,
     _verdict_to_result,
     classify_console,
     first_crash_signature,
@@ -57,6 +58,7 @@ from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLI
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.steps import observed_crash_signature
 from tests.live_vm import require_live_vm_provisioned
 from tests.live_vm.console_actor import claim_console_inode
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
@@ -189,11 +191,17 @@ class _Readiness:
     answered: bool = True
     ok: bool = True
     probe_error: ProbeFailure | None = None
+    crash_signature: str | None = None
     calls: int = 0
 
     def readiness(self, system_id: UUID) -> ReadinessResult:
         self.calls += 1
-        return ReadinessResult(answered=self.answered, ok=self.ok, probe_error=self.probe_error)
+        return ReadinessResult(
+            answered=self.answered,
+            ok=self.ok,
+            probe_error=self.probe_error,
+            crash_signature=self.crash_signature,
+        )
 
 
 @dataclass
@@ -1157,6 +1165,49 @@ def test_boot_answered_but_failed_is_readiness_failure(tmp_path: Path) -> None:
     assert caught.value.category is ErrorCategory.READINESS_FAILURE
 
 
+def test_boot_readiness_failure_carries_crash_signature(tmp_path: Path) -> None:
+    # #2691: the matched pre-marker literal rides the error details, and the worker persists it
+    # as `failure_detail_crash_signature` on the failed boot job for `runs.get` to read back.
+    domain = _domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    seam = _Readiness(answered=True, ok=False, crash_signature="UBSAN:")
+    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        inst.boot(_SYS)
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.details["crash_signature"] == "UBSAN:"
+    context = _failure_context(caught.value, SecretRegistry())
+    assert context["failure_detail_crash_signature"] == "UBSAN:"
+
+
+def test_crash_signature_survives_worker_persistence_to_the_runs_read() -> None:
+    # #2691: pins the key coupling — the booter's `crash_signature` detail, prefixed by the
+    # worker's `_failure_context`, is exactly what the `runs.get` read path looks up.
+    error = CategorizedError(
+        "System booted but a run-readiness check failed",
+        category=ErrorCategory.READINESS_FAILURE,
+        details=LocalLibvirtBooter._boot_failure_details(_SYS, None, "UBSAN:"),
+    )
+    context = _failure_context(error, SecretRegistry())
+    assert observed_crash_signature(context) == "UBSAN:"
+
+
+def test_boot_failure_details_drop_a_non_vocabulary_signature() -> None:
+    # The write side fails closed: `jobs.get` publishes failure_context without a read filter.
+    details = LocalLibvirtBooter._boot_failure_details(_SYS, None, "arbitrary console text")
+    assert "crash_signature" not in details
+
+
+def test_boot_timeout_has_no_crash_signature(tmp_path: Path) -> None:
+    domain = _domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    inst = _install(conn=conn, seam=_Readiness(answered=False), staging_root=tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        inst.boot(_SYS)
+    assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
+    assert "crash_signature" not in caught.value.details
+
+
 def test_boot_create_error_is_retryable_infrastructure_failure(tmp_path: Path) -> None:
     # Same reasoning as defineXML: `create` is a libvirtd operation, not the in-guest install.
     domain = FakeDomain(
@@ -1634,6 +1685,31 @@ def test_verdict_to_result_pending_exited_is_answered_failure() -> None:
     assert _verdict_to_result(ConsoleVerdict.PENDING, exited=True) == ReadinessResult(
         answered=True, ok=False
     )
+
+
+_UBSAN_LINE = b"[    3.10] UBSAN: shift-out-of-bounds in kernel/foo.c:12:34\n"
+
+
+def test_scan_result_crashed_carries_signature() -> None:
+    # #2691: the literal the scanner matched survives onto the readiness result.
+    assert _scan_result(_UBSAN_LINE, exited=False) == ReadinessResult(True, False, None, "UBSAN:")
+
+
+def test_scan_result_ready_and_pending_carry_none() -> None:
+    assert _scan_result(b"kdive-ready\n", exited=False) == ReadinessResult(True, True)
+    assert _scan_result(b"booting\n", exited=False) is None
+    exited = _scan_result(b"booting\n", exited=True)
+    assert exited == ReadinessResult(True, False)
+    assert exited is not None and exited.crash_signature is None
+
+
+def test_real_readiness_crash_reports_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Run booter's probe (`LocalLibvirtInstall.from_env`) must carry the signature too.
+    monkeypatch.setattr(readiness_mod, "read_console_log", lambda path: _UBSAN_LINE)
+
+    result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+
+    assert result == ReadinessResult(True, False, None, "UBSAN:")
 
 
 def test_real_readiness_treats_missing_domain_as_terminal(

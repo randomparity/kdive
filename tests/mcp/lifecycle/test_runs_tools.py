@@ -952,6 +952,60 @@ def test_envelope_for_run_boot_failure_no_crash_key_without_expectation() -> Non
     assert "expected_crash_matched" not in readiness
 
 
+_NO_SIGNATURE_READINESS_DETAIL = (
+    "no crash signature was recorded; the guest stopped or failed a run-readiness check before "
+    "becoming ready"
+)
+
+
+@pytest.mark.parametrize(
+    ("category", "detail"),
+    [
+        (ErrorCategory.READINESS_FAILURE, _NO_SIGNATURE_READINESS_DETAIL),
+        (
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            "no crash signature was recorded for this boot failure",
+        ),
+        (None, "no crash signature was recorded for this boot failure"),
+    ],
+)
+def test_envelope_for_run_boot_failure_detail_without_signature(
+    category: ErrorCategory | None, detail: str
+) -> None:
+    # #2691: with no declared expectation there is no declared clause.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="pending", boot_outcome=None),
+        boot_readiness=run_steps.BootAttempt(job_id=uuid4(), error_category=category),
+    )
+    readiness = resp.data["boot_readiness"]
+    assert isinstance(readiness, dict)
+    assert readiness["observed_crash_signature"] is None
+    assert readiness["detail"] == detail
+
+
+def test_envelope_for_run_boot_failure_detail_names_console_crash_pattern() -> None:
+    # #2691: the custom lane has no preset name, so the clause names the declared literal.
+    resp = runs_common.envelope_for_run(
+        _run_model(
+            RunState.SUCCEEDED,
+            expected_boot_failure={"kind": "console_crash", "pattern": "my oops"},
+        ),
+        step_progress=StepProgress(install="succeeded", boot="pending", boot_outcome=None),
+        boot_readiness=run_steps.BootAttempt(
+            job_id=uuid4(),
+            error_category=ErrorCategory.READINESS_FAILURE,
+            observed_crash_signature="Oops:",
+        ),
+    )
+    readiness = resp.data["boot_readiness"]
+    assert isinstance(readiness, dict)
+    assert readiness["detail"] == (
+        "crash signature `Oops:` observed before the readiness marker"
+        "; the declared `my oops` crash was not recorded as matched"
+    )
+
+
 def test_envelope_for_run_surfaces_degraded_liveness() -> None:
     # A guest that livelocked after a ready boot reads state=degraded (#1237, ADR-0373).
     resp = runs_common.envelope_for_run(
@@ -1665,6 +1719,7 @@ async def _seed_boot_job(
     *,
     state: JobState,
     error_category: ErrorCategory | None = None,
+    failure_context: dict[str, str] | None = None,
 ) -> str:
     """Insert a boot job for ``run_id`` under its deterministic ``dedup_key`` (#750).
 
@@ -1675,8 +1730,8 @@ async def _seed_boot_job(
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO jobs (id, kind, payload, state, max_attempts, authorizing, dedup_key, "
-            "    error_category) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            "    error_category, failure_context) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 job_id,
                 JobKind.BOOT.value,
@@ -1686,6 +1741,7 @@ async def _seed_boot_job(
                 Jsonb({"principal": "user-1", "agent_session": "s", "project": "proj"}),
                 f"{run_id}:boot",
                 error_category.value if error_category is not None else None,
+                Jsonb(failure_context or {}),
             ),
         )
     return str(job_id)
@@ -1745,6 +1801,7 @@ def test_failed_boot_attempt_surfaces_failed_job(migrated_url: str) -> None:
             "job_id": job_id,
             "status": "failed",
             "error_category": "readiness_failure",
+            "observed_crash_signature": None,
         }
 
     asyncio.run(_run())
@@ -1763,7 +1820,32 @@ def test_failed_boot_attempt_null_category(migrated_url: str) -> None:
             "job_id": str(attempt.job_id),
             "status": "failed",
             "error_category": None,
+            "observed_crash_signature": None,
         }
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(("stored", "expected"), [("UBSAN:", "UBSAN:"), ("rm -rf /", None)])
+def test_failed_boot_attempt_reads_crash_signature(
+    migrated_url: str, stored: str, expected: str | None
+) -> None:
+    # #2691: a persisted signature is surfaced only when it is a literal the scanner can match.
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+                failure_context={"failure_detail_crash_signature": stored},
+            )
+            async with pool.connection() as conn:
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id), JobOperations())
+        assert attempt is not None
+        assert attempt.observed_crash_signature == expected
+        assert attempt.as_data()["observed_crash_signature"] == expected
 
     asyncio.run(_run())
 
@@ -1787,6 +1869,8 @@ def test_get_run_surfaces_failed_boot_attempt(migrated_url: str) -> None:
             "job_id": job_id,
             "status": "failed",
             "error_category": "readiness_failure",
+            "observed_crash_signature": None,
+            "detail": _NO_SIGNATURE_READINESS_DETAIL,
         }
 
     asyncio.run(_run())
@@ -1835,6 +1919,91 @@ def test_get_run_no_boot_readiness_when_boot_succeeded(migrated_url: str) -> Non
         assert "boot_readiness" not in resp.data
 
     asyncio.run(_run())
+
+
+def test_get_run_expected_crash_observed_has_no_boot_readiness(migrated_url: str) -> None:
+    # #2691: the matched expected-crash success path is unchanged — a succeeded boot step hides a
+    # stale failed boot job, even one that recorded a crash signature.
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool, run_id, "boot", "succeeded", {"boot_outcome": "expected_crash_observed"}
+            )
+            await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+                failure_context={"failure_detail_crash_signature": "Kernel panic"},
+            )
+            resp = await get_run(pool, ctx(), run_id)
+        assert resp.data["steps"]["boot"] == "succeeded"
+        assert "boot_readiness" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_get_run_declared_panic_with_ubsan_signature(migrated_url: str) -> None:
+    # #2691: declared `panic`, observed `UBSAN:` — a crash happened, but not the declared one.
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _declare_expected_boot_failure(pool, run_id, {"kind": "panic"})
+            await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+                failure_context={"failure_detail_crash_signature": "UBSAN:"},
+            )
+            resp = await get_run(pool, ctx(), run_id)
+        readiness = resp.data["boot_readiness"]
+        assert isinstance(readiness, dict)
+        assert readiness["observed_crash_signature"] == "UBSAN:"
+        assert readiness["detail"] == (
+            "crash signature `UBSAN:` observed before the readiness marker"
+            "; the declared `panic` crash was not recorded as matched"
+        )
+        assert readiness["expected_crash_matched"] is False
+
+    asyncio.run(_run())
+
+
+def test_get_run_declared_panic_silent_timeout(migrated_url: str) -> None:
+    # #2691: declared `panic`, no crash signature — the guest never became ready.
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _declare_expected_boot_failure(pool, run_id, {"kind": "panic"})
+            await _seed_boot_job(
+                pool, run_id, state=JobState.FAILED, error_category=ErrorCategory.BOOT_TIMEOUT
+            )
+            resp = await get_run(pool, ctx(), run_id)
+        readiness = resp.data["boot_readiness"]
+        assert isinstance(readiness, dict)
+        assert readiness["observed_crash_signature"] is None
+        assert readiness["detail"] == (
+            "no crash signature was recorded before the readiness deadline; the guest did not "
+            "become ready in the boot window; the declared `panic` crash was not recorded as "
+            "matched"
+        )
+        assert readiness["expected_crash_matched"] is False
+
+    asyncio.run(_run())
+
+
+async def _declare_expected_boot_failure(
+    pool: AsyncConnectionPool, run_id: str, expected: dict[str, str]
+) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE runs SET expected_boot_failure = %s WHERE id = %s",
+            (Jsonb(expected), UUID(run_id)),
+        )
 
 
 def test_get_booted_run_surfaces_console_ref(migrated_url: str) -> None:

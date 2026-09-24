@@ -56,6 +56,15 @@ def first_crash_signature(text: str) -> re.Match[str] | None:
     return _CRASH_SIGNATURE.search(text)
 
 
+def is_crash_signature(text: str) -> bool:
+    """True iff ``text`` is exactly a literal ``first_crash_signature`` matches (#2691).
+
+    Guards the read side of a persisted signature: a value outside the matcher's closed
+    vocabulary is not reported as an observed crash.
+    """
+    return _CRASH_SIGNATURE.fullmatch(text) is not None
+
+
 #: The custom-pattern kind: the caller supplies the literal ``pattern`` verbatim.
 CONSOLE_CRASH_KIND = "console_crash"
 
