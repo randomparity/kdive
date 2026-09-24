@@ -16,8 +16,8 @@ Systems (#488); the reverse direction has no pointer.
 
 `systems.get` returns the System's own `investigation_id`, the distinct investigation ids of
 its Runs as `run_investigation_ids` (every Run state, newest first, capped at 20, with a
-`run_investigation_ids_truncated` flag), and appends `runs.list` to its next actions, after ADR-0454's recovery actions on a `failed` System.
-`runs.list(system_id=…)` stays the one paginated read of the Runs themselves.
+`run_investigation_ids_truncated` flag), and appends `runs.list` to its next actions, after
+ADR-0454's recovery actions on a `failed` System. `runs.list(system_id=…)` stays the one paginated read of the Runs themselves.
 `investigation_id` also appears on `systems.list` items because it is a row column; the
 investigation list stays get-only.
 
