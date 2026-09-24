@@ -16,7 +16,11 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import Loca
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.ports.external_boot import RunningKernelObservation
 from kdive.testing.live_vm import boot_gdbstub_domain, create_overlay
-from tests.live_vm import require_live_vm_bzimage, require_live_vm_throwaway
+from tests.live_vm import (
+    require_live_vm_bzimage,
+    require_live_vm_throwaway,
+    require_native_guest_arch,
+)
 from tests.support.domain_ownership import drop_ownership_metadata
 
 
@@ -25,6 +29,7 @@ from tests.support.domain_ownership import drop_ownership_metadata
 def test_live_local_observer_returns_exact_running_cmdline() -> None:
     rootfs = require_live_vm_throwaway("qemu:///system")
     kernel = require_live_vm_bzimage("qemu:///system")
+    arch = require_native_guest_arch()
     overlay = rootfs.rootfs.with_name(f"kdive-cmdline-live-{uuid4().hex[:12]}.qcow2")
     console = overlay.with_suffix(".log")
     create_overlay(rootfs.rootfs, overlay)
@@ -37,6 +42,7 @@ def test_live_local_observer_returns_exact_running_cmdline() -> None:
             _optional_initramfs(kernel.bzimage),
             _free_port(),
             console,
+            arch,
         )
         with boot_gdbstub_domain(xml, uri=rootfs.libvirt_uri, wait_for="active") as live:
             observation = _await_observation(LocalRunningObserver(), system_id, live.domain)
@@ -56,11 +62,12 @@ def _transient_xml(
     initramfs: Path | None,
     ssh_port: int,
     console: Path,
+    arch: str,
 ) -> str:
     profile = ProvisioningProfile.parse(
         {
             "schema_version": 1,
-            "arch": "x86_64",
+            "arch": arch,
             "vcpu": 2,
             "memory_mb": 1024,
             "disk_gb": 6,
@@ -68,7 +75,6 @@ def _transient_xml(
             "kernel_source_ref": "git+https://kernel.invalid/linux.git#live-proof",
             "provider": {
                 "local-libvirt": {
-                    "domain_xml_params": {"machine": "pc-q35-9.0"},
                     "rootfs": {"kind": "local", "path": str(disk)},
                     "debug": {"gdbstub": False, "preserve_on_crash": False},
                 }
