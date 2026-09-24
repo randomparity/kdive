@@ -18,6 +18,7 @@ from tests.live_vm import (
     require_live_vm_storage_double,
     require_live_vm_throwaway,
     require_live_vm_vmlinux,
+    require_native_guest_arch,
     resolve_bzimage_contract,
     resolve_provisioned_contract,
     resolve_remote_contract,
@@ -654,3 +655,17 @@ def test_storage_double_latched_probe_still_honours_the_env_split(
 def test_storage_double_accepts_the_published_socket_uri_shape(uri: str) -> None:
     """The two values live.yml exports as KDIVE_LIBVIRT_URI before running this tier."""
     assert _is_local_session_uri(uri)
+
+
+@pytest.mark.parametrize("host_arch", ["x86_64", "ppc64le"])
+def test_native_guest_arch_is_the_supported_host_arch(
+    monkeypatch: pytest.MonkeyPatch, host_arch: str
+) -> None:
+    monkeypatch.setattr("platform.machine", lambda: host_arch)
+    assert require_native_guest_arch() == host_arch
+
+
+def test_native_guest_arch_skips_an_unsupported_host_arch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("platform.machine", lambda: "aarch64")
+    with pytest.raises(pytest.skip.Exception, match="'aarch64'"):
+        require_native_guest_arch()

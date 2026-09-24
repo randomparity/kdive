@@ -22,13 +22,14 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, QEMU_NS
 from kdive.providers.shared.runtime_paths import system_id_from_domain_name
 from kdive.testing.live_vm import boot_gdbstub_domain
-from tests.live_vm import require_live_vm_bzimage
+from tests.live_vm import require_live_vm_bzimage, require_native_guest_arch
 from tests.support.domain_ownership import drop_ownership_metadata
 
 _GDB_PORT = 51234
@@ -45,6 +46,7 @@ _DOMAIN_NAME_PREFIX = "kdive-preserve-live-"
 @pytest.mark.live_vm_throwaway
 def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pragma: no cover
     contract = require_live_vm_bzimage()
+    arch = require_native_guest_arch()
     try:
         import libvirt  # noqa: F401, PLC0415  # operator-provided; presence gates the live boot
     except ImportError:
@@ -56,7 +58,7 @@ def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pr
     console.write_text("")
 
     final_xml = _render_preserve_domain(
-        bzimage=contract.bzimage, disk=garbage_disk, console=console
+        bzimage=contract.bzimage, disk=garbage_disk, console=console, arch=arch
     )
 
     # The harness boot both proves libvirt accepts the new pvpanic + <on_crash>preserve</on_crash>
@@ -92,9 +94,11 @@ def test_preserve_domain_claims_no_production_ownership(tmp_path: Path) -> None:
     assert system_id_from_domain_name(name) is None, "name still reaps by convention"
 
 
-def test_preserve_domain_keeps_production_gdbstub_xml(tmp_path: Path) -> None:
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+def test_preserve_domain_keeps_production_gdbstub_xml(tmp_path: Path, arch: str) -> None:
     """Disowning the domain must remove only the claim, not the production XML under test."""
-    root = ET.fromstring(_rendered(tmp_path))  # noqa: S314 - kdive-rendered, trusted
+    root = ET.fromstring(_rendered(tmp_path, arch=arch))  # noqa: S314 - kdive-rendered, trusted
+    traits = arch_traits(arch)
 
     arg_path = f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg"
     args = [arg.get("value") for arg in root.findall(arg_path)]
@@ -104,7 +108,11 @@ def test_preserve_domain_keeps_production_gdbstub_xml(tmp_path: Path) -> None:
     assert root.find("./devices/panic[@model='pvpanic']") is not None
     assert root.findtext("on_crash") == "preserve"
     assert root.findtext("./os/kernel")
-    assert root.findtext("./os/cmdline")
+    assert f"console={traits.console_device} " in (root.findtext("./os/cmdline") or "")
+    # The machine comes from the arch traits, not a pinned versioned machine type (#2694).
+    os_type = root.find("./os/type")
+    assert os_type is not None
+    assert (os_type.get("arch"), os_type.get("machine")) == (arch, traits.machine)
     assert root.find("./devices/disk/source") is not None
     assert root.find("./devices/serial/log") is not None
 
@@ -114,12 +122,13 @@ def test_preserve_domain_name_is_unique_per_render(tmp_path: Path) -> None:
     assert _name_of(_rendered(tmp_path)) != _name_of(_rendered(tmp_path))
 
 
-def _rendered(tmp_path: Path) -> str:
+def _rendered(tmp_path: Path, *, arch: str = "x86_64") -> str:
     """The finished XML for the unmarked contract tests; the paths need not exist to render."""
     return _render_preserve_domain(
         bzimage=tmp_path / "bzImage",
         disk=tmp_path / "garbage.qcow2",
         console=tmp_path / "console.log",
+        arch=arch,
     )
 
 
@@ -129,7 +138,7 @@ def _name_of(xml: str) -> str:
     return name
 
 
-def _render_preserve_domain(*, bzimage: Path, disk: Path, console: Path) -> str:
+def _render_preserve_domain(*, bzimage: Path, disk: Path, console: Path, arch: str) -> str:
     """Render the production preserve+gdbstub XML, then adapt it for a transient live boot.
 
     Everything libvirt is being asked to accept stays production output: the pvpanic device,
@@ -137,7 +146,7 @@ def _render_preserve_domain(*, bzimage: Path, disk: Path, console: Path) -> str:
     Only the ownership claim and the boot-specific paths are rewritten — the direct-kernel
     ``<os>`` install.py adds in the full pipeline, and a writable serial log.
     """
-    profile = ProvisioningProfile.parse(_profile_data(disk))
+    profile = ProvisioningProfile.parse(_profile_data(disk, arch))
     base_xml = render_domain_xml(
         uuid4(),
         profile,
@@ -159,17 +168,18 @@ def _render_preserve_domain(*, bzimage: Path, disk: Path, console: Path) -> str:
     assert os_el is not None
     ET.SubElement(os_el, "kernel").text = str(bzimage)
     # No usable rootfs in the empty disk -> VFS panic; panic=0 halts (does not reboot).
-    ET.SubElement(os_el, "cmdline").text = "console=ttyS0 panic=0 root=/dev/vda"
+    console_device = arch_traits(arch).console_device
+    ET.SubElement(os_el, "cmdline").text = f"console={console_device} panic=0 root=/dev/vda"
     serial_log = root.find("./devices/serial/log")
     assert serial_log is not None
     serial_log.set("file", str(console))
     return ET.tostring(root, encoding="unicode")
 
 
-def _profile_data(disk: Path) -> dict[str, object]:
+def _profile_data(disk: Path, arch: str) -> dict[str, object]:
     return {
         "schema_version": 1,
-        "arch": "x86_64",
+        "arch": arch,
         "vcpu": 2,
         "memory_mb": 1024,
         "disk_gb": 5,
@@ -177,7 +187,6 @@ def _profile_data(disk: Path) -> dict[str, object]:
         "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
         "provider": {
             "local-libvirt": {
-                "domain_xml_params": {"machine": "pc-q35-9.0"},
                 "rootfs": {"kind": "local", "path": str(disk)},
                 "debug": {"gdbstub": True, "preserve_on_crash": True},
             }
