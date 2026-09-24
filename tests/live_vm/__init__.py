@@ -31,6 +31,7 @@ mis-provisioned runner and fails loud rather than skipping.
 from __future__ import annotations
 
 import os
+import platform
 from dataclasses import dataclass
 from enum import Enum
 from ipaddress import ip_address
@@ -39,6 +40,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 import libvirt
 import pytest
+
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 
 LIVE_VM_ROOTFS_ENV = "KDIVE_LIVE_VM_ROOTFS"
 LIVE_VM_BZIMAGE_ENV = "KDIVE_LIVE_VM_BZIMAGE"
@@ -446,6 +449,22 @@ def resolve_storage_double_contract(default_uri: str) -> EnvResolution[StorageDo
             ),
         )
     return EnvResolution(LiveVmEnvState.AVAILABLE, StorageDoubleContract(libvirt_uri=uri))
+
+
+def require_native_guest_arch() -> str:
+    """Return the guest arch a native KVM live test boots: the host's own, or skip.
+
+    A native tier guest runs under KVM, so its arch is the host's (the rule
+    ``scripts/live-vm/mint-system.sh`` follows). A host arch kdive cannot provision skips with that
+    arch named rather than defining a domain libvirt would refuse.
+    """
+    arch = platform.machine()
+    if arch not in SUPPORTED_ARCHES:
+        pytest.skip(
+            f"native live_vm guests boot the host arch; {arch!r} is not one of "
+            f"{sorted(SUPPORTED_ARCHES)}"
+        )
+    return arch
 
 
 def require_live_vm_throwaway(

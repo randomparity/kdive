@@ -320,6 +320,93 @@ def test_complete_build_finalizer_rejects_expired_single_put_manifest(migrated_u
     asyncio.run(_run())
 
 
+async def _declining_refresh(
+    conn: psycopg.AsyncConnection,
+    owner_kind: upload_manifest.UploadOwnerKind,
+    owner_id: Any,
+    ttl: timedelta,
+    *,
+    max_window: timedelta,
+    _real_refresh: Any = upload_manifest.refresh_deadline,
+) -> upload_manifest.WindowRefresh | None:
+    """Stand in for a locked ``refresh_deadline`` that finds the manifest already gone.
+
+    Deletes the row first, so the real ``refresh_deadline`` query — not an asserted value —
+    is what decides the returned ``None``: its ``UPDATE ... RETURNING`` matches no row once the
+    manifest is gone, exactly as when a concurrent finalize's commit removed it between this
+    finalize's manifest read and this locked refresh — the race #2696 reports — rather than only
+    an ordinary reap. ``_real_refresh`` is bound at definition time so a test's own
+    ``monkeypatch.setattr(upload_manifest, "refresh_deadline", ...)`` cannot recursively replace
+    it with itself.
+    """
+    await upload_manifest.delete_manifest(conn, owner_kind, owner_id)
+    return await _real_refresh(conn, owner_kind, owner_id, ttl, max_window=max_window)
+
+
+def test_complete_build_finalizer_rejects_missing_manifest_on_declined_chunk_refresh(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No recorded result: a declined chunked-window refresh still reports the manifest gone."""
+
+    async def _run() -> None:
+        async with complete_build_support.pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            store = _ChunkedStore()
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(build_output(run_id)),
+                object_store_factory=lambda: store,
+            )
+            with monkeypatch.context() as patched:
+                patched.setattr(upload_manifest, "refresh_deadline", _declining_refresh)
+                error = await _complete_config_error(pool, run_id, finalizer)
+
+        assert error.data == {"reason": "no_upload_manifest"}
+        assert store.events == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_returns_recorded_result_on_declined_chunk_refresh(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent finalize's commit can delete the manifest between two reads (#2696).
+
+    Models replica A committing — and its post-commit cleanup deleting the upload manifest —
+    between replica B's ``_prepare`` manifest read and B's locked ``refresh_deadline`` call: B
+    must return A's recorded result instead of raising ``NO_UPLOAD_MANIFEST`` and telling the
+    agent to re-mint and re-upload a build that already succeeded.
+    """
+    recorded = BuildStepResult(
+        kernel_ref="recorded/kernel", debuginfo_ref=None, build_id="recorded-build"
+    )
+
+    async def _run() -> None:
+        async with complete_build_support.pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            await _record_build_step(pool, run_id, recorded)
+            store = _ChunkedStore()
+
+            def unexpected_validator(*args: object, **kwargs: object) -> NoReturn:
+                del args, kwargs
+                raise AssertionError("recorded result must bypass validation")
+
+            with monkeypatch.context() as patched:
+                patched.setattr(upload_manifest, "refresh_deadline", _declining_refresh)
+                result = await complete_build(
+                    pool,
+                    run_id,
+                    CompleteBuildFinalizer(
+                        validate_complete_build=unexpected_validator,
+                        object_store_factory=lambda: store,
+                    ),
+                )
+
+        assert result == recorded
+        assert store.events == []  # never reassembled — the result was already recorded
+
+    asyncio.run(_run())
+
+
 def test_complete_build_finalizer_declines_when_reaper_wins_mid_validation(
     migrated_url: str,
 ) -> None:

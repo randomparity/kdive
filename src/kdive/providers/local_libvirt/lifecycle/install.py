@@ -45,6 +45,7 @@ from kdive.config.core_settings import INSTALL_SCRATCH, INSTALL_STAGING
 from kdive.config.registry import Setting
 from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.crash_signatures import is_crash_signature
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _RealGuestKernelWriter,
@@ -255,7 +256,9 @@ class LocalLibvirtBooter:
                 raise CategorizedError(
                     "System booted but a run-readiness check failed",
                     category=ErrorCategory.READINESS_FAILURE,
-                    details=self._boot_failure_details(system_id, first_probe_error),
+                    details=self._boot_failure_details(
+                        system_id, first_probe_error, result.crash_signature
+                    ),
                 )
         raise CategorizedError(
             "System did not become ready within the boot window",
@@ -265,12 +268,22 @@ class LocalLibvirtBooter:
 
     @staticmethod
     def _boot_failure_details(
-        system_id: UUID, first_probe_error: ProbeFailure | None
+        system_id: UUID,
+        first_probe_error: ProbeFailure | None,
+        crash_signature: str | None = None,
     ) -> dict[str, object]:
-        """The System plus a closed probe reason, rendered as a JSON scalar (ADR-0594)."""
+        """The System plus closed probe and crash reasons, as JSON scalars (ADR-0594, #2691).
+
+        ``crash_signature`` is the pre-marker crash literal the readiness scan matched; the
+        worker persists it as ``failure_detail_crash_signature`` for ``runs.get`` to read back.
+        Only a literal in the scanner's closed vocabulary is written, because ``jobs.get`` and
+        ``jobs.wait`` publish ``failure_context`` without a read-side filter.
+        """
         details: dict[str, object] = {"system_id": str(system_id)}
         if first_probe_error is not None:
             details["probe_error"] = first_probe_error.value
+        if crash_signature is not None and is_crash_signature(crash_signature):
+            details["crash_signature"] = crash_signature
         return details
 
 

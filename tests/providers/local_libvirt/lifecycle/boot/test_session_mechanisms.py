@@ -173,7 +173,7 @@ def test_prepared_window_discards_prior_marker_before_new_crash(
     finally:
         window.close()
 
-    assert result == ReadinessResult(True, False)
+    assert result == ReadinessResult(True, False, None, "Kernel panic")
 
 
 def test_external_boot_readiness_terminal_domain_gets_one_final_read() -> None:
@@ -186,7 +186,7 @@ def test_external_boot_readiness_terminal_domain_gets_one_final_read() -> None:
         domain_exit_probe=lambda _name: _DomainExitProbe(True),
     )
 
-    assert probe(SYSTEM_ID, window) == ReadinessResult(True, False)
+    assert probe(SYSTEM_ID, window) == ReadinessResult(True, False, None, "Kernel panic")
 
 
 def test_console_readiness_window_rejects_path_replacement(tmp_path: Path) -> None:

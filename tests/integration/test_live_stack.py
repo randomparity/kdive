@@ -39,6 +39,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.sizing import AllocationSizing
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.mcp.dev_harness import (
     LiveStackClient,
     OidcIssuer,
@@ -73,6 +74,7 @@ from tests.integration.live_stack.spine import (
     system_torn_down,
     worker_libvirt_uri,
 )
+from tests.live_vm import require_native_guest_arch
 from tests.mcp.json_data import data_mapping, data_str
 
 _GUEST_IMAGE_ENV = "KDIVE_GUEST_IMAGE"
@@ -187,11 +189,15 @@ def _token(issuer: OidcIssuer, *, role: str, platform_roles: list[str] | None = 
     )
 
 
-def _provision_profile() -> dict[str, object]:
-    """A provisioning profile that opts force_crash in (the gate's profile factor, ADR-0045)."""
+def _provision_profile(arch: str) -> dict[str, object]:
+    """A provisioning profile that opts force_crash in (the gate's profile factor, ADR-0045).
+
+    ``arch`` is the native guest arch (``require_native_guest_arch``); the kernel tree and image
+    are that arch's, and ``crashkernel`` is its trait default (#2694).
+    """
     return {
         "schema_version": 1,
-        "arch": "x86_64",
+        "arch": arch,
         "vcpu": 2,
         "memory_mb": 2048,
         "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -200,14 +206,14 @@ def _provision_profile() -> dict[str, object]:
         "provider": {
             "local-libvirt": {
                 "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
-                "crashkernel": "256M",
+                "crashkernel": arch_traits(arch).default_crashkernel,
                 "destructive_ops": ["force_crash"],
             }
         },
     }
 
 
-def _live_script_provision_profile() -> dict[str, object]:
+def _live_script_provision_profile(arch: str) -> dict[str, object]:
     """Provision profile for the online drgn-live path: no force_crash.
 
     drgn-live needs no credential provisioning (ADR-0315): the loopback SSH forward renders on
@@ -217,7 +223,7 @@ def _live_script_provision_profile() -> dict[str, object]:
     """
     return {
         "schema_version": 1,
-        "arch": "x86_64",
+        "arch": arch,
         "vcpu": 2,
         "memory_mb": 2048,
         "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -226,7 +232,7 @@ def _live_script_provision_profile() -> dict[str, object]:
         "provider": {
             "local-libvirt": {
                 "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
-                "crashkernel": "256M",
+                "crashkernel": arch_traits(arch).default_crashkernel,
             }
         },
     }
@@ -235,8 +241,9 @@ def _live_script_provision_profile() -> dict[str, object]:
 # --- non-gated unit tests (CI-runnable; pin the equality invariant, ADR-0205) ----------------
 
 
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
 def test_provision_profile_disk_gb_equals_allocation_request(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, arch: str
 ) -> None:
     """The spine's provision profile disk_gb equals the allocate request's (ADR-0205, #656).
 
@@ -253,8 +260,12 @@ def test_provision_profile_disk_gb_equals_allocation_request(
     """
     monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
     monkeypatch.setenv(_GUEST_IMAGE_ENV, "/nonexistent/guest-image.qcow2")
-    profile = _provision_profile()
+    profile = _provision_profile(arch)
     assert profile["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
+    # The spine provisions the native guest arch with that arch's crashkernel default (#2694).
+    assert profile["arch"] == arch
+    section = cast(dict[str, dict[str, object]], profile["provider"])["local-libvirt"]
+    assert section["crashkernel"] == arch_traits(arch).default_crashkernel
 
     snapshot = AllocationSizing(vcpu=2, memory_mb=2048, disk_gb=LOCAL_ALLOCATION_DISK_GB)
     reconciled = reconcile_profile_sizing(profile, snapshot)
@@ -368,6 +379,7 @@ def test_report_all_projects_denied_to_project_token() -> None:
 def test_spine_over_the_wire() -> None:
     """Drive allocate → … → teardown over HTTP; assert #1/#2/#3/#5; name the failing phase."""
     issuer, base_url, db_url = _spine_preflight()
+    arch = require_native_guest_arch()
     operator_token = _token(issuer, role="operator")
     admin_token = _token(issuer, role="admin")
     auditor_token = _token(issuer, role="viewer", platform_roles=["platform_auditor"])
@@ -407,7 +419,7 @@ def test_spine_over_the_wire() -> None:
                             op,
                             "systems.provision",
                             allocation_id=allocation_id,
-                            profile=_provision_profile(),
+                            profile=_provision_profile(arch),
                         ),
                         "provision",
                     )
@@ -430,13 +442,13 @@ def test_spine_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_id,
                             system_id=system_id,
-                            build_profile=build_profile(),
+                            build_profile=build_profile(arch),
                         ),
                         "create-run",
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id)
+                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -516,6 +528,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
     (install re-stages, boot re-runs — no re-upload). Self-cleans (release).
     """
     issuer, base_url, _ = _spine_preflight()
+    arch = require_native_guest_arch()
     operator_token = _token(issuer, role="operator")
 
     async def _run() -> None:
@@ -546,7 +559,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                             op,
                             "systems.provision",
                             allocation_id=allocation_id,
-                            profile=_provision_profile(),
+                            profile=_provision_profile(arch),
                         ),
                         "provision",
                     )
@@ -568,13 +581,13 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_id,
                             system_id=system_id,
-                            build_profile=build_profile(),
+                            build_profile=build_profile(arch),
                         ),
                         "create-run",
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id)
+                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
 
                 for variant in ("dhash_entries=1", "dhash_entries=2"):
                     async with phase(f"install:{variant}"):
@@ -618,6 +631,7 @@ def test_spine_live_script_over_the_wire() -> None:
     over-cap script is rejected before any guest send. Self-cleans (end_session + release).
     """
     issuer, base_url, db_url = _spine_preflight()
+    arch = require_native_guest_arch()
     operator_token = _token(issuer, role="operator")
 
     async def _run() -> None:
@@ -649,7 +663,7 @@ def test_spine_live_script_over_the_wire() -> None:
                             op,
                             "systems.provision",
                             allocation_id=allocation_id,
-                            profile=_live_script_provision_profile(),
+                            profile=_live_script_provision_profile(arch),
                         ),
                         "provision",
                     )
@@ -672,13 +686,13 @@ def test_spine_live_script_over_the_wire() -> None:
                             "runs.create",
                             investigation_id=investigation_id,
                             system_id=system_id,
-                            build_profile=build_profile(),
+                            build_profile=build_profile(arch),
                         ),
                         "create-run",
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id)
+                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)

@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import ErrorCategory
+from kdive.domain.lifecycle.crash_signatures import is_crash_signature
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import (
     BOOT_OUTCOME_READY,
@@ -282,6 +283,9 @@ class BootAttempt:
 
     job_id: UUID
     error_category: ErrorCategory | None
+    #: The pre-marker crash literal the provider's readiness scan matched, or ``None`` when the
+    #: failed job recorded none (#2691).
+    observed_crash_signature: str | None = None
 
     def as_data(self) -> dict[str, JsonValue]:
         """The fixed-key ``data.boot_readiness`` payload; ``status`` is always ``"failed"``."""
@@ -289,6 +293,7 @@ class BootAttempt:
             "job_id": str(self.job_id),
             "status": "failed",
             "error_category": self.error_category.value if self.error_category else None,
+            "observed_crash_signature": self.observed_crash_signature,
         }
 
 
@@ -305,7 +310,21 @@ async def failed_boot_attempt(
     job = await jobs.find_by_dedup_key(conn, f"{run_id}:boot")
     if job is None or job.state is not JobState.FAILED:
         return None
-    return BootAttempt(job_id=job.id, error_category=job.error_category)
+    return BootAttempt(
+        job_id=job.id,
+        error_category=job.error_category,
+        observed_crash_signature=observed_crash_signature(job.failure_context),
+    )
+
+
+def observed_crash_signature(failure_context: Mapping[str, JsonValue]) -> str | None:
+    """The booter's ``crash_signature`` detail as the worker persisted it, if valid (#2691).
+
+    The worker's ``_failure_context`` stores ``CategorizedError.details["crash_signature"]`` as
+    ``failure_detail_crash_signature``; a value outside the scanner's vocabulary reads as ``None``.
+    """
+    value = failure_context.get("failure_detail_crash_signature")
+    return value if isinstance(value, str) and is_crash_signature(value) else None
 
 
 _LATEST_BOOTED_RUN_SQL: LiteralString = (
