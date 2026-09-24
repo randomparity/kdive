@@ -327,16 +327,20 @@ async def _declining_refresh(
     ttl: timedelta,
     *,
     max_window: timedelta,
-) -> None:
+    _real_refresh: Any = upload_manifest.refresh_deadline,
+) -> upload_manifest.WindowRefresh | None:
     """Stand in for a locked ``refresh_deadline`` that finds the manifest already gone.
 
-    Deletes the row first, so the return value matches what the real function returns when a
-    concurrent finalize's commit removed it between this finalize's manifest read and this
-    locked refresh — the race #2696 reports — rather than only an ordinary reap.
+    Deletes the row first, so the real ``refresh_deadline`` query — not an asserted value —
+    is what decides the returned ``None``: its ``UPDATE ... RETURNING`` matches no row once the
+    manifest is gone, exactly as when a concurrent finalize's commit removed it between this
+    finalize's manifest read and this locked refresh — the race #2696 reports — rather than only
+    an ordinary reap. ``_real_refresh`` is bound at definition time so a test's own
+    ``monkeypatch.setattr(upload_manifest, "refresh_deadline", ...)`` cannot recursively replace
+    it with itself.
     """
-    del ttl, max_window
     await upload_manifest.delete_manifest(conn, owner_kind, owner_id)
-    return None
+    return await _real_refresh(conn, owner_kind, owner_id, ttl, max_window=max_window)
 
 
 def test_complete_build_finalizer_rejects_missing_manifest_on_declined_chunk_refresh(
