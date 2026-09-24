@@ -664,6 +664,25 @@ def test_strict_stack_rejects_fresh_admission_after_unknown_header(
         conftest.require_stack()
 
 
+def test_strict_stack_reprobes_server_with_unchanged_workers(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
+    conftest._HEADER_PROBES[_STACK_URL] = SkewProbe(
+        [ProcessSkew("server", SkewVerdict.FRESH, "running HEAD")], frozenset({101})
+    )
+    probes = iter(
+        [
+            SkewProbe([ProcessSkew("server", SkewVerdict.FRESH, "running HEAD")], frozenset({101})),
+            SkewProbe([ProcessSkew("server", SkewVerdict.UNKNOWN, "no commit")], frozenset({101})),
+        ]
+    )
+    monkeypatch.setattr(conftest, "probe_stack_skew", lambda _url: next(probes))
+    assert conftest.require_stack() == _STACK_URL
+    with pytest.raises(Skipped, match="server: unknown"):
+        conftest.require_stack()
+
+
 def test_default_stack_still_warns_on_unknown_worker(
     stack_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

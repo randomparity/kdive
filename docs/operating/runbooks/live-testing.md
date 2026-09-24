@@ -313,6 +313,8 @@ exercised process; a skipped proof is not a passing revision proof.
 The strict path checks both the header and test-admission probes. If a stack
 becomes fresh only after pytest prints its header, restart the proof run so
 the recorded revisions describe the run that passes.
+Strict admission probes each test gate, including when the worker PID set is
+unchanged, so a server or reconciler restart cannot reuse an earlier verdict.
 An absent `lifecycle-witness` is shown as `not deployed` in the portable
 three-role stack and does not block it. Check the header and passed/skipped
 counts before recording proof against a PR head.
