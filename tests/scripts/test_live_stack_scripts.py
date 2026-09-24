@@ -925,7 +925,11 @@ def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Source `script` and run `snippet` under exactly `env` (no ambient merge)."""
     return subprocess.run(
-        ["bash", "-c", f'before=$-\nsource "{script}" || exit $?\n{snippet}'],
+        [
+            "bash",
+            "-c",
+            f'set +e +u\nset +o pipefail\nbefore=$-\nsource "{script}" || exit $?\n{snippet}',
+        ],
         capture_output=True,
         text=True,
         check=False,
