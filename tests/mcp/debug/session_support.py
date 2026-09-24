@@ -63,23 +63,16 @@ PROFILE: dict[str, Any] = {
 _GDBSTUB_PROVEN_ARCHES = frozenset({"x86_64"})
 
 
-def live_host_arch() -> str:
-    """Resolve the host architecture a live gdbstub debug guest must match.
-
-    KVM refuses to define a guest whose ``<os type arch=...>`` differs from the host, so the live
-    debug tests take their guest arch from here rather than ``PROFILE``'s fixed ``x86_64`` (#2695).
-    """
-    return os.uname().machine
-
-
 def require_live_gdbstub_arch() -> str:
     """Resolve the host arch, skipping with a named reason where gdbstub debug is unproven.
 
-    ppc64le gdbstub/multiarch debug support is out of scope for #2695 (tracked by #2678); this
-    keeps the native live suite from failing -- rather than skipping -- on a host arch it cannot
-    yet validate.
+    KVM refuses to define a guest whose ``<os type arch=...>`` differs from the host, so the live
+    debug tests take their guest arch from ``os.uname()`` rather than ``PROFILE``'s fixed
+    ``x86_64`` (#2695). ppc64le gdbstub/multiarch debug support is out of scope for #2695
+    (tracked by #2678); this keeps the native live suite from failing -- rather than skipping --
+    on a host arch it cannot yet validate.
     """
-    arch = live_host_arch()
+    arch = os.uname().machine
     if arch not in _GDBSTUB_PROVEN_ARCHES:
         pytest.skip(
             f"native gdbstub debug live tests are unproven on {arch!r} guests "
