@@ -632,17 +632,17 @@ def test_require_stack_warns_but_runs_when_merely_behind(
         assert conftest.require_stack() == _STACK_URL
 
 
-def test_revision_bound_stack_skips_unknown_worker_even_with_policy_off(
+def test_strict_stack_skips_unknown_worker(
     stack_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(POLICY_ENV, "off")
+    monkeypatch.setenv(POLICY_ENV, "strict")
     monkeypatch.setattr(
         conftest,
         "probe_stack_skew",
         _fake_probe(ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")),
     )
     with pytest.raises(Skipped, match="worker: unknown"):
-        conftest.require_stack(revision_bound=True)
+        conftest.require_stack()
 
 
 def test_default_stack_still_warns_on_unknown_worker(
@@ -660,6 +660,7 @@ def test_default_stack_still_warns_on_unknown_worker(
 def test_require_stack_explains_absent_witness_without_strict_skip(
     stack_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
     monkeypatch.setattr(
         conftest,
         "probe_stack_skew",
@@ -674,7 +675,7 @@ def test_require_stack_explains_absent_witness_without_strict_skip(
         ),
     )
     with pytest.warns(UserWarning, match="lifecycle-witness: unknown — not deployed"):
-        assert conftest.require_stack(revision_bound=True) == _STACK_URL
+        assert conftest.require_stack() == _STACK_URL
 
 
 def test_require_stack_is_silent_on_a_fresh_stack(

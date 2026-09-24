@@ -508,11 +508,9 @@ KDIVE_STACK_SKEW_POLICY=off just test-live-stack      # do not probe at all
 ```
 
 Use `strict` for any proof whose result is tied to a deployed revision; an
-unknown worker build must skip that proof. In test code, use
-`require_stack(revision_bound=True)` for that proof so its admission stays
-strict even when an operator selects `warn` or `off` for ordinary tests. Run
-pytest with `-v` to retain the probed-revision header and check that the proof
-passed rather than skipped. The portable stack's absent Kubernetes-only
+unknown worker build must skip that proof. Keep the variable set for the full
+proof run. Run pytest with `-v` to retain the probed-revision header and check
+that the proof passed rather than skipped. The portable stack's absent Kubernetes-only
 `lifecycle-witness` is reported as `not deployed` and is inapplicable.
 
 A stack whose processes predate this feature reports `unknown` and only warns, so the preflight

@@ -307,10 +307,9 @@ KDIVE_STACK_SKEW_POLICY=strict uv run python -m pytest -v -m live_stack \
 ```
 
 The header lists the revision probed for each app process, or `unknown` when
-none was reported. A revision-bound test should call
-`require_stack(revision_bound=True)` so it keeps strict admission even when
-the ambient policy is changed. Strict mode skips any proof with an unknown or
-non-fresh exercised process; a skipped proof is not a passing revision proof.
+none was reported. Keep `KDIVE_STACK_SKEW_POLICY=strict` set for the entire
+revision-bound run. Strict mode skips any proof with an unknown or non-fresh
+exercised process; a skipped proof is not a passing revision proof.
 An absent `lifecycle-witness` is shown as `not deployed` in the portable
 three-role stack and does not block it. Check the header and passed/skipped
 counts before recording proof against a PR head.
