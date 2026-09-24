@@ -365,7 +365,10 @@ The throwaway-domain proofs (snapshot, traffic capture, console inode, preserve-
 external-boot cmdline) and the local spine (`test_spine_over_the_wire`, the install cmdline sweep,
 `test_spine_live_script_over_the_wire`, console parts) boot a guest of the host arch. They take
 the machine type from `arch_traits`, so on a POWER host they run as ppc64le guests; on a host
-arch kdive cannot provision they skip and name it. The ppc64le spine drivers in
+arch kdive cannot provision they skip and name it. On POWER, the spine's `KDIVE_GUEST_IMAGE` must
+be a ppc64le qcow2 and `KDIVE_KERNEL_SRC` a built ppc64le tree with `vmlinux` at its root. These
+inputs are separate from the ppc64le drivers' `KDIVE_GUEST_IMAGE_PPC64LE` and
+`KDIVE_PPC64LE_BUNDLE`. The ppc64le spine drivers in
 `test_live_stack.py` run under KVM on a POWER host. `test_pinned_model_is_host_usable` skips
 there, because it pins an x86-64-vN CPU rung. Still x86_64-only: the per-family SSH reachability spine
 and the SUSE v7.0 kdump spine, whose preflight reads an x86 bzImage (leave their image env vars
