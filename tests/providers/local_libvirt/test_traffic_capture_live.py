@@ -34,7 +34,7 @@ from typing import Protocol
 import pytest
 
 from kdive.testing.live_vm import boot_throwaway_domain
-from tests.live_vm import require_live_vm_throwaway
+from tests.live_vm import require_live_vm_throwaway, require_native_guest_arch
 
 
 class _Event(Protocol):
@@ -87,6 +87,7 @@ def _submit_blocked_nbd_add(
 @pytest.mark.live_vm_throwaway
 def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - live_vm
     contract = require_live_vm_throwaway("qemu:///session", session_required=True)
+    arch = require_native_guest_arch()
     try:
         import libvirt  # noqa: PLC0415  # operator-provided
         import libvirt_qemu  # noqa: PLC0415  # operator-provided (QEMU-specific binding)
@@ -112,7 +113,7 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
     try:
         with boot_throwaway_domain(
             contract.rootfs,
-            arch="x86_64",
+            arch=arch,
             name=name,
             mode=contract.libvirt_uri,
             ssh_hostfwd_port=port,
@@ -145,6 +146,7 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
 def test_local_capture_waits_for_accepted_monitor_mutation() -> None:  # pragma: no cover
     """A fresh absence query cannot pass an accepted NBD-handshake-blocked QMP mutation."""
     contract = require_live_vm_throwaway("qemu:///session", session_required=True)
+    arch = require_native_guest_arch()
     try:
         import libvirt  # noqa: PLC0415  # operator-provided
         import libvirt_qemu  # noqa: PLC0415  # operator-provided
@@ -174,7 +176,7 @@ def test_local_capture_waits_for_accepted_monitor_mutation() -> None:  # pragma:
     try:
         with boot_throwaway_domain(
             contract.rootfs,
-            arch="x86_64",
+            arch=arch,
             name=name,
             mode=contract.libvirt_uri,
             ssh_hostfwd_port=_free_port(),

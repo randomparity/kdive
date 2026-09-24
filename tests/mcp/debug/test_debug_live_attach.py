@@ -29,8 +29,10 @@ from tests.mcp.debug.live_support import render_panicking_domain
 from tests.mcp.debug.session_support import (
     PROFILE_POLICY,
     granted_allocation,
+    live_profile,
     pool,
     request_context,
+    require_live_gdbstub_arch,
     seed_run,
     seed_system,
 )
@@ -46,6 +48,7 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
     (resolves the gdb port from the live domain XML, runs the real rsp_reachable probe) open a
     live gdbstub session against a real KVM domain that VFS-panics on an empty disk. Only the
     boot-step row is seeded directly (its recording is unit-tested separately)."""
+    arch = require_live_gdbstub_arch()
     contract = require_live_vm_bzimage()
     try:
         import libvirt  # noqa: F401, PLC0415  # operator-provided; presence gates the live boot
@@ -60,12 +63,15 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
         ["qemu-img", "create", "-f", "qcow2", str(disk), "1G"], check=True, capture_output=True
     )
 
-    final_xml = render_panicking_domain(bzimage=str(contract.bzimage), disk=disk, console=console)
+    profile = live_profile(arch)
+    final_xml = render_panicking_domain(
+        bzimage=str(contract.bzimage), disk=disk, console=console, profile_data=profile
+    )
 
     async def _drive() -> Any:
         async with pool(migrated_url) as db_pool:
             alloc_id = await granted_allocation(db_pool)
-            sys_id = await seed_system(db_pool, alloc_id, SystemState.READY)
+            sys_id = await seed_system(db_pool, alloc_id, SystemState.READY, profile=profile)
             run_id = await seed_run(
                 db_pool, sys_id, boot_result={"boot_outcome": "crashed_halted_live"}
             )

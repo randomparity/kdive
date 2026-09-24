@@ -9,6 +9,7 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
+from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KIND
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import (
     BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
@@ -187,11 +188,50 @@ def _boot_readiness_data(run: Run, boot_readiness: BootAttempt) -> dict[str, Jso
     records ``expected_crash_observed`` and succeeds the boot step, so a surviving failed boot job
     cannot coexist with a match. ``expected_crash_matched`` is therefore ``False`` here, telling the
     agent to look for an unexpected failure rather than its declared signature (#1384).
+
+    ``detail`` is one plain-language line built from the recorded ``observed_crash_signature``
+    and ``error_category`` (#2691), so an agent can tell "a crash, but not the declared one" from
+    "no crash signature; the guest never became ready" without reading the console. A null
+    signature reads "not recorded", never "not observed": a provider that does not scan records
+    nothing.
     """
     data = dict(boot_readiness.as_data())
+    data["detail"] = _boot_failure_detail(run, boot_readiness)
     if run.expected_boot_failure is not None:
         data["expected_crash_matched"] = False
     return data
+
+
+def _boot_failure_detail(run: Run, attempt: BootAttempt) -> str:
+    signature = attempt.observed_crash_signature
+    if signature is not None:
+        detail = f"crash signature `{signature}` observed before the readiness marker"
+    elif attempt.error_category is ErrorCategory.BOOT_TIMEOUT:
+        detail = (
+            "no crash signature was recorded before the readiness deadline; the guest did not "
+            "become ready in the boot window"
+        )
+    elif attempt.error_category is ErrorCategory.READINESS_FAILURE:
+        detail = (
+            "no crash signature was recorded; the guest stopped or failed a run-readiness check "
+            "before becoming ready"
+        )
+    else:
+        detail = "no crash signature was recorded for this boot failure"
+    declared = _declared_expectation(run)
+    if declared is not None:
+        detail += f"; the declared `{declared}` crash was not recorded as matched"
+    return detail
+
+
+def _declared_expectation(run: Run) -> str | None:
+    """The preset name, or the literal for the custom ``console_crash`` lane."""
+    expected = run.expected_boot_failure
+    if expected is None:
+        return None
+    kind = expected.get("kind")
+    value = expected.get("pattern") if kind == CONSOLE_CRASH_KIND else kind
+    return value if isinstance(value, str) else None
 
 
 def _run_step_data(

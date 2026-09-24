@@ -118,6 +118,13 @@ def _with_authorize_preflight_limit(
 class _SystemsListPayload(ToolPayload):
     """Public payload for ``systems.list`` filters and pagination."""
 
+    project: str | None = Field(
+        default=None,
+        description=(
+            "Optional project to narrow within the caller's readable projects; an unreadable "
+            "project returns an empty collection. Omitted lists all readable projects."
+        ),
+    )
     allocation_id: str | None = Field(
         default=None, description="Only Systems under this Allocation id."
     )
@@ -143,6 +150,7 @@ class _SystemsListPayload(ToolPayload):
     def to_list_request(self) -> _SystemsListRequest:
         """Convert the public MCP payload into the handler request record."""
         return _SystemsListRequest(
+            project=self.project,
             allocation_id=self.allocation_id,
             state=self.state,
             shape=self.shape,

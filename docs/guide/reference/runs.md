@@ -163,11 +163,17 @@ args (e.g. `dhash_entries=1`) with the `cmdline` field on
 Boot failure: a boot that fails to reach readiness recycles its `data.steps.boot` back to
 `pending` (it never reports a `failed` value), so do NOT poll `steps.boot=="succeeded"` to
 detect a failed boot — it would wait forever. The failure signal is `data.boot_readiness`:
-`{job_id, status:"failed", error_category}` on the surviving failed boot job. If you
+`{job_id, status:"failed", error_category, observed_crash_signature, detail}` on the
+surviving failed boot job. `observed_crash_signature` is the crash literal the readiness
+scan matched before the readiness marker (e.g. `"UBSAN:"`, `"Kernel panic"`), or null
+when none was recorded (a timeout, a guest that stopped cleanly, or a provider that does
+not scan). `detail` is one plain-language line telling "a crash signature was observed"
+apart from "no crash signature; the guest never became ready". If you
 declared an `expected_boot_failure` at `runs.create`, `data.boot_readiness` also carries
-`expected_crash_matched:false` on this path — a matched crash instead succeeds the boot as
-`expected_crash_observed`, so a failed `boot_readiness` means your declared crash was NOT
-reproduced (look for an unrelated failure, not your declared signature).
+`expected_crash_matched:false` on this path, and `detail` ends by naming your declared
+expectation — a matched crash instead succeeds the boot as `expected_crash_observed`, so a
+failed `boot_readiness` means your declared crash was NOT reproduced (look for an
+unrelated failure, not your declared signature).
 
 Console evidence: `refs.console` is the boot-window console snapshot and
 `data.console_access` names how to read it (`artifacts.get` windowed/paged, or
@@ -255,6 +261,7 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 `request` fields:
 
+- `project` (`string (nullable)`, optional) — Optional project to narrow within the caller's readable projects; an unreadable project returns an empty collection. Omitted lists all readable projects.
 - `system_id` (`string (nullable)`, optional) — Only Runs bound to this System id.
 - `investigation_id` (`string (nullable)`, optional) — Only Runs under this Investigation id.
 - `state` (``created`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only Runs in this build-phase state.

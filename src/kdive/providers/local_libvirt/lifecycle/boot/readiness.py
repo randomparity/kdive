@@ -54,11 +54,17 @@ class ProbeFailure(StrEnum):
 
 
 class ReadinessResult(NamedTuple):
-    """The run-readiness preflight result: did the System answer, and did its checks pass."""
+    """The run-readiness preflight result: did the System answer, and did its checks pass.
+
+    ``crash_signature`` is the literal ``first_crash_signature`` matched before the readiness
+    marker on a crashed console, else ``None`` (#2691). It is a closed-vocabulary token, never
+    console text, so it may leave the provider in error details.
+    """
 
     answered: bool
     ok: bool
     probe_error: ProbeFailure | None = None
+    crash_signature: str | None = None
 
 
 class _DomainExitProbe(NamedTuple):
@@ -144,15 +150,21 @@ def prepare_console_readiness_window(system_id: UUID) -> ConsoleReadinessWindow:
         raise
 
 
-def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:
-    """Classify a console capture as ready, crashed, or pending."""
+def _scan_console(data: bytes, marker: str) -> tuple[ConsoleVerdict, str | None]:
+    """Classify a console capture and return the pre-marker crash literal it matched, if any."""
     text = data.decode("utf-8", errors="replace")
     marker_re = re.compile(rf"(?:^|[^\S\n]){re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     marker_match = marker_re.search(text)
     region = text if marker_match is None else text[: marker_match.start()]
-    if first_crash_signature(region) is not None:
-        return ConsoleVerdict.CRASHED
-    return ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING
+    crash = first_crash_signature(region)
+    if crash is not None:
+        return ConsoleVerdict.CRASHED, crash.group(0)
+    return (ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING), None
+
+
+def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:
+    """Classify a console capture as ready, crashed, or pending."""
+    return _scan_console(data, marker)[0]
 
 
 def _bounded_probe_error(message: str) -> str:
@@ -242,10 +254,9 @@ class LocalExternalBootReadiness:
         domain_name = domain_name_for(system_id)
         while self._clock() < window.deadline:
             try:
-                verdict = classify_console(window.read())
+                result = _scan_result(window.read(), exited=False)
             except _ConsoleWindowFailure:
                 return ReadinessResult(answered=True, ok=False)
-            result = _verdict_to_result(verdict, exited=False)
             if result is not None:
                 return result
             probe = self._domain_exit_probe(domain_name)
@@ -253,12 +264,10 @@ class LocalExternalBootReadiness:
                 first_probe_error = probe.error
             if probe.exited:
                 try:
-                    final = classify_console(window.read())
+                    final = _scan_result(window.read(), exited=True)
                 except _ConsoleWindowFailure:
                     return ReadinessResult(True, False, first_probe_error)
-                return _verdict_to_result(final, exited=True) or ReadinessResult(
-                    True, False, first_probe_error
-                )
+                return final or ReadinessResult(True, False, first_probe_error)
             remaining = window.deadline - self._clock()
             if remaining <= 0:
                 break
@@ -271,27 +280,35 @@ def _domain_exited(domain_name: str) -> bool:  # pragma: no cover - live_vm
     return _domain_exit_probe(domain_name).exited
 
 
-def _verdict_to_result(verdict: ConsoleVerdict, *, exited: bool) -> ReadinessResult | None:
+def _verdict_to_result(
+    verdict: ConsoleVerdict, *, exited: bool, crash_signature: str | None = None
+) -> ReadinessResult | None:
     """Map a console verdict plus domain-exited flag to a readiness result, or ``None``."""
     if verdict is ConsoleVerdict.READY:
         return ReadinessResult(answered=True, ok=True)
     if verdict is ConsoleVerdict.CRASHED:
-        return ReadinessResult(answered=True, ok=False)
+        return ReadinessResult(answered=True, ok=False, crash_signature=crash_signature)
     if exited:
         return ReadinessResult(answered=True, ok=False)
     return None
 
 
+def _scan_result(data: bytes, *, exited: bool) -> ReadinessResult | None:
+    """Scan one console read and map it to a readiness result carrying any crash literal."""
+    verdict, signature = _scan_console(data, _READINESS_MARKER)
+    return _verdict_to_result(verdict, exited=exited, crash_signature=signature)
+
+
 def _real_readiness(system_id: UUID) -> ReadinessResult:  # pragma: no cover - live_vm
     """Run one readiness probe of the System's truncated console."""
     log_path = console_log_path(system_id)
-    result = _verdict_to_result(classify_console(read_console_log(log_path)), exited=False)
+    result = _scan_result(read_console_log(log_path), exited=False)
     if result is not None:
         return result
     probe = _domain_exit_probe(domain_name_for(system_id))
     if probe.exited:
-        return _verdict_to_result(
-            classify_console(read_console_log(log_path)), exited=True
-        ) or ReadinessResult(answered=True, ok=False)
+        return _scan_result(read_console_log(log_path), exited=True) or ReadinessResult(
+            answered=True, ok=False
+        )
     time.sleep(_POLL_INTERVAL_SECONDS)
     return ReadinessResult(answered=False, ok=False, probe_error=probe.error)
