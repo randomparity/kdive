@@ -83,6 +83,7 @@ class ProcessSkew:
     process: str
     verdict: SkewVerdict
     detail: str
+    applicable: bool = True
 
     def __str__(self) -> str:
         return f"{self.process}: {self.verdict.value} — {self.detail}"
@@ -412,11 +413,17 @@ def probe_stack_skew(
     for process, url in readyz_urls(base_url).items():
         version = fetch(url)
         if version is None:
+            detail = (
+                "not deployed in the portable three-role stack (Kubernetes-only role)"
+                if process == "lifecycle-witness"
+                else f"no build reported at {url} (process down, or predates ADR-0482)"
+            )
             results.append(
                 ProcessSkew(
                     process,
                     SkewVerdict.UNKNOWN,
-                    f"no build reported at {url} (process down, or predates ADR-0482)",
+                    detail,
+                    applicable=process != "lifecycle-witness",
                 )
             )
             continue
@@ -474,6 +481,10 @@ def partition(
 ) -> tuple[list[ProcessSkew], list[ProcessSkew]]:
     """Split ``results`` into ``(skip_worthy, warn_worthy)`` under ``policy``."""
     skipping = skipping_verdicts(policy)
-    skip = [r for r in results if r.verdict in skipping]
-    warn = [r for r in results if r.verdict is not SkewVerdict.FRESH and r.verdict not in skipping]
+    skip = [r for r in results if r.applicable and r.verdict in skipping]
+    warn = [
+        r
+        for r in results
+        if r.verdict is not SkewVerdict.FRESH and (not r.applicable or r.verdict not in skipping)
+    ]
     return skip, warn
