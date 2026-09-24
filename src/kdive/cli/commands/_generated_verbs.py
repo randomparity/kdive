@@ -3624,6 +3624,15 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         unwrap_request=True,
         flags=(
             GeneratedFlag(
+                name="--project",
+                dest="project",
+                required=False,
+                help="Optional project to narrow within the caller's readable projects; an unreadable project returns an empty collection. Omitted lists all readable projects.",
+                arg_type="str",
+                action=None,
+                choices=(),
+            ),
+            GeneratedFlag(
                 name="--system-id",
                 dest="system_id",
                 required=False,
