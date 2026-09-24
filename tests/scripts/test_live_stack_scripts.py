@@ -925,11 +925,7 @@ def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Source `script` and run `snippet` under exactly `env` (no ambient merge)."""
     return subprocess.run(
-        [
-            "bash",
-            "-c",
-            f'set +e +u\nset +o pipefail\nbefore=$-\nsource "{script}" || exit $?\n{snippet}',
-        ],
+        ["bash", "-c", f'source "{script}" || exit $?\n{snippet}'],
         capture_output=True,
         text=True,
         check=False,
@@ -941,15 +937,28 @@ def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.Comp
     "script",
     (ROOT / "scripts/live-stack/env.sh", ROOT / "examples/local-libvirt/env.sh"),
 )
-def test_sourced_env_preserves_relaxed_caller_options_and_exports(
-    tmp_path: Path, script: Path
+@pytest.mark.parametrize(
+    ("options", "expected_pipefail"),
+    (("set +e +u\nset +o pipefail", "off"), ("set -euo pipefail", "on")),
+)
+def test_sourced_env_preserves_caller_options_and_exports(
+    tmp_path: Path, script: Path, options: str, expected_pipefail: str
 ) -> None:
     _, staged = _published_contract(tmp_path)
-    result = _sourced(
-        script,
-        '[[ "$-" == "$before" ]] && ! shopt -qo pipefail || exit 17\n'
-        'bash -c \'[[ -n "$KDIVE_LIBVIRT_URI" && -n "$KDIVE_SERVER_DATABASE_URL" ]]\'',
-        staged,
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'{options}\nbefore=$-\nsource "{script}"\n'
+            '[[ "$-" == "$before" ]] || exit 17\n'
+            "if shopt -qo pipefail; then actual_pipefail=on; else actual_pipefail=off; fi\n"
+            '[[ "$actual_pipefail" == "$expected_pipefail" ]] || exit 18\n'
+            'bash -c \'[[ -n "$KDIVE_LIBVIRT_URI" && -n "$KDIVE_SERVER_DATABASE_URL" ]]\'',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**staged, "expected_pipefail": expected_pipefail},
     )
     assert result.returncode == 0, result.stderr
 
