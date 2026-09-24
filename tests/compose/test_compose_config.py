@@ -83,6 +83,38 @@ def _services() -> dict[str, Any]:
     return _config()["services"]
 
 
+@pytest.mark.parametrize(
+    ("project_override", "environment_override", "expected"),
+    [
+        (None, None, "kdive"),
+        (None, "custom-env", "custom-env"),
+        ("custom-flag", "custom-env", "custom-flag"),
+    ],
+)
+def test_project_name_is_stable_across_worktrees_and_respects_overrides(
+    tmp_path: Path,
+    project_override: str | None,
+    environment_override: str | None,
+    expected: str,
+) -> None:
+    env = os.environ.copy()
+    env.pop("COMPOSE_PROJECT_NAME", None)
+    if environment_override is not None:
+        env["COMPOSE_PROJECT_NAME"] = environment_override
+    args = ["docker", "compose", "--project-directory", str(tmp_path), "-f", str(_COMPOSE_FILE)]
+    if project_override is not None:
+        args.extend(("-p", project_override))
+    result = subprocess.run(
+        [*args, "config", "--format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["name"] == expected
+
+
 def test_worker_death_verifier_uses_inspect_only_private_proxy() -> None:
     model = _config()
     services = model["services"]

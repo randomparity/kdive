@@ -555,8 +555,8 @@ def test_spine_over_the_wire(record_property: Callable[[str, object], None]) -> 
 def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
     """#988 acceptance: sweep two boot cmdlines, one uploaded kernel, no re-upload (ADR-0299).
 
-    allocate → provision → upload-build (once) → install(dhash_entries=1) → boot →
-    install(dhash_entries=2) → boot. Asserts each install's ``runs.get`` ``installed_cmdline``
+    allocate → provision → upload-build (once) → install(loglevel=4) → boot →
+    install(loglevel=7) → boot. Asserts each install's ``runs.get`` ``installed_cmdline``
     reflects the swept value and that the ``build`` step stays ``succeeded`` across the sweep
     (install re-stages, boot re-runs — no re-upload). Self-cleans (release).
     """
@@ -622,7 +622,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                 async with phase("upload-build"):
                     await build_and_upload_kernel(op, run_id=run_id, arch=arch)
 
-                for variant in ("dhash_entries=1", "dhash_entries=2"):
+                for variant in ("loglevel=4", "loglevel=7"):
                     async with phase(f"install:{variant}"):
                         env = ok(
                             await scalar(op, "runs.install", run_id=run_id, cmdline=variant),

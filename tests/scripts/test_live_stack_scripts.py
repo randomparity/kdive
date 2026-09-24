@@ -925,12 +925,67 @@ def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Source `script` and run `snippet` under exactly `env` (no ambient merge)."""
     return subprocess.run(
-        ["bash", "-c", f'source "{script}"\n{snippet}'],
+        ["bash", "-c", f'source "{script}" || exit $?\n{snippet}'],
         capture_output=True,
         text=True,
         check=False,
         env=env,
     )
+
+
+@pytest.mark.parametrize(
+    "script",
+    (ROOT / "scripts/live-stack/env.sh", ROOT / "examples/local-libvirt/env.sh"),
+)
+@pytest.mark.parametrize(
+    ("options", "expected_pipefail"),
+    (("set +e +u\nset +o pipefail", "off"), ("set -euo pipefail", "on")),
+)
+def test_sourced_env_preserves_caller_options_and_exports(
+    tmp_path: Path, script: Path, options: str, expected_pipefail: str
+) -> None:
+    _, staged = _published_contract(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'{options}\nbefore=$-\nsource "{script}"\n'
+            '[[ "$-" == "$before" ]] || exit 17\n'
+            "if shopt -qo pipefail; then actual_pipefail=on; else actual_pipefail=off; fi\n"
+            '[[ "$actual_pipefail" == "$expected_pipefail" ]] || exit 18\n'
+            'bash -c \'[[ -n "$KDIVE_LIBVIRT_URI" && -n "$KDIVE_SERVER_DATABASE_URL" ]]\'',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**staged, "expected_pipefail": expected_pipefail},
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "script",
+    (ROOT / "scripts/live-stack/env.sh", ROOT / "examples/local-libvirt/env.sh"),
+)
+def test_sourced_env_propagates_required_libvirt_failure_with_errexit_off(
+    tmp_path: Path, script: Path
+) -> None:
+    _, staged = _broken_contract(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set +e +u\nset +o pipefail\nsource "{script}"\n'
+            'status=$?\nprintf "%s|%s" "$status" "$-"',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    status, options = result.stdout.split("|", 1)
+    assert int(status) != 0
+    assert "e" not in options and "u" not in options
 
 
 def test_live_stack_libvirt_uri_reaches_child_processes(tmp_path: Path) -> None:
@@ -2075,9 +2130,7 @@ def test_libvirt_uri_parser_is_safe_to_source_twice() -> None:
 
 
 def test_local_libvirt_example_env_resolves_the_published_endpoint(tmp_path: Path) -> None:
-    """The example wrapper keeps working once the live-stack env owns the resolution: it must
-    still source cleanly under `set -euo pipefail` (demo-up.sh sources it first and does nothing
-    otherwise) and still reach its own values past the shared block."""
+    """The example wrapper reaches its own values after the shared endpoint resolution block."""
     _, staged = _published_contract(tmp_path)
     staged.pop("KDIVE_PROJECT", None)
     result = _sourced(
@@ -2156,9 +2209,8 @@ def test_client_urls_derive_from_the_configurable_ports() -> None:
     assert "http://localhost:${KDIVE_OIDC_PORT}/default" in env
 
 
-def test_live_stack_scripts_are_strict_bash() -> None:
+def test_executable_live_stack_scripts_are_strict_bash() -> None:
     for name in (
-        "env.sh",
         "apply-migrations.sh",
         "stack-services.sh",
         "stack-down.sh",
@@ -4111,6 +4163,7 @@ def test_backends_stage_waits_only_on_the_long_running_backends(tmp_path: Path) 
     assert result.returncode == 0, result.stderr
     wait = [ln for ln in log.read_text().splitlines() if "--wait" in ln]
     assert len(wait) == 1, wait
+    assert "--no-recreate" in wait[0], wait[0]
     assert wait[0].endswith("postgres seaweedfs oidc"), wait[0]
     assert "seaweedfs-init" not in wait[0]
 
