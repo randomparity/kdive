@@ -147,8 +147,12 @@ Verification:
   `test_envelope_for_run_boot_failure_detail_names_console_crash_pattern` declares
   `{"kind": "console_crash", "pattern": "my oops"}` and expects the clause to name `my oops`.
   Update `test_get_run_surfaces_failed_boot_attempt`, `test_failed_boot_attempt_surfaces_failed_job`
-  and `test_failed_boot_attempt_null_category` for the added keys. The unchanged success path is held by the existing
-  `test_get_run_no_boot_readiness_when_boot_succeeded`. Same green command.
+  and `test_failed_boot_attempt_null_category` for the added keys. The unchanged success path: new
+  `test_get_run_expected_crash_observed_has_no_boot_readiness` inserts a succeeded boot step with
+  `{"boot_outcome": "expected_crash_observed"}` plus a failed boot job carrying a signature and
+  asserts `"boot_readiness" not in resp.data`; add `or expected_crash_observed` to the green
+  command. The boot handler's expected-crash branch (catches the booter's `CategorizedError`) is
+  gated by `uv run pytest tests/jobs/handlers/test_runs_boot.py -k expected_crash -q`.
 - Contract: agent-facing docstring and generated reference name both fields. Mode:
   focused-test. `just docs-check` fails red if the reference is stale; green after `just docs`.
 

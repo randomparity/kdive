@@ -41,7 +41,9 @@ The external-boot session checks only for exact success, so the new field does n
 `_boot_failure_details`, which adds `details["crash_signature"]` when it is not `None`. The
 message and category are unchanged. The worker's existing `_failure_context` copies the scalar to
 `failure_context["failure_detail_crash_signature"]` (redacted, truncated) — the same channel
-ADR-0594 uses for `probe_error`. No schema change.
+ADR-0594 uses for `probe_error`. No schema change. Because `ToolResponse.from_job` merges
+`failure_context` into a failed job's envelope, the key is also visible on `jobs.get` /
+`jobs.wait` for that job; its value is a closed-vocabulary literal, never console text.
 
 **Service.** `BootAttempt` gains `observed_crash_signature: str | None = None`.
 `failed_boot_attempt` reads `failure_detail_crash_signature` from the job's `failure_context` and
@@ -83,8 +85,8 @@ and ADR-0594 set the precedent for carrying a closed scalar through `details`.
    - Remote-libvirt and window-continuity failures (`_ConsoleWindowFailure`) record no signature;
      they report `null` and a "not recorded" detail, which is true.
    - The external-boot session and the system-authority readiness probe compute the signature
-     but consume only success/`ok`; their failures never become a Run boot job, so nothing is
-     lost on `runs.get`.
+     but consume only success/`ok`, so their failures record no signature and read as "not
+     recorded".
    - When console capture fails, the declared clause still reads "not recorded as matched",
      which is what the job records.
    - A failed boot job written before this change has no `failure_detail_crash_signature`; it
@@ -105,4 +107,6 @@ and ADR-0594 set the precedent for carrying a closed scalar through `details`.
 - `runs.get`: declared `panic` + `UBSAN:` job → signature and the crash detail; declared `panic`
   + `boot_timeout` with no signature → `null` and the timeout detail, both ending in the declared
   `panic` clause; no expectation → no clause; the existing
-  `expected_crash_observed` success path shows no `boot_readiness`.
+  `expected_crash_observed` success path shows no `boot_readiness` (a `runs.get` test with that
+  outcome beside a stale failed boot job), and the boot handler's `expected_crash` tests stay
+  green.
