@@ -57,5 +57,5 @@ def test_require_live_gdbstub_arch_skips_rather_than_fails_on_an_unrelated_arch(
 ) -> None:
     """A host arch_traits does not even know (e.g. aarch64) still skips, never raises."""
     monkeypatch.setattr(session_support.os, "uname", lambda: _FakeUname("aarch64"))
-    with pytest.raises(pytest.skip.Exception, match="aarch64"):
+    with pytest.raises(pytest.skip.Exception, match="aarch64.*other architectures unproven"):
         session_support.require_live_gdbstub_arch()

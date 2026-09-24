@@ -76,7 +76,7 @@ def require_live_gdbstub_arch() -> str:
     if arch not in _GDBSTUB_PROVEN_ARCHES:
         pytest.skip(
             f"native gdbstub debug live tests are unproven on {arch!r} guests "
-            "(ppc64le/other-arch gdbstub support tracked by #2736)"
+            "(ppc64le gdbstub support tracked by #2736; other architectures unproven)"
         )
     return arch
 
