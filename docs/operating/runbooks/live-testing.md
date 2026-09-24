@@ -298,6 +298,23 @@ just stack-backends          # backends healthy, bucket verified, schema migrate
 just test-live-stack   # runs -m live_stack; skips cleanly if the stack is absent
 ```
 
+For a proof tied to a particular deployed revision, run the selected proof with
+strict skew and a visible pytest header:
+
+```bash
+KDIVE_STACK_SKEW_POLICY=strict uv run python -m pytest -v -m live_stack \
+    tests/integration/test_live_stack.py
+```
+
+The header lists the revision probed for each app process, or `unknown` when
+none was reported. A revision-bound test should call
+`require_stack(revision_bound=True)` so it keeps strict admission even when
+the ambient policy is changed. Strict mode skips any proof with an unknown or
+non-fresh exercised process; a skipped proof is not a passing revision proof.
+An absent `lifecycle-witness` is shown as `not deployed` in the portable
+three-role stack and does not block it. Check the header and passed/skipped
+counts before recording proof against a PR head.
+
 `just stack-backends` reuses the compose backends (Postgres + SeaweedFS + mock-OIDC) and
 keeps the host `server`/`worker`/`reconciler` outside compose. Full bring-up,
 including the host-process env block, is in the

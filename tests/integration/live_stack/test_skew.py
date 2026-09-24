@@ -28,6 +28,7 @@ from kdive.health.aux_listener import build_aux_app
 from kdive.health.heartbeat import Heartbeat
 from kdive.health.probe import BackendCheck, HealthProbe
 from kdive.version import version_info
+from tests.integration import conftest as integration_conftest
 from tests.integration.live_stack import conftest, skew
 from tests.integration.live_stack.skew import (
     POLICY_ENV,
@@ -425,6 +426,35 @@ def test_probe_grades_a_deployed_witness() -> None:
     witness = next(result for result in probe.results if result.process == "lifecycle-witness")
     assert witness.verdict is SkewVerdict.FRESH
     assert witness.applicable
+    assert probe.revisions == {
+        "lifecycle-witness": _HEAD,
+        "reconciler": _HEAD,
+        "server": _HEAD,
+        "worker": _HEAD,
+    }
+
+
+def test_pytest_header_lists_probed_revisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.setattr(
+        integration_conftest,
+        "probe_stack_skew",
+        lambda _url: SkewProbe(
+            [
+                ProcessSkew("server", SkewVerdict.FRESH, "running HEAD"),
+                ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit"),
+                ProcessSkew("lifecycle-witness", SkewVerdict.UNKNOWN, "not deployed", False),
+            ],
+            frozenset({101}),
+            {"server": _HEAD, "worker": None},
+        ),
+    )
+    header = integration_conftest.pytest_report_header()
+    assert f"server={_HEAD}" in header[0]
+    assert "worker=unknown" in header[0]
+    assert "lifecycle-witness=not deployed" in header[0]
 
 
 def test_probe_enforces_skew_on_a_deployed_witness() -> None:
@@ -602,10 +632,34 @@ def test_require_stack_warns_but_runs_when_merely_behind(
         assert conftest.require_stack() == _STACK_URL
 
 
+def test_revision_bound_stack_skips_unknown_worker_even_with_policy_off(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "off")
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")),
+    )
+    with pytest.raises(Skipped, match="worker: unknown"):
+        conftest.require_stack(revision_bound=True)
+
+
+def test_default_stack_still_warns_on_unknown_worker(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")),
+    )
+    with pytest.warns(UserWarning, match="worker: unknown"):
+        assert conftest.require_stack() == _STACK_URL
+
+
 def test_require_stack_explains_absent_witness_without_strict_skip(
     stack_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(POLICY_ENV, "strict")
     monkeypatch.setattr(
         conftest,
         "probe_stack_skew",
@@ -620,7 +674,7 @@ def test_require_stack_explains_absent_witness_without_strict_skip(
         ),
     )
     with pytest.warns(UserWarning, match="lifecycle-witness: unknown — not deployed"):
-        assert conftest.require_stack() == _STACK_URL
+        assert conftest.require_stack(revision_bound=True) == _STACK_URL
 
 
 def test_require_stack_is_silent_on_a_fresh_stack(
