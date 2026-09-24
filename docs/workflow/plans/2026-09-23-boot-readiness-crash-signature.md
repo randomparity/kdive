@@ -10,8 +10,9 @@ the booter puts it in `CategorizedError.details`, which the worker already persi
 `_boot_readiness_data` renders it with `detail`. Python 3.14, uv, psycopg 3; no dependency or
 schema change.
 
-Expected implementation size: 170–230 changed lines (M) — about 30 provider lines, 25 service
-lines, 30 read-model lines, 10 docstring and generated-reference lines, 80–130 test lines.
+Expected implementation size: 360–400 changed lines (M) — about 70 provider lines, 20 service
+lines, 50 read-model lines, 30 docstring and generated-reference lines, 230 test lines. (Revised
+after the build: the first estimate, 170–230, predates the tests the design review added.)
 
 ## Global Constraints
 
