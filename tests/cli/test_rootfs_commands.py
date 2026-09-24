@@ -73,6 +73,15 @@ def test_build_fs_image_derives_local_rootfs_dest(
         "kdive.cli.rootfs_commands._publish_rootfs",
         lambda _output, dest: seen_dest.append(dest),
     )
+    # run_build_fs also writes a provenance sidecar and a kernel-config sibling beside the
+    # derived destination; stub both so this test never touches the real
+    # /var/lib/kdive/rootfs/local directory (#2677).
+    monkeypatch.setattr(
+        "kdive.cli.rootfs_commands._write_provenance_sidecar", lambda dest, output: None
+    )
+    monkeypatch.setattr(
+        "kdive.cli.rootfs_commands._write_config_sibling", lambda dest, output: None
+    )
     args = build_parser().parse_args(
         ["build-fs", "--image", "fedora-kdive-ready-44", "--workspace", str(tmp_path / "ws")]
     )
