@@ -126,6 +126,17 @@ dropped for a no-leak category or when none was attributed — the concrete form
 stays readable" mitigation, said to the agent rather than only to the ADR's reader.
 """
 
+RUN_INVESTIGATIONS_LIMIT = 20
+"""Cap on ``systems.get``'s ``run_investigation_ids`` (ADR-0677); ``runs.list`` reads the rest."""
+
+
+@dataclass(frozen=True, slots=True)
+class SystemRunHistory:
+    """Distinct investigation ids with Runs on a System, newest first (ADR-0677)."""
+
+    investigation_ids: list[str]
+    truncated: bool
+
 
 @dataclass(frozen=True, slots=True)
 class SystemsListRequest:
@@ -172,13 +183,15 @@ def system_envelope(
     supports_snapshots: bool | None = None,
     supports_traffic_capture: bool | None = None,
     failure_job: FailureJobLookup = FAILURE_JOB_NOT_LOOKED_UP,
+    run_history: SystemRunHistory | None = None,
 ) -> ToolResponse:
     """Render a System with recovery context; ``failed`` becomes a failure envelope.
 
     ``resource_kind``/``resource_id`` are the backing Resource and the granted resource id
     (ADR-0169/0180). The provisioning summary, ``allocation_id``, ``shape``, and timestamps
     come from the System row (no extra query, both paths). ``active_run`` and
-    ``active_debug_session_ids`` are get-only (an N+1 on the list path), omitted otherwise.
+    ``active_debug_session_ids`` are get-only (an N+1 on the list path), omitted otherwise, and so
+    is ``run_history``, which also appends ``runs.list`` to the next actions (ADR-0677).
 
     ``failure_job`` explicitly distinguishes an unperformed lookup, no matching job, and a found
     attributing job (ADR-0454). The list path uses the default unperformed variant.
@@ -186,6 +199,7 @@ def system_envelope(
     data: dict[str, JsonValue] = {
         "project": system.project,
         "allocation_id": str(system.allocation_id),
+        "investigation_id": str(system.investigation_id) if system.investigation_id else None,
         "shape": system.shape,
         "label": system.label,
         # Host-derived accelerator resolved at admission (ADR-0339); null when not host-derived.
@@ -210,6 +224,11 @@ def system_envelope(
         data["supports_snapshots"] = supports_snapshots
     if supports_traffic_capture is not None:
         data["supports_traffic_capture"] = supports_traffic_capture
+    history_actions: list[str] = []
+    if run_history is not None:
+        data["run_investigation_ids"] = list(run_history.investigation_ids)
+        data["run_investigation_ids_truncated"] = run_history.truncated
+        history_actions.append("runs.list")
     if system.state is SystemState.FAILED:
         failing_job = failure_job.job if isinstance(failure_job, FailureJobFound) else None
         return _failed_system_envelope(
@@ -217,11 +236,12 @@ def system_envelope(
             failing_job,
             data,
             attributed=not isinstance(failure_job, FailureJobNotLookedUp),
+            history_actions=history_actions,
         )
     return ToolResponse.success(
         str(system.id),
         system.state.value,
-        suggested_next_actions=["systems.get", "systems.teardown"],
+        suggested_next_actions=["systems.get", "systems.teardown", *history_actions],
         data=data,
     )
 
@@ -232,6 +252,7 @@ def _failed_system_envelope(
     data: dict[str, JsonValue],
     *,
     attributed: bool,
+    history_actions: list[str],
 ) -> ToolResponse:
     """Build the ``failed`` System envelope from the System's recorded verdict (ADR-0492/0454).
 
@@ -284,7 +305,7 @@ def _failed_system_envelope(
         str(system.id),
         category,
         detail=detail,
-        suggested_next_actions=list(actions),
+        suggested_next_actions=[*actions, *history_actions],
         data=failure_data,
     )
 
@@ -400,6 +421,21 @@ async def _active_run_for_system(
     return {"id": str(row[0]), "state": row[1]}
 
 
+async def _run_history_for_system(
+    conn: AsyncConnection, system_id: UUID, project: str
+) -> SystemRunHistory:
+    """Investigations with a Run on the System in any state, newest Run first (ADR-0677)."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT investigation_id FROM runs WHERE system_id = %s AND project = %s "
+            "GROUP BY investigation_id ORDER BY max(created_at) DESC, investigation_id LIMIT %s",
+            (system_id, project, RUN_INVESTIGATIONS_LIMIT + 1),
+        )
+        rows = await cur.fetchall()
+    kept, truncated = _paginate(rows, RUN_INVESTIGATIONS_LIMIT)
+    return SystemRunHistory([str(row[0]) for row in kept], truncated)
+
+
 async def get_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -420,6 +456,7 @@ async def get_system(
             resource_id, resource_kind = await _placement_for_system(conn, system.allocation_id)
             active_sessions = await active_session_ids_for_system(conn, system.id)
             active_run = await _active_run_for_system(conn, system.id)
+            run_history = await _run_history_for_system(conn, system.id, system.project)
             # In-memory capability read (no libvirt round-trip): whether this System's provider can
             # snapshot/restore, surfaced so an agent discovers support before calling the tools.
             # A System whose provider kind is no longer registered (disabled/uncomposed) cannot
@@ -447,6 +484,7 @@ async def get_system(
             resource_id=resource_id,
             active_debug_session_ids=active_sessions,
             active_run=active_run,
+            run_history=run_history,
             supports_snapshots=supports_snapshots,
             supports_traffic_capture=supports_traffic_capture,
             failure_job=(

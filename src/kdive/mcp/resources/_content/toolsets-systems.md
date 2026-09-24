@@ -16,6 +16,9 @@ follow resource://kdive/docs/guide/toolsets/introspect.md for live-introspection
 Local-libvirt manages its own bootstrap key; do not invent a profile credential to enable it.
 
 `systems.get` reports state, connection/capability details, accelerator, and recorded CPU data.
+It also names the owning `investigation_id` and a bounded, newest-first `run_investigation_ids`
+list of the Investigations with Runs on the System (`run_investigation_ids_truncated` marks a
+longer history). Read the System's full run history with `runs.list(system_id=…)`.
 `systems.list` provides filters and cursor pagination. Missing capability/CPU data is unknown,
 not proof of support. Check `data.supports_snapshots` before using checkpoints.
 
