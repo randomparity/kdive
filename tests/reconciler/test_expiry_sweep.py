@@ -29,6 +29,7 @@ from kdive.reconciler import loop
 from kdive.reconciler.cleanup.idempotency import gc_idempotency_keys
 from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.services.accounting import ledger as accounting
+from tests.conftest import _RoleDsns
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, run_repair
@@ -365,5 +366,27 @@ def test_concurrent_release_vs_sweep_reconciles_once(migrated_url: str) -> None:
             assert await _alloc_state(check, alloc_id) == "released"
             reconciled = [k for k in await _ledger_kinds(check, alloc_id) if k == "reconciled"]
             assert len(reconciled) == 1
+
+    asyncio.run(_run())
+
+
+def test_expired_allocation_swept_as_kdive_reconciler(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    # The expiry writes its audit row through record_system, so the sweep needs INSERT and
+    # SELECT (id) on audit_log under the role production connects as (#2686).
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            alloc_id = await _seed_expired_alloc(seed, state=AllocationState.ACTIVE)
+        reconciler_dsn = authority_role_dsns("kdive_reconciler")
+        async with AsyncConnectionPool(reconciler_dsn, min_size=1, max_size=1) as pool:
+            count = await run_repair(pool, allocation_repairs.sweep_expired_allocations)
+        assert count == 1
+        async with await connect(migrated_url) as check:
+            assert await _alloc_state(check, alloc_id) == "expired"
+            cur = await check.execute(
+                "SELECT principal, transition FROM audit_log WHERE object_id = %s", (alloc_id,)
+            )
+            assert await cur.fetchall() == [("system:reconciler", "active->expired")]
 
     asyncio.run(_run())

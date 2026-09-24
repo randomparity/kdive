@@ -183,6 +183,66 @@ def test_failure_reaches_joiners_and_next_call_retries(
     asyncio.run(_run())
 
 
+def test_uncategorized_failure_reaches_joiners_and_next_call_retries(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+
+    async def _run() -> None:
+        async with pool(migrated_url) as conn_pool:
+            run_id = await seed_external_run_with_manifest(conn_pool)
+            validator = _BlockingValidator(run_id, first_error=RuntimeError("scan crashed"))
+            handlers = CompleteBuildHandlers(validate_complete_build=validator)
+
+            first = _call(handlers, conn_pool, run_id)
+            await _started(validator)
+            joiner = _call(handlers, conn_pool, run_id)
+            await _joined(caplog)
+            validator.release.set()
+            outcomes = await asyncio.gather(first, joiner, return_exceptions=True)
+
+            assert [str(o) for o in outcomes] == ["scan crashed"] * 2
+            assert all(isinstance(o, RuntimeError) for o in outcomes)
+            assert run_id not in _IN_FLIGHT
+            retry = await _call(handlers, conn_pool, run_id)
+            assert retry.status == "succeeded"
+            assert validator.calls == 2
+
+    asyncio.run(_run())
+
+
+def test_failure_with_every_caller_cancelled_logs_one_error(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The finalize's own failure log is the only ERROR record, even with no caller awaiting."""
+    caplog.set_level(logging.INFO)
+
+    async def _run() -> None:
+        async with pool(migrated_url) as conn_pool:
+            run_id = await seed_external_run_with_manifest(conn_pool)
+            validator = _BlockingValidator(run_id, first_error=RuntimeError("scan crashed"))
+            handlers = CompleteBuildHandlers(validate_complete_build=validator)
+
+            first = _call(handlers, conn_pool, run_id)
+            await _started(validator)
+            joiner = _call(handlers, conn_pool, run_id)
+            await _joined(caplog)
+            task = _IN_FLIGHT[run_id]
+            await _cancelled(first)
+            await _cancelled(joiner)
+            validator.release.set()
+            await asyncio.wait({task}, timeout=_WAIT_S)
+            await asyncio.sleep(0)
+
+            assert task.done()
+            errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+            assert [r.getMessage() for r in errors] == [
+                f"runs.complete_build finalize for run {run_id} failed"
+            ]
+
+    asyncio.run(_run())
+
+
 def _remint(url: str, run_id: Any) -> None:
     """Reap and re-mint the window with a new deadline, as a concurrent agent would."""
     with psycopg.connect(url, autocommit=True) as other:

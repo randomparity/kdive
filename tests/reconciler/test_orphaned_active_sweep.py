@@ -48,6 +48,7 @@ from kdive.reconciler import loop
 from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.admission.core import AllocationRequest, admit
+from tests.conftest import _RoleDsns
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, run_repair, seed_debug_session, seed_run
@@ -800,5 +801,33 @@ def test_reconcile_once_threads_the_configured_crashed_idle_grace(migrated_url: 
         assert default.reaped_active_allocations == 1  # past the 30-min default
         async with await connect(migrated_url) as check:
             assert await _alloc_state(check, alloc_id) == "released"
+
+    asyncio.run(_run())
+
+
+def test_orphaned_active_reclaimed_as_kdive_reconciler(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    # The release writes its audit rows through record_system (INSERT ... RETURNING id), so the
+    # reaper needs INSERT and SELECT (id) on audit_log under the role production connects as
+    # (#2686). Every other test here runs as the table owner, which hid a missing grant.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            alloc_id = await _seed_active_alloc(seed, system_state=SystemState.FAILED)
+        reconciler_dsn = authority_role_dsns("kdive_reconciler")
+        async with AsyncConnectionPool(reconciler_dsn, min_size=1, max_size=1) as pool:
+            count = await run_repair(pool, allocation_repairs.reap_orphaned_active_allocations)
+        assert count == 1
+        async with await connect(migrated_url) as check:
+            assert await _alloc_state(check, alloc_id) == "released"
+            cur = await check.execute(
+                "SELECT principal, transition FROM audit_log "
+                "WHERE object_id = %s ORDER BY transition",
+                (alloc_id,),
+            )
+            assert await cur.fetchall() == [
+                ("system:reconciler", "active->releasing"),
+                ("system:reconciler", "releasing->released"),
+            ]
 
     asyncio.run(_run())
