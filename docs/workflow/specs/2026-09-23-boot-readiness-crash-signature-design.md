@@ -38,8 +38,9 @@ exited)` joins the two; the polled `LocalExternalBootReadiness` and `_real_readi
 The external-boot session checks only for exact success, so the new field does not reach it.
 
 **Booter.** `LocalLibvirtBooter._await_ready` passes the answered result's `crash_signature` to
-`_boot_failure_details`, which adds `details["crash_signature"]` when it is not `None`. The
-message and category are unchanged. The worker's existing `_failure_context` copies the scalar to
+`_boot_failure_details`, which adds `details["crash_signature"]` when `is_crash_signature`
+holds (the write side fails closed, because `jobs.get` publishes `failure_context` unfiltered).
+The message and category are unchanged. The worker's existing `_failure_context` copies the scalar to
 `failure_context["failure_detail_crash_signature"]` (redacted, truncated) — the same channel
 ADR-0594 uses for `probe_error`. No schema change. Because `ToolResponse.from_job` merges
 `failure_context` into a failed job's envelope, the key is also visible on `jobs.get` /
