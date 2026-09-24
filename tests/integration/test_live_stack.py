@@ -46,7 +46,8 @@ from kdive.mcp.dev_harness import (
     OidcIssuer,
 )
 from kdive.mcp.responses import ToolResponse
-from kdive.profiles.provisioning import reconcile_profile_sizing
+from kdive.profiles.provisioning import ProvisioningProfile, reconcile_profile_sizing
+from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from tests.integration.live_stack.conftest import (
     expected_accel,
     require_guest_arch,
@@ -213,7 +214,8 @@ def _provision_profile(arch: str, *, gdbstub: bool = False) -> dict[str, object]
         },
     }
     if gdbstub:
-        profile["debug"] = {"gdbstub": True}
+        provider = cast(dict[str, dict[str, object]], profile["provider"])
+        provider["local-libvirt"]["debug"] = {"gdbstub": True}
     return profile
 
 
@@ -228,7 +230,8 @@ def test_spine_gdbstub_profile_and_register(
     monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
     monkeypatch.setenv(_GUEST_IMAGE_ENV, "/nonexistent/guest-image.qcow2")
     profile = _provision_profile(arch, gdbstub=arch == "x86_64")
-    assert profile.get("debug") == ({"gdbstub": True} if arch == "x86_64" else None)
+    parsed = ProvisioningProfile.parse(profile)
+    assert LocalLibvirtProfilePolicy().gdbstub_provisioned(parsed) is (arch == "x86_64")
     assert _SPINE_PC_REGISTER[arch] == register
 
 
@@ -467,7 +470,9 @@ def test_spine_over_the_wire(record_property: Callable[[str, object], None]) -> 
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
+                    await build_and_upload_kernel(
+                        op, run_id=run_id, arch=arch, with_vmlinux=arch == "x86_64"
+                    )
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -490,6 +495,7 @@ def test_spine_over_the_wire(record_property: Callable[[str, object], None]) -> 
                             ),
                             "attach",
                         )
+                        ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
                 else:
                     record_property("spine_attach", _SPINE_GDBSTUB_GAP)
                 async with phase("crash-rbac-negative"):
