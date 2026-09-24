@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -13,7 +14,9 @@ from tests.mcp.debug.session_support import PROFILE
 from tests.support.domain_ownership import drop_ownership_metadata
 
 
-def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
+def render_panicking_domain(
+    *, bzimage: str, disk: Path, console: Path, profile_data: dict[str, Any] | None = None
+) -> str:
     """Render the preserved gdbstub domain used by live early-panic tests.
 
     The rendered cmdline carries ``nokaslr`` so a symbol-addressed live debug command resolves
@@ -23,11 +26,14 @@ def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
         bzimage: Kernel image path to boot directly.
         disk: Empty disk path that causes the expected VFS panic.
         console: Serial console log path observed by the live-test harness.
+        profile_data: Provisioning profile dict to render from. Defaults to the fixed x86_64
+            ``PROFILE``, which the non-live structural tests (XML shape only, no real host) use;
+            the live gdbstub debug tests pass a host-resolved ``live_profile`` instead (#2695).
 
     Returns:
         The rendered libvirt domain XML.
     """
-    data = copy.deepcopy(PROFILE)
+    data = copy.deepcopy(profile_data if profile_data is not None else PROFILE)
     section = data["provider"]["local-libvirt"]
     section["rootfs"] = {"kind": "local", "path": str(disk)}
     section["debug"] = {"gdbstub": True, "preserve_on_crash": True}
