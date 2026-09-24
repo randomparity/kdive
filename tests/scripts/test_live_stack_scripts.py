@@ -925,12 +925,54 @@ def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Source `script` and run `snippet` under exactly `env` (no ambient merge)."""
     return subprocess.run(
-        ["bash", "-c", f'source "{script}"\n{snippet}'],
+        ["bash", "-c", f'before=$-\nsource "{script}" || exit $?\n{snippet}'],
         capture_output=True,
         text=True,
         check=False,
         env=env,
     )
+
+
+@pytest.mark.parametrize(
+    "script",
+    (ROOT / "scripts/live-stack/env.sh", ROOT / "examples/local-libvirt/env.sh"),
+)
+def test_sourced_env_preserves_relaxed_caller_options_and_exports(
+    tmp_path: Path, script: Path
+) -> None:
+    _, staged = _published_contract(tmp_path)
+    result = _sourced(
+        script,
+        '[[ "$-" == "$before" ]] && ! shopt -qo pipefail || exit 17\n'
+        'bash -c \'[[ -n "$KDIVE_LIBVIRT_URI" && -n "$KDIVE_SERVER_DATABASE_URL" ]]\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "script",
+    (ROOT / "scripts/live-stack/env.sh", ROOT / "examples/local-libvirt/env.sh"),
+)
+def test_sourced_env_propagates_required_libvirt_failure_with_errexit_off(
+    tmp_path: Path, script: Path
+) -> None:
+    _, staged = _broken_contract(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set +e +u\nset +o pipefail\nsource "{script}"\n'
+            'status=$?\nprintf "%s|%s" "$status" "$-"',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    status, options = result.stdout.split("|", 1)
+    assert int(status) != 0
+    assert "e" not in options and "u" not in options
 
 
 def test_live_stack_libvirt_uri_reaches_child_processes(tmp_path: Path) -> None:
@@ -2156,9 +2198,8 @@ def test_client_urls_derive_from_the_configurable_ports() -> None:
     assert "http://localhost:${KDIVE_OIDC_PORT}/default" in env
 
 
-def test_live_stack_scripts_are_strict_bash() -> None:
+def test_executable_live_stack_scripts_are_strict_bash() -> None:
     for name in (
-        "env.sh",
         "apply-migrations.sh",
         "stack-services.sh",
         "stack-down.sh",

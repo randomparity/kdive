@@ -7,7 +7,6 @@
 #   source examples/local-libvirt/env.sh
 #
 # Every value is overridable from the caller's environment.
-set -euo pipefail
 
 example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
@@ -23,7 +22,7 @@ fi
 # documents. It already exports KDIVE_KERNEL_SRC=~/src/linux, KDIVE_INSTALL_STAGING=
 # /var/lib/kdive/install, and the OIDC issuer on :8090 (the host-published mock issuer).
 # shellcheck source=scripts/live-stack/env.sh disable=SC1091
-source "${repo_root}/scripts/live-stack/env.sh"
+source "${repo_root}/scripts/live-stack/env.sh" || return $?
 
 # The project this example onboards and mints a token for. One name, threaded through the
 # seed step (demo-up.sh) and the token claims (mint-token.sh) so they always agree. `demo` matches
