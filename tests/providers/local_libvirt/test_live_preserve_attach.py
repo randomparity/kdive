@@ -4,8 +4,9 @@ and the gdbstub is reachable (kdive's own ``rsp_reachable``) on a preserved earl
 `live_vm`-gated (bzimage family, ADR-0392). The operator points ``KDIVE_LIVE_VM_BZIMAGE`` at a
 kernel image that panics early in boot when it cannot mount its root (a bare bzImage with no
 usable rootfs), optionally overriding ``KDIVE_LIBVIRT_URI`` (default ``qemu:///session`` so it
-needs no root). The test renders the real provisioning XML (its SUT), adds the direct-kernel
-``<os>`` the install step adds in the full pipeline, and hands the finished XML to
+needs no root). The test renders the real provisioning XML (its SUT) with the direct-kernel
+``<os>`` the install step adds in the full pipeline, sets a panic-halting cmdline, and hands the
+finished XML to
 ``boot_gdbstub_domain`` — which starts the domain against a deliberately empty disk to
 force the panic, waits for it, and tears the transient domain down. The test then asserts the stub
 answers ``rsp_reachable``.
@@ -107,8 +108,11 @@ def test_preserve_domain_keeps_production_gdbstub_xml(tmp_path: Path, arch: str)
     # The preserve half of the SUT: pvpanic notifies the host, <on_crash> holds the vCPUs.
     assert root.find("./devices/panic[@model='pvpanic']") is not None
     assert root.findtext("on_crash") == "preserve"
-    assert root.findtext("./os/kernel")
-    assert f"console={traits.console_device} " in (root.findtext("./os/cmdline") or "")
+    # One <kernel>/<cmdline>: libvirt honours only the first <cmdline>, so a second is dead.
+    assert len(root.findall("./os/kernel")) == 1
+    assert [el.text for el in root.findall("./os/cmdline")] == [
+        f"console={traits.console_device} panic=0 root=/dev/vda"
+    ]
     # The machine comes from the arch traits, not a pinned versioned machine type (#2694).
     os_type = root.find("./os/type")
     assert os_type is not None
@@ -143,8 +147,8 @@ def _render_preserve_domain(*, bzimage: Path, disk: Path, console: Path, arch: s
 
     Everything libvirt is being asked to accept stays production output: the pvpanic device,
     ``<on_crash>preserve</on_crash>``, the ``-gdb`` passthrough, the SSH forward, and the disk.
-    Only the ownership claim and the boot-specific paths are rewritten — the direct-kernel
-    ``<os>`` install.py adds in the full pipeline, and a writable serial log.
+    Only the ownership claim and the boot-specific values are rewritten — the direct-kernel
+    ``<cmdline>`` and a writable serial log.
     """
     profile = ProvisioningProfile.parse(_profile_data(disk, arch))
     base_xml = render_domain_xml(
@@ -164,12 +168,12 @@ def _render_preserve_domain(*, bzimage: Path, disk: Path, console: Path, arch: s
     name = root.find("name")
     assert name is not None
     name.text = f"{_DOMAIN_NAME_PREFIX}{uuid4().hex[:12]}"
-    os_el = root.find("os")
-    assert os_el is not None
-    ET.SubElement(os_el, "kernel").text = str(bzimage)
-    # No usable rootfs in the empty disk -> VFS panic; panic=0 halts (does not reboot).
-    console_device = arch_traits(arch).console_device
-    ET.SubElement(os_el, "cmdline").text = f"console={console_device} panic=0 root=/dev/vda"
+    # render_domain_xml already emitted the direct-kernel <kernel> and <cmdline> (kernel_path
+    # above); rewrite that cmdline, since libvirt ignores a second one. No usable rootfs in the
+    # empty disk -> VFS panic; panic=0 halts (does not reboot).
+    cmdline = root.find("./os/cmdline")
+    assert cmdline is not None
+    cmdline.text = f"console={arch_traits(arch).console_device} panic=0 root=/dev/vda"
     serial_log = root.find("./devices/serial/log")
     assert serial_log is not None
     serial_log.set("file", str(console))
