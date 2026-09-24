@@ -569,7 +569,14 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
     member = boot_member_source(kernel_src, arch)
     modstage = dest_dir / "modstage"
     subprocess.run(
-        ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
+        [
+            "make",
+            "-C",
+            str(kernel_src),
+            "modules_install",
+            f"INSTALL_MOD_PATH={modstage}",
+            "INSTALL_MOD_STRIP=1",
+        ],
         check=True,
     )
     tar_path = dest_dir / "kernel.tar.gz"

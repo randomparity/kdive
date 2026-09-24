@@ -12,11 +12,15 @@ import pytest
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
+from kdive.build_artifacts.limits import MAX_LEGACY_INSTALL_MODULE_BYTES
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.records import Run, System
 from kdive.jobs.handlers.runs import install as runs_install
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
+from kdive.services.runs.steps import BuildStepResult
 
 
 def test_install_handler_is_exported_through_runs_facade() -> None:
@@ -39,6 +43,115 @@ def test_reusable_install_requires_every_referenced_artifact_version() -> None:
             assert exc.details["reason"] == "reusable_build_versions_incomplete"
         else:
             raise AssertionError(f"incomplete versions unexpectedly accepted: {versions!r}")
+
+
+@pytest.mark.parametrize(
+    ("size", "method", "provider_kind", "build_ref", "reject"),
+    [
+        (
+            MAX_LEGACY_INSTALL_MODULE_BYTES + 1,
+            CaptureMethod.KDUMP,
+            ResourceKind.LOCAL_LIBVIRT,
+            "ref",
+            True,
+        ),
+        (
+            MAX_LEGACY_INSTALL_MODULE_BYTES,
+            CaptureMethod.KDUMP,
+            ResourceKind.LOCAL_LIBVIRT,
+            "ref",
+            False,
+        ),
+        (
+            MAX_LEGACY_INSTALL_MODULE_BYTES + 1,
+            CaptureMethod.HOST_DUMP,
+            ResourceKind.LOCAL_LIBVIRT,
+            "ref",
+            False,
+        ),
+        (
+            MAX_LEGACY_INSTALL_MODULE_BYTES + 1,
+            CaptureMethod.KDUMP,
+            ResourceKind.REMOTE_LIBVIRT,
+            "ref",
+            False,
+        ),
+        (
+            MAX_LEGACY_INSTALL_MODULE_BYTES + 1,
+            CaptureMethod.KDUMP,
+            ResourceKind.LOCAL_LIBVIRT,
+            None,
+            False,
+        ),
+    ],
+)
+def test_install_plan_checks_measured_modules_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+    method: CaptureMethod,
+    provider_kind: ResourceKind,
+    build_ref: str | None,
+    reject: bool,
+) -> None:
+    run_id, system_id = uuid4(), uuid4()
+    reads: list[str] = []
+
+    async def build_result(*_args: object) -> BuildStepResult:
+        return BuildStepResult(
+            kernel_ref="kernel",
+            debuginfo_ref=None,
+            build_id=None,
+            artifact_versions={"kernel": "v1"},
+        )
+
+    async def cmdline(*_args: object, **_kwargs: object) -> str:
+        return "root=/dev/vda"
+
+    async def resolve(*_args: object) -> object:
+        reads.append("build")
+        return SimpleNamespace(
+            canonical_document={
+                "external_boot_evidence": {
+                    "module_uncompressed_bytes": size,
+                }
+            }
+        )
+
+    monkeypatch.setattr(runs_install, "existing_build_result", build_result)
+    monkeypatch.setattr(runs_install, "cmdline_for", cmdline)
+    monkeypatch.setattr(runs_install, "system_arch", lambda _system: "x86_64")
+    monkeypatch.setattr(runs_install, "resolve_build", resolve)
+    run = cast(Run, SimpleNamespace(id=run_id, investigation_id=uuid4(), build_ref=build_ref))
+    system = cast(System, SimpleNamespace(id=system_id))
+    payload = runs_install._InstallPayloadContext(run_id, None, None, None, None)
+
+    async def plan() -> runs_install._InstallPlan:
+        return await runs_install._build_install_plan(
+            cast(AsyncConnection, object()),
+            run,
+            system,
+            cast(Installer, object()),
+            method,
+            provider_kind=provider_kind,
+            kernel_ref="kernel",
+            root_cmdline=None,
+            payload=payload,
+        )
+
+    if reject:
+        with pytest.raises(CategorizedError, match="INSTALL_MOD_STRIP=1") as exc:
+            asyncio.run(plan())
+        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert exc.value.details["max_uncompressed_bytes"] == MAX_LEGACY_INSTALL_MODULE_BYTES
+    else:
+        assert asyncio.run(plan()).request.kernel_ref == "kernel"
+    assert reads == (
+        ["build"]
+        if provider_kind is ResourceKind.LOCAL_LIBVIRT
+        and method is CaptureMethod.KDUMP
+        and build_ref
+        else []
+    )
 
 
 def test_authority_staging_claims_without_calling_provider(
