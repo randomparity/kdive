@@ -237,7 +237,7 @@ async def admission_gate(
             ),
             devices=[],
         )
-    host = await _host_cap_check(conn, request.resource)
+    host = await _host_cap_check(conn, request.resource, request.project)
     if host is not None:
         return _GateResult(denial=host, devices=[])
     claim = await _resolve_pcie_claim(conn, request)
@@ -421,15 +421,23 @@ async def _grant(
     return AdmissionOutcome(granted=True, allocation=allocation)
 
 
-async def _host_cap_check(conn: AsyncConnection, resource: Resource) -> AdmissionOutcome | None:
+async def _host_cap_check(
+    conn: AsyncConnection, resource: Resource, project: str
+) -> AdmissionOutcome | None:
     """The per-host capacity check; return a denial outcome, or ``None`` if under cap.
+
+    ``in_use`` counts every occupying allocation on the host across all projects (host-wide),
+    which the caller's own ``allocations.list`` cannot show in full — so a denial carries the
+    disclosure-safe :class:`_OccupancyBreakdown` split in ``details`` (ADR-0676): the caller's own
+    vs every other project's count (never naming another project) and the same total split by
+    occupying state.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if the resource has no valid cap.
     """
     cap = _resolve_cap(resource)
-    in_use = await _count_occupying(conn, resource.id)
-    if in_use >= cap:
+    occupancy = await _count_occupying(conn, resource.id, project)
+    if occupancy.in_use >= cap:
         # A host-cap denial is a CAPACITY denial — a freed slot admits it — so it is
         # queueable. It shares ``allocation_denied`` with the budget denial; the
         # ``queueable`` flag (not the category) is what routes the enqueue (ADR-0069).
@@ -439,8 +447,13 @@ async def _host_cap_check(conn: AsyncConnection, resource: Resource) -> Admissio
             category=ErrorCategory.ALLOCATION_DENIED,
             reason="at_capacity",
             cap=cap,
-            in_use=in_use,
+            in_use=occupancy.in_use,
             queueable=True,
+            details={
+                "in_use_own_projects": occupancy.own_projects,
+                "in_use_other_projects": occupancy.other_projects,
+                "in_use_by_state": occupancy.by_state,
+            },
         )
     return None
 
@@ -450,21 +463,56 @@ def _resolve_cap(resource: Resource) -> int:
     return resource.capability_view.require_allocation_cap(resource_id=resource.id)
 
 
-async def _count_occupying(conn: AsyncConnection, resource_id: object) -> int:
-    """Count the host's allocations occupying a host-cap slot (GRANTED/ACTIVE/RELEASING).
+@dataclass(frozen=True)
+class _OccupancyBreakdown:
+    """A host's occupancy split by project membership and by state (ADR-0676).
+
+    ``in_use`` is the existing host-wide total; ``own_projects``/``other_projects`` split it by
+    whether the occupying row belongs to the checked ``project`` without ever naming another
+    project, and ``by_state`` splits the same total across :data:`OCCUPYING_ALLOCATION_STATES`.
+    """
+
+    in_use: int
+    own_projects: int
+    other_projects: int
+    by_state: dict[str, int]
+
+
+async def _count_occupying(
+    conn: AsyncConnection, resource_id: object, project: str
+) -> _OccupancyBreakdown:
+    """Count and break down the host's occupying allocations (GRANTED/ACTIVE/RELEASING).
 
     Uses the dedicated occupancy predicate (ADR-0069): a queued ``requested`` row holds only
-    a queue position and is excluded, so it never consumes the host cap it is waiting for.
+    a queue position and is excluded, so it never consumes the host cap it is waiting for. One
+    query groups by state and by whether the row's project matches ``project`` (ADR-0676), so the
+    breakdown can never disagree with the plain total.
     """
     async with conn.cursor() as cur:
         await cur.execute(
-            "SELECT count(*) FROM allocations WHERE resource_id = %s AND state = ANY(%s)",
-            (resource_id, OCCUPYING_ALLOCATION_STATE_VALUES),
+            "SELECT state, project = %s AS is_own, count(*) FROM allocations "
+            "WHERE resource_id = %s AND state = ANY(%s) GROUP BY state, is_own",
+            (project, resource_id, OCCUPYING_ALLOCATION_STATE_VALUES),
         )
-        row = await cur.fetchone()
-    if row is None:  # Invariant: count(*) always yields a row.
-        raise RuntimeError("count(*) returned no row")
-    return int(row[0])
+        rows = await cur.fetchall()
+    by_state: dict[str, int] = dict.fromkeys(OCCUPYING_ALLOCATION_STATE_VALUES, 0)
+    own_projects = 0
+    other_projects = 0
+    for state, is_own, count in rows:
+        n = int(count)
+        # The WHERE clause already constrains `state` to OCCUPYING_ALLOCATION_STATE_VALUES, so
+        # every key is pre-seeded above; a bare `+=` is safe (no fallback default needed).
+        by_state[str(state)] += n
+        if is_own:
+            own_projects += n
+        else:
+            other_projects += n
+    return _OccupancyBreakdown(
+        in_use=own_projects + other_projects,
+        own_projects=own_projects,
+        other_projects=other_projects,
+        by_state=by_state,
+    )
 
 
 async def _within_alloc_quota(conn: AsyncConnection, project: str) -> bool:

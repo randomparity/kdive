@@ -59,7 +59,9 @@ from tests.mcp.debug.session_support import (
     PROFILE,
     PROFILE_POLICY,
     granted_allocation,
+    live_profile,
     request_context,
+    require_live_gdbstub_arch,
     seed_run,
     seed_system,
 )
@@ -90,6 +92,7 @@ class _LiveDebugSurface:
     migrated_url: str
     monkeypatch: pytest.MonkeyPatch
     transcript_dir: Path
+    profile: dict[str, Any]
 
     @contextlib.asynccontextmanager
     async def session(
@@ -107,7 +110,9 @@ class _LiveDebugSurface:
         )
         runtime_resolver = _FixedDebugRuntimeResolver(runtime)
         async with open_pool(self.migrated_url) as pool:
-            session_id = await _start_live_session(pool, runtime_resolver, boot_result=boot_result)
+            session_id = await _start_live_session(
+                pool, runtime_resolver, boot_result=boot_result, profile=self.profile
+            )
             try:
                 async with _debug_client(pool, runtime_resolver, self.monkeypatch) as client:
                     yield _LiveDebugSession(client=client, pool=pool, session_id=session_id)
@@ -135,10 +140,12 @@ class _FixedDebugRuntimeResolver:
 def live_debug_surface(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> _LiveDebugSurface:
+    arch = require_live_gdbstub_arch()
     return _LiveDebugSurface(
         migrated_url=migrated_url,
         monkeypatch=monkeypatch,
         transcript_dir=tmp_path / "gdbmi-transcripts",
+        profile=live_profile(arch),
     )
 
 
@@ -161,7 +168,12 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
         ["qemu-img", "create", "-f", "qcow2", str(disk), "1G"], check=True, capture_output=True
     )
 
-    final_xml = render_panicking_domain(bzimage=str(contract.bzimage), disk=disk, console=console)
+    final_xml = render_panicking_domain(
+        bzimage=str(contract.bzimage),
+        disk=disk,
+        console=console,
+        profile_data=live_debug_surface.profile,
+    )
     module_fixture = _optional_module_fixture()
     with boot_gdbstub_domain(
         final_xml,
@@ -191,6 +203,7 @@ def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
             bzimage=bzimage_contract.bzimage,
             gdb_port=gdb_port,
             ssh_port=ssh_port,
+            profile_data=live_debug_surface.profile,
         )
         with boot_gdbstub_domain(
             xml,
@@ -573,9 +586,10 @@ async def _start_live_session(
     runtime_resolver: _FixedDebugRuntimeResolver,
     *,
     boot_result: dict[str, object] | None,
+    profile: dict[str, Any],
 ) -> str:
     alloc_id = await granted_allocation(pool)
-    sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+    sys_id = await seed_system(pool, alloc_id, SystemState.READY, profile=profile)
     run_id = await seed_run(pool, sys_id, boot_result=boot_result)
     handlers = _session_handlers(runtime_resolver)
     resp = await handlers.start_session(pool, request_context(), run_id=run_id, transport="gdbstub")
@@ -726,8 +740,15 @@ def _rootfs_overlay(rootfs: Path) -> Iterator[Path]:
         overlay.unlink(missing_ok=True)
 
 
-def _render_stepping_domain(*, disk: Path, bzimage: Path, gdb_port: int, ssh_port: int) -> str:
-    data = copy.deepcopy(PROFILE)
+def _render_stepping_domain(
+    *,
+    disk: Path,
+    bzimage: Path,
+    gdb_port: int,
+    ssh_port: int,
+    profile_data: dict[str, Any] | None = None,
+) -> str:
+    data = copy.deepcopy(profile_data if profile_data is not None else PROFILE)
     section = data["provider"]["local-libvirt"]
     section["rootfs"] = {"kind": "local", "path": str(disk)}
     section["debug"] = {"gdbstub": True}
