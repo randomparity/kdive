@@ -3029,19 +3029,27 @@ def _ensure_session_libvirtd(
 ) -> subprocess.CompletedProcess[str]:
     """Source the real lib.sh and run ensure_session_libvirtd against staged paths.
 
-    `positional=False` drops the three overrides so the call exercises the defaults, which are
-    derived from the published URI's daemon family rather than hardcoded.
+    `positional=False` drops the binary and config overrides so the call exercises those two
+    defaults, which are derived from the published URI's daemon family rather than hardcoded —
+    but still pins the runtime-root override to `tmp_path` so the pid-file probe it drives never
+    reads the real `/run/kdive/live-libvirt`. Bash's `${n:-default}` falls through to the default
+    on an empty positional exactly as it would on an absent one, so leaving the first two
+    positionals empty keeps the real-default assertions intact. Without this, a host that is
+    provisioned with a running dedicated session daemon has a live pid file at that real default
+    path, and the call's own "already running" short-circuit returns 0 before ever reaching the
+    missing-prerequisite branch this test asserts on (#2675).
     """
     for name in ("lib.sh", "libvirt-uri.sh"):
         (tmp_path / name).write_text(
             (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
         )
-    args = ""
     if positional:
         args = (
             f'"{tmp_path / f"{daemon}-stub"}" "{tmp_path / f"{daemon}-live.conf"}" '
             f'"{tmp_path / "run/kdive/live-libvirt"}"'
         )
+    else:
+        args = f'"" "" "{tmp_path / "run/kdive/live-libvirt"}"'
     socket_name = "virtqemud-sock" if daemon == "virtqemud" else "libvirt-sock"
     result = subprocess.run(
         [

@@ -126,10 +126,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 326, f"runner listed {len(actual_tasks)} baseline tasks, expected 326")
+require(len(actual_tasks) == 328, f"runner listed {len(actual_tasks)} baseline tasks, expected 328")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 326 ordered task names and tags match the updated baseline")
+print("ok runner: 328 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
@@ -583,6 +583,76 @@ require(
     "the kernel-upgrade hook is no longer installed executable",
 )
 print("ok boot kernels: the upgrade hook applies 0640 root:kvm to both kernel patterns")
+
+
+# needrestart's post-upgrade restart mints a new INVOCATION_ID for kdive-live-worker@N.service;
+# the lifecycle witness binds each slot's release marker to the INVOCATION_ID it started
+# (ADR-0574), so the gate refuses the new one and the slot stays wedged until an operator runs
+# worker-lifecycle.sh recover (#2481, #2663). The override lives beside the base apt install in
+# packages_debian.yml because it applies to every Debian-family host this role provisions, not
+# only the Ubuntu-only extractor block below it.
+NEEDRESTART_CONF = ANSIBLE / "roles/local_worker_host/files/needrestart-kdive.conf"
+packages_debian_tasks = yaml.safe_load(
+    (ANSIBLE / "roles/local_worker_host/tasks/packages_debian.yml").read_text()
+)
+
+
+def is_needrestart(task: dict, module: str) -> bool:
+    return module in task and "needrestart" in task.get("name", "").lower()
+
+
+require(
+    any(is_needrestart(t, "ansible.builtin.copy") for t in packages_debian_tasks),
+    "packages_debian.yml no longer installs the needrestart override for the worker units",
+)
+needrestart_mkdir = next(
+    t for t in packages_debian_tasks if is_needrestart(t, "ansible.builtin.file")
+)
+needrestart_task = next(
+    t for t in packages_debian_tasks if is_needrestart(t, "ansible.builtin.copy")
+)
+# ansible.builtin.copy fails outright ("Destination directory ... does not exist") rather than
+# creating a missing parent, and needrestart is not in live_vm_host_packages, so a Debian host
+# without needrestart already installed has no /etc/needrestart/conf.d yet. Reproduced against
+# this exact ansible-core version: a copy task targeting a missing parent directory fails the
+# whole play instead of converging it, which would break every Debian-family provisioning run
+# on such a host, not just the ones needrestart itself would race.
+mkdir_install = needrestart_mkdir.get("ansible.builtin.file", {})
+require(
+    mkdir_install.get("path") == "/etc/needrestart/conf.d"
+    and mkdir_install.get("state") == "directory",
+    "the needrestart drop-in directory is no longer ensured before the override is copied into it",
+)
+require(
+    packages_debian_tasks.index(needrestart_mkdir) < packages_debian_tasks.index(needrestart_task),
+    "the needrestart drop-in directory must be ensured before the override is copied into it",
+)
+needrestart_install = needrestart_task.get("ansible.builtin.copy", {})
+require(
+    needrestart_install.get("src") == NEEDRESTART_CONF.name,
+    "the needrestart override task no longer copies the shipped conf file",
+)
+require(
+    needrestart_install.get("dest") == "/etc/needrestart/conf.d/kdive.conf",
+    "the needrestart override is no longer installed into /etc/needrestart/conf.d",
+)
+require(
+    needrestart_install.get("mode") == "0644",
+    "the needrestart override is no longer installed mode 0644",
+)
+# Neither task carries its own `when`: packages_debian.yml is only ever imported under
+# main.yml's `ansible_facts['os_family'] == 'Debian'` guard (exercised by package_route()
+# above), so an own `when` here would duplicate rather than depend on the existing conditional.
+require(
+    "when" not in needrestart_mkdir and "when" not in needrestart_task,
+    "the needrestart tasks added their own guard instead of the existing Debian import",
+)
+needrestart_conf = NEEDRESTART_CONF.read_text()
+require(
+    r"$nrconf{override_rc}{qr(^kdive-live-worker@.+\.service$)} = 0;" in needrestart_conf,
+    "the needrestart override no longer excludes every kdive-live-worker@N.service instance",
+)
+print("ok needrestart: package upgrades can no longer select the fixed worker units for restart")
 
 
 # One shared task installs a root-resolvable uv for both callers -- local-libvirt-host.yml's own

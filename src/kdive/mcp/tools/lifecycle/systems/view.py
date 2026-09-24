@@ -131,6 +131,7 @@ stays readable" mitigation, said to the agent rather than only to the ADR's read
 class SystemsListRequest:
     """Filter payload for ``systems.list``."""
 
+    project: str | None = None
     allocation_id: str | None = None
     state: SystemState | None = None
     shape: str | None = None
@@ -463,6 +464,16 @@ def _viewer_projects(ctx: RequestContext) -> list[str]:
     return [p for p in ctx.projects if ctx.roles.get(p) is not None]
 
 
+def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
+    """Narrow the caller's readable projects to ``project`` (``allocations.list`` pattern).
+
+    An unreadable ``project`` returns an empty list rather than an error, so the caller
+    gets the same empty collection an absent project would (no existence signal).
+    """
+    readable = _viewer_projects(ctx)
+    return readable if project is None else [project] if project in readable else []
+
+
 @dataclass(frozen=True, slots=True)
 class _SystemFilters:
     """The validated, SQL-ready clauses and params for a :func:`list_systems` query."""
@@ -472,16 +483,20 @@ class _SystemFilters:
 
 
 def _build_filters(
-    viewer_projects: list[str],
+    projects: list[str],
     *,
     allocation_id: str | None,
     state: str | None,
     shape: str | None,
     pcie: str | None,
 ) -> _SystemFilters | ToolResponse:
-    """Translate filter args into SQL clauses, or a ``configuration_error`` envelope."""
+    """Translate filter args into SQL clauses, or a ``configuration_error`` envelope.
+
+    ``projects`` is the caller's readable projects, already narrowed by any ``project``
+    filter (:func:`_project_filter`).
+    """
     clauses: list[Composable] = [sql.SQL("s.project = ANY(%s)")]
-    params: list[object] = [viewer_projects]
+    params: list[object] = [projects]
     if allocation_id is not None:
         uid = _as_uuid(allocation_id)
         if uid is None:
@@ -538,10 +553,15 @@ async def list_systems(
     ctx: RequestContext,
     request: SystemsListRequest,
 ) -> ToolResponse:
-    """List the caller's Systems, filterable by allocation, state, shape, and PCIe match."""
-    viewer_projects = _viewer_projects(ctx)
+    """List the caller's Systems, filterable by project, allocation, state, shape, and PCIe match.
+
+    Omit ``project`` to list every readable project. A supplied project narrows within that
+    set; an unreadable project returns an empty collection without revealing whether it exists
+    (matches ``allocations.list``).
+    """
+    projects = _project_filter(ctx, request.project)
     filters = _build_filters(
-        viewer_projects,
+        projects,
         allocation_id=request.allocation_id,
         state=request.state,
         shape=request.shape,
@@ -557,7 +577,7 @@ async def list_systems(
         except InvalidCursor:
             return _invalid_cursor_error("systems")
     with bind_context(principal=ctx.principal):
-        if not viewer_projects:
+        if not projects:
             return _systems_collection([], truncated=False, next_cursor=None)
         clauses = list(filters.clauses)
         params: list[object] = list(filters.params)
