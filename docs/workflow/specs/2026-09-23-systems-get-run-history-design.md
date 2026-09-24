@@ -42,9 +42,9 @@ Owner: `src/kdive/mcp/tools/lifecycle/systems/view.py`, which already owns `acti
   `SELECT investigation_id FROM runs WHERE system_id = %s AND project = %s GROUP BY
   investigation_id ORDER BY max(created_at) DESC, investigation_id LIMIT %s` with
   `RUN_INVESTIGATIONS_LIMIT + 1`, then trims with the existing `paginate` helper. The
-  `project` predicate restates the admission invariant (`runs/admission.py` and `runs/bind.py`
-  refuse a Run whose project differs from its System's), so a violated invariant cannot leak
-  another project's ids.
+  `project` predicate restates the admission invariant (`services/runs/admission.py` and
+  `services/runs/bind.py` refuse a Run whose project differs from its System's), so a violated
+  invariant cannot leak another project's ids.
 - `system_envelope` takes `run_history: SystemRunHistory | None = None`. When set, it adds the
   two keys and appends `runs.list` to whichever action list the envelope returns (success or
   `failed`). Only `get_system` passes it.
