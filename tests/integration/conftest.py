@@ -19,6 +19,7 @@ from kdive.security.authz.rbac import Role
 
 # Re-export the disposable-Postgres fixtures so the integration tests can request them.
 from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url  # noqa: F401
+from tests.integration.live_stack import conftest as stack_conftest
 from tests.integration.live_stack.skew import probe_stack_skew
 from tests.store.conftest import minio_store  # noqa: F401
 
@@ -29,6 +30,7 @@ def pytest_report_header() -> list[str]:
     if not base_url:
         return []
     probe = probe_stack_skew(base_url)
+    stack_conftest._HEADER_PROBES[base_url] = probe
     revisions = [
         f"{result.process}="
         + (

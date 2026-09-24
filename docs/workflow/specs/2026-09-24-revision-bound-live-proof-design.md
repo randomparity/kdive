@@ -32,6 +32,11 @@ its entire run. The existing preflight skips that proof for any non-fresh
 applicable process. Ordinary callers retain the default policy.
 The skew probe retains each process's reported commit in its result, and the
 integration pytest report header lists those values when a stack URL is set.
+For a strict proof, admission requires both the header probe and the test's
+current probe to be fresh. A stack that becomes fresh only after the header
+cannot pass under a header naming its earlier revision; rerun pytest to make
+the header and admission agree. The existing worker-set check still refreshes
+the admission probe when workers change.
 An absent portable witness is labelled inapplicable, not a missing revision.
 
 The runbook instructs operators to use strict mode for revision-bound live
@@ -45,5 +50,7 @@ remain separately owned exclusions.
   still warns and runs.
 - Focused test: an absent portable witness does not skip strict mode.
 - Focused test: a probe records revisions and the pytest hook renders them.
+- Focused test: a non-fresh header probe prevents a strict proof from passing
+  even if a later admission probe would be fresh.
 - Documentation: inspect the runbook instruction and examples against the
   implemented API and recipe.

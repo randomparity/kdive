@@ -455,6 +455,7 @@ def test_pytest_header_lists_probed_revisions(
     assert f"server={_HEAD}" in header[0]
     assert "worker=unknown" in header[0]
     assert "lifecycle-witness=not deployed" in header[0]
+    assert conftest._HEADER_PROBES[_STACK_URL].revisions["server"] == _HEAD
 
 
 def test_probe_enforces_skew_on_a_deployed_witness() -> None:
@@ -593,10 +594,12 @@ def stack_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv(POLICY_ENV, raising=False)
     monkeypatch.setattr(conftest, "running_worker_pids", lambda: frozenset({101}))
     conftest._SKEW_CACHE.clear()
+    conftest._HEADER_PROBES.clear()
     yield
     # Clear on the way out too: these tests seed the *real* conftest cache with fabricated
     # verdicts, which a later live_stack run in the same process would otherwise trust.
     conftest._SKEW_CACHE.clear()
+    conftest._HEADER_PROBES.clear()
 
 
 def _fake_probe(*results: ProcessSkew) -> object:
@@ -642,6 +645,22 @@ def test_strict_stack_skips_unknown_worker(
         _fake_probe(ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")),
     )
     with pytest.raises(Skipped, match="worker: unknown"):
+        conftest.require_stack()
+
+
+def test_strict_stack_rejects_fresh_admission_after_unknown_header(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
+    conftest._HEADER_PROBES[_STACK_URL] = SkewProbe(
+        [ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")], frozenset({101})
+    )
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(ProcessSkew("worker", SkewVerdict.FRESH, "running HEAD")),
+    )
+    with pytest.raises(Skipped, match="header probe.*worker: unknown"):
         conftest.require_stack()
 
 
