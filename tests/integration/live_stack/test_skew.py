@@ -23,6 +23,7 @@ import pytest
 import uvicorn
 from _pytest.outcomes import Skipped
 
+from kdive import version as runtime_version
 from kdive.health.aux_listener import build_aux_app
 from kdive.health.heartbeat import Heartbeat
 from kdive.health.probe import BackendCheck, HealthProbe
@@ -301,6 +302,45 @@ def test_fetch_version_reads_the_real_aux_listener(ready_stack: str) -> None:
     assert set(version) == {"version", "commit", "is_release", "started_at"}
 
 
+def test_checkout_worker_endpoint_is_gradeable_from_foreign_cwd_and_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = Path(runtime_version.__file__).resolve().parents[2]
+    expected = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    version_info.cache_clear()
+    try:
+        app = build_aux_app(
+            heartbeat=Heartbeat(stale_after=1e9),
+            probe=HealthProbe(checks=[]),
+            metric_reader=None,
+        )
+        for base in _serve(app):
+            payload = skew._fetch_version(f"{base}/readyz")
+            assert payload is not None
+            commit = payload["commit"]
+            started_at = payload["started_at"]
+            assert commit == expected
+            assert isinstance(commit, str)
+            assert isinstance(started_at, str)
+            full = expected.ljust(40, "a")
+            result = classify(
+                "worker",
+                commit=commit,
+                started_at=started_at,
+                facts=_facts(head=full, known={expected: full}),
+            )
+            assert result.verdict is SkewVerdict.FRESH
+    finally:
+        version_info.cache_clear()
+
+
 def test_fetch_version_reads_the_body_of_a_503(unready_stack: str) -> None:
     # The load-bearing edge (ADR-0482 §1): urllib raises HTTPError on 503, so without the
     # re-read path the preflight goes blind exactly when a backend is down.
@@ -368,6 +408,23 @@ def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
     witness = next(result for result in results if result.process == "lifecycle-witness")
     assert "not deployed" in witness.detail
     assert "Kubernetes" in witness.detail
+    assert not witness.applicable
+    skip, warn = partition(
+        [witness, ProcessSkew("server", SkewVerdict.FRESH, "running HEAD")], SkewPolicy.STRICT
+    )
+    assert skip == warn == []
+
+
+def test_probe_grades_a_deployed_witness() -> None:
+    probe = probe_stack_skew(
+        _STACK_URL,
+        facts=_facts(),
+        fetch=lambda _url: {"commit": _HEAD, "started_at": _STARTED_AT},
+        inventory=lambda: frozenset({101}),
+    )
+    witness = next(result for result in probe.results if result.process == "lifecycle-witness")
+    assert witness.verdict is SkewVerdict.FRESH
+    assert witness.applicable
 
 
 @pytest.mark.parametrize(

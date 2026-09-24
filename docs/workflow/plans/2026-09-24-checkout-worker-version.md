@@ -18,7 +18,7 @@ In `src/kdive/version.py`, derive a candidate checkout root from the module's re
 
 Verification:
 
-- Mode: focused-test. Contract: `probe_stack_skew()` describes an absent portable lifecycle witness as not deployed but grades a reachable witness normally. Test: `tests/integration/live_stack/test_skew.py`; expected red: generic no-build unknown text. Green: `uv run python -m pytest tests/integration/live_stack/test_skew.py -q` exits 0.
+- Mode: focused-test. Contract: `probe_stack_skew()` describes an absent portable lifecycle witness as not deployed, excludes it from strict skew enforcement, and grades a reachable witness normally. Test: `tests/integration/live_stack/test_skew.py`; expected red: generic no-build unknown text or a strict skip. Green: `uv run python -m pytest tests/integration/live_stack/test_skew.py -q` exits 0.
 - Mode: focused-test. Contract: worker version from the aux endpoint remains gradeable. Test: `tests/integration/live_stack/test_skew.py`; expected red: worker with checkout commit is unknown. Green: same command exits 0.
 
 In `tests/integration/live_stack/skew.py`, handle the missing witness separately from a missing deployed process. Keep the other process and inventory checks unchanged. Extend the existing tests with the absent and present cases. Rollback restores the probe and its tests together.

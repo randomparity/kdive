@@ -83,6 +83,7 @@ class ProcessSkew:
     process: str
     verdict: SkewVerdict
     detail: str
+    applicable: bool = True
 
     def __str__(self) -> str:
         return f"{self.process}: {self.verdict.value} — {self.detail}"
@@ -417,7 +418,14 @@ def probe_stack_skew(
                 if process == "lifecycle-witness"
                 else f"no build reported at {url} (process down, or predates ADR-0482)"
             )
-            results.append(ProcessSkew(process, SkewVerdict.UNKNOWN, detail))
+            results.append(
+                ProcessSkew(
+                    process,
+                    SkewVerdict.UNKNOWN,
+                    detail,
+                    applicable=process != "lifecycle-witness",
+                )
+            )
             continue
         if process == "worker":
             reported_workers += 1
@@ -473,6 +481,10 @@ def partition(
 ) -> tuple[list[ProcessSkew], list[ProcessSkew]]:
     """Split ``results`` into ``(skip_worthy, warn_worthy)`` under ``policy``."""
     skipping = skipping_verdicts(policy)
-    skip = [r for r in results if r.verdict in skipping]
-    warn = [r for r in results if r.verdict is not SkewVerdict.FRESH and r.verdict not in skipping]
+    skip = [r for r in results if r.applicable and r.verdict in skipping]
+    warn = [
+        r
+        for r in results
+        if r.applicable and r.verdict is not SkewVerdict.FRESH and r.verdict not in skipping
+    ]
     return skip, warn

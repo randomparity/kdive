@@ -8,14 +8,14 @@ The portable live worker imports KDIVE from a source checkout but starts with `/
 
 The runtime version resolver owns source commit identity. It locates the repository at the root of the imported `kdive` source tree, verifies that the root itself has Git metadata, and asks Git there for the commit, tag, and dirty state. The Git invocation must accept that the running account differs from the checkout owner without changing global Git configuration. A checkout outside Git remains unknown. The baked `_buildinfo` path still wins over live Git. The worker launcher keeps selecting checkout source through `PYTHONPATH`; it does not export a second commit source.
 
-The live-stack skew probe keeps grading a worker that reports a commit with its existing ancestry rules. When the lifecycle-witness endpoint is absent in the portable three-role stack, its result explains that this role is Kubernetes-only and is not deployed here. A running witness is still graded normally. No Kubernetes deployment or baked artifact generation changes are included.
+The live-stack skew probe keeps grading a worker that reports a commit with its existing ancestry rules. When the lifecycle-witness endpoint is absent in the portable three-role stack, its result explains that this role is Kubernetes-only and is not deployed here. That observation is inapplicable to skew enforcement, including strict policy. A running witness is still graded normally. No Kubernetes deployment or baked artifact generation changes are included.
 
 ### Failure model
 
 - Git absent, inaccessible, timed out, or invalid checkout: report an unknown commit, preserving the current fallback.
 - Foreign checkout ownership: permit only the imported checkout root for the individual Git command; report the checkout commit.
 - Source package under a parent Git tree but not itself a checkout: report unknown rather than attributing the parent's commit.
-- Portable witness absent: report a non-failure explanation for this role; do not claim a build was observed.
+- Portable witness absent: report a non-failure explanation for this role; exclude it from skew policy without claiming a build was observed.
 
 ## Success
 
