@@ -352,6 +352,7 @@ _RECONCILER_SELECT = _ORDINARY_TABLES - {
 _RECONCILER_MUTATIONS = {
     "INSERT": {
         "artifacts",
+        "audit_log",
         "capture_reap_state",
         "cost_class_coefficients",
         "image_catalog",
@@ -1385,7 +1386,7 @@ def test_worker_audit_record_path_has_exact_role_authority(
         event.transition,
     )
 
-    for role in ("kdive_reconciler", "kdive_lifecycle_witness", "unprivileged"):
+    for role in ("kdive_lifecycle_witness", "unprivileged"):
         with (
             psycopg.connect(role_dsn(role), autocommit=True) as runtime,
             pytest.raises(psycopg.errors.InsufficientPrivilege),
@@ -1397,6 +1398,54 @@ def test_worker_audit_record_path_has_exact_role_authority(
                 "'provisioning->ready', 'd')",
                 (uuid4(),),
             )
+
+
+def test_reconciler_audit_record_system_path_has_exact_role_authority(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The reconciler appends through audit.record_system and can read back only the id."""
+    readable_columns = {
+        str(row[0])
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'audit_log' "
+            "AND has_column_privilege(%s, 'public.audit_log', column_name, 'SELECT')",
+            (role_dsn.logins["kdive_reconciler"],),
+        ).fetchall()
+    }
+    assert readable_columns == {"id"}
+
+    event = audit.AuditEvent(
+        tool="reconciler.sweep_expired",
+        object_kind="allocations",
+        object_id=uuid4(),
+        transition="active->expired",
+        args={"allocation_id": "a"},
+        project="project-a",
+    )
+
+    async def exercise_reconciler_path() -> UUID:
+        async with await psycopg.AsyncConnection.connect(
+            role_dsn("kdive_reconciler"), autocommit=True
+        ) as reconciler:
+            audit_id = await audit.record_system(
+                reconciler, principal="system:reconciler", event=event
+            )
+            denied_operations: tuple[LiteralString, ...] = (
+                "SELECT principal FROM public.audit_log WHERE id = %s",
+                "UPDATE public.audit_log SET transition = 'changed' WHERE id = %s",
+                "DELETE FROM public.audit_log WHERE id = %s",
+            )
+            for operation in denied_operations:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    await reconciler.execute(operation, (audit_id,))
+            return audit_id
+
+    audit_id = asyncio.run(exercise_reconciler_path())
+    stored = pg_conn.execute(
+        "SELECT principal, transition FROM public.audit_log WHERE id = %s", (audit_id,)
+    ).fetchone()
+    assert stored == ("system:reconciler", event.transition)
 
 
 def test_worker_bootstrap_key_path_has_exact_role_authority(
